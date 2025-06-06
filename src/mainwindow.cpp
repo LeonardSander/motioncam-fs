@@ -28,6 +28,9 @@ namespace {
         if(ui.vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
 
+        if(ui.vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+
         if(ui.scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
 
@@ -56,6 +59,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteCorrectionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
@@ -73,6 +77,7 @@ void MainWindow::saveSettings() {
     settings.setValue("draftMode", ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("applyVignetteCorrection", ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mDraftQuality);
 
@@ -98,6 +103,9 @@ void MainWindow::restoreSettings() {
 
     ui->scaleRawCheckBox->setCheckState(
         settings.value("scaleRaw").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+
+    ui->vignetteOnlyColorCheckBox->setCheckState(
+        settings.value("vignetteOnlyColor").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
@@ -279,10 +287,13 @@ void MainWindow::updateUi() {
         ui->draftQuality->setEnabled(false);
 
     // Scale raw only enabled when vignette correction is on
-    if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
+    if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->scaleRawCheckBox->setEnabled(true);
-    else
+        ui->vignetteOnlyColorCheckBox->setEnabled(true);
+    } else {
         ui->scaleRawCheckBox->setEnabled(false);
+        ui->vignetteOnlyColorCheckBox->setEnabled(false);
+    }
 
     ui->cacheFolderLabel->setText(mCacheRootFolder);
 }

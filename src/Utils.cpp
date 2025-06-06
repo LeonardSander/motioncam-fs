@@ -107,6 +107,35 @@ namespace {
         }
     }
 
+    void colorOnlyShadingMap(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight) {
+        if (shadingMap.empty() || shadingMap[0].empty()) {
+            return; // Handle empty case
+        }
+
+        // Find the maximum value
+        float maxValue = 0.0f;
+        for (const auto& row : shadingMap) {
+            for (float value : row) {
+                maxValue = std::max(maxValue, value);
+            }
+        }
+
+        // Avoid division by zero
+        if (maxValue == 0.0f) {
+            return;
+        }
+
+        // For every position in the shading map, divide by the minimum value of the four channels
+        for(int j = 0; j < lensShadingMapHeight; j++) {
+            for(int i = 0; i < lensShadingMapWidth; i++) {
+                auto minValue = std::min(shadingMap[0][j*lensShadingMapWidth+i], std::min(shadingMap[1][j*lensShadingMapWidth+i], std::min(shadingMap[2][j*lensShadingMapWidth+i], shadingMap[3][j*lensShadingMapWidth+i])));
+                for(int channel = 0; channel < 4; channel++) {
+                    shadingMap[channel][j*lensShadingMapWidth+i] = shadingMap[channel][j*lensShadingMapWidth+i] / minValue;
+                }
+            }
+        }
+    }
+
     inline float getShadingMapValue(
         float x, float y, int channel, const std::vector<std::vector<float>>& lensShadingMap, int lensShadingMapWidth, int lensShadingMapHeight)
     {
@@ -251,6 +280,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     const std::array<uint8_t, 4>& cfa,
     uint32_t scale,
     bool applyShadingMap=true,
+    bool vignetteOnlyColor=false,
     bool normaliseShadingMap=false)
 {
     if (scale > 1) {
@@ -301,6 +331,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
         dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         for(auto& v : dstBlackLevel)
             v <<= 2;
+
+        if(vignetteOnlyColor)
+            colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
 
         if(normaliseShadingMap)
             normalizeShadingMap(lensShadingMap);
@@ -408,6 +441,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Scale down if requested
     bool applyShadingMap = options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    bool vignetteOnlyColor = options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
 
     auto [processedData, dstBlackLevel, dstWhiteLevel] = utils::preprocessData(
         data,
@@ -416,7 +450,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         cameraConfiguration,
         cfa,
         scale,
-        applyShadingMap, normalizeShadingMap);
+        applyShadingMap, vignetteOnlyColor, normalizeShadingMap);
 
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
