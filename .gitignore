@@ -1,1 +1,7 @@
 build/
+.vs/
+.vscode/
+cache/
+logs/
+out/
+vcpkg_installed/
