@@ -41,6 +41,7 @@ private:
     std::vector<uint8_t> mAudioFile;
     int mDraftScale;
     float mFps;
+    double mBaselineExpValue;
 };
 
 } // namespace motioncam

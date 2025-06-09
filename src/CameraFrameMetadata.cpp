@@ -70,6 +70,15 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     return frame;
 }
 
+CameraFrameMetadata CameraFrameMetadata::limitedParse(const json& j) {
+    CameraFrameMetadata frame;
+
+    frame.exposureTime = j.value("exposureTime", 0.0);
+    frame.iso = j.value("iso", 0);
+
+    return frame;
+}
+
 CameraFrameMetadata CameraFrameMetadata::parse(const std::string& jsonString) {
     json j = json::parse(jsonString);
     return parse(j);

@@ -36,6 +36,7 @@ struct CameraFrameMetadata {
 
     static CameraFrameMetadata parse(const std::string& jsonString);
     static CameraFrameMetadata parse(const nlohmann::json& j);
+    static CameraFrameMetadata limitedParse(const nlohmann::json& j);
 };
 
 }

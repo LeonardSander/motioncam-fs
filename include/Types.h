@@ -65,10 +65,11 @@ struct Entry {
 
 enum FileRenderOptions : unsigned int {
     RENDER_OPT_NONE                         = 0,
-    RENDER_OPT_DRAFT                        = 1 << 0,
+    RENDER_OPT_DRAFT                        = 1 << 0,    
     RENDER_OPT_APPLY_VIGNETTE_CORRECTION    = 1 << 1,
     RENDER_OPT_NORMALIZE_SHADING_MAP        = 1 << 2,
-    RENDER_OPT_VIGNETTE_ONLY_COLOR          = 1 << 3
+    RENDER_OPT_VIGNETTE_ONLY_COLOR          = 1 << 3,
+    RENDER_OPT_NORMALIZE_EXPOSURE           = 1 << 4
 };
 
 // Overload bitwise OR operator
@@ -105,6 +106,9 @@ static std::string optionsToString(FileRenderOptions options) {
 
     if (options & RENDER_OPT_DRAFT) {
         flags.push_back("DRAFT");
+    }
+    if (options & RENDER_OPT_NORMALIZE_EXPOSURE) {
+        flags.push_back("NORMALIZE_EXPOSURE");
     }
     if (options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
         flags.push_back("VIGNETTE_CORRECTION");

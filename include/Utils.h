@@ -19,7 +19,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     float recordingFps,
     int frameNumber,
     FileRenderOptions options,
-    int scale=1);
+    int scale=1,
+    double baselineExpValue=0.0);
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);
 

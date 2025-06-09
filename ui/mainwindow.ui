@@ -150,7 +150,17 @@
           <bool>true</bool>
          </property>
          <property name="text">
-          <string>Apply vignette correction</string>
+          <string>Apply Vignette Correction</string>
+         </property>
+        </widget>
+       </item>
+       <item row="0" column="2">
+        <widget class="QCheckBox" name="normalizeExposureCheckBox">
+         <property name="enabled">
+          <bool>true</bool>
+         </property>
+         <property name="text">
+          <string>Normalize Exposure</string>
          </property>
         </widget>
        </item>

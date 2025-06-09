@@ -185,6 +185,24 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mTypicalDngSize(0),
         mFps(0),
         mDraftScale(draftScale) {
+    
+    Decoder decoder(mSrcPath);
+    auto frames = decoder.getFrames();
+    std::sort(frames.begin(), frames.end());
+
+    if(frames.empty())
+        return;
+
+    mBaselineExpValue = std::numeric_limits<double>::max();  // find most insensible exposure settings in sequence, Start with maximum possible value
+
+    for(const auto& frame : frames) {
+        nlohmann::json metadata;
+        decoder.loadFrameMetadata(frame, metadata);
+        const auto& cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
+        //spdlog::debug("ISO={}, EXP={}", cameraFrameMetadata.iso, cameraFrameMetadata.exposureTime);
+        mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
+        //spdlog::debug("VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW: mBaselineExpValue={}", mBaselineExpValue);
+    } 
 
     init(options);
 }
@@ -220,7 +238,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         mFps,
         0,
         options,
-        getScaleFromOptions(options, mDraftScale));
+        getScaleFromOptions(options, mDraftScale),
+        mBaselineExpValue);
 
     mTypicalDngSize = dngData->size();
 
@@ -345,8 +364,9 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
     auto sharableFuture = frameDataFuture.share();
     const auto fps = mFps;
     const auto draftScale = mDraftScale;
+    const auto baselineExpValue = mBaselineExpValue;
 
-    auto generateTask = [sharableFuture, fps, draftScale, options, pos, len, dst, result]() {
+    auto generateTask = [sharableFuture, fps, draftScale, baselineExpValue, options, pos, len, dst, result]() {
         size_t readBytes = 0;
         int errorCode = -1;
 
@@ -361,7 +381,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 fps,
                 frameIndex,
                 options,
-                getScaleFromOptions(options, draftScale));
+                getScaleFromOptions(options, draftScale),
+                baselineExpValue);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy

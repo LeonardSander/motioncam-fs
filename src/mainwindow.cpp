@@ -34,6 +34,9 @@ namespace {
         if(ui.scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
 
+        if(ui.normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
+
         return options;
     }
 }
@@ -60,6 +63,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->vignetteCorrectionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
@@ -78,6 +82,7 @@ void MainWindow::saveSettings() {
     settings.setValue("applyVignetteCorrection", ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mDraftQuality);
 
@@ -106,6 +111,9 @@ void MainWindow::restoreSettings() {
 
     ui->vignetteOnlyColorCheckBox->setCheckState(
         settings.value("vignetteOnlyColor").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+
+    ui->normalizeExposureCheckBox->setCheckState(
+        settings.value("normalizeExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());

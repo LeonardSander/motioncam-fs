@@ -442,7 +442,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     float recordingFps,
     int frameNumber,
     FileRenderOptions options,
-    int scale)
+    int scale,
+    double baselineExpValue)
 {
     Measure m("generateDng");
 
@@ -466,6 +467,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool applyShadingMap = options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     bool vignetteOnlyColor = options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
 
     auto [processedData, dstBlackLevel, dstWhiteLevel] = utils::preprocessData(
         data,
@@ -520,7 +522,11 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetIso(metadata.iso);
     dng.SetExposureTime(metadata.exposureTime / 1e9);
-    dng.SetBaselineExposure(1.5f); 
+
+    if (normalizeExposure)
+        dng.SetBaselineExposure(std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime)));
+    else
+        dng.SetBaselineExposure(0.0);
 
     dng.SetCFAPattern(4, cfa.data());
 
