@@ -5,6 +5,7 @@
 #include "CameraMetadata.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/back_inserter.hpp>
@@ -536,7 +537,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     int hours = (int) floor(time / 3600);
     int minutes = ((int) floor(time / 60)) % 60;
     int seconds = ((int) floor(time)) % 60;
-    int frames = recordingFps > 1 ? (frameNumber % ((int) round(recordingFps))) : 0;
+    int frames = recordingFps > 1 ? (frameNumber % static_cast<int>(std::round(recordingFps))) : 0;
 
     std::vector<uint8_t> timeCode(8);
 

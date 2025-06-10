@@ -10,6 +10,7 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QSettings>
+#include <algorithm>
 
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
@@ -263,7 +264,7 @@ void MainWindow::playFile(const QString& path) {
     QStringList arguments;
     arguments << path;
 
-    bool success = QProcess::startDetached("MCRAW_Player.exe", arguments);
+    bool success = QProcess::startDetached("MotionCam_Player.exe", arguments);
     if (!success)
         QMessageBox::warning(this, "Error", QString("Failed to launch player with file: %1").arg(path));
 }
@@ -283,8 +284,15 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     // Unmount the file
     bool ok = false;
     motioncam::MountId mountId = fileWidget->property("mountId").toInt(&ok);
-    if(ok)
+    if(ok) {
         mFuseFilesystem->unmount(mountId);
+
+        auto it = std::find_if(
+            mMountedFiles.begin(), mMountedFiles.end(),
+            [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
+        if(it != mMountedFiles.end())
+            mMountedFiles.erase(it);
+    }
 }
 
 void MainWindow::updateUi() {
