@@ -57,6 +57,7 @@ IconSize=16
         // Use running average to prevent overflow
         double avgDuration = 0.0;
         int validFrames = 0;
+        std::vector<double> durations;  // Store all valid durations for median calculation
 
         for (size_t i = 1; i < frames.size(); ++i) {
             double duration = static_cast<double>(frames[i] - frames[i-1]);
@@ -65,7 +66,22 @@ IconSize=16
                 // Update running average
                 // new_avg = old_avg + (new_value - old_avg) / (count + 1)
                 avgDuration = avgDuration + (duration - avgDuration) / (validFrames + 1);
+                durations.push_back(duration);  // Store duration for median calculation
                 validFrames++;
+            }
+        }
+
+        // Calculate median duration
+        double medianDuration = 0.0;
+        if (!durations.empty()) {
+            std::sort(durations.begin(), durations.end());
+            size_t mid = durations.size() / 2;
+            if (durations.size() % 2 == 0) {
+                // Even number of elements - average of two middle values
+                medianDuration = (durations[mid - 1] + durations[mid]) / 2.0;
+            } else {
+                // Odd number of elements - middle value
+                medianDuration = durations[mid];
             }
         }
 
@@ -73,7 +89,7 @@ IconSize=16
             return 0.0f;
         }
 
-        return static_cast<float>(1000000000.0 / avgDuration);
+        return static_cast<float>(1000000000.0 / medianDuration);   //experimental: use median instead of average for constant framerate conversion
     }
 
     int64_t getFrameNumberFromTimestamp(Timestamp timestamp, Timestamp referenceTimestamp, float frameRate) {
@@ -220,7 +236,38 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     // Clear everything
     mFiles.clear();
 
-    mFps = calculateFrameRate(frames);
+    float medianFrameRate = calculateFrameRate(frames);
+
+    // match medianFramerate to neighboring standard framerates
+    if      (medianFrameRate <=  23.0 || medianFrameRate >= 121.0) 
+        mFps = medianFrameRate;
+    else if (medianFrameRate < 24.0) 
+        mFps = 23.976f;
+    else if (medianFrameRate < 24.5)
+        mFps = 24.0f;
+    else if (medianFrameRate < 26.0)
+        mFps = 25.0f;
+    else if (medianFrameRate >= 28.0 && medianFrameRate < 30.0)
+        mFps = 29.97f;
+    else if (medianFrameRate <  32.0)
+        mFps = 30.0f;
+    else if (medianFrameRate >= 46.0 && medianFrameRate < 48.0)
+        mFps = 47.952f;
+    else if (medianFrameRate <  49.0)
+        mFps = 48.0f;
+    else if (medianFrameRate <  52.0)
+        mFps = 50.0f;
+    else if (medianFrameRate >= 58.0 && medianFrameRate < 60.0)
+        mFps = 59.94f;
+    else if (medianFrameRate < 62.0)
+        mFps = 60.0f;
+    else if (medianFrameRate >= 115.0 && medianFrameRate < 119.9)
+        mFps = 119.88f;
+    else if (medianFrameRate < 121.0)
+        mFps = 120.0f;
+    else    
+        mFps = medianFrameRate;   
+    
 
     // Calculate typical DNG size that we can use for all files
     std::vector<uint8_t> data;
@@ -298,7 +345,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
             // Add main entry
             entry.type = EntryType::FILE_ENTRY;
             entry.size = mTypicalDngSize;
-            entry.name = constructFrameFilename("frame-", lastPts, 6, "dng");
+            entry.name = constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
             entry.userData = x;
 
             mFiles.emplace_back(entry);

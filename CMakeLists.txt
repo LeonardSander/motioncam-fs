@@ -165,5 +165,14 @@ if(QT_VERSION_MAJOR EQUAL 6)
                 --verbose 2
                 $<TARGET_FILE:motioncam-fs>
         )
+        add_custom_command(TARGET motioncam-fs POST_BUILD
+            COMMAND "${QT_BIN_DIR}/windeployqt.exe"
+                --no-translations
+                --no-system-d3d-compiler
+                --no-opengl-sw
+                --no-compiler-runtime
+                --verbose 2
+                $<TARGET_FILE:motioncam-fs>
+        )       # add both release and debug qt dlls because im lazy
     endif()
 endif()
