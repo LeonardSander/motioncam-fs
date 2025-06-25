@@ -48,10 +48,15 @@ IconSize=16
         return p.stem().string();
     }
 
-    float calculateFrameRate(const std::vector<Timestamp>& frames) {
+    struct FrameRateInfo {
+        float medianFrameRate;
+        float averageFrameRate;
+    };
+
+    FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
         // Need at least 2 frames to calculate frame rate
         if (frames.size() < 2) {
-            return 0.0f;
+            return {0.0f, 0.0f};
         }
 
         // Use running average to prevent overflow
@@ -86,10 +91,13 @@ IconSize=16
         }
 
         if (validFrames == 0) {
-            return 0.0f;
+            return {0.0f, 0.0f};
         }
 
-        return static_cast<float>(1000000000.0 / medianDuration);   //experimental: use median instead of average for constant framerate conversion
+        return {
+            static_cast<float>(1000000000.0 / medianDuration),
+            static_cast<float>(1000000000.0 / avgDuration)
+        };
     }
 
     int64_t getFrameNumberFromTimestamp(Timestamp timestamp, Timestamp referenceTimestamp, float frameRate) {
@@ -236,7 +244,9 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     // Clear everything
     mFiles.clear();
 
-    float medianFrameRate = calculateFrameRate(frames);
+    auto frameRateInfo = calculateFrameRate(frames);
+    float medianFrameRate = frameRateInfo.medianFrameRate;
+    float averageFrameRate = frameRateInfo.averageFrameRate;
 
     // match medianFramerate to neighboring standard framerates
     if      (medianFrameRate <=  23.0 || medianFrameRate >= 121.0) 

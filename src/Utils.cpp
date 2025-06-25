@@ -108,7 +108,7 @@ namespace {
         }
     }
 
-    void colorOnlyShadingMap(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight) {
+    void colorOnlyShadingMap(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
         if (shadingMap.empty() || shadingMap[0].empty())
             return; // Handle empty case
 
@@ -140,11 +140,19 @@ namespace {
                 if(shadingMap[3][j*lensShadingMapWidth+i] < minValue11)
                     minValue11 = shadingMap[3][j*lensShadingMapWidth+i];
         }}       // detect image-global white balance adjustment in shadingMap     
+
+        if (cfa == std::array<uint8_t, 4>{0, 1, 1, 2} || cfa == std::array<uint8_t, 4>{2, 1, 1, 0}) {
+            minValue01 = std::min(minValue01, minValue10);
+            minValue01 = minValue10;
+        } else if (cfa == std::array<uint8_t, 4>{1, 0, 2, 1} || cfa == std::array<uint8_t, 4>{1, 2, 0, 1}) {
+            minValue00 = std::min(minValue00, minValue11);
+            minValue00 = minValue11;
+        }   
         
         for(int j = 0; j < lensShadingMapHeight; j++) {
             for(int i = 0; i < lensShadingMapWidth; i++) {
                 if (aggressive) {
-                    shadingMap[0][j*lensShadingMapWidth+i] = shadingMap[0][j*lensShadingMapWidth+i] / minValue00;   //cfa unaware
+                    shadingMap[0][j*lensShadingMapWidth+i] = shadingMap[0][j*lensShadingMapWidth+i] / minValue00;   
                     shadingMap[1][j*lensShadingMapWidth+i] = shadingMap[1][j*lensShadingMapWidth+i] / minValue01;
                     shadingMap[2][j*lensShadingMapWidth+i] = shadingMap[2][j*lensShadingMapWidth+i] / minValue10;
                     shadingMap[3][j*lensShadingMapWidth+i] = shadingMap[3][j*lensShadingMapWidth+i] / minValue11;
@@ -349,7 +357,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     // When applying shading map, increase precision
     if(applyShadingMap) {
         if(vignetteOnlyColor)
-            colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+            colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
         if(normaliseShadingMap) {
             normalizeShadingMap(lensShadingMap);
             int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 4);
