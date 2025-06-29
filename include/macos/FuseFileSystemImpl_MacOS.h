@@ -11,13 +11,14 @@ namespace BS {
 
 namespace motioncam {
 
-class VirtualizationInstance;
+struct Session;
 class LRUCache;
 
-class FuseFileSystemImpl_Win : public IFuseFileSystem
+class FuseFileSystemImpl_MacOs : public IFuseFileSystem
 {
 public:
-    FuseFileSystemImpl_Win();
+    FuseFileSystemImpl_MacOs();
+    ~FuseFileSystemImpl_MacOs();
 
     MountId mount(FileRenderOptions options, int draftScale, const std::string& srcFile, const std::string& dstPath) override;
     void unmount(MountId mountId) override;
@@ -25,11 +26,10 @@ public:
 
 private:
     MountId mNextMountId;
-    std::map<MountId, std::unique_ptr<VirtualizationInstance>> mMountedFiles;
+    std::map<MountId, std::unique_ptr<Session>> mMountedFiles;
     std::unique_ptr<BS::thread_pool> mIoThreadPool;
     std::unique_ptr<BS::thread_pool> mProcessingThreadPool;
     std::unique_ptr<LRUCache> mCache;
-
 };
 
 } // namespace motioncam

@@ -57,7 +57,7 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     frame.lensShadingMapWidth = j.value("lensShadingMapWidth", 0);
     frame.needRemosaic = j.value("needRemosaic", false);
     frame.offset = j.value("offset", "");
-    frame.orientation = j.value("orientation", 0);
+    frame.orientation = static_cast<ScreenOrientation>(j.value("orientation", ScreenOrientation::INVALID));
     frame.originalHeight = j.value("originalHeight", 0);
     frame.originalWidth = j.value("originalWidth", 0);
     frame.pixelFormat = j.value("pixelFormat", "");

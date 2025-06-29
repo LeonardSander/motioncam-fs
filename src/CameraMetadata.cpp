@@ -159,7 +159,11 @@ CameraConfiguration CameraConfiguration::parse(const nlohmann::json& j) {
     config.colorIlluminant1 = j.value("colorIlluminant1", "");
     config.colorIlluminant2 = j.value("colorIlluminant2", "");
     config.numSegments = j.value("numSegments", 0);
-    config.sensorArrangement = j.value("sensorArrangment", "");
+
+    auto val0 = j.value("sensorArrangment", "");
+    auto val1 = j.value("sensorArrangement", "");
+    config.sensorArrangement = val0.empty() ? val1 : val0;
+
     config.whiteLevel = j.value("whiteLevel", 0.0);
 
     // Parse nested objects

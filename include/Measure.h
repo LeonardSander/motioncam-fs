@@ -17,7 +17,7 @@ public:
         const auto end = std::chrono::high_resolution_clock::now();
         const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - mStart).count();
 
-        spdlog::info("{}: {} ms", mName, duration / 1000.0);
+        spdlog::debug("{}: {} ms", mName, duration / 1000.0);
     }
 
     // Prevent copying and moving

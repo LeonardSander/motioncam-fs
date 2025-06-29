@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 
+if(APPLE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
+endif()
+
 project(motioncam-fs VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
@@ -13,7 +17,7 @@ find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
 
 set(DEPENDENCIES_PATH deps)
-set(Boost_DEBUG 1)
+# set(Boost_DEBUG 1)
 
 set(PROJECT_SOURCES
         src/main.cpp
@@ -46,17 +50,26 @@ if(WIN32)
     list(APPEND PROJECT_SOURCES
         resources/app.rc
 
-        src/win/fusefilesystemimpl_win.cpp
+        src/win/FuseFileSystemImpl_Win.cpp
         src/win/virtualizationInstance.cpp
         src/win/dirInfo.cpp
 
         include/win/dirInfo.h
-        include/win/fusefilesystemimpl_win.h
+        include/win/FuseFileSystemImpl_Win.h
         include/win/virtualizationInstance.h)
 
     find_library(projected-fs ProjectedFSLib)
 
     set(platform-specific ${projected-fs})
+elseif(APPLE)
+  list(APPEND PROJECT_SOURCES
+      src/macos/FuseFileSystemImpl_MacOS.cpp
+      include/macos/FuseFileSystemImpl_MacOS.h)
+
+  find_library(fuse_t fuse_t)
+
+  set(platform-specific ${fuse_t})
+
 endif()
 
 set(CMAKE_AUTOUIC_SEARCH_PATHS ui)
@@ -85,6 +98,28 @@ else()
 endif()
 
 target_include_directories(motioncam-fs PRIVATE include)
+
+target_compile_definitions(motioncam-fs PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=26)
+
+# # Debug configuration with sanitizers
+# if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+#     target_compile_options(motioncam-fs PRIVATE
+#         -fsanitize=address,undefined
+#         -fsanitize-address-use-after-scope
+#         -fno-sanitize-recover=all
+#         -fstack-protector-strong
+#         -g
+#         -O0
+#         -fno-omit-frame-pointer  # Better stack traces
+#     )
+
+#     target_link_options(motioncam-fs PRIVATE
+#       -fsanitize=address,undefined
+#       -fsanitize-address-use-after-scope
+#       -fno-sanitize-recover=all
+#       -fstack-protector-strong
+#     )
+# endif()
 
 # Add motioncam decoder as static library
 add_library(motioncam-decoder STATIC

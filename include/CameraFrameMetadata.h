@@ -7,6 +7,14 @@
 
 namespace motioncam {
 
+enum class ScreenOrientation : int {
+    PORTRAIT = 0,
+    REVERSE_PORTRAIT,
+    LANDSCAPE,
+    REVERSE_LANDSCAPE,
+    INVALID
+};
+
 struct CameraFrameMetadata {
     std::array<float, 3> asShotNeutral;
     int compressionType;
@@ -24,7 +32,7 @@ struct CameraFrameMetadata {
     int lensShadingMapWidth;
     bool needRemosaic;
     std::string offset;
-    int orientation;
+    ScreenOrientation orientation;
     int originalHeight;
     int originalWidth;
     std::string pixelFormat;

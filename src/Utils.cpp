@@ -18,6 +18,12 @@ namespace motioncam {
 namespace utils {
 
 namespace {
+    const float IDENTITY_MATRIX[9] = {
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 1.0f
+    };
+
     enum DngIlluminant {
         lsUnknown					=  0,
         lsDaylight					=  1,
@@ -42,6 +48,19 @@ namespace {
         lsISOStudioTungsten			= 24,
 
         lsOther						= 255
+    };
+
+    enum DngOrientation
+    {
+        kNormal		 = 1,
+        kMirror		 = 2,
+        kRotate180	 = 3,
+        kMirror180	 = 4,
+        kMirror90CCW = 5,
+        kRotate90CW	 = 6,
+        kMirror90CW	 = 7,
+        kRotate90CCW = 8,
+        kUnknown	 = 9
     };
 
     inline uint8_t ToTimecodeByte(int value)
@@ -523,6 +542,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetRowsPerStrip(height);
     dng.SetSamplesPerPixel(1);
     dng.SetCFARepeatPatternDim(2, 2);
+    dng.SetXResolution(300);
+    dng.SetYResolution(300);
 
     dng.SetBlackLevelRepeatDim(2, 2);
     dng.SetBlackLevel(4, dstBlackLevel.data());
@@ -538,6 +559,35 @@ std::shared_ptr<std::vector<char>> generateDng(
         dng.SetBaselineExposure(0.0);
 
     dng.SetCFAPattern(4, cfa.data());
+
+    // Add orientation tag
+    DngOrientation dngOrientation;
+    bool isFlipped = cameraConfiguration.extraData.postProcessSettings.flipped;
+
+    switch(metadata.orientation)
+    {
+    case ScreenOrientation::PORTRAIT:
+        dngOrientation = isFlipped ? DngOrientation::kMirror90CW : DngOrientation::kRotate90CW;
+        break;
+
+    case ScreenOrientation::REVERSE_PORTRAIT:
+        dngOrientation = isFlipped ? DngOrientation::kMirror90CCW : DngOrientation::kRotate90CCW;
+        break;
+
+    case ScreenOrientation::REVERSE_LANDSCAPE:
+        dngOrientation = isFlipped ? DngOrientation::kMirror180 : DngOrientation::kRotate180;
+        break;
+
+    case ScreenOrientation::LANDSCAPE:
+        dngOrientation = isFlipped ? DngOrientation::kMirror : DngOrientation::kNormal;
+        break;
+
+    default:
+        dngOrientation = DngOrientation::kUnknown;
+        break;
+    }
+
+    dng.SetOrientation(dngOrientation);
 
     // Time code
     float time = frameNumber / recordingFps;
@@ -569,6 +619,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
     dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
 
+    dng.SetCameraCalibration1(3, IDENTITY_MATRIX);
+    dng.SetCameraCalibration2(3, IDENTITY_MATRIX);
+
     dng.SetAsShotNeutral(3, metadata.asShotNeutral.data());
 
     dng.SetCalibrationIlluminant1(getColorIlluminant(cameraConfiguration.colorIlluminant1));
@@ -599,8 +652,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Reserve enough to fit the data
     output->reserve(width*height*sizeof(uint16_t) + 512*1024);
 
-    boost::iostreams::back_insert_device<std::vector<char>> sink(*output);
-    boost::iostreams::stream<boost::iostreams::back_insert_device<std::vector<char>>> stream(sink);
+    utils::vector_ostream stream(*output);
 
     writer.WriteToFile(stream, &err);
 
