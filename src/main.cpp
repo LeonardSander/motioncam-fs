@@ -18,6 +18,16 @@ int main(int argc, char *argv[])
     app.setOrganizationName("MotionCam");
     app.setWindowIcon(QIcon(":/assets/app_icon.png"));
 
+    // Load theme
+    QFile themeFile(":qdarkstyle/dark/darkstyle.qss");
+
+    if (themeFile.exists())   {
+        themeFile.open(QFile::ReadOnly | QFile::Text);
+
+        QTextStream ts(&themeFile);
+        app.setStyleSheet(ts.readAll());
+    }
+
     // Parse command line arguments
     QCommandLineParser parser;
 

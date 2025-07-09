@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QtGui/qevent.h>
 
 class SingleApplication : public QApplication
 {
@@ -60,6 +61,18 @@ public:
         socket.disconnectFromServer();
 
         return true;
+    }
+
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::FileOpen) {
+            QFileOpenEvent *openEvent = static_cast<QFileOpenEvent *>(event);
+            QString fileName = openEvent->file();
+
+            sendMessage(QString("MOUNT_FILE:%1").arg(fileName));
+
+            return true;
+        }
+        return QApplication::event(event);
     }
 
 signals:

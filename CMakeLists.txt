@@ -4,7 +4,7 @@ if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
 endif()
 
-project(motioncam-fs VERSION 0.1 LANGUAGES CXX)
+project(MotionCamFuse VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -16,8 +16,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
 
+set(APP_NAME "MotionCam Fuse")
 set(DEPENDENCIES_PATH deps)
+
 # set(Boost_DEBUG 1)
+
+set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 
 set(PROJECT_SOURCES
         src/main.cpp
@@ -44,7 +48,9 @@ set(PROJECT_SOURCES
         ui/mainwindow.ui
 )
 
-qt_add_resources(PROJECT_SOURCES resources.qrc)
+qt_add_resources(PROJECT_SOURCES
+    resources.qrc
+    qdarkstyle/dark/darkstyle.qrc)
 
 if(WIN32)
     list(APPEND PROJECT_SOURCES
@@ -63,47 +69,48 @@ if(WIN32)
     set(platform-specific ${projected-fs})
 elseif(APPLE)
   list(APPEND PROJECT_SOURCES
+      ${MACOS_BUNDLE_ICON_FILE}
       src/macos/FuseFileSystemImpl_MacOS.cpp
       include/macos/FuseFileSystemImpl_MacOS.h)
 
-  find_library(fuse_t fuse_t)
+  find_library(FUSE_T_FRAMEWORK fuse_t)
 
-  set(platform-specific ${fuse_t})
+  set(platform-specific ${FUSE_T_FRAMEWORK})
 
 endif()
 
 set(CMAKE_AUTOUIC_SEARCH_PATHS ui)
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
-    qt_add_executable(motioncam-fs
+    qt_add_executable(${PROJECT_NAME}
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
     )
 # Define target properties for Android with Qt 6 as:
-#    set_property(TARGET motioncam-fs APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
+#    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
 #                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
 # For more information, see https://doc.qt.io/qt-6/qt-add-executable.html#target-creation
 else()
     if(ANDROID)
-        add_library(motioncam-fs SHARED
+        add_library(${PROJECT_NAME} SHARED
             ${PROJECT_SOURCES}
         )
 # Define properties for Android with Qt 5 after find_package() calls as:
 #    set(ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
     else()
-        add_executable(motioncam-fs
+        add_executable(${PROJECT_NAME}
             ${PROJECT_SOURCES}
         )
     endif()
 endif()
 
-target_include_directories(motioncam-fs PRIVATE include)
+target_include_directories(${PROJECT_NAME} PRIVATE include)
 
-target_compile_definitions(motioncam-fs PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=26)
+target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=26)
 
 # # Debug configuration with sanitizers
 # if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-#     target_compile_options(motioncam-fs PRIVATE
+#     target_compile_options(${PROJECT_NAME} PRIVATE
 #         -fsanitize=address,undefined
 #         -fsanitize-address-use-after-scope
 #         -fno-sanitize-recover=all
@@ -113,7 +120,7 @@ target_compile_definitions(motioncam-fs PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VE
 #         -fno-omit-frame-pointer  # Better stack traces
 #     )
 
-#     target_link_options(motioncam-fs PRIVATE
+#     target_link_options(${PROJECT_NAME} PRIVATE
 #       -fsanitize=address,undefined
 #       -fsanitize-address-use-after-scope
 #       -fno-sanitize-recover=all
@@ -150,7 +157,7 @@ if(Boost_FOUND)
   include_directories(${Boost_INCLUDE_DIRS})
 endif()
 
-target_link_libraries(motioncam-fs PRIVATE
+target_link_libraries(${PROJECT_NAME} PRIVATE
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Network
   ${Boost_FILESYSTEM_LIBRARY}
@@ -159,29 +166,38 @@ target_link_libraries(motioncam-fs PRIVATE
   motioncam-decoder
   ${platform-specific})
 
+set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
+
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
 # explicit, fixed bundle identifier manually though.
 if(${QT_VERSION} VERSION_LESS 6.1.0)
-  set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.motioncam.motioncam-fs)
+  set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.motioncam.fuse)
 endif()
-set_target_properties(motioncam-fs PROPERTIES
+
+set_target_properties(${PROJECT_NAME} PROPERTIES
     ${BUNDLE_ID_OPTION}
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+    MACOSX_BUNDLE_ICON_FILE ${MACOS_BUNDLE_ICON_FILE}
+    MACOSX_BUNDLE_BUNDLE_NAME ${APP_NAME}
     MACOSX_BUNDLE TRUE
     WIN32_EXECUTABLE TRUE
 )
 
+set_source_files_properties(${MACOS_BUNDLE_ICON_FILE} PROPERTIES
+    MACOSX_PACKAGE_LOCATION "Resources"
+)
+
 include(GNUInstallDirs)
-install(TARGETS motioncam-fs
+install(TARGETS ${PROJECT_NAME}
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 if(QT_VERSION_MAJOR EQUAL 6)
-    qt_finalize_executable(motioncam-fs)
+    qt_finalize_executable(${PROJECT_NAME})
     
     # Deploy Qt dependencies using Qt's deployment tool
     if(WIN32)
@@ -190,7 +206,7 @@ if(QT_VERSION_MAJOR EQUAL 6)
         get_filename_component(QT_BIN_DIR "${QT_QMAKE_EXECUTABLE}" DIRECTORY)
         
         # Use windeployqt to copy all required Qt dependencies
-        add_custom_command(TARGET motioncam-fs POST_BUILD
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND "${QT_BIN_DIR}/windeployqt.exe"
                 --debug
                 --no-translations
@@ -198,16 +214,16 @@ if(QT_VERSION_MAJOR EQUAL 6)
                 --no-opengl-sw
                 --no-compiler-runtime
                 --verbose 2
-                $<TARGET_FILE:motioncam-fs>
+                $<TARGET_FILE:${PROJECT_NAME}>
         )
-        add_custom_command(TARGET motioncam-fs POST_BUILD
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND "${QT_BIN_DIR}/windeployqt.exe"
                 --no-translations
                 --no-system-d3d-compiler
                 --no-opengl-sw
                 --no-compiler-runtime
                 --verbose 2
-                $<TARGET_FILE:motioncam-fs>
+                $<TARGET_FILE:${PROJECT_NAME}>
         )       # add both release and debug qt dlls because im lazy
     endif()
 endif()

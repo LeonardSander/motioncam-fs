@@ -8,6 +8,8 @@
 #include <iostream>
 #include <ntstatus.h>
 #include <mutex>
+#include <filesystem>
+#include <shlobj.h>
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -457,19 +459,52 @@ HRESULT Session::Notify(
     }
 }
 
+std::string getLogDirectory() {
+    std::string logDir;
+    wchar_t* appDataPath = nullptr;
+
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appDataPath))) {
+        // Convert wide string to string
+        int size = WideCharToMultiByte(CP_UTF8, 0, appDataPath, -1, nullptr, 0, nullptr, nullptr);
+        std::string appData(size - 1, '\0');
+
+        WideCharToMultiByte(CP_UTF8, 0, appDataPath, -1, &appData[0], size, nullptr, nullptr);
+        CoTaskMemFree(appDataPath);
+
+        logDir = appData + "\\MotionCam Tools\\Fuse\\logs";
+    }
+    else {
+        // Fallback to temp directory
+        logDir = std::filesystem::temp_directory_path().string() + "\\MotionCam Tools\\Fuse\\logs";
+    }
+
+    return logDir;
+}
+
 void setupLogging() {
     try {
+        // Get platform-appropriate log directory
+        std::string logDir = getLogDirectory();
+
+        // Create the log directory if it doesn't exist
+        std::filesystem::create_directories(logDir);
+
+        // Create log file path
+        std::string logFilePath = logDir + "/logfile.txt";
+
         // Create a vector of sinks
         std::vector<spdlog::sink_ptr> sinks;
 
         // Regular console output
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 
-        // File sink
-        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/logfile.txt", true));
+        // File sink with the proper path
+        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFilePath, true));
 
+#ifdef _WIN32
         // For Windows/Visual Studio debugger
         sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_mt>());
+#endif
 
         // Create a logger with all sinks
         auto logger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
@@ -487,9 +522,14 @@ void setupLogging() {
         // Flush on info level messages
         spdlog::flush_on(spdlog::level::info);
 
+        // Log the successful initialization and file location
+        spdlog::info("Logging initialized. Log file: {}", logFilePath);
     }
     catch (const spdlog::spdlog_ex& ex) {
         std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+    }
+    catch (const std::filesystem::filesystem_error& ex) {
+        std::cerr << "Failed to create log directory: " << ex.what() << std::endl;
     }
 }
 
