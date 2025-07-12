@@ -102,7 +102,7 @@
        <property name="verticalSpacing">
         <number>2</number>
        </property>
-       <item row="1" column="1">
+       <item row="2" column="1">
         <widget class="QCheckBox" name="scaleRawCheckBox">
          <property name="enabled">
           <bool>true</bool>
@@ -117,59 +117,22 @@
          <property name="enabled">
           <bool>true</bool>
          </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
          <property name="text">
           <string>Reduce to Color Correction</string>
          </property>
         </widget>
-       </item>
-       <item row="1" column="0">
-        <layout class="QHBoxLayout" name="cacheLayout">
-         <item>
-          <widget class="QLabel" name="descCacheFolder">
-           <property name="sizePolicy">
-            <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
-             <horstretch>0</horstretch>
-             <verstretch>0</verstretch>
-            </sizepolicy>
-           </property>
-           <property name="text">
-            <string>Cache Folder:</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="cacheFolderLabel">
-           <property name="sizePolicy">
-            <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
-             <horstretch>1</horstretch>
-             <verstretch>0</verstretch>
-            </sizepolicy>
-           </property>
-           <property name="text">
-            <string>-</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="changeCacheBtn">
-           <property name="minimumSize">
-            <size>
-             <width>100</width>
-             <height>30</height>
-            </size>
-           </property>
-           <property name="text">
-            <string>Change</string>
-           </property>
-          </widget>
-         </item>
-        </layout>
        </item>
        <item row="0" column="1">
         <widget class="QCheckBox" name="vignetteCorrectionCheckBox">
          <property name="enabled">
           <bool>true</bool>
          </property>
+         <property name="checked">
+            <bool>true</bool>
+           </property>
          <property name="text">
           <string>Bake in Vignette Correction</string>
          </property>
@@ -180,18 +143,11 @@
          <property name="enabled">
           <bool>true</bool>
          </property>
+         <property name="checked">
+            <bool>true</bool>
+           </property>
          <property name="text">
           <string>Normalize Exposure</string>
-         </property>
-        </widget>
-       </item>
-       <item row="4" column="0">
-        <widget class="QCheckBox" name="cfrConversionCheckBox">
-         <property name="enabled">
-          <bool>true</bool>
-         </property>
-         <property name="text">
-          <string>Constant Framerate Conversion</string>
          </property>
         </widget>
        </item>
@@ -237,16 +193,6 @@
          </item>
         </layout>
        </item>
-       <item row="2" column="1">
-        <widget class="QCheckBox" name="scaleRawCheckBox">
-         <property name="enabled">
-          <bool>true</bool>
-         </property>
-         <property name="text">
-          <string>Scale data</string>
-         </property>
-        </widget>
-       </item>
        <item row="2" column="0">
         <layout class="QHBoxLayout" name="cacheLayout">
          <item>
@@ -290,6 +236,62 @@
          </item>
         </layout>
        </item>
+       <item row="4" column="0">
+        <layout class="QHBoxLayout" name="cfrLayout">
+         <item>
+          <widget class="QCheckBox" name="cfrConversionCheckBox">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+             <horstretch>1</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="enabled">
+            <bool>true</bool>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+           <property name="text">
+            <string>Constant Framerate Conversion</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="cfrTarget">
+           <property name="minimumSize">
+            <size>
+             <width>100</width>
+             <height>30</height>
+            </size>
+           </property>
+           <property name="editable">
+            <bool>true</bool>
+           </property>
+           <item>
+            <property name="text">
+             <string>Prefer Drop Frame</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Prefer Integer</string>
+            </property>
+           </item>           
+           <item>
+            <property name="text">
+             <string>Median (Slowmotion)</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Average (Testing)</string>
+            </property>
+           </item>
+          </widget>
+         </item>
+        </layout>
+       </item>
        <item row="1" column="1">
         <widget class="QLabel" name="vignetteCorrectionLabel">
          <property name="text">
@@ -316,7 +318,7 @@
        <item row="1" column="2">
         <widget class="QLabel" name="vignetteOnlyColorLabel">
          <property name="text">
-          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Only treat Color Imperfections to retain natural Vignette and DR in corners.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Only treat color imperfections to retain natural vignette and DR in corners.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
          <property name="scaledContents">
           <bool>false</bool>
@@ -329,7 +331,7 @@
        <item row="3" column="2">
         <widget class="QLabel" name="normalizeExposureLabel">
          <property name="text">
-          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Compensate for Changes in Exposure Settings for consistent Brightness.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Compensate for changes in exposure settings for consistent brightness.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
          <property name="scaledContents">
           <bool>false</bool>
@@ -342,7 +344,7 @@
        <item row="5" column="0">
         <widget class="QLabel" name="cfrConversionLabel">
          <property name="text">
-          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Dynamically duplicate / drop Frames to retain sync at a constant target framerate.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Dynamically duplicate / drop frames to retain sync at a constant target framerate. (Set before opening in Davinci)&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
          <property name="scaledContents">
           <bool>false</bool>

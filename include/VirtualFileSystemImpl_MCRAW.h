@@ -20,7 +20,9 @@ public:
         LRUCache& lruCache,
         FileRenderOptions options,
         int draftScale,
-        const std::string& file);
+        const std::string& cfrTarget,
+        const std::string& file,
+        const std::string& baseName);
 
     ~VirtualFileSystemImpl_MCRAW();
 
@@ -35,7 +37,10 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale) override;
+    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget) override;
+
+    // Get the current frame rate
+    float getFps() const { return mFps; }
 
 private:
     void init(FileRenderOptions options);
@@ -66,6 +71,7 @@ private:
     std::vector<Entry> mFiles;
     std::vector<uint8_t> mAudioFile;
     int mDraftScale;
+    std::string mCFRTarget;
     FileRenderOptions mOptions;
     float mFps;
     double mBaselineExpValue;

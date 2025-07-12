@@ -83,7 +83,10 @@ public:
     ~Session();
 
 public:
-    void updateOptions(FileRenderOptions options, int draftScale);
+    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget);
+    float getFps() const { 
+        return mFs->getFps(); 
+    }
 
 protected:
     HRESULT StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) override;
@@ -158,12 +161,12 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale) {
+void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget) {
     mOptions = options;
     mDraftScale = draftScale;
 
     // Tell file system about new options
-    mFs->updateOptions(options, draftScale);
+    mFs->updateOptions(options, draftScale, cfrTarget);
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -207,6 +210,7 @@ void Session::updateOptions(FileRenderOptions options, int draftScale) {
         }
     }
 }
+};
 
 HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
     spdlog::debug("StartDirEnum(): Path [{}] triggered by [{}]",
@@ -533,18 +537,18 @@ void setupLogging() {
     }
 }
 
-} // namespace
+} // namespace motioncam
 
-FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
+motioncam::FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     mNextMountId(0),
-    mIoThreadPool(std::make_unique<BS::thread_pool>(IO_THREADS)),
+    mIoThreadPool(std::make_unique<BS::thread_pool>(motioncam::IO_THREADS)),
     mProcessingThreadPool(std::make_unique<BS::thread_pool>()),
-    mCache(std::make_unique<LRUCache>(CACHE_SIZE))
+    mCache(std::make_unique<motioncam::LRUCache>(motioncam::CACHE_SIZE))
 {
-    setupLogging();
+    motioncam::setupLogging();
 }
 
-MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, const std::string& srcFile, const std::string& dstPath) {
+motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -554,7 +558,11 @@ MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale,
         auto mountId = mNextMountId++;
 
         try {
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, srcFile);
+            // Extract base name from destination path
+            fs::path dstPathObj(dstPath);
+            std::string baseName = dstPathObj.filename().string();
+            
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, srcFile, baseName);
 
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
@@ -572,17 +580,25 @@ MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale,
     throw std::runtime_error("Invalid format");
 }
 
-void FuseFileSystemImpl_Win::unmount(MountId mountId) {
+void motioncam::FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale) {
+void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
 
     dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
-        options, draftScale);
+        options, draftScale, cfrTarget);
 }
 
-} // namespace motioncam
+float motioncam::FuseFileSystemImpl_Win::getFps(MountId mountId) const {
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        return 0.0f;
+    }
+
+    return dynamic_cast<Session*>(it->second.get())->getFps();
+}
+

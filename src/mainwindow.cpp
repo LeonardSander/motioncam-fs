@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <algorithm>
+#include <QTimer>
 
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
@@ -39,6 +40,9 @@ namespace {
 
         if(ui.normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
+
+        if(ui.cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
 
         return options;
     }
@@ -69,7 +73,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, [this](const Qt::CheckState &state) {
+        onRenderSettingsChanged(state);
+        QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+    });
+
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
+    connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onCFRTargetChanged(text.toStdString());
+        QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+    });
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
 }
@@ -88,8 +101,10 @@ void MainWindow::saveSettings() {
     settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mDraftQuality);
+    settings.setValue("cfrTarget", QString::fromStdString(mCFRTARGET));
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -120,8 +135,17 @@ void MainWindow::restoreSettings() {
     ui->normalizeExposureCheckBox->setCheckState(
         settings.value("normalizeExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
+    ui->cfrConversionCheckBox->setCheckState(
+        settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
+    mCFRTARGET = settings.value("cfrTarget").toString().toStdString();
+    
+    // Set default CFR target if none is restored
+    if (mCFRTARGET.empty()) {
+        mCFRTARGET = "Prefer Drop Frame";
+    }
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -129,6 +153,14 @@ void MainWindow::restoreSettings() {
         ui->draftQuality->setCurrentIndex(1);
     else if(mDraftQuality == 8)
         ui->draftQuality->setCurrentIndex(2);
+
+    // Set CFR target ComboBox to match restored value
+    int cfrIndex = ui->cfrTarget->findText(QString::fromStdString(mCFRTARGET));
+    if (cfrIndex != -1) {
+        ui->cfrTarget->setCurrentIndex(cfrIndex);
+    } else if (!mCFRTARGET.empty()) {
+        ui->cfrTarget->setEditText(QString::fromStdString(mCFRTARGET));
+    }
 
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
@@ -198,7 +230,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     try {
         mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, filePath.toStdString(), dstPath.toStdString());
+            getRenderOptions(*ui), mDraftQuality, mCFRTARGET, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -227,6 +259,21 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Add a spacer to push the button to the right
     fileLayout->addStretch();
+
+    // FPS label that displays mFps of given mounted mcraw
+    auto* fpsLabel = new QLabel("", fileWidget);
+    fpsLabel->setFixedSize(80, 30);
+    fpsLabel->setAlignment(Qt::AlignCenter);
+    fpsLabel->setStyleSheet("QLabel { background-color: #2b2b2b; border: 1px solid #555; border-radius: 4px; padding: 2px; }");
+    
+    fpsLabel->setProperty("mountId", QVariant(mountId));
+    fpsLabel->setProperty("isFpsLabel", true);
+    
+    // Get the current fps value
+    float fps = mFuseFilesystem->getFps(mountId);
+    fpsLabel->setText(QString("%1 fps").arg(fps, 0, 'f', 2));
+    
+    fileLayout->addWidget(fpsLabel);
 
     // Define consistent button size
     const int buttonWidth = 100;
@@ -328,6 +375,41 @@ void MainWindow::updateUi() {
     ui->cacheFolderLabel->setText(mCacheRootFolder);
 }
 
+void MainWindow::updateFpsLabels() {
+    // Get the scroll area's content widget
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    if (!scrollContent) {
+        return;
+    }
+    
+    // Force recalculation of fps values by calling updateOptions for all mounted files
+    auto renderOptions = getRenderOptions(*ui);
+    
+    for (const auto& mountedFile : mMountedFiles) {
+        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTARGET);
+    }
+    
+    // Find all fps labels in the scroll area
+    auto fpsLabels = scrollContent->findChildren<QLabel*>();
+    
+    for (auto* label : fpsLabels) {
+        // Check if this is an fps label by looking for the isFpsLabel property
+        bool isFpsLabel = label->property("isFpsLabel").toBool();
+        
+        if (isFpsLabel) {
+            bool ok = false;
+            auto mountId = label->property("mountId").toInt(&ok);
+            
+            if (ok && mountId >= 0) {
+                // Get the updated fps value
+                float fps = mFuseFilesystem->getFps(mountId);
+                QString newText = QString("%1 fps").arg(fps, 0, 'f', 2);
+                label->setText(newText);
+            }
+        }
+    }
+}
+
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     auto it = mMountedFiles.begin();
     auto renderOptions = getRenderOptions(*ui);
@@ -335,9 +417,12 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     updateUi();
 
     while(it != mMountedFiles.end()) {
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality);
+        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTARGET);
         ++it;
     }
+    
+    // Update fps labels after a short delay to ensure updateOptions has completed
+    QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
 }
 
 void MainWindow::onDraftModeQualityChanged(int index) {
@@ -348,6 +433,11 @@ void MainWindow::onDraftModeQualityChanged(int index) {
     else if(index == 2)
         mDraftQuality = 8;
 
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onCFRTargetChanged(std::string input) {
+    mCFRTARGET = input;
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 

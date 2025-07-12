@@ -66,6 +66,7 @@ private slots:
     void onRenderSettingsChanged(const Qt::CheckState &state);
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
+    void onCFRTargetChanged(std::string input);
 
     void playFile(const QString& path);
     void removeFile(QWidget* fileWidget);
@@ -74,6 +75,7 @@ private:
     void saveSettings();
     void restoreSettings();
     void updateUi();
+    void updateFpsLabels();
 
 private:
     Ui::MainWindow *ui;
@@ -81,6 +83,7 @@ private:
     QList<motioncam::MountedFile> mMountedFiles;
     QString mCacheRootFolder;
     int mDraftQuality;
+    std::string mCFRTARGET;
 };
 
 #endif // MAINWINDOW_H

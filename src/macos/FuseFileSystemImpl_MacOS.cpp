@@ -89,7 +89,8 @@ public:
     Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs);
     ~Session();
 
-    void updateOptions(FileRenderOptions options, int draftScale);
+    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget);
+    float getFps() const { return mFs->getFps(); }
 
 private:
     void init(VirtualFileSystemImpl_MCRAW* fs);
@@ -205,11 +206,10 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
 
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale) {
-    mFs->updateOptions(options, draftScale);
+void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget) {
+    mFs->updateOptions(options, draftScale, cfrTarget);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
-
 }
 
 void Session::fuseMain(struct fuse_chan* ch, struct fuse* fuse) {
@@ -382,7 +382,7 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
 }
 
 MountId FuseFileSystemImpl_MacOs::mount(
-    FileRenderOptions options, int draftScale, const std::string& srcFile, const std::string& dstPath)
+    FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& srcFile, const std::string& dstPath)
 {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
@@ -408,6 +408,10 @@ MountId FuseFileSystemImpl_MacOs::mount(
         size_t stack_size = 0;
 
         try {
+            // Extract base name from destination path
+            fs::path dstPathObj(dstPath);
+            std::string baseName = dstPathObj.filename().string();
+            
             auto* fs =
                 new VirtualFileSystemImpl_MCRAW(
                     *mIoThreadPool,
@@ -415,7 +419,9 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     *mCache,
                     options,
                     draftScale,
-                    srcFile);
+                    cfrTarget,
+                    srcFile,
+                    baseName);
 
             auto session = std::make_unique<Session>(srcFile, dstPath, fs);
 
@@ -448,10 +454,10 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
     }
 }
 
-void FuseFileSystemImpl_MacOs::updateOptions(MountId mountId, FileRenderOptions options, int draftScale) {
+void FuseFileSystemImpl_MacOs::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
-        it->second->updateOptions(options, draftScale);
+        it->second->updateOptions(options, draftScale, cfrTarget);
     }
 }
 

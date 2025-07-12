@@ -209,15 +209,18 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         LRUCache& lruCache,
         FileRenderOptions options,
         int draftScale,
-        const std::string& file) :
+        const std::string& cfrTarget,
+        const std::string& file,
+        const std::string& baseName) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
         mSrcPath(file),
-        mBaseName(extractFilenameWithoutExtension(file)),
+        mBaseName(baseName),
         mTypicalDngSize(0),
         mFps(0),
         mDraftScale(draftScale),
+        mCFRTarget(cfrTarget),
         mOptions(options) {
     
     Decoder decoder(mSrcPath);
@@ -238,7 +241,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         //spdlog::debug("VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW: mBaselineExpValue={}", mBaselineExpValue);
     } 
 
-    init(options);
+    this->init(options);
 }
 
 VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
@@ -262,36 +265,87 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     float medianFrameRate = frameRateInfo.medianFrameRate;
     float averageFrameRate = frameRateInfo.averageFrameRate;
 
-    // match medianFramerate to neighboring standard framerates
-    if      (medianFrameRate <=  23.0 || medianFrameRate >= 121.0) 
-        mFps = medianFrameRate;
-    else if (medianFrameRate < 24.0) 
-        mFps = 23.976f;
-    else if (medianFrameRate < 24.5)
-        mFps = 24.0f;
-    else if (medianFrameRate < 26.0)
-        mFps = 25.0f;
-    else if (medianFrameRate >= 28.0 && medianFrameRate < 30.0)
-        mFps = 29.97f;
-    else if (medianFrameRate <  32.0)
-        mFps = 30.0f;
-    else if (medianFrameRate >= 46.0 && medianFrameRate < 48.0)
-        mFps = 47.952f;
-    else if (medianFrameRate <  49.0)
-        mFps = 48.0f;
-    else if (medianFrameRate <  52.0)
-        mFps = 50.0f;
-    else if (medianFrameRate >= 58.0 && medianFrameRate < 60.0)
-        mFps = 59.94f;
-    else if (medianFrameRate < 62.0)
-        mFps = 60.0f;
-    else if (medianFrameRate >= 115.0 && medianFrameRate < 119.9)
-        mFps = 119.88f;
-    else if (medianFrameRate < 121.0)
-        mFps = 120.0f;
-    else    
-        mFps = medianFrameRate;   
+    bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
     
+    if (applyCFRConversion && !mCFRTarget.empty()) {
+        if (mCFRTarget == "Prefer Integer") {
+            if (medianFrameRate <=  23.0 || medianFrameRate >= 1000.0) 
+                mFps = medianFrameRate;
+            else if (medianFrameRate < 24.5)
+                mFps = 24.0f;
+            else if (medianFrameRate < 26.0)
+                mFps = 25.0f;
+            else if (medianFrameRate < 33.0)
+                mFps = 30.0f;
+            else if (medianFrameRate < 49.0)
+                mFps = 48.0f;
+            else if (medianFrameRate < 52.0)
+                mFps = 50.0f;
+            else if (medianFrameRate > 56.0  && medianFrameRate < 63.0)
+                mFps = 60.0f;
+            else if (medianFrameRate > 112.0 && medianFrameRate < 125.0)
+                mFps = 120.0f;
+            else if (medianFrameRate > 224.0 && medianFrameRate < 250.0)
+                mFps = 240.0f;
+            else if (medianFrameRate > 448.0 && medianFrameRate < 500.0)
+                mFps = 480.0f;
+            else if (medianFrameRate > 896.0 && medianFrameRate < 1000.0)
+                mFps = 960.0f;
+            else    
+                mFps = 60.0f;
+        }
+        else if (mCFRTarget == "Prefer Drop Frame") {
+            if (medianFrameRate <=  23.0 || medianFrameRate >= 1000.0) 
+                mFps = medianFrameRate;
+            else if (medianFrameRate < 24.5)
+                mFps = 23.976f;
+            else if (medianFrameRate < 26.0)
+                mFps = 25.0f;
+            else if (medianFrameRate < 33.0)
+                mFps = 29.97f;
+            else if (medianFrameRate < 49.0)
+                mFps = 47.952f;
+            else if (medianFrameRate < 52.0)
+                mFps = 50.0f;
+            else if (medianFrameRate > 56.0  && medianFrameRate < 63.0)
+                mFps = 59.94f;
+            else if (medianFrameRate > 112.0 && medianFrameRate < 125.0)
+                mFps = 119.88f;
+            else if (medianFrameRate > 224.0 && medianFrameRate < 250.0)
+                mFps = 240.0f;
+            else if (medianFrameRate > 448.0 && medianFrameRate < 500.0)
+                mFps = 480.0f;
+            else if (medianFrameRate > 896.0 && medianFrameRate < 1000.0)
+                mFps = 960.0f;
+            else    
+                mFps = 59.94f;
+        }
+        else if (mCFRTarget == "Median (Slowmotion)") {
+            // Use median frame rate for non real time playback
+            mFps = medianFrameRate;
+        }
+        else if (mCFRTarget == "Average (Testing)") {
+            // legacy framerate target determination
+            mFps = averageFrameRate;
+        }
+        else {
+            // Custom framerate - try to parse as float
+            try {
+                mFps = std::stof(mCFRTarget);
+            } catch (const std::exception& e) {
+                spdlog::warn("Invalid CFR target '{}', using median frame rate", mCFRTarget);
+                mFps = medianFrameRate;
+            }
+        }
+    } else {
+        // Custom framerate - try to parse as float
+        try {
+            mFps = std::stof(mCFRTarget);
+        } catch (const std::exception& e) {
+            spdlog::warn("Invalid CFR target '{}', using average for no cfr conversion", mCFRTarget);
+            mFps = averageFrameRate;
+        }
+    }       
 
     // Calculate typical DNG size that we can use for all files
     std::vector<uint8_t> data;
@@ -361,10 +415,23 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
 
     // Add video frames
     for(auto& x : frames) {
-        int pts = getFrameNumberFromTimestamp(x, frames[0], mFps);
+        if(applyCFRConversion) {
+            int pts = getFrameNumberFromTimestamp(x, frames[0], mFps);
 
-        // Duplicate frames to account for dropped frames
-        while(lastPts < pts) {
+            // Duplicate frames to account for dropped frames
+            while(lastPts < pts) {
+                Entry entry;
+
+                // Add main entry
+                entry.type = EntryType::FILE_ENTRY;
+                entry.size = mTypicalDngSize;
+                entry.name = constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
+                entry.userData = x;
+
+                mFiles.emplace_back(entry);
+                ++lastPts;
+            }
+        } else {
             Entry entry;
 
             // Add main entry
@@ -374,9 +441,9 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
             entry.userData = x;
 
             mFiles.emplace_back(entry);
-
             ++lastPts;
         }
+        
     }
 }
 
@@ -563,12 +630,15 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget) {
     mDraftScale = draftScale;
     mOptions = options;
+    mCFRTarget = cfrTarget;
 
-    init(options);
+    this->init(options);
 }
+
+
 
 } // namespace motioncam
 

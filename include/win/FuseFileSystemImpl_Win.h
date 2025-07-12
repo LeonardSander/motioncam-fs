@@ -19,9 +19,10 @@ class FuseFileSystemImpl_Win : public IFuseFileSystem
 public:
     FuseFileSystemImpl_Win();
 
-    MountId mount(FileRenderOptions options, int draftScale, const std::string& srcFile, const std::string& dstPath) override;
+    MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string& srcFile, const std::string& dstPath) override;
     void unmount(MountId mountId) override;
-    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale) override;
+    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, const std::string cfrTarget) override;
+    float getFps(MountId mountId) const override;
 
 private:
     MountId mNextMountId;
