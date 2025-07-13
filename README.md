@@ -4,7 +4,7 @@ Work in progress
 
 MotionCam Fuse allows mounting MCRAW files (propriatary MotionCam Raw Capture Format) to projected Folders of DNG sequences. This allows for a convenient Raw Video editing workflow preferably in Davinci Resolve.
 
-<img width="811" height="1120" alt="image" src="https://github.com/user-attachments/assets/7d61ecad-8397-4b9c-a044-c5c018a03867" />
+<img width="800" height="1105" alt="mcfs_screenshot" src="https://github.com/user-attachments/assets/a2ca5952-dd60-45a2-bbaa-189aeb9df632" />
 
 Additionally to the features of the source repository, this fork adds functionality to reduce the included vignette correction to be reduced to color corrections before being applied to the image data. 
 
