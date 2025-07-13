@@ -27,6 +27,6 @@ In addition to the features of the original repository, this fork adds:
 
 ### Platform Support
 
-Currently, **only Windows builds** are maintained in this fork.
+Currently, **only Windows builds** are maintained in this fork. For now builds are published via the MotionCam Community Discord ( https://discord.gg/Vy4gQNEdNS - https://discord.com/channels/980884979955421255/1377309561219973121/1393635519249776700 )
 
 ⚠️ **Note:** Expect slowdowns when opening MCRAW files or changing settings.
