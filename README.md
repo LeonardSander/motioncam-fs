@@ -1,22 +1,3 @@
-# MotionCam Fuse - Virtual File System
-
-Work in progress
-
-MotionCam Fuse allows mounting MCRAW files (propriatary MotionCam Raw Capture Format) to projected Folders of DNG sequences. This allows for a convenient Raw Video editing workflow preferably in Davinci Resolve.
-
-<img width="800" height="1105" alt="mcfs_screenshot" src="https://github.com/user-attachments/assets/a2ca5952-dd60-45a2-bbaa-189aeb9df632" />
-
-Additionally to the features of the source repository, this fork adds functionality to reduce the included vignette correction to be reduced to color corrections before being applied to the image data. 
-
-Furthermore based on per frame ISO and shutter speed metadata, exposure settings changes can be normalized to avoid exposure transients. This relies on the per frame Baseline Exposure DNG Tag which is recognized by Davinci Resolve. 
-
-Since the underlying raw video streams captured in MCRAW files often feature a non standard and possibly variable framerate, the logic to determine a suitable target framerate for constant framerate conversion is expanded upon in this fork. 
-
-
-For this fork only Windows builds are being focussed on. Expect slowdowns upon opening MCRAW files and changing settings.
-
-
-
 # MotionCam Fuse – Virtual File System
 
 **Work in Progress**
