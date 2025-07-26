@@ -91,6 +91,7 @@ public:
 
     void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget);
     float getFps() const { return mFs->getFps(); }
+    FileInfo getFileInfo() const;
 
 private:
     void init(VirtualFileSystemImpl_MCRAW* fs);
@@ -210,6 +211,10 @@ void Session::updateOptions(FileRenderOptions options, int draftScale, std::stri
     mFs->updateOptions(options, draftScale, cfrTarget, cropTarget);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
+}
+
+FileInfo Session::getFileInfo() const {
+    return mFs->getFileInfo();
 }
 
 void Session::fuseMain(struct fuse_chan* ch, struct fuse* fuse) {
@@ -458,6 +463,14 @@ void FuseFileSystemImpl_MacOs::updateOptions(MountId mountId, FileRenderOptions 
     if(it != mMountedFiles.end()) {
         it->second->updateOptions(options, draftScale, cfrTarget, cropTarget);
     }
+}
+
+std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
+    auto it = mMountedFiles.find(mountId);
+    if(it != mMountedFiles.end()) {
+        return it->second->getFileInfo();
+    }
+    return std::nullopt;
 }
 
 } // namespace motioncam

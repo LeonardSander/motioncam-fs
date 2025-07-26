@@ -220,6 +220,10 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mBaseName(baseName),
         mTypicalDngSize(0),
         mFps(0),
+        mTotalFrames(0),
+        mDroppedFrames(0),
+        mWidth(0),
+        mHeight(0),
         mDraftScale(draftScale),
         mCFRTarget(cfrTarget),
         mCropTarget(cropTarget),
@@ -356,8 +360,11 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
-
-    
+    // Store frame information
+    mWidth = cameraFrameMetadata.width;
+    mHeight = cameraFrameMetadata.height;
+    mTotalFrames = static_cast<int>(frames.size());
+    mDroppedFrames = 0; // Will be calculated during frame processing
 
     auto dngData = utils::generateDng(
         data,
@@ -422,6 +429,9 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     for(auto& x : frames) {
         if(applyCFRConversion) {
             int pts = getFrameNumberFromTimestamp(x, frames[0], mFps);
+
+            // Count dropped frames before this frame
+            mDroppedFrames += (std::max)(0, pts - lastPts - 1);
 
             // Duplicate frames to account for dropped frames
             while(lastPts < pts) {
@@ -646,6 +656,16 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int d
     this->init(options);
 }
 
+
+FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
+    return FileInfo{
+        mFps,
+        mTotalFrames,
+        mDroppedFrames,
+        mWidth,
+        mHeight
+    };
+}
 
 } // namespace motioncam
 

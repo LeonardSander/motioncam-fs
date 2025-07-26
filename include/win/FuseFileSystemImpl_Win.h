@@ -21,8 +21,9 @@ public:
 
     MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string& srcFile, const std::string& dstPath);
     void unmount(MountId mountId) override;
-    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget);
+    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget) override;
     float getFps(MountId mountId) const override;
+    std::optional<FileInfo> getFileInfo(MountId mountId) override;
 
 private:
     MountId mNextMountId;

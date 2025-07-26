@@ -254,24 +254,53 @@ void MainWindow::mountFile(const QString& filePath) {
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
 
-    // Create a widget to hold a filename label and remove button
+    // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(50);
+    fileWidget->setFixedHeight(120);
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
 
-    auto* fileLayout = new QHBoxLayout(fileWidget);
-    fileLayout->setContentsMargins(5, 5, 5, 5);
+    auto* fileLayout = new QVBoxLayout(fileWidget);
+    fileLayout->setContentsMargins(16, 12, 16, 12);
+    fileLayout->setSpacing(4);
 
     // Create and add the filename label
-    auto* fileLabel = new QLabel(fileName, fileWidget);
-
+    auto* fileLabel = new QLabel(fileInfo.baseName(), fileWidget);
     fileLabel->setToolTip(filePath); // Show full path on hover
+    fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
     fileLayout->addWidget(fileLabel);
 
-    // Add a spacer to push the button to the right
-    fileLayout->addStretch();
+    // Get file information from the FUSE filesystem
+    auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
+    if (fileInfoOpt.has_value()) {
+        auto info = fileInfoOpt.value();
+
+        // Create info label with FPS, Total Frames/Dropped, and Resolution
+        auto infoText = QString("FPS: %1 | Frames: %2 | Dropped: %3 | Resolution: %4x%5")
+                            .arg(QString::number(info.fps, 'f', 1))
+                            .arg(info.totalFrames)
+                            .arg(info.droppedFrames)
+                            .arg(info.width)
+                            .arg(info.height);
+
+        auto* infoLabel = new QLabel(infoText, fileWidget);
+        infoLabel->setStyleSheet("font-size: 9pt; color: #888888;");
+        fileLayout->addWidget(infoLabel);
+    }
+
+    // Create and add the source folder label
+    auto* sourceLabel = new QLabel(QString("Source: %1").arg(fileInfo.path()), fileWidget);
+    sourceLabel->setStyleSheet("font-size: 9pt; color: #666666;");
+    sourceLabel->setToolTip(filePath); // Show full path on hover
+    fileLayout->addWidget(sourceLabel);
+
+    // Add spacer to maintain button position
+    fileLayout->addSpacing(12);
+
+    // Create horizontal layout for buttons
+    auto* buttonLayout = new QHBoxLayout();
+    buttonLayout->setSpacing(8);
 
     // FPS label that displays mFps of given mounted mcraw
     auto* fpsLabel = new QLabel("", fileWidget);
@@ -292,21 +321,34 @@ void MainWindow::mountFile(const QString& filePath) {
     const int buttonWidth = 100;
     const int buttonHeight = 30;
 
-    // Create and add the remove button
+    // Create and add the play button
     auto* playButton = new QPushButton("Play", fileWidget);
-
     playButton->setFixedSize(buttonWidth, buttonHeight);
     playButton->setIcon(QIcon(":/assets/play_btn.png"));
-
-    fileLayout->addWidget(playButton);
+    buttonLayout->addWidget(playButton);
 
     // Create and add the remove button
-    auto* removeButton = new QPushButton("Remove", fileWidget);
-
+    auto* removeButton = new QPushButton("Unmount", fileWidget);
     removeButton->setFixedSize(buttonWidth, buttonHeight);
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
+    buttonLayout->addWidget(removeButton);
 
-    fileLayout->addWidget(removeButton);
+    // Add stretch to push buttons to the left
+    buttonLayout->addStretch();
+
+    // Add button layout to main layout
+    fileLayout->addLayout(buttonLayout);
+
+    // Add separator if there are already mounted files
+    if (!mMountedFiles.empty()) {
+        auto* separator = new QFrame(scrollContent);
+
+        separator->setFrameShape(QFrame::HLine);
+        separator->setFrameShadow(QFrame::Plain);
+        separator->setLineWidth(1);
+        separator->setStyleSheet("QFrame { color: #e0e0e0; margin: 16px 0px; }");
+        scrollLayout->insertWidget(0, separator);
+    }
 
     // Add the file widget to the scroll area
     scrollLayout->insertWidget(0, fileWidget);
@@ -347,13 +389,23 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
 
+    // Find and remove the separator above this file widget if it exists
+    int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
+    if (fileWidgetIndex > 0) {
+        auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
+        if (itemAbove && itemAbove->widget()) {
+            auto* widgetAbove = itemAbove->widget();
+            // Check if it's a separator (QFrame with HLine shape)
+            auto* frame = qobject_cast<QFrame*>(widgetAbove);
+            if (frame && frame->frameShape() == QFrame::HLine) {
+                scrollLayout->removeWidget(frame);
+                frame->deleteLater();
+            }
+        }
+    }
+
     scrollLayout->removeWidget(fileWidget);
     fileWidget->deleteLater();
-
-    // If all files are removed, show the drag-drop label again
-    if (scrollLayout->count() == 0) {
-        ui->dragAndDropLabel->show();
-    }
 
     // Unmount the file
     bool ok = false;
@@ -365,7 +417,13 @@ void MainWindow::removeFile(QWidget* fileWidget) {
             mMountedFiles.begin(), mMountedFiles.end(),
             [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
         if(it != mMountedFiles.end())
+
             mMountedFiles.erase(it);
+    }
+
+    // If all files are removed, show the drag-drop label again
+    if (mMountedFiles.empty()) {
+        ui->dragAndDropLabel->show();
     }
 }
 
@@ -390,7 +448,14 @@ void MainWindow::updateUi() {
         ui->vignetteOnlyColorCheckBox->setEnabled(false);
     }
 
-    ui->cacheFolderLabel->setText(mCacheRootFolder);
+    if (mCacheRootFolder.isEmpty()) {
+        ui->cacheFolderLabel->setText("<i>Same as source file</i>");
+        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-style: italic;");
+    }
+    else {
+        ui->cacheFolderLabel->setText(mCacheRootFolder);
+        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
+    }
 }
 
 void MainWindow::updateFpsLabels() {
@@ -475,5 +540,12 @@ void MainWindow::onSetCacheFolder(bool checked) {
     );
 
     mCacheRootFolder = folderPath;
-    ui->cacheFolderLabel->setText(mCacheRootFolder);
+    if (mCacheRootFolder.isEmpty()) {
+        ui->cacheFolderLabel->setText("<i>Same as source file</i>");
+        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-style: italic;");
+    }
+    else {
+        ui->cacheFolderLabel->setText(mCacheRootFolder);
+        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
+    }
 }

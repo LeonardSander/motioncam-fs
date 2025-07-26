@@ -87,6 +87,7 @@ public:
     float getFps() const { 
         return mFs->getFps(); 
     }
+    FileInfo getFileInfo() const;
 
 protected:
     HRESULT StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) override;
@@ -208,7 +209,10 @@ void Session::updateOptions(FileRenderOptions options, int draftScale, std::stri
         }
     }
 }
-};
+
+FileInfo Session::getFileInfo() const {
+    return mFs->getFileInfo();
+}
 
 HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
     spdlog::debug("StartDirEnum(): Path [{}] triggered by [{}]",
@@ -582,6 +586,14 @@ void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRende
         return;
     dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
         options, draftScale, cfrTarget, cropTarget);
+}
+
+std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
+    auto it = mMountedFiles.find(mountId);
+    if(it != mMountedFiles.end()) {
+        return dynamic_cast<Session*>(it->second.get())->getFileInfo();
+    }
+    return std::nullopt;
 }
 
 float motioncam::FuseFileSystemImpl_Win::getFps(MountId mountId) const {

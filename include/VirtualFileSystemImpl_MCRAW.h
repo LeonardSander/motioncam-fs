@@ -2,6 +2,7 @@
 
 #include "IFuseFileSystem.h"
 #include <IVirtualFileSystem.h>
+#include <IFuseFileSystem.h>
 
 namespace BS {
 class thread_pool;
@@ -40,6 +41,7 @@ public:
         bool async=true) override;
 
     void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) override;
+    FileInfo getFileInfo() const;
 
     // Get the current frame rate
     float getFps() const { return mFps; }
@@ -77,6 +79,10 @@ private:
     std::string mCropTarget;
     FileRenderOptions mOptions;
     float mFps;
+    int mTotalFrames;
+    int mDroppedFrames;
+    int mWidth;
+    int mHeight;
     double mBaselineExpValue;
     std::mutex mMutex;
 };
