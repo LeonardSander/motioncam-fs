@@ -327,9 +327,10 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     const CameraConfiguration& cameraConfiguration,
     const std::array<uint8_t, 4>& cfa,
     uint32_t scale,
-    bool applyShadingMap=true,
-    bool vignetteOnlyColor=false,
-    bool normaliseShadingMap=false)
+    bool applyShadingMap,
+    bool vignetteOnlyColor,
+    bool normaliseShadingMap,
+    std::string cropTarget)
 {
     if (scale > 1) {
         // Ensure even scale for downscaling
@@ -340,13 +341,35 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
         scale = 1;
     }
 
-    // Calculate new dimensions
-    uint32_t newWidth = inOutWidth / scale;
-    uint32_t newHeight = inOutHeight / scale;
+    uint32_t newWidth, newHeight;
+    uint32_t cropWidth = 0, cropHeight = 0;
 
+    if (!cropTarget.empty()) {
+        const size_t separatorPos = cropTarget.find('x');
+        if (separatorPos != std::string::npos) {
+            try {
+                cropWidth = std::stoul(cropTarget.substr(0, separatorPos));
+                cropHeight = std::stoul(cropTarget.substr(separatorPos + 1));
+            } catch (const std::exception&) {
+                // Ignore invalid crop target
+                cropWidth = 0;
+                cropHeight = 0;
+            }
+        }
+    }
+
+    if (cropWidth > 0 && cropHeight > 0 && (cropWidth < inOutWidth || cropHeight < inOutWidth)) {
+        newWidth = cropWidth / scale;
+        newHeight = cropHeight / scale;
+    } else {
+        // Calculate new dimensions
+        newWidth = inOutWidth / scale;
+        newHeight = inOutHeight / scale;
+    }
+    
     // Align to 4 for bayer pattern and also because we read 4 bytes at a time when encoding to 10/14 bit
     newWidth = (newWidth / 4) * 4;
-    newHeight = (newHeight / 4) * 4;
+    newHeight = (newHeight / 4) * 4;    
 
     const auto& srcBlackLevel = cameraConfiguration.blackLevel;
     const float srcWhiteLevel = cameraConfiguration.whiteLevel;
@@ -367,8 +390,12 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     const int fullWidth = metadata.originalWidth;
     const int fullHeight = metadata.originalHeight;
 
-    const int left = (fullWidth - inOutWidth) / 2;
-    const int top = (fullHeight - inOutHeight) / 2;
+    int left = 0;
+    int top = 0;
+    if (!(cropWidth > 0 && cropHeight > 0)) {
+        left = (fullWidth - inOutWidth) / 2;
+        top = (fullHeight - inOutHeight) / 2;
+    }
 
     const float shadingMapScaleX = 1.0f / static_cast<float>(fullWidth);
     const float shadingMapScaleY = 1.0f / static_cast<float>(fullHeight);
@@ -413,6 +440,11 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
             // Get the source coordinates (scaled)
             uint32_t srcY = y * scale;
             uint32_t srcX = x * scale;
+            // For crop, always use top-left, so no offset
+            if (!(cropWidth > 0 && cropHeight > 0)) {
+                srcY += top;
+                srcX += left;
+            }
 
             auto s0 = srcData[srcY * originalWidth + srcX];
             auto s1 = srcData[srcY * originalWidth + srcX + 1];
@@ -421,16 +453,24 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
 
             if(applyShadingMap) {
                 // Calculate position in shading map
-                const float sx = (srcX + left) * shadingMapScaleX;
-                const float sy = (srcY + top) * shadingMapScaleY;
-
-                // Calculate shading map
-                shadingMapVals = {
-                    getShadingMapValue(sx, sy, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                    getShadingMapValue(sx, sy, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                    getShadingMapValue(sx, sy, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                    getShadingMapValue(sx, sy, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight)
-                };
+                const float sx = srcX * shadingMapScaleX;
+                const float sy = srcY * shadingMapScaleY;
+                if (!(cropWidth > 0 && cropHeight > 0)) {
+                    // If not cropping, use offset
+                    shadingMapVals = {
+                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight)
+                    };
+                } else {
+                    shadingMapVals = {
+                        getShadingMapValue(sx, sy, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                        getShadingMapValue(sx, sy, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                        getShadingMapValue(sx, sy, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                        getShadingMapValue(sx, sy, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight)
+                    };
+                }
             }
 
             // Linearize and (maybe) apply shading map
@@ -471,7 +511,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     int frameNumber,
     FileRenderOptions options,
     int scale,
-    double baselineExpValue)
+    double baselineExpValue,
+    std::string cropTarget)
 {
     Measure m("generateDng");
 
@@ -497,6 +538,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool vignetteOnlyColor = options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
     bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
 
+    if(!(options & RENDER_OPT_CROPPING))
+        cropTarget = "0x0";
+
     auto [processedData, dstBlackLevel, dstWhiteLevel] = utils::preprocessData(
         data,
         width, height,
@@ -504,7 +548,8 @@ std::shared_ptr<std::vector<char>> generateDng(
         cameraConfiguration,
         cfa,
         scale,
-        applyShadingMap, vignetteOnlyColor, normalizeShadingMap);
+        applyShadingMap, vignetteOnlyColor, normalizeShadingMap,
+        cropTarget);
 
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);

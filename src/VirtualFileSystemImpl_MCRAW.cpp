@@ -210,6 +210,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         FileRenderOptions options,
         int draftScale,
         const std::string& cfrTarget,
+        const std::string& cropTarget,
         const std::string& file,
         const std::string& baseName) :
         mCache(lruCache),
@@ -221,26 +222,22 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mFps(0),
         mDraftScale(draftScale),
         mCFRTarget(cfrTarget),
+        mCropTarget(cropTarget),
         mOptions(options) {
     
+    spdlog::debug("Attempting to open MCRAW file: {}", file);
     Decoder decoder(mSrcPath);
     auto frames = decoder.getFrames();
     std::sort(frames.begin(), frames.end());
-
     if(frames.empty())
         return;
-
-    mBaselineExpValue = std::numeric_limits<double>::max();  // find most insensible exposure settings in sequence, Start with maximum possible value
-
+    mBaselineExpValue = std::numeric_limits<double>::max();
     for(const auto& frame : frames) {
         nlohmann::json metadata;
         decoder.loadFrameMetadata(frame, metadata);
         const auto& cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
-        //spdlog::debug("ISO={}, EXP={}", cameraFrameMetadata.iso, cameraFrameMetadata.exposureTime);
         mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
-        //spdlog::debug("VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW: mBaselineExpValue={}", mBaselineExpValue);
-    } 
-
+    }
     this->init(options);
 }
 
@@ -291,7 +288,9 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
                 mFps = 480.0f;
             else if (medianFrameRate > 896.0 && medianFrameRate < 1000.0)
                 mFps = 960.0f;
-            else    
+            else if (medianFrameRate >= 63.0)
+                mFps = 120.0f;
+            else   
                 mFps = 60.0f;
         }
         else if (mCFRTarget == "Prefer Drop Frame") {
@@ -317,6 +316,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
                 mFps = 480.0f;
             else if (medianFrameRate > 896.0 && medianFrameRate < 1000.0)
                 mFps = 960.0f;
+            else if (medianFrameRate >= 63.0)
+                mFps = 119.88f;
             else    
                 mFps = 59.94f;
         }
@@ -356,6 +357,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
 
+    
+
     auto dngData = utils::generateDng(
         data,
         cameraFrameMetadata,
@@ -364,7 +367,9 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         0,
         options,
         getScaleFromOptions(options, mDraftScale),
-        mBaselineExpValue);
+        mBaselineExpValue,
+        mCropTarget
+    );
 
     mTypicalDngSize = dngData->size();
 
@@ -546,7 +551,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 frameIndex,
                 options,
                 getScaleFromOptions(options, draftScale),
-                baselineExpValue);
+                baselineExpValue,
+                mCropTarget);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -630,14 +636,15 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) {
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;
+    mCropTarget = cropTarget;
 
+    mCache.clear();
     this->init(options);
 }
-
 
 
 } // namespace motioncam

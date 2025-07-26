@@ -67,6 +67,7 @@ private slots:
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
     void onCFRTargetChanged(std::string input);
+    void onCropTargetChanged(std::string input);
 
     void playFile(const QString& path);
     void removeFile(QWidget* fileWidget);
@@ -83,7 +84,8 @@ private:
     QList<motioncam::MountedFile> mMountedFiles;
     QString mCacheRootFolder;
     int mDraftQuality;
-    std::string mCFRTARGET;
+    std::string mCFRTarget;
+    std::string mCropTarget;
 };
 
 #endif // MAINWINDOW_H

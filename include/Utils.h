@@ -163,7 +163,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     int frameNumber,
     FileRenderOptions options,
     int scale=1,
-    double baselineExpValue=0.0);
+    double baselineExpValue=0.0,
+    std::string cropTarget = "0x0");
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);
 

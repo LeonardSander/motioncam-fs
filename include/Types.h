@@ -70,7 +70,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_NORMALIZE_SHADING_MAP        = 1 << 2,
     RENDER_OPT_VIGNETTE_ONLY_COLOR          = 1 << 3,
     RENDER_OPT_NORMALIZE_EXPOSURE           = 1 << 4,
-    RENDER_OPT_FRAMERATE_CONVERSION         = 1 << 5
+    RENDER_OPT_FRAMERATE_CONVERSION         = 1 << 5,
+    RENDER_OPT_CROPPING                     = 1 << 6
 };
 
 // Overload bitwise OR operator
@@ -122,6 +123,9 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_FRAMERATE_CONVERSION) {
         flags.push_back("FRAMERATE_CONVERSION");
+    }
+    if (options & RENDER_OPT_CROPPING) {
+        flags.push_back("CROPPING");
     }
 
     std::string result;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "IFuseFileSystem.h"
 #include <IVirtualFileSystem.h>
 
 namespace BS {
@@ -21,6 +22,7 @@ public:
         FileRenderOptions options,
         int draftScale,
         const std::string& cfrTarget,
+        const std::string& cropTarget,
         const std::string& file,
         const std::string& baseName);
 
@@ -37,7 +39,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget) override;
+    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) override;
 
     // Get the current frame rate
     float getFps() const { return mFps; }
@@ -72,6 +74,7 @@ private:
     std::vector<uint8_t> mAudioFile;
     int mDraftScale;
     std::string mCFRTarget;
+    std::string mCropTarget;
     FileRenderOptions mOptions;
     float mFps;
     double mBaselineExpValue;

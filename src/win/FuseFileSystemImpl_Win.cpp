@@ -83,7 +83,7 @@ public:
     ~Session();
 
 public:
-    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget);
+    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget);
     float getFps() const { 
         return mFs->getFps(); 
     }
@@ -161,12 +161,10 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget) {
+void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget) {
     mOptions = options;
     mDraftScale = draftScale;
-
-    // Tell file system about new options
-    mFs->updateOptions(options, draftScale, cfrTarget);
+    mFs->updateOptions(options, draftScale, cfrTarget, cropTarget);
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -548,7 +546,7 @@ motioncam::FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     motioncam::setupLogging();
 }
 
-motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, const std::string& srcFile, const std::string& dstPath) {
+motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -561,22 +559,16 @@ motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions op
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, srcFile, baseName);
-
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
-
             throw std::runtime_error(e.what());
         }
-
         return mountId;
     }
-
     spdlog::error("Failed to mount {} to {}, invalid file format", srcFile, dstPath);
-
     throw std::runtime_error("Invalid format");
 }
 
@@ -584,13 +576,12 @@ void motioncam::FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget) {
+void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
-
     dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
-        options, draftScale, cfrTarget);
+        options, draftScale, cfrTarget, cropTarget);
 }
 
 float motioncam::FuseFileSystemImpl_Win::getFps(MountId mountId) const {

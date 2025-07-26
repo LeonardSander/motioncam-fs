@@ -89,7 +89,7 @@ public:
     Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs);
     ~Session();
 
-    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget);
+    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget);
     float getFps() const { return mFs->getFps(); }
 
 private:
@@ -206,8 +206,8 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
 
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget) {
-    mFs->updateOptions(options, draftScale, cfrTarget);
+void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget) {
+    mFs->updateOptions(options, draftScale, cfrTarget, cropTarget);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
@@ -381,9 +381,7 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
     spdlog::info("Destroying FuseFileSystemImpl_MacOs()");
 }
 
-MountId FuseFileSystemImpl_MacOs::mount(
-    FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& srcFile, const std::string& dstPath)
-{
+MountId FuseFileSystemImpl_MacOs::mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -420,6 +418,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     options,
                     draftScale,
                     cfrTarget,
+                    cropTarget,
                     srcFile,
                     baseName);
 
@@ -454,10 +453,10 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
     }
 }
 
-void FuseFileSystemImpl_MacOs::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget) {
+void FuseFileSystemImpl_MacOs::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
-        it->second->updateOptions(options, draftScale, cfrTarget);
+        it->second->updateOptions(options, draftScale, cfrTarget, cropTarget);
     }
 }
 

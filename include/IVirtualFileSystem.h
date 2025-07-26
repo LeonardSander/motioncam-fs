@@ -1,5 +1,6 @@
 #pragma once
 
+#include "IFuseFileSystem.h"
 #include "Types.h"
 
 #include <optional>
@@ -26,7 +27,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async) = 0;
 
-    virtual void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget) = 0;
+    virtual void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) = 0;
 
 protected:
     IVirtualFileSystem() = default;

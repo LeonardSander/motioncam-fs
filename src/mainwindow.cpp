@@ -44,6 +44,9 @@ namespace {
         if(ui.cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
 
+        if(ui.cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_CROPPING;
+
         return options;
     }
 }
@@ -73,15 +76,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
-    connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, [this](const Qt::CheckState &state) {
-        onRenderSettingsChanged(state);
-        QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
-    });
-
+    connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCFRTargetChanged(text.toStdString());
         QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+    });
+    connect(ui->cropTargetComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onCropTargetChanged(text.toStdString());
     });
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
@@ -102,9 +106,11 @@ void MainWindow::saveSettings() {
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mDraftQuality);
-    settings.setValue("cfrTarget", QString::fromStdString(mCFRTARGET));
+    settings.setValue("cfrTarget", ui->cfrTarget->currentText());
+    settings.setValue("cropTarget", ui->cropTargetComboBox->currentText());
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -138,13 +144,20 @@ void MainWindow::restoreSettings() {
     ui->cfrConversionCheckBox->setCheckState(
         settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
+    ui->cropEnableCheckBox->setCheckState(
+        settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
-    mCFRTARGET = settings.value("cfrTarget").toString().toStdString();
+    mCFRTarget = settings.value("cfrTarget").toString().toStdString();
+    mCropTarget = settings.value("cropTarget").toString().toStdString();
+
+    if (!mCropTarget.empty())
+        ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));
     
     // Set default CFR target if none is restored
-    if (mCFRTARGET.empty()) {
-        mCFRTARGET = "Prefer Drop Frame";
+    if (mCFRTarget.empty()) {
+        mCFRTarget = "Prefer Drop Frame";
     }
 
     if(mDraftQuality == 2)
@@ -155,11 +168,11 @@ void MainWindow::restoreSettings() {
         ui->draftQuality->setCurrentIndex(2);
 
     // Set CFR target ComboBox to match restored value
-    int cfrIndex = ui->cfrTarget->findText(QString::fromStdString(mCFRTARGET));
+    int cfrIndex = ui->cfrTarget->findText(QString::fromStdString(mCFRTarget));
     if (cfrIndex != -1) {
         ui->cfrTarget->setCurrentIndex(cfrIndex);
-    } else if (!mCFRTARGET.empty()) {
-        ui->cfrTarget->setEditText(QString::fromStdString(mCFRTARGET));
+    } else if (!mCFRTarget.empty()) {
+        ui->cfrTarget->setEditText(QString::fromStdString(mCFRTarget));
     }
 
     // Restore mounted files
@@ -230,7 +243,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     try {
         mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTARGET, filePath.toStdString(), dstPath.toStdString());
+            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -363,6 +376,11 @@ void MainWindow::updateUi() {
     else
         ui->draftQuality->setEnabled(false);
 
+    if(ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
+        ui->cropTargetComboBox->setEnabled(true);
+    else
+        ui->cropTargetComboBox->setEnabled(false);
+
     // Scale raw only enabled when vignette correction is on
     if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->scaleRawCheckBox->setEnabled(true);
@@ -386,7 +404,7 @@ void MainWindow::updateFpsLabels() {
     auto renderOptions = getRenderOptions(*ui);
     
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTARGET);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget);
     }
     
     // Find all fps labels in the scroll area
@@ -416,8 +434,8 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
 
     updateUi();
 
-    while(it != mMountedFiles.end()) {
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTARGET);
+    while(it != mMountedFiles.end()) {        
+        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget);
         ++it;
     }
     
@@ -437,7 +455,12 @@ void MainWindow::onDraftModeQualityChanged(int index) {
 }
 
 void MainWindow::onCFRTargetChanged(std::string input) {
-    mCFRTARGET = input;
+    mCFRTarget = input;
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onCropTargetChanged(std::string input) {
+    mCropTarget = input;
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 

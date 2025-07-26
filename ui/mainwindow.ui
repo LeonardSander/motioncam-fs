@@ -292,6 +292,61 @@
          </item>
         </layout>
        </item>
+       <item row="6" column="0">
+        <layout class="QHBoxLayout" name="cropLayout">
+         <item>
+          <widget class="QCheckBox" name="cropEnableCheckBox">
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+             <horstretch>1</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="text">
+            <string>Enable Crop</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QComboBox" name="cropTargetComboBox">
+           <property name="minimumSize">
+            <size>
+             <width>120</width>
+             <height>30</height>
+            </size>
+           </property>
+           <property name="editable">
+            <bool>true</bool>
+           </property>
+           <item>
+            <property name="text">
+             <string>4096x2304</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4096x2560</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4080x2296</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4000x2256</string>
+            </property>
+           </item>           
+           <item>
+            <property name="text">
+             <string>4000x3000</string>
+            </property>
+           </item>           
+          </widget>
+         </item>
+        </layout>
+       </item>
        <item row="1" column="1">
         <widget class="QLabel" name="vignetteCorrectionLabel">
          <property name="text">
@@ -345,6 +400,19 @@
         <widget class="QLabel" name="cfrConversionLabel">
          <property name="text">
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Dynamically duplicate / drop frames to retain sync at a constant target framerate. (Set before opening in Davinci)&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+         <property name="scaledContents">
+          <bool>false</bool>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item row="7" column="0">
+        <widget class="QLabel" name="cropInfoLabel">
+         <property name="text">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; color:#b4b4b4;&quot;&gt;Crop to fix image resolution mismatch. always top-left oriented to fix misalignments. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
          <property name="scaledContents">
           <bool>false</bool>
