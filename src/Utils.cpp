@@ -330,6 +330,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     bool applyShadingMap,
     bool vignetteOnlyColor,
     bool normaliseShadingMap,
+    bool debugShadingMap,
     std::string cropTarget)
 {
     if (scale > 1) {
@@ -358,7 +359,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
         }
     }
 
-    if (cropWidth > 0 && cropHeight > 0 && (cropWidth < inOutWidth || cropHeight < inOutWidth)) {
+    if (cropWidth > 0 && cropHeight > 0 && cropWidth <= inOutWidth && cropHeight <= inOutHeight) {
         newWidth = cropWidth / scale;
         newHeight = cropHeight / scale;
     } else {
@@ -392,9 +393,14 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
 
     int left = 0;
     int top = 0;
-    if (!(cropWidth > 0 && cropHeight > 0)) {
+    if ((!(cropWidth > 0 && cropHeight > 0)) || inOutWidth < cropWidth || inOutHeight < cropHeight) {
         left = (fullWidth - inOutWidth) / 2;
         top = (fullHeight - inOutHeight) / 2;
+        cropWidth = 0;
+        cropHeight = 0;
+    } else {
+        left = (fullWidth - cropWidth) / 2;
+        top = (fullHeight - cropHeight) / 2;
     }
 
     const float shadingMapScaleX = 1.0f / static_cast<float>(fullWidth);
@@ -404,7 +410,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     if(applyShadingMap) {
         if(vignetteOnlyColor)
             colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
-        if(normaliseShadingMap) {
+        if(normaliseShadingMap || debugShadingMap) {
             normalizeShadingMap(lensShadingMap);
             int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 4);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
@@ -440,11 +446,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
             // Get the source coordinates (scaled)
             uint32_t srcY = y * scale;
             uint32_t srcX = x * scale;
-            // For crop, always use top-left, so no offset
-            if (!(cropWidth > 0 && cropHeight > 0)) {
-                srcY += top;
-                srcX += left;
-            }
 
             auto s0 = srcData[srcY * originalWidth + srcX];
             auto s1 = srcData[srcY * originalWidth + srcX + 1];
@@ -452,32 +453,29 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
             auto s3 = srcData[(srcY + 1) * originalWidth + srcX + 1];
 
             if(applyShadingMap) {
-                // Calculate position in shading map
-                const float sx = srcX * shadingMapScaleX;
-                const float sy = srcY * shadingMapScaleY;
-                if (!(cropWidth > 0 && cropHeight > 0)) {
-                    // If not cropping, use offset
-                    shadingMapVals = {
-                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                        getShadingMapValue(sx + left * shadingMapScaleX, sy + top * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight)
-                    };
-                } else {
-                    shadingMapVals = {
-                        getShadingMapValue(sx, sy, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                        getShadingMapValue(sx, sy, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                        getShadingMapValue(sx, sy, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
-                        getShadingMapValue(sx, sy, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight)
-                    };
-                }
+                // Calculate position in shading map               
+                shadingMapVals = {
+                    getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                    getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                    getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight),
+                    getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight)
+                };
             }
 
-            // Linearize and (maybe) apply shading map
-            const float p0 = std::max(0.0f, linear[0] * (s0 - srcBlackLevel[0]) * shadingMapVals[cfa[0]]) * (dstWhiteLevel - dstBlackLevel[0]);
-            const float p1 = std::max(0.0f, linear[1] * (s1 - srcBlackLevel[1]) * shadingMapVals[cfa[1]]) * (dstWhiteLevel - dstBlackLevel[1]);
-            const float p2 = std::max(0.0f, linear[2] * (s2 - srcBlackLevel[2]) * shadingMapVals[cfa[2]]) * (dstWhiteLevel - dstBlackLevel[2]);
-            const float p3 = std::max(0.0f, linear[3] * (s3 - srcBlackLevel[3]) * shadingMapVals[cfa[3]]) * (dstWhiteLevel - dstBlackLevel[3]);
+            float p0, p1, p2, p3;
+
+            if(debugShadingMap) {
+                p0 = std::max(0.0f, linear[0] * (srcWhiteLevel - srcBlackLevel[0]) * shadingMapVals[cfa[0]]) * (dstWhiteLevel - dstBlackLevel[0]);
+                p1 = std::max(0.0f, linear[1] * (srcWhiteLevel - srcBlackLevel[1]) * shadingMapVals[cfa[1]]) * (dstWhiteLevel - dstBlackLevel[1]);
+                p2 = std::max(0.0f, linear[2] * (srcWhiteLevel - srcBlackLevel[2]) * shadingMapVals[cfa[2]]) * (dstWhiteLevel - dstBlackLevel[2]);
+                p3 = std::max(0.0f, linear[3] * (srcWhiteLevel - srcBlackLevel[3]) * shadingMapVals[cfa[3]]) * (dstWhiteLevel - dstBlackLevel[3]);
+            } else {
+                // Linearize and (maybe) apply shading map
+                p0 = std::max(0.0f, linear[0] * (s0 - srcBlackLevel[0]) * shadingMapVals[cfa[0]]) * (dstWhiteLevel - dstBlackLevel[0]);
+                p1 = std::max(0.0f, linear[1] * (s1 - srcBlackLevel[1]) * shadingMapVals[cfa[1]]) * (dstWhiteLevel - dstBlackLevel[1]);
+                p2 = std::max(0.0f, linear[2] * (s2 - srcBlackLevel[2]) * shadingMapVals[cfa[2]]) * (dstWhiteLevel - dstBlackLevel[2]);
+                p3 = std::max(0.0f, linear[3] * (s3 - srcBlackLevel[3]) * shadingMapVals[cfa[3]]) * (dstWhiteLevel - dstBlackLevel[3]);
+            }
 
             s0 = std::clamp(std::round((p0 + dstBlackLevel[0])), 0.f, dstWhiteLevel);
             s1 = std::clamp(std::round((p1 + dstBlackLevel[1])), 0.f, dstWhiteLevel);
@@ -533,12 +531,13 @@ std::shared_ptr<std::vector<char>> generateDng(
         throw std::runtime_error("Invalid sensor arrangement");
 
     // Scale down if requested
-    bool applyShadingMap = options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    bool applyShadingMap = options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;    
     bool vignetteOnlyColor = options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    bool debugShadingMap = options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
 
-    if(!(options & RENDER_OPT_CROPPING))
+    if(!(options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
         cropTarget = "0x0";
 
     auto [processedData, dstBlackLevel, dstWhiteLevel] = utils::preprocessData(
@@ -548,7 +547,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         cameraConfiguration,
         cfa,
         scale,
-        applyShadingMap, vignetteOnlyColor, normalizeShadingMap,
+        applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap,
         cropTarget);
 
     spdlog::debug("New black level {},{},{},{} and white level {}",

@@ -605,3 +605,4 @@ float motioncam::FuseFileSystemImpl_Win::getFps(MountId mountId) const {
     return dynamic_cast<Session*>(it->second.get())->getFps();
 }
 
+}

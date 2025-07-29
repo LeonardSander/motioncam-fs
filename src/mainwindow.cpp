@@ -38,6 +38,9 @@ namespace {
         if(ui.scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
 
+        if(ui.debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
+
         if(ui.normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
 
@@ -257,12 +260,12 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(120);
+    fileWidget->setFixedHeight(140);
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
 
     auto* fileLayout = new QVBoxLayout(fileWidget);
-    fileLayout->setContentsMargins(16, 12, 16, 12);
+    fileLayout->setContentsMargins(16, 12, 16, 20);
     fileLayout->setSpacing(4);
 
     // Create and add the filename label
@@ -276,9 +279,9 @@ void MainWindow::mountFile(const QString& filePath) {
     if (fileInfoOpt.has_value()) {
         auto info = fileInfoOpt.value();
 
-        // Create info label with FPS, Total Frames/Dropped, and Resolution
-        auto infoText = QString("FPS: %1 | Frames: %2 | Dropped: %3 | Resolution: %4x%5")
-                            .arg(QString::number(info.fps, 'f', 1))
+        // Create info label with FPS, Total Frames/Dropped, and Resolution 
+        auto infoText = QString("Target FPS: %1 | Framecount: %2 | Duplicated: %3 | Resolution: %4x%5")
+                            .arg(QString::number(info.fps, 'f', 2))
                             .arg(info.totalFrames)
                             .arg(info.droppedFrames)
                             .arg(info.width)
@@ -286,13 +289,14 @@ void MainWindow::mountFile(const QString& filePath) {
 
         auto* infoLabel = new QLabel(infoText, fileWidget);
         infoLabel->setStyleSheet("font-size: 9pt; color: #888888;");
+        infoLabel->setProperty("infoLabel", true); // <-- Add this line
+        infoLabel->setProperty("mountId", QVariant(mountId)); // <-- Add this line for consistency
         fileLayout->addWidget(infoLabel);
     }
 
     // Create and add the source folder label
     auto* sourceLabel = new QLabel(QString("Source: %1").arg(fileInfo.path()), fileWidget);
     sourceLabel->setStyleSheet("font-size: 9pt; color: #666666;");
-    sourceLabel->setToolTip(filePath); // Show full path on hover
     fileLayout->addWidget(sourceLabel);
 
     // Add spacer to maintain button position
@@ -301,22 +305,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create horizontal layout for buttons
     auto* buttonLayout = new QHBoxLayout();
     buttonLayout->setSpacing(8);
-
-    // FPS label that displays mFps of given mounted mcraw
-    auto* fpsLabel = new QLabel("", fileWidget);
-    fpsLabel->setFixedSize(80, 30);
-    fpsLabel->setAlignment(Qt::AlignCenter);
-    fpsLabel->setStyleSheet("QLabel { background-color: #2b2b2b; border: 1px solid #555; border-radius: 4px; padding: 2px; }");
     
-    fpsLabel->setProperty("mountId", QVariant(mountId));
-    fpsLabel->setProperty("isFpsLabel", true);
-    
-    // Get the current fps value
-    float fps = mFuseFilesystem->getFps(mountId);
-    fpsLabel->setText(QString("%1 fps").arg(fps, 0, 'f', 2));
-    
-    fileLayout->addWidget(fpsLabel);
-
     // Define consistent button size
     const int buttonWidth = 100;
     const int buttonHeight = 30;
@@ -442,9 +431,14 @@ void MainWindow::updateUi() {
     // Scale raw only enabled when vignette correction is on
     if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->scaleRawCheckBox->setEnabled(true);
+        if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) 
+            ui->debugVignetteCheckBox->setEnabled(true);
+        else 
+            ui->debugVignetteCheckBox->setEnabled(false);
         ui->vignetteOnlyColorCheckBox->setEnabled(true);
     } else {
         ui->scaleRawCheckBox->setEnabled(false);
+        ui->debugVignetteCheckBox->setEnabled(false);
         ui->vignetteOnlyColorCheckBox->setEnabled(false);
     }
 
@@ -477,17 +471,23 @@ void MainWindow::updateFpsLabels() {
     
     for (auto* label : fpsLabels) {
         // Check if this is an fps label by looking for the isFpsLabel property
-        bool isFpsLabel = label->property("isFpsLabel").toBool();
-        
-        if (isFpsLabel) {
+        if (label->property("infoLabel").toBool()) {
             bool ok = false;
             auto mountId = label->property("mountId").toInt(&ok);
             
             if (ok && mountId >= 0) {
                 // Get the updated fps value
-                float fps = mFuseFilesystem->getFps(mountId);
-                QString newText = QString("%1 fps").arg(fps, 0, 'f', 2);
-                label->setText(newText);
+                auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
+                if (fileInfoOpt.has_value()) {
+                    auto info = fileInfoOpt.value();
+                    auto infoText = QString("Target FPS: %1 | Framecount: %2 | Duplicated: %3 | Resolution: %4x%5")
+                                .arg(QString::number(info.fps, 'f', 2))
+                                .arg(info.totalFrames)
+                                .arg(info.droppedFrames)
+                                .arg(info.width)
+                                .arg(info.height);
+                    label->setText(infoText);
+                }
             }
         }
     }
