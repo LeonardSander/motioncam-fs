@@ -4,5 +4,6 @@
         <file>assets/app_icon.png</file>
         <file>assets/play_btn.png</file>
         <file>assets/remove_btn.png</file>
+        <file>assets/folder_btn.png</file>
     </qresource>
 </RCC>

@@ -70,6 +70,7 @@ private slots:
     void onCropTargetChanged(std::string input);
 
     void playFile(const QString& path);
+    void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
 
 private:

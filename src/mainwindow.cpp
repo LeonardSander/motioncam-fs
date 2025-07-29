@@ -10,6 +10,7 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QSettings>
+#include <QDir>
 #include <algorithm>
 #include <QTimer>
 
@@ -263,6 +264,7 @@ void MainWindow::mountFile(const QString& filePath) {
     fileWidget->setFixedHeight(140);
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
+    fileWidget->setProperty("mountPath", dstPath);
 
     auto* fileLayout = new QVBoxLayout(fileWidget);
     fileLayout->setContentsMargins(16, 12, 16, 20);
@@ -310,6 +312,12 @@ void MainWindow::mountFile(const QString& filePath) {
     const int buttonWidth = 100;
     const int buttonHeight = 30;
 
+    // Create and add the open button
+    auto* openButton = new QPushButton("Open", fileWidget);
+    openButton->setFixedSize(buttonWidth, buttonHeight);
+    openButton->setIcon(QIcon(":/assets/folder_btn.png"));
+    buttonLayout->addWidget(openButton);
+
     // Create and add the play button
     auto* playButton = new QPushButton("Play", fileWidget);
     playButton->setFixedSize(buttonWidth, buttonHeight);
@@ -346,6 +354,10 @@ void MainWindow::mountFile(const QString& filePath) {
     ui->dragAndDropLabel->hide();
 
     // Connect buttons
+    connect(openButton, &QPushButton::clicked, this, [this, fileWidget] {
+        openMountedDirectory(fileWidget);
+    });
+
     connect(playButton, &QPushButton::clicked, this, [this, filePath] {
         playFile(filePath);
     });
@@ -372,6 +384,25 @@ void MainWindow::playFile(const QString& path) {
 
     if (!success)
         QMessageBox::warning(this, "Error", QString("Failed to launch player with file: %1").arg(path));
+}
+
+void MainWindow::openMountedDirectory(QWidget* fileWidget) {
+    auto mountPath = fileWidget->property("mountPath").toString();
+    if (mountPath.isEmpty()) {
+        QMessageBox::warning(this, "Error", "Mount path not found");
+        return;
+    }
+
+    bool success = false;
+
+#ifdef _WIN32
+    success = QProcess::startDetached("explorer", QStringList() << QDir::toNativeSeparators(mountPath));
+#elif __APPLE__
+    success = QProcess::startDetached("/usr/bin/open", QStringList() << mountPath);
+#endif
+
+    if (!success)
+        QMessageBox::warning(this, "Error", QString("Failed to open directory: %1").arg(mountPath));
 }
 
 void MainWindow::removeFile(QWidget* fileWidget) {
