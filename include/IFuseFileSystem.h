@@ -12,9 +12,12 @@ using MountId = int;
 constexpr auto InvalidMountId = -1;
 
 struct FileInfo {
+    float medFps;
+    float avgFps;
     float fps;
     int totalFrames;
     int droppedFrames;
+    int duplicatedFrames;
     int width;
     int height;
 };
@@ -29,7 +32,6 @@ public:
     virtual MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string& srcFile, const std::string& dstPath) = 0;
     virtual void unmount(MountId mountId) = 0;
     virtual void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget) = 0;
-    virtual float getFps(MountId mountId) const = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
 
 protected:

@@ -84,9 +84,6 @@ public:
 
 public:
     void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget);
-    float getFps() const { 
-        return mFs->getFps(); 
-    }
     FileInfo getFileInfo() const;
 
 protected:
@@ -594,15 +591,6 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
         return dynamic_cast<Session*>(it->second.get())->getFileInfo();
     }
     return std::nullopt;
-}
-
-float motioncam::FuseFileSystemImpl_Win::getFps(MountId mountId) const {
-    auto it = mMountedFiles.find(mountId);
-    if(it == mMountedFiles.end()) {
-        return 0.0f;
-    }
-
-    return dynamic_cast<Session*>(it->second.get())->getFps();
 }
 
 }

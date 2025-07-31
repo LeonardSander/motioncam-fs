@@ -43,9 +43,6 @@ public:
     void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) override;
     FileInfo getFileInfo() const;
 
-    // Get the current frame rate
-    float getFps() const { return mFps; }
-
 private:
     void init(FileRenderOptions options);
 
@@ -79,8 +76,11 @@ private:
     std::string mCropTarget;
     FileRenderOptions mOptions;
     float mFps;
+    float mMedFps;
+    float mAvgFps;
     int mTotalFrames;
     int mDroppedFrames;
+    int mDuplicatedFrames;
     int mWidth;
     int mHeight;
     double mBaselineExpValue;

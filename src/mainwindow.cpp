@@ -282,12 +282,15 @@ void MainWindow::mountFile(const QString& filePath) {
         auto info = fileInfoOpt.value();
 
         // Create info label with FPS, Total Frames/Dropped, and Resolution 
-        auto infoText = QString("Target FPS: %1 | Framecount: %2 | Duplicated: %3 | Resolution: %4x%5")
-                            .arg(QString::number(info.fps, 'f', 2))
-                            .arg(info.totalFrames)
-                            .arg(info.droppedFrames)
-                            .arg(info.width)
-                            .arg(info.height);
+        auto infoText = QString("Median / Average / Target FPS: %1 / %2 -> %3 | Framecount: %4 | Dropped: -%5 | Duplicated: +%6 | Resolution: %7x%8")
+                                .arg(QString::number(info.medFps, 'f', 2))
+                                .arg(QString::number(info.avgFps, 'f', 2))
+                                .arg(QString::number(info.fps, 'f', 2))
+                                .arg(info.totalFrames)
+                                .arg(info.droppedFrames)
+                                .arg(info.duplicatedFrames)
+                                .arg(info.width)
+                                .arg(info.height);
 
         auto* infoLabel = new QLabel(infoText, fileWidget);
         infoLabel->setStyleSheet("font-size: 9pt; color: #888888;");
@@ -464,13 +467,18 @@ void MainWindow::updateUi() {
         ui->scaleRawCheckBox->setEnabled(true);
         if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) 
             ui->debugVignetteCheckBox->setEnabled(true);
-        else 
+        else {
             ui->debugVignetteCheckBox->setEnabled(false);
+            ui->debugVignetteCheckBox->setChecked(false);
+        }
         ui->vignetteOnlyColorCheckBox->setEnabled(true);
     } else {
         ui->scaleRawCheckBox->setEnabled(false);
+        ui->scaleRawCheckBox->setChecked(false);
         ui->debugVignetteCheckBox->setEnabled(false);
+        ui->debugVignetteCheckBox->setChecked(false);
         ui->vignetteOnlyColorCheckBox->setEnabled(false);
+        ui->vignetteOnlyColorCheckBox->setChecked(false);
     }
 
     if (mCacheRootFolder.isEmpty()) {
@@ -511,10 +519,13 @@ void MainWindow::updateFpsLabels() {
                 auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
                 if (fileInfoOpt.has_value()) {
                     auto info = fileInfoOpt.value();
-                    auto infoText = QString("Target FPS: %1 | Framecount: %2 | Duplicated: %3 | Resolution: %4x%5")
+                    auto infoText = QString("Median / Average / Target FPS: %1 / %2 -> %3 | Framecount: %4 | Dropped: -%5 | Duplicated: +%6 | Resolution: %7x%8")
+                                .arg(QString::number(info.medFps, 'f', 2))
+                                .arg(QString::number(info.avgFps, 'f', 2))
                                 .arg(QString::number(info.fps, 'f', 2))
                                 .arg(info.totalFrames)
                                 .arg(info.droppedFrames)
+                                .arg(info.duplicatedFrames)
                                 .arg(info.width)
                                 .arg(info.height);
                     label->setText(infoText);

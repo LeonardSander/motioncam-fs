@@ -90,7 +90,6 @@ public:
     ~Session();
 
     void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget);
-    float getFps() const { return mFs->getFps(); }
     FileInfo getFileInfo() const;
 
 private:
