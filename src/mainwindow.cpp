@@ -51,6 +51,9 @@ namespace {
         if(ui.cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_CROPPING;
 
+        if(ui.camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
+
         return options;
     }
 }
@@ -78,10 +81,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteCorrectionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
@@ -90,6 +95,9 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(ui->cropTargetComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCropTargetChanged(text.toStdString());
+    });
+    connect(ui->camModelOverrideComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onCamModelOverrideChanged(text.toStdString());
     });
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
@@ -115,6 +123,7 @@ void MainWindow::saveSettings() {
     settings.setValue("draftQuality", mDraftQuality);
     settings.setValue("cfrTarget", ui->cfrTarget->currentText());
     settings.setValue("cropTarget", ui->cropTargetComboBox->currentText());
+    settings.setValue("camModelOverride", ui->camModelOverrideComboBox->currentText());
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -151,18 +160,23 @@ void MainWindow::restoreSettings() {
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
+    ui->camModelOverrideCheckBox->setCheckState(
+        settings.value("camModelOverride").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
     mCFRTarget = settings.value("cfrTarget").toString().toStdString();
     mCropTarget = settings.value("cropTarget").toString().toStdString();
+    mCameraModel = settings.value("camModelOverrideComboBox").toString().toStdString();
 
     if (!mCropTarget.empty())
         ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));
-    
-    // Set default CFR target if none is restored
-    if (mCFRTarget.empty()) {
+    else
         mCFRTarget = "Prefer Drop Frame";
-    }
+    // Set default CFR target if none is restored
+
+    if (!mCameraModel.empty())
+        ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -247,7 +261,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     try {
         mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, filePath.toStdString(), dstPath.toStdString());
+            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, filePath.toStdString(), dstPath.toStdString(), mCameraModel);
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -462,14 +476,21 @@ void MainWindow::updateUi() {
     else
         ui->cropTargetComboBox->setEnabled(false);
 
+    if(ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked) {
+        ui->camModelOverrideComboBox->setEnabled(true);
+    } else {
+        ui->camModelOverrideComboBox->setEnabled(false);     
+        ui->camModelOverrideComboBox->setCurrentText("");
+    }   
+
     // Scale raw only enabled when vignette correction is on
     if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->scaleRawCheckBox->setEnabled(true);
-        if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) 
-            ui->debugVignetteCheckBox->setEnabled(true);
-        else {
+        if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) {
             ui->debugVignetteCheckBox->setEnabled(false);
             ui->debugVignetteCheckBox->setChecked(false);
+        } else {
+            ui->debugVignetteCheckBox->setEnabled(true);            
         }
         ui->vignetteOnlyColorCheckBox->setEnabled(true);
     } else {
@@ -502,7 +523,7 @@ void MainWindow::updateFpsLabels() {
     auto renderOptions = getRenderOptions(*ui);
     
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel);
     }
     
     // Find all fps labels in the scroll area
@@ -542,7 +563,7 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     updateUi();
 
     while(it != mMountedFiles.end()) {        
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget);
+        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel);
         ++it;
     }
     
@@ -568,6 +589,11 @@ void MainWindow::onCFRTargetChanged(std::string input) {
 
 void MainWindow::onCropTargetChanged(std::string input) {
     mCropTarget = input;
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onCamModelOverrideChanged(std::string input) {
+    mCameraModel = input;
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 

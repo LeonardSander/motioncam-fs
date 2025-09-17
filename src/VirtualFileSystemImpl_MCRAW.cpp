@@ -212,7 +212,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const std::string& cfrTarget,
         const std::string& cropTarget,
         const std::string& file,
-        const std::string& baseName) :
+        const std::string& baseName,
+        const std::string& cameraModel) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -230,6 +231,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mDraftScale(draftScale),
         mCFRTarget(cfrTarget),
         mCropTarget(cropTarget),
+        mCameraModel(cameraModel),
         mOptions(options) {
     
     spdlog::debug("Attempting to open MCRAW file: {}", file);
@@ -379,7 +381,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         options,
         getScaleFromOptions(options, mDraftScale),
         mBaselineExpValue,
-        mCropTarget
+        mCropTarget,
+        mCameraModel
     );
 
     mTypicalDngSize = dngData->size();
@@ -569,7 +572,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 options,
                 getScaleFromOptions(options, draftScale),
                 baselineExpValue,
-                mCropTarget);
+                mCropTarget,
+                mCameraModel);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -653,11 +657,12 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel) {
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;
     mCropTarget = cropTarget;
+    mCameraModel = cameraModel;
 
     mCache.clear();
     this->init(options);

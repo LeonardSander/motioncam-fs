@@ -127,6 +127,23 @@ namespace {
         }
     }
 
+    void invertShadingMap(std::vector<std::vector<float>>& shadingMap) {
+        if (shadingMap.empty() || shadingMap[0].empty()) 
+            return;                                 // Handle empty case
+        
+        for (const auto& row : shadingMap) 
+            for (float value : row) 
+                if (value <= 0.0f) 
+            return;                             // Avoid division by zero
+                  
+        // Normalize all values
+        for (auto& row : shadingMap) {
+            for (float& value : row) {
+                value = 1 / value;
+            }
+        }
+    }
+
     void colorOnlyShadingMap(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
         if (shadingMap.empty() || shadingMap[0].empty())
             return; // Handle empty case
@@ -410,17 +427,19 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     if(applyShadingMap) {
         if(vignetteOnlyColor)
             colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
-        if(normaliseShadingMap || debugShadingMap) {
+        if(normaliseShadingMap) {
             normalizeShadingMap(lensShadingMap);
             int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 4);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
             for(auto& v : dstBlackLevel)
-                v <<= 4;
+                v = 0;
         } else {
-            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 2);
+            if (debugShadingMap) 
+                invertShadingMap(lensShadingMap);
+            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 2);            
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
             for(auto& v : dstBlackLevel)
-                v <<= 2;
+                v = 0;
         }                 
     }
 
@@ -441,6 +460,25 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     dst.resize(sizeof(uint16_t) * newWidth * newHeight);
     uint16_t* dstData = reinterpret_cast<uint16_t*>(dst.data());
 
+    //uint16_t x = 3826;    
+
+    // Make a full copy of srcData into a separate buffer
+    //std::vector<uint16_t> srcDataModified(srcData, srcData + (newWidth * newHeight));
+
+/*
+
+    // Apply edits to the copy
+    std::memmove(&srcDataModified[x],     &srcData[x + 16],     256  * sizeof(uint16_t));
+    std::memmove(&srcDataModified[2 * x], &srcData[2 * x + 16], 512  * sizeof(uint16_t));
+    std::memmove(&srcDataModified[3 * x], &srcData[3 * x + 16], 768  * sizeof(uint16_t));
+    std::memmove(&srcDataModified[4 * x], &srcData[4 * x + 16], 1024 * sizeof(uint16_t));
+    std::memmove(&srcDataModified[5 * x], &srcData[2 * x + 16], 1280 * sizeof(uint16_t));
+    std::memmove(&srcDataModified[6 * x], &srcData[2 * x + 16], 1536 * sizeof(uint16_t));*/
+
+    // Write the modified data back to srcData
+    /*std::memcpy(srcData, srcDataModified.data(),
+            newWidth * newHeight * sizeof(uint16_t));*/
+
     for (auto y = 0; y < newHeight; y += 2) {
         for (auto x = 0; x < newWidth; x += 2) {
             // Get the source coordinates (scaled)
@@ -451,6 +489,13 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
             auto s1 = srcData[srcY * originalWidth + srcX + 1];
             auto s2 = srcData[(srcY + 1) * originalWidth + srcX];
             auto s3 = srcData[(srcY + 1) * originalWidth + srcX + 1];
+
+            //std::array<uint16_t, 3826*200> remap = {0..3825,;
+
+            //auto s0 = srcData[srcY * newWidth + srcX];
+            //auto s1 = srcData[srcY * newWidth + srcX + 1];
+            //auto s2 = srcData[(srcY + 1) * newWidth + srcX];
+            //auto s3 = srcData[(srcY + 1) * newWidth + srcX + 1];
 
             if(applyShadingMap) {
                 // Calculate position in shading map               
@@ -510,7 +555,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     FileRenderOptions options,
     int scale,
     double baselineExpValue,
-    std::string cropTarget)
+    std::string cropTarget, 
+    std::string camModel)
 {
     Measure m("generateDng");
 
@@ -675,7 +721,25 @@ std::shared_ptr<std::vector<char>> generateDng(
     const auto software = "MotionCam Tools";
 
     dng.SetSoftware(software);
-    dng.SetUniqueCameraModel(cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
+
+    
+    if(camModel != ""){
+        if (camModel == "Blackmagic") {
+            dng.SetUniqueCameraModel("Blackmagic Pocket Cinema Camera 4K");
+        } else if (camModel == "Panasonic") {
+            dng.SetUniqueCameraModel("Panasonic Varicam RAW");
+        } else if (camModel == "Fujifilm" || camModel == "Fujifilm X-T5") {
+            dng.SetUniqueCameraModel("Fujifilm X-T5");
+            dng.SetMake("Fujifilm");
+            dng.SetCameraModelName("X-T5");
+        } else {
+            // Generic camera model
+            dng.SetUniqueCameraModel(camModel);
+        }
+    } else {
+        dng.SetUniqueCameraModel(cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
+    }
+
 
     // Set data
     dng.SetSubfileType();

@@ -20,9 +20,9 @@ public:
     FuseFileSystemImpl_MacOs();
     ~FuseFileSystemImpl_MacOs();
 
-    MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string& srcFile, const std::string& dstPath,);
+    MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string& srcFile, const std::string& dstPath, const std::string& cameraModel = "") override;
     void unmount(MountId mountId) override;
-    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget) override;
+    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& cameraModel) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
 
 private:

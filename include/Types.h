@@ -72,7 +72,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_VIGNETTE_ONLY_COLOR          = 1 << 4,
     RENDER_OPT_NORMALIZE_EXPOSURE           = 1 << 5,
     RENDER_OPT_FRAMERATE_CONVERSION         = 1 << 6,
-    RENDER_OPT_CROPPING                     = 1 << 7
+    RENDER_OPT_CROPPING                     = 1 << 7,
+    RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8
 };
 
 // Overload bitwise OR operator
@@ -130,6 +131,9 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_CROPPING) {
         flags.push_back("CROPPING");
+    }
+    if (options & RENDER_OPT_CAMMODEL_OVERRIDE) {
+        flags.push_back("CAMMODEL_OVERRIDE");
     }
 
     std::string result;

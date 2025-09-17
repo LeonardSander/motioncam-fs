@@ -27,7 +27,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async) = 0;
 
-    virtual void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget) = 0;
+    virtual void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel) = 0;
 
 protected:
     IVirtualFileSystem() = default;

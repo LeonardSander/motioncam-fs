@@ -67,6 +67,7 @@ private slots:
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
     void onCFRTargetChanged(std::string input);
+    void onCamModelOverrideChanged(std::string input);
     void onCropTargetChanged(std::string input);
 
     void playFile(const QString& path);
@@ -86,7 +87,8 @@ private:
     QString mCacheRootFolder;
     int mDraftQuality;
     std::string mCFRTarget;
-    std::string mCropTarget;
+    std::string mCropTarget;    
+    std::string mCameraModel;
 };
 
 #endif // MAINWINDOW_H
