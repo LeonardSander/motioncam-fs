@@ -68,6 +68,7 @@ private slots:
     void onSetCacheFolder(bool checked);
     void onCFRTargetChanged(std::string input);
     void onCamModelOverrideChanged(std::string input);
+    void onLevelsChanged(std::string input);
     void onCropTargetChanged(std::string input);
 
     void playFile(const QString& path);
@@ -89,6 +90,7 @@ private:
     std::string mCFRTarget;
     std::string mCropTarget;    
     std::string mCameraModel;
+    std::string mLevels;
 };
 
 #endif // MAINWINDOW_H

@@ -24,6 +24,15 @@ namespace {
         0.0f, 0.0f, 1.0f
     };
 
+    bool isZeroMatrix(const std::array<float, 9>& matrix) {
+        for (const auto& value : matrix) {
+            if (value != 0.0f) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     enum DngIlluminant {
         lsUnknown					=  0,
         lsDaylight					=  1,
@@ -348,7 +357,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     bool vignetteOnlyColor,
     bool normaliseShadingMap,
     bool debugShadingMap,
-    std::string cropTarget)
+    std::string cropTarget,
+    std::string levels)
 {
     if (scale > 1) {
         // Ensure even scale for downscaling
@@ -389,11 +399,61 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     newWidth = (newWidth / 4) * 4;
     newHeight = (newHeight / 4) * 4;    
 
-    //const auto& srcBlackLevel = metadata.dynamicBlackLevel[0] > 0.0f ? metadata.dynamicBlackLevel : cameraConfiguration.blackLevel;   //for now
-    //const auto srcWhiteLevel = metadata.dynamicWhiteLevel > 0.0f ? metadata.dynamicWhiteLevel : cameraConfiguration.whiteLevel;
+    auto srcBlackLevel = metadata.dynamicBlackLevel;
+    auto srcWhiteLevel = metadata.dynamicWhiteLevel;
 
-    const auto srcBlackLevel = metadata.dynamicBlackLevel[0] >= cameraConfiguration.blackLevel[0] ? metadata.dynamicBlackLevel : cameraConfiguration.blackLevel;
-    const auto srcWhiteLevel = metadata.dynamicWhiteLevel >= cameraConfiguration.whiteLevel ? metadata.dynamicWhiteLevel : cameraConfiguration.whiteLevel;
+    if (levels == "Static") {
+        srcBlackLevel = cameraConfiguration.blackLevel;
+        srcWhiteLevel = cameraConfiguration.whiteLevel;
+    } else if (!levels.empty()) {
+        const size_t separatorPos = levels.find('/');
+        if (separatorPos != std::string::npos) {
+            try {
+                const std::string whiteLevelStr = levels.substr(0, separatorPos);
+                const std::string blackLevelStr = levels.substr(separatorPos + 1);
+                
+                // Parse white level (int or float)
+                if (whiteLevelStr.find('.') != std::string::npos) 
+                    srcWhiteLevel = std::stof(whiteLevelStr);
+                else 
+                    srcWhiteLevel = std::stoul(whiteLevelStr);                
+                
+                // Parse black level (single value or comma-separated values)
+                if (blackLevelStr.find(',') != std::string::npos) {
+                    // Parse comma-separated values
+                    std::array<float, 4> blackValues = {0.0f, 0.0f, 0.0f, 0.0f};
+                    size_t start = 0;
+                    size_t valueIndex = 0;
+                    
+                    while (start < blackLevelStr.length() && valueIndex < 4) {
+                        size_t commaPos = blackLevelStr.find(',', start);
+                        if (commaPos == std::string::npos) commaPos = blackLevelStr.length();
+                        
+                        std::string valueStr = blackLevelStr.substr(start, commaPos - start);
+                        if (valueStr.find('.') != std::string::npos) {
+                            blackValues[valueIndex] = std::stof(valueStr);
+                        } else {
+                            blackValues[valueIndex] = std::stoul(valueStr);
+                        }
+                        
+                        valueIndex++;
+                        start = commaPos + 1;
+                    }                    
+                    srcBlackLevel = blackValues;
+                } else {
+                    // Parse single value for all channels
+                    float blackLevelValue;
+                    if (blackLevelStr.find('.') != std::string::npos) 
+                        blackLevelValue = std::stof(blackLevelStr);
+                    else 
+                        blackLevelValue = std::stoul(blackLevelStr);                                
+                    srcBlackLevel = {blackLevelValue, blackLevelValue, blackLevelValue, blackLevelValue};
+                }
+            } catch (const std::exception&) {
+                // Handle exception silently
+            }
+        }
+    }
 
     const std::array<float, 4> linear = {
         1.0f / (srcWhiteLevel - srcBlackLevel[0]),
@@ -432,14 +492,14 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
             colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
         if(normaliseShadingMap) {
             normalizeShadingMap(lensShadingMap);
-            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 4);
+            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
             for(auto& v : dstBlackLevel)
                 v = 0;
         } else {
             if (debugShadingMap) 
                 invertShadingMap(lensShadingMap);
-            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(cameraConfiguration.whiteLevel)) + 2);            
+            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);            
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
             for(auto& v : dstBlackLevel)
                 v = 0;
@@ -564,7 +624,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     int scale,
     double baselineExpValue,
     std::string cropTarget, 
-    std::string camModel)
+    std::string camModel,
+    std::string levels)
 {
     Measure m("generateDng");
 
@@ -602,7 +663,9 @@ std::shared_ptr<std::vector<char>> generateDng(
         cfa,
         scale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap,
-        cropTarget);
+        cropTarget,
+        levels
+    );
 
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
@@ -711,8 +774,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     const uint16_t bps[1] = { encodeBits };
     dng.SetBitsPerSample(1, bps);
 
-    dng.SetColorMatrix1(3, cameraConfiguration.colorMatrix1.data());
-    dng.SetColorMatrix2(3, cameraConfiguration.colorMatrix2.data());
+    dng.SetColorMatrix1(3, isZeroMatrix(cameraConfiguration.colorMatrix1) ? 
+                        IDENTITY_MATRIX : cameraConfiguration.colorMatrix1.data());
+    dng.SetColorMatrix2(3, isZeroMatrix(cameraConfiguration.colorMatrix2) ? 
+                        IDENTITY_MATRIX : cameraConfiguration.colorMatrix2.data());
 
     dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
     dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());

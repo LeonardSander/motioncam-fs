@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1160</width>
-    <height>920</height>
+    <height>980</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -566,8 +566,94 @@
             <property name="text">
              <string>4000x3000</string>
             </property>
+          </item>           
+           <item>
             <property name="text">
              <string>4624x2608</string>
+            </property>
+           </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="cropLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop to top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="levelsSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <layout class="QHBoxLayout" name="levelsLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+          <widget class="QLabel" name="levelsSectionTitle">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;Override White / Black Levels:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+          </widget>
+         </item>           
+           <item>
+            <widget class="QComboBox" name="levelsComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>120</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+              <item>
+            <property name="text">
+             <string>Dynamic</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Static</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>1023/64</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4095/256</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>16383/1024</string>
+            </property>
+           </item>           
+           <item>
+            <property name="text">
+             <string>65535/4096</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4095/64</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>16383/64</string>
             </property>
            </item>
             </widget>

@@ -99,6 +99,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->camModelOverrideComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCamModelOverrideChanged(text.toStdString());
     });
+    connect(ui->levelsComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onLevelsChanged(text.toStdString());
+    });
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
 }
@@ -124,6 +127,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cfrTarget", ui->cfrTarget->currentText());
     settings.setValue("cropTarget", ui->cropTargetComboBox->currentText());
     settings.setValue("camModelOverride", ui->camModelOverrideComboBox->currentText());
+    settings.setValue("levels", ui->levelsComboBox->currentText());
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -168,15 +172,7 @@ void MainWindow::restoreSettings() {
     mCFRTarget = settings.value("cfrTarget").toString().toStdString();
     mCropTarget = settings.value("cropTarget").toString().toStdString();
     mCameraModel = settings.value("camModelOverrideComboBox").toString().toStdString();
-
-    if (!mCropTarget.empty())
-        ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));
-    else
-        mCFRTarget = "Prefer Drop Frame";
-    // Set default CFR target if none is restored
-
-    if (!mCameraModel.empty())
-        ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
+    mLevels = settings.value("levels").toString().toStdString();
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -185,14 +181,18 @@ void MainWindow::restoreSettings() {
     else if(mDraftQuality == 8)
         ui->draftQuality->setCurrentIndex(2);
 
-    // Set CFR target ComboBox to match restored value
-    int cfrIndex = ui->cfrTarget->findText(QString::fromStdString(mCFRTarget));
-    if (cfrIndex != -1) {
-        ui->cfrTarget->setCurrentIndex(cfrIndex);
-    } else if (!mCFRTarget.empty()) {
-        ui->cfrTarget->setEditText(QString::fromStdString(mCFRTarget));
-    }
+    if (mCropTarget.empty())
+        mCFRTarget = "Prefer Drop Frame";
+    if (mLevels.empty())
+        mLevels = "Dynamic"; 
+    if (!mCameraModel.empty())
+        ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
+    if (!mCFRTarget.empty())    
+        ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
 
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));  
+  
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
     for (int i = 0; i < size; ++i) {
@@ -261,7 +261,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     try {
         mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, filePath.toStdString(), dstPath.toStdString(), mCameraModel);
+            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -523,7 +523,7 @@ void MainWindow::updateFpsLabels() {
     auto renderOptions = getRenderOptions(*ui);
     
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels);
     }
     
     // Find all fps labels in the scroll area
@@ -563,7 +563,7 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     updateUi();
 
     while(it != mMountedFiles.end()) {        
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel);
+        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels);
         ++it;
     }
     
@@ -594,6 +594,11 @@ void MainWindow::onCropTargetChanged(std::string input) {
 
 void MainWindow::onCamModelOverrideChanged(std::string input) {
     mCameraModel = input;
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onLevelsChanged(std::string input) {
+    mLevels = input;
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 

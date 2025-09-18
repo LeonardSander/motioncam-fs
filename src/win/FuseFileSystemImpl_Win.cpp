@@ -83,7 +83,7 @@ public:
     ~Session();
 
 public:
-    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& cameraModel);
+    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& cameraModel, const std::string& levels);
     FileInfo getFileInfo() const;
 
 protected:
@@ -159,10 +159,10 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& cameraModel) {
+void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& cameraModel, const std::string& levels) {
     mOptions = options;
     mDraftScale = draftScale;
-    mFs->updateOptions(options, draftScale, cfrTarget, cropTarget, cameraModel);
+    mFs->updateOptions(options, draftScale, cfrTarget, cropTarget, cameraModel, levels);
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -547,7 +547,7 @@ motioncam::FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     motioncam::setupLogging();
 }
 
-motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& srcFile, const std::string& dstPath, const std::string& cameraModel) {
+motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -560,7 +560,7 @@ motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions op
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel);
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel, levels);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
@@ -577,12 +577,12 @@ void motioncam::FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, const std::string& cameraModel) {
+void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
     dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
-        options, draftScale, cfrTarget, cropTarget, cameraModel);
+        options, draftScale, cfrTarget, cropTarget, cameraModel, levels);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {

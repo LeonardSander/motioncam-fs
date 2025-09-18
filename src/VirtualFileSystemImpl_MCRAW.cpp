@@ -213,7 +213,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const std::string& cropTarget,
         const std::string& file,
         const std::string& baseName,
-        const std::string& cameraModel) :
+        const std::string& cameraModel,
+        const std::string& levels) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -232,6 +233,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mCFRTarget(cfrTarget),
         mCropTarget(cropTarget),
         mCameraModel(cameraModel),
+        mLevels(levels),
         mOptions(options) {
     
     spdlog::debug("Attempting to open MCRAW file: {}", file);
@@ -382,7 +384,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         getScaleFromOptions(options, mDraftScale),
         mBaselineExpValue,
         mCropTarget,
-        mCameraModel
+        mCameraModel,
+        mLevels
     );
 
     mTypicalDngSize = dngData->size();
@@ -573,7 +576,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 getScaleFromOptions(options, draftScale),
                 baselineExpValue,
                 mCropTarget,
-                mCameraModel);
+                mCameraModel,
+                mLevels);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -657,12 +661,13 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels) {
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;
     mCropTarget = cropTarget;
     mCameraModel = cameraModel;
+    mLevels = levels;
 
     mCache.clear();
     this->init(options);
