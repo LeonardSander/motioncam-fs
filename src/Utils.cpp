@@ -774,13 +774,15 @@ std::shared_ptr<std::vector<char>> generateDng(
     const uint16_t bps[1] = { encodeBits };
     dng.SetBitsPerSample(1, bps);
 
-    dng.SetColorMatrix1(3, isZeroMatrix(cameraConfiguration.colorMatrix1) ? 
-                        IDENTITY_MATRIX : cameraConfiguration.colorMatrix1.data());
-    dng.SetColorMatrix2(3, isZeroMatrix(cameraConfiguration.colorMatrix2) ? 
-                        IDENTITY_MATRIX : cameraConfiguration.colorMatrix2.data());
+    if (!isZeroMatrix(cameraConfiguration.colorMatrix1))
+        dng.SetColorMatrix1(3, cameraConfiguration.colorMatrix1.data());
+    if (!isZeroMatrix(cameraConfiguration.colorMatrix2))
+        dng.SetColorMatrix2(3, cameraConfiguration.colorMatrix2.data());
 
-    dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
-    dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
+    if (!isZeroMatrix(cameraConfiguration.forwardMatrix1))
+        dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
+    if (!isZeroMatrix(cameraConfiguration.forwardMatrix2))
+        dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
 
     dng.SetCameraCalibration1(3, IDENTITY_MATRIX);
     dng.SetCameraCalibration2(3, IDENTITY_MATRIX);
