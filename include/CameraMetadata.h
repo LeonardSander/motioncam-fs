@@ -68,7 +68,7 @@ struct ExtraData {
 
 struct CameraConfiguration {
     std::vector<float> apertures;
-    std::array<unsigned short, 4> blackLevel;
+    std::array<float, 4> blackLevel;
     std::array<float, 9> calibrationMatrix1;
     std::array<float, 9> calibrationMatrix2;
     std::string colorIlluminant1;

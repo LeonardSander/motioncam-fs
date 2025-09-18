@@ -389,8 +389,11 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     newWidth = (newWidth / 4) * 4;
     newHeight = (newHeight / 4) * 4;    
 
-    const auto& srcBlackLevel = cameraConfiguration.blackLevel;
-    const float srcWhiteLevel = cameraConfiguration.whiteLevel;
+    //const auto& srcBlackLevel = metadata.dynamicBlackLevel[0] > 0.0f ? metadata.dynamicBlackLevel : cameraConfiguration.blackLevel;   //for now
+    //const auto srcWhiteLevel = metadata.dynamicWhiteLevel > 0.0f ? metadata.dynamicWhiteLevel : cameraConfiguration.whiteLevel;
+
+    const auto srcBlackLevel = metadata.dynamicBlackLevel[0] >= cameraConfiguration.blackLevel[0] ? metadata.dynamicBlackLevel : cameraConfiguration.blackLevel;
+    const auto srcWhiteLevel = metadata.dynamicWhiteLevel >= cameraConfiguration.whiteLevel ? metadata.dynamicWhiteLevel : cameraConfiguration.whiteLevel;
 
     const std::array<float, 4> linear = {
         1.0f / (srcWhiteLevel - srcBlackLevel[0]),
@@ -399,8 +402,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
         1.0f / (srcWhiteLevel - srcBlackLevel[3])
     };
 
-    std::array<unsigned short, 4> dstBlackLevel = srcBlackLevel;
-    float dstWhiteLevel = srcWhiteLevel;
+    auto dstBlackLevel = srcBlackLevel;
+    auto dstWhiteLevel = srcWhiteLevel;
 
     // Calculate shading map offsets
     auto lensShadingMap = metadata.lensShadingMap;
@@ -543,7 +546,12 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     inOutWidth = newWidth;
     inOutHeight = newHeight;
 
-    return std::make_tuple(dst, dstBlackLevel, static_cast<unsigned short>(dstWhiteLevel));
+    std::array<unsigned short, 4> blackLevelResult;
+
+    for(auto i = 0; i < dstBlackLevel.size(); ++i)
+        blackLevelResult[i] = static_cast<unsigned short>(std::round(dstBlackLevel[i]));
+
+    return std::make_tuple(dst, blackLevelResult, static_cast<unsigned short>(dstWhiteLevel));
 }
 
 std::shared_ptr<std::vector<char>> generateDng(

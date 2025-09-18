@@ -124,7 +124,7 @@ CameraConfiguration CameraConfiguration::parse(const nlohmann::json& j) {
     }
 
     if (j.contains("blackLevel") && j["blackLevel"].is_array()) {
-        config.blackLevel = jsonArrayToStdArray<unsigned short, 4>(j["blackLevel"]);
+        config.blackLevel = jsonArrayToStdArray<float, 4>(j["blackLevel"]);
     }
 
     if (j.contains("calibrationMatrix1") && j["calibrationMatrix1"].is_array()) {
@@ -164,7 +164,7 @@ CameraConfiguration CameraConfiguration::parse(const nlohmann::json& j) {
     auto val1 = j.value("sensorArrangement", "");
     config.sensorArrangement = val0.empty() ? val1 : val0;
 
-    config.whiteLevel = j.value("whiteLevel", 0.0);
+    config.whiteLevel = j.value("whiteLevel", 0.0f);
 
     // Parse nested objects
     if (j.contains("deviceSpecificProfile")) {

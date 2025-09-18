@@ -19,7 +19,7 @@ struct CameraFrameMetadata {
     std::array<float, 3> asShotNeutral;
     int compressionType;
     std::array<float, 4> dynamicBlackLevel;
-    double dynamicWhiteLevel;
+    float dynamicWhiteLevel;
     int exposureCompensation;
     double exposureTime;
     std::string filename;
