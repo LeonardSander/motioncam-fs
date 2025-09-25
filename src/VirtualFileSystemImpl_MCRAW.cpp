@@ -214,7 +214,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const std::string& file,
         const std::string& baseName,
         const std::string& cameraModel,
-        const std::string& levels) :
+        const std::string& levels,
+        const std::string& logTransform) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -234,6 +235,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mCropTarget(cropTarget),
         mCameraModel(cameraModel),
         mLevels(levels),
+        mLogTransform(logTransform),
         mOptions(options) {
     
     spdlog::debug("Attempting to open MCRAW file: {}", file);
@@ -385,7 +387,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         mBaselineExpValue,
         mCropTarget,
         mCameraModel,
-        mLevels
+        mLevels,
+        mLogTransform
     );
 
     mTypicalDngSize = dngData->size();
@@ -577,7 +580,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 baselineExpValue,
                 mCropTarget,
                 mCameraModel,
-                mLevels);
+                mLevels,
+                mLogTransform);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -661,13 +665,14 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform) {
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;
     mCropTarget = cropTarget;
     mCameraModel = cameraModel;
     mLevels = levels;
+    mLogTransform = logTransform;
 
     mCache.clear();
     this->init(options);

@@ -166,7 +166,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     double baselineExpValue=0.0,
     std::string cropTarget = "0x0",
     std::string camModel = "",
-    std::string levels = "Dynamic"
+    std::string levels = "Dynamic",
+    std::string logTransform = ""
 );
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);

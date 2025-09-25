@@ -345,6 +345,137 @@ void encodeTo14Bit(
     data.resize(newSize);
 }
 
+void encodeTo8Bit(
+    std::vector<uint8_t>& data,
+    uint32_t& width,
+    uint32_t& height)
+{
+    Measure m("encodeTo8Bit");
+
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x++) {
+            const uint16_t p0 = srcPtr[0];
+            // Store lower 8 bits directly
+            dstPtr[0] = p0 & 0xFF;
+
+            srcPtr += 1;
+            dstPtr += 1;
+        }
+    }
+
+    // Resize to fit new data
+    auto newSize = dstPtr - data.data();
+
+    data.resize(newSize);
+}
+
+void encodeTo6Bit(
+    std::vector<uint8_t>& data,
+    uint32_t& width,
+    uint32_t& height)
+{
+    Measure m("encodeTo6Bit");
+
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x+=4) {
+            const uint16_t p0 = srcPtr[0];
+            const uint16_t p1 = srcPtr[1];
+            const uint16_t p2 = srcPtr[2];
+            const uint16_t p3 = srcPtr[3];
+
+            // Pack 4 pixels (6 bits each) into 3 bytes - use lower 6 bits
+            const uint8_t v0 = p0 & 0x3F;
+            const uint8_t v1 = p1 & 0x3F;
+            const uint8_t v2 = p2 & 0x3F;
+            const uint8_t v3 = p3 & 0x3F;
+
+            dstPtr[0] = (v0 << 2) | (v1 >> 4);
+            dstPtr[1] = ((v1 & 0x0F) << 4) | (v2 >> 2);
+            dstPtr[2] = ((v2 & 0x03) << 6) | v3;
+
+            srcPtr += 4;
+            dstPtr += 3;
+        }
+    }
+
+    // Resize to fit new data
+    auto newSize = dstPtr - data.data();
+
+    data.resize(newSize);
+}
+
+void encodeTo4Bit(
+    std::vector<uint8_t>& data,
+    uint32_t& width,
+    uint32_t& height)
+{
+    Measure m("encodeTo4Bit");
+
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x+=2) {
+            const uint16_t p0 = srcPtr[0];
+            const uint16_t p1 = srcPtr[1];
+
+            // Pack 2 pixels (4 bits each) into 1 byte - use lower 4 bits
+            const uint8_t v0 = p0 & 0x0F;
+            const uint8_t v1 = p1 & 0x0F;
+
+            dstPtr[0] = (v0 << 4) | v1;
+
+            srcPtr += 2;
+            dstPtr += 1;
+        }
+    }
+
+    // Resize to fit new data
+    auto newSize = dstPtr - data.data();
+
+    data.resize(newSize);
+}
+
+void encodeTo2Bit(
+    std::vector<uint8_t>& data,
+    uint32_t& width,
+    uint32_t& height)
+{
+    Measure m("encodeTo2Bit");
+
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+
+    for(int y = 0; y < height; y++) {
+        for(int x = 0; x < width; x+=4) {
+            const uint16_t p0 = srcPtr[0];
+            const uint16_t p1 = srcPtr[1];
+            const uint16_t p2 = srcPtr[2];
+            const uint16_t p3 = srcPtr[3];
+
+            // Try different bit order: p3 in bits 1-0, p2 in bits 3-2, p1 in bits 5-4, p0 in bits 7-6
+            dstPtr[0] = ((p0 & 0x03) << 6) | 
+                       ((p1 & 0x03) << 4) | 
+                       ((p2 & 0x03) << 2) | 
+                       (p3 & 0x03);
+
+            srcPtr += 4;
+            dstPtr += 1;
+        }
+    }
+
+    // Resize to fit new data
+    auto newSize = dstPtr - data.data();
+
+    data.resize(newSize);
+}
+
 std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> preprocessData(
     std::vector<uint8_t>& data,
     uint32_t& inOutWidth,
@@ -358,7 +489,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     bool normaliseShadingMap,
     bool debugShadingMap,
     std::string cropTarget,
-    std::string levels)
+    std::string levels,
+    std::string logTransform)
 {
     if (scale > 1) {
         // Ensure even scale for downscaling
@@ -486,24 +618,58 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     const float shadingMapScaleX = 1.0f / static_cast<float>(fullWidth);
     const float shadingMapScaleY = 1.0f / static_cast<float>(fullHeight);
 
+    int useBits = 0;
+
     // When applying shading map, increase precision
     if(applyShadingMap) {
         if(vignetteOnlyColor)
             colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
         if(normaliseShadingMap) {
             normalizeShadingMap(lensShadingMap);
-            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-            for(auto& v : dstBlackLevel)
-                v = 0;
+            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
         } else {
             if (debugShadingMap) 
                 invertShadingMap(lensShadingMap);
-            int useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);            
+            else if (logTransform != "") {                 
+                if (logTransform == "Reduce by 4bit") {
+                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                } else if (logTransform == "Reduce by 6bit") {
+                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
+                } else if (logTransform == "Reduce by 8bit") {
+                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
+                } else if (logTransform != "Keep Input") {
+                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
+                } else {
+                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                }
+            } else {
+                useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
+                dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+            }
+        }
+        for(auto& v : dstBlackLevel)
+            v = 0;                 
+    } else if (logTransform != "") {
+        if (logTransform == "Reduce by 2bit") {
+            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-            for(auto& v : dstBlackLevel)
-                v = 0;
-        }                 
+        } else if (logTransform == "Reduce by 4bit") {
+            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        } else if (logTransform == "Reduce by 6bit") {
+            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;        
+        } else if (logTransform == "Reduce by 8bit") {
+            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;        
+        }
+        for(auto& v : dstBlackLevel)
+            v = 0;       
     }
 
     //
@@ -577,13 +743,59 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
                 p1 = std::max(0.0f, linear[1] * (srcWhiteLevel - srcBlackLevel[1]) * shadingMapVals[cfa[1]]) * (dstWhiteLevel - dstBlackLevel[1]);
                 p2 = std::max(0.0f, linear[2] * (srcWhiteLevel - srcBlackLevel[2]) * shadingMapVals[cfa[2]]) * (dstWhiteLevel - dstBlackLevel[2]);
                 p3 = std::max(0.0f, linear[3] * (srcWhiteLevel - srcBlackLevel[3]) * shadingMapVals[cfa[3]]) * (dstWhiteLevel - dstBlackLevel[3]);
-            } else {
+            } else if (logTransform == "") {
                 // Linearize and (maybe) apply shading map
                 p0 = std::max(0.0f, linear[0] * (s0 - srcBlackLevel[0]) * shadingMapVals[cfa[0]]) * (dstWhiteLevel - dstBlackLevel[0]);
                 p1 = std::max(0.0f, linear[1] * (s1 - srcBlackLevel[1]) * shadingMapVals[cfa[1]]) * (dstWhiteLevel - dstBlackLevel[1]);
                 p2 = std::max(0.0f, linear[2] * (s2 - srcBlackLevel[2]) * shadingMapVals[cfa[2]]) * (dstWhiteLevel - dstBlackLevel[2]);
                 p3 = std::max(0.0f, linear[3] * (s3 - srcBlackLevel[3]) * shadingMapVals[cfa[3]]) * (dstWhiteLevel - dstBlackLevel[3]);
-            }
+            } else {
+                // Apply logarithmic tone mapping with triangular dithering
+                // Generate improved triangular dither with better randomization
+                std::array<float, 4> dither;
+                
+                // Use different seeds for each pixel in the 2x2 block to avoid correlation
+                for (int pixelIdx = 0; pixelIdx < 4; pixelIdx++) {
+                    // Create unique seed for each pixel using position and pixel index
+                    uint32_t seed = ((x + (pixelIdx & 1)) * 1664525 + (y + (pixelIdx >> 1)) * 1013904223) ^ 0xdeadbeef;
+                    
+                    // Apply multiple hash iterations to improve randomness
+                    seed ^= seed >> 16;
+                    seed *= 0x85ebca6b;
+                    seed ^= seed >> 13;
+                    seed *= 0xc2b2ae35;
+                    seed ^= seed >> 16;
+                    
+                    // Generate triangular dither: sum of two uniform random values
+                    float r1 = (seed & 0xffff) / 65535.0f;
+                    float r2 = ((seed >> 16) & 0xffff) / 65535.0f;
+                    
+                    // Triangular distribution: r1 + r2 - 1, range [-1, 1]
+                    // Scale down for subtle dithering appropriate for log encoding
+                    dither[pixelIdx] = (r1 + r2 - 1.0f) * 0.5f;
+                }
+                
+                // Prepare linearized values
+                std::array<float, 4> linearValues = {
+                    linear[0] * (s0 - srcBlackLevel[0]) * shadingMapVals[cfa[0]],
+                    linear[1] * (s1 - srcBlackLevel[1]) * shadingMapVals[cfa[1]],
+                    linear[2] * (s2 - srcBlackLevel[2]) * shadingMapVals[cfa[2]],
+                    linear[3] * (s3 - srcBlackLevel[3]) * shadingMapVals[cfa[3]]
+                };
+                
+                // Apply log2 transform that preserves black and white levels as identity points
+                for (int i = 0; i < 4; i++) {
+                    float logValue = std::log2(1.0f + 60.0f * std::max(0.0f, linearValues[i])) / std::log2(61.0f);                    
+                    
+                    // Scale by dstWhiteLevel to match what the linearization table expects
+                    linearValues[i] = logValue * dstWhiteLevel + dither[i];
+                }
+                
+                p0 = linearValues[0];
+                p1 = linearValues[1];
+                p2 = linearValues[2];
+                p3 = linearValues[3];
+            }            
 
             s0 = std::clamp(std::round((p0 + dstBlackLevel[0])), 0.f, dstWhiteLevel);
             s1 = std::clamp(std::round((p1 + dstBlackLevel[1])), 0.f, dstWhiteLevel);
@@ -608,8 +820,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
 
     std::array<unsigned short, 4> blackLevelResult;
 
-    for(auto i = 0; i < dstBlackLevel.size(); ++i)
+    for(auto i = 0; i < dstBlackLevel.size(); ++i) {
         blackLevelResult[i] = static_cast<unsigned short>(std::round(dstBlackLevel[i]));
+    }
 
     return std::make_tuple(dst, blackLevelResult, static_cast<unsigned short>(dstWhiteLevel));
 }
@@ -625,7 +838,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     double baselineExpValue,
     std::string cropTarget, 
     std::string camModel,
-    std::string levels)
+    std::string levels,
+    std::string logTransform)
 {
     Measure m("generateDng");
 
@@ -651,6 +865,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     bool debugShadingMap = options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    bool useLogCurve = options & RENDER_OPT_LOG_TRANSFORM;
 
     if(!(options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
         cropTarget = "0x0";
@@ -664,7 +879,8 @@ std::shared_ptr<std::vector<char>> generateDng(
         scale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap,
         cropTarget,
-        levels
+        levels,
+        logTransform
     );
 
     spdlog::debug("New black level {},{},{},{} and white level {}",
@@ -673,7 +889,23 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Encode to reduce size in container
     auto encodeBits = bitsNeeded(dstWhiteLevel);
 
-    if(encodeBits <= 10) {
+    if(encodeBits <= 2) {
+        utils::encodeTo2Bit(processedData, width, height);
+        encodeBits = 2;
+    }
+    else if(encodeBits <= 4) {
+        utils::encodeTo4Bit(processedData, width, height);
+        encodeBits = 4;
+    }
+    else if(encodeBits <= 6) {
+        utils::encodeTo6Bit(processedData, width, height);
+        encodeBits = 6;
+    }
+    else if(encodeBits <= 8) {
+        utils::encodeTo8Bit(processedData, width, height);
+        encodeBits = 8;
+    }
+    else if(encodeBits <= 10) {
         utils::encodeTo10Bit(processedData, width, height);
         encodeBits = 10;
     }
@@ -707,8 +939,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetYResolution(300);
 
     dng.SetBlackLevelRepeatDim(2, 2);
-    dng.SetBlackLevel(4, dstBlackLevel.data());
-    dng.SetWhiteLevel(dstWhiteLevel);
+        
     dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
 
     dng.SetIso(metadata.iso);
@@ -821,6 +1052,46 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     const uint32_t activeArea[4] = { 0, 0, height, width };
     dng.SetActiveArea(&activeArea[0]);
+
+    // Add linearization table based on actual bit depth
+    
+    if (logTransform != "" && !(logTransform == "Keep Input" && !applyShadingMap)) {
+        // Create linearization table sized for the actual stored range
+        // The stored values range from 0 to dstWhiteLevel, so we need dstWhiteLevel+1 entries
+        const int tableSize = static_cast<int>(dstWhiteLevel) + 1;
+        std::vector<unsigned short> linearizationTable(tableSize);
+        
+        for (int i = 0; i < tableSize; i++) {
+            // Convert stored log value back to linear
+            // Must match the aggressive log curve: logValue = log2(1 + k*clampedValue) / log2(1 + k)
+            // Inverse: clampedValue = (2^(logValue * log2(1 + k)) - 1) / k
+            
+            float logValue = static_cast<float>(i);
+            float normalizedLogValue = logValue / dstWhiteLevel;  // Normalize by dstWhiteLevel to match forward transform
+            
+            // Reverse the k=30 curve with guaranteed identity preservation
+            float linearValue;
+            
+            if (i == 0) {
+                linearValue = 0.0f;  // Exact identity: stored 0 → linear 0
+            } else if (i == tableSize - 1) {
+                linearValue = 1.0f;  // Force maximum table entry → linear 1 → 65535
+            } else {                               
+                // Inverse of: logValue = log2(1 + k*clampedValue) / log2(1 + k)
+                linearValue = (std::pow(2.0f, normalizedLogValue * std::log2(1.0f + 60.0f)) - 1.0f) / 60.0f;
+                linearValue = std::clamp(linearValue, 0.0f, 1.0f);
+            }            
+            // Scale to 16-bit range            
+            linearizationTable[i] = static_cast<unsigned short>(linearValue * 65535.0f);                  
+        }        
+        dng.SetLinearizationTable(tableSize, linearizationTable.data());
+        std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
+        dng.SetBlackLevel(4, linearBlackLevel.data());
+        dng.SetWhiteLevel(65534);  //idk why
+    } else {           
+        dng.SetBlackLevel(4, dstBlackLevel.data());
+        dng.SetWhiteLevel(dstWhiteLevel);    
+    }    
 
     // Write DNG
     std::string err;

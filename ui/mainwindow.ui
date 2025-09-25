@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1160</width>
-    <height>980</height>
+    <height>1040</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -664,6 +664,70 @@
           <widget class="QLabel" name="cropLabel">
            <property name="text">
             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="logTransformSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>         
+         <item>
+          <layout class="QHBoxLayout" name="logTransformLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="logTransformCheckBox">
+             <property name="text">
+              <string>Apply Log Transfer curve</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="logTransformComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>80</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+             <item>
+              <property name="text">
+               <string>Keep Input</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Reduce by 2bit</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Reduce by 4bit</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Reduce by 6bit</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="logTransformLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Reduce output bitdepth by applying logarithmic transfer curve with Dithering. 'Keep Input' is only useful for vignette baking.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

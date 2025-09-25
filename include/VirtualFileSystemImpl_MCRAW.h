@@ -27,7 +27,8 @@ public:
         const std::string& file,
         const std::string& baseName,
         const std::string& cameraModel,
-        const std::string& levels);
+        const std::string& levels,
+        const std::string& logTransform);
 
     ~VirtualFileSystemImpl_MCRAW();
 
@@ -42,7 +43,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels) override;
+    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& bitDepthReduction) override;
     FileInfo getFileInfo() const;
 
 private:
@@ -78,6 +79,7 @@ private:
     std::string mCropTarget;
     std::string mCameraModel;    
     std::string mLevels;
+    std::string mLogTransform;
     FileRenderOptions mOptions;
     float mFps;
     float mMedFps;

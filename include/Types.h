@@ -73,7 +73,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_NORMALIZE_EXPOSURE           = 1 << 5,
     RENDER_OPT_FRAMERATE_CONVERSION         = 1 << 6,
     RENDER_OPT_CROPPING                     = 1 << 7,
-    RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8
+    RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8,
+    RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
 };
 
 // Overload bitwise OR operator
@@ -135,7 +136,10 @@ static std::string optionsToString(FileRenderOptions options) {
     if (options & RENDER_OPT_CAMMODEL_OVERRIDE) {
         flags.push_back("CAMMODEL_OVERRIDE");
     }
-
+    if (options & RENDER_OPT_LOG_TRANSFORM) {
+        flags.push_back("LOG_TRANSFORM");
+    }
+    
     std::string result;
     for (size_t i = 0; i < flags.size(); ++i) {
         if (i > 0) result += " | ";

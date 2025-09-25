@@ -70,6 +70,7 @@ private slots:
     void onCamModelOverrideChanged(std::string input);
     void onLevelsChanged(std::string input);
     void onCropTargetChanged(std::string input);
+    void onLogTransformChanged(std::string input);
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
@@ -91,6 +92,7 @@ private:
     std::string mCropTarget;    
     std::string mCameraModel;
     std::string mLevels;
+    std::string mLogTransform;
 };
 
 #endif // MAINWINDOW_H
