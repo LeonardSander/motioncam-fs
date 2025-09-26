@@ -1,6 +1,5 @@
 #pragma once
 
-#include "IFuseFileSystem.h"
 #include "Types.h"
 
 #include <optional>
