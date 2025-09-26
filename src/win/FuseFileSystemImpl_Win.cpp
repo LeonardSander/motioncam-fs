@@ -538,16 +538,16 @@ void setupLogging() {
 
 } // namespace motioncam
 
-motioncam::FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
+FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     mNextMountId(0),
-    mIoThreadPool(std::make_unique<BS::thread_pool>(motioncam::IO_THREADS)),
+    mIoThreadPool(std::make_unique<BS::thread_pool>(IO_THREADS)),
     mProcessingThreadPool(std::make_unique<BS::thread_pool>()),
-    mCache(std::make_unique<motioncam::LRUCache>(motioncam::CACHE_SIZE))
+    mCache(std::make_unique<LRUCache>(CACHE_SIZE))
 {
-    motioncam::setupLogging();
+    setupLogging();
 }
 
-motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, const std::string& srcFile, const std::string& dstPath) {
+MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -573,11 +573,11 @@ motioncam::MountId motioncam::FuseFileSystemImpl_Win::mount(FileRenderOptions op
     throw std::runtime_error("Invalid format");
 }
 
-void motioncam::FuseFileSystemImpl_Win::unmount(MountId mountId) {
+void FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void motioncam::FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform) {
+void FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;

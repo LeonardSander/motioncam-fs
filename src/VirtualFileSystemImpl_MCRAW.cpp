@@ -238,7 +238,6 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mLogTransform(logTransform),
         mOptions(options) {
     
-    spdlog::debug("Attempting to open MCRAW file: {}", file);
     Decoder decoder(mSrcPath);
     auto frames = decoder.getFrames();
     std::sort(frames.begin(), frames.end());
@@ -369,6 +368,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
+
     // Store frame information
     mWidth = cameraFrameMetadata.width;
     mHeight = cameraFrameMetadata.height;
@@ -474,7 +474,6 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
             mFiles.emplace_back(entry);
             ++lastPts;
         }
-        
     }
 }
 
@@ -559,7 +558,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
     const auto baselineExpValue = mBaselineExpValue;
     const auto options = mOptions;
 
-    auto generateTask = [this, entry, sharableFuture, fps, draftScale, baselineExpValue, options, pos, len, dst, result]() {
+    auto generateTask = [this, &cache = mCache, entry, sharableFuture, fps, draftScale, baselineExpValue, options, pos, len, dst, result]() {
         size_t readBytes = 0;
         int errorCode = -1;
 
@@ -594,11 +593,11 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
             }
 
             // Add to cache
-            this->mCache.put(entry, dngData);
+            cache.put(entry, dngData);
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to generate DNG (error: {})", e.what());
-            this->mCache.markLoadFailed(entry);
+            cache.markLoadFailed(entry);
         }
 
         result(readBytes, errorCode);
@@ -675,9 +674,8 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int d
     mLogTransform = logTransform;
 
     mCache.clear();
-    this->init(options);
+    init(options);
 }
-
 
 FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
     return FileInfo{

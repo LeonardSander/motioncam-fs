@@ -110,8 +110,8 @@ static std::string optionsToString(FileRenderOptions options) {
     std::vector<std::string> flags;
 
     if (options & RENDER_OPT_DRAFT) {
-        flags.push_back("DRAFT");    }
-    
+        flags.push_back("DRAFT");
+    }    
     if (options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
         flags.push_back("VIGNETTE_CORRECTION");
     }    

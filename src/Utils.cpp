@@ -25,11 +25,9 @@ namespace {
     };
 
     bool isZeroMatrix(const std::array<float, 9>& matrix) {
-        for (const auto& value : matrix) {
-            if (value != 0.0f) {
+        for (const auto& value : matrix) 
+            if (value != 0.0f) 
                 return false;
-            }
-        }
         return true;
     }
 
@@ -143,31 +141,27 @@ namespace {
         for (const auto& row : shadingMap) 
             for (float value : row) 
                 if (value <= 0.0f) 
-            return;                             // Avoid division by zero
+                    return;                             // Avoid division by zero
                   
-        // Normalize all values
-        for (auto& row : shadingMap) {
-            for (float& value : row) {
-                value = 1 / value;
-            }
-        }
+        for (auto& row : shadingMap) 
+            for (float& value : row) 
+                value = 1 / value;          // Normalize all values
     }
 
     void colorOnlyShadingMap(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
         if (shadingMap.empty() || shadingMap[0].empty())
             return; // Handle empty case
 
-        // Find the maximum value
         float maxValue = 0.0f;
+
         for (const auto& row : shadingMap) 
             for (float value : row) 
                 maxValue = std::max(maxValue, value);
-
-        // Avoid division by zero
-        if (maxValue == 0.0f) 
+        
+        if (maxValue == 0.0f)   // Avoid division by zero
             return;
 
-        bool aggressive = false;
+        bool aggressive = false;            //TODO: add ui option for aggressive color fix reduction that if effective breaks awb and might not improve highlight reconstruction
 
         auto minValue00 = 10.0f;
         auto minValue01 = 10.0f;
@@ -184,7 +178,7 @@ namespace {
                     minValue10 = shadingMap[2][j*lensShadingMapWidth+i];
                 if(shadingMap[3][j*lensShadingMapWidth+i] < minValue11)
                     minValue11 = shadingMap[3][j*lensShadingMapWidth+i];
-        }}       // detect image-global white balance adjustment in shadingMap     
+        }}       
 
         if (cfa == std::array<uint8_t, 4>{0, 1, 1, 2} || cfa == std::array<uint8_t, 4>{2, 1, 1, 0}) {
             minValue01 = std::min(minValue01, minValue10);
@@ -196,7 +190,7 @@ namespace {
         
         for(int j = 0; j < lensShadingMapHeight; j++) {
             for(int i = 0; i < lensShadingMapWidth; i++) {
-                if (aggressive) {
+                if (aggressive) {                               // remove image-global white balance adjustment in shadingMap     
                     shadingMap[0][j*lensShadingMapWidth+i] = shadingMap[0][j*lensShadingMapWidth+i] / minValue00;   
                     shadingMap[1][j*lensShadingMapWidth+i] = shadingMap[1][j*lensShadingMapWidth+i] / minValue01;
                     shadingMap[2][j*lensShadingMapWidth+i] = shadingMap[2][j*lensShadingMapWidth+i] / minValue10;
@@ -514,9 +508,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
                 // Ignore invalid crop target
                 cropWidth = 0;
                 cropHeight = 0;
-            }
-        }
-    }
+    }}}
 
     if (cropWidth > 0 && cropHeight > 0 && cropWidth <= inOutWidth && cropHeight <= inOutHeight) {
         newWidth = cropWidth / scale;
@@ -689,25 +681,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
     dst.resize(sizeof(uint16_t) * newWidth * newHeight);
     uint16_t* dstData = reinterpret_cast<uint16_t*>(dst.data());
 
-    //uint16_t x = 3826;    
-
-    // Make a full copy of srcData into a separate buffer
-    //std::vector<uint16_t> srcDataModified(srcData, srcData + (newWidth * newHeight));
-
-/*
-
-    // Apply edits to the copy
-    std::memmove(&srcDataModified[x],     &srcData[x + 16],     256  * sizeof(uint16_t));
-    std::memmove(&srcDataModified[2 * x], &srcData[2 * x + 16], 512  * sizeof(uint16_t));
-    std::memmove(&srcDataModified[3 * x], &srcData[3 * x + 16], 768  * sizeof(uint16_t));
-    std::memmove(&srcDataModified[4 * x], &srcData[4 * x + 16], 1024 * sizeof(uint16_t));
-    std::memmove(&srcDataModified[5 * x], &srcData[2 * x + 16], 1280 * sizeof(uint16_t));
-    std::memmove(&srcDataModified[6 * x], &srcData[2 * x + 16], 1536 * sizeof(uint16_t));*/
-
-    // Write the modified data back to srcData
-    /*std::memcpy(srcData, srcDataModified.data(),
-            newWidth * newHeight * sizeof(uint16_t));*/
-
     for (auto y = 0; y < newHeight; y += 2) {
         for (auto x = 0; x < newWidth; x += 2) {
             // Get the source coordinates (scaled)
@@ -718,13 +691,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
             auto s1 = srcData[srcY * originalWidth + srcX + 1];
             auto s2 = srcData[(srcY + 1) * originalWidth + srcX];
             auto s3 = srcData[(srcY + 1) * originalWidth + srcX + 1];
-
-            //std::array<uint16_t, 3826*200> remap = {0..3825,;
-
-            //auto s0 = srcData[srcY * newWidth + srcX];
-            //auto s1 = srcData[srcY * newWidth + srcX + 1];
-            //auto s2 = srcData[(srcY + 1) * newWidth + srcX];
-            //auto s3 = srcData[(srcY + 1) * newWidth + srcX + 1];
 
             if(applyShadingMap) {
                 // Calculate position in shading map               
@@ -820,9 +786,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short> 
 
     std::array<unsigned short, 4> blackLevelResult;
 
-    for(auto i = 0; i < dstBlackLevel.size(); ++i) {
+    for(auto i = 0; i < dstBlackLevel.size(); ++i)
         blackLevelResult[i] = static_cast<unsigned short>(std::round(dstBlackLevel[i]));
-    }
 
     return std::make_tuple(dst, blackLevelResult, static_cast<unsigned short>(dstWhiteLevel));
 }
@@ -945,10 +910,12 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetIso(metadata.iso);
     dng.SetExposureTime(metadata.exposureTime / 1e9);
 
+    float exposureOffset = (camModel == "Panasonic" ? -2.0f : 0.0f);
+
     if (normalizeExposure)
-        dng.SetBaselineExposure(std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime)));
+        dng.SetBaselineExposure(std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime)) + exposureOffset);
     else
-        dng.SetBaselineExposure(0.0);
+        dng.SetBaselineExposure(exposureOffset);
 
     dng.SetCFAPattern(4, cfa.data());
 

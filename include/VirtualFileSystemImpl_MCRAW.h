@@ -1,6 +1,5 @@
 #pragma once
 
-#include "IFuseFileSystem.h"
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
 
