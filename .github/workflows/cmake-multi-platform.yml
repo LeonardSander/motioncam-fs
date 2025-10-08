@@ -1,0 +1,99 @@
+# This starter workflow is for a CMake project running on multiple platforms. There is a different starter workflow if you just want a single platform.
+# See: https://github.com/actions/starter-workflows/blob/main/ci/cmake-single-platform.yml
+name: CMake Multi-Platform Build and Release
+
+on:
+  push:
+    branches: [ "master" ]
+    tags:
+      - "v*"            # Build & release when pushing tags like v1.0.0
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+        build_type: [Release]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: "6.7.2"
+        host: ${{ matrix.os == 'windows-latest' && 'windows' || 'mac' }}
+
+    - name: Configure CMake
+      shell: bash
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          cmake -S . -B build ^
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} ^
+            -DCMAKE_VERBOSE_MAKEFILE=ON ^
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
+            -DCMAKE_PREFIX_PATH="D:/a/motioncam-fs/Qt/6.7.2/msvc2019_64" ^
+            -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
+        else
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_VERBOSE_MAKEFILE=ON \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos"
+        fi
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+    # ---------- PACKAGE ----------
+    - name: Package binaries
+      shell: bash
+      run: |
+        mkdir -p artifacts
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          cd build/${{ matrix.build_type }}
+          exe=$(ls *.exe | head -n 1)
+          echo "Running windeployqt on $exe"
+          ${{ env.Qt6_DIR }}/bin/windeployqt.exe "$exe" || echo "windeployqt failed (may be harmless)"
+          7z a ../../artifacts/motioncam-${{ github.ref_name }}-windows.zip ./*
+        elif [ "${{ runner.os }}" == "macOS" ]; then
+          cd build
+          app=$(find . -name "*.app" | head -n 1)
+          echo "Running macdeployqt on $app"
+          macdeployqt "$app" -verbose=2 || echo "macdeployqt failed"
+          zip -r ../artifacts/motioncam-${{ github.ref_name }}-macos.zip "$app"
+        fi
+
+    # ---------- UPLOAD ----------
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: motioncam-${{ runner.os }}
+        path: artifacts/*
+
+  # ---------- RELEASE ----------
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+  
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files/
+  
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/**/*
+          tag_name: ${{ github.ref_name }}
+          name: "MotionCam-FS ${{ github.ref_name }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
