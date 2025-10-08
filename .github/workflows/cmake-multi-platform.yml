@@ -57,7 +57,7 @@ jobs:
       uses: jurplel/install-qt-action@v3
       with:
         version: "6.9.1"
-        host: ${{ runner.os }}
+        host: ${{ matrix.os == 'windows-latest' && 'windows' || 'mac' }}
         modules: qtbase qttools qtdeclarative
 
     # ---------- CONFIGURE ----------
@@ -69,6 +69,7 @@ jobs:
         -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
         -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}"
         -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
+      shell: bash
 
     # ---------- BUILD ----------
     - name: Build
@@ -84,13 +85,13 @@ jobs:
           exe=$(ls *.exe | head -n 1)
           echo "Running windeployqt on $exe"
           ${{ env.Qt6_DIR }}/bin/windeployqt.exe "$exe" || echo "windeployqt failed (may be harmless)"
-          7z a ../../artifacts/motioncam-${{ runner.os }}.zip ./*
+          7z a ../../artifacts/motioncam-${{ github.ref_name }}-windows.zip ./*
         elif [ "${{ runner.os }}" == "macOS" ]; then
           cd build
           app=$(find . -name "*.app" | head -n 1)
           echo "Running macdeployqt on $app"
           macdeployqt "$app" -verbose=2 || echo "macdeployqt failed"
-          zip -r ../artifacts/motioncam-${{ runner.os }}.zip "$app"
+          zip -r ../artifacts/motioncam-${{ github.ref_name }}-macos.zip "$app"
         fi
 
     # ---------- UPLOAD ----------
@@ -117,5 +118,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release-files/**/*
+          tag_name: ${{ github.ref_name }}
+          name: "MotionCam-FS ${{ github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
