@@ -52,89 +52,67 @@ jobs:
     - name: Checkout source
       uses: actions/checkout@v4
 
-    # ---------- WINDOWS ----------
-    - name: Configure (Windows)
-      if: runner.os == 'Windows'
+    # ---------- INSTALL QT ----------
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: "6.9.1"
+        host: ${{ runner.os }}
+        modules: qtbase qttools qtdeclarative
+
+    # ---------- CONFIGURE ----------
+    - name: Configure CMake
       run: >
         cmake -S . -B build
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DCMAKE_VERBOSE_MAKEFILE=ON
         -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
-        -DCMAKE_PREFIX_PATH=C:/Qt/6.9.1/msvc2022_64
+        -DCMAKE_PREFIX_PATH="${{ env.Qt6_DIR }}"
         -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
 
-    - name: Build (Windows)
-      if: runner.os == 'Windows'
+    # ---------- BUILD ----------
+    - name: Build
       run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
-    - name: Deploy Qt (Windows)
-      if: runner.os == 'Windows'
+    # ---------- PACKAGE ----------
+    - name: Package binaries
+      shell: bash
       run: |
-        cd build/${{ matrix.build_type }}
-        if (Test-Path "*.exe") {
-          $exe = Get-ChildItem *.exe | Select-Object -First 1
-          echo "Deploying $exe..."
-          & "C:/Qt/6.9.1/msvc2022_64/bin/windeployqt.exe" $exe
-          7z a ../../motioncam-windows.zip ./*
-        }
-
-    # ---------- MACOS ----------
-    - name: Install Qt (macOS)
-      if: runner.os == 'macOS'
-      uses: jurplel/install-qt-action@v3
-      with:
-        version: "6.9.1"
-        host: mac
-        modules: qtbase qttools qtdeclarative
-
-    - name: Configure (macOS)
-      if: runner.os == 'macOS'
-      run: >
-        cmake -S . -B build
-        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
-        -DCMAKE_PREFIX_PATH=${{ env.Qt6_DIR }}
-
-    - name: Build (macOS)
-      if: runner.os == 'macOS'
-      run: cmake --build build --config ${{ matrix.build_type }} --parallel
-
-    - name: Deploy Qt (macOS)
-      if: runner.os == 'macOS'
-      run: |
-        cd build
-        app_name=$(find . -name "*.app" | head -n 1)
-        if [ -n "$app_name" ]; then
-          echo "Deploying $app_name"
-          macdeployqt "$app_name" -verbose=2 || echo "macdeployqt failed (may be harmless)"
-          zip -r ../motioncam-macos.zip "$app_name"
+        mkdir -p artifacts
+        if [ "${{ runner.os }}" == "Windows" ]; then
+          cd build/${{ matrix.build_type }}
+          exe=$(ls *.exe | head -n 1)
+          echo "Running windeployqt on $exe"
+          ${{ env.Qt6_DIR }}/bin/windeployqt.exe "$exe" || echo "windeployqt failed (may be harmless)"
+          7z a ../../artifacts/motioncam-${{ runner.os }}.zip ./*
+        elif [ "${{ runner.os }}" == "macOS" ]; then
+          cd build
+          app=$(find . -name "*.app" | head -n 1)
+          echo "Running macdeployqt on $app"
+          macdeployqt "$app" -verbose=2 || echo "macdeployqt failed"
+          zip -r ../artifacts/motioncam-${{ runner.os }}.zip "$app"
         fi
 
-    # ---------- COMMON ----------
-    - name: Upload build artifacts
+    # ---------- UPLOAD ----------
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: motioncam-${{ runner.os }}-${{ matrix.build_type }}
-        path: |
-          build/**/*.exe
-          build/**/*.app
-          build/**/*.dylib
-          build/**/*.dll
-          build/**/*.so
+        name: motioncam-${{ runner.os }}
+        path: artifacts/*
 
-    
-  # ---------- RELEASE JOB ----------
+  # ---------- RELEASE ----------
   release:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')   # Only run for tags
-
+    if: startsWith(github.ref, 'refs/tags/v')
+  
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-files/
-
+  
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
