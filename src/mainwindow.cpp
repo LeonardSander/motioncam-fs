@@ -157,36 +157,42 @@ void MainWindow::restoreSettings() {
         settings.value("draftMode").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     ui->vignetteCorrectionCheckBox->setCheckState(
-        settings.value("applyVignetteCorrection").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+        !settings.contains("applyVignetteCorrection") ? Qt::CheckState::Checked :
+        (settings.value("applyVignetteCorrection").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
     ui->scaleRawCheckBox->setCheckState(
         settings.value("scaleRaw").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     ui->vignetteOnlyColorCheckBox->setCheckState(
-        settings.value("vignetteOnlyColor").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+        !settings.contains("vignetteOnlyColor") ? Qt::CheckState::Checked :
+        (settings.value("vignetteOnlyColor").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
     ui->normalizeExposureCheckBox->setCheckState(
-        settings.value("normalizeExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+        !settings.contains("normalizeExposure") ? Qt::CheckState::Checked :
+        (settings.value("normalizeExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
     ui->cfrConversionCheckBox->setCheckState(
-        settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+        !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
+        (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     ui->camModelOverrideCheckBox->setCheckState(
-        settings.value("camModelOverrideEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+        !settings.contains("camModelOverrideEnabled") ? Qt::CheckState::Checked :
+        (settings.value("camModelOverrideEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
     ui->logTransformCheckBox->setCheckState(
-        settings.value("logTransformEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+        !settings.contains("logTransformEnabled") ? Qt::CheckState::Checked :
+        (settings.value("logTransformEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
-    mCFRTarget = settings.value("cfrTarget").toString().toStdString();
+    mCFRTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mCropTarget = settings.value("cropTarget").toString().toStdString();
-    mCameraModel = settings.value("camModelOverride").toString().toStdString();
-    mLevels = settings.value("levels").toString().toStdString();
-    mLogTransform = settings.value("logTransform").toString().toStdString();
+    mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
+    mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
+    mLogTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -195,15 +201,8 @@ void MainWindow::restoreSettings() {
     else if(mDraftQuality == 8)
         ui->draftQuality->setCurrentIndex(2);
 
-    if (mCropTarget.empty())
-        mCFRTarget = "Prefer Drop Frame";
-    if (mLevels.empty())
-        mLevels = "Dynamic"; 
-    if (!mCameraModel.empty())
-        ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
-    if (!mCFRTarget.empty())    
-        ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
-
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
+    ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
@@ -493,6 +492,8 @@ void MainWindow::updateUi() {
 
     if(ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->camModelOverrideComboBox->setEnabled(true);
+        if (ui->camModelOverrideComboBox->currentText() == "")
+            ui->camModelOverrideComboBox->setCurrentText("Panasonic");
     } else {
         ui->camModelOverrideComboBox->setCurrentText("");
         ui->camModelOverrideComboBox->setEnabled(false);             
@@ -501,6 +502,8 @@ void MainWindow::updateUi() {
     // Bit depth reduction combobox only enabled when checkbox is checked
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->logTransformComboBox->setEnabled(true);
+        if (ui->logTransformComboBox->currentText() == "")
+            ui->logTransformComboBox->setCurrentText("Keep Input");
     } else {
         ui->logTransformComboBox->setCurrentText("");
         ui->logTransformComboBox->setEnabled(false);

@@ -1,3 +1,3 @@
 [submodule "deps/motioncam-decoder"]
 	path = deps/motioncam-decoder
-	url = https://github.com/mirsadm/motioncam-decoder.git
+	url = https://github.com/LeonardSander/motioncam-decoder.git

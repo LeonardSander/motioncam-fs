@@ -43,6 +43,14 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
         }
     }
 
+    if (j.contains("noiseProfile") && j["noiseProfile"].is_array()) {
+        auto noiseArray = j["noiseProfile"];
+        for (size_t i = 0; i < 6 && i < noiseArray.size(); ++i) {
+            frame.noiseProfile[i] = noiseArray[i].get<double>();
+        }
+    }
+
+
     // Parse simple fields with safe defaults
     frame.compressionType = j.value("compressionType", 0);
     frame.dynamicWhiteLevel = j.value("dynamicWhiteLevel", 0.0);

@@ -41,6 +41,7 @@ struct CameraFrameMetadata {
     std::string timestamp;
     std::string type;
     int width;
+    std::array<double, 6> noiseProfile;
 
     static CameraFrameMetadata parse(const std::string& jsonString);
     static CameraFrameMetadata parse(const nlohmann::json& j);

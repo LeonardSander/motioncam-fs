@@ -480,14 +480,14 @@
               </property>
               <item>
                 <property name="text">
-                <string>Blackmagic</string>
+                <string>Panasonic</string>
                 </property>
               </item>
               <item>
                 <property name="text">
-                <string>Panasonic</string>
+                <string>Blackmagic</string>
                 </property>
-              </item>
+              </item>              
               <item>
                 <property name="text">
                 <string>Fujifilm</string>
@@ -664,6 +664,80 @@
           <widget class="QLabel" name="cropLabel">
            <property name="text">
             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="quadBayerSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>         
+         <item>
+          <layout class="QHBoxLayout" name="quadBayerLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="quadBayerCheckBox">
+             <property name="text">
+              <string>Interpret as Quad Bayer CFA</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="quadBayerComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>80</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+             <item>
+              <property name="text">
+               <string>Remosaic</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Demosaic only</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Metadata only</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Wrong Metadata</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>3by3 CFA</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4by4 CFA</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="logTransformLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Reduce output bitdepth by applying logarithmic transfer curve with Dithering. 'Keep Input' is only useful for vignette baking.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
