@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1160</width>
-    <height>1040</height>
+    <height>1080</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -735,7 +735,7 @@
           </layout>
          </item>
          <item>
-          <widget class="QLabel" name="logTransformLabel">
+          <widget class="QLabel" name="remosaicLabel">
            <property name="text">
             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Reduce output bitdepth by applying logarithmic transfer curve with Dithering. 'Keep Input' is only useful for vignette baking.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>

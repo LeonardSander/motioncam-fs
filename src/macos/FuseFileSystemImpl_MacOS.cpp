@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 #include <BS_thread_pool.hpp>
-#include <fuse_t/fuse_t.h>
+//#include <fuse_t/fuse_t.h>
 #include <QDir>
 
 // Logging
