@@ -65,6 +65,8 @@ jobs:
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;/opt/homebrew/Library/Frameworks;/opt/homebrew" \
+          -DCMAKE_INCLUDE_PATH="/opt/homebrew/include" \
+          -DCMAKE_LIBRARY_PATH="/opt/homebrew/lib" \
           -DFUSE_T_FRAMEWORK="/opt/homebrew/Library/Frameworks/macFUSE.framework"
 
 
