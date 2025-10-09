@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "master" ]
     tags:
-      - "v*"            # e.g. v1.0.0
+      - "v*"
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
@@ -24,8 +24,34 @@ jobs:
       with:
         submodules: recursive
 
+    # ---------- CACHE: Qt, vcpkg, fuse-t ----------
+    - name: Cache Qt
+      id: qt-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.tool_cache }}/Qt
+        key: ${{ runner.os }}-qt-6.7.2
+
+    - name: Cache vcpkg
+      id: vcpkg-cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ github.workspace }}/vcpkg_installed
+          ${{ env.VCPKG_ROOT }}
+        key: ${{ runner.os }}-vcpkg-spdlog
+
+    - name: Cache FUSE-T headers (macOS)
+      if: matrix.os == 'macos-latest'
+      id: fuse-cache
+      uses: actions/cache@v4
+      with:
+        path: /opt/homebrew/include/fuse_t
+        key: macos-fuse-t-1.0.49
+
     # ---------- QT ----------
     - name: Install Qt
+      if: steps.qt-cache.outputs.cache-hit != 'true'
       uses: jurplel/install-qt-action@v3
       with:
         version: "6.7.2"
@@ -33,52 +59,50 @@ jobs:
 
     # ---------- VCPKG ----------
     - name: Install spdlog via vcpkg
+      if: steps.vcpkg-cache.outputs.cache-hit != 'true'
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgArguments: spdlog
-        # This will define $VCPKG_ROOT automatically
 
     # ---------- MACOS DEPENDENCIES ----------
-    - name: Install macFUSE (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        brew install --cask macfuse
-
-    - name: Install FUSE-T (macOS) headers manually
-      if: matrix.os == 'macos-latest'
+    - name: Install macOS FUSE dependencies
+      if: matrix.os == 'macos-latest' && steps.fuse-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         set -euxo pipefail
+        echo "📦 Installing macFUSE runtime..."
+        brew install --cask macfuse || echo "macFUSE already installed"
 
-        # Fetch the latest FUSE-T release package
-        curl -L -o /tmp/fuse-t.pkg \
-          https://github.com/macos-fuse-t/fuse-t/releases/download/1.0.49/fuse-t-macos-installer-1.0.49.pkg
+        echo "📦 Installing fuse-t headers..."
+        FUSE_T_VERSION="1.0.49"
+        FUSE_T_PKG="fuse-t-macos-installer-${FUSE_T_VERSION}.pkg"
+        FUSE_T_URL="https://github.com/macos-fuse-t/fuse-t/releases/download/${FUSE_T_VERSION}/${FUSE_T_PKG}"
 
-        # Extract the .pkg contents without installing system-wide
-        mkdir -p /tmp/fuse-t-expanded
-        pkgutil --expand /tmp/fuse-t.pkg /tmp/fuse-t-expanded
+        TMPDIR=$(mktemp -d)
+        curl -L -o "${TMPDIR}/${FUSE_T_PKG}" "${FUSE_T_URL}"
+        pkgutil --expand "${TMPDIR}/${FUSE_T_PKG}" "${TMPDIR}/expanded"
+        mkdir -p "${TMPDIR}/payload"
+        cd "${TMPDIR}/payload"
 
-        # The actual payload is inside a subpackage; extract it
-        mkdir -p /tmp/fuse-t-payload
-        cd /tmp/fuse-t-payload
-        cat /tmp/fuse-t-expanded/*.pkg/Payload | gunzip -dc | cpio -i || true
-        cd -
+        for PAYLOAD in "${TMPDIR}"/expanded/*.pkg/Payload; do
+          if [ -f "$PAYLOAD" ]; then
+            cat "$PAYLOAD" | gunzip -dc | cpio -i --quiet || true
+          fi
+        done
 
-        # Locate headers
-        FOUND_HEADERS=$(find /tmp/fuse-t-payload -type f -name "fuse_t.h" | head -n 1 || true)
-        if [ -z "$FOUND_HEADERS" ]; then
-          echo "❌ Could not find fuse_t headers inside the .pkg payload"
-          ls -R /tmp/fuse-t-payload | head -n 100
+        HEADER_DIR=$(find "${TMPDIR}/payload" -type f -name "fuse_t.h" -exec dirname {} \; | head -n 1 || true)
+        if [ -z "$HEADER_DIR" ]; then
+          echo "❌ fuse_t.h not found!"
+          ls -R "${TMPDIR}/payload" | head -n 200
           exit 1
         fi
 
-        echo "✅ Found headers at: $(dirname "$FOUND_HEADERS")"
         BREW_PREFIX=$(brew --prefix)
-        sudo mkdir -p "$BREW_PREFIX/include/fuse_t"
-        sudo cp -R "$(dirname "$FOUND_HEADERS")/"* "$BREW_PREFIX/include/fuse_t/"
-        ls -R "$BREW_PREFIX/include/fuse_t"
+        sudo mkdir -p "${BREW_PREFIX}/include/fuse_t"
+        sudo cp -R "${HEADER_DIR}/"*.h "${BREW_PREFIX}/include/fuse_t/"
+        ls -l "${BREW_PREFIX}/include/fuse_t"
+        rm -rf "${TMPDIR}"
 
-        
     # ---------- CONFIGURE ----------
     - name: Configure CMake (Windows)
       if: matrix.os == 'windows-latest'
@@ -100,16 +124,10 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX/Library/Frameworks;$BREW_PREFIX" \
-          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include;/Library/Application Support/fuse-t/include" \
-          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Application Support/fuse-t/lib" \
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX" \
+          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include" \
+          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Frameworks" \
           -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"
-
-
-          
-    - name: Verify FUSE headers
-      if: matrix.os == 'macos-latest'
-      run: ls -R /opt/homebrew/include/fuse_t
 
     # ---------- BUILD ----------
     - name: Build
@@ -125,7 +143,7 @@ jobs:
           exe=$(ls *.exe 2>/dev/null | head -n 1)
           if [ -n "$exe" ]; then
             echo "Running windeployqt on $exe"
-            "${{ github.workspace }}/Qt/6.7.2/msvc2019_64/bin/windeployqt.exe" "$exe" || echo "windeployqt failed (may be harmless)"
+            "${{ github.workspace }}/Qt/6.7.2/msvc2019_64/bin/windeployqt.exe" "$exe" || echo "windeployqt failed"
             7z a ../../artifacts/motioncam-${{ github.ref_name }}-windows.zip ./*
           fi
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
