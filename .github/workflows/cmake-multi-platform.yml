@@ -38,7 +38,13 @@ jobs:
         vcpkgArguments: spdlog
         # This will define $VCPKG_ROOT automatically
 
-        # ---------- CONFIGURE ----------
+    # ---------- MACOS DEPENDENCIES ----------
+    - name: Install macFUSE (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install --cask macfuse
+        
+      # ---------- CONFIGURE ----------
     - name: Configure CMake (Windows)
       if: matrix.os == 'windows-latest'
       shell: pwsh
