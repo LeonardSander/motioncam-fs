@@ -58,7 +58,9 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos"
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;/opt/homebrew/Library/Frameworks;/opt/homebrew" \
+          -DFUSE_T_FRAMEWORK="/opt/homebrew/Library/Frameworks/macFUSE.framework"
+
 
     # ---------- BUILD ----------
     - name: Build
