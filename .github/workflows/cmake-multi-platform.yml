@@ -66,41 +66,62 @@ jobs:
 
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macOS FUSE dependencies
-      if: matrix.os == 'macos-latest' && steps.fuse-cache.outputs.cache-hit != 'true'
+      if: matrix.os == 'macos-latest'
       shell: bash
       run: |
         set -euxo pipefail
-        echo "📦 Installing macFUSE runtime..."
         brew install --cask macfuse || echo "macFUSE already installed"
 
-        echo "📦 Installing fuse-t headers..."
+    - name: Prepare FUSE-T headers (macOS, cached)
+      if: matrix.os == 'macos-latest'
+      id: fuse_t
+      uses: actions/cache@v4
+      with:
+        path: /opt/homebrew/include/fuse_t
+        key: macos-fuse-t-1.0.49
+
+    - name: Install FUSE-T headers
+      if: matrix.os == 'macos-latest' && steps.fuse_t.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euxo pipefail
         FUSE_T_VERSION="1.0.49"
         FUSE_T_PKG="fuse-t-macos-installer-${FUSE_T_VERSION}.pkg"
         FUSE_T_URL="https://github.com/macos-fuse-t/fuse-t/releases/download/${FUSE_T_VERSION}/${FUSE_T_PKG}"
 
         TMPDIR=$(mktemp -d)
+        echo "📦 Downloading FUSE-T ${FUSE_T_VERSION}..."
         curl -L -o "${TMPDIR}/${FUSE_T_PKG}" "${FUSE_T_URL}"
+
+        echo "📦 Extracting .pkg..."
         pkgutil --expand "${TMPDIR}/${FUSE_T_PKG}" "${TMPDIR}/expanded"
+
         mkdir -p "${TMPDIR}/payload"
         cd "${TMPDIR}/payload"
 
-        for PAYLOAD in "${TMPDIR}"/expanded/*.pkg/Payload; do
-          if [ -f "$PAYLOAD" ]; then
-            cat "$PAYLOAD" | gunzip -dc | cpio -i --quiet || true
+        # Extract all payloads
+        for PKG in "${TMPDIR}"/expanded/*.pkg; do
+          if [ -f "${PKG}/Payload" ]; then
+            cat "${PKG}/Payload" | gunzip -dc | cpio -i --quiet || true
           fi
         done
 
+        # Locate fuse_t.h
         HEADER_DIR=$(find "${TMPDIR}/payload" -type f -name "fuse_t.h" -exec dirname {} \; | head -n 1 || true)
         if [ -z "$HEADER_DIR" ]; then
-          echo "❌ fuse_t.h not found!"
-          ls -R "${TMPDIR}/payload" | head -n 200
+          echo "❌ Could not find fuse_t.h"
+          find "${TMPDIR}/payload" -maxdepth 4 -type f | head -n 50
           exit 1
         fi
 
+        echo "✅ Found fuse_t.h at: ${HEADER_DIR}"
         BREW_PREFIX=$(brew --prefix)
         sudo mkdir -p "${BREW_PREFIX}/include/fuse_t"
         sudo cp -R "${HEADER_DIR}/"*.h "${BREW_PREFIX}/include/fuse_t/"
-        ls -l "${BREW_PREFIX}/include/fuse_t"
+
+        echo "📂 Installed headers:"
+        ls -la "${BREW_PREFIX}/include/fuse_t"
+
         rm -rf "${TMPDIR}"
 
     # ---------- CONFIGURE ----------
