@@ -68,7 +68,10 @@ jobs:
           -DCMAKE_INCLUDE_PATH="/opt/homebrew/include" \
           -DCMAKE_LIBRARY_PATH="/opt/homebrew/lib" \
           -DFUSE_T_FRAMEWORK="/opt/homebrew/Library/Frameworks/macFUSE.framework"
-
+          
+    - name: Verify FUSE headers
+      if: matrix.os == 'macos-latest'
+      run: ls -R /opt/homebrew/include/fuse_t
 
     # ---------- BUILD ----------
     - name: Build
