@@ -44,60 +44,39 @@ jobs:
       run: |
         brew install --cask macfuse
 
-    - name: Install FUSE-T (macOS) and make headers available
+    - name: Install FUSE-T (macOS) headers manually
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
-        # Install the fuse-t cask (tries both forms)
-        brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t || true
-    
-        # Detect brew prefix used by the runner (handles /usr/local vs /opt/homebrew)
-        BREW_PREFIX="$(brew --prefix)"
-        echo "Homebrew prefix: $BREW_PREFIX"
-    
-        # Candidate header/framework locations we will check
-        CANDIDATES=(
-          "$BREW_PREFIX/include/fuse"
-          "/Library/Application Support/fuse-t/include/fuse"
-          "/Library/Frameworks/fuse_t.framework/Headers"
-          "/Library/Application Support/fuse-t/include"
-        )
-    
-        FOUND=
-        for p in "${CANDIDATES[@]}"; do
-          if [ -d "$p" ]; then
-            echo "Found FUSE headers at: $p"
-            ls -la "$p" || true
-            FOUND="$p"
-            break
-          fi
-        done
-    
-        # If header dir is in Application Support or framework Headers, copy to brew prefix include
-        if [ -z "$FOUND" ]; then
-          echo "No standard FUSE header dir found. Listing /Library/Application Support and /Library/Frameworks for debugging:"
-          ls -la "/Library/Application Support" || true
-          ls -la "/Library/Frameworks" || true
-          echo "If headers are still missing the cask may not have installed headers on this runner."
-        else
-          echo "Copying headers (if needed) into $BREW_PREFIX/include so CMake can find them"
-          sudo mkdir -p "$BREW_PREFIX/include"
-          # If it's a framework Headers dir, copy individual header(s)
-          if [[ "$FOUND" == */Frameworks/* ]] ; then
-            sudo cp -R "$FOUND/"* "$BREW_PREFIX/include/" || true
-            # Also ensure a fuse_t/ directory exists so '#include <fuse_t/fuse_t.h>' works
-            sudo mkdir -p "$BREW_PREFIX/include/fuse_t"
-            if [ -f "/Library/Frameworks/fuse_t.framework/Headers/fuse_t.h" ]; then
-              sudo cp "/Library/Frameworks/fuse_t.framework/Headers/fuse_t.h" "$BREW_PREFIX/include/fuse_t/"
-            fi
-          else
-            # If it's an include/fuse style dir, copy its contents into brew include/fuse
-            sudo mkdir -p "$BREW_PREFIX/include/fuse"
-            sudo cp -R "$FOUND/"* "$BREW_PREFIX/include/fuse/" || true
-          fi
-          echo "Final /usr include tree (trimmed):"
-          ls -la "$BREW_PREFIX/include" | sed -n '1,200p'
+        set -euxo pipefail
+
+        # Fetch the latest FUSE-T release package
+        curl -L -o /tmp/fuse-t.pkg \
+          https://github.com/macos-fuse-t/fuse-t/releases/download/1.0.49/fuse-t-macos-installer-1.0.49.pkg
+
+        # Extract the .pkg contents without installing system-wide
+        mkdir -p /tmp/fuse-t-expanded
+        pkgutil --expand /tmp/fuse-t.pkg /tmp/fuse-t-expanded
+
+        # The actual payload is inside a subpackage; extract it
+        mkdir -p /tmp/fuse-t-payload
+        cd /tmp/fuse-t-payload
+        cat /tmp/fuse-t-expanded/*.pkg/Payload | gunzip -dc | cpio -i || true
+        cd -
+
+        # Locate headers
+        FOUND_HEADERS=$(find /tmp/fuse-t-payload -type f -name "fuse_t.h" | head -n 1 || true)
+        if [ -z "$FOUND_HEADERS" ]; then
+          echo "❌ Could not find fuse_t headers inside the .pkg payload"
+          ls -R /tmp/fuse-t-payload | head -n 100
+          exit 1
         fi
+
+        echo "✅ Found headers at: $(dirname "$FOUND_HEADERS")"
+        BREW_PREFIX=$(brew --prefix)
+        sudo mkdir -p "$BREW_PREFIX/include/fuse_t"
+        sudo cp -R "$(dirname "$FOUND_HEADERS")/"* "$BREW_PREFIX/include/fuse_t/"
+        ls -R "$BREW_PREFIX/include/fuse_t"
 
         
     # ---------- CONFIGURE ----------
