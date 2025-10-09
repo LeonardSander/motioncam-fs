@@ -43,8 +43,64 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: |
         brew install --cask macfuse
+
+    - name: Install FUSE-T (macOS) and make headers available
+      if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        # Install the fuse-t cask (tries both forms)
+        brew install --cask fuse-t || brew install macos-fuse-t/homebrew-cask/fuse-t || true
+    
+        # Detect brew prefix used by the runner (handles /usr/local vs /opt/homebrew)
+        BREW_PREFIX="$(brew --prefix)"
+        echo "Homebrew prefix: $BREW_PREFIX"
+    
+        # Candidate header/framework locations we will check
+        CANDIDATES=(
+          "$BREW_PREFIX/include/fuse"
+          "/Library/Application Support/fuse-t/include/fuse"
+          "/Library/Frameworks/fuse_t.framework/Headers"
+          "/Library/Application Support/fuse-t/include"
+        )
+    
+        FOUND=
+        for p in "${CANDIDATES[@]}"; do
+          if [ -d "$p" ]; then
+            echo "Found FUSE headers at: $p"
+            ls -la "$p" || true
+            FOUND="$p"
+            break
+          fi
+        done
+    
+        # If header dir is in Application Support or framework Headers, copy to brew prefix include
+        if [ -z "$FOUND" ]; then
+          echo "No standard FUSE header dir found. Listing /Library/Application Support and /Library/Frameworks for debugging:"
+          ls -la "/Library/Application Support" || true
+          ls -la "/Library/Frameworks" || true
+          echo "If headers are still missing the cask may not have installed headers on this runner."
+        else
+          echo "Copying headers (if needed) into $BREW_PREFIX/include so CMake can find them"
+          sudo mkdir -p "$BREW_PREFIX/include"
+          # If it's a framework Headers dir, copy individual header(s)
+          if [[ "$FOUND" == */Frameworks/* ]] ; then
+            sudo cp -R "$FOUND/"* "$BREW_PREFIX/include/" || true
+            # Also ensure a fuse_t/ directory exists so '#include <fuse_t/fuse_t.h>' works
+            sudo mkdir -p "$BREW_PREFIX/include/fuse_t"
+            if [ -f "/Library/Frameworks/fuse_t.framework/Headers/fuse_t.h" ]; then
+              sudo cp "/Library/Frameworks/fuse_t.framework/Headers/fuse_t.h" "$BREW_PREFIX/include/fuse_t/"
+            fi
+          else
+            # If it's an include/fuse style dir, copy its contents into brew include/fuse
+            sudo mkdir -p "$BREW_PREFIX/include/fuse"
+            sudo cp -R "$FOUND/"* "$BREW_PREFIX/include/fuse/" || true
+          fi
+          echo "Final /usr include tree (trimmed):"
+          ls -la "$BREW_PREFIX/include" | sed -n '1,200p'
+        fi
+
         
-      # ---------- CONFIGURE ----------
+    # ---------- CONFIGURE ----------
     - name: Configure CMake (Windows)
       if: matrix.os == 'windows-latest'
       shell: pwsh
@@ -60,13 +116,21 @@ jobs:
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
+        BREW_PREFIX="$(brew --prefix)"
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;/opt/homebrew/Library/Frameworks;/opt/homebrew" \
-          -DFUSE_T_FRAMEWORK="/opt/homebrew/Library/Frameworks/macFUSE.framework"
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX/Library/Frameworks;$BREW_PREFIX" \
+          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include;/Library/Application Support/fuse-t/include" \
+          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Application Support/fuse-t/lib" \
+          -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"
 
+
+          
+    - name: Verify FUSE headers
+      if: matrix.os == 'macos-latest'
+      run: ls -R /opt/homebrew/include/fuse_t
 
     # ---------- BUILD ----------
     - name: Build
