@@ -43,6 +43,19 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: |
         brew install --cask macfuse
+
+    - name: Install FUSE-T headers (macOS)
+      if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        git clone --depth 1 https://github.com/osxfuse/fuse-t.git
+        BREW_PREFIX=$(brew --prefix)
+        echo "Using Homebrew prefix: $BREW_PREFIX"
+        sudo mkdir -p "$BREW_PREFIX/include/fuse_t"
+        sudo cp -r fuse-t/include/* "$BREW_PREFIX/include/fuse_t/"
+        ls -R "$BREW_PREFIX/include/fuse_t"
+
+
         
       # ---------- CONFIGURE ----------
     - name: Configure CMake (Windows)
@@ -60,14 +73,16 @@ jobs:
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
+        BREW_PREFIX=$(brew --prefix)
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;/opt/homebrew/Library/Frameworks;/opt/homebrew" \
-          -DCMAKE_INCLUDE_PATH="/opt/homebrew/include" \
-          -DCMAKE_LIBRARY_PATH="/opt/homebrew/lib" \
-          -DFUSE_T_FRAMEWORK="/opt/homebrew/Library/Frameworks/macFUSE.framework"
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX/Library/Frameworks;$BREW_PREFIX" \
+          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include" \
+          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib" \
+          -DFUSE_T_FRAMEWORK="$BREW_PREFIX/Library/Frameworks/macFUSE.framework"
+
           
     - name: Verify FUSE headers
       if: matrix.os == 'macos-latest'
