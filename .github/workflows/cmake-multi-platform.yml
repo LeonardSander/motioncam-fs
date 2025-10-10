@@ -141,14 +141,29 @@ jobs:
       shell: bash
       run: |
         BREW_PREFIX="$(brew --prefix)"
+        FUSE_T_INCLUDE=$(find "$BREW_PREFIX" /Library /usr/local -type f -name fuse_t.h 2>/dev/null | xargs -I {} dirname {} | head -n 1 || true)
+        echo "📁 Using FUSE_T_INCLUDE=${FUSE_T_INCLUDE}"
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX" \
-          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include" \
+          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include;$FUSE_T_INCLUDE" \
           -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Frameworks" \
+          -DFUSE_T_INCLUDE_DIR="$FUSE_T_INCLUDE" \
           -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"
+
+
+
+    - name: Debug FUSE-T header location
+      if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        echo "🔍 Searching for fuse_t.h..."
+        find /opt/homebrew /usr/local /Library /Applications /private/tmp -type f -name fuse_t.h 2>/dev/null | tee /tmp/fuse_t_locations.txt
+        echo "✅ All detected FUSE-T header paths:"
+        cat /tmp/fuse_t_locations.txt || true
 
     # ---------- BUILD ----------
     - name: Build
