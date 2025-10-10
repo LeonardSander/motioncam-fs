@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1520</width>
-    <height>720</height>
+    <height>660</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -166,7 +166,7 @@
          <item>
           <widget class="QLabel" name="cacheSectionTitle">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;DNG Folder:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;DNG Output Folder:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
           </widget>
          </item>
@@ -196,7 +196,7 @@
          <item>
           <widget class="QLabel" name="cacheFolderDescription">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG files will appear after they are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG file sequences will appear after MCRAWs are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -218,7 +218,7 @@
            <item>
             <widget class="QCheckBox" name="cfrConversionCheckBox">
              <property name="text">
-              <string>Constant Framerate Conversion</string>
+              <string>Frame Rate Conversion</string>
              </property>
              <property name="checked">
               <bool>true</bool>
@@ -278,6 +278,11 @@
           <number>8</number>
          </property>
          <item>
+         <layout class="QHBoxLayout" name="camModelLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
           <widget class="QCheckBox" name="normalizeExposureCheckBox">
            <property name="text">
             <string>Normalize Exposure</string>
@@ -287,6 +292,51 @@
            </property>
           </widget>
          </item>
+         <item>
+            <widget class="QComboBox" name="exposureOffsetCombobox">
+             <property name="minimumSize">
+              <size>
+               <width>60</width>
+               <height>25</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+             <item>
+              <property name="text">
+               <string>0ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>1ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>2ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>3ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>-1ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>-2ev</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+           </layout>
+           </item>         
          <item>
           <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">
@@ -352,7 +402,7 @@
          <item>
           <widget class="QLabel" name="camModelLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Unlock more options in Camera Raw.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Unlock additional options in Camera Raw.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -374,7 +424,7 @@
            <item>
           <widget class="QLabel" name="levelsSectionTitle">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;Override White / Black Levels:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;White / Black Levels:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
           </widget>
          </item>           
@@ -474,7 +524,7 @@
       </layout>
      </item>
      <item>
-      <spacer name="verticalSpacer">
+      <spacer name="verticalSpacer2">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>
@@ -540,7 +590,7 @@
          <item>
           <widget class="QCheckBox" name="vignetteCorrectionCheckBox">
            <property name="text">
-            <string>Bake in vignette correction</string>
+            <string>Bake in Vignette Correction</string>
            </property>
            <property name="checked">
             <bool>true</bool>
@@ -550,7 +600,7 @@
          <item>
           <widget class="QLabel" name="vignetteCorrectionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply vignette correction to RAW pixels before saving them to DNG.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply Gainmaps to raw pixel values before writing to DNG.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -577,7 +627,7 @@
          <item>
           <widget class="QLabel" name="vignetteOnlyColorLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Only treat color imperfections to retain natural vignette and DR in corners.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Only treat color imperfections to retain natural vignette and dynamic range in image corners.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -606,7 +656,7 @@
            <item>
             <widget class="QCheckBox" name="debugVignetteCheckBox">
              <property name="text">
-              <string>Gainmap only</string>
+              <string>Gainmaps only</string>
              </property>
             </widget>
            </item>
@@ -615,7 +665,7 @@
          <item>
           <widget class="QLabel" name="scaleRawLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Debug views: examine clipping in pink highlights or draw flat-field image based on vignette correction.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Debug views: examine clipping in pink highlights or draw flat-field images based on vignette correction.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -637,7 +687,7 @@
            <item>
             <widget class="QCheckBox" name="logTransformCheckBox">
              <property name="text">
-              <string>Apply Log Transfer curve</string>
+              <string>Use Log Transfer Curve</string>
              </property>
             </widget>
            </item>
@@ -701,7 +751,7 @@
            <item>
             <widget class="QCheckBox" name="draftModeCheckBox">
              <property name="text">
-              <string>Draft Mode</string>
+              <string>Proxy / Binning Mode</string>
              </property>
             </widget>
            </item>
@@ -888,7 +938,7 @@
          <item>
           <widget class="QLabel" name="remosaicLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Reduce output bitdepth by applying logarithmic transfer curve with Dithering. 'Keep Input' is only useful for vignette baking.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Different options to treat Quad Bayer CFA footage.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -898,7 +948,7 @@
         </layout>
        </item>       
        <item>
-        <spacer name="verticalSpacer">
+        <spacer name="verticalSpacer3">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>
