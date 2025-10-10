@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "master" ]
     tags:
-      - "v*"
+      - "v*"            # e.g. v1.0.0
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
@@ -24,34 +24,20 @@ jobs:
       with:
         submodules: recursive
 
-    # ---------- CACHE: Qt, vcpkg, fuse-t ----------
-    - name: Cache Qt
-      id: qt-cache
-      uses: actions/cache@v4
-      with:
-        path: ${{ runner.tool_cache }}/Qt
-        key: ${{ runner.os }}-qt-6.7.2
-
-    - name: Cache vcpkg
-      id: vcpkg-cache
+    # ---------- CACHE ----------
+    - name: Cache dependencies
       uses: actions/cache@v4
       with:
         path: |
-          ${{ github.workspace }}/vcpkg_installed
-          ${{ env.VCPKG_ROOT }}
-        key: ${{ runner.os }}-vcpkg-spdlog
-
-    - name: Cache FUSE-T headers (macOS)
-      if: matrix.os == 'macos-latest'
-      id: fuse-cache
-      uses: actions/cache@v4
-      with:
-        path: /opt/homebrew/include/fuse_t
-        key: macos-fuse-t-1.0.49
+          ~/.cache/vcpkg
+          ~/Library/Caches/Homebrew
+          build/
+        key: ${{ runner.os }}-deps-${{ hashFiles('CMakeLists.txt', '.github/workflows/**') }}
+        restore-keys: |
+          ${{ runner.os }}-deps-
 
     # ---------- QT ----------
     - name: Install Qt
-      if: steps.qt-cache.outputs.cache-hit != 'true'
       uses: jurplel/install-qt-action@v3
       with:
         version: "6.7.2"
@@ -59,70 +45,54 @@ jobs:
 
     # ---------- VCPKG ----------
     - name: Install spdlog via vcpkg
-      if: steps.vcpkg-cache.outputs.cache-hit != 'true'
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgArguments: spdlog
 
     # ---------- MACOS DEPENDENCIES ----------
-    - name: Install macOS FUSE dependencies
+    - name: Install macFUSE (macOS)
+      if: matrix.os == 'macos-latest'
+      run: brew install --cask macfuse
+
+    - name: Install FUSE-T headers (macOS)
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
-        set -euxo pipefail
-        brew install --cask macfuse || echo "macFUSE already installed"
+        set -eux
+        FUSE_T_VERSION=1.0.49
+        PKG_URL="https://github.com/macos-fuse-t/fuse-t/releases/download/${FUSE_T_VERSION}/fuse-t-macos-installer-${FUSE_T_VERSION}.pkg"
 
-    - name: Prepare FUSE-T headers (macOS, cached)
-      if: matrix.os == 'macos-latest'
-      id: fuse_t
-      uses: actions/cache@v4
-      with:
-        path: /opt/homebrew/include/fuse_t
-        key: macos-fuse-t-1.0.49
+        echo "📦 Downloading FUSE-T from $PKG_URL"
+        curl -L -o /tmp/fuse-t.pkg "$PKG_URL"
 
-    - name: Install FUSE-T headers
-      if: matrix.os == 'macos-latest' && steps.fuse_t.outputs.cache-hit != 'true'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        FUSE_T_VERSION="1.0.49"
-        FUSE_T_PKG="fuse-t-macos-installer-${FUSE_T_VERSION}.pkg"
-        FUSE_T_URL="https://github.com/macos-fuse-t/fuse-t/releases/download/${FUSE_T_VERSION}/${FUSE_T_PKG}"
+        rm -rf /tmp/fuse-t-expanded /tmp/fuse-t-payload
+        mkdir -p /tmp/fuse-t-expanded /tmp/fuse-t-payload
 
-        TMPDIR=$(mktemp -d)
-        echo "📦 Downloading FUSE-T ${FUSE_T_VERSION}..."
-        curl -L -o "${TMPDIR}/${FUSE_T_PKG}" "${FUSE_T_URL}"
-
-        echo "📦 Extracting .pkg..."
-        pkgutil --expand "${TMPDIR}/${FUSE_T_PKG}" "${TMPDIR}/expanded"
-
-        mkdir -p "${TMPDIR}/payload"
-        cd "${TMPDIR}/payload"
-
-        # Extract all payloads
-        for PKG in "${TMPDIR}"/expanded/*.pkg; do
-          if [ -f "${PKG}/Payload" ]; then
-            cat "${PKG}/Payload" | gunzip -dc | cpio -i --quiet || true
-          fi
+        pkgutil --expand /tmp/fuse-t.pkg /tmp/fuse-t-expanded || true
+        find /tmp/fuse-t-expanded -name Payload | while read -r payload; do
+          cat "$payload" | gunzip -dc | (cd /tmp/fuse-t-payload && cpio -i) || true
         done
 
-        # Locate fuse_t.h
-        HEADER_DIR=$(find "${TMPDIR}/payload" -type f -name "fuse_t.h" -exec dirname {} \; | head -n 1 || true)
-        if [ -z "$HEADER_DIR" ]; then
-          echo "❌ Could not find fuse_t.h"
-          find "${TMPDIR}/payload" -maxdepth 4 -type f | head -n 50
+        if [ -d "/tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework/Headers" ]; then
+          echo "✅ Found fuse_t.framework headers"
+          sudo mkdir -p /opt/homebrew/include/fuse_t
+          sudo cp -R /tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework/Headers/* /opt/homebrew/include/fuse_t/
+        else
+          echo "❌ Could not find fuse_t headers in payload"
+          find /tmp/fuse-t-payload | head -n 100
           exit 1
         fi
 
-        echo "✅ Found fuse_t.h at: ${HEADER_DIR}"
-        BREW_PREFIX=$(brew --prefix)
-        sudo mkdir -p "${BREW_PREFIX}/include/fuse_t"
-        sudo cp -R "${HEADER_DIR}/"*.h "${BREW_PREFIX}/include/fuse_t/"
+        echo "✅ Final fuse_t headers:"
+        ls -la /opt/homebrew/include/fuse_t
 
-        echo "📂 Installed headers:"
-        ls -la "${BREW_PREFIX}/include/fuse_t"
-
-        rm -rf "${TMPDIR}"
+    - name: Debug FUSE-T header location
+      if: matrix.os == 'macos-latest'
+      continue-on-error: true
+      shell: bash
+      run: |
+        echo "🔍 Searching for fuse_t.h..."
+        find /opt/homebrew /usr/local /Library /Applications /private/tmp -type f -name fuse_t.h || true
 
     # ---------- CONFIGURE ----------
     - name: Configure CMake (Windows)
@@ -141,29 +111,14 @@ jobs:
       shell: bash
       run: |
         BREW_PREFIX="$(brew --prefix)"
-        FUSE_T_INCLUDE=$(find "$BREW_PREFIX" /Library /usr/local -type f -name fuse_t.h 2>/dev/null | xargs -I {} dirname {} | head -n 1 || true)
-        echo "📁 Using FUSE_T_INCLUDE=${FUSE_T_INCLUDE}"
         cmake -S . -B build \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX" \
-          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include;$FUSE_T_INCLUDE" \
+          -DCMAKE_INCLUDE_PATH="$BREW_PREFIX/include;/opt/homebrew/include/fuse_t;/Library/Frameworks/fuse_t.framework/Headers" \
           -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Frameworks" \
-          -DFUSE_T_INCLUDE_DIR="$FUSE_T_INCLUDE" \
           -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"
-
-
-
-    - name: Debug FUSE-T header location
-      if: matrix.os == 'macos-latest'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        echo "🔍 Searching for fuse_t.h..."
-        find /opt/homebrew /usr/local /Library /Applications /private/tmp -type f -name fuse_t.h 2>/dev/null | tee /tmp/fuse_t_locations.txt
-        echo "✅ All detected FUSE-T header paths:"
-        cat /tmp/fuse_t_locations.txt || true
 
     # ---------- BUILD ----------
     - name: Build
