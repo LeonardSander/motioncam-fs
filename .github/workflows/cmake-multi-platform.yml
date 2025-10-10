@@ -106,6 +106,12 @@ jobs:
         echo "✅ Final installed headers:"
         ls -la /opt/homebrew/include/fuse_t
 
+        echo "📦 Installing fuse_t.framework to /Library/Frameworks..."
+        sudo mkdir -p /Library/Frameworks
+        sudo cp -R "/tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework" "/Library/Frameworks/"
+        sudo chmod -R 755 "/Library/Frameworks/fuse_t.framework"
+        echo "✅ Installed framework at /Library/Frameworks/fuse_t.framework"
+
 
     - name: Debug FUSE-T header location
       if: matrix.os == 'macos-latest'
