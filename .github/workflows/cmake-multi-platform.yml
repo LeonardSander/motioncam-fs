@@ -75,9 +75,6 @@ jobs:
           xar -xf /tmp/fuse-t.pkg -C /tmp/fuse-t-expanded || true
         fi
 
-        echo "📦 Expanded files:"
-        ls -la /tmp/fuse-t-expanded || true
-
         echo "🔍 Searching recursively for Payload files..."
         find /tmp/fuse-t-expanded -type f -name Payload | while read -r payload; do
           echo "📂 Extracting payload: $payload"
@@ -88,20 +85,27 @@ jobs:
         echo "📁 Listing extracted payload contents:"
         find /tmp/fuse-t-payload | head -n 200 || true
 
-        HEADER_PATH=$(find /tmp/fuse-t-payload -type d -path "*/fuse_t.framework/Headers" | head -n 1 || true)
-        if [ -n "$HEADER_PATH" ]; then
-          echo "✅ Found headers at $HEADER_PATH"
-          sudo mkdir -p /opt/homebrew/include/fuse_t
-          sudo cp -R "$HEADER_PATH"/* /opt/homebrew/include/fuse_t/
-        else
+        # Look for Headers folders
+        HEADER_CANDIDATES=$(find /tmp/fuse-t-payload -type d \( -path "*/fuse_t.framework/Versions/A/Headers" -o -path "*/fuse_t.framework/Headers" \))
+        if [ -z "$HEADER_CANDIDATES" ]; then
           echo "❌ Could not locate fuse_t.framework headers after extraction"
           echo "Dumping directory tree for debugging:"
           find /tmp/fuse-t-expanded /tmp/fuse-t-payload | head -n 300
           exit 1
         fi
 
+        echo "✅ Found fuse_t headers:"
+        echo "$HEADER_CANDIDATES"
+
+        sudo mkdir -p /opt/homebrew/include/fuse_t
+        for h in $HEADER_CANDIDATES; do
+          echo "📦 Copying headers from $h"
+          sudo cp -R "$h"/* /opt/homebrew/include/fuse_t/ || true
+        done
+
         echo "✅ Final installed headers:"
         ls -la /opt/homebrew/include/fuse_t
+
 
     - name: Debug FUSE-T header location
       if: matrix.os == 'macos-latest'
