@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "master" ]
     tags:
-      - "v*"            # e.g. v1.0.0
+      - "v*"
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
@@ -58,32 +58,42 @@ jobs:
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
-        set -eux
+        set -euxo pipefail
+
         FUSE_T_VERSION=1.0.49
         PKG_URL="https://github.com/macos-fuse-t/fuse-t/releases/download/${FUSE_T_VERSION}/fuse-t-macos-installer-${FUSE_T_VERSION}.pkg"
-
         echo "📦 Downloading FUSE-T from $PKG_URL"
         curl -L -o /tmp/fuse-t.pkg "$PKG_URL"
 
+        # Ensure clean extraction dirs
         rm -rf /tmp/fuse-t-expanded /tmp/fuse-t-payload
         mkdir -p /tmp/fuse-t-expanded /tmp/fuse-t-payload
 
+        # Expand pkg and all nested pkgs
         pkgutil --expand /tmp/fuse-t.pkg /tmp/fuse-t-expanded || true
+        echo "📦 Extracted fuse-t.pkg contents:"
+        ls -la /tmp/fuse-t-expanded || true
+
+        # Extract payloads recursively
         find /tmp/fuse-t-expanded -name Payload | while read -r payload; do
+          echo "📂 Extracting payload: $payload"
           cat "$payload" | gunzip -dc | (cd /tmp/fuse-t-payload && cpio -i) || true
         done
 
+        echo "📁 Listing extracted payload:"
+        find /tmp/fuse-t-payload | head -n 100 || true
+
+        # Locate the framework headers
         if [ -d "/tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework/Headers" ]; then
           echo "✅ Found fuse_t.framework headers"
           sudo mkdir -p /opt/homebrew/include/fuse_t
           sudo cp -R /tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework/Headers/* /opt/homebrew/include/fuse_t/
         else
-          echo "❌ Could not find fuse_t headers in payload"
-          find /tmp/fuse-t-payload | head -n 100
+          echo "❌ Could not find fuse_t.framework headers inside payload"
           exit 1
         fi
 
-        echo "✅ Final fuse_t headers:"
+        echo "✅ Final fuse_t include dir:"
         ls -la /opt/homebrew/include/fuse_t
 
     - name: Debug FUSE-T header location
