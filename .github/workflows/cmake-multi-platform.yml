@@ -152,6 +152,46 @@ jobs:
     - name: Build
       run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
+
+
+    - name: Bundle fuse_t.framework into app (macOS)
+      if: matrix.os == 'macos-latest'
+      shell: bash
+      run: |
+        set -eux
+        APP_PATH=$(find build -name "*.app" | head -n 1)
+        if [ -z "$APP_PATH" ]; then
+          echo "❌ No .app found!"
+          exit 1
+        fi
+    
+        echo "📦 Bundling fuse_t.framework into $APP_PATH"
+        mkdir -p "$APP_PATH/Contents/Frameworks"
+    
+        # Locate the framework (from extracted FUSE-T)
+        FRAMEWORK_SRC="/tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework"
+        if [ ! -d "$FRAMEWORK_SRC" ]; then
+          echo "❌ fuse_t.framework not found at $FRAMEWORK_SRC"
+          exit 1
+        fi
+    
+        # Copy into the app
+        cp -R "$FRAMEWORK_SRC" "$APP_PATH/Contents/Frameworks/"
+    
+        # Fix rpath so the app looks inside its own bundle
+        install_name_tool -change \
+          "/Library/Frameworks/fuse_t.framework/Versions/A/fuse_t" \
+          "@rpath/fuse_t.framework/Versions/A/fuse_t" \
+          "$APP_PATH/Contents/MacOS/MotionCamFuse"
+    
+        # Ensure the app searches its own Frameworks dir
+        install_name_tool -add_rpath "@executable_path/../Frameworks" \
+          "$APP_PATH/Contents/MacOS/MotionCamFuse"
+    
+        echo "✅ fuse_t.framework successfully bundled."
+        ls -R "$APP_PATH/Contents/Frameworks"
+
+
     # ---------- PACKAGE ----------
     - name: Package binaries
       shell: bash
