@@ -65,9 +65,17 @@ struct Entry {
 
 enum FileRenderOptions : unsigned int {
     RENDER_OPT_NONE                         = 0,
-    RENDER_OPT_DRAFT                        = 1 << 0,
+    RENDER_OPT_DRAFT                        = 1 << 0,    
     RENDER_OPT_APPLY_VIGNETTE_CORRECTION    = 1 << 1,
-    RENDER_OPT_NORMALIZE_SHADING_MAP        = 1 << 2
+    RENDER_OPT_NORMALIZE_SHADING_MAP        = 1 << 2,
+    RENDER_OPT_DEBUG_SHADING_MAP            = 1 << 3,
+    RENDER_OPT_VIGNETTE_ONLY_COLOR          = 1 << 4,
+    RENDER_OPT_NORMALIZE_EXPOSURE           = 1 << 5,
+    RENDER_OPT_FRAMERATE_CONVERSION         = 1 << 6,
+    RENDER_OPT_CROPPING                     = 1 << 7,
+    RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8,
+    RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
+    RENDER_OPT_INTERPRET_AS_QUAD_BAYER      = 1 << 10,
 };
 
 // Overload bitwise OR operator
@@ -107,11 +115,35 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
         flags.push_back("VIGNETTE_CORRECTION");
+    }    
+    if (options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
+        flags.push_back("VIGNETTE_ONLY_COLOR");
     }
     if (options & RENDER_OPT_NORMALIZE_SHADING_MAP) {
         flags.push_back("NORMALIZE_SHADING_MAP");
     }
-
+    if (options & RENDER_OPT_DEBUG_SHADING_MAP) {
+        flags.push_back("DEBUG_SHADING_MAP");
+    }
+    if (options & RENDER_OPT_NORMALIZE_EXPOSURE) {
+        flags.push_back("NORMALIZE_EXPOSURE");
+    }
+    if (options & RENDER_OPT_FRAMERATE_CONVERSION) {
+        flags.push_back("FRAMERATE_CONVERSION");
+    }
+    if (options & RENDER_OPT_CROPPING) {
+        flags.push_back("CROPPING");
+    }
+    if (options & RENDER_OPT_CAMMODEL_OVERRIDE) {
+        flags.push_back("CAMMODEL_OVERRIDE");
+    }
+    if (options & RENDER_OPT_LOG_TRANSFORM) {
+        flags.push_back("LOG_TRANSFORM");
+    }
+    if (options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER) {
+        flags.push_back("INTERPRET_AS_QUAD_BAYER");
+    }
+    
     std::string result;
     for (size_t i = 0; i < flags.size(); ++i) {
         if (i > 0) result += " | ";

@@ -66,6 +66,14 @@ private slots:
     void onRenderSettingsChanged(const Qt::CheckState &state);
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
+    void onCFRTargetChanged(std::string input);
+    void onCamModelOverrideChanged(std::string input);
+    void onLevelsChanged(std::string input);
+    void onCropTargetChanged(std::string input);
+    void onLogTransformChanged(std::string input);
+    void onExposureCompensationChanged(std::string input);
+    void onQuadBayerChanged(std::string input);
+    void onSetDefaultSettings(bool checked);
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
@@ -75,6 +83,7 @@ private:
     void saveSettings();
     void restoreSettings();
     void updateUi();
+    void updateFpsLabels();
 
 private:
     Ui::MainWindow *ui;
@@ -82,6 +91,13 @@ private:
     QList<motioncam::MountedFile> mMountedFiles;
     QString mCacheRootFolder;
     int mDraftQuality;
+    std::string mCFRTarget;
+    std::string mCropTarget;    
+    std::string mCameraModel;
+    std::string mLevels;
+    std::string mLogTransform;
+    std::string mExposureCompensation;
+    std::string mQuadBayerOption;
 };
 
 #endif // MAINWINDOW_H

@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
-    <height>600</height>
+    <width>1520</width>
+    <height>660</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -157,6 +157,586 @@
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:18pt; font-weight:700;&quot;&gt;Settings&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
         </widget>
+       </item> 
+       <item>
+        <layout class="QVBoxLayout" name="cacheSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="cacheSectionTitle">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;DNG Output Folder:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="cacheFolderLabel">
+           <property name="text">
+            <string>-</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="changeCacheBtn">
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>30</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>Set Folder</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="cacheFolderDescription">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG file sequences will appear after MCRAWs are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="cfrConversionSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <layout class="QHBoxLayout" name="cfrConversionLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="cfrConversionCheckBox">
+             <property name="text">
+              <string>Frame Rate Conversion</string>
+             </property>
+             <property name="checked">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="cfrTarget">
+             <property name="minimumSize">
+              <size>
+               <width>100</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+              <item>
+                <property name="text">
+                <string>Prefer Drop Frame</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>Prefer Integer</string>
+                </property>
+              </item>           
+              <item>
+                <property name="text">
+                <string>Median (Slowmotion)</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>Average (Testing)</string>
+                </property>
+              </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="cfrConversionLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Dynamically duplicate / drop frames to retain sync at a constant target framerate. (Set before opening in Davinci)&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>      
+       <item>
+        <layout class="QVBoxLayout" name="normalizeExposureSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+         <layout class="QHBoxLayout" name="normalizeExposureLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+          <widget class="QCheckBox" name="normalizeExposureCheckBox">
+           <property name="text">
+            <string>Normalize Exposure</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+            <widget class="QComboBox" name="exposureCompensationCombobox">
+             <property name="minimumSize">
+              <size>
+               <width>60</width>
+               <height>25</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+             <item>
+              <property name="text">
+               <string>0ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>1ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>2ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>3ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>-1ev</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>-2ev</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+           </layout>
+           </item>         
+         <item>
+          <widget class="QLabel" name="normalizeExposureLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings for consistent brightness.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>       
+       <item>
+        <layout class="QVBoxLayout" name="camModelSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <layout class="QHBoxLayout" name="camModelLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="camModelOverrideCheckBox">
+             <property name="text">
+              <string>Override Unique Camera Model</string>
+             </property>
+             <property name="checked">
+              <bool>false</bool>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="camModelOverrideComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>100</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+              <item>
+                <property name="text">
+                <string>Panasonic</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>Blackmagic</string>
+                </property>
+              </item>              
+              <item>
+                <property name="text">
+                <string>Fujifilm</string>
+                </property>
+              </item>     
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="camModelLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Unlock additional options in Camera Raw.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="levelsSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <layout class="QHBoxLayout" name="levelsLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+          <widget class="QLabel" name="levelsSectionTitle">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;White / Black Levels:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+          </widget>
+         </item>           
+           <item>
+            <widget class="QComboBox" name="levelsComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>120</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+              <item>
+            <property name="text">
+             <string>Dynamic</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>Static</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>1023/64</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4095/256</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>16383/1024</string>
+            </property>
+           </item>           
+           <item>
+            <property name="text">
+             <string>65535/4096</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4095/64</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>16383/64</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>16383/0</string>
+            </property>
+           </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+        <layout class="QVBoxLayout" name="defaultSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>         
+         <item>
+          <widget class="QPushButton" name="defaultBtn">
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>30</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>Default Settings</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+      <spacer name="verticalSpacer">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+        </layout>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <spacer name="verticalSpacer2">
+         <property name="orientation">
+          <enum>Qt::Orientation::Vertical</enum>
+         </property>
+         <property name="sizeHint" stdset="0">
+          <size>
+           <width>20</width>
+           <height>40</height>
+          </size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </widget>
+    </item>
+    <item>
+     <widget class="QFrame" name="globalPreprocessingSettings">
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+        <horstretch>1</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
+      <property name="minimumSize">
+       <size>
+        <width>280</width>
+        <height>0</height>
+       </size>
+      </property>
+      <property name="frameShape">
+       <enum>QFrame::Shape::StyledPanel</enum>
+      </property>
+      <property name="frameShadow">
+       <enum>QFrame::Shadow::Raised</enum>
+      </property>
+      <layout class="QVBoxLayout" name="preprocessingLayout">
+       <property name="spacing">
+        <number>16</number>
+       </property>
+       <property name="leftMargin">
+        <number>16</number>
+       </property>
+       <property name="topMargin">
+        <number>16</number>
+       </property>
+       <property name="rightMargin">
+        <number>16</number>
+       </property>
+       <property name="bottomMargin">
+        <number>16</number>
+       </property>
+       <item>
+        <widget class="QLabel" name="preprocessingTitle">
+         <property name="text">
+          <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:18pt; font-weight:700;&quot;&gt;Preprocessing&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+         </property>
+        </widget>
+       </item>       
+       <item>
+        <layout class="QVBoxLayout" name="vignetteSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QCheckBox" name="vignetteCorrectionCheckBox">
+           <property name="text">
+            <string>Bake in Vignette Correction</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="vignetteCorrectionLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply Gainmaps to raw pixel values before writing to DNG.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="vignetteOnlyColorSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QCheckBox" name="vignetteOnlyColorCheckBox">
+           <property name="text">
+            <string>Reduce to Color Correction</string>
+           </property>
+           <property name="checked">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="vignetteOnlyColorLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Only treat color imperfections to retain natural vignette and dynamic range in image corners.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="scaleSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <layout class="QHBoxLayout" name="scaleLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="scaleRawCheckBox">
+             <property name="text">
+              <string>Scale data</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QCheckBox" name="debugVignetteCheckBox">
+             <property name="text">
+              <string>Gainmaps only</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="scaleRawLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Debug views: examine clipping in pink highlights or draw flat-field images based on vignette correction.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item> 
+       <item>
+        <layout class="QVBoxLayout" name="logTransformSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>         
+         <item>
+          <layout class="QHBoxLayout" name="logTransformLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="logTransformCheckBox">
+             <property name="text">
+              <string>Use Log Transfer Curve</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="logTransformComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>80</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+             <item>
+              <property name="text">
+               <string>Keep Input</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Reduce by 2bit</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Reduce by 4bit</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Reduce by 6bit</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="logTransformLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Reduce output bitdepth by applying logarithmic transfer curve with Dithering. 'Keep Input' is only useful for vignette baking.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
        </item>
        <item>
         <layout class="QVBoxLayout" name="draftSection">
@@ -171,7 +751,7 @@
            <item>
             <widget class="QCheckBox" name="draftModeCheckBox">
              <property name="text">
-              <string>Draft Mode</string>
+              <string>Proxy / Binning Mode</string>
              </property>
             </widget>
            </item>
@@ -215,21 +795,76 @@
         </layout>
        </item>
        <item>
-        <layout class="QVBoxLayout" name="vignetteSection">
+        <layout class="QVBoxLayout" name="cropSection">
          <property name="spacing">
           <number>8</number>
          </property>
          <item>
-          <widget class="QCheckBox" name="vignetteCorrectionCheckBox">
-           <property name="text">
-            <string>Bake in vignette correction</string>
+          <layout class="QHBoxLayout" name="cropLayout">
+           <property name="spacing">
+            <number>8</number>
            </property>
-          </widget>
+           <item>
+            <widget class="QCheckBox" name="cropEnableCheckBox">
+             <property name="text">
+              <string>Enable Crop</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="cropTargetComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>120</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+              <item>
+            <property name="text">
+             <string>4096x2304</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4096x2560</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4080x2296</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4080x2288</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4000x2256</string>
+            </property>
+           </item>           
+           <item>
+            <property name="text">
+             <string>4000x3000</string>
+            </property>
+          </item>           
+           <item>
+            <property name="text">
+             <string>4624x2608</string>
+            </property>
+           </item>
+            </widget>
+           </item>
+          </layout>
          </item>
          <item>
-          <widget class="QLabel" name="vignetteCorrectionLabel">
+          <widget class="QLabel" name="cropLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply vignette correction to RAW pixels before saving them to DNG.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop to top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -239,21 +874,71 @@
         </layout>
        </item>
        <item>
-        <layout class="QVBoxLayout" name="scaleSection">
+        <layout class="QVBoxLayout" name="quadBayerSection">
          <property name="spacing">
           <number>8</number>
-         </property>
+         </property>         
          <item>
-          <widget class="QCheckBox" name="scaleRawCheckBox">
-           <property name="text">
-            <string>Scale data</string>
+          <layout class="QHBoxLayout" name="quadBayerLayout">
+           <property name="spacing">
+            <number>8</number>
            </property>
-          </widget>
+           <item>
+            <widget class="QCheckBox" name="quadBayerCheckBox">
+             <property name="text">
+              <string>Interpret as Quad Bayer CFA</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="quadBayerComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>80</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="editable">
+                <bool>true</bool>
+              </property>
+             <!-- <item>
+              <property name="text">
+               <string>Remosaic</string>
+              </property>
+             </item> -->
+             <!-- <item>
+              <property name="text">
+               <string>Demosaic only</string>
+              </property>
+             </item> -->
+             <item>
+              <property name="text">
+               <string>Wrong CFA Metadata</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Correct QBCFA Metadata</string>
+              </property>
+             </item>             
+             <!-- <item>
+              <property name="text">
+               <string>3by3 CFA</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4by4 CFA</string>
+              </property>
+             </item> -->
+            </widget>
+           </item>
+          </layout>
          </item>
          <item>
-          <widget class="QLabel" name="scaleRawLabel">
+          <widget class="QLabel" name="remosaicLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Scale RAW pixels to prevent clipping highlights. This will cause highlights to look pink if the data is clipped.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Different options to treat Quad Bayer CFA images. More options to come.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -261,56 +946,9 @@
           </widget>
          </item>
         </layout>
-       </item>
+       </item>       
        <item>
-        <layout class="QVBoxLayout" name="cacheSection">
-         <property name="spacing">
-          <number>8</number>
-         </property>
-         <item>
-          <widget class="QLabel" name="cacheSectionTitle">
-           <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;DNG Folder:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="cacheFolderLabel">
-           <property name="text">
-            <string>-</string>
-           </property>
-           <property name="wordWrap">
-            <bool>true</bool>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="changeCacheBtn">
-           <property name="minimumSize">
-            <size>
-             <width>0</width>
-             <height>30</height>
-            </size>
-           </property>
-           <property name="text">
-            <string>Set Folder</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="cacheFolderDescription">
-           <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG files will appear after they are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-           </property>
-           <property name="wordWrap">
-            <bool>true</bool>
-           </property>
-          </widget>
-         </item>
-        </layout>
-       </item>
-       <item>
-        <spacer name="verticalSpacer">
+        <spacer name="verticalSpacer3">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
          </property>

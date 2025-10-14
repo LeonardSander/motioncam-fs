@@ -162,7 +162,15 @@ std::shared_ptr<std::vector<char>> generateDng(
     float recordingFps,
     int frameNumber,
     FileRenderOptions options,
-    int scale=1);
+    int scale,
+    double baselineExpValue,
+    std::string cropTarget,
+    std::string camModel,
+    std::string levels,
+    std::string logTransform,
+    std::string exposureCompensation,
+    std::string quadBayerOption
+);
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);
 

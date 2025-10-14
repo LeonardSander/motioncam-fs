@@ -83,7 +83,7 @@ public:
     ~Session();
 
 public:
-    void updateOptions(FileRenderOptions options, int draftScale);
+    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption);
     FileInfo getFileInfo() const;
 
 protected:
@@ -159,12 +159,10 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale) {
+void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption) {
     mOptions = options;
     mDraftScale = draftScale;
-
-    // Tell file system about new options
-    mFs->updateOptions(options, draftScale);
+    mFs->updateOptions(options, draftScale, cfrTarget, cropTarget, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -538,7 +536,7 @@ void setupLogging() {
     }
 }
 
-} // namespace
+} // namespace motioncam
 
 FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     mNextMountId(0),
@@ -549,7 +547,7 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     setupLogging();
 }
 
-MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, const std::string& srcFile, const std::string& dstPath) {
+MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -559,21 +557,19 @@ MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale,
         auto mountId = mNextMountId++;
 
         try {
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, srcFile);
-
+            // Extract base name from destination path
+            fs::path dstPathObj(dstPath);
+            std::string baseName = dstPathObj.filename().string();
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
-
             throw std::runtime_error(e.what());
         }
-
         return mountId;
     }
-
     spdlog::error("Failed to mount {} to {}, invalid file format", srcFile, dstPath);
-
     throw std::runtime_error("Invalid format");
 }
 
@@ -581,13 +577,12 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale) {
+void FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
-
     dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
-        options, draftScale);
+        options, draftScale, cfrTarget, cropTarget, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
@@ -598,4 +593,4 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
     return std::nullopt;
 }
 
-} // namespace motioncam
+}

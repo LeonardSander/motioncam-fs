@@ -1,2 +1,8 @@
 build/
+.vs/
+.vscode/
+cache/
+logs/
+out/
 vcpkg_installed/
+mcraw_player_debug_log.txt

@@ -47,15 +47,21 @@ IconSize=16
         return p.stem().string();
     }
 
-    float calculateFrameRate(const std::vector<Timestamp>& frames) {
+    struct FrameRateInfo {
+        float medianFrameRate;
+        float averageFrameRate;
+    };
+
+    FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
         // Need at least 2 frames to calculate frame rate
         if (frames.size() < 2) {
-            return 0.0f;
+            return {0.0f, 0.0f};
         }
 
         // Use running average to prevent overflow
         double avgDuration = 0.0;
         int validFrames = 0;
+        std::vector<double> durations;  // Store all valid durations for median calculation
 
         for (size_t i = 1; i < frames.size(); ++i) {
             double duration = static_cast<double>(frames[i] - frames[i-1]);
@@ -64,15 +70,33 @@ IconSize=16
                 // Update running average
                 // new_avg = old_avg + (new_value - old_avg) / (count + 1)
                 avgDuration = avgDuration + (duration - avgDuration) / (validFrames + 1);
+                durations.push_back(duration);  // Store duration for median calculation
                 validFrames++;
             }
         }
 
-        if (validFrames == 0) {
-            return 0.0f;
+        // Calculate median duration
+        double medianDuration = 0.0;
+        if (!durations.empty()) {
+            std::sort(durations.begin(), durations.end());
+            size_t mid = durations.size() / 2;
+            if (durations.size() % 2 == 0) {
+                // Even number of elements - average of two middle values
+                medianDuration = (durations[mid - 1] + durations[mid]) / 2.0;
+            } else {
+                // Odd number of elements - middle value
+                medianDuration = durations[mid];
+            }
         }
 
-        return static_cast<float>(1000000000.0 / avgDuration);
+        if (validFrames == 0) {
+            return {0.0f, 0.0f};
+        }
+
+        return {
+            static_cast<float>(1000000000.0 / medianDuration),
+            static_cast<float>(1000000000.0 / avgDuration)
+        };
     }
 
     int64_t getFrameNumberFromTimestamp(Timestamp timestamp, Timestamp referenceTimestamp, float frameRate) {
@@ -185,22 +209,52 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         LRUCache& lruCache,
         FileRenderOptions options,
         int draftScale,
-        const std::string& file) :
+        const std::string& cfrTarget,
+        const std::string& cropTarget,
+        const std::string& file,
+        const std::string& baseName,
+        const std::string& cameraModel,
+        const std::string& levels,
+        const std::string& logTransform,
+        const std::string& exposureCompensation,
+        const std::string& quadBayerOption) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
         mSrcPath(file),
-        mBaseName(extractFilenameWithoutExtension(file)),
+        mBaseName(baseName),
         mTypicalDngSize(0),
         mFps(0),
+        mMedFps(0),
+        mAvgFps(0),
         mTotalFrames(0),
         mDroppedFrames(0),
+        mDuplicatedFrames(0),
         mWidth(0),
         mHeight(0),
         mDraftScale(draftScale),
+        mCFRTarget(cfrTarget),
+        mCropTarget(cropTarget),
+        mCameraModel(cameraModel),
+        mLevels(levels),
+        mLogTransform(logTransform),
+        mExposureCompensation(exposureCompensation),
+        mQuadBayerOption(quadBayerOption),
         mOptions(options) {
-
-    init(options);
+    
+    Decoder decoder(mSrcPath);
+    auto frames = decoder.getFrames();
+    std::sort(frames.begin(), frames.end());
+    if(frames.empty())
+        return;
+    mBaselineExpValue = std::numeric_limits<double>::max();
+    for(const auto& frame : frames) {
+        nlohmann::json metadata;
+        decoder.loadFrameMetadata(frame, metadata);
+        const auto& cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
+        mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
+    }
+    this->init(options);
 }
 
 VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
@@ -220,7 +274,95 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     // Clear everything
     mFiles.clear();
 
-    mFps = calculateFrameRate(frames);
+    auto frameRateInfo = calculateFrameRate(frames);
+    mMedFps = frameRateInfo.medianFrameRate;
+    mAvgFps = frameRateInfo.averageFrameRate;
+
+    bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
+    
+    if (applyCFRConversion && !mCFRTarget.empty()) {
+        if (mCFRTarget == "Prefer Integer") {
+            if (mMedFps <=  23.0 || mMedFps >= 1000.0) 
+                mFps = mMedFps;
+            else if (mMedFps < 24.5)
+                mFps = 24.0f;
+            else if (mMedFps < 26.0)
+                mFps = 25.0f;
+            else if (mMedFps < 33.0)
+                mFps = 30.0f;
+            else if (mMedFps < 49.0)
+                mFps = 48.0f;
+            else if (mMedFps < 52.0)
+                mFps = 50.0f;
+            else if (mMedFps > 56.0  && mMedFps < 63.0)
+                mFps = 60.0f;
+            else if (mMedFps > 112.0 && mMedFps < 125.0)
+                mFps = 120.0f;
+            else if (mMedFps > 224.0 && mMedFps < 250.0)
+                mFps = 240.0f;
+            else if (mMedFps > 448.0 && mMedFps < 500.0)
+                mFps = 480.0f;
+            else if (mMedFps > 896.0 && mMedFps < 1000.0)
+                mFps = 960.0f;
+            else if (mMedFps >= 63.0)
+                mFps = 120.0f;
+            else   
+                mFps = 60.0f;
+        }
+        else if (mCFRTarget == "Prefer Drop Frame") {
+            if (mMedFps <=  23.0 || mMedFps >= 1000.0) 
+                mFps = mMedFps;
+            else if (mMedFps < 24.5)
+                mFps = 23.976f;
+            else if (mMedFps < 26.0)
+                mFps = 25.0f;
+            else if (mMedFps < 33.0)
+                mFps = 29.97f;
+            else if (mMedFps < 49.0)
+                mFps = 47.952f;
+            else if (mMedFps < 52.0)
+                mFps = 50.0f;
+            else if (mMedFps > 56.0  && mMedFps < 63.0)
+                mFps = 59.94f;
+            else if (mMedFps > 112.0 && mMedFps < 125.0)
+                mFps = 119.88f;
+            else if (mMedFps > 224.0 && mMedFps < 250.0)
+                mFps = 240.0f;
+            else if (mMedFps > 448.0 && mMedFps < 500.0)
+                mFps = 480.0f;
+            else if (mMedFps > 896.0 && mMedFps < 1000.0)
+                mFps = 960.0f;
+            else if (mMedFps >= 63.0)
+                mFps = 119.88f;
+            else    
+                mFps = 59.94f;
+        }
+        else if (mCFRTarget == "Median (Slowmotion)") {
+            // Use median frame rate for non real time playback
+            mFps = mMedFps;
+        }
+        else if (mCFRTarget == "Average (Testing)") {
+            // legacy framerate target determination
+            mFps = mAvgFps;
+        }
+        else {
+            // Custom framerate - try to parse as float
+            try {
+                mFps = std::stof(mCFRTarget);
+            } catch (const std::exception& e) {
+                spdlog::warn("Invalid CFR target '{}', using median frame rate", mCFRTarget);
+                mFps = mMedFps;
+            }
+        }
+    } else {
+        // Custom framerate - try to parse as float
+        try {
+            mFps = std::stof(mCFRTarget);
+        } catch (const std::exception& e) {
+            spdlog::warn("Invalid CFR target '{}', using average for no cfr conversion", mCFRTarget);
+            mFps = mAvgFps;
+        }
+    }       
 
     // Calculate typical DNG size that we can use for all files
     std::vector<uint8_t> data;
@@ -230,12 +372,13 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
-    
+
     // Store frame information
     mWidth = cameraFrameMetadata.width;
     mHeight = cameraFrameMetadata.height;
     mTotalFrames = static_cast<int>(frames.size());
     mDroppedFrames = 0; // Will be calculated during frame processing
+    mDuplicatedFrames = 0;	
 
     auto dngData = utils::generateDng(
         data,
@@ -244,7 +387,15 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         mFps,
         0,
         options,
-        getScaleFromOptions(options, mDraftScale));
+        getScaleFromOptions(options, mDraftScale),
+        mBaselineExpValue,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );
 
     mTypicalDngSize = dngData->size();
 
@@ -295,23 +446,38 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
 
     // Add video frames
     for(auto& x : frames) {
-        int pts = getFrameNumberFromTimestamp(x, frames[0], mFps);
+        if(applyCFRConversion) {
+            int pts = getFrameNumberFromTimestamp(x, frames[0], mFps);
 
-        // Count dropped frames before this frame
-        mDroppedFrames += (std::max)(0, pts - lastPts - 1);
+            // Count dropped frames before this frame
+            mDuplicatedFrames += (std::max)(0, pts - lastPts - 1);
 
-        // Duplicate frames to account for dropped frames
-        while(lastPts < pts) {
+            if (lastPts > 0 && lastPts == pts)
+                mDroppedFrames += 1;
+
+            // Duplicate frames to account for dropped frames
+            while(lastPts < pts) {
+                Entry entry;
+
+                // Add main entry
+                entry.type = EntryType::FILE_ENTRY;
+                entry.size = mTypicalDngSize;
+                entry.name = constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
+                entry.userData = x;
+
+                mFiles.emplace_back(entry);
+                ++lastPts;
+            }
+        } else {
             Entry entry;
 
             // Add main entry
             entry.type = EntryType::FILE_ENTRY;
             entry.size = mTypicalDngSize;
-            entry.name = constructFrameFilename("frame-", lastPts, 6, "dng");
+            entry.name = constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
             entry.userData = x;
 
             mFiles.emplace_back(entry);
-
             ++lastPts;
         }
     }
@@ -395,8 +561,10 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
 
     const auto fps = mFps;
     const auto draftScale = mDraftScale;
+    const auto baselineExpValue = mBaselineExpValue;
+    const auto options = mOptions;
 
-    auto generateTask = [&options = mOptions, &cache = mCache, entry, sharableFuture, fps, draftScale, pos, len, dst, result]() {
+    auto generateTask = [this, &cache = mCache, entry, sharableFuture, fps, draftScale, baselineExpValue, options, pos, len, dst, result]() {
         size_t readBytes = 0;
         int errorCode = -1;
 
@@ -413,11 +581,18 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 fps,
                 frameIndex,
                 options,
-                getScaleFromOptions(options, draftScale));
+                getScaleFromOptions(options, draftScale),
+                baselineExpValue,
+                mCropTarget,
+                mCameraModel,
+                mLevels,
+                mLogTransform,
+                mExposureCompensation,
+                mQuadBayerOption);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
-                const size_t actualLen = (std::min)(len, dngData->size() - pos);
+                const size_t actualLen = std::min(len, dngData->size() - pos);
 
                 std::memcpy(dst, dngData->data() + pos, actualLen);
 
@@ -497,18 +672,29 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption) {
     mDraftScale = draftScale;
     mOptions = options;
+    mCFRTarget = cfrTarget;
+    mCropTarget = cropTarget;
+    mCameraModel = cameraModel;
+    mLevels = levels;
+    mLogTransform = logTransform;
+    mExposureCompensation = exposureCompensation;
+    mQuadBayerOption = quadBayerOption;
 
+    mCache.clear();
     init(options);
 }
 
 FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
     return FileInfo{
+        mMedFps,
+        mAvgFps,
         mFps,
         mTotalFrames,
         mDroppedFrames,
+        mDuplicatedFrames,
         mWidth,
         mHeight
     };
