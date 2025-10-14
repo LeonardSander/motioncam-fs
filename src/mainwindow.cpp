@@ -699,6 +699,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->quadBayerCheckBox->setCheckState(Qt::CheckState::Unchecked);
 
     mDraftQuality = 1;
     mCFRTarget = "Prefer Drop Frame";
