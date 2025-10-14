@@ -71,6 +71,9 @@ private slots:
     void onLevelsChanged(std::string input);
     void onCropTargetChanged(std::string input);
     void onLogTransformChanged(std::string input);
+    void onExposureCompensationChanged(std::string input);
+    void onQuadBayerChanged(std::string input);
+    void onSetDefaultSettings(bool checked);
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
@@ -93,6 +96,8 @@ private:
     std::string mCameraModel;
     std::string mLevels;
     std::string mLogTransform;
+    std::string mExposureCompensation;
+    std::string mQuadBayerOption;
 };
 
 #endif // MAINWINDOW_H

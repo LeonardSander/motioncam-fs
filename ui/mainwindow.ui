@@ -278,7 +278,7 @@
           <number>8</number>
          </property>
          <item>
-         <layout class="QHBoxLayout" name="camModelLayout">
+         <layout class="QHBoxLayout" name="normalizeExposureLayout">
            <property name="spacing">
             <number>8</number>
            </property>
@@ -293,7 +293,7 @@
           </widget>
          </item>
          <item>
-            <widget class="QComboBox" name="exposureOffsetCombobox">
+            <widget class="QComboBox" name="exposureCompensationCombobox">
              <property name="minimumSize">
               <size>
                <width>60</width>
@@ -901,27 +901,27 @@
              <property name="editable">
                 <bool>true</bool>
               </property>
-             <item>
+             <!-- <item>
               <property name="text">
                <string>Remosaic</string>
               </property>
-             </item>
-             <item>
+             </item> -->
+             <!-- <item>
               <property name="text">
                <string>Demosaic only</string>
               </property>
-             </item>
+             </item> -->
              <item>
               <property name="text">
-               <string>Metadata only</string>
+               <string>Wrong CFA Metadata</string>
               </property>
              </item>
              <item>
               <property name="text">
-               <string>Wrong Metadata</string>
+               <string>Correct QBCFA Metadata</string>
               </property>
-             </item>
-             <item>
+             </item>             
+             <!-- <item>
               <property name="text">
                <string>3by3 CFA</string>
               </property>
@@ -930,7 +930,7 @@
               <property name="text">
                <string>4by4 CFA</string>
               </property>
-             </item>
+             </item> -->
             </widget>
            </item>
           </layout>
@@ -938,7 +938,7 @@
          <item>
           <widget class="QLabel" name="remosaicLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Different options to treat Quad Bayer CFA footage.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Different options to treat Quad Bayer CFA images. More options to come.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

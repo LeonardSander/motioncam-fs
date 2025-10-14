@@ -215,7 +215,9 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const std::string& baseName,
         const std::string& cameraModel,
         const std::string& levels,
-        const std::string& logTransform) :
+        const std::string& logTransform,
+        const std::string& exposureCompensation,
+        const std::string& quadBayerOption) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -236,6 +238,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mCameraModel(cameraModel),
         mLevels(levels),
         mLogTransform(logTransform),
+        mExposureCompensation(exposureCompensation),
+        mQuadBayerOption(quadBayerOption),
         mOptions(options) {
     
     Decoder decoder(mSrcPath);
@@ -388,7 +392,9 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         mCropTarget,
         mCameraModel,
         mLevels,
-        mLogTransform
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
     );
 
     mTypicalDngSize = dngData->size();
@@ -580,7 +586,9 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 mCropTarget,
                 mCameraModel,
                 mLevels,
-                mLogTransform);
+                mLogTransform,
+                mExposureCompensation,
+                mQuadBayerOption);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -664,7 +672,7 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption) {
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;
@@ -672,6 +680,8 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int d
     mCameraModel = cameraModel;
     mLevels = levels;
     mLogTransform = logTransform;
+    mExposureCompensation = exposureCompensation;
+    mQuadBayerOption = quadBayerOption;
 
     mCache.clear();
     init(options);

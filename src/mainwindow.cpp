@@ -57,6 +57,9 @@ namespace {
         if(ui.logTransformCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
 
+        if(ui.quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
+
         return options;
     }
 }
@@ -91,11 +94,15 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->quadBayerCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCFRTargetChanged(text.toStdString());
         QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+    });
+    connect(ui->exposureCompensationCombobox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onExposureCompensationChanged(text.toStdString());
     });
     connect(ui->cropTargetComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCropTargetChanged(text.toStdString());
@@ -109,8 +116,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->logTransformComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onLogTransformChanged(text.toStdString());
     });
+    connect(ui->quadBayerComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onQuadBayerChanged(text.toStdString());
+    });
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
+    connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
 }
 
 MainWindow::~MainWindow() {
@@ -131,13 +142,16 @@ void MainWindow::saveSettings() {
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("interpretAsQBEnabled", ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mDraftQuality);
     settings.setValue("cfrTarget", ui->cfrTarget->currentText());
     settings.setValue("cropTarget", ui->cropTargetComboBox->currentText());
+    settings.setValue("exposureCompensation", ui->exposureCompensationCombobox->currentText());
     settings.setValue("camModelOverride", ui->camModelOverrideComboBox->currentText());
     settings.setValue("levels", ui->levelsComboBox->currentText());
     settings.setValue("logTransform", ui->logTransformComboBox->currentText());
+    settings.setValue("quadBayerOption", ui->quadBayerComboBox->currentText());
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -186,9 +200,14 @@ void MainWindow::restoreSettings() {
         !settings.contains("logTransformEnabled") ? Qt::CheckState::Checked :
         (settings.value("logTransformEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
+    ui->quadBayerCheckBox->setCheckState(
+        settings.value("interpretAsQBEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+
     mCacheRootFolder = settings.value("cachePath").toString();    
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
     mCFRTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
+    mExposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
+    mQuadBayerOption = (!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
     mCropTarget = settings.value("cropTarget").toString().toStdString();
     mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
     mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
@@ -200,11 +219,13 @@ void MainWindow::restoreSettings() {
         ui->draftQuality->setCurrentIndex(1);
     else if(mDraftQuality == 8)
         ui->draftQuality->setCurrentIndex(2);
-
-    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
+    
     ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mExposureCompensation));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels));  
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
   
     // Restore mounted files
@@ -275,7 +296,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     try {
         mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, filePath.toStdString(), dstPath.toStdString());
+            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -289,7 +310,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(140);
+    fileWidget->setFixedHeight(140);        //168 for 2 lines of metrics
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
@@ -480,10 +501,13 @@ void MainWindow::removeFile(QWidget* fileWidget) {
 
 void MainWindow::updateUi() {
     // Draft quality only enabled when draft mode is on
-    if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked)
+    if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->draftQuality->setEnabled(true);
-    else
+        ui->quadBayerComboBox->setEnabled(false);
+    } else {
         ui->draftQuality->setEnabled(false);
+        ui->quadBayerComboBox->setEnabled(true);
+    }
 
     if(ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
         ui->cropTargetComboBox->setEnabled(true);
@@ -549,7 +573,7 @@ void MainWindow::updateFpsLabels() {
     auto renderOptions = getRenderOptions(*ui);
     
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption);
     }
     
     // Find all fps labels in the scroll area
@@ -589,7 +613,7 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     updateUi();
 
     while(it != mMountedFiles.end()) {        
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform);
+        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption);
         ++it;
     }
     
@@ -633,6 +657,16 @@ void MainWindow::onLogTransformChanged(std::string input) {
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 
+void MainWindow::onExposureCompensationChanged(std::string input) {
+    mExposureCompensation = input;
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onQuadBayerChanged(std::string input) {
+    mQuadBayerOption = input;
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
 void MainWindow::onSetCacheFolder(bool checked) {
     Q_UNUSED(checked);  // Parameter not needed for folder selection
 
@@ -652,4 +686,36 @@ void MainWindow::onSetCacheFolder(bool checked) {
         ui->cacheFolderLabel->setText(mCacheRootFolder);
         ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
     }
+}
+
+void MainWindow::onSetDefaultSettings(bool checked) {
+    ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->vignetteCorrectionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->scaleRawCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->normalizeExposureCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
+
+    mDraftQuality = 1;
+    mCFRTarget = "Prefer Drop Frame";
+    mExposureCompensation = "0ev";
+    mCameraModel = "Panasonic";
+    mLevels = "Dynamic";
+    mLogTransform = "Keep Input";
+    mQuadBayerOption = "Wrong CFA Metadata";
+    mDraftQuality = 1;
+
+    ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mExposureCompensation));
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));    
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
+
+    updateUi();
 }

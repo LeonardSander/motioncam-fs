@@ -584,21 +584,16 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     bool vignetteOnlyColor,
     bool normaliseShadingMap,
     bool debugShadingMap,
+    bool interpretAsQuadBayer,
     std::string cropTarget,
     std::string levels,
     std::string logTransform,
+    std::string quadBayerOption,
     bool includeOpcode)
 {
-    if (scale > 1) {
-        // Ensure even scale for downscaling
-        scale = (scale / 2) * 2;
-    }
-    else {
-        // No scaling
-        scale = 1;
-    }
+    scale = (scale > 1 ? (scale / 2) * 2 : 1); // Ensure even scale for downscaling
 
-    uint32_t cfaSize = (metadata.needRemosaic ? 2 : 1); //TODO: add ui. assume quadbayer for now
+    uint32_t cfaSize = (interpretAsQuadBayer ? 2 : 1);  //assume quadbayer for now
 
     uint32_t newWidth, newHeight;
     uint32_t cropWidth = 0, cropHeight = 0;
@@ -902,7 +897,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
 
                 std::array<float, 16> r;
 
-                if(cfaSize > 1 && false) {
+                /*if(cfaSize > 1 && (quadBayerOption == "Remosaic" || quadBayerOption == "Demosaic only")) {
                     // Quad Bayer demosaic - simplified bilinear interpolation
                     // p[16] contains 4x4 Quad Bayer block, d[48] will contain 16 RGB pixels
                     
@@ -990,19 +985,19 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                             int bayerCfaIdx = (py % 2) * 2 + (px % 2);
                             int bayerColor = cfa[bayerCfaIdx];
                             
-                            if(bayerColor == 0) { // Red position in normal Bayer
+                            //if(bayerColor == 0) { // Red position in normal Bayer
                                 r[idx] = red;
-                            }
-                            else if(bayerColor == 1) { // Green position in normal Bayer
-                                r[idx] = green;
-                            }
-                            else { // Blue position in normal Bayer
-                                r[idx] = blue;
-                            }
+                            //}
+                            //else if(bayerColor == 1) { // Green position in normal Bayer
+                                //r[idx] = green;
+                            //}
+                            //else { // Blue position in normal Bayer
+                              //  r[idx] = blue;
+                            //}
                         }
                     }
                     p = r;
-                }
+                }*/
 
 
                 if (logTransform == "") {               // Linearize and (maybe) apply shading map
@@ -1074,7 +1069,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::string cropTarget, 
     std::string camModel,
     std::string levels,
-    std::string logTransform)
+    std::string logTransform,
+    std::string exposureCompensation,
+    std::string quadBayerOption)
 {
     Measure m("generateDng");
 
@@ -1102,6 +1099,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool debugShadingMap = options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
     bool useLogCurve = options & RENDER_OPT_LOG_TRANSFORM;
+    bool interpretAsQuadBayer = metadata.needRemosaic || options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
 
     if(!(options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
         cropTarget = "0x0";
@@ -1113,10 +1111,11 @@ std::shared_ptr<std::vector<char>> generateDng(
         cameraConfiguration,
         cfa,
         scale,
-        applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap,
+        applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap, interpretAsQuadBayer,
         cropTarget,
         levels,
         logTransform,
+        quadBayerOption,
         true  // includeOpcode = true to generate lens shading opcode when not applied to image
     );
 
@@ -1182,13 +1181,22 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetExposureTime(metadata.exposureTime / 1e9);
 
     float exposureOffset = (camModel == "Panasonic" ? -2.0f : 0.0f);
+    
+    // Parse float from exposureCompensation string and add to exposureOffset
+    if (!exposureCompensation.empty()) {
+        try {
+            exposureOffset += std::stof(exposureCompensation);
+        } catch (const std::exception&) {
+            // If parsing fails, keep the original exposureOffset value
+        }
+    }
 
     if (normalizeExposure)
         dng.SetBaselineExposure(std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime)) + exposureOffset);
     else
         dng.SetBaselineExposure(exposureOffset);
 
-    if(metadata.needRemosaic && scale == 1 && false) {   //de/remosaic need to be disabled and add ui option. 
+    if(interpretAsQuadBayer && scale == 1 && quadBayerOption == "Correct QBCFA Metadata") {   //de/remosaic need to be disabled and add ui option. 
         dng.SetCFARepeatPatternDim(4, 4);
         std::array<uint8_t, 4> cfa_pattern_0112 = {0,1,1,2};
         std::array<uint8_t, 4> cfa_pattern_2110 = {2,1,1,0};
@@ -1349,9 +1357,13 @@ std::shared_ptr<std::vector<char>> generateDng(
         std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
         dng.SetBlackLevel(4, linearBlackLevel.data());
         dng.SetWhiteLevel(65534);  //idk why
+        //displayLevels = std::to_string(static_cast<int>(srcWhiteLevel)) + "/" + std::to_string(static_cast<float>(srcBlackLevel[0])) + " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/0 RAW" + std::to_string(bitsNeeded(dstWhiteLevel)) + " (log)";
     } else {           
         dng.SetBlackLevel(4, dstBlackLevel.data());
-        dng.SetWhiteLevel(dstWhiteLevel);    
+        dng.SetWhiteLevel(dstWhiteLevel);
+        //displayLevels = std::to_string(static_cast<float>(srcWhiteLevel)) + "/" + std::to_string(static_cast<float>(srcBlackLevel[0])) + 
+        //                    ((int) srcWhiteLevel != (int) dstWhiteLevel || (float) srcBlackLevel[0] != (float) dstBlackLevel[0] ? " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" +  std::to_string(static_cast<float>(dstBlackLevel[0])): "") + 
+        //                    " RAW" + std::to_string(bitsNeeded(dstWhiteLevel));    
     }    
 
     // Write DNG
