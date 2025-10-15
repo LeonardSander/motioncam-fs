@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Types.h"
+#include "IFuseFileSystem.h"
 
 #include <optional>
 #include <string>
@@ -27,6 +28,7 @@ public:
         bool async) = 0;
 
     virtual void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption) = 0;
+    virtual FileInfo getFileInfo() const = 0;
 
 protected:
     IVirtualFileSystem() = default;

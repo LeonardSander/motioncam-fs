@@ -2,7 +2,11 @@
 #include "win/dirInfo.h"
 #include "win/virtualizationInstance.h"
 
+#include "IVirtualFileSystem.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
+#include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl_DNG.h"
+#include "DNGSequenceDecoder.h"
 #include "LRUCache.h"
 
 #include <iostream>
@@ -79,7 +83,7 @@ namespace {
 
 class Session : public VirtualizationInstance {
 public:
-    Session(const std::string& dstPath, std::unique_ptr<VirtualFileSystemImpl_MCRAW> fs);
+    Session(const std::string& dstPath, std::unique_ptr<IVirtualFileSystem> fs);
     ~Session();
 
 public:
@@ -112,13 +116,13 @@ private:
     FileRenderOptions mOptions;
     int mDraftScale;
     std::mutex mOpLock;
-    std::unique_ptr<VirtualFileSystemImpl_MCRAW> mFs;
+    std::unique_ptr<IVirtualFileSystem> mFs;
     std::map<GUID, std::unique_ptr<DirInfo>, GUIDComparer> mActiveEnumSessions;
 };
 
 Session::Session(
     const std::string& dstPath,
-    std::unique_ptr<VirtualFileSystemImpl_MCRAW> fs) : mFs(std::move(fs))
+    std::unique_ptr<IVirtualFileSystem> fs) : mFs(std::move(fs))
 {
     SetOptionalMethods(OptionalMethods::Notify);
 
@@ -165,7 +169,7 @@ void Session::updateOptions(FileRenderOptions options, int draftScale, std::stri
     mFs->updateOptions(options, draftScale, cfrTarget, cropTarget, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
 
     // We need to clear out the cache
-    auto files = mFs->listFiles();
+    auto files = mFs->listFiles("");
     HRESULT hr = S_OK;
 
     PRJ_UPDATE_FAILURE_CAUSES failureReason;
@@ -550,6 +554,7 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
 MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
+    std::string filename = srcPath.filename().string();
 
     spdlog::debug("Mounting file {} to {}", srcFile, dstPath);
 
@@ -561,6 +566,39 @@ MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale,
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
+            mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
+        }
+        catch(std::runtime_error& e) {
+            spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
+            throw std::runtime_error(e.what());
+        }
+        return mountId;
+    }
+    else if((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4")) && 
+            boost::icontains(filename, "NATIVE")) {
+        auto mountId = mNextMountId++;
+
+        try {
+            // Extract base name from destination path
+            fs::path dstPathObj(dstPath);
+            std::string baseName = dstPathObj.filename().string();
+            auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
+            mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
+        }
+        catch(std::runtime_error& e) {
+            spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
+            throw std::runtime_error(e.what());
+        }
+        return mountId;
+    }
+    else if(boost::iequals(extension, ".dng") || DNGSequenceDecoder::isDNGSequence(srcFile)) {
+        auto mountId = mNextMountId++;
+
+        try {
+            // Extract base name from destination path
+            fs::path dstPathObj(dstPath);
+            std::string baseName = dstPathObj.filename().string();
+            auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {

@@ -27,6 +27,9 @@ set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
+        src/VirtualFileSystemImpl_DirectLog.cpp
+        src/DirectLogDecoder.cpp
+        src/DNGSequenceDecoder.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
         src/AudioWriter.cpp
@@ -37,6 +40,9 @@ set(PROJECT_SOURCES
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h
         include/VirtualFileSystemImpl_MCRAW.h
+        include/VirtualFileSystemImpl_DirectLog.h
+        include/DirectLogDecoder.h
+        include/DNGSequenceDecoder.h
         include/LRUCache.h
         include/AudioWriter.h
         include/Measure.h
@@ -145,6 +151,56 @@ target_include_directories(motioncam-decoder
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
 
+# Find FFmpeg - try manual path first, then pkg-config, then vcpkg
+set(FFMPEG_ROOT "" CACHE PATH "Path to FFmpeg installation (e.g., C:/ffmpeg)")
+
+if(FFMPEG_ROOT)
+    # Manual FFmpeg path specified
+    set(FFMPEG_INCLUDE_DIRS "${FFMPEG_ROOT}/include")
+    set(FFMPEG_LIBRARY_DIRS "${FFMPEG_ROOT}/lib")
+    
+    find_library(AVFORMAT_LIBRARY avformat PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    find_library(AVCODEC_LIBRARY avcodec PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    find_library(SWSCALE_LIBRARY swscale PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    find_library(AVUTIL_LIBRARY avutil PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    
+    if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
+        set(FFMPEG_FOUND TRUE)
+        set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
+        include_directories(${FFMPEG_INCLUDE_DIRS})
+        link_directories(${FFMPEG_LIBRARY_DIRS})
+        message(STATUS "Found FFmpeg at: ${FFMPEG_ROOT}")
+    endif()
+endif()
+
+if(NOT FFMPEG_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
+            libavformat
+            libavcodec
+            libswscale
+            libavutil
+        )
+        if(FFMPEG_FOUND)
+            set(FFMPEG_LIBRARIES PkgConfig::FFMPEG)
+        endif()
+    endif()
+endif()
+
+# Fallback to vcpkg if nothing else worked
+if(NOT FFMPEG_FOUND)
+    find_package(ffmpeg CONFIG QUIET)
+    if(ffmpeg_FOUND)
+        set(FFMPEG_FOUND TRUE)
+        set(FFMPEG_LIBRARIES ffmpeg::avformat ffmpeg::avcodec ffmpeg::swscale ffmpeg::avutil)
+    endif()
+endif()
+
+if(NOT FFMPEG_FOUND)
+    message(FATAL_ERROR "FFmpeg not found. Please install via vcpkg or set FFMPEG_ROOT to pre-built FFmpeg location.")
+endif()
+
 # Add boost
 set(Boost_USE_STATIC_LIBS        ON)
 set(Boost_USE_DEBUG_LIBS        OFF)
@@ -164,6 +220,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   spdlog::spdlog
   fmt::fmt
   motioncam-decoder
+  ${FFMPEG_LIBRARIES}
   ${platform-specific})
 
 set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")

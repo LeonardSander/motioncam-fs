@@ -254,8 +254,12 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                 for (const auto& url : urls) {
                     auto filePath = url.toLocalFile();
 
-                    // Replace ".txt" with your desired file extension
-                    if (filePath.endsWith(".mcraw", Qt::CaseInsensitive)) {
+                    // Accept MCRAW files, MOV/MP4 files with NATIVE suffix, or DNG files/directories
+                    if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                        (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
+                         (filePath.endsWith(".mov", Qt::CaseInsensitive) || 
+                          filePath.endsWith(".mp4", Qt::CaseInsensitive))) ||
+                        filePath.endsWith(".dng", Qt::CaseInsensitive)) {
                         dragEvent->acceptProposedAction();
                         return true;
                     }
@@ -272,7 +276,11 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 
                 for (const auto& url : urls) {
                     auto filePath = url.toLocalFile();
-                    if (filePath.endsWith(".mcraw", Qt::CaseInsensitive)) {
+                    if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                        (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
+                         (filePath.endsWith(".mov", Qt::CaseInsensitive) || 
+                          filePath.endsWith(".mp4", Qt::CaseInsensitive))) ||
+                        filePath.endsWith(".dng", Qt::CaseInsensitive)) {
                         mountFile(filePath);
                     }
                 }
