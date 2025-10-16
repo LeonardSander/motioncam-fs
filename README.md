@@ -16,6 +16,8 @@ At first these DNG files are only projected and do not consume storage space. As
 
 These cached files will remain in storage for now when unmounting MCRAW or closing Fuse. If Fuse is not active, projected files remain visible in the File Explorer and will appear empty if opened. To access these files just open Fuse again for the previously saved session to be restored. The cache can be manually cleared by closing Fuse, deleting folder contents and folders afterwards. These will appear again when Fuse is opened once again and the session gets restored.
 
+---
+
 ### Features
 
 [Showcase Video](https://youtu.be/knACG5jy-rk)
@@ -30,7 +32,9 @@ These cached files will remain in storage for now when unmounting MCRAW or closi
 
 - **Override Data Levels**
   
-  White and Black Levels used in Fuse will default to their dynamic tags stored in MCRAW. Static tags are also still available to choose as a fallback option (choose that to apply levels override from calibration.json).   
+  White and Black Levels used in Fuse will default to their dynamic tags stored in MCRAW. Static tags are also still available to choose as a fallback option (choose that to apply levels override from calibration.json).
+
+---
 
 ### Vignette Correction
 
@@ -45,6 +49,8 @@ These cached files will remain in storage for now when unmounting MCRAW or closi
 - **Debug Views**  
   - Formerly known as 'Don't clip highlights' the Scale data option allows to inspect clipping in the image by applying the vignette correction in a normalized state with clipped highlights showing pink.
   - Gainmaps only will apply the vignette correction to a white image. This allows to inspect the impact of the vignette correction on the underlying image data. The resulting flat field DNGs can even be used in RawTherapee for manual vignette correction.
+ 
+---
 
 ### Further Preprocessing
 
