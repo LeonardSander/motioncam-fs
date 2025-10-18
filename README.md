@@ -10,7 +10,7 @@
 
 ---
 
-Upon mounting of the MCRAW files, their corresponding folders will appear in the same directory as the MCRAWs if not defined otherwise (Output Folder needs to be defined on a NTFS drive for Windows). 
+Upon mounting of the MCRAW files, their corresponding folders will appear in the same directory as the MCRAWs if not defined otherwise. For Windows the Output Folder needs to be defined on a NTFS drive and in general only use Fuse with SSD storage. 
 
 At first these DNG files are only projected and do not consume storage space. As soon as the individual files are accessed, their corresponding frames are read from MCRAW, potentially preprocessed and written to storage. To cache all files without manually accessing each one use [this script](https://discord.com/channels/980884979955421255/1377309561219973121/1423424334185234574). Keep in mind that the cached files will be overriden dynamically with projected ones again if Fuse settings are altered.
 
