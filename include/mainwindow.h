@@ -2,10 +2,12 @@
 #define MAINWINDOW_H
 
 #include "IFuseFileSystem.h"
+#include "CalibrationData.h"
 
 #include <QMainWindow>
 #include <QList>
 #include <QString>
+#include <optional>
 
 namespace motioncam {
     struct MountedFile {
@@ -78,6 +80,8 @@ private slots:
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
+    void createCalibrationJson(QWidget* fileWidget);
+    void updateCalibrationButtonStates();
 
 private:
     void saveSettings();
@@ -98,6 +102,7 @@ private:
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    std::optional<motioncam::CalibrationData> mGlobalCalibration;
 };
 
 #endif // MAINWINDOW_H

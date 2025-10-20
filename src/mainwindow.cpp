@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "CalibrationData.h"
 
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -11,8 +12,13 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QLabel>
+#include <QFrame>
 #include <algorithm>
 #include <QTimer>
+#include <fstream>
+#include <sstream>
+#include <spdlog/spdlog.h>
 
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
@@ -122,6 +128,24 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    
+    // Load global calibration.json if it exists
+    QString appDir = QCoreApplication::applicationDirPath();
+    QString globalCalibPath = QDir(appDir).absoluteFilePath("calibration.json");
+    if (QFile::exists(globalCalibPath)) {
+        mGlobalCalibration = motioncam::CalibrationData::loadFromFile(globalCalibPath.toStdString());
+        if (mGlobalCalibration.has_value()) {
+            spdlog::info("Loaded global calibration from: {}", globalCalibPath.toStdString());
+        }
+    } else {
+        // Create example calibration.json
+        std::ofstream outFile(globalCalibPath.toStdString());
+        if (outFile.is_open()) {
+            outFile << motioncam::CalibrationData::createExampleJson();
+            outFile.close();
+            spdlog::info("Created example calibration.json at: {}", globalCalibPath.toStdString());
+        }
+    }
 }
 
 MainWindow::~MainWindow() {
@@ -392,6 +416,19 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Add stretch to push buttons to the left
     buttonLayout->addStretch();
+    
+    // Create calibration button (right-aligned)
+    auto* calibButton = new QPushButton("Create JSON", fileWidget);
+    calibButton->setFixedSize(buttonWidth, buttonHeight);
+    calibButton->setProperty("calibButton", true);
+    buttonLayout->addWidget(calibButton);
+    
+    // Create calibration status label (initially hidden)
+    auto* calibStatusLabel = new QLabel("", fileWidget);
+    calibStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold;");
+    calibStatusLabel->setProperty("calibStatusLabel", true);
+    calibStatusLabel->setVisible(false);
+    buttonLayout->addWidget(calibStatusLabel);
 
     // Add button layout to main layout
     fileLayout->addLayout(buttonLayout);
@@ -425,9 +462,16 @@ void MainWindow::mountFile(const QString& filePath) {
     connect(removeButton, &QPushButton::clicked, this, [this, fileWidget] {
         removeFile(fileWidget);
     });
+    
+    connect(calibButton, &QPushButton::clicked, this, [this, fileWidget] {
+        createCalibrationJson(fileWidget);
+    });
 
     mMountedFiles.append(
         motioncam::MountedFile(mountId, filePath));
+    
+    // Update calibration button state
+    updateCalibrationButtonStates();
 }
 
 void MainWindow::playFile(const QString& path) {
@@ -568,6 +612,9 @@ void MainWindow::updateUi() {
         ui->cacheFolderLabel->setText(mCacheRootFolder);
         ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
     }
+    
+    // Update calibration button states
+    updateCalibrationButtonStates();
 }
 
 void MainWindow::updateFpsLabels() {
@@ -727,4 +774,124 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
 
     updateUi();
+}
+
+void MainWindow::createCalibrationJson(QWidget* fileWidget) {
+    auto filePath = fileWidget->property("filePath").toString();
+    if (filePath.isEmpty()) {
+        QMessageBox::warning(this, "Error", "File path not found");
+        return;
+    }
+    
+    QFileInfo fileInfo(filePath);
+    QString jsonPath = fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
+    
+    // Check if JSON already exists
+    if (QFile::exists(jsonPath)) {
+        auto reply = QMessageBox::question(this, "File Exists", 
+            QString("Calibration file already exists:\n%1\n\nOverwrite?").arg(jsonPath),
+            QMessageBox::Yes | QMessageBox::No);
+        if (reply != QMessageBox::Yes) {
+            return;
+        }
+    }
+    
+    // Read the global calibration.json file directly to preserve all fields (including disabled ones)
+    std::string jsonContent;
+    QString appDir = QCoreApplication::applicationDirPath();
+    QString globalCalibPath = QDir(appDir).absoluteFilePath("calibration.json");
+    
+    if (QFile::exists(globalCalibPath)) {
+        // Read the global calibration.json file
+        std::ifstream inFile(globalCalibPath.toStdString());
+        if (inFile.is_open()) {
+            std::stringstream buffer;
+            buffer << inFile.rdbuf();
+            jsonContent = buffer.str();
+            inFile.close();
+        } else {
+            // Fallback to example if can't read
+            jsonContent = motioncam::CalibrationData::createExampleJson();
+        }
+    } else {
+        // Use example template if global calibration doesn't exist
+        jsonContent = motioncam::CalibrationData::createExampleJson();
+    }
+    
+    // Write JSON file
+    std::ofstream outFile(jsonPath.toStdString());
+    if (!outFile.is_open()) {
+        QMessageBox::critical(this, "Error", QString("Failed to create calibration file:\n%1").arg(jsonPath));
+        return;
+    }
+    
+    outFile << jsonContent;
+    outFile.close();
+    
+    // Update button states
+    updateCalibrationButtonStates();
+}
+
+void MainWindow::updateCalibrationButtonStates() {
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    if (!scrollContent) return;
+    
+    auto fileWidgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+    
+    for (auto* fileWidget : fileWidgets) {
+        // Skip if not a file widget (e.g., separators)
+        if (!fileWidget->property("filePath").isValid()) {
+            continue;
+        }
+        
+        auto filePath = fileWidget->property("filePath").toString();
+        QFileInfo fileInfo(filePath);
+        QString jsonPath = fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
+        
+        // Find the calibration button and status label
+        auto* calibButton = fileWidget->findChild<QPushButton*>(QString(), Qt::FindDirectChildrenOnly);
+        QPushButton* actualCalibButton = nullptr;
+        for (auto* btn : fileWidget->findChildren<QPushButton*>()) {
+            if (btn->property("calibButton").toBool()) {
+                actualCalibButton = btn;
+                break;
+            }
+        }
+        
+        auto* calibStatusLabel = fileWidget->findChild<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+        QLabel* actualStatusLabel = nullptr;
+        for (auto* lbl : fileWidget->findChildren<QLabel*>()) {
+            if (lbl->property("calibStatusLabel").toBool()) {
+                actualStatusLabel = lbl;
+                break;
+            }
+        }
+        
+        if (!actualCalibButton || !actualStatusLabel) {
+            continue;
+        }
+        
+        // Check if JSON exists and is valid
+        if (QFile::exists(jsonPath)) {
+            auto calibData = motioncam::CalibrationData::loadFromFile(jsonPath.toStdString());
+            
+            if (calibData.has_value()) {
+                // Valid calibration found
+                actualCalibButton->setVisible(false);
+                actualStatusLabel->setText("Calibration Loaded");
+                actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #00AA00;");
+                actualStatusLabel->setVisible(true);
+            } else {
+                // Invalid calibration
+                actualCalibButton->setVisible(false);
+                actualStatusLabel->setText("Calibration Ignored");
+                actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #AA0000;");
+                actualStatusLabel->setVisible(true);
+            }
+        } else {
+            // No JSON file
+            actualCalibButton->setVisible(true);
+            actualStatusLabel->setVisible(false);
+        }
+    }
 }

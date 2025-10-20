@@ -1071,7 +1071,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::string levels,
     std::string logTransform,
     std::string exposureCompensation,
-    std::string quadBayerOption)
+    std::string quadBayerOption,
+    const std::optional<CalibrationData>& calibration)
 {
     Measure m("generateDng");
 
@@ -1269,20 +1270,41 @@ std::shared_ptr<std::vector<char>> generateDng(
     const uint16_t bps[1] = { encodeBits };
     dng.SetBitsPerSample(1, bps);
 
-    if (!isZeroMatrix(cameraConfiguration.colorMatrix1))
+    // Apply calibration data to override, otherwise use camera configuration
+    // Calibration only overrides fields that are explicitly set
+    if (calibration.has_value() && calibration->hasColorMatrix1) {
+        dng.SetColorMatrix1(3, calibration->colorMatrix1.data());
+    } else if (!isZeroMatrix(cameraConfiguration.colorMatrix1)) {
         dng.SetColorMatrix1(3, cameraConfiguration.colorMatrix1.data());
-    if (!isZeroMatrix(cameraConfiguration.colorMatrix2))
+    }
+    
+    if (calibration.has_value() && calibration->hasColorMatrix2) {
+        dng.SetColorMatrix2(3, calibration->colorMatrix2.data());
+    } else if (!isZeroMatrix(cameraConfiguration.colorMatrix2)) {
         dng.SetColorMatrix2(3, cameraConfiguration.colorMatrix2.data());
+    }
 
-    if (!isZeroMatrix(cameraConfiguration.forwardMatrix1))
+    if (calibration.has_value() && calibration->hasForwardMatrix1) {
+        dng.SetForwardMatrix1(3, calibration->forwardMatrix1.data());
+    } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix1)) {
         dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
-    if (!isZeroMatrix(cameraConfiguration.forwardMatrix2))
+    }
+    
+    if (calibration.has_value() && calibration->hasForwardMatrix2) {
+        dng.SetForwardMatrix2(3, calibration->forwardMatrix2.data());
+    } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix2)) {
         dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
+    }
 
     dng.SetCameraCalibration1(3, IDENTITY_MATRIX);
     dng.SetCameraCalibration2(3, IDENTITY_MATRIX);
 
-    dng.SetAsShotNeutral(3, metadata.asShotNeutral.data());
+    // Apply asShotNeutral from calibration if available, otherwise from metadata
+    if (calibration.has_value() && calibration->hasAsShotNeutral) {
+        dng.SetAsShotNeutral(3, calibration->asShotNeutral.data());
+    } else {
+        dng.SetAsShotNeutral(3, metadata.asShotNeutral.data());
+    }
 
     dng.SetCalibrationIlluminant1(getColorIlluminant(cameraConfiguration.colorIlluminant1));
     dng.SetCalibrationIlluminant2(getColorIlluminant(cameraConfiguration.colorIlluminant2));

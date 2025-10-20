@@ -1,4 +1,4 @@
-#include "DNGSequenceDecoder.h"
+#include "DNGDecoder.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -6,6 +6,12 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
+
+#ifdef _MSC_VER
+#include <stdlib.h>
+#define __builtin_bswap16(x) _byteswap_ushort(x)
+#define __builtin_bswap32(x) _byteswap_ulong(x)
+#endif
 
 namespace motioncam {
 
@@ -21,18 +27,18 @@ namespace {
     constexpr uint16_t TIFF_MAGIC = 42;
 }
 
-DNGSequenceDecoder::DNGSequenceDecoder(const std::string& sequencePath) 
+DNGDecoder::DNGDecoder(const std::string& sequencePath) 
     : mSequencePath(sequencePath) {
     
-    spdlog::info("DNGSequenceDecoder: Initializing for {}", sequencePath);
+    spdlog::info("DNGDecoder: Initializing for {}", sequencePath);
     analyzeSequence();
 }
 
-DNGSequenceDecoder::~DNGSequenceDecoder() {
-    spdlog::debug("DNGSequenceDecoder: Cleanup completed");
+DNGDecoder::~DNGDecoder() {
+    spdlog::debug("DNGDecoder: Cleanup completed");
 }
 
-bool DNGSequenceDecoder::isDNGSequence(const std::string& path) {
+bool DNGDecoder::isDNGSequence(const std::string& path) {
     boost::filesystem::path p(path);
     
     // Check if it's a directory containing DNG files
@@ -53,7 +59,7 @@ bool DNGSequenceDecoder::isDNGSequence(const std::string& path) {
     return false;
 }
 
-void DNGSequenceDecoder::analyzeSequence() {
+void DNGDecoder::analyzeSequence() {
     boost::filesystem::path sequencePath(mSequencePath);
     
     if (boost::filesystem::is_directory(sequencePath)) {
@@ -79,11 +85,11 @@ void DNGSequenceDecoder::analyzeSequence() {
         }
     }
     
-    spdlog::info("DNGSequenceDecoder: Found {} DNG files, {}x{} @ {:.2f}fps", 
+    spdlog::info("DNGDecoder: Found {} DNG files, {}x{} @ {:.2f}fps", 
                  mSequenceInfo.totalFrames, mSequenceInfo.width, mSequenceInfo.height, mSequenceInfo.fps);
 }
 
-void DNGSequenceDecoder::findDNGFiles() {
+void DNGDecoder::findDNGFiles() {
     boost::filesystem::path basePath(mSequenceInfo.basePath);
     
     if (!boost::filesystem::exists(basePath) || !boost::filesystem::is_directory(basePath)) {
@@ -123,7 +129,7 @@ void DNGSequenceDecoder::findDNGFiles() {
     }
 }
 
-void DNGSequenceDecoder::extractTimestampsFromFilenames() {
+void DNGDecoder::extractTimestampsFromFilenames() {
     // Try to extract frame numbers from filenames for better timing
     boost::regex frameNumberRegex(R"((\d{6,}))");
     boost::smatch match;
@@ -148,7 +154,7 @@ void DNGSequenceDecoder::extractTimestampsFromFilenames() {
               });
 }
 
-bool DNGSequenceDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& dngData) {
+bool DNGDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& dngData) {
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) {
         return false;
     }
@@ -157,7 +163,7 @@ bool DNGSequenceDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& dng
     return readDNGFile(frameInfo.filePath, dngData);
 }
 
-bool DNGSequenceDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& dngData) {
+bool DNGDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& dngData) {
     // Find frame with closest timestamp
     auto it = std::lower_bound(mFrames.begin(), mFrames.end(), timestamp,
                               [](const DNGFrameInfo& frame, Timestamp ts) {
@@ -172,7 +178,7 @@ bool DNGSequenceDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vecto
     return extractFrame(frameNumber, dngData);
 }
 
-bool DNGSequenceDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
+bool DNGDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) {
         return false;
     }
@@ -194,7 +200,7 @@ bool DNGSequenceDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
     return false;
 }
 
-bool DNGSequenceDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data) {
+bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data) {
     std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         spdlog::error("Could not open DNG file: {}", filePath);
@@ -215,18 +221,18 @@ bool DNGSequenceDecoder::readDNGFile(const std::string& filePath, std::vector<ui
         return false;
     }
     
-    spdlog::debug("DNGSequenceDecoder: Read DNG file {} ({} bytes)", filePath, fileSize);
+    spdlog::debug("DNGDecoder: Read DNG file {} ({} bytes)", filePath, fileSize);
     return true;
 }
 
-void DNGSequenceDecoder::readDNGGainMap(const std::string& dngPath, GainMap& gainMap) {
+bool DNGDecoder::readDNGGainMap(const std::string& dngPath, GainMap& gainMap) {
     std::vector<uint8_t> dngData;
     if (!readDNGFile(dngPath, dngData)) {
-        return;
+        return false;
     }
     
     if (dngData.size() < 8) {
-        return;
+        return false;
     }
     
     // Check TIFF header
@@ -237,14 +243,15 @@ void DNGSequenceDecoder::readDNGGainMap(const std::string& dngPath, GainMap& gai
         littleEndian = true;
     } else if (byteOrder != TIFF_BIG_ENDIAN) {
         spdlog::debug("Invalid TIFF header in DNG: {}", dngPath);
-        return;
+        return false;
     }
     
     // Read TIFF magic number
     uint16_t magic = *reinterpret_cast<const uint16_t*>(dngData.data() + 2);
-    if ((littleEndian && magic != TIFF_MAGIC) || (!littleEndian && __builtin_bswap16(magic) != TIFF_MAGIC)) {
+    uint16_t expectedMagic = littleEndian ? magic : __builtin_bswap16(magic);
+    if (expectedMagic != TIFF_MAGIC) {
         spdlog::debug("Invalid TIFF magic in DNG: {}", dngPath);
-        return;
+        return false;
     }
     
     // Read first IFD offset
@@ -282,7 +289,7 @@ void DNGSequenceDecoder::readDNGGainMap(const std::string& dngPath, GainMap& gai
                 if (valueOffset < dngData.size() && valueOffset + count <= dngData.size()) {
                     if (parseOpcodeGainMap(dngData.data() + valueOffset, count, gainMap)) {
                         spdlog::debug("Found gain map in DNG: {}", dngPath);
-                        return;
+                        return true;
                     }
                 }
             }
@@ -300,9 +307,11 @@ void DNGSequenceDecoder::readDNGGainMap(const std::string& dngPath, GainMap& gai
             break;
         }
     }
+    
+    return false;
 }
 
-bool DNGSequenceDecoder::parseOpcodeGainMap(const uint8_t* opcodeData, size_t opcodeSize, GainMap& gainMap) {
+bool DNGDecoder::parseOpcodeGainMap(const uint8_t* opcodeData, size_t opcodeSize, GainMap& gainMap) {
     if (opcodeSize < 4) return false;
     
     // Read number of opcodes

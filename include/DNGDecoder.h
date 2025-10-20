@@ -34,10 +34,10 @@ struct GainMap {
     std::vector<float> data;
 };
 
-class DNGSequenceDecoder {
+class DNGDecoder {
 public:
-    DNGSequenceDecoder(const std::string& sequencePath);
-    ~DNGSequenceDecoder();
+    DNGDecoder(const std::string& sequencePath);
+    ~DNGDecoder();
 
     const DNGSequenceInfo& getSequenceInfo() const { return mSequenceInfo; }
     const std::vector<DNGFrameInfo>& getFrames() const { return mFrames; }
@@ -53,7 +53,7 @@ private:
     void findDNGFiles();
     void extractTimestampsFromFilenames();
     bool readDNGFile(const std::string& filePath, std::vector<uint8_t>& data);
-    void readDNGGainMap(const std::string& dngPath, GainMap& gainMap);
+    bool readDNGGainMap(const std::string& dngPath, GainMap& gainMap);
     bool parseOpcodeGainMap(const uint8_t* opcodeData, size_t opcodeSize, GainMap& gainMap);
 
 private:

@@ -23,8 +23,8 @@
 
 ### 2. DNG Sequence Support
 **Files:**
-- `include/DNGSequenceDecoder.h` ✅
-- `src/DNGSequenceDecoder.cpp` ✅
+- `include/DNGDecoder.h` ✅
+- `src/DNGDecoder.cpp` ✅
 - `include/VirtualFileSystemImpl_DNG.h` ✅
 - `src/VirtualFileSystemImpl_DNG.cpp` ✅
 

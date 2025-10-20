@@ -2,6 +2,7 @@
 
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
+#include <CalibrationData.h>
 #include <memory>
 
 namespace BS {
@@ -11,7 +12,7 @@ class thread_pool;
 namespace motioncam {
 
 class LRUCache;
-class DNGSequenceDecoder;
+class DNGDecoder;
 
 class VirtualFileSystemImpl_DNG : public IVirtualFileSystem
 {
@@ -86,7 +87,8 @@ private:
     int mDuplicatedFrames;
     int mWidth;
     int mHeight;
-    std::unique_ptr<DNGSequenceDecoder> mDecoder;
+    std::unique_ptr<DNGDecoder> mDecoder;
+    std::optional<CalibrationData> mCalibration;
     mutable std::mutex mMutex;
 };
 

@@ -7,8 +7,10 @@
 #include <ostream>
 #include <algorithm>
 #include <memory>
+#include <optional>
 
 #include "Types.h"
+#include "CalibrationData.h"
 
 namespace motioncam {
 
@@ -169,7 +171,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::string levels,
     std::string logTransform,
     std::string exposureCompensation,
-    std::string quadBayerOption
+    std::string quadBayerOption,
+    const std::optional<CalibrationData>& calibration = std::nullopt
 );
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);

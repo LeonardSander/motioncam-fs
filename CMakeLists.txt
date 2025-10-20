@@ -28,12 +28,15 @@ set(PROJECT_SOURCES
         src/mainwindow.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/VirtualFileSystemImpl_DirectLog.cpp
+        src/VirtualFileSystemImpl_DNG.cpp
         src/DirectLogDecoder.cpp
-        src/DNGSequenceDecoder.cpp
+        src/DNGDecoder.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
+        src/CalibrationData.cpp
         src/AudioWriter.cpp
         src/Utils.cpp
+        src/ExposureKeyframes.cpp
 
         include/mainwindow.h
         include/Types.h
@@ -41,15 +44,18 @@ set(PROJECT_SOURCES
         include/IFuseFileSystem.h
         include/VirtualFileSystemImpl_MCRAW.h
         include/VirtualFileSystemImpl_DirectLog.h
+        include/VirtualFileSystemImpl_DNG.h
         include/DirectLogDecoder.h
-        include/DNGSequenceDecoder.h
+        include/DNGDecoder.h
         include/LRUCache.h
         include/AudioWriter.h
         include/Measure.h
         include/SingleApplication.h
         include/CameraMetadata.h
         include/CameraFrameMetadata.h
+        include/CalibrationData.h
         include/Utils.h
+        include/ExposureKeyframes.h
 
         ui/mainwindow.ui
 )
@@ -194,6 +200,27 @@ if(NOT FFMPEG_FOUND)
     if(ffmpeg_FOUND)
         set(FFMPEG_FOUND TRUE)
         set(FFMPEG_LIBRARIES ffmpeg::avformat ffmpeg::avcodec ffmpeg::swscale ffmpeg::avutil)
+    endif()
+endif()
+
+# Last resort: manually find libraries in vcpkg directory
+if(NOT FFMPEG_FOUND AND WIN32)
+    set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/vcpkg_installed/x64-windows")
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/debug/lib")
+    else()
+        set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/lib")
+    endif()
+    
+    find_library(AVFORMAT_LIBRARY avformat PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
+    find_library(AVCODEC_LIBRARY avcodec PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
+    find_library(SWSCALE_LIBRARY swscale PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
+    find_library(AVUTIL_LIBRARY avutil PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
+    
+    if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
+        set(FFMPEG_FOUND TRUE)
+        set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
+        message(STATUS "Found FFmpeg in vcpkg: ${VCPKG_LIB_DIR}")
     endif()
 endif()
 

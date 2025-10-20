@@ -6,7 +6,7 @@
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "VirtualFileSystemImpl_DirectLog.h"
 #include "VirtualFileSystemImpl_DNG.h"
-#include "DNGSequenceDecoder.h"
+#include "DNGDecoder.h"
 #include "LRUCache.h"
 
 #include <iostream>
@@ -591,7 +591,7 @@ MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale,
         }
         return mountId;
     }
-    else if(boost::iequals(extension, ".dng") || DNGSequenceDecoder::isDNGSequence(srcFile)) {
+    else if(boost::iequals(extension, ".dng") || DNGDecoder::isDNGSequence(srcFile)) {
         auto mountId = mNextMountId++;
 
         try {

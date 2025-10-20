@@ -3,10 +3,13 @@
 #include <vector>
 #include <string>
 #include <variant>
+#include <cstdint>
 
 #include <boost/filesystem.hpp>
 
 namespace motioncam {
+
+typedef int64_t Timestamp;
 
 enum EntryType : int {
     FILE_ENTRY = 0,

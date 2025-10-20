@@ -1,6 +1,7 @@
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
+#include "CalibrationData.h"
 #include "Utils.h"
 #include "AudioWriter.h"
 #include "LRUCache.h"
@@ -242,6 +243,19 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mQuadBayerOption(quadBayerOption),
         mOptions(options) {
     
+    // Parse exposure keyframes if the input contains keyframe syntax
+    mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
+    
+    // Load calibration JSON if it exists
+    boost::filesystem::path srcPath(mSrcPath);
+    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    if (boost::filesystem::exists(calibPath)) {
+        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        if (mCalibration.has_value()) {
+            spdlog::info("Loaded calibration for MCRAW: {}", calibPath.string());
+        }
+    }
+    
     Decoder decoder(mSrcPath);
     auto frames = decoder.getFrames();
     std::sort(frames.begin(), frames.end());
@@ -394,7 +408,8 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         mLevels,
         mLogTransform,
         mExposureCompensation,
-        mQuadBayerOption
+        mQuadBayerOption,
+        mCalibration
     );
 
     mTypicalDngSize = dngData->size();
@@ -574,6 +589,13 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
 
             spdlog::debug("Generating {}", entry.name);
 
+            // Calculate frame-specific exposure compensation
+            std::string frameExposureComp = mExposureCompensation;
+            if (mExposureKeyframes.has_value()) {
+                float exposureValue = mExposureKeyframes->getExposureAtFrame(frameIndex, mTotalFrames);
+                frameExposureComp = std::to_string(exposureValue);
+            }
+
             auto dngData = utils::generateDng(
                 *frameData,
                 frameMetadata,
@@ -587,8 +609,9 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 mCameraModel,
                 mLevels,
                 mLogTransform,
-                mExposureCompensation,
-                mQuadBayerOption);
+                frameExposureComp,
+                mQuadBayerOption,
+                mCalibration);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -682,6 +705,9 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int d
     mLogTransform = logTransform;
     mExposureCompensation = exposureCompensation;
     mQuadBayerOption = quadBayerOption;
+    
+    // Re-parse exposure keyframes
+    mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
 
     mCache.clear();
     init(options);

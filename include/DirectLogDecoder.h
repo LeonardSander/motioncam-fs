@@ -4,11 +4,11 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <mutex>
 
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libavutil/rational.h>
@@ -46,18 +46,17 @@ public:
     const DirectLogVideoInfo& getVideoInfo() const { return mVideoInfo; }
     const std::vector<DirectLogFrameInfo>& getFrames() const { return mFrames; }
     
-    bool extractFrame(int frameNumber, std::vector<uint8_t>& rgbData);
-    bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& rgbData);
+    bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData);
+    bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint16_t>& rgbData);
     
     static bool isHLGVideo(const std::string& filePath);
 
 private:
     void initFFmpeg();
     void analyzeVideo();
-    void setupScaler();
     void cleanup();
-    bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint8_t>& rgbData);
-    void applyHLGToLinear(std::vector<uint8_t>& rgbData);
+    bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData);
+    void applyHLGToLinear(std::vector<uint16_t>& rgbData);
 
 private:
     std::string mFilePath;
@@ -67,15 +66,13 @@ private:
     AVFormatContext* mFormatContext;
     AVCodecContext* mCodecContext;
     const AVCodec* mCodec;
-    SwsContext* mSwsContext;
     AVFrame* mFrame;
-    AVFrame* mRGBFrame;
     AVPacket* mPacket;
     
     int mVideoStreamIndex;
-    uint8_t* mRGBBuffer;
-    int mRGBBufferSize;
     AVRational mTimeBase;
+    
+    mutable std::mutex mMutex;
 };
 
 } // namespace motioncam

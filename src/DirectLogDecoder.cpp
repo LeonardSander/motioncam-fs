@@ -11,19 +11,14 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
       mFormatContext(nullptr),
       mCodecContext(nullptr),
       mCodec(nullptr),
-      mSwsContext(nullptr),
       mFrame(nullptr),
-      mRGBFrame(nullptr),
       mPacket(nullptr),
-      mVideoStreamIndex(-1),
-      mRGBBuffer(nullptr),
-      mRGBBufferSize(0) {
+      mVideoStreamIndex(-1) {
     
     spdlog::info("DirectLogDecoder: Initializing for {}", filePath);
     
     initFFmpeg();
     analyzeVideo();
-    setupScaler();
 }
 
 DirectLogDecoder::~DirectLogDecoder() {
@@ -80,10 +75,9 @@ void DirectLogDecoder::initFFmpeg() {
     
     // Allocate frames and packet
     mFrame = av_frame_alloc();
-    mRGBFrame = av_frame_alloc();
     mPacket = av_packet_alloc();
     
-    if (!mFrame || !mRGBFrame || !mPacket) {
+    if (!mFrame || !mPacket) {
         throw std::runtime_error("Could not allocate frame or packet");
     }
     
@@ -113,13 +107,9 @@ void DirectLogDecoder::analyzeVideo() {
     // Check if HLG based on filename
     mVideoInfo.isHLG = boost::icontains(mFilePath, "HLG_NATIVE");
     
-    // Calculate FPS and duration
-    AVRational frameRate = mFormatContext->streams[mVideoStreamIndex]->r_frame_rate;
-    if (frameRate.den != 0) {
-        mVideoInfo.fps = static_cast<double>(frameRate.num) / frameRate.den;
-    } else {
-        mVideoInfo.fps = 30.0; // Default
-    }
+    // Don't rely on container's average framerate - we'll calculate from actual frame timestamps
+    // This allows proper CFR conversion handling similar to MCRAW
+    mVideoInfo.fps = 0.0; // Will be calculated from actual frame intervals
     
     mVideoInfo.duration = static_cast<double>(mFormatContext->duration) / AV_TIME_BASE;
     
@@ -147,38 +137,20 @@ void DirectLogDecoder::analyzeVideo() {
     
     // Seek back to beginning
     av_seek_frame(mFormatContext, mVideoStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
-    avcodec_flush_buffers(mCodecContext);
+    if (mCodecContext) {
+        avcodec_flush_buffers(mCodecContext);
+    }
     
     spdlog::info("DirectLogDecoder: Analyzed video - {}x{} @ {:.2f}fps, {} frames, format: {}, HLG: {}", 
                  mVideoInfo.width, mVideoInfo.height, mVideoInfo.fps, mVideoInfo.totalFrames, 
                  mVideoInfo.pixelFormat, mVideoInfo.isHLG);
 }
 
-void DirectLogDecoder::setupScaler() {
-    // Setup scaler to convert YUV to RGB
-    mSwsContext = sws_getContext(
-        mVideoInfo.width, mVideoInfo.height, mCodecContext->pix_fmt,
-        mVideoInfo.width, mVideoInfo.height, AV_PIX_FMT_RGB24,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
-    
-    if (!mSwsContext) {
-        throw std::runtime_error("Could not initialize scaler context");
-    }
-    
-    // Allocate RGB buffer
-    mRGBBufferSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, mVideoInfo.width, mVideoInfo.height, 1);
-    mRGBBuffer = static_cast<uint8_t*>(av_malloc(mRGBBufferSize));
-    
-    if (!mRGBBuffer) {
-        throw std::runtime_error("Could not allocate RGB buffer");
-    }
-    
-    // Setup RGB frame
-    av_image_fill_arrays(mRGBFrame->data, mRGBFrame->linesize, mRGBBuffer, 
-                        AV_PIX_FMT_RGB24, mVideoInfo.width, mVideoInfo.height, 1);
-}
 
-bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& rgbData) {
+
+bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbData) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) {
         return false;
     }
@@ -191,7 +163,9 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& rgbDa
         return false;
     }
     
-    avcodec_flush_buffers(mCodecContext);
+    if (mCodecContext) {
+        avcodec_flush_buffers(mCodecContext);
+    }
     
     // Read packets until we find our frame
     while (av_read_frame(mFormatContext, mPacket) >= 0) {
@@ -214,7 +188,7 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& rgbDa
     return false;
 }
 
-bool DirectLogDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& rgbData) {
+bool DirectLogDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<uint16_t>& rgbData) {
     // Find frame with closest timestamp
     auto it = std::lower_bound(mFrames.begin(), mFrames.end(), timestamp,
                               [](const DirectLogFrameInfo& frame, Timestamp ts) {
@@ -229,20 +203,97 @@ bool DirectLogDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<
     return extractFrame(frameNumber, rgbData);
 }
 
-bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint8_t>& rgbData) {
-    // Scale YUV to RGB
-    int result = sws_scale(mSwsContext, 
-                          yuvFrame->data, yuvFrame->linesize, 0, mVideoInfo.height,
-                          mRGBFrame->data, mRGBFrame->linesize);
+bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData) {
+    // Manual YUV to RGB conversion using Rec.2020 color space
+    // Input: YUV with limited range (16-235 for Y, 16-240 for UV in 8-bit, scaled for 10-bit)
+    // Output: RGB 16-bit per channel with full range (0-65535)
     
-    if (result != mVideoInfo.height) {
-        spdlog::error("Failed to scale frame");
-        return false;
+    const int width = mVideoInfo.width;
+    const int height = mVideoInfo.height;
+    
+    // Allocate output buffer (3 channels * 16-bit)
+    rgbData.resize(width * height * 3);
+    
+    // Rec.2020 YCbCr to RGB conversion matrix coefficients
+    const double Kr = 0.2627;
+    const double Kg = 0.6780;
+    const double Kb = 0.0593;
+    
+    // Determine bit depth and scaling factors
+    bool is10bit = (mCodecContext->pix_fmt == AV_PIX_FMT_YUV420P10LE || 
+                    mCodecContext->pix_fmt == AV_PIX_FMT_YUV422P10LE);
+    int bitDepth = is10bit ? 10 : 8;
+    int maxInput = (1 << bitDepth) - 1;  // 255 for 8-bit, 1023 for 10-bit
+    
+    // Limited range parameters
+    double yMin = 16.0 * (maxInput / 255.0);
+    double yMax = 235.0 * (maxInput / 255.0);
+    double cMin = 16.0 * (maxInput / 255.0);
+    double cMax = 240.0 * (maxInput / 255.0);
+    
+    // Get plane pointers and strides
+    uint8_t* yPlane = yuvFrame->data[0];
+    uint8_t* uPlane = yuvFrame->data[1];
+    uint8_t* vPlane = yuvFrame->data[2];
+    
+    int yStride = yuvFrame->linesize[0];
+    int uStride = yuvFrame->linesize[1];
+    int vStride = yuvFrame->linesize[2];
+    
+    // Determine chroma subsampling
+    int chromaHeightDiv = (mCodecContext->pix_fmt == AV_PIX_FMT_YUV422P10LE ? 1 : 2);
+    int chromaWidthDiv = 2;
+    
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            // Read Y value
+            double yVal;
+            if (is10bit) {
+                uint16_t* yPtr = reinterpret_cast<uint16_t*>(yPlane + y * yStride);
+                yVal = yPtr[x];
+            } else {
+                yVal = yPlane[y * yStride + x];
+            }
+            
+            // Read U and V values (with chroma subsampling)
+            int chromaX = x / chromaWidthDiv;
+            int chromaY = y / chromaHeightDiv;
+            
+            double uVal, vVal;
+            if (is10bit) {
+                uint16_t* uPtr = reinterpret_cast<uint16_t*>(uPlane + chromaY * uStride);
+                uint16_t* vPtr = reinterpret_cast<uint16_t*>(vPlane + chromaY * vStride);
+                uVal = uPtr[chromaX];
+                vVal = vPtr[chromaX];
+            } else {
+                uVal = uPlane[chromaY * uStride + chromaX];
+                vVal = vPlane[chromaY * vStride + chromaX];
+            }
+            
+            // Convert from limited range to full range [0, 1]
+            double yNorm = (yVal - yMin) / (yMax - yMin);
+            double uNorm = (uVal - cMin) / (cMax - cMin) - 0.5;
+            double vNorm = (vVal - cMin) / (cMax - cMin) - 0.5;
+            
+            // Clamp normalized values
+            yNorm = std::clamp(yNorm, 0.0, 1.0);
+            
+            // Rec.2020 YCbCr to RGB conversion
+            double r = yNorm + 2.0 * (1.0 - Kr) * vNorm;
+            double g = yNorm - 2.0 * Kb * (1.0 - Kb) / Kg * uNorm - 2.0 * Kr * (1.0 - Kr) / Kg * vNorm;
+            double b = yNorm + 2.0 * (1.0 - Kb) * uNorm;
+            
+            // Clamp to [0, 1] and convert to 16-bit full range
+            r = std::clamp(r, 0.0, 1.0);
+            g = std::clamp(g, 0.0, 1.0);
+            b = std::clamp(b, 0.0, 1.0);
+            
+            int idx = (y * width + x) * 3;
+            rgbData[idx + 0] = static_cast<uint16_t>(r * 65535.0 + 0.5);
+            rgbData[idx + 1] = static_cast<uint16_t>(g * 65535.0 + 0.5);
+            rgbData[idx + 2] = static_cast<uint16_t>(b * 65535.0 + 0.5);
+        }
     }
-    
-    // Copy RGB data
-    rgbData.resize(mRGBBufferSize);
-    std::memcpy(rgbData.data(), mRGBBuffer, mRGBBufferSize);
     
     // Apply HLG to linear conversion if needed
     if (mVideoInfo.isHLG) {
@@ -252,12 +303,12 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint8_t>& 
     return true;
 }
 
-void DirectLogDecoder::applyHLGToLinear(std::vector<uint8_t>& rgbData) {
+void DirectLogDecoder::applyHLGToLinear(std::vector<uint16_t>& rgbData) {
     // Convert HLG to linear
     // HLG OECF inverse (simplified)
     for (size_t i = 0; i < rgbData.size(); i += 3) {
         for (int c = 0; c < 3; ++c) {
-            float normalized = rgbData[i + c] / 255.0f;
+            float normalized = rgbData[i + c] / 65535.0f;
             
             // HLG inverse OECF
             float linear;
@@ -267,7 +318,7 @@ void DirectLogDecoder::applyHLGToLinear(std::vector<uint8_t>& rgbData) {
                 linear = (std::exp((normalized - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
             }
             
-            rgbData[i + c] = static_cast<uint8_t>(std::clamp(linear * 255.0f, 0.0f, 255.0f));
+            rgbData[i + c] = static_cast<uint16_t>(std::clamp(linear * 65535.0f, 0.0f, 65535.0f));
         }
     }
 }
@@ -277,22 +328,8 @@ bool DirectLogDecoder::isHLGVideo(const std::string& filePath) {
 }
 
 void DirectLogDecoder::cleanup() {
-    if (mRGBBuffer) {
-        av_free(mRGBBuffer);
-        mRGBBuffer = nullptr;
-    }
-    
-    if (mSwsContext) {
-        sws_freeContext(mSwsContext);
-        mSwsContext = nullptr;
-    }
-    
     if (mFrame) {
         av_frame_free(&mFrame);
-    }
-    
-    if (mRGBFrame) {
-        av_frame_free(&mRGBFrame);
     }
     
     if (mPacket) {

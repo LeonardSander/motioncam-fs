@@ -2,6 +2,8 @@
 
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
+#include <CalibrationData.h>
+#include <ExposureKeyframes.h>
 
 namespace BS {
 class thread_pool;
@@ -82,6 +84,7 @@ private:
     std::string mLevels;
     std::string mLogTransform;
     std::string mExposureCompensation;
+    std::optional<ExposureKeyframes> mExposureKeyframes;
     std::string mQuadBayerOption;
     FileRenderOptions mOptions;
     float mFps;
@@ -93,6 +96,7 @@ private:
     int mWidth;
     int mHeight;
     double mBaselineExpValue;
+    std::optional<CalibrationData> mCalibration;
     std::mutex mMutex;
 };
 

@@ -253,6 +253,61 @@
               </item>
               <item>
                 <property name="text">
+                <string>23.976</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>24</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>25</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>29.97</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>30</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>47.52</string>
+                </property>
+              </item><item>
+                <property name="text">
+                <string>48</string>
+                </property>
+              </item><item>
+                <property name="text">
+                <string>50</string>
+                </property>
+              </item><item>
+                <property name="text">
+                <string>59.94</string>
+                </property>
+              </item><item>
+                <property name="text">
+                <string>60</string>
+                </property>
+              </item><item>
+                <property name="text">
+                <string>119.88</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                <string>120</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
                 <string>Average (Testing)</string>
                 </property>
               </item>
@@ -303,6 +358,9 @@
              <property name="editable">
                 <bool>true</bool>
               </property>
+             <property name="toolTip">
+              <string>Enter constant value (e.g., "2ev") or keyframes (e.g., "0.2:-4, 0.4:2.4" or "start:-2, 0.5:0, end:2")</string>
+             </property>
              <item>
               <property name="text">
                <string>0ev</string>
@@ -333,6 +391,11 @@
                <string>-2ev</string>
               </property>
              </item>
+             <item>
+              <property name="text">
+               <string>start:-2, 0.5:0, end:2</string>
+              </property>
+             </item>
             </widget>
            </item>
            </layout>
@@ -340,7 +403,7 @@
          <item>
           <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings for consistent brightness.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings. Use constant value (e.g., "2ev") or keyframes for smooth transitions (e.g., "0.2:-4, 0.4:2.4"). Keyframe positions are normalized (0-1 or "start"/"end").&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

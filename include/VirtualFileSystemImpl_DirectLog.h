@@ -2,6 +2,8 @@
 
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
+#include <CalibrationData.h>
+#include <ExposureKeyframes.h>
 #include <memory>
 
 namespace BS {
@@ -61,7 +63,7 @@ private:
 
     bool isHLGVideo() const;
     void calculateFrameRateStats();
-    bool convertRGBToDNG(const std::vector<uint8_t>& rgbData, std::vector<uint8_t>& dngData, int frameNumber, Timestamp timestamp);
+    bool convertRGBToDNG(const std::vector<uint16_t>& rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp);
 
 
 private:
@@ -79,6 +81,7 @@ private:
     std::string mLevels;
     std::string mLogTransform;
     std::string mExposureCompensation;
+    std::optional<ExposureKeyframes> mExposureKeyframes;
     std::string mQuadBayerOption;
     FileRenderOptions mOptions;
     float mFps;
@@ -92,6 +95,7 @@ private:
     std::string mPixelFormat;
     bool mIsHLG;
     std::unique_ptr<DirectLogDecoder> mDecoder;
+    std::optional<CalibrationData> mCalibration;
     mutable std::mutex mMutex;
 };
 

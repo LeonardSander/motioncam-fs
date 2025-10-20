@@ -1,5 +1,6 @@
 #include "VirtualFileSystemImpl_DNG.h"
-#include "DNGSequenceDecoder.h"
+#include "DNGDecoder.h"
+#include "CalibrationData.h"
 #include "Utils.h"
 #include "LRUCache.h"
 #include "Types.h"
@@ -100,9 +101,19 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mQuadBayerOption(quadBayerOption),
         mOptions(options) {
     
-    // Initialize DNGSequenceDecoder
+    // Load calibration JSON if it exists (for DNG folder)
+    boost::filesystem::path srcPath(mSrcPath);
+    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    if (boost::filesystem::exists(calibPath)) {
+        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        if (mCalibration.has_value()) {
+            spdlog::info("Loaded calibration for DNG sequence: {}", calibPath.string());
+        }
+    }
+    
+    // Initialize DNGDecoder
     try {
-        mDecoder = std::make_unique<DNGSequenceDecoder>(mSrcPath);
+        mDecoder = std::make_unique<DNGDecoder>(mSrcPath);
         const auto& sequenceInfo = mDecoder->getSequenceInfo();
         
         mWidth = sequenceInfo.width;
@@ -119,7 +130,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                      mWidth, mHeight, mFps, mAvgFps, mMedFps, mTotalFrames);
     }
     catch (const std::exception& e) {
-        spdlog::error("Failed to initialize DNGSequenceDecoder: {}", e.what());
+        spdlog::error("Failed to initialize DNGDecoder: {}", e.what());
         throw;
     }
     
