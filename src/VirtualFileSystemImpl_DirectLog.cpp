@@ -94,7 +94,8 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         const std::string& levels,
         const std::string& logTransform,
         const std::string& exposureCompensation,
-        const std::string& quadBayerOption) :
+        const std::string& quadBayerOption,
+        const std::string& cfaPhase) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -117,6 +118,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mLogTransform(logTransform),
         mExposureCompensation(exposureCompensation),
         mQuadBayerOption(quadBayerOption),
+        mCfaPhase(cfaPhase),
         mOptions(options),
         mIsHLG(false) {
     
@@ -622,6 +624,117 @@ namespace {
         auto newSize = dstPtr - data.data();
         data.resize(newSize);
     }
+
+    // Single-channel Bayer encoding functions
+    void encodeTo12Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
+        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+        uint8_t* dstPtr = data.data();
+        
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x += 2) {
+                uint16_t v0 = srcPtr[0];
+                uint16_t v1 = srcPtr[1];
+                
+                dstPtr[0] = v0 >> 4;
+                dstPtr[1] = ((v0 & 0x0F) << 4) | (v1 >> 8);
+                dstPtr[2] = v1 & 0xFF;
+                
+                srcPtr += 2;
+                dstPtr += 3;
+            }
+        }
+        
+        auto newSize = dstPtr - data.data();
+        data.resize(newSize);
+    }
+
+    void encodeTo10Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
+        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+        uint8_t* dstPtr = data.data();
+        
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x += 4) {
+                uint16_t s[4];
+                for (int i = 0; i < 4; i++) {
+                    s[i] = srcPtr[i];
+                }
+                
+                dstPtr[0] = s[0] >> 2;
+                dstPtr[1] = ((s[0] & 0x03) << 6) | (s[1] >> 4);
+                dstPtr[2] = ((s[1] & 0x0F) << 4) | (s[2] >> 6);
+                dstPtr[3] = ((s[2] & 0x3F) << 2) | (s[3] >> 8);
+                dstPtr[4] = s[3] & 0xFF;
+                
+                srcPtr += 4;
+                dstPtr += 5;
+            }
+        }
+        
+        auto newSize = dstPtr - data.data();
+        data.resize(newSize);
+    }
+
+    void encodeTo8Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
+        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+        uint8_t* dstPtr = data.data();
+        
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x++) {
+                dstPtr[0] = srcPtr[0] & 0xFF;
+                srcPtr += 1;
+                dstPtr += 1;
+            }
+        }
+        
+        auto newSize = dstPtr - data.data();
+        data.resize(newSize);
+    }
+
+    void encodeTo6Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
+        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+        uint8_t* dstPtr = data.data();
+        
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x += 4) {
+                uint8_t v[4];
+                for (int i = 0; i < 4; i++) {
+                    v[i] = srcPtr[i] & 0x3F;
+                }
+                
+                dstPtr[0] = (v[0] << 2) | (v[1] >> 4);
+                dstPtr[1] = ((v[1] & 0x0F) << 4) | (v[2] >> 2);
+                dstPtr[2] = ((v[2] & 0x03) << 6) | v[3];
+                
+                srcPtr += 4;
+                dstPtr += 3;
+            }
+        }
+        
+        auto newSize = dstPtr - data.data();
+        data.resize(newSize);
+    }
+
+    void encodeTo4Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
+        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+        uint8_t* dstPtr = data.data();
+        
+        for (uint32_t y = 0; y < height; y++) {
+            for (uint32_t x = 0; x < width; x += 2) {
+                uint8_t v[2];
+                for (int i = 0; i < 2; i++) {
+                    v[i] = srcPtr[i] & 0x0F;
+                }
+                
+                dstPtr[0] = (v[0] << 4) | v[1];
+                
+                srcPtr += 2;
+                dstPtr += 1;
+            }
+        }
+        
+        auto newSize = dstPtr - data.data();
+        data.resize(newSize);
+    }
 }
 
 bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
@@ -697,25 +810,79 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             processedRgbData = rgbData;
         }
         
-        // Pack data to actual bit depth
-        std::vector<uint8_t> imageBytes(width * height * 3 * 2);
-        std::memcpy(imageBytes.data(), processedRgbData.data(), processedRgbData.size() * sizeof(uint16_t));
+        // Check if remosaicing is requested (from render options)
+        bool shouldRemosaic = (mOptions & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
+        
+        // Get CFA phase from calibration JSON if available, otherwise use UI setting
+        std::string cfaPhase = "bggr";
+        if (mCalibration.has_value() && !mCalibration->cfaPhase.empty()) {
+            // JSON override takes priority
+            cfaPhase = mCalibration->cfaPhase;
+        } else if (!mCfaPhase.empty() && mCfaPhase != "Don't override CFA") {
+            // Use UI setting if not "Don't override CFA"
+            cfaPhase = mCfaPhase;
+        }
+        // else: keep default "bggr"
+        
+        // Convert to lowercase for consistency
+        std::transform(cfaPhase.begin(), cfaPhase.end(), cfaPhase.begin(), ::tolower);
+        
+        std::vector<uint8_t> imageBytes;
+        int samplesPerPixel = 3;
+        int photometric = 2; // RGB
+        
+        if (shouldRemosaic) {
+            // Convert RGB to Bayer CFA pattern
+            std::vector<uint16_t> bayerData;
+            utils::remosaicRGBToBayer(processedRgbData, bayerData, width, height, cfaPhase);
+            
+            // Pack Bayer data to actual bit depth
+            imageBytes.resize(width * height * 2);
+            std::memcpy(imageBytes.data(), bayerData.data(), bayerData.size() * sizeof(uint16_t));
+            
+            samplesPerPixel = 1; // Single channel for CFA
+            photometric = 32803; // CFA (Color Filter Array)
+        } else {
+            // Pack RGB data to actual bit depth
+            imageBytes.resize(width * height * 3 * 2);
+            std::memcpy(imageBytes.data(), processedRgbData.data(), processedRgbData.size() * sizeof(uint16_t));
+        }
         
         if (applyLogCurve) {
             if (encodeBits <= 4) {
-                encodeRGBTo4Bit(imageBytes, width, height);
+                if (shouldRemosaic) {
+                    encodeTo4Bit(imageBytes, width, height);
+                } else {
+                    encodeRGBTo4Bit(imageBytes, width, height);
+                }
                 encodeBits = 4;
             } else if (encodeBits <= 6) {
-                encodeRGBTo6Bit(imageBytes, width, height);
+                if (shouldRemosaic) {
+                    encodeTo6Bit(imageBytes, width, height);
+                } else {
+                    encodeRGBTo6Bit(imageBytes, width, height);
+                }
                 encodeBits = 6;
             } else if (encodeBits <= 8) {
-                encodeRGBTo8Bit(imageBytes, width, height);
+                if (shouldRemosaic) {
+                    encodeTo8Bit(imageBytes, width, height);
+                } else {
+                    encodeRGBTo8Bit(imageBytes, width, height);
+                }
                 encodeBits = 8;
             } else if (encodeBits <= 10) {
-                encodeRGBTo10Bit(imageBytes, width, height);
+                if (shouldRemosaic) {
+                    encodeTo10Bit(imageBytes, width, height);
+                } else {
+                    encodeRGBTo10Bit(imageBytes, width, height);
+                }
                 encodeBits = 10;
             } else if (encodeBits <= 12) {
-                encodeRGBTo12Bit(imageBytes, width, height);
+                if (shouldRemosaic) {
+                    encodeTo12Bit(imageBytes, width, height);
+                } else {
+                    encodeRGBTo12Bit(imageBytes, width, height);
+                }
                 encodeBits = 12;
             }
             // else keep 16-bit
@@ -728,22 +895,38 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetBigEndian(false);
         dng.SetImageWidth(width);
         dng.SetImageLength(height);
-        dng.SetSamplesPerPixel(3); // RGB
+        dng.SetSamplesPerPixel(samplesPerPixel);
         
         unsigned short bitsPerSample[3] = {
             static_cast<unsigned short>(encodeBits),
             static_cast<unsigned short>(encodeBits),
             static_cast<unsigned short>(encodeBits)
         };
-        dng.SetBitsPerSample(3, bitsPerSample);
+        dng.SetBitsPerSample(samplesPerPixel, bitsPerSample);
         
-        // Photometric interpretation: RGB (not CFA)
-        dng.SetPhotometric(2); // RGB
-        dng.SetPlanarConfig(1); // Chunky (interleaved RGB)
+        // Photometric interpretation
+        dng.SetPhotometric(photometric);
+        dng.SetPlanarConfig(1); // Chunky
         dng.SetCompression(1);  // No compression
         
         unsigned short sampleFormat[3] = {1, 1, 1}; // Unsigned integer
-        dng.SetSampleFormat(3, sampleFormat);
+        dng.SetSampleFormat(samplesPerPixel, sampleFormat);
+        
+        // Set CFA pattern if remosaicing
+        if (shouldRemosaic) {
+            unsigned char cfaPattern[4];
+            if (cfaPhase == "bggr") {
+                cfaPattern[0] = 2; cfaPattern[1] = 1; cfaPattern[2] = 1; cfaPattern[3] = 0; // B G G R
+            } else if (cfaPhase == "rggb") {
+                cfaPattern[0] = 0; cfaPattern[1] = 1; cfaPattern[2] = 1; cfaPattern[3] = 2; // R G G B
+            } else if (cfaPhase == "grbg") {
+                cfaPattern[0] = 1; cfaPattern[1] = 0; cfaPattern[2] = 2; cfaPattern[3] = 1; // G R B G
+            } else { // gbrg
+                cfaPattern[0] = 1; cfaPattern[1] = 2; cfaPattern[2] = 0; cfaPattern[3] = 1; // G B R G
+            }
+            dng.SetCFAPattern(4, cfaPattern);
+            dng.SetCFALayout(1); // Rectangular (or square) layout
+        }
         
         // Set DNG version
         dng.SetDNGVersion(1, 4, 0, 0);
@@ -763,6 +946,9 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
         if (applyLogCurve) {
             desc << " (Log " << encodeBits << "-bit)";
+        }
+        if (shouldRemosaic) {
+            desc << " (Remosaiced " << cfaPhase << ")";
         }
         dng.SetImageDescription(desc.str());
         
@@ -875,7 +1061,8 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(
     const std::string& levels, 
     const std::string& logTransform, 
     const std::string& exposureCompensation, 
-    const std::string& quadBayerOption) {
+    const std::string& quadBayerOption,
+    const std::string& cfaPhase) {
     
     std::lock_guard<std::mutex> lock(mMutex);
     
@@ -888,9 +1075,20 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(
     mLogTransform = logTransform;
     mExposureCompensation = exposureCompensation;
     mQuadBayerOption = quadBayerOption;
+    mCfaPhase = cfaPhase;
     
     // Re-parse exposure keyframes
     mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
+    
+    // Reload calibration JSON if it exists
+    boost::filesystem::path srcPath(mSrcPath);
+    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    if (boost::filesystem::exists(calibPath)) {
+        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        if (mCalibration.has_value()) {
+            spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
+        }
+    }
     
     init(options);
 }

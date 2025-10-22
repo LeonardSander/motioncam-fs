@@ -79,6 +79,7 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8,
     RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
     RENDER_OPT_INTERPRET_AS_QUAD_BAYER      = 1 << 10,
+    RENDER_OPT_REMOSAIC_TO_BAYER            = 1 << 11,
 };
 
 // Overload bitwise OR operator
@@ -145,6 +146,9 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER) {
         flags.push_back("INTERPRET_AS_QUAD_BAYER");
+    }
+    if (options & RENDER_OPT_REMOSAIC_TO_BAYER) {
+        flags.push_back("REMOSAIC_TO_BAYER");
     }
     
     std::string result;

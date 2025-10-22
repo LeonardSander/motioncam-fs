@@ -218,7 +218,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const std::string& levels,
         const std::string& logTransform,
         const std::string& exposureCompensation,
-        const std::string& quadBayerOption) :
+        const std::string& quadBayerOption,
+        const std::string& cfaPhase) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -241,6 +242,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mLogTransform(logTransform),
         mExposureCompensation(exposureCompensation),
         mQuadBayerOption(quadBayerOption),
+        mCfaPhase(cfaPhase),
         mOptions(options) {
     
     // Parse exposure keyframes if the input contains keyframe syntax
@@ -611,7 +613,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 mLogTransform,
                 frameExposureComp,
                 mQuadBayerOption,
-                mCalibration);
+                mCalibration,
+                mCfaPhase);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -695,7 +698,7 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, const std::string& cfaPhase) {
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;
@@ -705,6 +708,7 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int d
     mLogTransform = logTransform;
     mExposureCompensation = exposureCompensation;
     mQuadBayerOption = quadBayerOption;
+    mCfaPhase = cfaPhase;
     
     // Re-parse exposure keyframes
     mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);

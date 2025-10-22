@@ -2,6 +2,13 @@
 #include "ui_mainwindow.h"
 #include "CalibrationData.h"
 
+// Prevent Windows.h macros from interfering with std::max/min
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -16,6 +23,7 @@
 #include <QFrame>
 #include <algorithm>
 #include <QTimer>
+#include <QtConcurrent>
 #include <fstream>
 #include <sstream>
 #include <spdlog/spdlog.h>
@@ -66,6 +74,9 @@ namespace {
         if(ui.quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
 
+        if(ui.remosaicCheckBox->checkState() == Qt::CheckState::Checked)
+            options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+
         return options;
     }
 }
@@ -74,8 +85,26 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , mDraftQuality(1)
+    , mProcessingWatcher(nullptr)
+    , mProcessingInProgress(false)
+#ifdef _WIN32
+    , mTaskbarList(nullptr)
+#endif
 {
     ui->setupUi(this);
+
+#ifdef _WIN32
+    // Initialize COM for taskbar progress
+    CoInitialize(nullptr);
+    CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&mTaskbarList));
+    if (mTaskbarList) {
+        mTaskbarList->HrInit();
+    }
+#endif
+
+    // Setup processing watcher
+    mProcessingWatcher = new QFutureWatcher<void>(this);
+    connect(mProcessingWatcher, &QFutureWatcher<void>::finished, this, &MainWindow::onProcessingFinished);
 
 #ifdef _WIN32
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Win>();
@@ -101,6 +130,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->quadBayerCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
@@ -124,6 +154,9 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(ui->quadBayerComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onQuadBayerChanged(text.toStdString());
+    });
+    connect(ui->cfaPhaseComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        onCfaPhaseChanged(text.toStdString());
     });
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
@@ -150,6 +183,18 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow() {
     saveSettings();
+    
+    // Wait for any ongoing processing
+    if (mProcessingWatcher && mProcessingWatcher->isRunning()) {
+        mProcessingWatcher->waitForFinished();
+    }
+
+#ifdef _WIN32
+    if (mTaskbarList) {
+        mTaskbarList->Release();
+    }
+    CoUninitialize();
+#endif
 
     delete ui;
 }
@@ -176,6 +221,7 @@ void MainWindow::saveSettings() {
     settings.setValue("levels", ui->levelsComboBox->currentText());
     settings.setValue("logTransform", ui->logTransformComboBox->currentText());
     settings.setValue("quadBayerOption", ui->quadBayerComboBox->currentText());
+    settings.setValue("cfaPhase", ui->cfaPhaseComboBox->currentText());
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -232,6 +278,7 @@ void MainWindow::restoreSettings() {
     mCFRTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mExposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
     mQuadBayerOption = (!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
+    mCfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
     mCropTarget = settings.value("cropTarget").toString().toStdString();
     mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
     mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
@@ -247,6 +294,7 @@ void MainWindow::restoreSettings() {
     ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
     ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mExposureCompensation));
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mCfaPhase));
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels));  
@@ -328,7 +376,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     try {
         mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, filePath.toStdString(), dstPath.toStdString());
+            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, mCfaPhase, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -628,7 +676,7 @@ void MainWindow::updateFpsLabels() {
     auto renderOptions = getRenderOptions(*ui);
     
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, mCfaPhase);
     }
     
     // Find all fps labels in the scroll area
@@ -662,18 +710,92 @@ void MainWindow::updateFpsLabels() {
 }
 
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
-    auto it = mMountedFiles.begin();
-    auto renderOptions = getRenderOptions(*ui);
-
     updateUi();
+    scheduleOptionsUpdate();
+}
 
-    while(it != mMountedFiles.end()) {        
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption);
-        ++it;
+void MainWindow::scheduleOptionsUpdate() {
+    // Don't start new processing if already in progress
+    if (mProcessingInProgress || (mProcessingWatcher && mProcessingWatcher->isRunning())) {
+        return;
     }
     
-    // Update fps labels after a short delay to ensure updateOptions has completed
-    QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+    // If no files mounted, nothing to do
+    if (mMountedFiles.isEmpty()) {
+        return;
+    }
+    
+    mProcessingInProgress = true;
+    
+    // Capture current settings
+    auto renderOptions = getRenderOptions(*ui);
+    auto draftQuality = mDraftQuality;
+    auto cfrTarget = mCFRTarget;
+    auto cropTarget = mCropTarget;
+    auto cameraModel = mCameraModel;
+    auto levels = mLevels;
+    auto logTransform = mLogTransform;
+    auto exposureCompensation = mExposureCompensation;
+    auto quadBayerOption = mQuadBayerOption;
+    auto cfaPhase = mCfaPhase;
+    auto mountedFiles = mMountedFiles;
+    auto filesystem = mFuseFilesystem.get();
+    
+    // Show progress
+    onProcessingStarted();
+    
+    // Run processing in background thread using QtConcurrent
+    QFuture<void> future = QtConcurrent::run([this, filesystem, renderOptions, draftQuality, cfrTarget, cropTarget, 
+                                               cameraModel, levels, logTransform, exposureCompensation, 
+                                               quadBayerOption, cfaPhase, mountedFiles]() {
+        int current = 0;
+        int total = mountedFiles.size();
+        
+        for (const auto& file : mountedFiles) {
+            filesystem->updateOptions(file.mountId, renderOptions, draftQuality, cfrTarget, 
+                                     cropTarget, cameraModel, levels, logTransform, 
+                                     exposureCompensation, quadBayerOption, cfaPhase);
+            current++;
+            
+            // Update progress on main thread
+            QMetaObject::invokeMethod(this, "onProcessingProgress", Qt::QueuedConnection,
+                                     Q_ARG(int, current), Q_ARG(int, total));
+        }
+    });
+    
+    mProcessingWatcher->setFuture(future);
+}
+
+void MainWindow::onProcessingStarted() {
+#ifdef _WIN32
+    if (mTaskbarList) {
+        HWND hwnd = reinterpret_cast<HWND>(winId());
+        mTaskbarList->SetProgressState(hwnd, TBPF_NORMAL);
+        mTaskbarList->SetProgressValue(hwnd, 0, mMountedFiles.size());
+    }
+#endif
+}
+
+void MainWindow::onProcessingProgress(int current, int total) {
+#ifdef _WIN32
+    if (mTaskbarList) {
+        HWND hwnd = reinterpret_cast<HWND>(winId());
+        mTaskbarList->SetProgressValue(hwnd, current, total);
+    }
+#endif
+}
+
+void MainWindow::onProcessingFinished() {
+#ifdef _WIN32
+    if (mTaskbarList) {
+        HWND hwnd = reinterpret_cast<HWND>(winId());
+        mTaskbarList->SetProgressState(hwnd, TBPF_NOPROGRESS);
+    }
+#endif
+    mProcessingInProgress = false;
+    
+    // Update FPS labels after processing completes
+    updateFpsLabels();
 }
 
 void MainWindow::onDraftModeQualityChanged(int index) {
@@ -684,42 +806,47 @@ void MainWindow::onDraftModeQualityChanged(int index) {
     else if(index == 2)
         mDraftQuality = 8;
 
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onCFRTargetChanged(std::string input) {
     mCFRTarget = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onCropTargetChanged(std::string input) {
     mCropTarget = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onCamModelOverrideChanged(std::string input) {
     mCameraModel = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onLevelsChanged(std::string input) {
     mLevels = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onLogTransformChanged(std::string input) {
     mLogTransform = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onExposureCompensationChanged(std::string input) {
     mExposureCompensation = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onQuadBayerChanged(std::string input) {
     mQuadBayerOption = input;
-    onRenderSettingsChanged(Qt::CheckState::Checked);
+    scheduleOptionsUpdate();
+}
+
+void MainWindow::onCfaPhaseChanged(std::string input) {
+    mCfaPhase = input;
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::onSetCacheFolder(bool checked) {
@@ -763,6 +890,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     mLevels = "Dynamic";
     mLogTransform = "Keep Input";
     mQuadBayerOption = "Wrong CFA Metadata";
+    mCfaPhase = "Don't override CFA";
     mDraftQuality = 1;
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
@@ -771,7 +899,8 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mCfaPhase));   
 
     updateUi();
 }

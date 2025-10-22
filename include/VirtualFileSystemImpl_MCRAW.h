@@ -31,7 +31,8 @@ public:
         const std::string& levels,
         const std::string& logTransform,
         const std::string& exposureCompensation = "0ev",
-        const std::string& quadBayerOption = "Remosaic");
+        const std::string& quadBayerOption = "Remosaic",
+        const std::string& cfaPhase = "bggr");
 
     ~VirtualFileSystemImpl_MCRAW();
 
@@ -46,7 +47,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption) override;
+    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, const std::string& cfaPhase = "bggr") override;
     FileInfo getFileInfo() const;
 
 private:
@@ -86,6 +87,7 @@ private:
     std::string mExposureCompensation;
     std::optional<ExposureKeyframes> mExposureKeyframes;
     std::string mQuadBayerOption;
+    std::string mCfaPhase;
     FileRenderOptions mOptions;
     float mFps;
     float mMedFps;

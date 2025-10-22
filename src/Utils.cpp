@@ -1072,7 +1072,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::string logTransform,
     std::string exposureCompensation,
     std::string quadBayerOption,
-    const std::optional<CalibrationData>& calibration)
+    const std::optional<CalibrationData>& calibration,
+    std::string cfaPhase)
 {
     Measure m("generateDng");
 
@@ -1082,13 +1083,35 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::array<uint8_t, 4> cfa;
     std::array<uint8_t, 16> qcfa;
 
-    if(cameraConfiguration.sensorArrangement == "rggb")
+    // Determine CFA pattern with priority: cfaPhase > calibration > metadata
+    std::string sensorArrangement = cameraConfiguration.sensorArrangement;
+    
+    // Apply cfaPhase override if specified
+    if (!cfaPhase.empty() && cfaPhase != "Don't override CFA") {
+        std::string phase = cfaPhase;
+        std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
+        if (phase == "bggr" || phase == "rggb" || phase == "grbg" || phase == "gbrg") {
+            sensorArrangement = phase;
+            spdlog::debug("CFA phase override applied: {}", sensorArrangement);
+        }
+    }
+    // Apply calibration cfaPhase if no UI override and calibration exists
+    else if (calibration && !calibration->cfaPhase.empty()) {
+        std::string phase = calibration->cfaPhase;
+        std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
+        if (phase == "bggr" || phase == "rggb" || phase == "grbg" || phase == "gbrg") {
+            sensorArrangement = phase;
+            spdlog::debug("CFA phase from calibration: {}", sensorArrangement);
+        }
+    }
+
+    if(sensorArrangement == "rggb")
         cfa = { 0, 1, 1, 2 };
-    else if(cameraConfiguration.sensorArrangement == "bggr")
+    else if(sensorArrangement == "bggr")
         cfa = { 2, 1, 1, 0 };
-    else if(cameraConfiguration.sensorArrangement == "grbg")
+    else if(sensorArrangement == "grbg")
         cfa = { 1, 0, 2, 1 };
-    else if(cameraConfiguration.sensorArrangement == "gbrg")
+    else if(sensorArrangement == "gbrg")
         cfa = { 1, 2, 0, 1 };
     else
         throw std::runtime_error("Invalid sensor arrangement");
@@ -1435,6 +1458,57 @@ std::pair<int, int> toFraction(float frameRate, int base) {
     denominator /= divisor;
 
     return std::make_pair(numerator, denominator);
+}
+
+void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData, 
+                        int width, int height, const std::string& cfaPhase) {
+    // Determine CFA pattern (default to BGGR if not specified or invalid)
+    std::string pattern = cfaPhase.empty() ? "bggr" : cfaPhase;
+    std::transform(pattern.begin(), pattern.end(), pattern.begin(), ::tolower);
+    
+    // Validate pattern
+    if (pattern != "bggr" && pattern != "rggb" && pattern != "grbg" && pattern != "gbrg") {
+        pattern = "bggr";
+    }
+    
+    // Allocate output buffer (single channel)
+    bayerData.resize(width * height);
+    
+    // Map pattern to channel indices at each position
+    // Pattern format: [0,0] [0,1] [1,0] [1,1]
+    int channelMap[2][2]; // [row%2][col%2] -> channel (0=R, 1=G, 2=B)
+    
+    if (pattern == "bggr") {
+        // B G
+        // G R
+        channelMap[0][0] = 2; channelMap[0][1] = 1;
+        channelMap[1][0] = 1; channelMap[1][1] = 0;
+    } else if (pattern == "rggb") {
+        // R G
+        // G B
+        channelMap[0][0] = 0; channelMap[0][1] = 1;
+        channelMap[1][0] = 1; channelMap[1][1] = 2;
+    } else if (pattern == "grbg") {
+        // G R
+        // B G
+        channelMap[0][0] = 1; channelMap[0][1] = 0;
+        channelMap[1][0] = 2; channelMap[1][1] = 1;
+    } else { // gbrg
+        // G B
+        // R G
+        channelMap[0][0] = 1; channelMap[0][1] = 2;
+        channelMap[1][0] = 0; channelMap[1][1] = 1;
+    }
+    
+    // Convert RGB to Bayer by selecting appropriate channel for each pixel
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int channel = channelMap[y % 2][x % 2];
+            int rgbIdx = (y * width + x) * 3 + channel;
+            int bayerIdx = y * width + x;
+            bayerData[bayerIdx] = rgbData[rgbIdx];
+        }
+    }
 }
 
 } // namespace utils

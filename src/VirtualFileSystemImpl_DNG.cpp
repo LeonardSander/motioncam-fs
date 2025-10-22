@@ -76,7 +76,8 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         const std::string& levels,
         const std::string& logTransform,
         const std::string& exposureCompensation,
-        const std::string& quadBayerOption) :
+        const std::string& quadBayerOption,
+        const std::string& cfaPhase) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -309,7 +310,8 @@ void VirtualFileSystemImpl_DNG::updateOptions(
     const std::string& levels, 
     const std::string& logTransform, 
     const std::string& exposureCompensation, 
-    const std::string& quadBayerOption) {
+    const std::string& quadBayerOption,
+    const std::string& cfaPhase) {
     
     std::lock_guard<std::mutex> lock(mMutex);
     
@@ -322,6 +324,7 @@ void VirtualFileSystemImpl_DNG::updateOptions(
     mLogTransform = logTransform;
     mExposureCompensation = exposureCompensation;
     mQuadBayerOption = quadBayerOption;
+    // Note: cfaPhase is only used for DirectLog, not DNG
     
     init(options);
 }

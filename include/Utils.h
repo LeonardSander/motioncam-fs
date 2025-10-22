@@ -172,10 +172,16 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::string logTransform,
     std::string exposureCompensation,
     std::string quadBayerOption,
-    const std::optional<CalibrationData>& calibration = std::nullopt
+    const std::optional<CalibrationData>& calibration = std::nullopt,
+    std::string cfaPhase = ""
 );
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);
+
+// Remosaic RGB data to Bayer CFA pattern
+// cfaPhase: "bggr", "rggb", "grbg", "gbrg" (defaults to "bggr" if empty)
+void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData, 
+                        int width, int height, const std::string& cfaPhase = "bggr");
 
 } // namespace utils
 } // namespace motioncam

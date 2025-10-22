@@ -937,6 +937,72 @@
         </layout>
        </item>
        <item>
+        <layout class="QVBoxLayout" name="remosaicSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <layout class="QHBoxLayout" name="remosaicLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="remosaicCheckBox">
+             <property name="text">
+              <string>Remosaic</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="cfaPhaseComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>120</width>
+               <height>30</height>
+              </size>
+             </property>
+             <item>
+              <property name="text">
+               <string>Don't override CFA</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>BGGR</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>RGGB</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>GRBG</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>GBRG</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="remosaicInfoLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Convert DirectLog RGB to Bayer mosaic CFA pattern.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
         <layout class="QVBoxLayout" name="quadBayerSection">
          <property name="spacing">
           <number>8</number>

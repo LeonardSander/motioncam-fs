@@ -13,6 +13,7 @@ struct CalibrationData {
     std::array<float, 9> forwardMatrix1;
     std::array<float, 9> forwardMatrix2;
     std::array<float, 3> asShotNeutral;
+    std::string cfaPhase;  // Bayer pattern: "bggr", "rggb", "grbg", "gbrg"
     
     bool hasColorMatrix1 = false;
     bool hasColorMatrix2 = false;

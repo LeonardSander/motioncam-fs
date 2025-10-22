@@ -7,7 +7,16 @@
 #include <QMainWindow>
 #include <QList>
 #include <QString>
+#include <QFutureWatcher>
 #include <optional>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shobjidl.h>
+#endif
 
 namespace motioncam {
     struct MountedFile {
@@ -65,6 +74,11 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
+    void onProcessingStarted();
+    void onProcessingFinished();
+    void onProcessingProgress(int current, int total);
+
+private slots:
     void onRenderSettingsChanged(const Qt::CheckState &state);
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
@@ -75,6 +89,7 @@ private slots:
     void onLogTransformChanged(std::string input);
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
+    void onCfaPhaseChanged(std::string input);
     void onSetDefaultSettings(bool checked);
 
     void playFile(const QString& path);
@@ -88,6 +103,7 @@ private:
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    void scheduleOptionsUpdate();
 
 private:
     Ui::MainWindow *ui;
@@ -102,7 +118,15 @@ private:
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    std::string mCfaPhase;
     std::optional<motioncam::CalibrationData> mGlobalCalibration;
+    
+    QFutureWatcher<void>* mProcessingWatcher;
+    bool mProcessingInProgress;
+    
+#ifdef _WIN32
+    ITaskbarList3* mTaskbarList;
+#endif
 };
 
 #endif // MAINWINDOW_H

@@ -87,10 +87,14 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             data.hasAsShotNeutral = true;
         }
         
+        if (j.contains("cfaPhase")) {
+            data.cfaPhase = j["cfaPhase"].get<std::string>();
+        }
+        
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 || 
             data.hasForwardMatrix1 || data.hasForwardMatrix2 || 
-            data.hasAsShotNeutral) {
+            data.hasAsShotNeutral || !data.cfaPhase.empty()) {
             return data;
         }
         
@@ -112,7 +116,9 @@ std::string CalibrationData::createExampleJson() {
   "_colorMatrix2": [0.9329, -0.3914, -0.0326, -0.5806, 1.4092, 0.1827, -0.0913, 0.1761, 0.5872],
   "_forwardMatrix1": [0.6484, 0.2734, 0.0469, 0.2344, 0.8984, -0.1328, 0.0469, -0.1797, 0.9609],
   "_forwardMatrix2": [0.6875, 0.1563, 0.125, 0.2734, 0.7578, -0.0313, 0.0859, -0.4688, 1.2109],
-  "_asShotNeutral": [0.5, 1.0, 0.5]
+  "_asShotNeutral": [0.5, 1.0, 0.5],
+  "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
+  "_cfaPhase": "bggr"
 })";
 }
 
