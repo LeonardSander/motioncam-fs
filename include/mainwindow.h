@@ -3,6 +3,7 @@
 
 #include "IFuseFileSystem.h"
 #include "CalibrationData.h"
+#include "RenderConfig.h"
 
 #include <QMainWindow>
 #include <QList>
@@ -106,19 +107,14 @@ private:
     void scheduleOptionsUpdate();
 
 private:
+    motioncam::RenderConfig buildRenderConfig() const;
+
+private:
     Ui::MainWindow *ui;
     std::unique_ptr<motioncam::IFuseFileSystem> mFuseFilesystem;
     QList<motioncam::MountedFile> mMountedFiles;
     QString mCacheRootFolder;
-    int mDraftQuality;
-    std::string mCFRTarget;
-    std::string mCropTarget;    
-    std::string mCameraModel;
-    std::string mLevels;
-    std::string mLogTransform;
-    std::string mExposureCompensation;
-    std::string mQuadBayerOption;
-    std::string mCfaPhase;
+    motioncam::RenderConfig mRenderConfig;
     std::optional<motioncam::CalibrationData> mGlobalCalibration;
     
     QFutureWatcher<void>* mProcessingWatcher;

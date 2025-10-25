@@ -4,6 +4,7 @@
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
 #include <ExposureKeyframes.h>
+#include <RenderConfig.h>
 #include <memory>
 
 namespace BS {
@@ -22,18 +23,9 @@ public:
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        FileRenderOptions options,
-        int draftScale,
-        const std::string& cfrTarget,
-        const std::string& cropTarget,
+        const RenderConfig& config,
         const std::string& file,
-        const std::string& baseName,
-        const std::string& cameraModel,
-        const std::string& levels,
-        const std::string& logTransform,
-        const std::string& exposureCompensation = "0ev",
-        const std::string& quadBayerOption = "Remosaic",
-        const std::string& cfaPhase = "bggr");
+        const std::string& baseName);
 
     ~VirtualFileSystemImpl_DirectLog();
 
@@ -48,11 +40,11 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, const std::string& cfaPhase = "bggr") override;
+    void updateOptions(const RenderConfig& config) override;
     FileInfo getFileInfo() const override;
 
 private:
-    void init(FileRenderOptions options);
+    void init();
     
     size_t generateFrame(
         const Entry& entry,
@@ -75,17 +67,8 @@ private:
     const std::string mBaseName;
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
-    int mDraftScale;
-    std::string mCFRTarget;
-    std::string mCropTarget;
-    std::string mCameraModel;    
-    std::string mLevels;
-    std::string mLogTransform;
-    std::string mExposureCompensation;
+    RenderConfig mConfig;
     std::optional<ExposureKeyframes> mExposureKeyframes;
-    std::string mQuadBayerOption;
-    std::string mCfaPhase;
-    FileRenderOptions mOptions;
     float mFps;
     float mMedFps;
     float mAvgFps;

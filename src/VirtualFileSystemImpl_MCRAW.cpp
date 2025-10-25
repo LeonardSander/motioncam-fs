@@ -1,4 +1,5 @@
 #include "VirtualFileSystemImpl_MCRAW.h"
+#include "VirtualFileSystemImpl.h"
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
 #include "CalibrationData.h"
@@ -17,209 +18,17 @@
 #include <audiofile/AudioFile.h>
 
 #include <algorithm>
-#include <sstream>
 #include <tuple>
 
 namespace motioncam {
-
-namespace {
-
-#ifdef _WIN32
-    constexpr std::string_view DESKTOP_INI = R"([.ShellClassInfo]
-ConfirmFileOp=0
-
-[ViewState]
-Mode=4
-Vid={137E7700-3573-11CF-AE69-08002B2E1262}
-FolderType=Generic
-
-[{5984FFE0-28D4-11CF-AE66-08002B2E1262}]
-Mode=4
-LogicalViewMode=1
-IconSize=16
-
-[LocalizedFileNames]
-)";
-
-#endif
-
-    std::string extractFilenameWithoutExtension(const std::string& fullPath) {
-        boost::filesystem::path p(fullPath);
-        return p.stem().string();
-    }
-
-    struct FrameRateInfo {
-        float medianFrameRate;
-        float averageFrameRate;
-    };
-
-    FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
-        // Need at least 2 frames to calculate frame rate
-        if (frames.size() < 2) {
-            return {0.0f, 0.0f};
-        }
-
-        // Use running average to prevent overflow
-        double avgDuration = 0.0;
-        int validFrames = 0;
-        std::vector<double> durations;  // Store all valid durations for median calculation
-
-        for (size_t i = 1; i < frames.size(); ++i) {
-            double duration = static_cast<double>(frames[i] - frames[i-1]);
-
-            if (duration > 0) {
-                // Update running average
-                // new_avg = old_avg + (new_value - old_avg) / (count + 1)
-                avgDuration = avgDuration + (duration - avgDuration) / (validFrames + 1);
-                durations.push_back(duration);  // Store duration for median calculation
-                validFrames++;
-            }
-        }
-
-        // Calculate median duration
-        double medianDuration = 0.0;
-        if (!durations.empty()) {
-            std::sort(durations.begin(), durations.end());
-            size_t mid = durations.size() / 2;
-            if (durations.size() % 2 == 0) {
-                // Even number of elements - average of two middle values
-                medianDuration = (durations[mid - 1] + durations[mid]) / 2.0;
-            } else {
-                // Odd number of elements - middle value
-                medianDuration = durations[mid];
-            }
-        }
-
-        if (validFrames == 0) {
-            return {0.0f, 0.0f};
-        }
-
-        return {
-            static_cast<float>(1000000000.0 / medianDuration),
-            static_cast<float>(1000000000.0 / avgDuration)
-        };
-    }
-
-    int64_t getFrameNumberFromTimestamp(Timestamp timestamp, Timestamp referenceTimestamp, float frameRate) {
-        if (frameRate <= 0) {
-            return -1; // Invalid frame rate
-        }
-
-        int64_t timeDifference = timestamp - referenceTimestamp;
-        if (timeDifference < 0) {
-            return -1;
-        }
-
-        // Calculate microseconds per frame
-        double nanosecondsPerFrame = 1000000000.0 / frameRate;
-
-        // Calculate expected frame number
-        return static_cast<int64_t>(std::round(timeDifference / nanosecondsPerFrame));
-    }
-
-    std::string constructFrameFilename(
-        const std::string& baseName, int frameNumber, int padding = 6, const std::string& extension = "")
-    {
-        std::ostringstream oss;
-
-        // Add the base name
-        oss << baseName;
-
-        // Add the zero-padded frame number
-        oss << std::setfill('0') << std::setw(padding) << frameNumber;
-
-        // Add the extension if provided
-        if (!extension.empty()) {
-            // Check if extension already has a dot prefix
-            if (extension[0] != '.') {
-                oss << '.';
-            }
-            oss << extension;
-        }
-
-        return oss.str();
-    }
-
-    void syncAudio(Timestamp videoTimestamp, std::vector<AudioChunk>& audioChunks, int sampleRate, int numChannels) {
-        // Calculate drift between the video and audio
-        auto audioVideoDriftMs = (audioChunks[0].first - videoTimestamp) * 1e-6f;
-        if(std::abs(audioVideoDriftMs) > 1000) {
-            spdlog::warn("Audio drift too large, not syncing audio");
-            return;
-        }
-
-        if(audioVideoDriftMs > 0) {
-            // Calculate how many audio frames to remove
-            int audioFramesToRemove = static_cast<int>(std::round(audioVideoDriftMs * sampleRate / 1000));
-            int samplesToRemove = audioFramesToRemove * numChannels;
-
-            // Remove samples from the beginning of audio chunks
-            int samplesRemoved = 0;
-            auto it = audioChunks.begin();
-
-            while(it != audioChunks.end() && samplesRemoved < samplesToRemove) {
-                int remainingSamplesToRemove = samplesToRemove - samplesRemoved;
-
-                if(it->second.size() <= remainingSamplesToRemove) {
-                    // Remove entire chunk
-                    samplesRemoved += it->second.size();
-                    it = audioChunks.erase(it);
-                }
-                else {
-                    // Trim partial chunk from the beginning
-                    it->second.erase(it->second.begin(), it->second.begin() + remainingSamplesToRemove);
-
-                    // Update timestamp for the trimmed chunk
-                    it->first += static_cast<Timestamp>(remainingSamplesToRemove * 1000 / sampleRate);
-                    break;
-                }
-            }
-        }
-        else {
-            // Otherwise video starts before audio, add silence
-            auto silenceDuration = -audioVideoDriftMs; // Make positive
-
-            int silenceFrames = static_cast<int>(std::round(silenceDuration * sampleRate / 1000));
-            int silenceSamples = silenceFrames * numChannels;
-
-            // Create silence chunk at the beginning
-            std::vector<int16_t> silenceData(silenceSamples, 0);
-            AudioChunk silenceChunk = std::make_pair(videoTimestamp, silenceData);
-
-            // Insert silence at the beginning
-            audioChunks.insert(audioChunks.begin(), silenceChunk);
-
-            // Update timestamps of existing chunks
-            for(auto it = audioChunks.begin() + 1; it != audioChunks.end(); ++it) {
-                it->first += silenceDuration;
-            }
-        }
-    }
-
-    int getScaleFromOptions(FileRenderOptions options, int draftScale) {
-        if(options & RENDER_OPT_DRAFT)
-            return draftScale;
-
-        return 1;
-    }
-}
 
 VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        FileRenderOptions options,
-        int draftScale,
-        const std::string& cfrTarget,
-        const std::string& cropTarget,
+        const RenderConfig& config,
         const std::string& file,
-        const std::string& baseName,
-        const std::string& cameraModel,
-        const std::string& levels,
-        const std::string& logTransform,
-        const std::string& exposureCompensation,
-        const std::string& quadBayerOption,
-        const std::string& cfaPhase) :
+        const std::string& baseName) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -234,19 +43,10 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mDuplicatedFrames(0),
         mWidth(0),
         mHeight(0),
-        mDraftScale(draftScale),
-        mCFRTarget(cfrTarget),
-        mCropTarget(cropTarget),
-        mCameraModel(cameraModel),
-        mLevels(levels),
-        mLogTransform(logTransform),
-        mExposureCompensation(exposureCompensation),
-        mQuadBayerOption(quadBayerOption),
-        mCfaPhase(cfaPhase),
-        mOptions(options) {
+        mConfig(config) {
     
     // Parse exposure keyframes if the input contains keyframe syntax
-    mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
+    mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
     
     // Load calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);
@@ -270,14 +70,14 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const auto& cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
         mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
     }
-    this->init(options);
+    this->init();
 }
 
 VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
     spdlog::info("Destroying VirtualFileSystemImpl_MCRAW({})", mSrcPath);
 }
 
-void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
+void VirtualFileSystemImpl_MCRAW::init() {
     Decoder decoder(mSrcPath);
     auto frames = decoder.getFrames();
     std::sort(frames.begin(), frames.end());
@@ -285,100 +85,17 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     if(frames.empty())
         return;
 
-    spdlog::debug("VirtualFileSystemImpl_MCRAW::init(options={})", optionsToString(options));
+    spdlog::debug("VirtualFileSystemImpl_MCRAW::init(options={})", optionsToString(mConfig.options));
 
     // Clear everything
     mFiles.clear();
 
-    auto frameRateInfo = calculateFrameRate(frames);
+    auto frameRateInfo = vfs::calculateFrameRate(frames);
     mMedFps = frameRateInfo.medianFrameRate;
     mAvgFps = frameRateInfo.averageFrameRate;
 
-    bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
-    
-    if (applyCFRConversion && !mCFRTarget.empty()) {
-        if (mCFRTarget == "Prefer Integer") {
-            if (mMedFps <=  23.0 || mMedFps >= 1000.0) 
-                mFps = mMedFps;
-            else if (mMedFps < 24.5)
-                mFps = 24.0f;
-            else if (mMedFps < 26.0)
-                mFps = 25.0f;
-            else if (mMedFps < 33.0)
-                mFps = 30.0f;
-            else if (mMedFps < 49.0)
-                mFps = 48.0f;
-            else if (mMedFps < 52.0)
-                mFps = 50.0f;
-            else if (mMedFps > 56.0  && mMedFps < 63.0)
-                mFps = 60.0f;
-            else if (mMedFps > 112.0 && mMedFps < 125.0)
-                mFps = 120.0f;
-            else if (mMedFps > 224.0 && mMedFps < 250.0)
-                mFps = 240.0f;
-            else if (mMedFps > 448.0 && mMedFps < 500.0)
-                mFps = 480.0f;
-            else if (mMedFps > 896.0 && mMedFps < 1000.0)
-                mFps = 960.0f;
-            else if (mMedFps >= 63.0)
-                mFps = 120.0f;
-            else   
-                mFps = 60.0f;
-        }
-        else if (mCFRTarget == "Prefer Drop Frame") {
-            if (mMedFps <=  23.0 || mMedFps >= 1000.0) 
-                mFps = mMedFps;
-            else if (mMedFps < 24.5)
-                mFps = 23.976f;
-            else if (mMedFps < 26.0)
-                mFps = 25.0f;
-            else if (mMedFps < 33.0)
-                mFps = 29.97f;
-            else if (mMedFps < 49.0)
-                mFps = 47.952f;
-            else if (mMedFps < 52.0)
-                mFps = 50.0f;
-            else if (mMedFps > 56.0  && mMedFps < 63.0)
-                mFps = 59.94f;
-            else if (mMedFps > 112.0 && mMedFps < 125.0)
-                mFps = 119.88f;
-            else if (mMedFps > 224.0 && mMedFps < 250.0)
-                mFps = 240.0f;
-            else if (mMedFps > 448.0 && mMedFps < 500.0)
-                mFps = 480.0f;
-            else if (mMedFps > 896.0 && mMedFps < 1000.0)
-                mFps = 960.0f;
-            else if (mMedFps >= 63.0)
-                mFps = 119.88f;
-            else    
-                mFps = 59.94f;
-        }
-        else if (mCFRTarget == "Median (Slowmotion)") {
-            // Use median frame rate for non real time playback
-            mFps = mMedFps;
-        }
-        else if (mCFRTarget == "Average (Testing)") {
-            // legacy framerate target determination
-            mFps = mAvgFps;
-        }
-        else {
-            // Custom framerate - try to parse as float
-            try {
-                mFps = std::stof(mCFRTarget);
-            } catch (const std::exception& e) {
-                spdlog::warn("Invalid CFR target '{}', using median frame rate", mCFRTarget);
-                mFps = mMedFps;
-            }
-        }
-    } else {
-        // Custom framerate - try to parse as float
-        try {
-            mFps = std::stof(mCFRTarget);
-        } catch (const std::exception& e) {
-            spdlog::warn("Invalid CFR target '{}', using average for no cfr conversion", mCFRTarget);
-            mFps = mAvgFps;
-        }
-    }       
+    bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+    mFps = vfs::determineCFRTarget(mMedFps, mConfig.cfrTarget, applyCFRConversion);       
 
     // Calculate typical DNG size that we can use for all files
     std::vector<uint8_t> data;
@@ -394,7 +111,10 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     mHeight = cameraFrameMetadata.height;
     mTotalFrames = static_cast<int>(frames.size());
     mDroppedFrames = 0; // Will be calculated during frame processing
-    mDuplicatedFrames = 0;	
+    mDuplicatedFrames = 0;
+    mNeedRemosaic = cameraFrameMetadata.needRemosaic;
+    mSrcWhiteLevel = cameraFrameMetadata.dynamicWhiteLevel;
+    mSrcBlackLevel = cameraFrameMetadata.dynamicBlackLevel;	
 
     auto dngData = utils::generateDng(
         data,
@@ -402,15 +122,15 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         cameraConfig,
         mFps,
         0,
-        options,
-        getScaleFromOptions(options, mDraftScale),
+        mConfig.options,
+        vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
         mBaselineExpValue,
-        mCropTarget,
-        mCameraModel,
-        mLevels,
-        mLogTransform,
-        mExposureCompensation,
-        mQuadBayerOption,
+        mConfig.cropTarget,
+        mConfig.cameraModel,
+        mConfig.levels,
+        mConfig.logTransform,
+        mConfig.exposureCompensation,
+        mConfig.quadBayerOption,
         mCalibration
     );
 
@@ -426,7 +146,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     Entry desktopIni;
 
     desktopIni.type = FILE_ENTRY;
-    desktopIni.size = DESKTOP_INI.size();
+    desktopIni.size = vfs::DESKTOP_INI.size();
     desktopIni.name = "desktop.ini";
 
     mFiles.emplace_back(desktopIni);
@@ -438,19 +158,28 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     std::vector<AudioChunk> audioChunks;
     decoder.loadAudio(audioChunks);
 
+    mAudioDurationSeconds = 0.0f;
     if(!audioChunks.empty()) {
         auto fpsFraction = utils::toFraction(mFps);
         AudioWriter audioWriter(mAudioFile, decoder.numAudioChannels(), decoder.audioSampleRateHz(), fpsFraction.first, fpsFraction.second);
 
         // Sync the audio to the video
-        syncAudio(
+        vfs::syncAudio(
             frames[0],
             audioChunks,
             decoder.audioSampleRateHz(),
             decoder.numAudioChannels());
 
-        for(auto& x : audioChunks)
+        // Calculate total audio duration
+        size_t totalSamples = 0;
+        for(auto& x : audioChunks) {
             audioWriter.write(x.second, x.second.size() / decoder.numAudioChannels());
+            totalSamples += x.second.size() / decoder.numAudioChannels();
+        }
+        
+        if (decoder.audioSampleRateHz() > 0) {
+            mAudioDurationSeconds = static_cast<float>(totalSamples) / static_cast<float>(decoder.audioSampleRateHz());
+        }
     }
 
     if(!mAudioFile.empty()) {
@@ -464,7 +193,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     // Add video frames
     for(auto& x : frames) {
         if(applyCFRConversion) {
-            int pts = getFrameNumberFromTimestamp(x, frames[0], mFps);
+            int pts = vfs::getFrameNumberFromTimestamp(x, frames[0], mFps);
 
             // Count dropped frames before this frame
             mDuplicatedFrames += (std::max)(0, pts - lastPts - 1);
@@ -479,7 +208,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
                 // Add main entry
                 entry.type = EntryType::FILE_ENTRY;
                 entry.size = mTypicalDngSize;
-                entry.name = constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
+                entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
                 entry.userData = x;
 
                 mFiles.emplace_back(entry);
@@ -491,7 +220,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
             // Add main entry
             entry.type = EntryType::FILE_ENTRY;
             entry.size = mTypicalDngSize;
-            entry.name = constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
+            entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
             entry.userData = x;
 
             mFiles.emplace_back(entry);
@@ -540,7 +269,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
     }
 
     // Use IO thread pool to decode frame
-    auto frameDataFuture = mIoThreadPool.submit_task([entry, &srcPath = mSrcPath, &options = mOptions]() -> FrameData {
+    auto frameDataFuture = mIoThreadPool.submit_task([entry, &srcPath = mSrcPath, &options = mConfig.options]() -> FrameData {
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
 
         auto timestamp = std::get<Timestamp>(entry.userData);
@@ -577,9 +306,9 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
     auto sharableFuture = frameDataFuture.share();
 
     const auto fps = mFps;
-    const auto draftScale = mDraftScale;
+    const auto draftScale = mConfig.draftScale;
     const auto baselineExpValue = mBaselineExpValue;
-    const auto options = mOptions;
+    const auto options = mConfig.options;
 
     auto generateTask = [this, &cache = mCache, entry, sharableFuture, fps, draftScale, baselineExpValue, options, pos, len, dst, result]() {
         size_t readBytes = 0;
@@ -592,7 +321,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
             spdlog::debug("Generating {}", entry.name);
 
             // Calculate frame-specific exposure compensation
-            std::string frameExposureComp = mExposureCompensation;
+            std::string frameExposureComp = mConfig.exposureCompensation;
             if (mExposureKeyframes.has_value()) {
                 float exposureValue = mExposureKeyframes->getExposureAtFrame(frameIndex, mTotalFrames);
                 frameExposureComp = std::to_string(exposureValue);
@@ -605,16 +334,16 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 fps,
                 frameIndex,
                 options,
-                getScaleFromOptions(options, draftScale),
+                vfs::getScaleFromOptions(options, draftScale),
                 baselineExpValue,
-                mCropTarget,
-                mCameraModel,
-                mLevels,
-                mLogTransform,
+                mConfig.cropTarget,
+                mConfig.cameraModel,
+                mConfig.levels,
+                mConfig.logTransform,
                 frameExposureComp,
-                mQuadBayerOption,
+                mConfig.quadBayerOption,
                 mCalibration,
-                mCfaPhase);
+                mConfig.cfaPhase);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -680,8 +409,8 @@ int VirtualFileSystemImpl_MCRAW::readFile(
 
     #ifdef _WIN32
         if(entry.name == "desktop.ini") {
-            const size_t actualLen = (std::min)(len, DESKTOP_INI.size() - pos);
-            std::memcpy(dst, DESKTOP_INI.data() + pos, actualLen);
+            const size_t actualLen = (std::min)(len, vfs::DESKTOP_INI.size() - pos);
+            std::memcpy(dst, vfs::DESKTOP_INI.data() + pos, actualLen);
 
             return actualLen;
         }
@@ -698,36 +427,132 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, const std::string& cfaPhase) {
-    mDraftScale = draftScale;
-    mOptions = options;
-    mCFRTarget = cfrTarget;
-    mCropTarget = cropTarget;
-    mCameraModel = cameraModel;
-    mLevels = levels;
-    mLogTransform = logTransform;
-    mExposureCompensation = exposureCompensation;
-    mQuadBayerOption = quadBayerOption;
-    mCfaPhase = cfaPhase;
+void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderConfig& config) {
+    mConfig = config;
     
     // Re-parse exposure keyframes
-    mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
+    mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
 
     mCache.clear();
-    init(options);
+    init();
 }
 
 FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
-    return FileInfo{
-        mMedFps,
-        mAvgFps,
-        mFps,
-        mTotalFrames,
-        mDroppedFrames,
-        mDuplicatedFrames,
-        mWidth,
-        mHeight
-    };
+    FileInfo info;
+    info.medFps = mMedFps;
+    info.avgFps = mAvgFps;
+    info.fps = mFps;
+    info.totalFrames = mTotalFrames;
+    info.droppedFrames = mDroppedFrames;
+    info.duplicatedFrames = mDuplicatedFrames;
+    info.width = mWidth;
+    info.height = mHeight;
+    
+    // Determine data type based on source and options
+    bool interpretAsQuadBayer = mNeedRemosaic || (mConfig.options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER);
+    if (interpretAsQuadBayer) {
+        info.dataType = "Quad Bayer CFA";
+    } else {
+        info.dataType = "Bayer CFA";
+    }
+    
+    // Determine levels info - need to calculate what the output will be
+    float srcWhiteLevel = mSrcWhiteLevel;
+    std::array<float, 4> srcBlackLevel = mSrcBlackLevel;
+    
+    // Apply levels override if specified
+    if (mConfig.levels == "Static") {
+        // Would use camera config values, but we don't have access here
+        // Just show the dynamic values
+    } else if (!mConfig.levels.empty() && mConfig.levels != "Dynamic") {
+        // Custom levels specified - parse them
+        const size_t separatorPos = mConfig.levels.find('/');
+        if (separatorPos != std::string::npos) {
+            try {
+                const std::string whiteLevelStr = mConfig.levels.substr(0, separatorPos);
+                const std::string blackLevelStr = mConfig.levels.substr(separatorPos + 1);
+                
+                if (whiteLevelStr.find('.') != std::string::npos) 
+                    srcWhiteLevel = std::stof(whiteLevelStr);
+                else 
+                    srcWhiteLevel = std::stoul(whiteLevelStr);
+                
+                if (blackLevelStr.find(',') == std::string::npos) {
+                    float blackLevelValue;
+                    if (blackLevelStr.find('.') != std::string::npos) 
+                        blackLevelValue = std::stof(blackLevelStr);
+                    else 
+                        blackLevelValue = std::stoul(blackLevelStr);
+                    srcBlackLevel = {blackLevelValue, blackLevelValue, blackLevelValue, blackLevelValue};
+                }
+            } catch (const std::exception&) {
+                // Keep original values on parse error
+            }
+        }
+    }
+    
+    float dstWhiteLevel = srcWhiteLevel;
+    std::array<float, 4> dstBlackLevel = srcBlackLevel;
+    
+    // Check if log transform is applied
+    bool applyLogCurve = !mConfig.logTransform.empty();
+    bool applyShadingMap = mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    bool normalizeShadingMap = mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    
+    int useBits = 0;
+    if (applyShadingMap && normalizeShadingMap) {
+        useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))) + 4);
+        dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+    } else if (applyLogCurve) {
+        if (mConfig.logTransform == "Keep Input") {
+            useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))));
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        } else if (mConfig.logTransform == "Reduce by 2bit") {
+            useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))) - 2);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        } else if (mConfig.logTransform == "Reduce by 4bit") {
+            useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))) - 4);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        } else if (mConfig.logTransform == "Reduce by 6bit") {
+            useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))) - 6);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        } else if (mConfig.logTransform == "Reduce by 8bit") {
+            useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))) - 8);
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        }
+    } else if (applyShadingMap) {
+        useBits = std::min(16, static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1))) + 2);
+        dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+    }
+
+    if(applyShadingMap || applyLogCurve)
+        for (auto& v : dstBlackLevel)
+            v = 0;
+    
+    // Calculate actual output bits
+    int outputBits = useBits > 0 ? useBits : static_cast<int>(std::ceil(std::log2(dstWhiteLevel + 1)));
+    
+    // Build levels info string - always show transformation even without vignette correction
+    info.levelsInfo = std::to_string(static_cast<int>(srcWhiteLevel)) + "/" + 
+                      std::to_string(static_cast<int>(srcBlackLevel[0]));
+    
+    // Show transformation if levels changed OR if any processing is applied
+    if (static_cast<int>(srcWhiteLevel) != static_cast<int>(dstWhiteLevel) || 
+        static_cast<int>(srcBlackLevel[0]) != static_cast<int>(dstBlackLevel[0]) ||
+        applyShadingMap || applyLogCurve) {
+        info.levelsInfo += " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" + 
+                           std::to_string(static_cast<int>(dstBlackLevel[0]));
+    }
+    
+    info.levelsInfo += " RAW" + std::to_string(outputBits);
+    if (applyLogCurve) {
+        info.levelsInfo += " log";
+    }
+    
+    // Set runtime from audio duration
+    info.runtimeSeconds = mAudioDurationSeconds;
+    
+    return info;
 }
 
 } // namespace motioncam

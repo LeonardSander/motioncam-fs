@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "IFuseFileSystem.h"
+#include "RenderConfig.h"
 
 namespace BS {
     class thread_pool;
@@ -18,10 +19,11 @@ class FuseFileSystemImpl_Win : public IFuseFileSystem
 {
 public:
     FuseFileSystemImpl_Win();
+    ~FuseFileSystemImpl_Win() override;
 
-    MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string cameraModel, const std::string levels, const std::string logTransform, const std::string exposureCompensation, const std::string quadBayerOption, const std::string cfaPhase, const std::string& srcFile, const std::string& dstPath) override;
+    MountId mount(const RenderConfig& config, const std::string& srcFile, const std::string& dstPath) override;
     void unmount(MountId mountId) override;
-    void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption, std::string cfaPhase) override;
+    void updateOptions(MountId mountId, const RenderConfig& config) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
 
 private:

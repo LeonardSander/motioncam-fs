@@ -17,6 +17,120 @@
 namespace motioncam {
 namespace utils {
 
+// ============================================================================
+// vectorbuf and vector_ostream implementations
+// ============================================================================
+
+vectorbuf::vectorbuf(std::vector<char>& vec) : vec_(vec) {
+    if (!vec_.empty()) {
+        setp(vec_.data(), vec_.data() + vec_.size());
+    }
+}
+
+vectorbuf::int_type vectorbuf::overflow(int_type c) {
+    if (c != traits_type::eof()) {
+        size_t old_size = vec_.size();
+        vec_.resize(old_size + 1);
+        vec_[old_size] = static_cast<char>(c);
+
+        setp(vec_.data(), vec_.data() + vec_.size());
+        pbump(static_cast<int>(old_size + 1));
+    }
+    return c;
+}
+
+std::streamsize vectorbuf::xsputn(const char* s, std::streamsize count) {
+    size_t old_size = vec_.size();
+    size_t available = epptr() - pptr();
+
+    if (static_cast<size_t>(count) > available) {
+        vec_.resize(old_size + count);
+        setp(vec_.data(), vec_.data() + vec_.size());
+        pbump(static_cast<int>(old_size));
+    }
+
+    std::copy(s, s + count, pptr());
+    pbump(static_cast<int>(count));
+
+    return count;
+}
+
+vectorbuf::pos_type vectorbuf::seekoff(off_type off, std::ios_base::seekdir way,
+                         std::ios_base::openmode which) {
+    if (which & std::ios_base::out) {
+        pos_type pos;
+
+        switch (way) {
+        case std::ios_base::beg:
+            pos = off;
+            break;
+        case std::ios_base::cur:
+            pos = (pptr() - pbase()) + off;
+            break;
+        case std::ios_base::end:
+            pos = vec_.size() + off;
+            break;
+        default:
+            return pos_type(off_type(-1));
+        }
+
+        return seekpos(pos, which);
+    }
+
+    return pos_type(off_type(-1));
+}
+
+vectorbuf::pos_type vectorbuf::seekpos(pos_type sp, std::ios_base::openmode which) {
+    if (which & std::ios_base::out) {
+        off_type pos = sp;
+
+        if (pos < 0) {
+            return pos_type(off_type(-1));
+        }
+
+        if (static_cast<size_t>(pos) > vec_.size()) {
+            vec_.resize(static_cast<size_t>(pos));
+        }
+
+        setp(vec_.data(), vec_.data() + vec_.size());
+        pbump(static_cast<int>(pos));
+
+        return sp;
+    }
+
+    return pos_type(off_type(-1));
+}
+
+vector_ostream::vector_ostream(std::vector<char>& vec)
+    : std::ostream(&buf_), buf_(vec) {}
+
+std::vector<char>& vector_ostream::vector() {
+    return buf_.vec_;
+}
+
+const std::vector<char>& vector_ostream::vector() const {
+    return buf_.vec_;
+}
+
+std::streampos vector_ostream::tell() {
+    return tellp();
+}
+
+vector_ostream& vector_ostream::seek(std::streampos pos) {
+    seekp(pos);
+    return *this;
+}
+
+vector_ostream& vector_ostream::seek_relative(std::streamoff off) {
+    seekp(off, std::ios_base::cur);
+    return *this;
+}
+
+vector_ostream& vector_ostream::seek_from_end(std::streamoff off) {
+    seekp(off, std::ios_base::end);
+    return *this;
+}
+
 namespace {
     const float IDENTITY_MATRIX[9] = {
         1.0f, 0.0f, 0.0f,
@@ -75,19 +189,7 @@ namespace {
         return (((value / 10) << 4) | (value % 10));
     }
 
-    unsigned short bitsNeeded(unsigned short value) {
-        if (value == 0)
-            return 1;
 
-        unsigned short bits = 0;
-
-        while (value > 0) {
-            value >>= 1;
-            bits++;
-        }
-
-        return bits;
-    }
 
     int getColorIlluminant(const std::string& value) {
         if(value == "standarda")
@@ -108,47 +210,11 @@ namespace {
             return lsUnknown;
     }
 
-    void normalizeShadingMap(std::vector<std::vector<float>>& shadingMap) {
-        if (shadingMap.empty() || shadingMap[0].empty()) {
-            return; // Handle empty case
-        }
 
-        // Find the maximum value
-        float maxValue = 0.0f;
-        for (const auto& row : shadingMap) {
-            for (float value : row) {
-                maxValue = std::max(maxValue, value);
-            }
-        }
 
-        // Avoid division by zero
-        if (maxValue == 0.0f) {
-            return;
-        }
 
-        // Normalize all values
-        for (auto& row : shadingMap) {
-            for (float& value : row) {
-                value /= maxValue;
-            }
-        }
-    }
 
-    void invertShadingMap(std::vector<std::vector<float>>& shadingMap) {
-        if (shadingMap.empty() || shadingMap[0].empty()) 
-            return;                                 // Handle empty case
-        
-        for (const auto& row : shadingMap) 
-            for (float value : row) 
-                if (value <= 0.0f) 
-                    return;                             // Avoid division by zero
-                  
-        for (auto& row : shadingMap) 
-            for (float& value : row) 
-                value = 1 / value;          // Normalize all values
-    }
-
-    void colorOnlyShadingMap(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
+    void colorOnlyShadingMapInternal(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
         if (shadingMap.empty() || shadingMap[0].empty())
             return; // Handle empty case
 
@@ -204,7 +270,7 @@ namespace {
         }       // For every position in the shading map, divide gain by the minimum value of the four channels
     }       
 
-    inline float getShadingMapValue(
+    inline float getShadingMapValueInternal(
         float x, float y, int channel, const std::vector<std::vector<float>>& lensShadingMap, int lensShadingMapWidth, int lensShadingMapHeight)
     {
         // Clamp input coordinates to [0, 1] range
@@ -475,8 +541,8 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     const CameraFrameMetadata& metadata,
     uint32_t imageWidth,
     uint32_t imageHeight,
-    int left = 0,
-    int top = 0)
+    int left,
+    int top)
 {
     tinydngwriter::OpcodeList opcodeList;
     
@@ -722,35 +788,29 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     // When applying shading map, increase precision
     if(applyShadingMap) {
         if(vignetteOnlyColor)
-            colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
+            utils::colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
         if(normaliseShadingMap) {
-            normalizeShadingMap(lensShadingMap);
-            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
+            utils::normalizeShadingMap(lensShadingMap);
+            useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
         } else {
             if (debugShadingMap) 
-                invertShadingMap(lensShadingMap);
+                utils::invertShadingMap(lensShadingMap);
             else if (logTransform != "") {                 
                 if (logTransform == "Keep Input") {
-                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0); //?
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
-                } else if (logTransform == "Reduce by 2bit") {
-                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
-                } else if (logTransform == "Reduce by 4bit") {
-                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
-                } else if (logTransform == "Reduce by 6bit") {
-                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
-                } else if (logTransform == "Reduce by 8bit") {
-                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
-                } else {
-                    useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
-                }
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0); //?
+                } else if (logTransform == "Reduce by 2bit") 
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
+                else if (logTransform == "Reduce by 4bit") 
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
+                else if (logTransform == "Reduce by 6bit") 
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
+                else if (logTransform == "Reduce by 8bit") 
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
+                else 
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
+                dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
             } else {
-                useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
+                useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
                 dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
             }
         }
@@ -820,10 +880,10 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 
                 if(applyShadingMap) {                              
                     // Calculate position in shading map     
-                    shadingMapVals[0] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, cfa[0], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[1] = getShadingMapValue((srcX + left + scale) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, cfa[1], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[2] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + scale) * shadingMapScaleY, cfa[2], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[3] = getShadingMapValue((srcX + left + scale) * shadingMapScaleX, (srcY + top + scale) * shadingMapScaleY, cfa[3], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[0] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, cfa[0], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[1] = getShadingMapValueInternal((srcX + left + scale) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, cfa[1], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[2] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + scale) * shadingMapScaleY, cfa[2], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[3] = getShadingMapValueInternal((srcX + left + scale) * shadingMapScaleX, (srcY + top + scale) * shadingMapScaleY, cfa[3], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
                 }
 
                 std::array<float, 4> p;
@@ -870,22 +930,22 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
 
                 if(applyShadingMap) { 
                     // Calculate position in shading map     
-                    shadingMapVals[0] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[1] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[2] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[3] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[4] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[5] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[6] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[7] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[8] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[9] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[10] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[11] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[12] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[13] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[14] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[15] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[0] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[1] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[2] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[3] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[4] = getShadingMapValueInternal((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[5] = getShadingMapValueInternal((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[6] = getShadingMapValueInternal((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[7] = getShadingMapValueInternal((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[8] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[9] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[10] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[11] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[12] = getShadingMapValueInternal((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[13] = getShadingMapValueInternal((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[14] = getShadingMapValueInternal((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[15] = getShadingMapValueInternal((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
                 }
 
                 std::array<float, 16> p;
@@ -1147,7 +1207,7 @@ std::shared_ptr<std::vector<char>> generateDng(
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
 
     // Encode to reduce size in container
-    auto encodeBits = bitsNeeded(dstWhiteLevel);
+    auto encodeBits = utils::bitsNeeded(dstWhiteLevel);
 
     if(encodeBits <= 2) {
         utils::encodeTo2Bit(processedData, width, height);
@@ -1402,13 +1462,9 @@ std::shared_ptr<std::vector<char>> generateDng(
         std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
         dng.SetBlackLevel(4, linearBlackLevel.data());
         dng.SetWhiteLevel(65534);  //idk why
-        //displayLevels = std::to_string(static_cast<int>(srcWhiteLevel)) + "/" + std::to_string(static_cast<float>(srcBlackLevel[0])) + " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/0 RAW" + std::to_string(bitsNeeded(dstWhiteLevel)) + " (log)";
     } else {           
         dng.SetBlackLevel(4, dstBlackLevel.data());
         dng.SetWhiteLevel(dstWhiteLevel);
-        //displayLevels = std::to_string(static_cast<float>(srcWhiteLevel)) + "/" + std::to_string(static_cast<float>(srcBlackLevel[0])) + 
-        //                    ((int) srcWhiteLevel != (int) dstWhiteLevel || (float) srcBlackLevel[0] != (float) dstBlackLevel[0] ? " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" +  std::to_string(static_cast<float>(dstBlackLevel[0])): "") + 
-        //                    " RAW" + std::to_string(bitsNeeded(dstWhiteLevel));    
     }    
 
     // Write DNG
@@ -1458,6 +1514,154 @@ std::pair<int, int> toFraction(float frameRate, int base) {
     denominator /= divisor;
 
     return std::make_pair(numerator, denominator);
+}
+
+// Public implementations of shading map and bit depth functions
+unsigned short bitsNeeded(unsigned short value) {
+    if (value == 0)
+        return 1;
+
+    unsigned short bits = 0;
+    while (value > 0) {
+        value >>= 1;
+        bits++;
+    }
+    return bits;
+}
+
+void normalizeShadingMap(std::vector<std::vector<float>>& shadingMap) {
+    if (shadingMap.empty() || shadingMap[0].empty()) {
+        return;
+    }
+
+    float maxValue = 0.0f;
+    for (const auto& row : shadingMap) {
+        for (float value : row) {
+            maxValue = std::max(maxValue, value);
+        }
+    }
+
+    if (maxValue == 0.0f) {
+        return;
+    }
+
+    for (auto& row : shadingMap) {
+        for (float& value : row) {
+            value /= maxValue;
+        }
+    }
+}
+
+void invertShadingMap(std::vector<std::vector<float>>& shadingMap) {
+    if (shadingMap.empty() || shadingMap[0].empty()) 
+        return;
+    
+    for (const auto& row : shadingMap) 
+        for (float value : row) 
+            if (value <= 0.0f) 
+                return;
+              
+    for (auto& row : shadingMap) 
+        for (float& value : row) 
+            value = 1 / value;
+}
+
+void colorOnlyShadingMap(
+    std::vector<std::vector<float>>& shadingMap,
+    int lensShadingMapWidth,
+    int lensShadingMapHeight,
+    const std::array<uint8_t, 4> cfa)
+{
+    if (shadingMap.empty() || shadingMap[0].empty())
+        return;
+
+    float maxValue = 0.0f;
+    for (const auto& row : shadingMap) 
+        for (float value : row) 
+            maxValue = std::max(maxValue, value);
+    
+    if (maxValue == 0.0f)
+        return;
+
+    bool aggressive = false;
+
+    auto minValue00 = 10.0f;
+    auto minValue01 = 10.0f;
+    auto minValue10 = 10.0f;
+    auto minValue11 = 10.0f;
+
+    for (int j = 0; j < lensShadingMapHeight; j++) {
+        for (int i = 0; i < lensShadingMapWidth; i++) {
+            if (shadingMap[0][j*lensShadingMapWidth+i] < minValue00)
+                minValue00 = shadingMap[0][j*lensShadingMapWidth+i];
+            if (shadingMap[1][j*lensShadingMapWidth+i] < minValue01)
+                minValue01 = shadingMap[1][j*lensShadingMapWidth+i];
+            if (shadingMap[2][j*lensShadingMapWidth+i] < minValue10)
+                minValue10 = shadingMap[2][j*lensShadingMapWidth+i];
+            if (shadingMap[3][j*lensShadingMapWidth+i] < minValue11)
+                minValue11 = shadingMap[3][j*lensShadingMapWidth+i];
+        }
+    }
+
+    if (cfa == std::array<uint8_t, 4>{0, 1, 1, 2} || cfa == std::array<uint8_t, 4>{2, 1, 1, 0}) {
+        minValue01 = std::min(minValue01, minValue10);
+        minValue01 = minValue10;
+    } else if (cfa == std::array<uint8_t, 4>{1, 0, 2, 1} || cfa == std::array<uint8_t, 4>{1, 2, 0, 1}) {
+        minValue00 = std::min(minValue00, minValue11);
+        minValue00 = minValue11;
+    }
+    
+    for (int j = 0; j < lensShadingMapHeight; j++) {
+        for (int i = 0; i < lensShadingMapWidth; i++) {
+            if (aggressive) {
+                shadingMap[0][j*lensShadingMapWidth+i] = shadingMap[0][j*lensShadingMapWidth+i] / minValue00;
+                shadingMap[1][j*lensShadingMapWidth+i] = shadingMap[1][j*lensShadingMapWidth+i] / minValue01;
+                shadingMap[2][j*lensShadingMapWidth+i] = shadingMap[2][j*lensShadingMapWidth+i] / minValue10;
+                shadingMap[3][j*lensShadingMapWidth+i] = shadingMap[3][j*lensShadingMapWidth+i] / minValue11;
+            }
+            auto localMinValue = std::min(
+                shadingMap[0][j*lensShadingMapWidth+i],
+                std::min(shadingMap[1][j*lensShadingMapWidth+i],
+                std::min(shadingMap[2][j*lensShadingMapWidth+i],
+                shadingMap[3][j*lensShadingMapWidth+i])));
+            for (int channel = 0; channel < 4; channel++) {
+                shadingMap[channel][j*lensShadingMapWidth+i] = 
+                    shadingMap[channel][j*lensShadingMapWidth+i] / localMinValue;
+            }
+        }
+    }
+}
+
+float getShadingMapValue(
+    float x, float y,
+    int channel,
+    const std::vector<std::vector<float>>& lensShadingMap,
+    int lensShadingMapWidth,
+    int lensShadingMapHeight)
+{
+    x = std::max(0.0f, std::min(1.0f, x));
+    y = std::max(0.0f, std::min(1.0f, y));
+
+    const float mapX = x * (lensShadingMapWidth - 1);
+    const float mapY = y * (lensShadingMapHeight - 1);
+
+    const int x0 = static_cast<int>(std::floor(mapX));
+    const int y0 = static_cast<int>(std::floor(mapY));
+    const int x1 = std::min(x0 + 1, lensShadingMapWidth - 1);
+    const int y1 = std::min(y0 + 1, lensShadingMapHeight - 1);
+
+    const float wx = mapX - x0;
+    const float wy = mapY - y0;
+
+    const float val00 = lensShadingMap[channel][y0*lensShadingMapWidth+x0];
+    const float val01 = lensShadingMap[channel][y0*lensShadingMapWidth+x1];
+    const float val10 = lensShadingMap[channel][y1*lensShadingMapWidth+x0];
+    const float val11 = lensShadingMap[channel][y1*lensShadingMapWidth+x1];
+
+    const float valTop = val00 * (1.0f - wx) + val01 * wx;
+    const float valBottom = val10 * (1.0f - wx) + val11 * wx;
+
+    return valTop * (1.0f - wy) + valBottom * wy;
 }
 
 void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData, 

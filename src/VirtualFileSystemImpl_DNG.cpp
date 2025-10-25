@@ -1,4 +1,5 @@
 #include "VirtualFileSystemImpl_DNG.h"
+#include "VirtualFileSystemImpl.h"
 #include "DNGDecoder.h"
 #include "CalibrationData.h"
 #include "Utils.h"
@@ -12,72 +13,19 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <sstream>
-#include <iomanip>
 #include <cstring>
 
 using motioncam::Timestamp;
 
 namespace motioncam {
 
-namespace {
-
-#ifdef _WIN32
-    constexpr std::string_view DESKTOP_INI = R"([.ShellClassInfo]
-ConfirmFileOp=0
-
-[ViewState]
-Mode=4
-Vid={137E7700-3573-11CF-AE69-08002B2E1262}
-FolderType=Generic
-
-[{5984FFE0-28D4-11CF-AE66-08002B2E1262}]
-Mode=4
-LogicalViewMode=1
-IconSize=16
-
-[LocalizedFileNames]
-)";
-#endif
-
-    std::string constructFrameFilename(
-        const std::string& baseName, int frameNumber, int padding = 6, const std::string& extension = "")
-    {
-        std::ostringstream oss;
-        oss << baseName;
-        oss << std::setfill('0') << std::setw(padding) << frameNumber;
-        if (!extension.empty()) {
-            if (extension[0] != '.') {
-                oss << '.';
-            }
-            oss << extension;
-        }
-        return oss.str();
-    }
-
-    int getScaleFromOptions(FileRenderOptions options, int draftScale) {
-        if(options & RENDER_OPT_DRAFT)
-            return draftScale;
-        return 1;
-    }
-}
-
 VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        FileRenderOptions options,
-        int draftScale,
-        const std::string& cfrTarget,
-        const std::string& cropTarget,
+        const RenderConfig& config,
         const std::string& file,
-        const std::string& baseName,
-        const std::string& cameraModel,
-        const std::string& levels,
-        const std::string& logTransform,
-        const std::string& exposureCompensation,
-        const std::string& quadBayerOption,
-        const std::string& cfaPhase) :
+        const std::string& baseName) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -92,15 +40,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mDuplicatedFrames(0),
         mWidth(0),
         mHeight(0),
-        mDraftScale(draftScale),
-        mCFRTarget(cfrTarget),
-        mCropTarget(cropTarget),
-        mCameraModel(cameraModel),
-        mLevels(levels),
-        mLogTransform(logTransform),
-        mExposureCompensation(exposureCompensation),
-        mQuadBayerOption(quadBayerOption),
-        mOptions(options) {
+        mConfig(config) {
     
     // Load calibration JSON if it exists (for DNG folder)
     boost::filesystem::path srcPath(mSrcPath);
@@ -135,15 +75,15 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         throw;
     }
     
-    this->init(options);
+    this->init();
 }
 
 VirtualFileSystemImpl_DNG::~VirtualFileSystemImpl_DNG() {
     spdlog::info("Destroying VirtualFileSystemImpl_DNG({})", mSrcPath);
 }
 
-void VirtualFileSystemImpl_DNG::init(FileRenderOptions options) {
-    spdlog::debug("VirtualFileSystemImpl_DNG::init(options={})", optionsToString(options));
+void VirtualFileSystemImpl_DNG::init() {
+    spdlog::debug("VirtualFileSystemImpl_DNG::init(options={})", optionsToString(mConfig.options));
     
     mFiles.clear();
 
@@ -152,7 +92,7 @@ void VirtualFileSystemImpl_DNG::init(FileRenderOptions options) {
     desktopIni.type = EntryType::FILE_ENTRY;
     desktopIni.pathParts = {};
     desktopIni.name = "desktop.ini";
-    desktopIni.size = DESKTOP_INI.size();
+    desktopIni.size = vfs::DESKTOP_INI.size();
     mFiles.push_back(desktopIni);
 #endif
 
@@ -162,7 +102,7 @@ void VirtualFileSystemImpl_DNG::init(FileRenderOptions options) {
         Entry dngEntry;
         dngEntry.type = EntryType::FILE_ENTRY;
         dngEntry.pathParts = {};
-        dngEntry.name = constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
+        dngEntry.name = vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
         dngEntry.size = 50 * 1024 * 1024; // Estimate DNG size
         dngEntry.userData = frames[i].timestamp;
         mFiles.push_back(dngEntry);
@@ -210,9 +150,9 @@ int VirtualFileSystemImpl_DNG::readFile(
     
     if (entry.name == "desktop.ini") {
 #ifdef _WIN32
-        size_t copyLen = std::min(len, DESKTOP_INI.size() - pos);
+        size_t copyLen = std::min(len, vfs::DESKTOP_INI.size() - pos);
         if (copyLen > 0) {
-            memcpy(dst, DESKTOP_INI.data() + pos, copyLen);
+            memcpy(dst, vfs::DESKTOP_INI.data() + pos, copyLen);
         }
         result(copyLen, 0);
         return 0;
@@ -268,7 +208,7 @@ size_t VirtualFileSystemImpl_DNG::generateFrame(
             }
             
             // Apply vignette correction if enabled and gain map is available
-            if (mOptions & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
+            if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
                 GainMap gainMap;
                 if (mDecoder->getGainMap(frameNumber, gainMap)) {
                     // Apply vignette correction to DNG data
@@ -301,32 +241,12 @@ size_t VirtualFileSystemImpl_DNG::generateFrame(
     }
 }
 
-void VirtualFileSystemImpl_DNG::updateOptions(
-    FileRenderOptions options, 
-    int draftScale, 
-    const std::string& cfrTarget, 
-    const std::string& cropTarget, 
-    const std::string& cameraModel, 
-    const std::string& levels, 
-    const std::string& logTransform, 
-    const std::string& exposureCompensation, 
-    const std::string& quadBayerOption,
-    const std::string& cfaPhase) {
-    
+void VirtualFileSystemImpl_DNG::updateOptions(const RenderConfig& config) {
     std::lock_guard<std::mutex> lock(mMutex);
     
-    mOptions = options;
-    mDraftScale = draftScale;
-    mCFRTarget = cfrTarget;
-    mCropTarget = cropTarget;
-    mCameraModel = cameraModel;
-    mLevels = levels;
-    mLogTransform = logTransform;
-    mExposureCompensation = exposureCompensation;
-    mQuadBayerOption = quadBayerOption;
-    // Note: cfaPhase is only used for DirectLog, not DNG
+    mConfig = config;
     
-    init(options);
+    init();
 }
 
 FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
@@ -339,6 +259,14 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     info.duplicatedFrames = mDuplicatedFrames;
     info.width = mWidth;
     info.height = mHeight;
+    
+    // DNG sequences are pass-through, so we show source format
+    info.dataType = "Bayer CFA (DNG)";
+    info.levelsInfo = "Source DNG";
+    
+    // Calculate runtime from frame count and fps
+    info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(mTotalFrames) / mFps) : 0.0f;
+    
     return info;
 }
 
@@ -351,41 +279,16 @@ void VirtualFileSystemImpl_DNG::calculateFrameRateStats() {
         return;
     }
     
-    std::vector<double> intervals;
-    intervals.reserve(frames.size() - 1);
-    
-    for (size_t i = 1; i < frames.size(); ++i) {
-        double intervalNs = static_cast<double>(frames[i].timestamp - frames[i-1].timestamp);
-        double intervalSec = intervalNs / 1000000000.0;
-        if (intervalSec > 0) {
-            intervals.push_back(intervalSec);
-        }
+    // Convert frame timestamps to vector of Timestamp
+    std::vector<Timestamp> timestamps;
+    timestamps.reserve(frames.size());
+    for (const auto& frame : frames) {
+        timestamps.push_back(frame.timestamp);
     }
     
-    if (intervals.empty()) {
-        mMedFps = mFps;
-        mAvgFps = mFps;
-        return;
-    }
-    
-    // Calculate average FPS
-    double avgInterval = 0.0;
-    for (double interval : intervals) {
-        avgInterval += interval;
-    }
-    avgInterval /= intervals.size();
-    mAvgFps = static_cast<float>(1.0 / avgInterval);
-    
-    // Calculate median FPS
-    std::sort(intervals.begin(), intervals.end());
-    double medianInterval;
-    size_t mid = intervals.size() / 2;
-    if (intervals.size() % 2 == 0) {
-        medianInterval = (intervals[mid - 1] + intervals[mid]) / 2.0;
-    } else {
-        medianInterval = intervals[mid];
-    }
-    mMedFps = static_cast<float>(1.0 / medianInterval);
+    auto frameRateInfo = vfs::calculateFrameRate(timestamps);
+    mMedFps = frameRateInfo.medianFrameRate;
+    mAvgFps = frameRateInfo.averageFrameRate;
     
     spdlog::debug("DNG sequence frame rate stats: avg={:.2f}fps, median={:.2f}fps", mAvgFps, mMedFps);
 }

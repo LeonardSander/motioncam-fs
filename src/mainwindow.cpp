@@ -37,54 +37,67 @@
 namespace {
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
+}
 
-    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {
-        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;
-
-        if(ui.draftModeCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_DRAFT;
-
-        if(ui.vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-
-        if(ui.vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
-
-        if(ui.scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
-
-        if(ui.debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
-
-        if(ui.normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
-
-        if(ui.cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
-
-        if(ui.cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_CROPPING;
-
-        if(ui.camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
-
-        if(ui.logTransformCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
-
-        if(ui.quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
-
-        if(ui.remosaicCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
-
-        return options;
-    }
+motioncam::RenderConfig MainWindow::buildRenderConfig() const {
+    motioncam::RenderConfig config;
+    
+    // Build options bitfield
+    config.options = motioncam::RENDER_OPT_NONE;
+    
+    if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_DRAFT;
+    
+    if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    
+    if(ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    
+    if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
+    
+    if(ui->debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
+    
+    if(ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
+    
+    if(ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+    
+    if(ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_CROPPING;
+    
+    if(ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
+    
+    if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+    
+    if(ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
+    
+    if(ui->remosaicCheckBox->checkState() == Qt::CheckState::Checked)
+        config.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+    
+    // Copy all other settings from member variable
+    config.draftScale = mRenderConfig.draftScale;
+    config.cfrTarget = mRenderConfig.cfrTarget;
+    config.cropTarget = mRenderConfig.cropTarget;
+    config.cameraModel = mRenderConfig.cameraModel;
+    config.levels = mRenderConfig.levels;
+    config.logTransform = mRenderConfig.logTransform;
+    config.exposureCompensation = mRenderConfig.exposureCompensation;
+    config.quadBayerOption = mRenderConfig.quadBayerOption;
+    config.cfaPhase = mRenderConfig.cfaPhase;
+    
+    return config;
 }
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
-    , mDraftQuality(1)
     , mProcessingWatcher(nullptr)
     , mProcessingInProgress(false)
 #ifdef _WIN32
@@ -131,6 +144,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->quadBayerCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    //connect(ui->precacheCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onPrecacheCheckboxChanged);
     
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
@@ -213,15 +227,16 @@ void MainWindow::saveSettings() {
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("interpretAsQBEnabled", ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
-    settings.setValue("draftQuality", mDraftQuality);
-    settings.setValue("cfrTarget", ui->cfrTarget->currentText());
-    settings.setValue("cropTarget", ui->cropTargetComboBox->currentText());
-    settings.setValue("exposureCompensation", ui->exposureCompensationCombobox->currentText());
-    settings.setValue("camModelOverride", ui->camModelOverrideComboBox->currentText());
-    settings.setValue("levels", ui->levelsComboBox->currentText());
-    settings.setValue("logTransform", ui->logTransformComboBox->currentText());
-    settings.setValue("quadBayerOption", ui->quadBayerComboBox->currentText());
-    settings.setValue("cfaPhase", ui->cfaPhaseComboBox->currentText());
+    settings.setValue("draftQuality", mRenderConfig.draftScale);
+    settings.setValue("cfrTarget", QString::fromStdString(mRenderConfig.cfrTarget));
+    settings.setValue("cropTarget", QString::fromStdString(mRenderConfig.cropTarget));
+    settings.setValue("exposureCompensation", QString::fromStdString(mRenderConfig.exposureCompensation));
+    settings.setValue("camModelOverride", QString::fromStdString(mRenderConfig.cameraModel));
+    settings.setValue("levels", QString::fromStdString(mRenderConfig.levels));
+    settings.setValue("logTransform", QString::fromStdString(mRenderConfig.logTransform));
+    settings.setValue("quadBayerOption", QString::fromStdString(mRenderConfig.quadBayerOption));
+    settings.setValue("cfaPhase", QString::fromStdString(mRenderConfig.cfaPhase));
+    settings.setValue("precacheEnabled", ui->precacheCheckBox->checkState() == Qt::CheckState::Checked);
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -272,33 +287,36 @@ void MainWindow::restoreSettings() {
 
     ui->quadBayerCheckBox->setCheckState(
         settings.value("interpretAsQBEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    
+    ui->precacheCheckBox->setCheckState(
+        settings.value("precacheEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     mCacheRootFolder = settings.value("cachePath").toString();    
-    mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
-    mCFRTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
-    mExposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
-    mQuadBayerOption = (!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
-    mCfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
-    mCropTarget = settings.value("cropTarget").toString().toStdString();
-    mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
-    mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
-    mLogTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
+    mRenderConfig.draftScale = std::max(1, settings.value("draftQuality").toInt());
+    mRenderConfig.cfrTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
+    mRenderConfig.exposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
+    mRenderConfig.quadBayerOption = (!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
+    mRenderConfig.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
+    mRenderConfig.cropTarget = settings.value("cropTarget").toString().toStdString();
+    mRenderConfig.cameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
+    mRenderConfig.levels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
+    mRenderConfig.logTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
 
-    if(mDraftQuality == 2)
+    if(mRenderConfig.draftScale == 2)
         ui->draftQuality->setCurrentIndex(0);
-    else if(mDraftQuality == 4)
+    else if(mRenderConfig.draftScale == 4)
         ui->draftQuality->setCurrentIndex(1);
-    else if(mDraftQuality == 8)
+    else if(mRenderConfig.draftScale == 8)
         ui->draftQuality->setCurrentIndex(2);
     
-    ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
-    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mExposureCompensation));
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
-    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mCfaPhase));
-    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
-    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels));  
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
+    ui->cfrTarget->setCurrentText(QString::fromStdString(mRenderConfig.cfrTarget));
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderConfig.exposureCompensation));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mRenderConfig.quadBayerOption));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cfaPhase));
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cropTarget));    
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cameraModel));
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderConfig.levels));  
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mRenderConfig.logTransform));  
   
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
@@ -375,8 +393,8 @@ void MainWindow::mountFile(const QString& filePath) {
     motioncam::MountId mountId;
 
     try {
-        mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, mCfaPhase, filePath.toStdString(), dstPath.toStdString());
+        auto config = buildRenderConfig();
+        mountId = mFuseFilesystem->mount(config, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -390,7 +408,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(140);        //168 for 2 lines of metrics
+    fileWidget->setFixedHeight(168);        // Increased height for 2 lines of metrics
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
@@ -410,22 +428,55 @@ void MainWindow::mountFile(const QString& filePath) {
     if (fileInfoOpt.has_value()) {
         auto info = fileInfoOpt.value();
 
-        // Create info label with FPS, Total Frames/Dropped, and Resolution 
-        auto infoText = QString("Median / Average / Target FPS: %1 / %2 -> %3 | Framecount: %4 | Dropped: -%5 | Duplicated: +%6 | Resolution: %7x%8")
+        // Format runtime as MM:SS
+        int minutes = static_cast<int>(info.runtimeSeconds) / 60;
+        int seconds = static_cast<int>(info.runtimeSeconds) % 60;
+        QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
+        
+        // Extract RAW bits and log indicator from levelsInfo for styling
+        QString levelsStr = QString::fromStdString(info.levelsInfo);
+        QString rawPart;
+        int rawIdx = levelsStr.indexOf("RAW");
+        if (rawIdx != -1) {
+            rawPart = levelsStr.mid(rawIdx);
+        }
+        
+        // First row: Runtime, Resolution, Data Type, Levels
+        auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
+                                 "<span style='color: #888888;'> | Resolution: %2x%3 | Data Type: %4 | Levels: %5</span>")
+                                .arg(runtimeStr)
+                                .arg(info.width)
+                                .arg(info.height)
+                                .arg(QString::fromStdString(info.dataType))
+                                .arg(levelsStr.left(rawIdx));
+        
+        // Add styled RAW part if it exists
+        if (!rawPart.isEmpty()) {
+            infoText1 += QString("<span style='color: white;'>%1</span>").arg(rawPart);
+        }
+
+        auto* infoLabel1 = new QLabel(infoText1, fileWidget);
+        infoLabel1->setStyleSheet("font-size: 9pt;");
+        infoLabel1->setProperty("infoLabel1", true);
+        infoLabel1->setProperty("mountId", QVariant(mountId));
+        fileLayout->addWidget(infoLabel1);
+        
+        // Second row: FPS info and frame counts
+        auto infoText2 = QString("<span style='color: #888888;'>Median / Average / Target FPS: %1 / %2 -> </span>"
+                                 "<span style='color: white;'>%3</span>"
+                                 "<span style='color: #888888;'> | Framecount: %4 | Dropped: -%5 | Duplicated: +%6</span>")
                                 .arg(QString::number(info.medFps, 'f', 2))
                                 .arg(QString::number(info.avgFps, 'f', 2))
                                 .arg(QString::number(info.fps, 'f', 2))
                                 .arg(info.totalFrames)
                                 .arg(info.droppedFrames)
-                                .arg(info.duplicatedFrames)
-                                .arg(info.width)
-                                .arg(info.height);
-
-        auto* infoLabel = new QLabel(infoText, fileWidget);
-        infoLabel->setStyleSheet("font-size: 9pt; color: #888888;");
-        infoLabel->setProperty("infoLabel", true); // <-- Add this line
-        infoLabel->setProperty("mountId", QVariant(mountId)); // <-- Add this line for consistency
-        fileLayout->addWidget(infoLabel);
+                                .arg(info.duplicatedFrames);
+        
+        auto* infoLabel2 = new QLabel(infoText2, fileWidget);
+        infoLabel2->setStyleSheet("font-size: 9pt;");
+        infoLabel2->setProperty("infoLabel2", true);
+        infoLabel2->setProperty("mountId", QVariant(mountId));
+        fileLayout->addWidget(infoLabel2);
     }
 
     // Create and add the source folder label
@@ -471,12 +522,32 @@ void MainWindow::mountFile(const QString& filePath) {
     calibButton->setProperty("calibButton", true);
     buttonLayout->addWidget(calibButton);
     
+    // Create a container widget for status label and refresh button overlay
+    auto* statusContainer = new QWidget(fileWidget);
+    statusContainer->setProperty("statusContainer", true);
+    statusContainer->setFixedHeight(buttonHeight);
+    
     // Create calibration status label (initially hidden)
-    auto* calibStatusLabel = new QLabel("", fileWidget);
+    auto* calibStatusLabel = new QLabel("", statusContainer);
     calibStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold;");
     calibStatusLabel->setProperty("calibStatusLabel", true);
     calibStatusLabel->setVisible(false);
-    buttonLayout->addWidget(calibStatusLabel);
+    calibStatusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    
+    // Create invisible refresh button on top of the status label
+    auto* refreshButton = new QPushButton("", statusContainer);
+    refreshButton->setStyleSheet("background: transparent; border: none;");
+    refreshButton->setCursor(Qt::PointingHandCursor);
+    refreshButton->setProperty("refreshButton", true);
+    refreshButton->setVisible(false);
+    refreshButton->setToolTip("Refresh Calibration");
+    
+    buttonLayout->addWidget(statusContainer);
+    
+    // Connect refresh button to update calibration
+    connect(refreshButton, &QPushButton::clicked, this, [this] {
+        updateCalibrationButtonStates();
+    });
 
     // Add button layout to main layout
     fileLayout->addLayout(buttonLayout);
@@ -673,38 +744,73 @@ void MainWindow::updateFpsLabels() {
     }
     
     // Force recalculation of fps values by calling updateOptions for all mounted files
-    auto renderOptions = getRenderOptions(*ui);
+    auto config = buildRenderConfig();
     
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, mCfaPhase);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, config);
     }
     
-    // Find all fps labels in the scroll area
-    auto fpsLabels = scrollContent->findChildren<QLabel*>();
+    // Find all info labels in the scroll area
+    auto allLabels = scrollContent->findChildren<QLabel*>();
     
-    for (auto* label : fpsLabels) {
-        // Check if this is an fps label by looking for the isFpsLabel property
-        if (label->property("infoLabel").toBool()) {
-            bool ok = false;
-            auto mountId = label->property("mountId").toInt(&ok);
+    for (auto* label : allLabels) {
+        bool ok = false;
+        auto mountId = label->property("mountId").toInt(&ok);
+        
+        if (!ok || mountId < 0) {
+            continue;
+        }
+        
+        // Get the updated info
+        auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
+        if (!fileInfoOpt.has_value()) {
+            continue;
+        }
+        
+        auto info = fileInfoOpt.value();
+        
+        // Update first info label (runtime, resolution, data type, levels)
+        if (label->property("infoLabel1").toBool()) {
+            // Format runtime as MM:SS
+            int minutes = static_cast<int>(info.runtimeSeconds) / 60;
+            int seconds = static_cast<int>(info.runtimeSeconds) % 60;
+            QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
             
-            if (ok && mountId >= 0) {
-                // Get the updated fps value
-                auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
-                if (fileInfoOpt.has_value()) {
-                    auto info = fileInfoOpt.value();
-                    auto infoText = QString("Median / Average / Target FPS: %1 / %2 -> %3 | Framecount: %4 | Dropped: -%5 | Duplicated: +%6 | Resolution: %7x%8")
-                                .arg(QString::number(info.medFps, 'f', 2))
-                                .arg(QString::number(info.avgFps, 'f', 2))
-                                .arg(QString::number(info.fps, 'f', 2))
-                                .arg(info.totalFrames)
-                                .arg(info.droppedFrames)
-                                .arg(info.duplicatedFrames)
-                                .arg(info.width)
-                                .arg(info.height);
-                    label->setText(infoText);
-                }
+            // Extract RAW bits and log indicator from levelsInfo for styling
+            QString levelsStr = QString::fromStdString(info.levelsInfo);
+            QString rawPart;
+            int rawIdx = levelsStr.indexOf("RAW");
+            if (rawIdx != -1) {
+                rawPart = levelsStr.mid(rawIdx);
             }
+            
+            auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
+                                     "<span style='color: #888888;'> | Resolution: %2x%3 | Data Type: %4 | Levels: %5</span>")
+                                    .arg(runtimeStr)
+                                    .arg(info.width)
+                                    .arg(info.height)
+                                    .arg(QString::fromStdString(info.dataType))
+                                    .arg(levelsStr.left(rawIdx));
+            
+            if (!rawPart.isEmpty()) {
+                infoText1 += QString("<span style='color: white;'>%1</span>").arg(rawPart);
+            }
+            
+            label->setText(infoText1);
+        }
+        // Update second info label (FPS and frame counts)
+        else if (label->property("infoLabel2").toBool()) {
+            auto infoText2 = QString("<span style='color: #888888;'>Median / Average / Target FPS: %1 / %2 -> </span>"
+                                     "<span style='color: white;'>%3</span>"
+                                     "<span style='color: #888888;'> | Framecount: %4 | Dropped: -%5 | Duplicated: +%6</span>")
+                                    .arg(QString::number(info.medFps, 'f', 2))
+                                    .arg(QString::number(info.avgFps, 'f', 2))
+                                    .arg(QString::number(info.fps, 'f', 2))
+                                    .arg(info.totalFrames)
+                                    .arg(info.droppedFrames)
+                                    .arg(info.duplicatedFrames);
+            
+            label->setText(infoText2);
         }
     }
 }
@@ -728,16 +834,7 @@ void MainWindow::scheduleOptionsUpdate() {
     mProcessingInProgress = true;
     
     // Capture current settings
-    auto renderOptions = getRenderOptions(*ui);
-    auto draftQuality = mDraftQuality;
-    auto cfrTarget = mCFRTarget;
-    auto cropTarget = mCropTarget;
-    auto cameraModel = mCameraModel;
-    auto levels = mLevels;
-    auto logTransform = mLogTransform;
-    auto exposureCompensation = mExposureCompensation;
-    auto quadBayerOption = mQuadBayerOption;
-    auto cfaPhase = mCfaPhase;
+    auto config = buildRenderConfig();
     auto mountedFiles = mMountedFiles;
     auto filesystem = mFuseFilesystem.get();
     
@@ -745,16 +842,12 @@ void MainWindow::scheduleOptionsUpdate() {
     onProcessingStarted();
     
     // Run processing in background thread using QtConcurrent
-    QFuture<void> future = QtConcurrent::run([this, filesystem, renderOptions, draftQuality, cfrTarget, cropTarget, 
-                                               cameraModel, levels, logTransform, exposureCompensation, 
-                                               quadBayerOption, cfaPhase, mountedFiles]() {
+    QFuture<void> future = QtConcurrent::run([this, filesystem, config, mountedFiles]() {
         int current = 0;
         int total = mountedFiles.size();
         
         for (const auto& file : mountedFiles) {
-            filesystem->updateOptions(file.mountId, renderOptions, draftQuality, cfrTarget, 
-                                     cropTarget, cameraModel, levels, logTransform, 
-                                     exposureCompensation, quadBayerOption, cfaPhase);
+            filesystem->updateOptions(file.mountId, config);
             current++;
             
             // Update progress on main thread
@@ -800,52 +893,52 @@ void MainWindow::onProcessingFinished() {
 
 void MainWindow::onDraftModeQualityChanged(int index) {
     if(index == 0)
-        mDraftQuality = 2;
+        mRenderConfig.draftScale = 2;
     else if(index == 1)
-        mDraftQuality = 4;
+        mRenderConfig.draftScale = 4;
     else if(index == 2)
-        mDraftQuality = 8;
+        mRenderConfig.draftScale = 8;
 
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCFRTargetChanged(std::string input) {
-    mCFRTarget = input;
+    mRenderConfig.cfrTarget = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCropTargetChanged(std::string input) {
-    mCropTarget = input;
+    mRenderConfig.cropTarget = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCamModelOverrideChanged(std::string input) {
-    mCameraModel = input;
+    mRenderConfig.cameraModel = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onLevelsChanged(std::string input) {
-    mLevels = input;
+    mRenderConfig.levels = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onLogTransformChanged(std::string input) {
-    mLogTransform = input;
+    mRenderConfig.logTransform = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onExposureCompensationChanged(std::string input) {
-    mExposureCompensation = input;
+    mRenderConfig.exposureCompensation = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onQuadBayerChanged(std::string input) {
-    mQuadBayerOption = input;
+    mRenderConfig.quadBayerOption = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCfaPhaseChanged(std::string input) {
-    mCfaPhase = input;
+    mRenderConfig.cfaPhase = input;
     scheduleOptionsUpdate();
 }
 
@@ -883,24 +976,23 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->quadBayerCheckBox->setCheckState(Qt::CheckState::Unchecked);
 
-    mDraftQuality = 1;
-    mCFRTarget = "Prefer Drop Frame";
-    mExposureCompensation = "0ev";
-    mCameraModel = "Panasonic";
-    mLevels = "Dynamic";
-    mLogTransform = "Keep Input";
-    mQuadBayerOption = "Wrong CFA Metadata";
-    mCfaPhase = "Don't override CFA";
-    mDraftQuality = 1;
+    mRenderConfig.draftScale = 1;
+    mRenderConfig.cfrTarget = "Prefer Drop Frame";
+    mRenderConfig.exposureCompensation = "0ev";
+    mRenderConfig.cameraModel = "Panasonic";
+    mRenderConfig.levels = "Dynamic";
+    mRenderConfig.logTransform = "Keep Input";
+    mRenderConfig.quadBayerOption = "Wrong CFA Metadata";
+    mRenderConfig.cfaPhase = "Don't override CFA";
 
-    ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));          // Set CFR target ComboBox to match restored value
-    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mExposureCompensation));
-    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));    
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
-    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
-    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mCfaPhase));   
+    ui->cfrTarget->setCurrentText(QString::fromStdString(mRenderConfig.cfrTarget));
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderConfig.exposureCompensation));
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cameraModel));    
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderConfig.levels)); 
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cropTarget));    
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mRenderConfig.logTransform));  
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mRenderConfig.quadBayerOption));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cfaPhase));   
 
     updateUi();
 }
@@ -977,17 +1069,26 @@ void MainWindow::updateCalibrationButtonStates() {
         QFileInfo fileInfo(filePath);
         QString jsonPath = fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
         
-        // Find the calibration button and status label
-        auto* calibButton = fileWidget->findChild<QPushButton*>(QString(), Qt::FindDirectChildrenOnly);
+        // Find the calibration button, status container, label, and refresh button
         QPushButton* actualCalibButton = nullptr;
+        QPushButton* actualRefreshButton = nullptr;
+        QWidget* statusContainer = nullptr;
         for (auto* btn : fileWidget->findChildren<QPushButton*>()) {
             if (btn->property("calibButton").toBool()) {
                 actualCalibButton = btn;
+            }
+            if (btn->property("refreshButton").toBool()) {
+                actualRefreshButton = btn;
+            }
+        }
+        
+        for (auto* widget : fileWidget->findChildren<QWidget*>()) {
+            if (widget->property("statusContainer").toBool()) {
+                statusContainer = widget;
                 break;
             }
         }
         
-        auto* calibStatusLabel = fileWidget->findChild<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
         QLabel* actualStatusLabel = nullptr;
         for (auto* lbl : fileWidget->findChildren<QLabel*>()) {
             if (lbl->property("calibStatusLabel").toBool()) {
@@ -996,7 +1097,7 @@ void MainWindow::updateCalibrationButtonStates() {
             }
         }
         
-        if (!actualCalibButton || !actualStatusLabel) {
+        if (!actualCalibButton || !actualStatusLabel || !actualRefreshButton || !statusContainer) {
             continue;
         }
         
@@ -1010,17 +1111,45 @@ void MainWindow::updateCalibrationButtonStates() {
                 actualStatusLabel->setText("Calibration Loaded");
                 actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #00AA00;");
                 actualStatusLabel->setVisible(true);
+                
+                // Adjust label size and position
+                actualStatusLabel->adjustSize();
+                actualStatusLabel->move(0, (statusContainer->height() - actualStatusLabel->height()) / 2);
+                
+                // Show refresh button and position it to overlay the label
+                int labelWidth = actualStatusLabel->fontMetrics().horizontalAdvance(actualStatusLabel->text());
+                actualRefreshButton->setGeometry(0, 0, labelWidth + 20, statusContainer->height());
+                actualRefreshButton->setVisible(true);
+                actualRefreshButton->raise();
+                
+                statusContainer->setFixedWidth(labelWidth + 20);
+                statusContainer->setVisible(true);
             } else {
                 // Invalid calibration
                 actualCalibButton->setVisible(false);
                 actualStatusLabel->setText("Calibration Ignored");
                 actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #AA0000;");
                 actualStatusLabel->setVisible(true);
+                
+                // Adjust label size and position
+                actualStatusLabel->adjustSize();
+                actualStatusLabel->move(0, (statusContainer->height() - actualStatusLabel->height()) / 2);
+                
+                // Show refresh button and position it to overlay the label
+                int labelWidth = actualStatusLabel->fontMetrics().horizontalAdvance(actualStatusLabel->text());
+                actualRefreshButton->setGeometry(0, 0, labelWidth + 20, statusContainer->height());
+                actualRefreshButton->setVisible(true);
+                actualRefreshButton->raise();
+                
+                statusContainer->setFixedWidth(labelWidth + 20);
+                statusContainer->setVisible(true);
             }
         } else {
             // No JSON file
             actualCalibButton->setVisible(true);
             actualStatusLabel->setVisible(false);
+            actualRefreshButton->setVisible(false);
+            statusContainer->setVisible(false);
         }
     }
 }

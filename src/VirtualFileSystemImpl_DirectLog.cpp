@@ -1,4 +1,5 @@
 #include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl.h"
 #include "DirectLogDecoder.h"
 #include "CalibrationData.h"
 #include "Utils.h"
@@ -21,81 +22,15 @@ using motioncam::Timestamp;
 
 namespace motioncam {
 
-namespace {
 
-#ifdef _WIN32
-    constexpr std::string_view DESKTOP_INI = R"([.ShellClassInfo]
-ConfirmFileOp=0
-
-[ViewState]
-Mode=4
-Vid={137E7700-3573-11CF-AE69-08002B2E1262}
-FolderType=Generic
-
-[{5984FFE0-28D4-11CF-AE66-08002B2E1262}]
-Mode=4
-LogicalViewMode=1
-IconSize=16
-
-[LocalizedFileNames]
-)";
-#endif
-
-    std::string constructFrameFilename(
-        const std::string& baseName, int frameNumber, int padding = 6, const std::string& extension = "")
-    {
-        std::ostringstream oss;
-        oss << baseName;
-        oss << std::setfill('0') << std::setw(padding) << frameNumber;
-        if (!extension.empty()) {
-            if (extension[0] != '.') {
-                oss << '.';
-            }
-            oss << extension;
-        }
-        return oss.str();
-    }
-
-    int getScaleFromOptions(FileRenderOptions options, int draftScale) {
-        if(options & RENDER_OPT_DRAFT)
-            return draftScale;
-        return 1;
-    }
-    
-    int getFrameNumberFromTimestamp(Timestamp timestamp, Timestamp referenceTimestamp, float frameRate) {
-        if (frameRate <= 0) {
-            return -1; // Invalid frame rate
-        }
-
-        int64_t timeDifference = timestamp - referenceTimestamp;
-        if (timeDifference < 0) {
-            return -1;
-        }
-
-        // Calculate nanoseconds per frame
-        double nanosecondsPerFrame = 1000000000.0 / frameRate;
-
-        // Calculate expected frame number
-        return static_cast<int>(std::round(timeDifference / nanosecondsPerFrame));
-    }
-}
 
 VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        FileRenderOptions options,
-        int draftScale,
-        const std::string& cfrTarget,
-        const std::string& cropTarget,
+        const RenderConfig& config,
         const std::string& file,
-        const std::string& baseName,
-        const std::string& cameraModel,
-        const std::string& levels,
-        const std::string& logTransform,
-        const std::string& exposureCompensation,
-        const std::string& quadBayerOption,
-        const std::string& cfaPhase) :
+        const std::string& baseName) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -110,20 +45,11 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mDuplicatedFrames(0),
         mWidth(0),
         mHeight(0),
-        mDraftScale(draftScale),
-        mCFRTarget(cfrTarget),
-        mCropTarget(cropTarget),
-        mCameraModel(cameraModel),
-        mLevels(levels),
-        mLogTransform(logTransform),
-        mExposureCompensation(exposureCompensation),
-        mQuadBayerOption(quadBayerOption),
-        mCfaPhase(cfaPhase),
-        mOptions(options),
+        mConfig(config),
         mIsHLG(false) {
     
     // Parse exposure keyframes if the input contains keyframe syntax
-    mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
+    mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
     
     // Load calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);
@@ -159,15 +85,15 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         throw;
     }
     
-    this->init(options);
+    this->init();
 }
 
 VirtualFileSystemImpl_DirectLog::~VirtualFileSystemImpl_DirectLog() {
     spdlog::info("Destroying VirtualFileSystemImpl_DirectLog({})", mSrcPath);
 }
 
-void VirtualFileSystemImpl_DirectLog::init(FileRenderOptions options) {
-    spdlog::debug("VirtualFileSystemImpl_DirectLog::init(options={})", optionsToString(options));
+void VirtualFileSystemImpl_DirectLog::init() {
+    spdlog::debug("VirtualFileSystemImpl_DirectLog::init(options={})", optionsToString(mConfig.options));
     
     mFiles.clear();
 
@@ -176,7 +102,7 @@ void VirtualFileSystemImpl_DirectLog::init(FileRenderOptions options) {
     desktopIni.type = EntryType::FILE_ENTRY;
     desktopIni.pathParts = {};
     desktopIni.name = "desktop.ini";
-    desktopIni.size = DESKTOP_INI.size();
+    desktopIni.size = vfs::DESKTOP_INI.size();
     mFiles.push_back(desktopIni);
 #endif
 
@@ -185,90 +111,9 @@ void VirtualFileSystemImpl_DirectLog::init(FileRenderOptions options) {
         return;
     }
     
-    // Determine target FPS based on CFR conversion options (similar to MCRAW)
-    bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
-    
-    if (applyCFRConversion && !mCFRTarget.empty()) {
-        if (mCFRTarget == "Prefer Integer") {
-            if (mMedFps <= 23.0 || mMedFps >= 1000.0) 
-                mFps = mMedFps;
-            else if (mMedFps < 24.5)
-                mFps = 24.0f;
-            else if (mMedFps < 26.0)
-                mFps = 25.0f;
-            else if (mMedFps < 33.0)
-                mFps = 30.0f;
-            else if (mMedFps < 49.0)
-                mFps = 48.0f;
-            else if (mMedFps < 52.0)
-                mFps = 50.0f;
-            else if (mMedFps > 56.0 && mMedFps < 63.0)
-                mFps = 60.0f;
-            else if (mMedFps > 112.0 && mMedFps < 125.0)
-                mFps = 120.0f;
-            else if (mMedFps > 224.0 && mMedFps < 250.0)
-                mFps = 240.0f;
-            else if (mMedFps > 448.0 && mMedFps < 500.0)
-                mFps = 480.0f;
-            else if (mMedFps > 896.0 && mMedFps < 1000.0)
-                mFps = 960.0f;
-            else if (mMedFps >= 63.0)
-                mFps = 120.0f;
-            else   
-                mFps = 60.0f;
-        }
-        else if (mCFRTarget == "Prefer Drop Frame") {
-            if (mMedFps <= 23.0 || mMedFps >= 1000.0) 
-                mFps = mMedFps;
-            else if (mMedFps < 24.5)
-                mFps = 23.976f;
-            else if (mMedFps < 26.0)
-                mFps = 25.0f;
-            else if (mMedFps < 33.0)
-                mFps = 29.97f;
-            else if (mMedFps < 49.0)
-                mFps = 47.952f;
-            else if (mMedFps < 52.0)
-                mFps = 50.0f;
-            else if (mMedFps > 56.0 && mMedFps < 63.0)
-                mFps = 59.94f;
-            else if (mMedFps > 112.0 && mMedFps < 125.0)
-                mFps = 119.88f;
-            else if (mMedFps > 224.0 && mMedFps < 250.0)
-                mFps = 240.0f;
-            else if (mMedFps > 448.0 && mMedFps < 500.0)
-                mFps = 480.0f;
-            else if (mMedFps > 896.0 && mMedFps < 1000.0)
-                mFps = 960.0f;
-            else if (mMedFps >= 63.0)
-                mFps = 119.88f;
-            else    
-                mFps = 59.94f;
-        }
-        else if (mCFRTarget == "Median (Slowmotion)") {
-            mFps = mMedFps;
-        }
-        else if (mCFRTarget == "Average (Testing)") {
-            mFps = mAvgFps;
-        }
-        else {
-            // Custom framerate - try to parse as float
-            try {
-                mFps = std::stof(mCFRTarget);
-            } catch (const std::exception& e) {
-                spdlog::warn("Invalid CFR target '{}', using median frame rate", mCFRTarget);
-                mFps = mMedFps;
-            }
-        }
-    } else {
-        // No CFR conversion - try to parse custom framerate or use average
-        try {
-            mFps = std::stof(mCFRTarget);
-        } catch (const std::exception& e) {
-            spdlog::warn("Invalid CFR target '{}', using average for no cfr conversion", mCFRTarget);
-            mFps = mAvgFps;
-        }
-    }
+    // Determine target FPS based on CFR conversion options
+    bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+    mFps = vfs::determineCFRTarget(mMedFps, mConfig.cfrTarget, applyCFRConversion);
     
     spdlog::info("DirectLog target FPS: {:.2f} (CFR conversion: {})", mFps, applyCFRConversion);
     
@@ -298,7 +143,7 @@ void VirtualFileSystemImpl_DirectLog::init(FileRenderOptions options) {
     if (applyCFRConversion) {
         // CFR conversion: duplicate/drop frames to match target framerate
         for (size_t i = 0; i < frames.size(); ++i) {
-            int pts = getFrameNumberFromTimestamp(frames[i].timestamp, frames[0].timestamp, mFps);
+            int pts = vfs::getFrameNumberFromTimestamp(frames[i].timestamp, frames[0].timestamp, mFps);
             
             // Count duplicated frames before this frame
             mDuplicatedFrames += std::max(0, pts - lastPts - 1);
@@ -312,7 +157,7 @@ void VirtualFileSystemImpl_DirectLog::init(FileRenderOptions options) {
                 Entry dngEntry;
                 dngEntry.type = EntryType::FILE_ENTRY;
                 dngEntry.pathParts = {};
-                dngEntry.name = constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
+                dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
                 dngEntry.size = mTypicalDngSize;
                 dngEntry.userData = frames[i].timestamp;
                 mFiles.push_back(dngEntry);
@@ -325,7 +170,7 @@ void VirtualFileSystemImpl_DirectLog::init(FileRenderOptions options) {
             Entry dngEntry;
             dngEntry.type = EntryType::FILE_ENTRY;
             dngEntry.pathParts = {};
-            dngEntry.name = constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
+            dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
             dngEntry.size = mTypicalDngSize;
             dngEntry.userData = frames[i].timestamp;
             mFiles.push_back(dngEntry);
@@ -376,9 +221,9 @@ int VirtualFileSystemImpl_DirectLog::readFile(
     
     if (entry.name == "desktop.ini") {
 #ifdef _WIN32
-        size_t copyLen = std::min(len, DESKTOP_INI.size() - pos);
+        size_t copyLen = std::min(len, vfs::DESKTOP_INI.size() - pos);
         if (copyLen > 0) {
-            memcpy(dst, DESKTOP_INI.data() + pos, copyLen);
+            memcpy(dst, vfs::DESKTOP_INI.data() + pos, copyLen);
         }
         result(copyLen, 0);
         return 0;
@@ -625,116 +470,6 @@ namespace {
         data.resize(newSize);
     }
 
-    // Single-channel Bayer encoding functions
-    void encodeTo12Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 2) {
-                uint16_t v0 = srcPtr[0];
-                uint16_t v1 = srcPtr[1];
-                
-                dstPtr[0] = v0 >> 4;
-                dstPtr[1] = ((v0 & 0x0F) << 4) | (v1 >> 8);
-                dstPtr[2] = v1 & 0xFF;
-                
-                srcPtr += 2;
-                dstPtr += 3;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    void encodeTo10Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 4) {
-                uint16_t s[4];
-                for (int i = 0; i < 4; i++) {
-                    s[i] = srcPtr[i];
-                }
-                
-                dstPtr[0] = s[0] >> 2;
-                dstPtr[1] = ((s[0] & 0x03) << 6) | (s[1] >> 4);
-                dstPtr[2] = ((s[1] & 0x0F) << 4) | (s[2] >> 6);
-                dstPtr[3] = ((s[2] & 0x3F) << 2) | (s[3] >> 8);
-                dstPtr[4] = s[3] & 0xFF;
-                
-                srcPtr += 4;
-                dstPtr += 5;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    void encodeTo8Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x++) {
-                dstPtr[0] = srcPtr[0] & 0xFF;
-                srcPtr += 1;
-                dstPtr += 1;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    void encodeTo6Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 4) {
-                uint8_t v[4];
-                for (int i = 0; i < 4; i++) {
-                    v[i] = srcPtr[i] & 0x3F;
-                }
-                
-                dstPtr[0] = (v[0] << 2) | (v[1] >> 4);
-                dstPtr[1] = ((v[1] & 0x0F) << 4) | (v[2] >> 2);
-                dstPtr[2] = ((v[2] & 0x03) << 6) | v[3];
-                
-                srcPtr += 4;
-                dstPtr += 3;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    void encodeTo4Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 2) {
-                uint8_t v[2];
-                for (int i = 0; i < 2; i++) {
-                    v[i] = srcPtr[i] & 0x0F;
-                }
-                
-                dstPtr[0] = (v[0] << 4) | v[1];
-                
-                srcPtr += 2;
-                dstPtr += 1;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
 }
 
 bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
@@ -749,20 +484,20 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         const int height = videoInfo.height;
         
         // Determine if we should apply log curve and bit reduction
-        bool applyLogCurve = !mLogTransform.empty();
+        bool applyLogCurve = !mConfig.logTransform.empty();
         int bitReduction = 0;
         
         if (applyLogCurve) {
             // Parse bit reduction from logTransform option
-            if (mLogTransform == "Reduce by 2bit") {
+            if (mConfig.logTransform == "Reduce by 2bit") {
                 bitReduction = 2;
-            } else if (mLogTransform == "Reduce by 4bit") {
+            } else if (mConfig.logTransform == "Reduce by 4bit") {
                 bitReduction = 4;
-            } else if (mLogTransform == "Reduce by 6bit") {
+            } else if (mConfig.logTransform == "Reduce by 6bit") {
                 bitReduction = 6;
-            } else if (mLogTransform == "Reduce by 8bit") {
+            } else if (mConfig.logTransform == "Reduce by 8bit") {
                 bitReduction = 8;
-            } else if (mLogTransform == "Keep Input") {
+            } else if (mConfig.logTransform == "Keep Input") {
                 bitReduction = 0;
             }
         }
@@ -811,16 +546,16 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
         
         // Check if remosaicing is requested (from render options)
-        bool shouldRemosaic = (mOptions & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
+        bool shouldRemosaic = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
         
         // Get CFA phase from calibration JSON if available, otherwise use UI setting
         std::string cfaPhase = "bggr";
         if (mCalibration.has_value() && !mCalibration->cfaPhase.empty()) {
             // JSON override takes priority
             cfaPhase = mCalibration->cfaPhase;
-        } else if (!mCfaPhase.empty() && mCfaPhase != "Don't override CFA") {
+        } else if (!mConfig.cfaPhase.empty() && mConfig.cfaPhase != "Don't override CFA") {
             // Use UI setting if not "Don't override CFA"
-            cfaPhase = mCfaPhase;
+            cfaPhase = mConfig.cfaPhase;
         }
         // else: keep default "bggr"
         
@@ -851,35 +586,40 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         if (applyLogCurve) {
             if (encodeBits <= 4) {
                 if (shouldRemosaic) {
-                    encodeTo4Bit(imageBytes, width, height);
+                    uint32_t w = width, h = height;
+                    utils::encodeTo4Bit(imageBytes, w, h);
                 } else {
                     encodeRGBTo4Bit(imageBytes, width, height);
                 }
                 encodeBits = 4;
             } else if (encodeBits <= 6) {
                 if (shouldRemosaic) {
-                    encodeTo6Bit(imageBytes, width, height);
+                    uint32_t w = width, h = height;
+                    utils::encodeTo6Bit(imageBytes, w, h);
                 } else {
                     encodeRGBTo6Bit(imageBytes, width, height);
                 }
                 encodeBits = 6;
             } else if (encodeBits <= 8) {
                 if (shouldRemosaic) {
-                    encodeTo8Bit(imageBytes, width, height);
+                    uint32_t w = width, h = height;
+                    utils::encodeTo8Bit(imageBytes, w, h);
                 } else {
                     encodeRGBTo8Bit(imageBytes, width, height);
                 }
                 encodeBits = 8;
             } else if (encodeBits <= 10) {
                 if (shouldRemosaic) {
-                    encodeTo10Bit(imageBytes, width, height);
+                    uint32_t w = width, h = height;
+                    utils::encodeTo10Bit(imageBytes, w, h);
                 } else {
                     encodeRGBTo10Bit(imageBytes, width, height);
                 }
                 encodeBits = 10;
             } else if (encodeBits <= 12) {
                 if (shouldRemosaic) {
-                    encodeTo12Bit(imageBytes, width, height);
+                    uint32_t w = width, h = height;
+                    utils::encodeTo12Bit(imageBytes, w, h);
                 } else {
                     encodeRGBTo12Bit(imageBytes, width, height);
                 }
@@ -934,8 +674,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // Set camera/software metadata
         dng.SetMake("DirectLog");
-        dng.SetCameraModelName(mCameraModel.empty() ? "DirectLog Video" : mCameraModel);
-        dng.SetUniqueCameraModel(mCameraModel.empty() ? "DirectLog Video" : mCameraModel);
+        dng.SetCameraModelName(mConfig.cameraModel.empty() ? "DirectLog Video" : mConfig.cameraModel);
+        dng.SetUniqueCameraModel(mConfig.cameraModel.empty() ? "DirectLog Video" : mConfig.cameraModel);
         dng.SetSoftware("MotionCam DirectLog Decoder");
         
         // Set image description with frame info
@@ -958,12 +698,12 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetResolutionUnit(2); // inches
         
         // Set baseline exposure with keyframe support
-        float exposureOffset = (mCameraModel == "Panasonic" ? -2.0f : 0.0f);
+        float exposureOffset = (mConfig.cameraModel == "Panasonic" ? -2.0f : 0.0f);
         if (mExposureKeyframes.has_value()) {
             exposureOffset += mExposureKeyframes->getExposureAtFrame(frameNumber, mTotalFrames);
-        } else if (!mExposureCompensation.empty()) {
+        } else if (!mConfig.exposureCompensation.empty()) {
             try {
-                exposureOffset += std::stof(mExposureCompensation);
+                exposureOffset += std::stof(mConfig.exposureCompensation);
             } catch (const std::exception&) {
                 // If parsing fails, keep the original exposureOffset value
             }
@@ -1052,33 +792,13 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     }
 }
 
-void VirtualFileSystemImpl_DirectLog::updateOptions(
-    FileRenderOptions options, 
-    int draftScale, 
-    const std::string& cfrTarget, 
-    const std::string& cropTarget, 
-    const std::string& cameraModel, 
-    const std::string& levels, 
-    const std::string& logTransform, 
-    const std::string& exposureCompensation, 
-    const std::string& quadBayerOption,
-    const std::string& cfaPhase) {
-    
+void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderConfig& config) {
     std::lock_guard<std::mutex> lock(mMutex);
     
-    mOptions = options;
-    mDraftScale = draftScale;
-    mCFRTarget = cfrTarget;
-    mCropTarget = cropTarget;
-    mCameraModel = cameraModel;
-    mLevels = levels;
-    mLogTransform = logTransform;
-    mExposureCompensation = exposureCompensation;
-    mQuadBayerOption = quadBayerOption;
-    mCfaPhase = cfaPhase;
+    mConfig = config;
     
     // Re-parse exposure keyframes
-    mExposureKeyframes = ExposureKeyframes::parse(exposureCompensation);
+    mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
     
     // Reload calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);
@@ -1090,7 +810,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(
         }
     }
     
-    init(options);
+    init();
 }
 
 FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
@@ -1103,6 +823,39 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.duplicatedFrames = mDuplicatedFrames;
     info.width = mWidth;
     info.height = mHeight;
+    
+    // Determine data type based on remosaic option
+    bool shouldRemosaic = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
+    info.dataType = shouldRemosaic ? "Bayer CFA" : "RGB";
+    
+    // Determine levels info
+    bool applyLogCurve = !mConfig.logTransform.empty();
+    int srcBits = 16;
+    int dstBits = 16;
+    
+    if (applyLogCurve) {
+        dstBits = 12; // Start with 12-bit log
+        if (mConfig.logTransform == "Reduce by 2bit") {
+            dstBits = 10;
+        } else if (mConfig.logTransform == "Reduce by 4bit") {
+            dstBits = 8;
+        } else if (mConfig.logTransform == "Reduce by 6bit") {
+            dstBits = 6;
+        } else if (mConfig.logTransform == "Reduce by 8bit") {
+            dstBits = 4;
+        }
+    }
+    
+    int srcWhiteLevel = (1 << srcBits) - 1;
+    int dstWhiteLevel = (1 << dstBits) - 1;
+    
+    info.levelsInfo = std::to_string(srcWhiteLevel) + "/0 -> " + 
+                      std::to_string(dstWhiteLevel) + "/0 RAW" + std::to_string(dstBits) +
+                      (applyLogCurve ? " log" : "");
+    
+    // Calculate runtime from video duration
+    info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(mTotalFrames) / mFps) : 0.0f;
+    
     return info;
 }
 
@@ -1119,41 +872,16 @@ void VirtualFileSystemImpl_DirectLog::calculateFrameRateStats() {
         return;
     }
     
-    std::vector<double> intervals;
-    intervals.reserve(frames.size() - 1);
-    
-    for (size_t i = 1; i < frames.size(); ++i) {
-        double intervalNs = static_cast<double>(frames[i].timestamp - frames[i-1].timestamp);
-        double intervalSec = intervalNs / 1000000000.0;
-        if (intervalSec > 0) {
-            intervals.push_back(intervalSec);
-        }
+    // Convert frame timestamps to vector of Timestamp
+    std::vector<Timestamp> timestamps;
+    timestamps.reserve(frames.size());
+    for (const auto& frame : frames) {
+        timestamps.push_back(frame.timestamp);
     }
     
-    if (intervals.empty()) {
-        mMedFps = mFps;
-        mAvgFps = mFps;
-        return;
-    }
-    
-    // Calculate average FPS
-    double avgInterval = 0.0;
-    for (double interval : intervals) {
-        avgInterval += interval;
-    }
-    avgInterval /= intervals.size();
-    mAvgFps = static_cast<float>(1.0 / avgInterval);
-    
-    // Calculate median FPS
-    std::sort(intervals.begin(), intervals.end());
-    double medianInterval;
-    size_t mid = intervals.size() / 2;
-    if (intervals.size() % 2 == 0) {
-        medianInterval = (intervals[mid - 1] + intervals[mid]) / 2.0;
-    } else {
-        medianInterval = intervals[mid];
-    }
-    mMedFps = static_cast<float>(1.0 / medianInterval);
+    auto frameRateInfo = vfs::calculateFrameRate(timestamps);
+    mMedFps = frameRateInfo.medianFrameRate;
+    mAvgFps = frameRateInfo.averageFrameRate;
     
     spdlog::debug("DirectLog frame rate stats: avg={:.2f}fps, median={:.2f}fps", mAvgFps, mMedFps);
 }

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1520</width>
-    <height>660</height>
+    <height>740</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -552,6 +552,33 @@
           </layout>
          </item>
          <item>
+        <layout class="QVBoxLayout" name="precacheSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QCheckBox" name="precacheCheckBox">
+           <property name="text">
+            <string>Enable Precaching</string>
+           </property>
+           <property name="checked">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="precacheLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Automatically render and cache all frames to disk in the background. Pauses when accessing frames.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
         <layout class="QVBoxLayout" name="defaultSection">
          <property name="spacing">
           <number>8</number>

@@ -26,6 +26,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/VirtualFileSystemImpl.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/VirtualFileSystemImpl_DirectLog.cpp
         src/VirtualFileSystemImpl_DNG.cpp
@@ -42,6 +43,7 @@ set(PROJECT_SOURCES
         include/Types.h
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h
+        include/VirtualFileSystemImpl.h
         include/VirtualFileSystemImpl_MCRAW.h
         include/VirtualFileSystemImpl_DirectLog.h
         include/VirtualFileSystemImpl_DNG.h
