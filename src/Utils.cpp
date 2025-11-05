@@ -587,8 +587,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     bool interpretAsQuadBayer,
     std::string cropTarget,
     std::string levels,
-    std::string logTransform,
-    std::string quadBayerOption,
+    LogTransformMode logTransform,
+    QuadBayerMode quadBayerOption,
     bool includeOpcode)
 {
     scale = (scale > 1 ? (scale / 2) * 2 : 1); // Ensure even scale for downscaling
@@ -727,51 +727,51 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
             normalizeShadingMap(lensShadingMap);
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
         } else {
-            if (debugShadingMap) 
+            if (debugShadingMap)
                 invertShadingMap(lensShadingMap);
-            else if (logTransform != "") {                 
-                if (logTransform == "Keep Input") {
+            else if (logTransform != LogTransformMode::Disabled) {
+                if (logTransform == LogTransformMode::KeepInput) {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0); //?
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
-                } else if (logTransform == "Reduce by 2bit") {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                } else if (logTransform == LogTransformMode::ReduceBy2Bit) {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
-                } else if (logTransform == "Reduce by 4bit") {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                } else if (logTransform == LogTransformMode::ReduceBy4Bit) {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
-                } else if (logTransform == "Reduce by 6bit") {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                } else if (logTransform == LogTransformMode::ReduceBy6Bit) {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
-                } else if (logTransform == "Reduce by 8bit") {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                } else if (logTransform == LogTransformMode::ReduceBy8Bit) {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
                 } else {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
                 }
             } else {
                 useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                dstWhiteLevel = std::pow(2.0f, useBits) - 1;
             }
         }
         for(auto& v : dstBlackLevel)
-            v = 0;                 
-    } else if (logTransform != "") {
-        if (logTransform == "Reduce by 2bit") {
+            v = 0;
+    } else if (logTransform != LogTransformMode::Disabled) {
+        if (logTransform == LogTransformMode::ReduceBy2Bit) {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == "Reduce by 4bit") {
+        } else if (logTransform == LogTransformMode::ReduceBy4Bit) {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == "Reduce by 6bit") {
+        } else if (logTransform == LogTransformMode::ReduceBy6Bit) {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;        
-        } else if (logTransform == "Reduce by 8bit") {
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+        } else if (logTransform == LogTransformMode::ReduceBy8Bit) {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;        
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         }
         for(auto& v : dstBlackLevel)
-            v = 0;       
+            v = 0;
     }
 
     // Create opcode list if requested and shading map is not applied to image data
@@ -831,7 +831,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 if(debugShadingMap) {
                     for (int i = 0; i < 4; i++)
                         p[i] = std::max(0.0f, linear[i] * (srcWhiteLevel - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
-                } else if (logTransform == "") {               // Linearize and (maybe) apply shading map
+                } else if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 4; i++)
                         p[i] = std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
                 } else {                                
@@ -1000,7 +1000,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 }*/
 
 
-                if (logTransform == "") {               // Linearize and (maybe) apply shading map
+                if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 16; i++)
                         p[i] = std::max(0.0f, p[i] * (dstWhiteLevel - dstBlackLevel[i%4]));
                 } else {                                
@@ -1063,15 +1063,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     const CameraConfiguration& cameraConfiguration,
     float recordingFps,
     int frameNumber,
-    FileRenderOptions options,
-    int scale,
     double baselineExpValue,
-    std::string cropTarget, 
-    std::string camModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption)
+    const RenderSettings& settings)
 {
     Measure m("generateDng");
 
@@ -1093,15 +1086,16 @@ std::shared_ptr<std::vector<char>> generateDng(
         throw std::runtime_error("Invalid sensor arrangement");
 
     // Scale down if requested
-    bool applyShadingMap = options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;    
-    bool vignetteOnlyColor = options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
-    bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
-    bool debugShadingMap = options & RENDER_OPT_DEBUG_SHADING_MAP;
-    bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
-    bool useLogCurve = options & RENDER_OPT_LOG_TRANSFORM;
-    bool interpretAsQuadBayer = metadata.needRemosaic || options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
+    bool applyShadingMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    bool vignetteOnlyColor = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    bool normalizeShadingMap = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    bool debugShadingMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
+    bool normalizeExposure = settings.options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    bool useLogCurve = settings.options & RENDER_OPT_LOG_TRANSFORM;
+    bool interpretAsQuadBayer = metadata.needRemosaic || settings.options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
 
-    if(!(options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
+    std::string cropTarget = settings.cropTarget;
+    if(!(settings.options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
         cropTarget = "0x0";
 
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2] = utils::preprocessData(
@@ -1110,12 +1104,12 @@ std::shared_ptr<std::vector<char>> generateDng(
         metadata,
         cameraConfiguration,
         cfa,
-        scale,
+        settings.draftScale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap, interpretAsQuadBayer,
         cropTarget,
-        levels,
-        logTransform,
-        quadBayerOption,
+        settings.levels,
+        settings.logTransform,
+        settings.quadBayerOption,
         true  // includeOpcode = true to generate lens shading opcode when not applied to image
     );
 
@@ -1180,12 +1174,12 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetIso(metadata.iso);
     dng.SetExposureTime(metadata.exposureTime / 1e9);
 
-    float exposureOffset = (camModel == "Panasonic" ? -2.0f : 0.0f);
-    
+    float exposureOffset = (settings.cameraModel == "Panasonic" ? -2.0f : 0.0f);
+
     // Parse float from exposureCompensation string and add to exposureOffset
-    if (!exposureCompensation.empty()) {
+    if (!settings.exposureCompensation.empty()) {
         try {
-            exposureOffset += std::stof(exposureCompensation);
+            exposureOffset += std::stof(settings.exposureCompensation);
         } catch (const std::exception&) {
             // If parsing fails, keep the original exposureOffset value
         }
@@ -1196,7 +1190,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         dng.SetBaselineExposure(exposureOffset);
 
-    if(interpretAsQuadBayer && scale == 1 && quadBayerOption == "Correct QBCFA Metadata") {   //de/remosaic need to be disabled and add ui option. 
+    if(interpretAsQuadBayer && settings.draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {   //de/remosaic need to be disabled and add ui option. 
         dng.SetCFARepeatPatternDim(4, 4);
         std::array<uint8_t, 4> cfa_pattern_0112 = {0,1,1,2};
         std::array<uint8_t, 4> cfa_pattern_2110 = {2,1,1,0};
@@ -1292,19 +1286,19 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetSoftware(software);
 
-    
-    if(camModel != ""){
-        if (camModel == "Blackmagic") {
+
+    if(settings.cameraModel != ""){
+        if (settings.cameraModel == "Blackmagic") {
             dng.SetUniqueCameraModel("Blackmagic Pocket Cinema Camera 4K");
-        } else if (camModel == "Panasonic") {
+        } else if (settings.cameraModel == "Panasonic") {
             dng.SetUniqueCameraModel("Panasonic Varicam RAW");
-        } else if (camModel == "Fujifilm" || camModel == "Fujifilm X-T5") {
+        } else if (settings.cameraModel == "Fujifilm" || settings.cameraModel == "Fujifilm X-T5") {
             dng.SetUniqueCameraModel("Fujifilm X-T5");
             dng.SetMake("Fujifilm");
             dng.SetCameraModelName("X-T5");
         } else {
             // Generic camera model
-            dng.SetUniqueCameraModel(camModel);
+            dng.SetUniqueCameraModel(settings.cameraModel);
         }
     } else {
         dng.SetUniqueCameraModel(cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
@@ -1323,8 +1317,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetActiveArea(&activeArea[0]);
 
     // Add linearization table based on actual bit depth
-    
-    if (logTransform != "" && !(logTransform == "Keep Input" && !applyShadingMap)) {
+
+    if (settings.logTransform != LogTransformMode::Disabled && !(settings.logTransform == LogTransformMode::KeepInput && !applyShadingMap)) {
         // Create linearization table sized for the actual stored range
         // The stored values range from 0 to dstWhiteLevel, so we need dstWhiteLevel+1 entries
         const int tableSize = static_cast<int>(dstWhiteLevel) + 1;

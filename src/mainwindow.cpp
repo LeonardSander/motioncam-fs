@@ -295,8 +295,18 @@ void MainWindow::mountFile(const QString& filePath) {
     motioncam::MountId mountId;
 
     try {
-        mountId = mFuseFilesystem->mount(
-            getRenderOptions(*ui), mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption, filePath.toStdString(), dstPath.toStdString());
+        motioncam::RenderSettings settings(
+            getRenderOptions(*ui),
+            mDraftQuality,
+            mCFRTarget,
+            mCropTarget,
+            mCameraModel,
+            mLevels,
+            mLogTransform,
+            mExposureCompensation,
+            mQuadBayerOption
+        );
+        mountId = mFuseFilesystem->mount(settings, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -570,10 +580,20 @@ void MainWindow::updateFpsLabels() {
     }
     
     // Force recalculation of fps values by calling updateOptions for all mounted files
-    auto renderOptions = getRenderOptions(*ui);
-    
+    motioncam::RenderSettings settings(
+        getRenderOptions(*ui),
+        mDraftQuality,
+        mCFRTarget,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );
+
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, settings);
     }
     
     // Find all fps labels in the scroll area
@@ -608,12 +628,22 @@ void MainWindow::updateFpsLabels() {
 
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     auto it = mMountedFiles.begin();
-    auto renderOptions = getRenderOptions(*ui);
+    motioncam::RenderSettings settings(
+        getRenderOptions(*ui),
+        mDraftQuality,
+        mCFRTarget,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );
 
     updateUi();
 
-    while(it != mMountedFiles.end()) {        
-        mFuseFilesystem->updateOptions(it->mountId, renderOptions, mDraftQuality, mCFRTarget, mCropTarget, mCameraModel, mLevels, mLogTransform, mExposureCompensation, mQuadBayerOption);
+    while(it != mMountedFiles.end()) {
+        mFuseFilesystem->updateOptions(it->mountId, settings);
         ++it;
     }
     

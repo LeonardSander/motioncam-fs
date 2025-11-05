@@ -83,7 +83,7 @@ public:
     ~Session();
 
 public:
-    void updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption);
+    void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
 
 protected:
@@ -159,10 +159,10 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption) {
-    mOptions = options;
-    mDraftScale = draftScale;
-    mFs->updateOptions(options, draftScale, cfrTarget, cropTarget, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
+void Session::updateOptions(const RenderSettings& settings) {
+    mOptions = settings.options;
+    mDraftScale = settings.draftScale;
+    mFs->updateOptions(settings);
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -188,7 +188,7 @@ void Session::updateOptions(FileRenderOptions options, int draftScale, std::stri
         if(boost::ends_with(e.name, "dng")) {
             PRJ_PLACEHOLDER_INFO placeholderInfo = {};
 
-            updatePlaceHolder(placeholderInfo, e, options, draftScale);
+            updatePlaceHolder(placeholderInfo, e, settings.options, settings.draftScale);
 
             hr = PrjUpdateFileIfNeeded(
                 _instanceHandle,
@@ -547,7 +547,7 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     setupLogging();
 }
 
-MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption, const std::string& srcFile, const std::string& dstPath) {
+MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -560,7 +560,7 @@ MountId FuseFileSystemImpl_Win::mount(FileRenderOptions options, int draftScale,
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, options, draftScale, cfrTarget, cropTarget, srcFile, baseName, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
@@ -577,12 +577,11 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void FuseFileSystemImpl_Win::updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption) {
+void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
-    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
-        options, draftScale, cfrTarget, cropTarget, cameraModel, levels, logTransform, exposureCompensation, quadBayerOption);
+    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(settings);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {

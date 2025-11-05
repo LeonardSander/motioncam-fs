@@ -29,9 +29,9 @@ public:
     IFuseFileSystem(const IFuseFileSystem&) = delete;
     IFuseFileSystem& operator=(const IFuseFileSystem&) = delete;
 
-    virtual MountId mount(FileRenderOptions options, int draftScale, const std::string cfrTarget, const std::string cropTarget, const std::string cameraModel, const std::string levels, const std::string logTransform, const std::string exposureCompensation, const std::string quadBayerOption, const std::string& srcFile, const std::string& dstPath) = 0;
+    virtual MountId mount(const RenderSettings& settings, const std::string& srcFile, const std::string& dstPath) = 0;
     virtual void unmount(MountId mountId) = 0;
-    virtual void updateOptions(MountId mountId, FileRenderOptions options, int draftScale, std::string cfrTarget, std::string cropTarget, std::string cameraModel, std::string levels, std::string logTransform, std::string exposureCompensation, std::string quadBayerOption) = 0;
+    virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
 
 protected:

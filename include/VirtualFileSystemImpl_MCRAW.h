@@ -19,17 +19,9 @@ public:
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        FileRenderOptions options,
-        int draftScale,
-        const std::string& cfrTarget,
-        const std::string& cropTarget,
+        const RenderSettings& settings,
         const std::string& file,
-        const std::string& baseName,
-        const std::string& cameraModel,
-        const std::string& levels,
-        const std::string& logTransform,
-        const std::string& exposureCompensation = "0ev",
-        const std::string& quadBayerOption = "Remosaic");
+        const std::string& baseName);
 
     ~VirtualFileSystemImpl_MCRAW();
 
@@ -44,7 +36,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption) override;
+    void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const;
 
 private:
@@ -76,13 +68,13 @@ private:
     std::vector<Entry> mFiles;
     std::vector<uint8_t> mAudioFile;
     int mDraftScale;
-    std::string mCFRTarget;
+    CFRTarget mCFRTarget;
     std::string mCropTarget;
-    std::string mCameraModel;    
+    std::string mCameraModel;
     std::string mLevels;
-    std::string mLogTransform;
+    LogTransformMode mLogTransform;
     std::string mExposureCompensation;
-    std::string mQuadBayerOption;
+    QuadBayerMode mQuadBayerOption;
     FileRenderOptions mOptions;
     float mFps;
     float mMedFps;
