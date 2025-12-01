@@ -28,8 +28,8 @@ public:
         std::function<void(size_t, int)> result,
         bool async) = 0;
 
-    virtual void updateOptions(const RenderConfig& config) = 0;
-    virtual FileInfo getFileInfo() const = 0;
+    virtual void updateOptions(const RenderSettings& settings) = 0;
+    //virtual FileInfo getFileInfo() const = 0;
 
 protected:
     IVirtualFileSystem() = default;

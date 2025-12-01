@@ -90,7 +90,7 @@ public:
     ~Session();
 
 public:
-    void updateOptions(const RenderConfig& config);
+    void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
 
 protected:
@@ -165,9 +165,11 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(const RenderConfig& config) {
-    mConfig = config;
-    mFs->updateOptions(config);
+void Session::updateOptions(const RenderSettings& settings) {
+    mOptions = settings.options;
+    mDraftScale = settings.draftScale;
+    /*mConfig = config;*/
+    mFs->updateOptions(settings);
 
     // We need to clear out the cache
     auto files = mFs->listFiles("");
@@ -193,7 +195,7 @@ void Session::updateOptions(const RenderConfig& config) {
         if(boost::ends_with(e.name, "dng")) {
             PRJ_PLACEHOLDER_INFO placeholderInfo = {};
 
-            updatePlaceHolder(placeholderInfo, e, config);
+            updatePlaceHolder(placeholderInfo, e, /*config*/settings.options, settings.draftScale);
 
             hr = PrjUpdateFileIfNeeded(
                 _instanceHandle,
@@ -552,9 +554,7 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     setupLogging();
 }
 
-FuseFileSystemImpl_Win::~FuseFileSystemImpl_Win() = default;
-
-MountId FuseFileSystemImpl_Win::mount(const RenderConfig& config, const std::string& srcFile, const std::string& dstPath) {
+MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
     std::string filename = srcPath.filename().string();
@@ -568,7 +568,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderConfig& config, const std::str
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, config, srcFile, baseName);
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
@@ -585,7 +585,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderConfig& config, const std::str
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, config, srcFile, baseName);
+            auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
@@ -601,7 +601,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderConfig& config, const std::str
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, config, srcFile, baseName);
+            auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
@@ -618,11 +618,11 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderConfig& config) {
+void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
-    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(config);
+    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(settings);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {

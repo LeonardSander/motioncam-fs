@@ -393,8 +393,20 @@ void MainWindow::mountFile(const QString& filePath) {
     motioncam::MountId mountId;
 
     try {
-        auto config = buildRenderConfig();
-        mountId = mFuseFilesystem->mount(config, filePath.toStdString(), dstPath.toStdString());
+        //auto config = buildRenderConfig();        TODO CONFIG
+        
+        motioncam::RenderSettings settings(
+            getRenderOptions(*ui),
+            mDraftQuality,
+            mCFRTarget,
+            mCropTarget,
+            mCameraModel,
+            mLevels,
+            mLogTransform,
+            mExposureCompensation,
+            mQuadBayerOption
+        );
+        mountId = mFuseFilesystem->mount(settings, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
@@ -742,12 +754,24 @@ void MainWindow::updateFpsLabels() {
     if (!scrollContent) {
         return;
     }
+
+    //auto config = buildRenderConfig();
     
     // Force recalculation of fps values by calling updateOptions for all mounted files
-    auto config = buildRenderConfig();
-    
+    motioncam::RenderSettings settings(
+        getRenderOptions(*ui),
+        mDraftQuality,
+        mCFRTarget,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );
+
     for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, config);
+        mFuseFilesystem->updateOptions(mountedFile.mountId, settings);
     }
     
     // Find all info labels in the scroll area
@@ -816,8 +840,24 @@ void MainWindow::updateFpsLabels() {
 }
 
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
+    auto it = mMountedFiles.begin();
+    motioncam::RenderSettings settings(
+        getRenderOptions(*ui),
+        mDraftQuality,
+        mCFRTarget,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );
+
     updateUi();
     scheduleOptionsUpdate();
+    while(it != mMountedFiles.end()) {
+        mFuseFilesystem->updateOptions(it->mountId, settings);
+        ++it;
 }
 
 void MainWindow::scheduleOptionsUpdate() {

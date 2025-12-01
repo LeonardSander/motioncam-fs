@@ -26,7 +26,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderConfig& config,
+        const RenderSettings& settings,
         const std::string& file,
         const std::string& baseName) :
         mCache(lruCache),
@@ -57,6 +57,15 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
             spdlog::info("Loaded calibration for MCRAW: {}", calibPath.string());
         }
     }
+        /*mDraftScale(settings.draftScale),
+        mCFRTarget(settings.cfrTarget),
+        mCropTarget(settings.cropTarget),
+        mCameraModel(settings.cameraModel),
+        mLevels(settings.levels),
+        mLogTransform(settings.logTransform),
+        mExposureCompensation(settings.exposureCompensation),
+        mQuadBayerOption(settings.quadBayerOption),
+        mOptions(settings.options)*/ {
     
     Decoder decoder(mSrcPath);
     auto frames = decoder.getFrames();
@@ -70,7 +79,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const auto& cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
         mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
     }
-    this->init();
+    this->init(/*mOptions*/);
 }
 
 VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
@@ -96,6 +105,85 @@ void VirtualFileSystemImpl_MCRAW::init() {
 
     bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
     mFps = vfs::determineCFRTarget(mMedFps, mConfig.cfrTarget, applyCFRConversion);       
+    /*bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
+
+    if (applyCFRConversion && mCFRTarget.mode != CFRMode::Disabled) {
+        if (mCFRTarget.mode == CFRMode::PreferInteger) {
+            if (mMedFps <=  23.0 || mMedFps >= 1000.0)
+                mFps = mMedFps;
+            else if (mMedFps < 24.5)
+                mFps = 24.0f;
+            else if (mMedFps < 26.0)
+                mFps = 25.0f;
+            else if (mMedFps < 33.0)
+                mFps = 30.0f;
+            else if (mMedFps < 49.0)
+                mFps = 48.0f;
+            else if (mMedFps < 52.0)
+                mFps = 50.0f;
+            else if (mMedFps > 56.0  && mMedFps < 63.0)
+                mFps = 60.0f;
+            else if (mMedFps > 112.0 && mMedFps < 125.0)
+                mFps = 120.0f;
+            else if (mMedFps > 224.0 && mMedFps < 250.0)
+                mFps = 240.0f;
+            else if (mMedFps > 448.0 && mMedFps < 500.0)
+                mFps = 480.0f;
+            else if (mMedFps > 896.0 && mMedFps < 1000.0)
+                mFps = 960.0f;
+            else if (mMedFps >= 63.0)
+                mFps = 120.0f;
+            else
+                mFps = 60.0f;
+        }
+        else if (mCFRTarget.mode == CFRMode::PreferDropFrame) {
+            if (mMedFps <=  23.0 || mMedFps >= 1000.0)
+                mFps = mMedFps;
+            else if (mMedFps < 24.5)
+                mFps = 23.976f;
+            else if (mMedFps < 26.0)
+                mFps = 25.0f;
+            else if (mMedFps < 33.0)
+                mFps = 29.97f;
+            else if (mMedFps < 49.0)
+                mFps = 47.952f;
+            else if (mMedFps < 52.0)
+                mFps = 50.0f;
+            else if (mMedFps > 56.0  && mMedFps < 63.0)
+                mFps = 59.94f;
+            else if (mMedFps > 112.0 && mMedFps < 125.0)
+                mFps = 119.88f;
+            else if (mMedFps > 224.0 && mMedFps < 250.0)
+                mFps = 240.0f;
+            else if (mMedFps > 448.0 && mMedFps < 500.0)
+                mFps = 480.0f;
+            else if (mMedFps > 896.0 && mMedFps < 1000.0)
+                mFps = 960.0f;
+            else if (mMedFps >= 63.0)
+                mFps = 119.88f;
+            else
+                mFps = 59.94f;
+        }
+        else if (mCFRTarget.mode == CFRMode::MedianSlowMotion) {
+            // Use median frame rate for non real time playback
+            mFps = mMedFps;
+        }
+        else if (mCFRTarget.mode == CFRMode::AverageTesting) {
+            // legacy framerate target determination
+            mFps = mAvgFps;
+        }
+        else if (mCFRTarget.mode == CFRMode::Custom) {
+            // Custom framerate
+            mFps = mCFRTarget.customValue;
+        }
+    } else {
+        // No CFR conversion - use custom value if provided, otherwise use average
+        if (mCFRTarget.mode == CFRMode::Custom) {
+            mFps = mCFRTarget.customValue;
+        } else {
+            mFps = mAvgFps;
+        }
+    }*/       
 
     // Calculate typical DNG size that we can use for all files
     std::vector<uint8_t> data;
@@ -116,7 +204,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mSrcWhiteLevel = cameraFrameMetadata.dynamicWhiteLevel;
     mSrcBlackLevel = cameraFrameMetadata.dynamicBlackLevel;	
 
-    auto dngData = utils::generateDng(
+    /*auto dngData = utils::generateDng(
         data,
         cameraFrameMetadata,
         cameraConfig,
@@ -132,6 +220,26 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mConfig.exposureCompensation,
         mConfig.quadBayerOption,
         mCalibration
+    RenderSettings settingsForInit(
+        options,
+        mDraftScale,
+        mCFRTarget,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );*/
+
+    auto dngData = utils::generateDng(
+        data,
+        cameraFrameMetadata,
+        cameraConfig,
+        mFps,
+        0,
+        mBaselineExpValue,
+        settingsForInit
     );
 
     mTypicalDngSize = dngData->size();
@@ -321,11 +429,22 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
             spdlog::debug("Generating {}", entry.name);
 
             // Calculate frame-specific exposure compensation
-            std::string frameExposureComp = mConfig.exposureCompensation;
+            /*std::string frameExposureComp = mConfig.exposureCompensation;
             if (mExposureKeyframes.has_value()) {
                 float exposureValue = mExposureKeyframes->getExposureAtFrame(frameIndex, mTotalFrames);
                 frameExposureComp = std::to_string(exposureValue);
             }
+            RenderSettings settings(
+                options,
+                draftScale,
+                mCFRTarget,
+                mCropTarget,
+                mCameraModel,
+                mLevels,
+                mLogTransform,
+                mExposureCompensation,
+                mQuadBayerOption
+            );*/
 
             auto dngData = utils::generateDng(
                 *frameData,
@@ -333,7 +452,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 containerMetadata,
                 fps,
                 frameIndex,
-                options,
+                /*options,
                 vfs::getScaleFromOptions(options, draftScale),
                 baselineExpValue,
                 mConfig.cropTarget,
@@ -344,6 +463,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 mConfig.quadBayerOption,
                 mCalibration,
                 mConfig.cfaPhase);
+                baselineExpValue,
+                settings);*/
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy
@@ -427,14 +548,25 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     return -1;
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderConfig& config) {
-    mConfig = config;
+void VirtualFileSystemImpl_MCRAW::updateOptions(/*const RenderConfig& config*/const RenderSettings& settings) {
+
+    //mConfig = config;
     
     // Re-parse exposure keyframes
     mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
 
+    /*mDraftScale = settings.draftScale;
+    mOptions = settings.options;
+    mCFRTarget = settings.cfrTarget;
+    mCropTarget = settings.cropTarget;
+    mCameraModel = settings.cameraModel;
+    mLevels = settings.levels;
+    mLogTransform = settings.logTransform;
+    mExposureCompensation = settings.exposureCompensation;
+    mQuadBayerOption = settings.quadBayerOption;*/
+
     mCache.clear();
-    init();
+    init(/*settings.options*/);
 }
 
 FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {

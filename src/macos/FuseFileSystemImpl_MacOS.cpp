@@ -92,7 +92,8 @@ public:
     Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs);
     ~Session();
 
-    void updateOptions(const RenderConfig& config);
+    void updateOptions(const RenderSettings& settings);
+
     FileInfo getFileInfo() const;
 
 private:
@@ -209,8 +210,9 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
 
 }
 
-void Session::updateOptions(const RenderConfig& config) {
-    mFs->updateOptions(config);
+void Session::updateOptions(const RenderSettings& settings)
+{
+    mFs->updateOptions(settings);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
@@ -388,7 +390,11 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
     spdlog::info("Destroying FuseFileSystemImpl_MacOs()");
 }
 
-MountId FuseFileSystemImpl_MacOs::mount(const RenderConfig& config, const std::string& srcFile, const std::string& dstPath) {
+MountId FuseFileSystemImpl_MacOs::mount(
+    const RenderSettings& settings,
+    const std::string& srcFile,
+    const std::string& dstPath)
+{
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -416,13 +422,13 @@ MountId FuseFileSystemImpl_MacOs::mount(const RenderConfig& config, const std::s
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            
+
             auto* fs =
                 new VirtualFileSystemImpl_MCRAW(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
-                    config,
+                    settings,
                     srcFile,
                     baseName
                 );
@@ -458,10 +464,13 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
     }
 }
 
-void FuseFileSystemImpl_MacOs::updateOptions(MountId mountId, const RenderConfig& config) {
+void FuseFileSystemImpl_MacOs::updateOptions(
+    MountId mountId,
+    const RenderSettings& settings)
+{
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
-        it->second->updateOptions(config);
+        it->second->updateOptions(settings);
     }
 }
 

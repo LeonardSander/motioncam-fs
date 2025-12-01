@@ -22,7 +22,7 @@ public:
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderConfig& config,
+        const RenderSettings& settings,
         const std::string& file,
         const std::string& baseName);
 
@@ -39,8 +39,8 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(const RenderConfig& config) override;
-    FileInfo getFileInfo() const override;
+    void updateOptions(const RenderSettings& settings) override;
+    FileInfo getFileInfo() const; //override;
 
 private:
     void init();
@@ -70,8 +70,18 @@ private:
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
     std::vector<uint8_t> mAudioFile;
-    RenderConfig mConfig;
-    std::optional<ExposureKeyframes> mExposureKeyframes;
+    /*RenderConfig mConfig;
+    std::optional<ExposureKeyframes> mExposureKeyframes;*/
+    /*int mDraftScale;
+    CFRTarget mCFRTarget;
+    std::string mCropTarget;
+    std::string mCameraModel;
+    std::string mLevels;
+    LogTransformMode mLogTransform;
+    std::string mExposureCompensation;
+    QuadBayerMode mQuadBayerOption;
+    FileRenderOptions mOptions;*/
+    RenderSettings mSettings; //EVALUATE
     float mFps;
     float mMedFps;
     float mAvgFps;

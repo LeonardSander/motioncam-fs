@@ -21,9 +21,15 @@ public:
     FuseFileSystemImpl_MacOs();
     ~FuseFileSystemImpl_MacOs();
 
-    MountId mount(const RenderConfig& config, const std::string& srcFile, const std::string& dstPath) override;
+    MountId mount(
+        const RenderSettings& settings,
+        const std::string& srcFile,
+        const std::string& dstPath) override;
+
     void unmount(MountId mountId) override;
-    void updateOptions(MountId mountId, const RenderConfig& config) override;
+    void updateOptions(
+        MountId mountId,
+        const RenderSettings& settings) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
 
 private:
