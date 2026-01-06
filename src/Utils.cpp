@@ -1409,5 +1409,175 @@ std::pair<int, int> toFraction(float frameRate, int base) {
     return std::make_pair(numerator, denominator);
 }
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+bool generateJpegThumbnail(
+    std::vector<uint8_t>& data,
+    const CameraFrameMetadata& metadata,
+    const CameraConfiguration& cameraConfiguration,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight,
+    const std::string& levels,
+    const std::string& exposureCompensation)
+{
+    unsigned int width = metadata.width;
+    unsigned int height = metadata.height;
+
+    std::array<uint8_t, 4> cfa;
+    if(cameraConfiguration.sensorArrangement == "rggb")
+        cfa = { 0, 1, 1, 2 };
+    else if(cameraConfiguration.sensorArrangement == "bggr")
+        cfa = { 2, 1, 1, 0 };
+    else if(cameraConfiguration.sensorArrangement == "grbg")
+        cfa = { 1, 0, 2, 1 };
+    else if(cameraConfiguration.sensorArrangement == "gbrg")
+        cfa = { 1, 2, 0, 1 };
+    else
+        cfa = { 0, 1, 1, 2 }; // Default to RGGB
+
+    float rGain = 1.0f / metadata.asShotNeutral[0];
+    float gGain = 1.0f / metadata.asShotNeutral[1];
+    float bGain = 1.0f / metadata.asShotNeutral[2];
+
+    auto srcBlackLevel = metadata.dynamicBlackLevel;
+    float srcWhiteLevel = metadata.dynamicWhiteLevel;
+
+    if (levels == "Static") {
+        srcBlackLevel = cameraConfiguration.blackLevel;
+        srcWhiteLevel = cameraConfiguration.whiteLevel;
+    } else if (!levels.empty()) {
+        const size_t separatorPos = levels.find('/');
+        if (separatorPos != std::string::npos) {
+            try {
+                const std::string whiteLevelStr = levels.substr(0, separatorPos);
+                const std::string blackLevelStr = levels.substr(separatorPos + 1);
+
+                if (whiteLevelStr.find('.') != std::string::npos)
+                    srcWhiteLevel = std::stof(whiteLevelStr);
+                else
+                    srcWhiteLevel = static_cast<float>(std::stoi(whiteLevelStr));
+
+                float blackLevelValue;
+                if (blackLevelStr.find('.') != std::string::npos)
+                    blackLevelValue = std::stof(blackLevelStr);
+                else
+                    blackLevelValue = static_cast<float>(std::stoi(blackLevelStr));
+
+                srcBlackLevel[0] = blackLevelValue;
+                srcBlackLevel[1] = blackLevelValue;
+                srcBlackLevel[2] = blackLevelValue;
+                srcBlackLevel[3] = blackLevelValue;
+            } catch (const std::exception&) {
+            }
+        }
+    }
+
+    float blackLevel = (srcBlackLevel[0] + srcBlackLevel[1] + srcBlackLevel[2] + srcBlackLevel[3]) / 4.0f;
+    float whiteLevel = srcWhiteLevel;
+    float range = whiteLevel - blackLevel;
+
+    float exposureMultiplier = 1.0f;
+    if (!exposureCompensation.empty()) {
+        try {
+            auto exposureCompSanitized = exposureCompensation;
+            if (exposureCompSanitized.size() > 2) {
+                auto lower = exposureCompSanitized;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.rfind("ev") == lower.size() - 2) {
+                    exposureCompSanitized = exposureCompSanitized.substr(0, exposureCompSanitized.size() - 2);
+                }
+            }
+
+            float exposureOffset = std::stof(exposureCompSanitized);
+            exposureMultiplier = std::pow(2.0f, exposureOffset);
+        } catch (const std::exception&) {
+        }
+    }
+
+    std::vector<uint8_t> rgbData(thumbWidth * thumbHeight * 3);
+
+    auto linearToSrgb = [](float v) {
+        if (v <= 0.0031308f) {
+            return 12.92f * v;
+        }
+        return 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    };
+
+    float scaleX = static_cast<float>(width) / thumbWidth;
+    float scaleY = static_cast<float>(height) / thumbHeight;
+
+    uint16_t* rawPtr = reinterpret_cast<uint16_t*>(data.data());
+
+    for (int y = 0; y < thumbHeight; ++y) {
+        for (int x = 0; x < thumbWidth; ++x) {
+            int srcX = static_cast<int>(x * scaleX) & ~1;
+            int srcY = static_cast<int>(y * scaleY) & ~1;
+
+            if (srcX >= static_cast<int>(width) - 1 || srcY >= static_cast<int>(height) - 1) continue;
+
+            int idx = srcY * width + srcX;
+            uint16_t pixels[4];
+            pixels[0] = rawPtr[idx];
+            pixels[1] = rawPtr[idx + 1];
+            pixels[2] = rawPtr[idx + width];
+            pixels[3] = rawPtr[idx + width + 1];
+
+            float r = 0, g = 0, b = 0;
+            int gCount = 0;
+
+            for (int i = 0; i < 4; ++i) {
+                if (cfa[i] == 0) r = pixels[i];
+                else if (cfa[i] == 1) { g += pixels[i]; gCount++; }
+                else if (cfa[i] == 2) b = pixels[i];
+            }
+
+            if (gCount > 0) g /= gCount;
+
+            r = (r - blackLevel) / range;
+            g = (g - blackLevel) / range;
+            b = (b - blackLevel) / range;
+
+            r = std::max(0.0f, std::min(1.0f, r));
+            g = std::max(0.0f, std::min(1.0f, g));
+            b = std::max(0.0f, std::min(1.0f, b));
+
+            r *= rGain;
+            g *= gGain;
+            b *= bGain;
+
+            r *= exposureMultiplier;
+            g *= exposureMultiplier;
+            b *= exposureMultiplier;
+
+            float maxVal = std::max({r, g, b});
+            if (maxVal > 1.0f) {
+                r /= maxVal;
+                g /= maxVal;
+                b /= maxVal;
+            }
+
+            r = linearToSrgb(r);
+            g = linearToSrgb(g);
+            b = linearToSrgb(b);
+
+            r = std::max(0.0f, std::min(1.0f, r));
+            g = std::max(0.0f, std::min(1.0f, g));
+            b = std::max(0.0f, std::min(1.0f, b));
+
+            float rgb[3] = {r * 255.0f, g * 255.0f, b * 255.0f};
+
+            int outIdx = (y * thumbWidth + x) * 3;
+            rgbData[outIdx + 0] = static_cast<uint8_t>(rgb[0]);
+            rgbData[outIdx + 1] = static_cast<uint8_t>(rgb[1]);
+            rgbData[outIdx + 2] = static_cast<uint8_t>(rgb[2]);
+        }
+    }
+
+    int result = stbi_write_jpg(outputPath.c_str(), thumbWidth, thumbHeight, 3, rgbData.data(), 85);
+    return result != 0;
+}
+
 } // namespace utils
 } // namespace motioncam

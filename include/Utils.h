@@ -167,5 +167,15 @@ std::shared_ptr<std::vector<char>> generateDng(
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);
 
+bool generateJpegThumbnail(
+    std::vector<uint8_t>& data,
+    const CameraFrameMetadata& metadata,
+    const CameraConfiguration& cameraConfiguration,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight,
+    const std::string& levels,
+    const std::string& exposureCompensation);
+
 } // namespace utils
 } // namespace motioncam

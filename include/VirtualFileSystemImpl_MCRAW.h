@@ -38,6 +38,9 @@ public:
 
     void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const;
+    const std::string& getSourcePath() const { return mSrcPath; }
+    const std::string& getLevels() const { return mLevels; }
+    const std::string& getExposureCompensation() const { return mExposureCompensation; }
 
 private:
     void init(FileRenderOptions options);
