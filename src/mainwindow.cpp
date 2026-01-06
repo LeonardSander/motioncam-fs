@@ -122,6 +122,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    connect(ui->resetNormalizeExposureButton, &QPushButton::clicked, this, &MainWindow::onResetNormalizeExposure);
+    connect(ui->resetCfrButton, &QPushButton::clicked, this, &MainWindow::onResetCfr);
+    connect(ui->applySelectedButton, &QPushButton::clicked, this, &MainWindow::onApplySelected);
+    connect(ui->applyAllButton, &QPushButton::clicked, this, &MainWindow::onApplyAll);
 }
 
 MainWindow::~MainWindow() {
@@ -649,6 +653,29 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     
     // Update fps labels after a short delay to ensure updateOptions has completed
     QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+}
+
+void MainWindow::onResetNormalizeExposure() {
+    ui->normalizeExposureCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->exposureCompensationCombobox->setCurrentText("0ev");
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onResetCfr() {
+    ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->cfrTarget->setCurrentText("Prefer Drop Frame");
+    onRenderSettingsChanged(Qt::CheckState::Checked);
+}
+
+void MainWindow::onApplySelected() {
+    onApplyAll();
+}
+
+void MainWindow::onApplyAll() {
+    if (mMountedFiles.isEmpty()) {
+        return;
+    }
+    onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 
 void MainWindow::onDraftModeQualityChanged(int index) {

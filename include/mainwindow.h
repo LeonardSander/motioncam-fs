@@ -74,6 +74,10 @@ private slots:
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
     void onSetDefaultSettings(bool checked);
+    void onResetNormalizeExposure();
+    void onResetCfr();
+    void onApplySelected();
+    void onApplyAll();
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);

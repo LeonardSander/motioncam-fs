@@ -245,7 +245,7 @@
                 <property name="text">
                 <string>Prefer Integer</string>
                 </property>
-              </item>           
+              </item>
               <item>
                 <property name="text">
                 <string>Median (Slowmotion)</string>
@@ -258,7 +258,20 @@
               </item>
             </widget>
            </item>
-          </layout>
+           <item>
+            <widget class="QPushButton" name="resetCfrButton">
+             <property name="minimumSize">
+              <size>
+               <width>60</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="text">
+              <string>Reset</string>
+             </property>
+            </widget>
+           </item>
+           </layout>
          </item>
          <item>
           <widget class="QLabel" name="cfrConversionLabel">
@@ -335,8 +348,21 @@
              </item>
             </widget>
            </item>
-           </layout>
-           </item>         
+           <item>
+            <widget class="QPushButton" name="resetNormalizeExposureButton">
+             <property name="minimumSize">
+              <size>
+               <width>60</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="text">
+              <string>Reset</string>
+             </property>
+            </widget>
+           </item>
+            </layout>
+            </item>
          <item>
           <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">
@@ -948,23 +974,69 @@
         </layout>
        </item>       
        <item>
-        <spacer name="verticalSpacer3">
-         <property name="orientation">
-          <enum>Qt::Orientation::Vertical</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
-         </property>
-        </spacer>
-       </item>
-      </layout>
-     </widget>
-    </item>
-   </layout>
-  </widget>
+       <spacer name="verticalSpacer3">
+        <property name="orientation">
+         <enum>Qt::Orientation::Vertical</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>20</width>
+          <height>40</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="applyLayout">
+        <property name="spacing">
+         <number>8</number>
+        </property>
+        <item>
+         <widget class="QPushButton" name="applySelectedButton">
+          <property name="minimumSize">
+           <size>
+            <width>120</width>
+            <height>32</height>
+           </size>
+          </property>
+          <property name="text">
+           <string>Apply to Selected</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="applyAllButton">
+          <property name="minimumSize">
+           <size>
+            <width>100</width>
+            <height>32</height>
+           </size>
+          </property>
+          <property name="text">
+           <string>Apply to All</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="applySpacer">
+          <property name="orientation">
+           <enum>Qt::Orientation::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
  </widget>
  <resources/>
  <connections/>
