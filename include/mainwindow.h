@@ -84,6 +84,7 @@ private:
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    void updateThumbnailForMount(motioncam::MountId mountId);
 
 private:
     Ui::MainWindow *ui;

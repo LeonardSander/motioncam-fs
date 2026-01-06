@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QPixmap>
 #include <algorithm>
 #include <QTimer>
 
@@ -319,8 +320,8 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
-
-    fileWidget->setFixedHeight(140);        //168 for 2 lines of metrics
+    auto thumbPath = QDir::temp().filePath(QString("mcraw_thumb_%1.jpg").arg(mountId));
+    fileWidget->setProperty("thumbPath", thumbPath);
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
@@ -334,6 +335,14 @@ void MainWindow::mountFile(const QString& filePath) {
     fileLabel->setToolTip(filePath); // Show full path on hover
     fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
     fileLayout->addWidget(fileLabel);
+
+    auto* thumbnailLabel = new QLabel(fileWidget);
+    thumbnailLabel->setObjectName("thumbnailLabel");
+    thumbnailLabel->setFixedSize(320, 180);
+    thumbnailLabel->setAlignment(Qt::AlignCenter);
+    thumbnailLabel->setStyleSheet("background-color: #111; border: 1px solid #333; color: #777;");
+    thumbnailLabel->setText("Generating preview...");
+    fileLayout->addWidget(thumbnailLabel);
 
     // Get file information from the FUSE filesystem
     auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
@@ -411,6 +420,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Add the file widget to the scroll area
     scrollLayout->insertWidget(0, fileWidget);
+    updateThumbnailForMount(mountId);
 
     // Hide the drag-drop label since we now have content
     ui->dragAndDropLabel->hide();
@@ -501,6 +511,11 @@ void MainWindow::removeFile(QWidget* fileWidget) {
         if(it != mMountedFiles.end())
 
             mMountedFiles.erase(it);
+    }
+
+    auto thumbPath = fileWidget->property("thumbPath").toString();
+    if (!thumbPath.isEmpty()) {
+        QFile::remove(thumbPath);
     }
 
     // If all files are removed, show the drag-drop label again
@@ -626,6 +641,46 @@ void MainWindow::updateFpsLabels() {
     }
 }
 
+void MainWindow::updateThumbnailForMount(motioncam::MountId mountId) {
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    if (!scrollContent) {
+        return;
+    }
+
+    const auto widgets = scrollContent->findChildren<QWidget*>();
+    for (auto* widget : widgets) {
+        bool ok = false;
+        auto widgetMountId = widget->property("mountId").toInt(&ok);
+        if (!ok || widgetMountId != mountId) {
+            continue;
+        }
+
+        auto* label = widget->findChild<QLabel*>("thumbnailLabel");
+        if (!label) {
+            continue;
+        }
+
+        QString thumbPath = widget->property("thumbPath").toString();
+        if (thumbPath.isEmpty()) {
+            thumbPath = QDir::temp().filePath(QString("mcraw_thumb_%1.jpg").arg(mountId));
+            widget->setProperty("thumbPath", thumbPath);
+        }
+
+        if (mFuseFilesystem->generateThumbnail(mountId, thumbPath.toStdString(), 320, 240)) {
+            QPixmap thumbnail(thumbPath);
+            if (!thumbnail.isNull()) {
+                label->setPixmap(thumbnail.scaled(label->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                label->setText("");
+            } else {
+                label->setText("Failed to load");
+            }
+        } else {
+            label->setText("No preview");
+        }
+        break;
+    }
+}
+
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
     auto it = mMountedFiles.begin();
     motioncam::RenderSettings settings(
@@ -646,7 +701,11 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
         mFuseFilesystem->updateOptions(it->mountId, settings);
         ++it;
     }
-    
+
+    for (const auto& mountedFile : mMountedFiles) {
+        updateThumbnailForMount(mountedFile.mountId);
+    }
+
     // Update fps labels after a short delay to ensure updateOptions has completed
     QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
 }

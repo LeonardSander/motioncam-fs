@@ -30,6 +30,7 @@ public:
         MountId mountId,
         const RenderSettings& settings) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
+    bool generateThumbnail(MountId mountId, const std::string& outputPath, int width = 320, int height = 240) override;
 
 private:
     MountId mNextMountId;

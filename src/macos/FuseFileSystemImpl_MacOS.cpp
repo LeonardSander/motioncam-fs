@@ -479,4 +479,12 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
     return std::nullopt;
 }
 
+bool FuseFileSystemImpl_MacOs::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
+    (void)mountId;
+    (void)outputPath;
+    (void)width;
+    (void)height;
+    return false;
+}
+
 } // namespace motioncam

@@ -4,11 +4,17 @@
 
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "LRUCache.h"
+#include "CameraFrameMetadata.h"
+#include "CameraMetadata.h"
+#include "Utils.h"
+#include <motioncam/Decoder.hpp>
 
 #include <iostream>
 #include <ntstatus.h>
 #include <mutex>
 #include <filesystem>
+#include <algorithm>
+#include <nlohmann/json.hpp>
 #include <shlobj.h>
 
 #include <boost/filesystem.hpp>
@@ -85,6 +91,7 @@ public:
 public:
     void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
+    VirtualFileSystemImpl_MCRAW* getFileSystem() const { return mFs.get(); }
 
 protected:
     HRESULT StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) override;
@@ -590,6 +597,54 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
         return dynamic_cast<Session*>(it->second.get())->getFileInfo();
     }
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_Win::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        auto* fs = session ? session->getFileSystem() : nullptr;
+        if(!fs) {
+            spdlog::error("generateThumbnail(): Filesystem missing for mount {}", mountId);
+            return false;
+        }
+
+        Decoder decoder(fs->getSourcePath());
+        auto frames = decoder.getFrames();
+        if(frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", fs->getSourcePath());
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        auto timestamp = frames.front();
+
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(timestamp, data, metadata);
+
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfiguration = CameraConfiguration::parse(decoder.getContainerMetadata());
+
+        return utils::generateJpegThumbnail(
+            data,
+            frameMetadata,
+            cameraConfiguration,
+            outputPath,
+            width,
+            height,
+            fs->getLevels(),
+            fs->getExposureCompensation());
+    }
+    catch(const std::exception& e) {
+        spdlog::error("generateThumbnail(): Exception: {}", e.what());
+        return false;
+    }
 }
 
 }

@@ -33,6 +33,7 @@ public:
     virtual void unmount(MountId mountId) = 0;
     virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
+    virtual bool generateThumbnail(MountId mountId, const std::string& outputPath, int width = 320, int height = 240) = 0;
 
 protected:
     IFuseFileSystem() = default;
