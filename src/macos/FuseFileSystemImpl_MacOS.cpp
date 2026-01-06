@@ -89,8 +89,19 @@ public:
     Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs);
     ~Session();
 
-    void updateOptions(const RenderSettings& settings);
-
+    void updateOptions(
+        FileRenderOptions options,
+        int draftScale,
+        std::string cfrTarget,
+        std::string cropTarget,
+        std::string cameraModel,
+        std::string levels,
+        std::string logTransform,
+        std::string exposureCompensation,
+        std::string quadBayerOption,
+        bool matrixOverrideEnabled,
+        std::string matrixProfile,
+        std::string matrixFilePath);
     FileInfo getFileInfo() const;
 
 private:
@@ -207,9 +218,32 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
 
 }
 
-void Session::updateOptions(const RenderSettings& settings)
-{
-    mFs->updateOptions(settings);
+void Session::updateOptions(
+    FileRenderOptions options,
+    int draftScale,
+    std::string cfrTarget,
+    std::string cropTarget,
+    std::string cameraModel,
+    std::string levels,
+    std::string logTransform,
+    std::string exposureCompensation,
+    std::string quadBayerOption,
+    bool matrixOverrideEnabled,
+    std::string matrixProfile,
+    std::string matrixFilePath) {
+    mFs->updateOptions(
+        options,
+        draftScale,
+        cfrTarget,
+        cropTarget,
+        cameraModel,
+        levels,
+        logTransform,
+        exposureCompensation,
+        quadBayerOption,
+        matrixOverrideEnabled,
+        matrixProfile,
+        matrixFilePath);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
@@ -371,9 +405,7 @@ FuseFileSystemImpl_MacOs::FuseFileSystemImpl_MacOs() :
     mNextMountId(0),
     mIoThreadPool(std::make_unique<BS::thread_pool>(IO_THREADS)),
     mProcessingThreadPool(std::make_unique<BS::thread_pool>()),
-    mCache(std::make_unique<LRUCache>(CACHE_SIZE)),
-    mCachePolicy(CachePolicy::Quota),
-    mCacheQuotaBytes(CACHE_SIZE)
+    mCache(std::make_unique<LRUCache>(CACHE_SIZE))
 {
     setupLogging();
 }
@@ -389,11 +421,35 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
     spdlog::info("Destroying FuseFileSystemImpl_MacOs()");
 }
 
+void FuseFileSystemImpl_MacOs::setCachePolicy(CachePolicy policy) {
+    (void)policy;
+}
+
+void FuseFileSystemImpl_MacOs::setCacheQuotaBytes(std::uint64_t bytes) {        
+    (void)bytes;
+}
+
+void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
+    if (mCache) {
+        mCache->cleanupExpired();
+    }
+}
+
 MountId FuseFileSystemImpl_MacOs::mount(
-    const RenderSettings& settings,
+    FileRenderOptions options,
+    int draftScale,
+    const std::string cfrTarget,
+    const std::string cropTarget,
+    const std::string cameraModel,
+    const std::string levels,
+    const std::string logTransform,
+    const std::string exposureCompensation,
+    const std::string quadBayerOption,
+    bool matrixOverrideEnabled,
+    const std::string& matrixProfile,
+    const std::string& matrixFilePath,
     const std::string& srcFile,
-    const std::string& dstPath)
-{
+    const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -421,15 +477,26 @@ MountId FuseFileSystemImpl_MacOs::mount(
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-
+            
             auto* fs =
                 new VirtualFileSystemImpl_MCRAW(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
-                    settings,
+                    options,
+                    draftScale,
+                    cfrTarget,
+                    cropTarget,
                     srcFile,
-                    baseName
+                    baseName,
+                    cameraModel,
+                    levels,
+                    logTransform,
+                    exposureCompensation,
+                    quadBayerOption,
+                    false,
+                    "",
+                    ""
                 );
 
             auto session = std::make_unique<Session>(srcFile, dstPath, fs);
@@ -465,11 +532,33 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
 
 void FuseFileSystemImpl_MacOs::updateOptions(
     MountId mountId,
-    const RenderSettings& settings)
-{
+    FileRenderOptions options,
+    int draftScale,
+    std::string cfrTarget,
+    std::string cropTarget,
+    std::string cameraModel,
+    std::string levels,
+    std::string logTransform,
+    std::string exposureCompensation,
+    std::string quadBayerOption,
+    bool matrixOverrideEnabled,
+    const std::string& matrixProfile,
+    const std::string& matrixFilePath) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
-        it->second->updateOptions(settings);
+        it->second->updateOptions(
+            options,
+            draftScale,
+            cfrTarget,
+            cropTarget,
+            cameraModel,
+            levels,
+            logTransform,
+            exposureCompensation,
+            quadBayerOption,
+            matrixOverrideEnabled,
+            matrixProfile,
+            matrixFilePath);
     }
 }
 
@@ -479,35 +568,6 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
         return it->second->getFileInfo();
     }
     return std::nullopt;
-}
-
-void FuseFileSystemImpl_MacOs::setCachePolicy(CachePolicy policy) {
-    mCachePolicy = policy;
-    if (mCache && policy == CachePolicy::Off) {
-        mCache->clear();
-    }
-}
-
-void FuseFileSystemImpl_MacOs::setCacheQuotaBytes(std::uint64_t bytes) {
-    mCacheQuotaBytes = bytes;
-    if (mCache && bytes > 0) {
-        mCache->setMaxSize(static_cast<size_t>(bytes));
-    }
-}
-
-void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
-    if (!mCache) {
-        return;
-    }
-
-    if (mCachePolicy == CachePolicy::Off) {
-        mCache->clear();
-        return;
-    }
-
-    if (mCachePolicy == CachePolicy::Quota && mCacheQuotaBytes > 0 && mCache->size() > mCacheQuotaBytes) {
-        mCache->clear();
-    }
 }
 
 } // namespace motioncam
