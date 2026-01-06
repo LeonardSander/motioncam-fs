@@ -13,6 +13,14 @@
 #include <QDir>
 #include <algorithm>
 #include <QTimer>
+#include <QProgressDialog>
+#include <QElapsedTimer>
+#include <QThread>
+#include <QApplication>
+#include <QDirIterator>
+#include <thread>
+#include <atomic>
+#include <motioncam/Decoder.hpp>
 
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
@@ -24,8 +32,49 @@ namespace {
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
 
-    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {
-        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;
+    qint64 estimateInputBytes(const QString& path) {
+        QFileInfo info(path);
+        if (!info.exists()) {
+            return 0;
+        }
+
+        if (info.isFile()) {
+            return info.size();
+        }
+
+        if (!info.isDir()) {
+            return 0;
+        }
+
+        qint64 totalBytes = 0;
+        QDirIterator it(path, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            it.next();
+            totalBytes += it.fileInfo().size();
+        }
+        return totalBytes;
+    }
+
+    QString formatSpeed(double mbps) {
+        if (mbps >= 1024.0) {
+            const double gbps = mbps / 1024.0;
+            return QString::number(gbps, 'f', 2) + " GB/s";
+        }
+        if (mbps >= 1.0) {
+            return QString::number(mbps, 'f', 2) + " MB/s";
+        }
+
+        const double kbps = mbps * 1024.0;
+        if (kbps >= 1.0) {
+            return QString::number(kbps, 'f', 2) + " KB/s";
+        }
+
+        const double bps = kbps * 1024.0;
+        return QString::number(bps, 'f', 0) + " B/s";
+    }
+
+    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {      
+        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;   
 
         if(ui.draftModeCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_DRAFT;
@@ -294,22 +343,100 @@ void MainWindow::mountFile(const QString& filePath) {
     auto dstPath = (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
     motioncam::MountId mountId;
 
-    try {
-        motioncam::RenderSettings settings(
-            getRenderOptions(*ui),
-            mDraftQuality,
-            mCFRTarget,
-            mCropTarget,
-            mCameraModel,
-            mLevels,
-            mLogTransform,
-            mExposureCompensation,
-            mQuadBayerOption
-        );
-        mountId = mFuseFilesystem->mount(settings, filePath.toStdString(), dstPath.toStdString());
+    motioncam::RenderSettings settings(
+        getRenderOptions(*ui),
+        mDraftQuality,
+        mCFRTarget,
+        mCropTarget,
+        mCameraModel,
+        mLevels,
+        mLogTransform,
+        mExposureCompensation,
+        mQuadBayerOption
+    );
+
+    const std::string srcPath = filePath.toStdString();
+    const std::string dstPathStd = dstPath.toStdString();
+    const qint64 totalBytes = estimateInputBytes(filePath);
+
+    std::atomic<bool> done(false);
+    std::atomic<uint64_t> bytesRead(0);
+    QString errorMessage;
+
+    QProgressDialog progress(this);
+    progress.setWindowTitle("Loading");
+    progress.setLabelText(QString("Loading %1").arg(fileName));
+    progress.setCancelButton(nullptr);
+    progress.setRange(0, 100);
+    progress.setValue(0);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.show();
+    QApplication::processEvents();
+
+    QElapsedTimer timer;
+    timer.start();
+    double smoothedMbps = 0.0;
+
+    std::thread worker([this, &mountId, &errorMessage, &done, &bytesRead, settings, srcPath, dstPathStd]() mutable {
+        try {
+            motioncam::Decoder::setReadCounter(&bytesRead);
+            mountId = mFuseFilesystem->mount(settings, srcPath, dstPathStd);
+        }
+        catch(std::runtime_error& e) {
+            errorMessage = QString("There was an error mounting the file. (error: %1)").arg(e.what());
+        }
+        catch(std::exception& e) {
+            errorMessage = QString("There was an error mounting the file. (error: %1)").arg(e.what());
+        }
+        catch(...) {
+            errorMessage = "There was an error mounting the file.";
+        }
+
+        motioncam::Decoder::setReadCounter(nullptr);
+        done.store(true);
+    });
+
+    while (!done.load()) {
+        QString speedText = "measuring...";
+        const qint64 elapsedMs = timer.elapsed();
+        const uint64_t readBytes = bytesRead.load();
+        int progressValue = 0;
+
+        if (totalBytes > 0 && readBytes > 0) {
+            const double ratio = static_cast<double>(readBytes) / static_cast<double>(totalBytes);
+            progressValue = std::min(99, static_cast<int>(ratio * 100.0));
+        }
+
+        if (elapsedMs > 0 && readBytes > 0) {
+            const double mb = static_cast<double>(readBytes) / (1024.0 * 1024.0);
+            const double seconds = static_cast<double>(elapsedMs) / 1000.0;
+            const double mbps = seconds > 0.0 ? mb / seconds : 0.0;
+            const double alpha = 0.2;
+
+            if (smoothedMbps <= 0.0) {
+                smoothedMbps = mbps;
+            } else {
+                smoothedMbps = alpha * mbps + (1.0 - alpha) * smoothedMbps;
+            }
+            speedText = formatSpeed(smoothedMbps);
+        }
+
+        progress.setValue(progressValue);
+        progress.setLabelText(QString("Loading %1\nRead speed: %2").arg(fileName).arg(speedText));
+        QApplication::processEvents();
+        QThread::msleep(100);
     }
-    catch(std::runtime_error& e) {
-        QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
+
+    if (worker.joinable()) {
+        worker.join();
+    }
+
+    progress.setValue(100);
+    progress.close();
+
+    if (!errorMessage.isEmpty()) {
+        QMessageBox::critical(this, "Error", errorMessage);
         return;
     }
 
