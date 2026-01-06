@@ -5,6 +5,8 @@
 
 #include <QMainWindow>
 #include <QList>
+#include <QSet>
+#include <QHash>
 #include <QString>
 
 namespace motioncam {
@@ -74,30 +76,58 @@ private slots:
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
     void onSetDefaultSettings(bool checked);
+    void onApplySelected();
+    void onApplyAll();
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
 
 private:
+    struct RenderSettings {
+        motioncam::FileRenderOptions renderOptions = motioncam::RENDER_OPT_NONE;
+        int draftQuality = 1;
+        std::string cfrTarget;
+        std::string cropTarget;
+        std::string cameraModel;
+        std::string levels;
+        std::string logTransform;
+        std::string exposureCompensation;
+        std::string quadBayerOption;
+    };
+
     void saveSettings();
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    RenderSettings captureSettingsFromUi() const;
+    motioncam::RenderSettings toMotionCamSettings(const RenderSettings& settings) const;
+    void applySettingsToMount(motioncam::MountId mountId, const RenderSettings& settings);
+    void applySettingsToMounts(const QSet<motioncam::MountId>& mounts, const RenderSettings& settings);
+    void updateLocalBadgeForMount(motioncam::MountId mountId);
+    void updateThumbnailForMount(motioncam::MountId mountId);
+    void updateSelectionUi();
+    void setFileWidgetSelected(QWidget* fileWidget, bool selected);
+    QWidget* findFileWidgetForMountId(motioncam::MountId mountId) const;
+    QWidget* findMountWidget(QObject* obj) const;
+    void clearSelection();
 
 private:
     Ui::MainWindow *ui;
     std::unique_ptr<motioncam::IFuseFileSystem> mFuseFilesystem;
     QList<motioncam::MountedFile> mMountedFiles;
+    QHash<motioncam::MountId, RenderSettings> mLocalSettings;
+    QSet<motioncam::MountId> mSelectedMountIds;
     QString mCacheRootFolder;
     int mDraftQuality;
     std::string mCFRTarget;
-    std::string mCropTarget;    
+    std::string mCropTarget;
     std::string mCameraModel;
     std::string mLevels;
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    motioncam::MountId mLastSelectedMountId;
 };
 
 #endif // MAINWINDOW_H

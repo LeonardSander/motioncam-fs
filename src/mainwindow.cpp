@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QMouseEvent>
 #include <algorithm>
 #include <QTimer>
 
@@ -68,6 +69,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , mDraftQuality(1)
+    , mLastSelectedMountId(motioncam::InvalidMountId)
 {
     ui->setupUi(this);
 
@@ -122,6 +124,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    connect(ui->applySelectedBtn, &QPushButton::clicked, this, &MainWindow::onApplySelected);
+    connect(ui->applyAllBtn, &QPushButton::clicked, this, &MainWindow::onApplyAll);
 }
 
 MainWindow::~MainWindow() {
@@ -243,6 +247,36 @@ void MainWindow::restoreSettings() {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::MouseButtonPress) {
+        auto* mouseEvent = static_cast<QMouseEvent*>(event);
+        if (mouseEvent->button() == Qt::LeftButton) {
+            auto* widget = findMountWidget(watched);
+            if (widget) {
+                if (watched->property("selectionIgnore").toBool()) {
+                    return QMainWindow::eventFilter(watched, event);
+                }
+
+                bool ok = false;
+                auto mountId = widget->property("mountId").toInt(&ok);
+                if (ok) {
+                    if (mouseEvent->modifiers() & Qt::ControlModifier) {
+                        if (mSelectedMountIds.contains(mountId)) {
+                            mSelectedMountIds.remove(mountId);
+                        } else {
+                            mSelectedMountIds.insert(mountId);
+                        }
+                    } else {
+                        mSelectedMountIds.clear();
+                        mSelectedMountIds.insert(mountId);
+                    }
+                    mLastSelectedMountId = mountId;
+                    updateSelectionUi();
+                    return true;
+                }
+            }
+        }
+    }
+
     if (watched == ui->dragAndDropScrollArea) {
         if (event->type() == QEvent::DragEnter) {
             auto* dragEvent = static_cast<QDragEnterEvent*>(event);
@@ -320,7 +354,9 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(140);        //168 for 2 lines of metrics
+    fileWidget->setFixedHeight(160);
+    fileWidget->setProperty("selectable", true);
+    fileWidget->setStyleSheet("QWidget { background-color: #1a2432; border: 1px solid #243348; border-radius: 8px; }");
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
@@ -329,11 +365,28 @@ void MainWindow::mountFile(const QString& filePath) {
     fileLayout->setContentsMargins(16, 12, 16, 20);
     fileLayout->setSpacing(4);
 
-    // Create and add the filename label
+    // Create and add the filename label with local badge/reset
+    auto* titleLayout = new QHBoxLayout();
     auto* fileLabel = new QLabel(fileInfo.baseName(), fileWidget);
     fileLabel->setToolTip(filePath); // Show full path on hover
     fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
-    fileLayout->addWidget(fileLabel);
+    titleLayout->addWidget(fileLabel);
+
+    auto* localBadge = new QLabel("LOCAL", fileWidget);
+    localBadge->setObjectName("localBadge");
+    localBadge->setStyleSheet("color: #7bd1ff; font-weight: bold;");
+    localBadge->setProperty("selectionIgnore", true);
+    localBadge->setVisible(false);
+    titleLayout->addStretch();
+    titleLayout->addWidget(localBadge, 0, Qt::AlignVCenter);
+
+    auto* localReset = new QPushButton("Clear Local", fileWidget);
+    localReset->setObjectName("localReset");
+    localReset->setProperty("selectionIgnore", true);
+    localReset->setVisible(false);
+    localReset->setFixedHeight(24);
+    titleLayout->addWidget(localReset);
+    fileLayout->addLayout(titleLayout);
 
     // Get file information from the FUSE filesystem
     auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
@@ -376,18 +429,21 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Create and add the open button
     auto* openButton = new QPushButton("Open", fileWidget);
+    openButton->setProperty("selectionIgnore", true);
     openButton->setFixedSize(buttonWidth, buttonHeight);
     openButton->setIcon(QIcon(":/assets/folder_btn.png"));
     buttonLayout->addWidget(openButton);
 
     // Create and add the play button
     auto* playButton = new QPushButton("Play", fileWidget);
+    playButton->setProperty("selectionIgnore", true);
     playButton->setFixedSize(buttonWidth, buttonHeight);
     playButton->setIcon(QIcon(":/assets/play_btn.png"));
     buttonLayout->addWidget(playButton);
 
     // Create and add the remove button
     auto* removeButton = new QPushButton("Unmount", fileWidget);
+    removeButton->setProperty("selectionIgnore", true);
     removeButton->setFixedSize(buttonWidth, buttonHeight);
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
     buttonLayout->addWidget(removeButton);
@@ -412,6 +468,16 @@ void MainWindow::mountFile(const QString& filePath) {
     // Add the file widget to the scroll area
     scrollLayout->insertWidget(0, fileWidget);
 
+    // Enable selection on the card and its children
+    fileWidget->installEventFilter(this);
+    for (auto* child : fileWidget->findChildren<QWidget*>()) {
+        child->installEventFilter(this);
+    }
+    mSelectedMountIds.clear();
+    mSelectedMountIds.insert(mountId);
+    mLastSelectedMountId = mountId;
+    updateSelectionUi();
+
     // Hide the drag-drop label since we now have content
     ui->dragAndDropLabel->hide();
 
@@ -428,8 +494,16 @@ void MainWindow::mountFile(const QString& filePath) {
         removeFile(fileWidget);
     });
 
-    mMountedFiles.append(
-        motioncam::MountedFile(mountId, filePath));
+    connect(fileWidget->findChild<QPushButton*>("localReset"), &QPushButton::clicked, this, [this, mountId]() {
+        if (!mLocalSettings.contains(mountId))
+            return;
+        mLocalSettings.remove(mountId);
+        updateLocalBadgeForMount(mountId);
+        applySettingsToMount(mountId, captureSettingsFromUi());
+    });
+
+    mMountedFiles.append(motioncam::MountedFile(mountId, filePath));
+    updateLocalBadgeForMount(mountId);
 }
 
 void MainWindow::playFile(const QString& path) {
@@ -501,6 +575,15 @@ void MainWindow::removeFile(QWidget* fileWidget) {
         if(it != mMountedFiles.end())
 
             mMountedFiles.erase(it);
+
+        if (mSelectedMountIds.contains(mountId)) {
+            mSelectedMountIds.remove(mountId);
+            mLastSelectedMountId = motioncam::InvalidMountId;
+            updateSelectionUi();
+        }
+
+        mLocalSettings.remove(mountId);
+        updateLocalBadgeForMount(mountId);
     }
 
     // If all files are removed, show the drag-drop label again
@@ -572,6 +655,121 @@ void MainWindow::updateUi() {
     }
 }
 
+MainWindow::RenderSettings MainWindow::captureSettingsFromUi() const {
+    RenderSettings rs;
+    rs.renderOptions = getRenderOptions(*ui);
+    rs.draftQuality = mDraftQuality;
+    rs.cfrTarget = mCFRTarget;
+    rs.cropTarget = mCropTarget;
+    rs.cameraModel = mCameraModel;
+    rs.levels = mLevels;
+    rs.logTransform = mLogTransform;
+    rs.exposureCompensation = mExposureCompensation;
+    rs.quadBayerOption = mQuadBayerOption;
+    return rs;
+}
+
+motioncam::RenderSettings MainWindow::toMotionCamSettings(const RenderSettings& settings) const {
+    return motioncam::RenderSettings(
+        settings.renderOptions,
+        settings.draftQuality,
+        settings.cfrTarget,
+        settings.cropTarget,
+        settings.cameraModel,
+        settings.levels,
+        settings.logTransform,
+        settings.exposureCompensation,
+        settings.quadBayerOption
+    );
+}
+
+void MainWindow::applySettingsToMount(motioncam::MountId mountId, const RenderSettings& settings) {
+    mFuseFilesystem->updateOptions(mountId, toMotionCamSettings(settings));
+}
+
+void MainWindow::applySettingsToMounts(const QSet<motioncam::MountId>& mounts, const RenderSettings& settings) {
+    for (auto mountId : mounts) {
+        applySettingsToMount(mountId, settings);
+        updateThumbnailForMount(mountId);
+    }
+    QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
+}
+
+void MainWindow::updateLocalBadgeForMount(motioncam::MountId mountId) {
+    auto* widget = findFileWidgetForMountId(mountId);
+    if (!widget) {
+        return;
+    }
+    auto* badge = widget->findChild<QLabel*>("localBadge");
+    auto* reset = widget->findChild<QPushButton*>("localReset");
+    const bool hasLocal = mLocalSettings.contains(mountId);
+    if (badge) badge->setVisible(hasLocal);
+    if (reset) reset->setVisible(hasLocal);
+}
+
+void MainWindow::updateSelectionUi() {
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    if (!scrollContent) {
+        return;
+    }
+
+    auto fileWidgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+    for (auto* widget : fileWidgets) {
+        bool ok = false;
+        auto mountId = widget->property("mountId").toInt(&ok);
+        if (!ok) {
+            continue;
+        }
+        setFileWidgetSelected(widget, mSelectedMountIds.contains(mountId));
+    }
+}
+
+void MainWindow::setFileWidgetSelected(QWidget* fileWidget, bool selected) {
+    if (!fileWidget) {
+        return;
+    }
+    const auto baseStyle = QStringLiteral("QWidget { background-color: #1a2432; border: 1px solid #243348; border-radius: 8px; }");
+    const auto selectedStyle = QStringLiteral("QWidget { background-color: #1d2c3d; border: 1px solid #4aa3ff; border-radius: 8px; }");
+    fileWidget->setStyleSheet(selected ? selectedStyle : baseStyle);
+}
+
+QWidget* MainWindow::findFileWidgetForMountId(motioncam::MountId mountId) const {
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    if (!scrollContent) {
+        return nullptr;
+    }
+    auto fileWidgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+    for (auto* widget : fileWidgets) {
+        bool ok = false;
+        auto widgetMountId = widget->property("mountId").toInt(&ok);
+        if (ok && widgetMountId == mountId) {
+            return widget;
+        }
+    }
+    return nullptr;
+}
+
+void MainWindow::updateThumbnailForMount(motioncam::MountId mountId) {
+    Q_UNUSED(mountId);
+}
+
+QWidget* MainWindow::findMountWidget(QObject* obj) const {
+    auto* current = qobject_cast<QWidget*>(obj);
+    while (current) {
+        if (current->property("mountId").isValid()) {
+            return current;
+        }
+        current = current->parentWidget();
+    }
+    return nullptr;
+}
+
+void MainWindow::clearSelection() {
+    mSelectedMountIds.clear();
+    mLastSelectedMountId = motioncam::InvalidMountId;
+    updateSelectionUi();
+}
+
 void MainWindow::updateFpsLabels() {
     // Get the scroll area's content widget
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
@@ -627,23 +825,17 @@ void MainWindow::updateFpsLabels() {
 }
 
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
+    Q_UNUSED(checkState);
     auto it = mMountedFiles.begin();
-    motioncam::RenderSettings settings(
-        getRenderOptions(*ui),
-        mDraftQuality,
-        mCFRTarget,
-        mCropTarget,
-        mCameraModel,
-        mLevels,
-        mLogTransform,
-        mExposureCompensation,
-        mQuadBayerOption
-    );
+    auto settings = captureSettingsFromUi();
 
     updateUi();
 
     while(it != mMountedFiles.end()) {
-        mFuseFilesystem->updateOptions(it->mountId, settings);
+        if (!mLocalSettings.contains(it->mountId)) {
+            mFuseFilesystem->updateOptions(it->mountId, toMotionCamSettings(settings));
+            updateThumbnailForMount(it->mountId);
+        }
         ++it;
     }
     
@@ -745,8 +937,36 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));    
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
 
     updateUi();
+}
+
+void MainWindow::onApplySelected() {
+    if (mSelectedMountIds.isEmpty()) {
+        return;
+    }
+    auto settings = captureSettingsFromUi();
+    applySettingsToMounts(mSelectedMountIds, settings);
+    for (auto mountId : mSelectedMountIds) {
+        mLocalSettings[mountId] = settings;
+        updateLocalBadgeForMount(mountId);
+    }
+}
+
+void MainWindow::onApplyAll() {
+    if (mMountedFiles.isEmpty()) {
+        return;
+    }
+    auto settings = captureSettingsFromUi();
+    mLocalSettings.clear();
+    QSet<motioncam::MountId> all;
+    for (const auto& file : mMountedFiles) {
+        all.insert(file.mountId);
+    }
+    applySettingsToMounts(all, settings);
+    for (const auto& file : mMountedFiles) {
+        updateLocalBadgeForMount(file.mountId);
+    }
 }
