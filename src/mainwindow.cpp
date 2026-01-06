@@ -6,11 +6,18 @@
 #include <QMimeData>
 #include <QPushButton>
 #include <QFileInfo>
+#include <QCoreApplication>
+#include <QFile>
 #include <QProcess>
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QMenu>
+#include <QAction>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <algorithm>
 #include <QTimer>
 
@@ -24,8 +31,19 @@ namespace {
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
 
-    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {
-        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;
+    QString defaultPlayerPath() {
+#ifdef _WIN32
+        QString appDir = QCoreApplication::applicationDirPath();
+        return QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe");
+#elif __APPLE__
+        return "/Applications/MotionCam Player.app";
+#else
+        return QString();
+#endif
+    }
+
+    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {      
+        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;   
 
         if(ui.draftModeCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_DRAFT;
@@ -68,6 +86,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , mDraftQuality(1)
+    , mPlayerPath(defaultPlayerPath())
 {
     ui->setupUi(this);
 
@@ -122,6 +141,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+
+    initSessionMenus();
 }
 
 MainWindow::~MainWindow() {
@@ -287,11 +308,35 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     return QMainWindow::eventFilter(watched, event);
 }
 
+QString MainWindow::mountDestinationPath(const QFileInfo& fileInfo) const {
+    return (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
+}
+
+void MainWindow::clearMountedFiles() {
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    auto* scrollLayout = scrollContent ? qobject_cast<QVBoxLayout*>(scrollContent->layout()) : nullptr;
+    if (!scrollLayout) {
+        return;
+    }
+
+    QList<QWidget*> fileWidgets;
+    for (int i = 0; i < scrollLayout->count(); ++i) {
+        auto* w = scrollLayout->itemAt(i)->widget();
+        if (w && w->property("mountId").isValid()) {
+            fileWidgets.append(w);
+        }
+    }
+
+    for (auto* w : fileWidgets) {
+        removeFile(w);
+    }
+}
+
 void MainWindow::mountFile(const QString& filePath) {
     // Extract just the filename from the path
     QFileInfo fileInfo(filePath);
     auto fileName = fileInfo.fileName();
-    auto dstPath = (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
+    auto dstPath = mountDestinationPath(fileInfo);
     motioncam::MountId mountId;
 
     try {
@@ -697,8 +742,10 @@ void MainWindow::onQuadBayerChanged(std::string input) {
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 
+void MainWindow::onCacheCleanup() {}
+
 void MainWindow::onSetCacheFolder(bool checked) {
-    Q_UNUSED(checked);  // Parameter not needed for folder selection
+    Q_UNUSED(checked);  // Parameter not needed for folder selection         
 
     auto folderPath = QFileDialog::getExistingDirectory(
         this,
@@ -718,11 +765,49 @@ void MainWindow::onSetCacheFolder(bool checked) {
     }
 }
 
+void MainWindow::onNewSession() {
+    clearMountedFiles();
+    mCurrentSessionFile.clear();
+}
+
+void MainWindow::onLoadSession() {
+    const QString filePath = QFileDialog::getOpenFileName(this, tr("Load Session"), QString(), tr("Session Files (*.json)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+    loadSessionFromFile(filePath);
+}
+
+void MainWindow::onSaveSession() {
+    if (mCurrentSessionFile.isEmpty()) {
+        onSaveSessionAs();
+        return;
+    }
+    saveSessionToFile(mCurrentSessionFile);
+}
+
+void MainWindow::onSaveSessionAs() {
+    QString filePath = QFileDialog::getSaveFileName(this, tr("Save Session As"), QString(), tr("Session Files (*.json)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+    if (!filePath.endsWith(".json", Qt::CaseInsensitive)) {
+        filePath += ".json";
+    }
+    saveSessionToFile(filePath);
+}
+
+void MainWindow::onClearRecentSessions() {
+    mRecentSessions.clear();
+    saveRecentSessions();
+    updateRecentSessionsMenu();
+}
+
 void MainWindow::onSetDefaultSettings(bool checked) {
-    ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);
-    ui->vignetteCorrectionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);        
+    ui->vignetteCorrectionCheckBox->setCheckState(Qt::CheckState::Checked); 
     ui->scaleRawCheckBox->setCheckState(Qt::CheckState::Unchecked);
-    ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);    
     ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->normalizeExposureCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
@@ -745,8 +830,205 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));    
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
 
     updateUi();
+}
+
+void MainWindow::initSessionMenus() {
+    loadRecentSessions();
+
+    if (ui->menubar && !mRecentSessionsMenu) {
+        mRecentSessionsMenu = new QMenu("Recent Sessions", this);
+        mClearRecentSessionsAction = new QAction("Clear Recent Sessions", this);
+        connect(mClearRecentSessionsAction, &QAction::triggered, this, &MainWindow::onClearRecentSessions);
+    }
+
+    if (ui->actionNewSession) {
+        connect(ui->actionNewSession, &QAction::triggered, this, &MainWindow::onNewSession);
+    }
+    if (ui->actionLoadSession) {
+        connect(ui->actionLoadSession, &QAction::triggered, this, &MainWindow::onLoadSession);
+    }
+    if (ui->actionSaveSession) {
+        connect(ui->actionSaveSession, &QAction::triggered, this, &MainWindow::onSaveSession);
+    }
+    if (ui->actionSaveSessionAs) {
+        connect(ui->actionSaveSessionAs, &QAction::triggered, this, &MainWindow::onSaveSessionAs);
+    }
+
+    updateRecentSessionsMenu();
+}
+
+void MainWindow::updateRecentSessionsMenu() {
+    if (!mRecentSessionsMenu) {
+        return;
+    }
+    mRecentSessionsMenu->clear();
+    if (mRecentSessions.isEmpty()) {
+        auto* emptyAction = mRecentSessionsMenu->addAction("No recent sessions");
+        emptyAction->setEnabled(false);
+    } else {
+        for (const auto& sessionPath : mRecentSessions) {
+            QFileInfo info(sessionPath);
+            const QString displayName = info.completeBaseName();
+            auto* action = mRecentSessionsMenu->addAction(displayName);
+            action->setToolTip(sessionPath);
+            connect(action, &QAction::triggered, this, [this, sessionPath]() {
+                loadSessionFromFile(sessionPath);
+            });
+        }
+    }
+    mRecentSessionsMenu->addSeparator();
+    if (mClearRecentSessionsAction) {
+        mRecentSessionsMenu->addAction(mClearRecentSessionsAction);
+    }
+
+    if (ui->menuFile && !ui->menuFile->actions().contains(mRecentSessionsMenu->menuAction())) {
+        ui->menuFile->addMenu(mRecentSessionsMenu);
+    }
+}
+
+void MainWindow::loadRecentSessions() {
+    QSettings settings(PACKAGE_NAME, APP_NAME);
+    mRecentSessions = settings.value("recentSessions").toStringList();
+    mRecentSessions.removeAll(QString());
+    const int maxRecent = 10;
+    if (mRecentSessions.size() > maxRecent) {
+        mRecentSessions = mRecentSessions.mid(0, maxRecent);
+    }
+}
+
+void MainWindow::saveRecentSessions() const {
+    QSettings settings(PACKAGE_NAME, APP_NAME);
+    settings.setValue("recentSessions", mRecentSessions);
+}
+
+void MainWindow::addRecentSession(const QString& filePath) {
+    if (filePath.isEmpty()) {
+        return;
+    }
+    const QString normalized = QFileInfo(filePath).absoluteFilePath();
+    mRecentSessions.removeAll(normalized);
+    mRecentSessions.prepend(normalized);
+    const int maxRecent = 10;
+    if (mRecentSessions.size() > maxRecent) {
+        mRecentSessions = mRecentSessions.mid(0, maxRecent);
+    }
+    saveRecentSessions();
+    updateRecentSessionsMenu();
+}
+
+void MainWindow::saveSessionToFile(const QString& filePath) {
+    QJsonObject obj;
+    obj["version"] = 1;
+    obj["cacheRootFolder"] = mCacheRootFolder;
+    obj["playerPath"] = mPlayerPath;
+    obj["draftMode"] = ui->draftModeCheckBox->isChecked();
+    obj["applyVignetteCorrection"] = ui->vignetteCorrectionCheckBox->isChecked();
+    obj["scaleRaw"] = ui->scaleRawCheckBox->isChecked();
+    obj["vignetteOnlyColor"] = ui->vignetteOnlyColorCheckBox->isChecked();
+    obj["normalizeExposure"] = ui->normalizeExposureCheckBox->isChecked();
+    obj["cfrConversion"] = ui->cfrConversionCheckBox->isChecked();
+    obj["cropEnabled"] = ui->cropEnableCheckBox->isChecked();
+    obj["camModelOverrideEnabled"] = ui->camModelOverrideCheckBox->isChecked();
+    obj["logTransformEnabled"] = ui->logTransformCheckBox->isChecked();
+    obj["interpretAsQBEnabled"] = ui->quadBayerCheckBox->isChecked();
+    obj["draftQuality"] = mDraftQuality;
+    obj["cfrTarget"] = ui->cfrTarget->currentText();
+    obj["cropTarget"] = ui->cropTargetComboBox->currentText();
+    obj["exposureCompensation"] = ui->exposureCompensationCombobox->currentText();
+    obj["camModelOverride"] = ui->camModelOverrideComboBox->currentText();
+    obj["levels"] = ui->levelsComboBox->currentText();
+    obj["logTransform"] = ui->logTransformComboBox->currentText();
+    obj["quadBayerOption"] = ui->quadBayerComboBox->currentText();
+
+    QJsonArray mounts;
+    for (const auto& f : mMountedFiles) {
+        mounts.append(f.srcFile);
+    }
+    obj["mountedFiles"] = mounts;
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, "Save Session", QString("Failed to save session to %1").arg(filePath));
+        return;
+    }
+    file.write(QJsonDocument(obj).toJson(QJsonDocument::Indented));
+    file.close();
+    mCurrentSessionFile = filePath;
+    addRecentSession(filePath);
+    QMessageBox::information(this, "Save Session", "Session saved.");
+}
+
+bool MainWindow::loadSessionFromFile(const QString& filePath) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "Load Session", QString("Failed to open session file: %1").arg(filePath));
+        return false;
+    }
+    const auto data = file.readAll();
+    file.close();
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        QMessageBox::warning(this, "Load Session", QString("Invalid session file: %1").arg(parseError.errorString()));
+        return false;
+    }
+    const QJsonObject obj = doc.object();
+
+    ui->draftModeCheckBox->setChecked(obj.value("draftMode").toBool());
+    ui->vignetteCorrectionCheckBox->setChecked(obj.value("applyVignetteCorrection").toBool(true));
+    ui->scaleRawCheckBox->setChecked(obj.value("scaleRaw").toBool());
+    ui->vignetteOnlyColorCheckBox->setChecked(obj.value("vignetteOnlyColor").toBool(true));
+    ui->normalizeExposureCheckBox->setChecked(obj.value("normalizeExposure").toBool());
+    ui->cfrConversionCheckBox->setChecked(obj.value("cfrConversion").toBool(true));
+    ui->cropEnableCheckBox->setChecked(obj.value("cropEnabled").toBool());
+    ui->camModelOverrideCheckBox->setChecked(obj.value("camModelOverrideEnabled").toBool());
+    ui->logTransformCheckBox->setChecked(obj.value("logTransformEnabled").toBool());
+    ui->quadBayerCheckBox->setChecked(obj.value("interpretAsQBEnabled").toBool());
+    mCacheRootFolder = obj.value("cacheRootFolder").toString();
+    mPlayerPath = obj.value("playerPath").toString();
+    mDraftQuality = obj.value("draftQuality").toInt(1);
+    mCFRTarget = obj.value("cfrTarget").toString("Prefer Drop Frame").toStdString();
+    mCropTarget = obj.value("cropTarget").toString().toStdString();
+    mExposureCompensation = obj.value("exposureCompensation").toString("0ev").toStdString();
+    mCameraModel = obj.value("camModelOverride").toString("Panasonic").toStdString();
+    mLevels = obj.value("levels").toString("Dynamic").toStdString();
+    mLogTransform = obj.value("logTransform").toString("Keep Input").toStdString();
+    mQuadBayerOption = obj.value("quadBayerOption").toString("Wrong CFA Metadata").toStdString();
+
+    if(mDraftQuality == 2)
+        ui->draftQuality->setCurrentIndex(0);
+    else if(mDraftQuality == 4)
+        ui->draftQuality->setCurrentIndex(1);
+    else if(mDraftQuality == 8)
+        ui->draftQuality->setCurrentIndex(2);
+
+    ui->cfrTarget->setCurrentText(QString::fromStdString(mCFRTarget));
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mExposureCompensation));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels));
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));
+
+    updateUi();
+
+    clearMountedFiles();
+    const auto mountsVal = obj.value("mountedFiles");
+    if (mountsVal.isArray()) {
+        const QJsonArray arr = mountsVal.toArray();
+        for (const auto& v : arr) {
+            const QString path = v.toString();
+            if (!path.isEmpty() && QFile::exists(path)) {
+                mountFile(path);
+            }
+        }
+    }
+
+    mCurrentSessionFile = filePath;
+    addRecentSession(filePath);
+    return true;
 }

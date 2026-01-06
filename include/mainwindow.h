@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <QList>
 #include <QString>
+#include <QStringList>
 
 namespace motioncam {
     struct MountedFile {
@@ -49,6 +50,11 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+class QTimer;
+class QFileInfo;
+class QMenu;
+class QAction;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -73,7 +79,13 @@ private slots:
     void onLogTransformChanged(std::string input);
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
+    void onCacheCleanup();
     void onSetDefaultSettings(bool checked);
+    void onNewSession();
+    void onLoadSession();
+    void onSaveSession();
+    void onSaveSessionAs();
+    void onClearRecentSessions();
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
@@ -84,6 +96,15 @@ private:
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    QString mountDestinationPath(const QFileInfo& fileInfo) const;
+    void clearMountedFiles();
+    void saveSessionToFile(const QString& filePath);
+    bool loadSessionFromFile(const QString& filePath);
+    void initSessionMenus();
+    void updateRecentSessionsMenu();
+    void loadRecentSessions();
+    void saveRecentSessions() const;
+    void addRecentSession(const QString& filePath);
 
 private:
     Ui::MainWindow *ui;
@@ -92,12 +113,17 @@ private:
     QString mCacheRootFolder;
     int mDraftQuality;
     std::string mCFRTarget;
-    std::string mCropTarget;    
+    std::string mCropTarget;
     std::string mCameraModel;
     std::string mLevels;
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    QString mPlayerPath;
+    QString mCurrentSessionFile;
+    QStringList mRecentSessions;
+    QMenu* mRecentSessionsMenu{nullptr};
+    QAction* mClearRecentSessionsAction{nullptr};
 };
 
 #endif // MAINWINDOW_H
