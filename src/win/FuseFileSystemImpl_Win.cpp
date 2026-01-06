@@ -584,7 +584,7 @@ void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings
     dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(settings);
 }
 
-std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
+std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {  
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
         return dynamic_cast<Session*>(it->second.get())->getFileInfo();
@@ -592,4 +592,16 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
     return std::nullopt;
 }
 
+void FuseFileSystemImpl_Win::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
 }
+
+void FuseFileSystemImpl_Win::setCacheQuotaBytes(std::uint64_t bytes) {
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_Win::cleanupCacheExpired() {
+    // TODO: implement TTL/quota-based cleanup if required
+}
+
+} // namespace motioncam

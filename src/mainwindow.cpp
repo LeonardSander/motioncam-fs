@@ -11,8 +11,12 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QStandardPaths>
+#include <QDesktopServices>
+#include <QUrl>
 #include <algorithm>
 #include <QTimer>
+#include <spdlog/spdlog.h>
 
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
@@ -68,6 +72,9 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , mDraftQuality(1)
+    , mCachePolicy(motioncam::CachePolicy::Off)
+    , mCacheQuotaBytes(0)
+    , mVerboseLogging(false)
 {
     ui->setupUi(this);
 
@@ -122,6 +129,10 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    connect(ui->applyCacheBtn, &QPushButton::clicked, this, &MainWindow::onApplyCacheSettings);
+    connect(ui->cleanupCacheBtn, &QPushButton::clicked, this, &MainWindow::onCleanupCache);
+    connect(ui->verboseLoggingCheckBox, &QCheckBox::toggled, this, &MainWindow::onVerboseLoggingToggled);
+    connect(ui->openLogsBtn, &QPushButton::clicked, this, &MainWindow::onOpenLogFolder);
 }
 
 MainWindow::~MainWindow() {
@@ -152,6 +163,9 @@ void MainWindow::saveSettings() {
     settings.setValue("levels", ui->levelsComboBox->currentText());
     settings.setValue("logTransform", ui->logTransformComboBox->currentText());
     settings.setValue("quadBayerOption", ui->quadBayerComboBox->currentText());
+    settings.setValue("cachePolicyQuota", ui->cacheQuotaCheckBox->isChecked());
+    settings.setValue("cacheQuotaMB", ui->cacheQuotaSpin->value());
+    settings.setValue("verboseLogging", ui->verboseLoggingCheckBox->isChecked());
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -212,6 +226,9 @@ void MainWindow::restoreSettings() {
     mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
     mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
     mLogTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
+    mCachePolicy = settings.value("cachePolicyQuota").toBool() ? motioncam::CachePolicy::Quota : motioncam::CachePolicy::Off;
+    mCacheQuotaBytes = static_cast<std::uint64_t>(settings.value("cacheQuotaMB", 512).toULongLong()) * 1024ull * 1024ull;
+    mVerboseLogging = settings.value("verboseLogging", false).toBool();
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -227,6 +244,9 @@ void MainWindow::restoreSettings() {
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels));  
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
+    ui->cacheQuotaCheckBox->setChecked(mCachePolicy == motioncam::CachePolicy::Quota);
+    ui->cacheQuotaSpin->setValue(static_cast<int>(mCacheQuotaBytes / (1024 * 1024)));
+    ui->verboseLoggingCheckBox->setChecked(mVerboseLogging);
   
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
@@ -239,6 +259,8 @@ void MainWindow::restoreSettings() {
     }
     settings.endArray();
 
+    onApplyCacheSettings(false);
+    onVerboseLoggingToggled(mVerboseLogging);
     updateUi();
 }
 
@@ -570,6 +592,7 @@ void MainWindow::updateUi() {
         ui->cacheFolderLabel->setText(mCacheRootFolder);
         ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
     }
+    ui->cacheQuotaSpin->setEnabled(ui->cacheQuotaCheckBox->isChecked());
 }
 
 void MainWindow::updateFpsLabels() {
@@ -746,7 +769,61 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels)); 
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mCropTarget));    
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));  
 
     updateUi();
+}
+
+void MainWindow::onApplyCacheSettings(bool checked) {
+    Q_UNUSED(checked);
+    mCachePolicy = ui->cacheQuotaCheckBox->isChecked() ? motioncam::CachePolicy::Quota : motioncam::CachePolicy::Off;
+    mCacheQuotaBytes = static_cast<std::uint64_t>(ui->cacheQuotaSpin->value()) * 1024ull * 1024ull;
+    ui->cacheQuotaSpin->setEnabled(ui->cacheQuotaCheckBox->isChecked());
+
+    if (mFuseFilesystem) {
+        mFuseFilesystem->setCachePolicy(mCachePolicy);
+        mFuseFilesystem->setCacheQuotaBytes(mCacheQuotaBytes);
+    }
+}
+
+void MainWindow::onCleanupCache(bool checked) {
+    Q_UNUSED(checked);
+    if (mFuseFilesystem) {
+        mFuseFilesystem->cleanupCacheExpired();
+    }
+}
+
+QString MainWindow::getLogDirectory() const {
+#ifdef _WIN32
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (baseDir.isEmpty()) {
+        baseDir = QDir::tempPath();
+    }
+    QDir logDir(QDir(baseDir).filePath("MotionCam Tools/Fuse/logs"));
+#elif __APPLE__
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+    if (baseDir.isEmpty()) {
+        baseDir = QDir::homePath();
+    }
+    QDir logDir(QDir(baseDir).filePath("Library/Logs/MotionCam Tools"));
+#else
+    QString baseDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    if (baseDir.isEmpty()) {
+        baseDir = QDir::homePath();
+    }
+    QDir logDir(QDir(baseDir).filePath("MotionCam Tools/Fuse/logs"));
+#endif
+    logDir.mkpath(".");
+    return logDir.absolutePath();
+}
+
+void MainWindow::onVerboseLoggingToggled(bool checked) {
+    mVerboseLogging = checked;
+    spdlog::set_level(checked ? spdlog::level::debug : spdlog::level::info);
+}
+
+void MainWindow::onOpenLogFolder(bool checked) {
+    Q_UNUSED(checked);
+    const auto logDir = getLogDirectory();
+    QDesktopServices::openUrl(QUrl::fromLocalFile(logDir));
 }

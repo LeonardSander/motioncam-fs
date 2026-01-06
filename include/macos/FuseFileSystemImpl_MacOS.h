@@ -30,6 +30,9 @@ public:
         MountId mountId,
         const RenderSettings& settings) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
+    void setCachePolicy(CachePolicy policy) override;
+    void setCacheQuotaBytes(std::uint64_t bytes) override;
+    void cleanupCacheExpired() override;
 
 private:
     MountId mNextMountId;
@@ -37,6 +40,8 @@ private:
     std::unique_ptr<BS::thread_pool> mIoThreadPool;
     std::unique_ptr<BS::thread_pool> mProcessingThreadPool;
     std::unique_ptr<LRUCache> mCache;
+    CachePolicy mCachePolicy{CachePolicy::Off};
+    std::uint64_t mCacheQuotaBytes{0};
 };
 
 } // namespace motioncam

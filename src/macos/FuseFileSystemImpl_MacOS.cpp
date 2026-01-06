@@ -471,6 +471,20 @@ void FuseFileSystemImpl_MacOs::updateOptions(
     }
 }
 
+
+
+void FuseFileSystemImpl_MacOs::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+}
+
+void FuseFileSystemImpl_MacOs::setCacheQuotaBytes(std::uint64_t bytes) {
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
+    // TODO: implement TTL-based cleanup if needed
+}
+
 std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {

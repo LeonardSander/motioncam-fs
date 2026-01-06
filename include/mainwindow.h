@@ -74,6 +74,10 @@ private slots:
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
     void onSetDefaultSettings(bool checked);
+    void onApplyCacheSettings(bool checked);
+    void onCleanupCache(bool checked);
+    void onVerboseLoggingToggled(bool checked);
+    void onOpenLogFolder(bool checked);
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
@@ -84,6 +88,7 @@ private:
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    QString getLogDirectory() const;
 
 private:
     Ui::MainWindow *ui;
@@ -98,6 +103,9 @@ private:
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    motioncam::CachePolicy mCachePolicy;
+    std::uint64_t mCacheQuotaBytes;
+    bool mVerboseLogging;
 };
 
 #endif // MAINWINDOW_H

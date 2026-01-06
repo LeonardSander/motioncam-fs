@@ -181,7 +181,7 @@
           </widget>
          </item>
          <item>
-          <widget class="QPushButton" name="changeCacheBtn">
+         <widget class="QPushButton" name="changeCacheBtn">
            <property name="minimumSize">
             <size>
              <width>0</width>
@@ -191,12 +191,114 @@
            <property name="text">
             <string>Set Folder</string>
            </property>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="cachePolicyLayout">
+          <item>
+           <widget class="QCheckBox" name="cacheQuotaCheckBox">
+            <property name="text">
+             <string>Enforce Cache Quota (MB)</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSpinBox" name="cacheQuotaSpin">
+            <property name="minimum">
+             <number>0</number>
+            </property>
+            <property name="maximum">
+             <number>16384</number>
+            </property>
+            <property name="value">
+             <number>512</number>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="cacheButtonsLayout">
+          <item>
+           <widget class="QPushButton" name="applyCacheBtn">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>30</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Apply Cache Settings</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="cleanupCacheBtn">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>30</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Cleanup Cache</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+        <widget class="QLabel" name="cacheFolderDescription">
+          <property name="text">
+           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG file sequences will appear after MCRAWs are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+          </property>
+          <property name="wordWrap">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+       <item>
+        <layout class="QVBoxLayout" name="loggingSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QLabel" name="loggingSectionTitle">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;Logging:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
           </widget>
          </item>
          <item>
-          <widget class="QLabel" name="cacheFolderDescription">
+          <layout class="QHBoxLayout" name="loggingControlsLayout">
+           <item>
+            <widget class="QCheckBox" name="verboseLoggingCheckBox">
+             <property name="text">
+              <string>Enable Verbose Logging</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="openLogsBtn">
+             <property name="minimumSize">
+              <size>
+               <width>0</width>
+               <height>30</height>
+              </size>
+             </property>
+             <property name="text">
+              <string>Open Log Folder</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="loggingDescription">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG file sequences will appear after MCRAWs are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Toggle detailed debug logging and jump to the current log folder for troubleshooting.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
