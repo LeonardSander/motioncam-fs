@@ -542,9 +542,40 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     mNextMountId(0),
     mIoThreadPool(std::make_unique<BS::thread_pool>(IO_THREADS)),
     mProcessingThreadPool(std::make_unique<BS::thread_pool>()),
-    mCache(std::make_unique<LRUCache>(CACHE_SIZE))
+    mCache(std::make_unique<LRUCache>(CACHE_SIZE)),
+    mCachePolicy(CachePolicy::Quota),
+    mCacheQuotaBytes(CACHE_SIZE)
 {
     setupLogging();
+}
+
+void FuseFileSystemImpl_Win::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+    if (mCache && policy == CachePolicy::Off) {
+        mCache->clear();
+    }
+}
+
+void FuseFileSystemImpl_Win::setCacheQuotaBytes(std::uint64_t bytes) {
+    mCacheQuotaBytes = bytes;
+    if (mCache && bytes > 0) {
+        mCache->setMaxSize(static_cast<size_t>(bytes));
+    }
+}
+
+void FuseFileSystemImpl_Win::cleanupCacheExpired() {
+    if (!mCache) {
+        return;
+    }
+
+    if (mCachePolicy == CachePolicy::Off) {
+        mCache->clear();
+        return;
+    }
+
+    if (mCachePolicy == CachePolicy::Quota && mCacheQuotaBytes > 0 && mCache->size() > mCacheQuotaBytes) {
+        mCache->clear();
+    }
 }
 
 MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std::string& srcFile, const std::string& dstPath) {

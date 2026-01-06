@@ -49,6 +49,9 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+class QTimer;
+class QFileInfo;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -74,6 +77,7 @@ private slots:
     void onLogTransformChanged(std::string input);
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
+    void onCacheCleanup();
     void onSetDefaultSettings(bool checked);
 
     void playFile(const QString& path);
@@ -85,15 +89,19 @@ private:
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    QString mountDestinationPath(const QFileInfo& fileInfo) const;
+    void applyCacheManagementSettings();
+    void deleteMountOutputIfRequested(const QString& mountPath);
 
 private:
     Ui::MainWindow *ui;
     std::unique_ptr<motioncam::IFuseFileSystem> mFuseFilesystem;
     QList<motioncam::MountedFile> mMountedFiles;
+    QTimer* mCacheCleanupTimer{nullptr};
     QString mCacheRootFolder;
     int mDraftQuality;
     std::string mCFRTarget;
-    std::string mCropTarget;    
+    std::string mCropTarget;
     std::string mCameraModel;
     std::string mLevels;
     std::string mLogTransform;
@@ -104,6 +112,7 @@ private:
     long long mCacheQuotaBytes;
     int mCacheCleanupIntervalSeconds;
     bool mDeleteOnUnmount;
+    motioncam::CachePolicy mCachePolicy{motioncam::CachePolicy::Off};
 };
 
 #endif // MAINWINDOW_H

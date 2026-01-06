@@ -86,6 +86,7 @@ MainWindow::MainWindow(QWidget *parent)
     , mCacheQuotaBytes(50ll * 1024ll * 1024ll * 1024ll)
     , mCacheCleanupIntervalSeconds(10)
     , mDeleteOnUnmount(false)
+    , mCachePolicy(motioncam::CachePolicy::Off)
 {
     ui->setupUi(this);
 
@@ -98,6 +99,9 @@ MainWindow::MainWindow(QWidget *parent)
     // Enable drag and drop on the scroll area
     ui->dragAndDropScrollArea->setAcceptDrops(true);
     ui->dragAndDropScrollArea->installEventFilter(this);
+
+    mCacheCleanupTimer = new QTimer(this);
+    connect(mCacheCleanupTimer, &QTimer::timeout, this, &MainWindow::onCacheCleanup);
 
     restoreSettings();
 
@@ -143,6 +147,8 @@ MainWindow::MainWindow(QWidget *parent)
     if (ui->actionOpenSettings) {
         connect(ui->actionOpenSettings, &QAction::triggered, this, &MainWindow::onOpenSettings);
     }
+
+    applyCacheManagementSettings();
 }
 
 MainWindow::~MainWindow() {
@@ -326,11 +332,45 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     return QMainWindow::eventFilter(watched, event);
 }
 
+QString MainWindow::mountDestinationPath(const QFileInfo& fileInfo) const {
+    return (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
+}
+
+void MainWindow::deleteMountOutputIfRequested(const QString& mountPath) {
+    if (!mDeleteOnUnmount) {
+        return;
+    }
+    if (mountPath.isEmpty()) {
+        return;
+    }
+
+    QFileInfo pathInfo(mountPath);
+    if (!pathInfo.exists() || !pathInfo.isDir()) {
+        return;
+    }
+
+    const QString canonical = pathInfo.canonicalFilePath().isEmpty()
+        ? pathInfo.absoluteFilePath()
+        : pathInfo.canonicalFilePath();
+
+    const QString cacheRootCanonical = mCacheRootFolder.isEmpty() ? QString() : QDir(mCacheRootFolder).canonicalPath();
+    if (!cacheRootCanonical.isEmpty() && canonical == cacheRootCanonical) {
+        return;
+    }
+
+    QDir dir(canonical);
+    if (dir.isRoot()) {
+        return;
+    }
+
+    dir.removeRecursively();
+}
+
 void MainWindow::mountFile(const QString& filePath) {
     // Extract just the filename from the path
     QFileInfo fileInfo(filePath);
     auto fileName = fileInfo.fileName();
-    auto dstPath = (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
+    auto dstPath = mountDestinationPath(fileInfo);
     motioncam::MountId mountId;
 
     try {
@@ -535,6 +575,7 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     // Unmount the file
     bool ok = false;
     auto mountId = fileWidget->property("mountId").toInt(&ok);
+    auto mountPath = fileWidget->property("mountPath").toString();
     if(ok) {
         mFuseFilesystem->unmount(mountId);
 
@@ -544,6 +585,8 @@ void MainWindow::removeFile(QWidget* fileWidget) {
         if(it != mMountedFiles.end())
 
             mMountedFiles.erase(it);
+
+        deleteMountOutputIfRequested(mountPath);
     }
 
     // If all files are removed, show the drag-drop label again
@@ -740,6 +783,12 @@ void MainWindow::onQuadBayerChanged(std::string input) {
     onRenderSettingsChanged(Qt::CheckState::Checked);
 }
 
+void MainWindow::onCacheCleanup() {
+    if (mFuseFilesystem) {
+        mFuseFilesystem->cleanupCacheExpired();
+    }
+}
+
 void MainWindow::onSetCacheFolder(bool checked) {
     Q_UNUSED(checked);  // Parameter not needed for folder selection         
 
@@ -794,7 +843,37 @@ void MainWindow::onOpenSettings() {
         mDeleteOnUnmount = dialog.getDeleteOnUnmount();
 
         saveSettings();
+        applyCacheManagementSettings();
         updateUi();
+    }
+}
+
+void MainWindow::applyCacheManagementSettings() {
+    if (!mFuseFilesystem) {
+        return;
+    }
+
+    if (mCachePolicyMode.compare("quota", Qt::CaseInsensitive) == 0) {
+        mCachePolicy = motioncam::CachePolicy::Quota;
+    } else if (mCachePolicyMode.compare("off", Qt::CaseInsensitive) == 0) {
+        mCachePolicy = motioncam::CachePolicy::Off;
+    } else {
+        mCachePolicy = motioncam::CachePolicy::Quota;
+    }
+
+    mFuseFilesystem->setCachePolicy(mCachePolicy);
+    if (mCachePolicy == motioncam::CachePolicy::Quota) {
+        mFuseFilesystem->setCacheQuotaBytes(static_cast<std::uint64_t>(std::max<long long>(0, mCacheQuotaBytes)));
+    } else {
+        mFuseFilesystem->setCacheQuotaBytes(0);
+    }
+
+    if (mCacheCleanupTimer) {
+        if (mCachePolicy != motioncam::CachePolicy::Off && mCacheCleanupIntervalSeconds > 0) {
+            mCacheCleanupTimer->start(mCacheCleanupIntervalSeconds * 1000);
+        } else {
+            mCacheCleanupTimer->stop();
+        }
     }
 }
 

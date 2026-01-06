@@ -2,14 +2,19 @@
 
 #include <string>
 #include <optional>
+#include <cstdint>
 
 #include "Types.h"
 
 namespace motioncam {
 
 using MountId = int;
-
 constexpr auto InvalidMountId = -1;
+
+enum class CachePolicy {
+    Off,
+    Quota
+};
 
 struct FileInfo {
     float medFps;
@@ -33,6 +38,9 @@ public:
     virtual void unmount(MountId mountId) = 0;
     virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
+    virtual void setCachePolicy(CachePolicy policy) = 0;
+    virtual void setCacheQuotaBytes(std::uint64_t bytes) = 0;
+    virtual void cleanupCacheExpired() = 0;
 
 protected:
     IFuseFileSystem() = default;

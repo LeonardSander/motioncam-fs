@@ -145,6 +145,19 @@ public:
         return mMaxSize;
     }
 
+    // Adjust maximum size (clears cache if over the new limit)
+    void setMaxSize(size_t maxSize) {
+        std::lock_guard<std::mutex> lock(mMutex);
+        mMaxSize = maxSize;
+        if (mCurrentSize > mMaxSize) {
+            mCacheMap.clear();
+            mCacheList.clear();
+            mInProgress.clear();
+            mCurrentSize = 0;
+            mCondition.notify_all();
+        }
+    }
+
     // Method to mark that processing for a key has failed
     // This should be called if the caller gets nullptr from get() but fails to load the data
     void markLoadFailed(const Entry& key) {
