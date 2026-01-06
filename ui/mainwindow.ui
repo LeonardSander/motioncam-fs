@@ -157,49 +157,36 @@
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:18pt; font-weight:700;&quot;&gt;Settings&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
         </widget>
-       </item> 
+       </item>
        <item>
-        <layout class="QVBoxLayout" name="cacheSection">
+        <layout class="QHBoxLayout" name="settingsScopeLayout">
          <property name="spacing">
           <number>8</number>
          </property>
          <item>
-          <widget class="QLabel" name="cacheSectionTitle">
+          <widget class="QLabel" name="settingsScopeLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;DNG Output Folder:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>Scope:</string>
            </property>
           </widget>
          </item>
          <item>
-          <widget class="QLabel" name="cacheFolderLabel">
-           <property name="text">
-            <string>-</string>
+          <spacer name="settingsScopeSpacer">
+           <property name="orientation">
+            <enum>Qt::Orientation::Horizontal</enum>
            </property>
-           <property name="wordWrap">
-            <bool>true</bool>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QPushButton" name="changeCacheBtn">
-           <property name="minimumSize">
+           <property name="sizeHint" stdset="0">
             <size>
-             <width>0</width>
-             <height>30</height>
+             <width>40</width>
+             <height>20</height>
             </size>
            </property>
-           <property name="text">
-            <string>Set Folder</string>
-           </property>
-          </widget>
+          </spacer>
          </item>
          <item>
-          <widget class="QLabel" name="cacheFolderDescription">
+          <widget class="QLabel" name="selectedFilesLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Sets the location where DNG file sequences will appear after MCRAWs are loaded.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-           </property>
-           <property name="wordWrap">
-            <bool>true</bool>
+            <string>0 selected</string>
            </property>
           </widget>
          </item>
@@ -215,27 +202,27 @@
            <property name="spacing">
             <number>8</number>
            </property>
-           <item>
-            <widget class="QCheckBox" name="cfrConversionCheckBox">
-             <property name="text">
-              <string>Frame Rate Conversion</string>
-             </property>
+          <item>
+           <widget class="QCheckBox" name="cfrConversionCheckBox">
+            <property name="text">
+             <string>Frame Rate Conversion</string>
+            </property>
              <property name="checked">
               <bool>true</bool>
              </property>
             </widget>
            </item>
-           <item>
-            <widget class="QComboBox" name="cfrTarget">
-             <property name="minimumSize">
-              <size>
-               <width>100</width>
-               <height>30</height>
-              </size>
+          <item>
+           <widget class="QComboBox" name="cfrTarget">
+            <property name="minimumSize">
+             <size>
+              <width>100</width>
+              <height>30</height>
+             </size>
+            </property>
+            <property name="editable">
+               <bool>true</bool>
              </property>
-             <property name="editable">
-                <bool>true</bool>
-              </property>
               <item>
                 <property name="text">
                 <string>Prefer Drop Frame</string>
@@ -245,7 +232,7 @@
                 <property name="text">
                 <string>Prefer Integer</string>
                 </property>
-              </item>           
+              </item>
               <item>
                 <property name="text">
                 <string>Median (Slowmotion)</string>
@@ -256,10 +243,77 @@
                 <string>Average (Testing)</string>
                 </property>
               </item>
-            </widget>
-           </item>
-          </layout>
-         </item>
+              <item>
+                <property name="text">
+                 <string>23.976</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>24</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>25</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>29.97</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>30</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>48</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>50</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>59.94</string>
+                </property>
+              </item>
+              <item>
+                <property name="text">
+                 <string>60</string>
+                </property>
+              </item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="resetCfrButton">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>70</width>
+              <height>16777215</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Reset</string>
+            </property>
+            <property name="toolTip">
+             <string>Reset to default (Prefer Drop Frame, conversion on)</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
          <item>
           <widget class="QLabel" name="cfrConversionLabel">
            <property name="text">
@@ -293,7 +347,7 @@
           </widget>
          </item>
          <item>
-            <widget class="QComboBox" name="exposureCompensationCombobox">
+           <widget class="QComboBox" name="exposureCompensationCombobox">
              <property name="minimumSize">
               <size>
                <width>60</width>
@@ -335,12 +389,34 @@
              </item>
             </widget>
            </item>
+           <item>
+           <widget class="QPushButton" name="resetNormalizeExposureButton">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>70</width>
+              <height>16777215</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>Reset</string>
+            </property>
+            <property name="toolTip">
+             <string>Turn off normalization and reset exposure compensation</string>
+             </property>
+            </widget>
+           </item>
            </layout>
-           </item>         
-         <item>
-          <widget class="QLabel" name="normalizeExposureLabel">
+           </item>
+          <item>
+         <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings for consistent brightness.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for exposure jumps when auto exposure misbehaves. Slower to load/process; only use when you need it.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -348,32 +424,29 @@
           </widget>
          </item>
         </layout>
-       </item>       
+       </item>
        <item>
-        <layout class="QVBoxLayout" name="camModelSection">
+        <layout class="QVBoxLayout" name="cropSection">
          <property name="spacing">
           <number>8</number>
          </property>
          <item>
-          <layout class="QHBoxLayout" name="camModelLayout">
+          <layout class="QHBoxLayout" name="cropLayout">
            <property name="spacing">
             <number>8</number>
            </property>
            <item>
-            <widget class="QCheckBox" name="camModelOverrideCheckBox">
+            <widget class="QCheckBox" name="cropEnableCheckBox">
              <property name="text">
-              <string>Override Unique Camera Model</string>
-             </property>
-             <property name="checked">
-              <bool>false</bool>
+              <string>Enable Crop</string>
              </property>
             </widget>
            </item>
            <item>
-            <widget class="QComboBox" name="camModelOverrideComboBox">
+            <widget class="QComboBox" name="cropTargetComboBox">
              <property name="minimumSize">
               <size>
-               <width>100</width>
+               <width>120</width>
                <height>30</height>
               </size>
              </property>
@@ -381,28 +454,48 @@
                 <bool>true</bool>
               </property>
               <item>
-                <property name="text">
-                <string>Panasonic</string>
-                </property>
-              </item>
-              <item>
-                <property name="text">
-                <string>Blackmagic</string>
-                </property>
-              </item>              
-              <item>
-                <property name="text">
-                <string>Fujifilm</string>
-                </property>
-              </item>     
+            <property name="text">
+             <string>4096x2304</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4096x2560</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4080x2296</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4080x2288</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4000x2256</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
+             <string>4000x3000</string>
+            </property>
+          </item>
+           <item>
+            <property name="text">
+             <string>4624x2608</string>
+            </property>
+           </item>
             </widget>
            </item>
           </layout>
          </item>
          <item>
-          <widget class="QLabel" name="camModelLabel">
+          <widget class="QLabel" name="cropLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Unlock additional options in Camera Raw.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop to top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -489,24 +582,6 @@
           </layout>
          </item>
          <item>
-        <layout class="QVBoxLayout" name="defaultSection">
-         <property name="spacing">
-          <number>8</number>
-         </property>         
-         <item>
-          <widget class="QPushButton" name="defaultBtn">
-           <property name="minimumSize">
-            <size>
-             <width>0</width>
-             <height>30</height>
-            </size>
-           </property>
-           <property name="text">
-            <string>Default Settings</string>
-           </property>
-          </widget>
-         </item>
-         <item>
       <spacer name="verticalSpacer">
          <property name="orientation">
           <enum>Qt::Orientation::Vertical</enum>
@@ -518,8 +593,6 @@
           </size>
          </property>
         </spacer>
-       </item>
-        </layout>
        </item>
       </layout>
      </item>
@@ -792,84 +865,36 @@
            </property>
           </widget>
          </item>
-        </layout>
-       </item>
-       <item>
-        <layout class="QVBoxLayout" name="cropSection">
-         <property name="spacing">
-          <number>8</number>
-         </property>
          <item>
-          <layout class="QHBoxLayout" name="cropLayout">
-           <property name="spacing">
-            <number>8</number>
+          <layout class="QHBoxLayout" name="highQualityFirstFrameLayout">
+           <property name="leftMargin">
+            <number>20</number>
            </property>
            <item>
-            <widget class="QCheckBox" name="cropEnableCheckBox">
+            <widget class="QCheckBox" name="highQualityFirstFrameCheckBox">
              <property name="text">
-              <string>Enable Crop</string>
+              <string>High Quality First Frame</string>
              </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QComboBox" name="cropTargetComboBox">
-             <property name="minimumSize">
-              <size>
-               <width>120</width>
-               <height>30</height>
-              </size>
-             </property>
-             <property name="editable">
-                <bool>true</bool>
-              </property>
-              <item>
-            <property name="text">
-             <string>4096x2304</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4096x2560</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4080x2296</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4080x2288</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4000x2256</string>
-            </property>
-           </item>           
-           <item>
-            <property name="text">
-             <string>4000x3000</string>
-            </property>
-          </item>           
-           <item>
-            <property name="text">
-             <string>4624x2608</string>
-            </property>
-           </item>
             </widget>
            </item>
           </layout>
          </item>
          <item>
-          <widget class="QLabel" name="cropLabel">
-           <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop to top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+          <layout class="QHBoxLayout" name="highQualityFirstFrameLabelLayout">
+           <property name="leftMargin">
+            <number>20</number>
            </property>
-           <property name="wordWrap">
-            <bool>true</bool>
-           </property>
-          </widget>
+           <item>
+            <widget class="QLabel" name="highQualityFirstFrameLabel">
+             <property name="text">
+              <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Render the first frame in high quality.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+             </property>
+             <property name="wordWrap">
+              <bool>true</bool>
+             </property>
+            </widget>
+           </item>
+          </layout>
          </item>
         </layout>
        </item>
@@ -877,7 +902,7 @@
         <layout class="QVBoxLayout" name="quadBayerSection">
          <property name="spacing">
           <number>8</number>
-         </property>         
+         </property>
          <item>
           <layout class="QHBoxLayout" name="quadBayerLayout">
            <property name="spacing">
@@ -885,6 +910,9 @@
            </property>
            <item>
             <widget class="QCheckBox" name="quadBayerCheckBox">
+             <property name="visible">
+              <bool>false</bool>
+             </property>
              <property name="text">
               <string>Interpret as Quad Bayer CFA</string>
              </property>
@@ -892,6 +920,9 @@
            </item>
            <item>
             <widget class="QComboBox" name="quadBayerComboBox">
+             <property name="visible">
+              <bool>false</bool>
+             </property>
              <property name="minimumSize">
               <size>
                <width>80</width>
@@ -937,6 +968,9 @@
          </item>
          <item>
           <widget class="QLabel" name="remosaicLabel">
+           <property name="visible">
+            <bool>false</bool>
+           </property>
            <property name="text">
             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Different options to treat Quad Bayer CFA images. More options to come.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
@@ -946,7 +980,94 @@
           </widget>
          </item>
         </layout>
-       </item>       
+       </item>
+       <item>
+        <layout class="QHBoxLayout" name="applyButtonsLayout">
+         <property name="spacing">
+          <number>10</number>
+         </property>
+         <item>
+          <widget class="QPushButton" name="applySelectedButton">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>28</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>Apply to Selected</string>
+           </property>
+           <property name="toolTip">
+            <string>Apply settings changes to selected files only</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="applyAllButton">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>28</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>Apply to All</string>
+           </property>
+           <property name="toolTip">
+            <string>Apply settings changes to all mounted files</string>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QPushButton" name="defaultBtn">
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>28</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>Default Settings</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QProgressBar" name="refreshProgressBar">
+         <property name="visible">
+          <bool>false</bool>
+         </property>
+         <property name="minimum">
+          <number>0</number>
+         </property>
+         <property name="maximum">
+          <number>0</number>
+         </property>
+         <property name="value">
+          <number>0</number>
+         </property>
+         <property name="textVisible">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="refreshStatusLabel">
+         <property name="text">
+          <string></string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignmentFlag::AlignCenter</set>
+         </property>
+        </widget>
+       </item>
        <item>
         <spacer name="verticalSpacer3">
          <property name="orientation">
@@ -965,6 +1086,73 @@
     </item>
    </layout>
   </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1520</width>
+     <height>21</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menuFile">
+   <property name="title">
+    <string>File</string>
+   </property>
+   <addaction name="actionNewSession"/>
+   <addaction name="actionLoadSession"/>
+   <addaction name="actionSaveSession"/>
+   <addaction name="actionSaveSessionAs"/>
+  </widget>
+   <widget class="QMenu" name="menuSettings">
+    <property name="title">
+     <string>Settings</string>
+    </property>
+    <addaction name="actionOpenSettings"/>
+   </widget>
+   <addaction name="menuFile"/>
+   <addaction name="menuSettings"/>
+  </widget>
+  <action name="actionLoadSession">
+   <property name="text">
+    <string>Load Session...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+O</string>
+   </property>
+  </action>
+  <action name="actionNewSession">
+   <property name="text">
+    <string>New Session</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+N</string>
+   </property>
+  </action>
+  <action name="actionSaveSession">
+   <property name="text">
+    <string>Save Session</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+S</string>
+   </property>
+  </action>
+  <action name="actionSaveSessionAs">
+   <property name="text">
+    <string>Save Session As...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+Shift+S</string>
+   </property>
+  </action>
+  <action name="actionOpenSettings">
+   <property name="text">
+    <string>Preferences...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+,</string>
+   </property>
+  </action>
  </widget>
  <resources/>
  <connections/>

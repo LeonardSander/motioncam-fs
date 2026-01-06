@@ -26,6 +26,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/settingsdialog.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
@@ -33,6 +34,7 @@ set(PROJECT_SOURCES
         src/Utils.cpp
 
         include/mainwindow.h
+        include/settingsdialog.h
         include/Types.h
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h
@@ -141,11 +143,11 @@ target_include_directories(motioncam-decoder
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/include
 )
 
-# Find the packages using vcpkg
+# Find the packages using vcpkg (needed before linking)
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
 
-# Link spdlog/fmt directly to decoder to avoid ODR issues
+# Link spdlog to decoder to avoid ODR violations
 target_link_libraries(motioncam-decoder PRIVATE spdlog::spdlog fmt::fmt)
 
 # Add UTF-8 support for MSVC
