@@ -11,6 +11,8 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QFile>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <QTimer>
 
@@ -122,6 +124,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    connect(ui->setPlayerPathBtn, &QPushButton::clicked, this, &MainWindow::onSetPlayerPath);
+    connect(ui->saveSessionBtn, &QPushButton::clicked, this, &MainWindow::onSaveSession);
+    connect(ui->loadSessionBtn, &QPushButton::clicked, this, &MainWindow::onLoadSession);
 }
 
 MainWindow::~MainWindow() {
@@ -152,6 +157,7 @@ void MainWindow::saveSettings() {
     settings.setValue("levels", ui->levelsComboBox->currentText());
     settings.setValue("logTransform", ui->logTransformComboBox->currentText());
     settings.setValue("quadBayerOption", ui->quadBayerComboBox->currentText());
+    settings.setValue("playerPath", mPlayerPath);
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -212,6 +218,7 @@ void MainWindow::restoreSettings() {
     mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
     mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
     mLogTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
+    mPlayerPath = settings.value("playerPath").toString();
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -227,7 +234,12 @@ void MainWindow::restoreSettings() {
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mCameraModel));
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mLevels));  
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(mLogTransform));  
-  
+    if (mPlayerPath.isEmpty()) {
+        ui->playerPathLabel->setText("<i>Auto-detected</i>");
+    } else {
+        ui->playerPathLabel->setText(mPlayerPath);
+    }
+
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
     for (int i = 0; i < size; ++i) {
@@ -437,7 +449,14 @@ void MainWindow::playFile(const QString& path) {
 
 #ifdef _WIN32
     QString appDir = QCoreApplication::applicationDirPath();
-    QString playerPath = QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe");
+    QString playerPath = mPlayerPath.isEmpty()
+        ? QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe")
+        : mPlayerPath;
+    if (!QFile::exists(playerPath)) {
+        QMessageBox::warning(this, "Player not found",
+            QString("Player not found at: %1\n\nSet the player path in Settings.").arg(playerPath));
+        return;
+    }
 
     success = QProcess::startDetached(QDir::cleanPath(playerPath), QStringList() << path);
 #elif __APPLE__
@@ -446,6 +465,33 @@ void MainWindow::playFile(const QString& path) {
 
     if (!success)
         QMessageBox::warning(this, "Error", QString("Failed to launch player with file: %1").arg(path));
+}
+
+void MainWindow::playMountedFolder(QWidget* fileWidget) {
+    auto srcPath = fileWidget->property("filePath").toString();
+    if (srcPath.isEmpty()) {
+        QMessageBox::warning(this, "Error", "Source file not found");
+        return;
+    }
+
+    bool success = false;
+#ifdef _WIN32
+    QString appDir = QCoreApplication::applicationDirPath();
+    QString playerPath = mPlayerPath.isEmpty()
+        ? QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe")
+        : mPlayerPath;
+    if (!QFile::exists(playerPath)) {
+        QMessageBox::warning(this, "Player not found",
+            QString("Player not found at: %1\n\nSet the player path in Settings.").arg(playerPath));
+        return;
+    }
+    success = QProcess::startDetached(QDir::cleanPath(playerPath), QStringList() << srcPath);
+#elif __APPLE__
+    success = QProcess::startDetached("/usr/bin/open", QStringList() << "-a" << "MotionCam Player" << srcPath);
+#endif
+
+    if (!success)
+        QMessageBox::warning(this, "Error", QString("Failed to launch player with file: %1").arg(srcPath));
 }
 
 void MainWindow::openMountedDirectory(QWidget* fileWidget) {
@@ -749,4 +795,120 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
 
     updateUi();
+}
+
+void MainWindow::onSetPlayerPath(bool checked) {
+    Q_UNUSED(checked);
+#ifdef _WIN32
+    QString filter = "Executable (*.exe);;All files (*.*)";
+#else
+    QString filter = "All files (*.*)";
+#endif
+    auto selected = QFileDialog::getOpenFileName(
+        this,
+        tr("Select MotionCam Player"),
+        QString(),
+        filter);
+    if (selected.isEmpty()) {
+        return;
+    }
+    mPlayerPath = selected;
+    ui->playerPathLabel->setText(mPlayerPath);
+}
+
+void MainWindow::onSaveSession(bool checked) {
+    Q_UNUSED(checked);
+    auto filePath = QFileDialog::getSaveFileName(
+        this,
+        tr("Save Session"),
+        QDir::home().filePath("motioncam-session.mfs"),
+        tr("MotionCam Session (*.mfs);;JSON (*.json);;All files (*.*)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+    saveSessionToFile(filePath);
+}
+
+void MainWindow::onLoadSession(bool checked) {
+    Q_UNUSED(checked);
+    auto filePath = QFileDialog::getOpenFileName(
+        this,
+        tr("Load Session"),
+        QDir::homePath(),
+        tr("MotionCam Session (*.mfs *.json);;All files (*.*)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+    loadSessionFromFile(filePath);
+}
+
+void MainWindow::saveSessionToFile(const QString& filePath) {
+    nlohmann::json j;
+    j["cachePath"] = mCacheRootFolder.toStdString();
+    j["playerPath"] = mPlayerPath.toStdString();
+    j["files"] = nlohmann::json::array();
+    for (const auto& f : mMountedFiles) {
+        j["files"].push_back(f.srcFile.toStdString());
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, "Error", QString("Failed to save session: %1").arg(file.errorString()));
+        return;
+    }
+    file.write(QString::fromStdString(j.dump(2)).toUtf8());
+    file.close();
+}
+
+void MainWindow::loadSessionFromFile(const QString& filePath) {
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "Error", QString("Failed to load session: %1").arg(file.errorString()));
+        return;
+    }
+    auto data = file.readAll();
+    file.close();
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(data.toStdString());
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, "Error", QString("Invalid session file: %1").arg(e.what()));
+        return;
+    }
+
+    clearAllMounts();
+
+    if (j.contains("cachePath") && j["cachePath"].is_string()) {
+        mCacheRootFolder = QString::fromStdString(j["cachePath"].get<std::string>());
+    }
+    if (j.contains("playerPath") && j["playerPath"].is_string()) {
+        mPlayerPath = QString::fromStdString(j["playerPath"].get<std::string>());
+    }
+    ui->playerPathLabel->setText(mPlayerPath.isEmpty() ? "<i>Auto-detected</i>" : mPlayerPath);
+    updateUi();
+
+    if (j.contains("files") && j["files"].is_array()) {
+        for (const auto& entry : j["files"]) {
+            if (entry.is_string()) {
+                auto path = QString::fromStdString(entry.get<std::string>());
+                if (QFile::exists(path)) {
+                    mountFile(path);
+                }
+            }
+        }
+    }
+}
+
+void MainWindow::clearAllMounts() {
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    if (!scrollContent) {
+        return;
+    }
+    auto widgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+    for (auto* widget : widgets) {
+        if (widget->property("mountId").isValid()) {
+            removeFile(widget);
+        }
+    }
 }

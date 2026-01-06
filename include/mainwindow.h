@@ -74,8 +74,12 @@ private slots:
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
     void onSetDefaultSettings(bool checked);
+    void onSetPlayerPath(bool checked);
+    void onSaveSession(bool checked);
+    void onLoadSession(bool checked);
 
     void playFile(const QString& path);
+    void playMountedFolder(QWidget* fileWidget);
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
 
@@ -84,6 +88,9 @@ private:
     void restoreSettings();
     void updateUi();
     void updateFpsLabels();
+    void saveSessionToFile(const QString& filePath);
+    void loadSessionFromFile(const QString& filePath);
+    void clearAllMounts();
 
 private:
     Ui::MainWindow *ui;
@@ -98,6 +105,7 @@ private:
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    QString mPlayerPath;
 };
 
 #endif // MAINWINDOW_H
