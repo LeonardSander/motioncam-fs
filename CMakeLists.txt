@@ -145,6 +145,14 @@ target_include_directories(motioncam-decoder
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
 
+# Link spdlog/fmt directly to decoder to avoid ODR issues
+target_link_libraries(motioncam-decoder PRIVATE spdlog::spdlog fmt::fmt)
+
+# Add UTF-8 support for MSVC
+if (MSVC)
+    target_compile_options(motioncam-decoder PRIVATE /utf-8)
+endif()
+
 # Add boost
 set(Boost_USE_STATIC_LIBS        ON)
 set(Boost_USE_DEBUG_LIBS        OFF)
@@ -165,6 +173,19 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   fmt::fmt
   motioncam-decoder
   ${platform-specific})
+
+if(WIN32)
+  target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+  target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:projectedfslib.dll")
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/Enable_ProjFS.bat"
+      "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Enable_ProjFS.bat"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/Disable_ProjFS.bat"
+      "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Disable_ProjFS.bat"
+  )
+endif()
 
 set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
 
