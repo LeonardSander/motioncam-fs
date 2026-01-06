@@ -206,6 +206,26 @@
         </layout>
        </item>
        <item>
+        <layout class="QHBoxLayout" name="thumbnailSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QPushButton" name="refreshThumbsBtn">
+           <property name="minimumSize">
+            <size>
+             <width>0</width>
+             <height>30</height>
+            </size>
+           </property>
+           <property name="text">
+            <string>Refresh Thumbnails</string>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
         <layout class="QVBoxLayout" name="cfrConversionSection">
          <property name="spacing">
           <number>8</number>

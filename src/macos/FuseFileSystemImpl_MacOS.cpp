@@ -1,6 +1,11 @@
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "LRUCache.h"
+#include "CameraFrameMetadata.h"
+#include "CameraMetadata.h"
+#include "Utils.h"
+#include <motioncam/Decoder.hpp>
+#include <nlohmann/json.hpp>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
@@ -92,6 +97,7 @@ public:
     void updateOptions(const RenderSettings& settings);
 
     FileInfo getFileInfo() const;
+    VirtualFileSystemImpl_MCRAW* getFileSystem() const { return mFs; }
 
 private:
     void init(VirtualFileSystemImpl_MCRAW* fs);
@@ -480,11 +486,51 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
 }
 
 bool FuseFileSystemImpl_MacOs::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
-    (void)mountId;
-    (void)outputPath;
-    (void)width;
-    (void)height;
-    return false;
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* session = it->second.get();
+        auto* fs = session ? session->getFileSystem() : nullptr;
+        if(!fs) {
+            spdlog::error("generateThumbnail(): Filesystem missing for mount {}", mountId);
+            return false;
+        }
+
+        Decoder decoder(fs->getSourcePath());
+        auto frames = decoder.getFrames();
+        if(frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", fs->getSourcePath());
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        auto timestamp = frames.front();
+
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(timestamp, data, metadata);
+
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfiguration = CameraConfiguration::parse(decoder.getContainerMetadata());
+
+        return utils::generateJpegThumbnail(
+            data,
+            frameMetadata,
+            cameraConfiguration,
+            outputPath,
+            width,
+            height,
+            fs->getLevels(),
+            fs->getExposureCompensation());
+    }
+    catch(const std::exception& e) {
+        spdlog::error("generateThumbnail(): Exception: {}", e.what());
+        return false;
+    }
 }
 
 } // namespace motioncam

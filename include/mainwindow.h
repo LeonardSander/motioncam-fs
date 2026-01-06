@@ -5,6 +5,7 @@
 
 #include <QMainWindow>
 #include <QList>
+#include <QSet>
 #include <QString>
 
 namespace motioncam {
@@ -74,6 +75,7 @@ private slots:
     void onExposureCompensationChanged(std::string input);
     void onQuadBayerChanged(std::string input);
     void onSetDefaultSettings(bool checked);
+    void onRefreshThumbnails(bool checked);
 
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
@@ -90,6 +92,7 @@ private:
     Ui::MainWindow *ui;
     std::unique_ptr<motioncam::IFuseFileSystem> mFuseFilesystem;
     QList<motioncam::MountedFile> mMountedFiles;
+    QSet<motioncam::MountId> mSelectedMountIds;
     QString mCacheRootFolder;
     int mDraftQuality;
     std::string mCFRTarget;

@@ -123,6 +123,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    connect(ui->refreshThumbsBtn, &QPushButton::clicked, this, &MainWindow::onRefreshThumbnails);
 }
 
 MainWindow::~MainWindow() {
@@ -808,4 +809,17 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mQuadBayerOption));   
 
     updateUi();
+}
+
+void MainWindow::onRefreshThumbnails(bool checked) {
+    Q_UNUSED(checked);
+    if (mSelectedMountIds.isEmpty()) {
+        for (const auto& file : mMountedFiles) {
+            updateThumbnailForMount(file.mountId);
+        }
+    } else {
+        for (auto mountId : mSelectedMountIds) {
+            updateThumbnailForMount(mountId);
+        }
+    }
 }
