@@ -26,6 +26,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/settingsdialog.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
@@ -33,6 +34,7 @@ set(PROJECT_SOURCES
         src/Utils.cpp
 
         include/mainwindow.h
+        include/settingsdialog.h
         include/Types.h
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h

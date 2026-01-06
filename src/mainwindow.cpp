@@ -1,11 +1,14 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "settingsdialog.h"
 
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
 #include <QPushButton>
 #include <QFileInfo>
+#include <QCoreApplication>
+#include <QFile>
 #include <QProcess>
 #include <QMessageBox>
 #include <QFileDialog>
@@ -24,8 +27,19 @@ namespace {
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
 
-    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {
-        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;
+    QString defaultPlayerPath() {
+#ifdef _WIN32
+        QString appDir = QCoreApplication::applicationDirPath();
+        return QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe");
+#elif __APPLE__
+        return "/Applications/MotionCam Player.app";
+#else
+        return QString();
+#endif
+    }
+
+    motioncam::FileRenderOptions getRenderOptions(Ui::MainWindow& ui) {      
+        motioncam::FileRenderOptions options = motioncam::RENDER_OPT_NONE;   
 
         if(ui.draftModeCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_DRAFT;
@@ -68,6 +82,10 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
     , mDraftQuality(1)
+    , mCachePolicyMode("off")
+    , mCacheQuotaBytes(50ll * 1024ll * 1024ll * 1024ll)
+    , mCacheCleanupIntervalSeconds(10)
+    , mDeleteOnUnmount(false)
 {
     ui->setupUi(this);
 
@@ -122,6 +140,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
+    if (ui->actionOpenSettings) {
+        connect(ui->actionOpenSettings, &QAction::triggered, this, &MainWindow::onOpenSettings);
+    }
 }
 
 MainWindow::~MainWindow() {
@@ -152,6 +173,11 @@ void MainWindow::saveSettings() {
     settings.setValue("levels", ui->levelsComboBox->currentText());
     settings.setValue("logTransform", ui->logTransformComboBox->currentText());
     settings.setValue("quadBayerOption", ui->quadBayerComboBox->currentText());
+    settings.setValue("playerPath", mPlayerPath);
+    settings.setValue("cachePolicyMode", mCachePolicyMode);
+    settings.setValue("cacheQuotaBytes", static_cast<qint64>(mCacheQuotaBytes));
+    settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
+    settings.setValue("deleteOnUnmount", mDeleteOnUnmount);
 
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
@@ -212,6 +238,19 @@ void MainWindow::restoreSettings() {
     mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
     mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
     mLogTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
+    const QString storedPlayerPath = settings.value("playerPath").toString();
+    mPlayerPath = storedPlayerPath.isEmpty() ? defaultPlayerPath() : storedPlayerPath;
+    mCachePolicyMode = settings.value("cachePolicyMode", "off").toString();
+    if (mCachePolicyMode.isEmpty()) {
+        mCachePolicyMode = "off";
+    }
+    const qint64 defaultQuota = static_cast<qint64>(50ll * 1024ll * 1024ll * 1024ll);
+    mCacheQuotaBytes = settings.value("cacheQuotaBytes", defaultQuota).toLongLong();
+    mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 10).toInt();
+    if (mCacheCleanupIntervalSeconds <= 0) {
+        mCacheCleanupIntervalSeconds = 10;
+    }
+    mDeleteOnUnmount = settings.value("deleteOnUnmount", false).toBool();
 
     if(mDraftQuality == 2)
         ui->draftQuality->setCurrentIndex(0);
@@ -436,8 +475,12 @@ void MainWindow::playFile(const QString& path) {
     bool success = false;
 
 #ifdef _WIN32
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString playerPath = QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe");
+    QString playerPath = mPlayerPath.isEmpty() ? defaultPlayerPath() : mPlayerPath;
+    if (playerPath.isEmpty() || !QFile::exists(playerPath)) {
+        QMessageBox::warning(this, "Error",
+            QString("Player not found at: %1\n\nPlease set the player path in Settings.").arg(playerPath));
+        return;
+    }
 
     success = QProcess::startDetached(QDir::cleanPath(playerPath), QStringList() << path);
 #elif __APPLE__
@@ -698,7 +741,7 @@ void MainWindow::onQuadBayerChanged(std::string input) {
 }
 
 void MainWindow::onSetCacheFolder(bool checked) {
-    Q_UNUSED(checked);  // Parameter not needed for folder selection
+    Q_UNUSED(checked);  // Parameter not needed for folder selection         
 
     auto folderPath = QFileDialog::getExistingDirectory(
         this,
@@ -718,9 +761,46 @@ void MainWindow::onSetCacheFolder(bool checked) {
     }
 }
 
+void MainWindow::onOpenSettings() {
+    SettingsDialog dialog(this);
+    dialog.setCacheFolder(mCacheRootFolder);
+    dialog.setPlayerPath(mPlayerPath.isEmpty() ? defaultPlayerPath() : mPlayerPath);
+    dialog.setCameraModel(QString::fromStdString(mCameraModel));
+    dialog.setCachePolicyMode(mCachePolicyMode.isEmpty() ? "off" : mCachePolicyMode);
+
+    const double quotaGb = mCacheQuotaBytes > 0
+        ? static_cast<double>(mCacheQuotaBytes) / (1024.0 * 1024.0 * 1024.0)
+        : 50.0;
+    dialog.setCacheQuotaGb(quotaGb);
+    dialog.setCacheCleanupIntervalSeconds(mCacheCleanupIntervalSeconds > 0 ? mCacheCleanupIntervalSeconds : 10);
+    dialog.setDeleteOnUnmount(mDeleteOnUnmount);
+
+    if (dialog.exec() == QDialog::Accepted) {
+        mCacheRootFolder = dialog.getCacheFolder().trimmed();
+        mPlayerPath = dialog.getPlayerPath().trimmed();
+        if (mPlayerPath.isEmpty()) {
+            mPlayerPath = defaultPlayerPath();
+        }
+        mCameraModel = dialog.getCameraModel().toStdString();
+        mCachePolicyMode = dialog.getCachePolicyMode();
+        if (mCachePolicyMode.isEmpty()) {
+            mCachePolicyMode = "off";
+        }
+        mCacheQuotaBytes = static_cast<long long>(dialog.getCacheQuotaGb() * 1024.0 * 1024.0 * 1024.0);
+        mCacheCleanupIntervalSeconds = dialog.getCacheCleanupIntervalSeconds();
+        if (mCacheCleanupIntervalSeconds <= 0) {
+            mCacheCleanupIntervalSeconds = 10;
+        }
+        mDeleteOnUnmount = dialog.getDeleteOnUnmount();
+
+        saveSettings();
+        updateUi();
+    }
+}
+
 void MainWindow::onSetDefaultSettings(bool checked) {
-    ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);
-    ui->vignetteCorrectionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);        
+    ui->vignetteCorrectionCheckBox->setCheckState(Qt::CheckState::Checked); 
     ui->scaleRawCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);

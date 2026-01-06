@@ -67,6 +67,7 @@ private slots:
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
     void onCFRTargetChanged(std::string input);
+    void onOpenSettings();
     void onCamModelOverrideChanged(std::string input);
     void onLevelsChanged(std::string input);
     void onCropTargetChanged(std::string input);
@@ -98,6 +99,11 @@ private:
     std::string mLogTransform;
     std::string mExposureCompensation;
     std::string mQuadBayerOption;
+    QString mPlayerPath;
+    QString mCachePolicyMode;
+    long long mCacheQuotaBytes;
+    int mCacheCleanupIntervalSeconds;
+    bool mDeleteOnUnmount;
 };
 
 #endif // MAINWINDOW_H
