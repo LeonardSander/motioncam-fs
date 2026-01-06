@@ -1,12 +1,225 @@
 #include "mainwindow.h"
 #include "SingleApplication.h"
-
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QMessageBox>
 #include <QTimer>
 #include <QFileInfo>
 #include <QDirIterator>
+#include <QProcess>
+#include <QDialog>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QLabel>
+#include <QPushButton>
+#include <QDir>
+#include <QPixmap>
+#include <spdlog/spdlog.h>
+
+#ifdef _WIN32
+#include <Windows.h>
+#include <shellapi.h>
+#endif
+
+void messageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
+{
+    Q_UNUSED(context);
+    const QByteArray localMsg = msg.toLocal8Bit();
+
+    switch (type) {
+    case QtDebugMsg:
+        spdlog::debug("Qt: {}", localMsg.constData());
+        break;
+    case QtInfoMsg:
+        spdlog::info("Qt: {}", localMsg.constData());
+        break;
+    case QtWarningMsg:
+        spdlog::warn("Qt: {}", localMsg.constData());
+        break;
+    case QtCriticalMsg:
+        spdlog::error("Qt: {}", localMsg.constData());
+        break;
+    case QtFatalMsg:
+        spdlog::critical("Qt: {}", localMsg.constData());
+        abort();
+    }
+}
+
+#ifdef _WIN32
+bool ensureProjectedFsAvailable()
+{
+    HMODULE lib = LoadLibraryW(L"projectedfslib.dll");
+    if (lib) {
+        FreeLibrary(lib);
+        return true;
+    }
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList enableBatCandidates{
+        QDir(appDir).filePath("Enable_ProjFS.bat"),
+        QDir(appDir).filePath("../Enable_ProjFS.bat"),
+        QDir(appDir).filePath("../../Enable_ProjFS.bat"),
+    };
+    QString enableBat;
+    for (const auto& candidate : enableBatCandidates) {
+        const QString cleaned = QDir::cleanPath(candidate);
+        if (QFile::exists(cleaned)) {
+            enableBat = cleaned;
+            break;
+        }
+    }
+    if (enableBat.isEmpty()) {
+        enableBat = QDir::cleanPath(enableBatCandidates.back());
+    }
+
+    QDialog dialog;
+    dialog.setWindowTitle("ProjectedFS Required");
+    dialog.setModal(true);
+    dialog.setMinimumWidth(520);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(12);
+
+    auto* headerRow = new QHBoxLayout();
+    auto* logoLabel = new QLabel(&dialog);
+    QIcon appIcon(":/assets/app_icon.ico");
+    QPixmap logo = appIcon.pixmap(48, 48);
+    if (!logo.isNull()) {
+        logoLabel->setPixmap(logo);
+    }
+    auto* title = new QLabel("Welcome to MotionCam Fuse", &dialog);
+    title->setStyleSheet("font-size: 18px; font-weight: 600; color: #f0f0f0;");
+    headerRow->addStretch();
+    headerRow->addWidget(logoLabel);
+    headerRow->addSpacing(10);
+    headerRow->addWidget(title);
+    headerRow->addStretch();
+    layout->addLayout(headerRow);
+    layout->addSpacing(10);
+
+    auto* alertBox = new QLabel(&dialog);
+    alertBox->setText("Projected File System is disabled or missing.");
+    alertBox->setAlignment(Qt::AlignHCenter);
+    alertBox->setStyleSheet(
+        "font-size: 14px; color: #d1a53a; font-weight: 700;"
+        "background-color: transparent; border: 2px solid #d1a53a; border-radius: 6px;"
+        "padding: 8px 10px;");
+    alertBox->setFixedWidth(380);
+    auto* alertRow = new QHBoxLayout();
+    alertRow->addStretch();
+    alertRow->addWidget(alertBox);
+    alertRow->addStretch();
+    layout->addLayout(alertRow);
+
+    auto* body = new QLabel(&dialog);
+    body->setTextFormat(Qt::RichText);
+    body->setWordWrap(true);
+    body->setText(
+        "<div style='font-size: 13px; color: #d4d4d4;'>"
+        "<p style='margin: 0 0 8px 0;'>"
+        "MotionCam Fuse needs ProjectedFS to mount files."
+        "</p>"
+        "<p style='margin: 0;'>"
+        "<b>Step 1:</b> Enable ProjectedFS (admin required)<br/>"
+        "<b>Step 2:</b> Restart your PC"
+        "</p>"
+        "</div>");
+    layout->addWidget(body);
+
+    auto* enableButton = new QPushButton("Enable ProjectedFS (Admin)", &dialog);
+    enableButton->setDefault(true);
+    enableButton->setAutoDefault(true);
+    enableButton->setMinimumHeight(46);
+    enableButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    enableButton->setStyleSheet(
+        "QPushButton { background-color: #d1a53a; color: #111111; font-weight: 700; border-radius: 6px; }"
+        "QPushButton:hover { background-color: #e1b64a; }");
+    layout->addWidget(enableButton);
+
+    auto* auxRow = new QHBoxLayout();
+    auxRow->setSpacing(8);
+    auxRow->setContentsMargins(0, 4, 0, 0);
+    auto* openButton = new QPushButton("Open Folder", &dialog);
+    auto* restartButton = new QPushButton("Restart PC", &dialog);
+    auto* quitButton = new QPushButton("Quit", &dialog);
+    const int auxHeight = 30;
+    openButton->setMinimumHeight(auxHeight);
+    restartButton->setMinimumHeight(auxHeight);
+    quitButton->setMinimumHeight(auxHeight);
+    openButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    restartButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    quitButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auxRow->addWidget(openButton);
+    auxRow->addWidget(restartButton);
+    auxRow->addWidget(quitButton);
+    layout->addLayout(auxRow);
+
+    if (!QFile::exists(enableBat)) {
+        enableButton->setEnabled(false);
+    }
+
+    enum class Action { None, Enable, Open, Restart, Quit };
+    Action action = Action::None;
+    QObject::connect(enableButton, &QPushButton::clicked, &dialog, [&]() {
+        action = Action::Enable;
+        dialog.accept();
+    });
+    QObject::connect(openButton, &QPushButton::clicked, &dialog, [&]() {
+        const QString scriptDir = QFileInfo(enableBat).absolutePath();
+        QProcess::startDetached("explorer", { QDir::toNativeSeparators(scriptDir) });
+    });
+    QObject::connect(restartButton, &QPushButton::clicked, &dialog, [&]() {
+        action = Action::Restart;
+        dialog.accept();
+    });
+    QObject::connect(quitButton, &QPushButton::clicked, &dialog, [&]() {
+        action = Action::Quit;
+        dialog.reject();
+    });
+
+    dialog.exec();
+
+    if (action == Action::Enable) {
+        if (!QFile::exists(enableBat)) {
+            QMessageBox::critical(nullptr, "ProjectedFS Setup",
+                                  "Enable_ProjFS.bat was not found.\n\n"
+                                  "Please make sure it is included in the app folder.");
+            return false;
+        }
+        const QString enablePath = QDir::toNativeSeparators(enableBat);
+        const QString psCommand =
+            QString("Start-Process -FilePath '%1' -Verb RunAs").arg(enablePath);
+        const QStringList psArgs{
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            psCommand,
+        };
+        if (!QProcess::startDetached("powershell.exe", psArgs)) {
+            QMessageBox::critical(nullptr, "ProjectedFS Setup",
+                                  "Failed to launch Enable_ProjFS.bat.\n\n"
+                                  "Please run it manually as Administrator.");
+            return false;
+        }
+        QMessageBox::information(nullptr, "ProjectedFS Setup",
+                                 "A setup window has opened.\n\n"
+                                 "When it finishes, restart your PC.");
+    } else if (action == Action::Restart) {
+        if (QMessageBox::question(nullptr, "Restart PC",
+                                  "Restart now? Make sure all work is saved.",
+                                  QMessageBox::Yes | QMessageBox::No,
+                                  QMessageBox::No) == QMessageBox::Yes) {
+            QProcess::startDetached("shutdown", { "/r", "/t", "0" });
+        }
+    } else if (action == Action::Quit) {
+        return false;
+    }
+
+    return false;
+}
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -20,7 +233,6 @@ int main(int argc, char *argv[])
 
     // Load theme
     QFile themeFile(":qdarkstyle/dark/darkstyle.qss");
-
     if (themeFile.exists())   {
         themeFile.open(QFile::ReadOnly | QFile::Text);
 
@@ -65,8 +277,15 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+#ifdef _WIN32
+    if (!ensureProjectedFsAvailable()) {
+        return 1;
+    }
+#endif
+
     // Create main window
     MainWindow window;
+    qInstallMessageHandler(messageHandler);
 
     // Handle messages from other instances
     QObject::connect(&app, &SingleApplication::messageReceived, &window,
