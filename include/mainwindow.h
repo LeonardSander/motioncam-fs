@@ -166,9 +166,9 @@ private:
     void setComboMixedState(QComboBox* combo, bool mixed, const QString& value);
     void setCheckBoxMixedState(QCheckBox* checkBox, bool mixed, bool checked);
     void syncGlobalsFromUi();
-    void refreshMatrixProfiles() {}
-    QStringList loadMatrixProfilesFromFile(const QString& path) const { Q_UNUSED(path); return {}; }
-    QString defaultMatrixFilePath() const { return QString(); }
+    void refreshMatrixProfiles();
+    QStringList loadMatrixProfilesFromFile(const QString& path) const;
+    QString defaultMatrixFilePath() const;
 
     void clearCurrentSession(bool showProgress);
     void saveSessionToFile(const QString& filePath);

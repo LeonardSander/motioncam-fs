@@ -63,6 +63,12 @@ struct Entry {
 };
 
 
+enum class CachePolicy {
+    Off,
+    Quota
+};
+
+
 enum FileRenderOptions : unsigned int {
     RENDER_OPT_NONE                         = 0,
     RENDER_OPT_DRAFT                        = 1 << 0,    

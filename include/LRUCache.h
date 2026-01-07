@@ -133,6 +133,8 @@ public:
         mCondition.notify_all();
     }
 
+    void cleanupExpired() {}
+
     // Get current size
     size_t size() const {
         std::lock_guard<std::mutex> lock(mMutex);

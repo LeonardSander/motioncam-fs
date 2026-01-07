@@ -3,19 +3,12 @@
 #include <string>
 #include <optional>
 
-
 #include "Types.h"
 
 namespace motioncam {
 
 using MountId = int;
-
 constexpr auto InvalidMountId = -1;
-
-enum class CachePolicy {
-    Off,
-    Quota
-};
 
 struct FileInfo {
     float medFps;
