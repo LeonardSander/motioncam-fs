@@ -62,15 +62,10 @@ struct Entry {
     }
 };
 
-enum class CachePolicy {
-    Off,
-    Quota
-};
-
 
 enum FileRenderOptions : unsigned int {
     RENDER_OPT_NONE                         = 0,
-    RENDER_OPT_DRAFT                        = 1 << 0,
+    RENDER_OPT_DRAFT                        = 1 << 0,    
     RENDER_OPT_APPLY_VIGNETTE_CORRECTION    = 1 << 1,
     RENDER_OPT_NORMALIZE_SHADING_MAP        = 1 << 2,
     RENDER_OPT_DEBUG_SHADING_MAP            = 1 << 3,
@@ -81,6 +76,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8,
     RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
     RENDER_OPT_INTERPRET_AS_QUAD_BAYER      = 1 << 10,
+    RENDER_OPT_FAST_MOUNT                   = 1 << 11,
+    RENDER_OPT_HIGH_QUALITY_FIRST_FRAME     = 1 << 12,
 };
 
 // Overload bitwise OR operator

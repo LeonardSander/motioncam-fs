@@ -426,20 +426,9 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        FileRenderOptions options,
-        int draftScale,
-        const std::string& cfrTarget,
-        const std::string& cropTarget,
+        const RenderSettings& settings,
         const std::string& file,
-        const std::string& baseName,
-        const std::string& cameraModel,
-        const std::string& levels,
-        const std::string& logTransform,
-        const std::string& exposureCompensation,
-        const std::string& quadBayerOption,
-        bool matrixOverrideEnabled,
-        const std::string& matrixProfile,
-        const std::string& matrixFilePath) :
+        const std::string& baseName) :
         mCache(lruCache),
         mIoThreadPool(ioThreadPool),
         mProcessingThreadPool(processingThreadPool),
@@ -454,21 +443,19 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mDuplicatedFrames(0),
         mWidth(0),
         mHeight(0),
-        mDraftScale(draftScale),
-        mCFRTarget(cfrTarget),
-        mCropTarget(cropTarget),
-        mCameraModel(cameraModel),
-        mLevels(levels),
-        mLogTransform(logTransform),
-        mExposureCompensation(exposureCompensation),
-        mQuadBayerOption(quadBayerOption),
-        mOptions(options),
-        mUseMatrixOverride(false),
-        mMatrixProfile(""),
-        mMatrixFilePath(""),
+        mDraftScale(settings.draftScale),
+        mCFRTarget(settings.cfrTarget),
+        mCropTarget(settings.cropTarget),
+        mCameraModel(settings.cameraModel),
+        mLevels(settings.levels),
+        mLogTransform(settings.logTransform),
+        mExposureCompensation(settings.exposureCompensation),
+        mQuadBayerOption(settings.quadBayerOption),
+        mOptions(settings.options),
         mPrefetchWindow(6) {
 
-    mCache.setStreamingBypass(true);
+    // TODO: Re-enable when LRUCache supports setStreamingBypass
+    // mCache.setStreamingBypass(true);
 
     const auto ctorStart = std::chrono::steady_clock::now();
     auto msSince = [](const std::chrono::steady_clock::time_point& start) {
@@ -487,7 +474,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     std::time_t mtime = 0;
     bool haveSignature = getFileSignature(mSrcPath, fileSize, mtime);
 
-    const bool fastMount = (options & RENDER_OPT_FAST_MOUNT);
+    const bool fastMount = (settings.options & RENDER_OPT_FAST_MOUNT);
     double cachedBaseline = 0.0;
     bool cacheHit = haveSignature && getCachedBaselineExposure(mSrcPath, fileSize, mtime, cachedBaseline);
     if (cacheHit) {
@@ -513,7 +500,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
             spdlog::info("Mount timing: Baseline exposure cache stored");
         }
     }
-    this->init(options);
+    this->init(settings.options);
     spdlog::info("Mount timing: init {} ms (total {})", msSince(ctorStart), msSince(ctorStart));
 }
 
@@ -557,10 +544,10 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     spdlog::info("Init timing: FPS stats {} ms", msSince(initStart));
 
     bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
-    
-    if (applyCFRConversion && !mCFRTarget.empty()) {
-        if (mCFRTarget == "Prefer Integer") {
-            if (mMedFps <=  23.0 || mMedFps >= 1000.0) 
+
+    if (applyCFRConversion && mCFRTarget.mode != CFRMode::Disabled) {
+        if (mCFRTarget.mode == CFRMode::PreferInteger) {
+            if (mMedFps <=  23.0 || mMedFps >= 1000.0)
                 mFps = mMedFps;
             else if (mMedFps < 24.5)
                 mFps = 24.0f;
@@ -584,11 +571,11 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
                 mFps = 960.0f;
             else if (mMedFps >= 63.0)
                 mFps = 120.0f;
-            else   
+            else
                 mFps = 60.0f;
         }
-        else if (mCFRTarget == "Prefer Drop Frame") {
-            if (mMedFps <=  23.0 || mMedFps >= 1000.0) 
+        else if (mCFRTarget.mode == CFRMode::PreferDropFrame) {
+            if (mMedFps <=  23.0 || mMedFps >= 1000.0)
                 mFps = mMedFps;
             else if (mMedFps < 24.5)
                 mFps = 23.976f;
@@ -612,25 +599,21 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
                 mFps = 960.0f;
             else if (mMedFps >= 63.0)
                 mFps = 119.88f;
-            else    
+            else
                 mFps = 59.94f;
         }
-        else if (mCFRTarget == "Median (Slowmotion)") {
+        else if (mCFRTarget.mode == CFRMode::MedianSlowMotion) {
             // Use median frame rate for non real time playback
             mFps = mMedFps;
         }
-        else if (mCFRTarget == "Average (Testing)") {
+        else if (mCFRTarget.mode == CFRMode::AverageTesting) {
             // legacy framerate target determination
             mFps = mAvgFps;
         }
-        else {
-            // Custom framerate - try to parse as float
-            try {
-                mFps = std::stof(mCFRTarget);
-            } catch (const std::exception& e) {
-                spdlog::warn("Invalid CFR target '{}', using median frame rate", mCFRTarget);
-                mFps = mMedFps;
-            }
+        else if (mCFRTarget.mode == CFRMode::Custom) {
+            // Custom framerate - use the custom value
+            mFps = mCFRTarget.customValue;
+            spdlog::info("Using custom CFR target: {} fps", mFps);
         }
     } else {
         // CFR disabled: just use the measured average rate
@@ -654,15 +637,10 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
     mDroppedFrames = 0; // Will be calculated during frame processing
     mDuplicatedFrames = 0;	
 
-    auto dngData = utils::generateDng(
-        data,
-        cameraFrameMetadata,
-        cameraConfig,
-        mFps,
-        0,
+    RenderSettings typicalSettings(
         options,
         getScaleFromOptions(options, mDraftScale),
-        mBaselineExpValue,
+        mCFRTarget,
         mCropTarget,
         mCameraModel,
         mLevels,
@@ -670,26 +648,39 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         mExposureCompensation,
         mQuadBayerOption
     );
+    auto dngData = utils::generateDng(
+        data,
+        cameraFrameMetadata,
+        cameraConfig,
+        mFps,
+        0,
+        mBaselineExpValue,
+        typicalSettings
+    );
 
     mTypicalDngSize = dngData->size();
 
     // Calculate first frame size at full quality if high quality first frame is enabled
     if ((options & RENDER_OPT_HIGH_QUALITY_FIRST_FRAME) && (options & RENDER_OPT_DRAFT)) {
-        auto firstFrameDngData = utils::generateDng(
-            data,
-            cameraFrameMetadata,
-            cameraConfig,
-            mFps,
-            0,
+        RenderSettings firstFrameSettings(
             options,
             1,  // Force scale=1 for full quality
-            mBaselineExpValue,
+            mCFRTarget,
             mCropTarget,
             mCameraModel,
             mLevels,
             mLogTransform,
             mExposureCompensation,
             mQuadBayerOption
+        );
+        auto firstFrameDngData = utils::generateDng(
+            data,
+            cameraFrameMetadata,
+            cameraConfig,
+            mFps,
+            0,
+            mBaselineExpValue,
+            firstFrameSettings
         );
         mFirstFrameDngSize = firstFrameDngData->size();
     } else {
@@ -1020,21 +1011,25 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
             }
 
             auto dngStart = std::chrono::high_resolution_clock::now();
+            RenderSettings frameSettings(
+                options,
+                effectiveScale,
+                mCFRTarget,
+                mCropTarget,
+                mCameraModel,
+                mLevels,
+                mLogTransform,
+                mExposureCompensation,
+                mQuadBayerOption
+            );
             auto dngData = utils::generateDng(
                 *frameData,
                 frameMetadata,
                 containerMetadata,
                 fps,
                 frameIndex,
-                options,
-                effectiveScale,
                 baselineExpValue,
-                mCropTarget,
-                mCameraModel,
-                mLevels,
-                mLogTransform,
-                mExposureCompensation,
-                mQuadBayerOption);
+                frameSettings);
             dngMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::high_resolution_clock::now() - dngStart).count();
 
@@ -1052,12 +1047,13 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
             }
 
             // Add to cache
-            if (cache.isStreamingBypassActive()) {
-                spdlog::info("[CACHE] SKIP STORE (streaming): {}", entry.name);
-            } else {
+            // TODO: Re-enable streaming bypass check when LRUCache supports it
+            // if (cache.isStreamingBypassActive()) {
+            //     spdlog::info("[CACHE] SKIP STORE (streaming): {}", entry.name);
+            // } else {
                 cache.put(entry, dngData);
                 spdlog::info("[CACHE] STORED: {} (size={} bytes)", entry.name, dngData->size());
-            }
+            // }
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to generate DNG (error: {})", e.what());
@@ -1183,26 +1179,23 @@ void VirtualFileSystemImpl_MCRAW::forgetDngAccess(const Entry& entry) {
     mLastAccessTimes.erase(entry);
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, bool matrixOverrideEnabled, const std::string& matrixProfile, const std::string& matrixFilePath) {
-    mDraftScale = draftScale;
-    mOptions = options;
-    mCFRTarget = cfrTarget;
-    mCropTarget = cropTarget;
-    mCameraModel = cameraModel;
-    mLevels = levels;
-    mLogTransform = logTransform;
-    mExposureCompensation = exposureCompensation;
-    mQuadBayerOption = quadBayerOption;
-    mUseMatrixOverride = matrixOverrideEnabled;
-    mMatrixProfile = matrixProfile;
-    mMatrixFilePath = matrixFilePath;
+void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {
+    mDraftScale = settings.draftScale;
+    mOptions = settings.options;
+    mCFRTarget = settings.cfrTarget;
+    mCropTarget = settings.cropTarget;
+    mCameraModel = settings.cameraModel;
+    mLevels = settings.levels;
+    mLogTransform = settings.logTransform;
+    mExposureCompensation = settings.exposureCompensation;
+    mQuadBayerOption = settings.quadBayerOption;
 
     mCache.clear();
     {
         std::lock_guard<std::mutex> lock(mAccessMutex);
         mLastAccessTimes.clear();
     }
-    init(options);
+    init(settings.options);
 }
 
 FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
