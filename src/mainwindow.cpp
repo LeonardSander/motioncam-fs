@@ -1262,7 +1262,7 @@ bool MainWindow::mountFileWithProgress(const QString& filePath, QProgressDialog&
     double smoothedMbps = 0.0;
 
     std::thread worker([this, &filePath, &mountId, &errorMessage, &done, &bytesRead]() {
-        motioncam::Decoder::setReadCounter(&bytesRead);
+        // Decoder in this snapshot does not expose setReadCounter; keep the counter but skip hook.
         QString localError;
         motioncam::MountId localMountId = 0;
         if (mountFileBackend(filePath, localMountId, localError)) {
@@ -1270,7 +1270,6 @@ bool MainWindow::mountFileWithProgress(const QString& filePath, QProgressDialog&
         } else {
             errorMessage = localError;
         }
-        motioncam::Decoder::setReadCounter(nullptr);
         done.store(true);
     });
 
@@ -2174,21 +2173,6 @@ void MainWindow::syncGlobalsFromUi() {
     mQuadBayerOption = settings.quadBayerOption;
 }
 
-QString MainWindow::defaultMatrixFilePath() const {
-    return QString();
-}
-
-QStringList MainWindow::loadMatrixProfilesFromFile(const QString& path) const {
-    Q_UNUSED(path);
-    return {};
-}
-
-void MainWindow::refreshMatrixProfiles() {
-    mMatrixOverrideEnabled = false;
-    mMatrixProfile.clear();
-    mMatrixProfiles.clear();
-}
-
 void MainWindow::updateFpsLabels() {
     // Get the scroll area's content widget
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
@@ -3037,8 +3021,8 @@ void MainWindow::onOpenSettings() {
             updateUi();
             applyCacheManagementSettings();
 
-            // If camera model or matrix override changed, apply render settings to update mounted files and regenerate thumbnails
-            if (cameraModelChanged || matrixChanged) {
+            // If camera model changed, apply render settings to update mounted files and regenerate thumbnails
+            if (cameraModelChanged) {
                 markSettingsDirty(true);
                 applyRenderSettings();
             }
