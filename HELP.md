@@ -20,7 +20,6 @@
 - **Delete on Unmount**: Also remove generated DNGs when unmounting/clearing.
 - **Video Player**: Path to MotionCamPlayer.exe for the Play action.
 - **Unique Camera Model**: Overrides camera model metadata.
-- **Color Matrix Override**: Use a preset from `matrix.json` to replace ColorMatrix/ForwardMatrix; pick a profile brand/model. Leave off to use source metadata.
 - **Cache Management**: Mode (Off/Quota), quota (GB), cleanup interval (sec).
 
 ## Render Settings (Right Panel)
@@ -41,7 +40,7 @@
 ## Troubleshooting
 - **Mount failed / NTFS required**: Ensure source and/or output folder is NTFS (Windows). Set a custom NTFS output folder in Preferences if needed.
 - **Audio missing**: Ensure the source has audio; re-mount if you changed audio settings.
-- **dng_validate errors**: Try disabling Scale Raw or custom matrices; ensure the correct matrix profile is chosen.
+- **dng_validate errors**: Try disabling Scale Raw; ensure the input files are valid.
 - **Cache full**: Increase quota or clear mounts; “Delete on Unmount” removes generated DNGs.
 - **Slow loads**: Disable Normalize Exposure, use Draft quality, or reduce cache cleanup frequency.
 

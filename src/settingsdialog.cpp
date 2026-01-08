@@ -173,8 +173,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     mainLayout->addWidget(cameraGroup);
 
-    // Matrix override group
+    // Matrix override group (disabled for Fuse-AllV2)
     auto* matrixGroup = new QGroupBox("Color Matrix Override", this);
+    matrixGroup->setVisible(false);
     auto* matrixLayout = new QVBoxLayout(matrixGroup);
 
     mMatrixOverrideCheckBox = new QCheckBox("Use custom color matrix profile", this);

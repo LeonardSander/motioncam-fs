@@ -854,9 +854,9 @@ bool MainWindow::mountFileBackend(const QString& filePath, motioncam::MountId& m
             mLogTransform,
             mExposureCompensation,
             mQuadBayerOption,
-            mMatrixOverrideEnabled,
-            mMatrixProfile,
-            mMatrixFilePath.toStdString(),
+            false,
+            "",
+            "",
             filePath.toStdString(),
             dstPath.toStdString());
     }
@@ -2522,9 +2522,6 @@ void MainWindow::saveSessionToFile(const QString& filePath) {
     settingsObj["logTransform"] = "";
     settingsObj["exposureCompensation"] = QString::fromStdString(mExposureCompensation);
     settingsObj["quadBayerOption"] = QString::fromStdString(mQuadBayerOption);
-    settingsObj["matrixOverrideEnabled"] = mMatrixOverrideEnabled;
-    settingsObj["matrixProfile"] = QString::fromStdString(mMatrixProfile);
-    settingsObj["matrixFilePath"] = mMatrixFilePath;
 
     // Save render options
     settingsObj["renderOptions"] = static_cast<int>(mGlobalRenderOptions);
@@ -2637,18 +2634,9 @@ void MainWindow::loadSessionFromFile(const QString& filePath) {
         mLogTransform = "";
         mExposureCompensation = settingsObj["exposureCompensation"].toString().toStdString();
         mQuadBayerOption = settingsObj["quadBayerOption"].toString().toStdString();
-        mMatrixOverrideEnabled = settingsObj["matrixOverrideEnabled"].toBool(mMatrixOverrideEnabled);
-        const QString sessionMatrixProfile = settingsObj["matrixProfile"].toString();
-        if (!sessionMatrixProfile.isEmpty()) {
-            mMatrixProfile = sessionMatrixProfile.toStdString();
-        }
-        const QString sessionMatrixPath = settingsObj["matrixFilePath"].toString();
-        if (!sessionMatrixPath.isEmpty()) {
-            mMatrixFilePath = sessionMatrixPath;
-        } else if (mMatrixFilePath.isEmpty()) {
-            mMatrixFilePath = defaultMatrixFilePath();
-        }
-        refreshMatrixProfiles();
+        mMatrixOverrideEnabled = false;
+        mMatrixProfile.clear();
+        mMatrixFilePath.clear();
 
         if (settingsObj.contains("renderOptions")) {
             const auto renderOptions = static_cast<motioncam::FileRenderOptions>(
