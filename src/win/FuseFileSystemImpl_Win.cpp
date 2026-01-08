@@ -201,8 +201,7 @@ void Session::updateOptions(
     std::string matrixFilePath) {
     mOptions = options;
     mDraftScale = draftScale;
-
-    RenderSettings settings(
+    mFs->updateOptions(
         options,
         draftScale,
         cfrTarget,
@@ -211,9 +210,10 @@ void Session::updateOptions(
         levels,
         logTransform,
         exposureCompensation,
-        quadBayerOption
-    );
-    mFs->updateOptions(settings);
+        quadBayerOption,
+        false,
+        "",
+        "");
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -851,24 +851,24 @@ MountId FuseFileSystemImpl_Win::mount(
             fs::path dstPathObj(dstPath);
             // Extract base name from destination path
             std::string baseName = dstPathObj.filename().string();
-            RenderSettings settings(
-                options,
-                draftScale,
-                cfrTarget,
-                cropTarget,
-                cameraModel,
-                levels,
-                logTransform,
-                exposureCompensation,
-                quadBayerOption);
-
             auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(
                 *mIoThreadPool,
                 *mProcessingThreadPool,
                 *mCache,
-                settings,
+                options,
+                draftScale,
+                cfrTarget,
+                cropTarget,
                 srcFile,
-                baseName);
+                baseName,
+                cameraModel,
+                levels,
+                logTransform,
+                exposureCompensation,
+                quadBayerOption,
+                false,
+                "",
+                "");
 
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }

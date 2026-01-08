@@ -1262,8 +1262,7 @@ bool MainWindow::mountFileWithProgress(const QString& filePath, QProgressDialog&
     double smoothedMbps = 0.0;
 
     std::thread worker([this, &filePath, &mountId, &errorMessage, &done, &bytesRead]() {
-        // TODO: Re-enable when Decoder supports setReadCounter API
-        // motioncam::Decoder::setReadCounter(&bytesRead);
+        motioncam::Decoder::setReadCounter(&bytesRead);
         QString localError;
         motioncam::MountId localMountId = 0;
         if (mountFileBackend(filePath, localMountId, localError)) {
@@ -1271,7 +1270,7 @@ bool MainWindow::mountFileWithProgress(const QString& filePath, QProgressDialog&
         } else {
             errorMessage = localError;
         }
-        // motioncam::Decoder::setReadCounter(nullptr);
+        motioncam::Decoder::setReadCounter(nullptr);
         done.store(true);
     });
 
@@ -3039,7 +3038,7 @@ void MainWindow::onOpenSettings() {
             applyCacheManagementSettings();
 
             // If camera model or matrix override changed, apply render settings to update mounted files and regenerate thumbnails
-            if (cameraModelChanged) {
+            if (cameraModelChanged || matrixChanged) {
                 markSettingsDirty(true);
                 applyRenderSettings();
             }

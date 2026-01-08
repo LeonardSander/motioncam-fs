@@ -1,19 +1,24 @@
 #include "mainwindow.h"
 #include "SingleApplication.h"
+
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QMessageBox>
+#include <QProcess>
 #include <QTimer>
 #include <QFileInfo>
 #include <QDirIterator>
+#include <QStandardPaths>
+#include <QFile>
+#include <QSplashScreen>
+#include <QPixmap>
+#include <QDateTime>
 #include <QProcess>
+#include <QPushButton>
 #include <QDialog>
 #include <QHBoxLayout>
-#include <QVBoxLayout>
 #include <QLabel>
-#include <QPushButton>
-#include <QDir>
-#include <QPixmap>
+#include <QVBoxLayout>
 #include <spdlog/spdlog.h>
 
 #ifdef _WIN32
@@ -185,7 +190,7 @@ bool ensureProjectedFsAvailable()
             QMessageBox::critical(nullptr, "ProjectedFS Setup",
                                   "Enable_ProjFS.bat was not found.\n\n"
                                   "Please make sure it is included in the app folder.");
-            return false;
+            return 1;
         }
         const QString enablePath = QDir::toNativeSeparators(enableBat);
         const QString psCommand =
@@ -201,7 +206,7 @@ bool ensureProjectedFsAvailable()
             QMessageBox::critical(nullptr, "ProjectedFS Setup",
                                   "Failed to launch Enable_ProjFS.bat.\n\n"
                                   "Please run it manually as Administrator.");
-            return false;
+            return 1;
         }
         QMessageBox::information(nullptr, "ProjectedFS Setup",
                                  "A setup window has opened.\n\n"
@@ -213,8 +218,6 @@ bool ensureProjectedFsAvailable()
                                   QMessageBox::No) == QMessageBox::Yes) {
             QProcess::startDetached("shutdown", { "/r", "/t", "0" });
         }
-    } else if (action == Action::Quit) {
-        return false;
     }
 
     return false;
@@ -233,6 +236,7 @@ int main(int argc, char *argv[])
 
     // Load theme
     QFile themeFile(":qdarkstyle/dark/darkstyle.qss");
+
     if (themeFile.exists())   {
         themeFile.open(QFile::ReadOnly | QFile::Text);
 
@@ -283,9 +287,35 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    // Create main window
+    // Create main window (initializes spdlog on Windows)
     MainWindow window;
     qInstallMessageHandler(messageHandler);
+
+    // Show window first so any dialogs appear in front of the app
+    window.show();
+
+    // Ask to resume previous session after showing the window
+    const QString appData = qEnvironmentVariable("APPDATA");
+    const QString baseDir = appData.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        : QDir(appData).filePath("MotionCam Tools/Fuse");
+    const QString sessionFile = QDir(baseDir).filePath("last_session.json");
+    if (QFile::exists(sessionFile) && fileToMount.isEmpty()) {
+        QTimer::singleShot(0, &window, [&window, sessionFile]() {
+            QMessageBox prompt(&window);
+            prompt.setIcon(QMessageBox::Question);
+            prompt.setWindowTitle("Resume Session");
+            prompt.setText("Resume the last session or start a new one?");
+            QPushButton* resumeButton = prompt.addButton("Resume", QMessageBox::AcceptRole);
+            QPushButton* newButton = prompt.addButton("New Session", QMessageBox::RejectRole);
+            prompt.setDefaultButton(resumeButton);
+            prompt.exec();
+
+            if (prompt.clickedButton() == resumeButton) {
+                window.loadSessionFromFile(sessionFile);
+            }
+        });
+    }
 
     // Handle messages from other instances
     QObject::connect(&app, &SingleApplication::messageReceived, &window,
@@ -307,6 +337,5 @@ int main(int argc, char *argv[])
         });
     }
 
-    window.show();
     return app.exec();
 }

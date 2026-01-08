@@ -1,7 +1,7 @@
 #include "settingsdialog.h"
-
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QFormLayout>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QFileDialog>
@@ -173,6 +173,30 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     mainLayout->addWidget(cameraGroup);
 
+    // Matrix override group
+    auto* matrixGroup = new QGroupBox("Color Matrix Override", this);
+    auto* matrixLayout = new QVBoxLayout(matrixGroup);
+
+    mMatrixOverrideCheckBox = new QCheckBox("Use custom color matrix profile", this);
+    matrixLayout->addWidget(mMatrixOverrideCheckBox);
+
+    auto* matrixProfileLayout = new QHBoxLayout();
+    auto* matrixProfileLabel = new QLabel("Profile:", this);
+    mMatrixProfileComboBox = new QComboBox(this);
+    mMatrixProfileComboBox->setEditable(false);
+    matrixProfileLayout->addWidget(matrixProfileLabel);
+    matrixProfileLayout->addWidget(mMatrixProfileComboBox, 1);
+    matrixLayout->addLayout(matrixProfileLayout);
+
+    auto* matrixHelpLabel = new QLabel(
+        "<span style='color: #888888; font-size: 9pt;'>"
+        "Overrides ColorMatrix1/2 and ForwardMatrix1/2 from a preset profile in matrix.json."
+        "</span>", this);
+    matrixHelpLabel->setWordWrap(true);
+    matrixLayout->addWidget(matrixHelpLabel);
+
+    mainLayout->addWidget(matrixGroup);
+
     // Add spacer
     mainLayout->addStretch();
 
@@ -190,6 +214,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     connect(mCachePolicyComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCachePolicyChanged);
     connect(mCacheQuotaComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCacheQuotaChanged);
     connect(mCacheCleanupIntervalComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCleanupIntervalChanged);
+    connect(mMatrixOverrideCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
+        mMatrixProfileComboBox->setEnabled(checked);
+    });
 
     onCachePolicyChanged(mCachePolicyComboBox->currentIndex());
     onCacheQuotaChanged(mCacheQuotaComboBox->currentIndex());
@@ -324,6 +351,33 @@ void SettingsDialog::setDeleteOnUnmount(bool enabled)
 bool SettingsDialog::getDeleteOnUnmount() const
 {
     return mDeleteOnUnmountCheckBox->isChecked();
+}
+
+void SettingsDialog::setMatrixOverrideEnabled(bool enabled)
+{
+    mMatrixOverrideCheckBox->setChecked(enabled);
+    mMatrixProfileComboBox->setEnabled(enabled);
+}
+
+bool SettingsDialog::getMatrixOverrideEnabled() const
+{
+    return mMatrixOverrideCheckBox->isChecked();
+}
+
+void SettingsDialog::setMatrixProfile(const QString& profile)
+{
+    mMatrixProfileComboBox->setCurrentText(profile);
+}
+
+QString SettingsDialog::getMatrixProfile() const
+{
+    return mMatrixProfileComboBox->currentText();
+}
+
+void SettingsDialog::setMatrixProfiles(const QStringList& profiles)
+{
+    mMatrixProfileComboBox->clear();
+    mMatrixProfileComboBox->addItems(profiles);
 }
 
 void SettingsDialog::onCacheFolderTextChanged(const QString& text)

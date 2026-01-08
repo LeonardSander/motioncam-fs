@@ -33,9 +33,20 @@ public:
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderSettings& settings,
+        FileRenderOptions options,
+        int draftScale,
+        const std::string& cfrTarget,
+        const std::string& cropTarget,
         const std::string& file,
-        const std::string& baseName);
+        const std::string& baseName,
+        const std::string& cameraModel,
+        const std::string& levels,
+        const std::string& logTransform,
+        const std::string& exposureCompensation = "0ev",
+        const std::string& quadBayerOption = "Remosaic",
+        bool matrixOverrideEnabled = false,
+        const std::string& matrixProfile = "",
+        const std::string& matrixFilePath = "");
 
     ~VirtualFileSystemImpl_MCRAW();
 
@@ -50,7 +61,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(const RenderSettings& settings) override;
+    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, bool matrixOverrideEnabled, const std::string& matrixProfile, const std::string& matrixFilePath) override;
     FileInfo getFileInfo() const;
     const std::string& getSourcePath() const { return mSrcPath; }
     const std::string& getLevels() const { return mLevels; }
@@ -117,13 +128,16 @@ private:
     std::unordered_map<Timestamp, size_t> mTimestampIndex;
     std::vector<uint8_t> mAudioFile;
     int mDraftScale;
-    CFRTarget mCFRTarget;
+    std::string mCFRTarget;
     std::string mCropTarget;
-    std::string mCameraModel;
+    std::string mCameraModel;    
     std::string mLevels;
-    LogTransformMode mLogTransform;
+    std::string mLogTransform;
     std::string mExposureCompensation;
-    QuadBayerMode mQuadBayerOption;
+    std::string mQuadBayerOption;
+    bool mUseMatrixOverride;
+    std::string mMatrixProfile;
+    std::string mMatrixFilePath;
     std::optional<MatrixOverrideProfile> mMatrixOverrideProfile;
     FileRenderOptions mOptions;
     float mFps;

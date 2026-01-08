@@ -3,6 +3,7 @@
 
 #include <QDialog>
 #include <QString>
+#include <cstdint>
 
 class QLineEdit;
 class QPushButton;
@@ -42,6 +43,12 @@ public:
     void setDeleteOnUnmount(bool enabled);
     bool getDeleteOnUnmount() const;
 
+    void setMatrixOverrideEnabled(bool enabled);
+    bool getMatrixOverrideEnabled() const;
+    void setMatrixProfile(const QString& profile);
+    QString getMatrixProfile() const;
+    void setMatrixProfiles(const QStringList& profiles);
+
 private slots:
     void onBrowsePlayerPath();
     void onBrowseCacheFolder();
@@ -61,6 +68,8 @@ private:
     QLabel* mCacheFolderWarningLabel;
     QDialogButtonBox* mButtonBox;
     QCheckBox* mDeleteOnUnmountCheckBox;
+    QCheckBox* mMatrixOverrideCheckBox;
+    QComboBox* mMatrixProfileComboBox;
 
     QComboBox* mCachePolicyComboBox;
     QComboBox* mCacheQuotaComboBox;
