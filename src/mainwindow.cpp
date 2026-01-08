@@ -2376,6 +2376,17 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     updateUi();
 }
 void MainWindow::markSettingsDirty(bool autoApply) {
+    // Nothing mounted: just clear UI affordances and bail.
+    if (mMountedFiles.isEmpty()) {
+        mSettingsDirty = false;
+        ui->applySelectedButton->setEnabled(false);
+        ui->applyAllButton->setEnabled(false);
+        ui->applySelectedButton->setText("Apply to Selected");
+        ui->applyAllButton->setText("Apply to All");
+        stopApplyPulse();
+        return;
+    }
+
     if (!mSettingsDirty) {
         mSettingsDirty = true;
     }
