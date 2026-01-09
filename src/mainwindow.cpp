@@ -166,9 +166,6 @@ namespace {
         // Always enabled - the actual value is set via mCameraModel
         options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
 
-        if(ui.quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
-            options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
-
         if(ui.draftModeCheckBox->checkState() == Qt::CheckState::Checked)
             options |= motioncam::RENDER_OPT_HIGH_QUALITY_FIRST_FRAME;
 
@@ -240,10 +237,15 @@ MainWindow::MainWindow(QWidget *parent)
     });
     ui->highQualityFirstFrameCheckBox->setVisible(false);
     ui->highQualityFirstFrameLabel->setVisible(false);
+    ui->quadBayerCheckBox->setVisible(false);
+    ui->quadBayerComboBox->setVisible(false);
+    ui->remosaicLabel->setVisible(false);
     ui->logTransformCheckBox->setVisible(false);
     ui->logTransformComboBox->setVisible(false);
     ui->logTransformLabel->setVisible(false);
     ui->highQualityFirstFrameCheckBox->setChecked(true);
+    ui->quadBayerCheckBox->setChecked(false);
+    ui->quadBayerComboBox->setCurrentText("");
     ui->logTransformCheckBox->setChecked(false);
     ui->logTransformComboBox->setCurrentText("");
     ui->centralwidget->setStyleSheet(
@@ -337,7 +339,7 @@ void MainWindow::saveSettings() {
     settings.setValue("normalizeExposure", (mGlobalRenderOptions & motioncam::RENDER_OPT_NORMALIZE_EXPOSURE) != 0);
     settings.setValue("cfrConversion", (mGlobalRenderOptions & motioncam::RENDER_OPT_FRAMERATE_CONVERSION) != 0);
     settings.setValue("cropEnabled", (mGlobalRenderOptions & motioncam::RENDER_OPT_CROPPING) != 0);
-    settings.setValue("interpretAsQBEnabled", (mGlobalRenderOptions & motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER) != 0);
+    settings.setValue("interpretAsQBEnabled", false);
     settings.setValue("logTransformEnabled", false);
     settings.setValue("highQualityFirstFrame", true);
     settings.setValue("cachePath", mCacheRootFolder);
@@ -349,7 +351,7 @@ void MainWindow::saveSettings() {
     settings.setValue("camModelOverride", QString::fromStdString(mCameraModel));
     settings.setValue("levels", QString::fromStdString(mLevels));
     settings.setValue("logTransform", "");
-    settings.setValue("quadBayerOption", QString::fromStdString(mQuadBayerOption));
+    settings.setValue("quadBayerOption", "");
     settings.setValue("playerPath", mPlayerPath);
     QString cachePolicyValue = "quota";
     if (mCachePolicy == motioncam::CachePolicy::Quota) {
@@ -394,8 +396,7 @@ void MainWindow::restoreSettings() {
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
-    ui->quadBayerCheckBox->setCheckState(
-        settings.value("interpretAsQBEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    ui->quadBayerCheckBox->setCheckState(Qt::CheckState::Unchecked);
 
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->highQualityFirstFrameCheckBox->setCheckState(Qt::CheckState::Checked);
@@ -405,7 +406,7 @@ void MainWindow::restoreSettings() {
     mDraftQuality = std::max(1, settings.value("draftQuality").toInt());
     mCFRTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mExposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
-    mQuadBayerOption = (!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
+    mQuadBayerOption = "";
     mCropTarget = settings.value("cropTarget").toString().toStdString();
     mCameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
     mLevels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
@@ -1518,11 +1519,13 @@ void MainWindow::updateUi() {
         ui->quadBayerComboBox->setEnabled(false);
     } else {
         ui->draftQuality->setEnabled(false);
-        ui->quadBayerComboBox->setEnabled(true);
+        ui->quadBayerComboBox->setEnabled(false);
     }
 
     ui->cropTargetComboBox->setEnabled(isCheckedOrMixed(ui->cropEnableCheckBox));
 
+    ui->quadBayerCheckBox->setEnabled(false);
+    ui->quadBayerComboBox->setEnabled(false);
     ui->logTransformCheckBox->setEnabled(false);
     ui->logTransformComboBox->setEnabled(false);
 
@@ -1558,9 +1561,7 @@ MainWindow::RenderSettings MainWindow::captureSettingsFromUi() const {
     settings.cropTarget = ui->cropTargetComboBox->currentText().toStdString();
     settings.cameraModel = mCameraModel;
     settings.levels = ui->levelsComboBox->currentText().toStdString();
-    settings.logTransform = "";
     settings.exposureCompensation = ui->exposureCompensationCombobox->currentText().toStdString();
-    settings.quadBayerOption = ui->quadBayerComboBox->currentText().toStdString();
     return settings;
 }
 
@@ -1572,9 +1573,7 @@ MainWindow::RenderSettings MainWindow::globalSettingsFromState() const {
     settings.cropTarget = mCropTarget;
     settings.cameraModel = mCameraModel;
     settings.levels = mLevels;
-    settings.logTransform = "";
     settings.exposureCompensation = mExposureCompensation;
-    settings.quadBayerOption = mQuadBayerOption;
     return settings;
 }
 
@@ -1601,7 +1600,6 @@ void MainWindow::applySettingsToUi(const RenderSettings& settings) {
     ui->levelsComboBox->setCurrentText(QString::fromStdString(settings.levels));
     ui->logTransformComboBox->setCurrentText("");
     ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(settings.exposureCompensation));
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(settings.quadBayerOption));
 }
 
 void MainWindow::applySettingsToMount(motioncam::MountId mountId, const RenderSettings& settings) {

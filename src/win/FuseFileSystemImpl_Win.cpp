@@ -816,9 +816,9 @@ MountId FuseFileSystemImpl_Win::mount(
                 baseName,
                 settings.cameraModel,
                 settings.levels,
-                settings.logTransform,
+                std::string{},
                 settings.exposureCompensation,
-                settings.quadBayerOption,
+                std::string{},
                 settings.matrixOverrideEnabled,
                 settings.matrixProfile,
                 settings.matrixFilePath);

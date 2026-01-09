@@ -1194,9 +1194,9 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
     const auto& cropTarget = settings.cropTarget;
     const auto& cameraModel = settings.cameraModel;
     const auto& levels = settings.levels;
-    const auto& logTransform = settings.logTransform;
+    const std::string logTransform = "";
     const auto& exposureCompensation = settings.exposureCompensation;
-    const auto& quadBayerOption = settings.quadBayerOption;
+    const std::string quadBayerOption = "";
     const bool matrixOverrideEnabled = settings.matrixOverrideEnabled;
     const auto& matrixProfile = settings.matrixProfile;
     const auto& matrixFilePath = settings.matrixFilePath;
