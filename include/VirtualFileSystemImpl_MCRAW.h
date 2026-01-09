@@ -155,6 +155,7 @@ private:
     size_t mPrefetchWindow;
     std::unordered_map<Timestamp, std::shared_future<FrameData>> mPrefetchFutures;
     std::deque<Timestamp> mPrefetchOrder;
+    std::unordered_map<Timestamp, std::deque<Timestamp>::iterator> mPrefetchOrderIndex;
     std::mutex mPrefetchMutex;
 };
 

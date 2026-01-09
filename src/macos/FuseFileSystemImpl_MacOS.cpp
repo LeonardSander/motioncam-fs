@@ -422,11 +422,11 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
 }
 
 void FuseFileSystemImpl_MacOs::setCachePolicy(CachePolicy policy) {
-    (void)policy;
+    mCachePolicy = policy;
 }
 
 void FuseFileSystemImpl_MacOs::setCacheQuotaBytes(std::uint64_t bytes) {        
-    (void)bytes;
+    mCacheQuotaBytes = bytes;
 }
 
 void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
@@ -568,6 +568,54 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
         return it->second->getFileInfo();
     }
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_MacOs::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        auto* fs = session->getFileSystem();
+        const std::string& srcPath = fs->getSourcePath();
+
+        Decoder decoder(srcPath);
+        auto frames = decoder.getFrames();
+        if(frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", srcPath);
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        const auto timestamp = frames[0];
+
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(timestamp, data, metadata);
+
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfiguration = CameraConfiguration::parse(decoder.getContainerMetadata());
+
+        const std::string& levels = fs->getLevels();
+        const std::string& exposureComp = fs->getExposureCompensation();
+
+        return utils::generateJpegThumbnail(
+            data,
+            frameMetadata,
+            cameraConfiguration,
+            outputPath,
+            width,
+            height,
+            levels,
+            exposureComp);
+    }
+    catch(const std::exception& e) {
+        spdlog::error("generateThumbnail(): Exception: {}", e.what());
+        return false;
+    }
 }
 
 } // namespace motioncam

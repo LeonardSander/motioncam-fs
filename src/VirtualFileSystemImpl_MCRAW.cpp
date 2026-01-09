@@ -878,6 +878,7 @@ std::shared_future<VirtualFileSystemImpl_MCRAW::FrameData> VirtualFileSystemImpl
         auto [it, inserted] = mPrefetchFutures.emplace(timestamp, sharedFuture);
         if (inserted) {
             mPrefetchOrder.push_back(timestamp);
+            mPrefetchOrderIndex[timestamp] = std::prev(mPrefetchOrder.end());
             trimPrefetchLocked();
         } else {
             sharedFuture = it->second;
@@ -890,6 +891,7 @@ void VirtualFileSystemImpl_MCRAW::trimPrefetchLocked() {
     while (mPrefetchOrder.size() > mPrefetchWindow + 2) {
         auto oldest = mPrefetchOrder.front();
         mPrefetchOrder.pop_front();
+        mPrefetchOrderIndex.erase(oldest);
         mPrefetchFutures.erase(oldest);
     }
 }
@@ -923,6 +925,7 @@ void VirtualFileSystemImpl_MCRAW::scheduleReadahead(size_t currentIndex) {
             std::lock_guard<std::mutex> lock(mPrefetchMutex);
             if (mPrefetchFutures.emplace(timestamp, fut).second) {
                 mPrefetchOrder.push_back(timestamp);
+                mPrefetchOrderIndex[timestamp] = std::prev(mPrefetchOrder.end());
                 trimPrefetchLocked();
             }
         }
@@ -932,9 +935,10 @@ void VirtualFileSystemImpl_MCRAW::scheduleReadahead(size_t currentIndex) {
 void VirtualFileSystemImpl_MCRAW::consumePrefetch(Timestamp timestamp) {
     std::lock_guard<std::mutex> lock(mPrefetchMutex);
     mPrefetchFutures.erase(timestamp);
-    auto it = std::find(mPrefetchOrder.begin(), mPrefetchOrder.end(), timestamp);
-    if (it != mPrefetchOrder.end()) {
-        mPrefetchOrder.erase(it);
+    auto it = mPrefetchOrderIndex.find(timestamp);
+    if (it != mPrefetchOrderIndex.end()) {
+        mPrefetchOrder.erase(it->second);
+        mPrefetchOrderIndex.erase(it);
     }
 }
 
@@ -951,7 +955,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
     // Try to get from cache first
     auto cacheEntry = mCache.get(entry);
     if(cacheEntry && pos < cacheEntry->size()) {
-        spdlog::info("[CACHE] HIT: {} (size={} bytes)", entry.name, cacheEntry->size());
+        spdlog::debug("[CACHE] HIT: {} (size={} bytes)", entry.name, cacheEntry->size());
 
         // Calculate length to copy
         const size_t actualLen = (std::min)(len, cacheEntry->size() - pos);
@@ -965,7 +969,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
         return actualLen;
     }
 
-    spdlog::warn("[CACHE] MISS: {} - will generate", entry.name);
+    spdlog::debug("[CACHE] MISS: {} - will generate", entry.name);
 
     spdlog::warn(
         "[THREADPOOL] IO running={} queued={} | Processing running={} queued={}",
@@ -1053,10 +1057,10 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
 
             // Add to cache
             if (cache.isStreamingBypassActive()) {
-                spdlog::info("[CACHE] SKIP STORE (streaming): {}", entry.name);
+                spdlog::debug("[CACHE] SKIP STORE (streaming): {}", entry.name);
             } else {
                 cache.put(entry, dngData);
-                spdlog::info("[CACHE] STORED: {} (size={} bytes)", entry.name, dngData->size());
+                spdlog::debug("[CACHE] STORED: {} (size={} bytes)", entry.name, dngData->size());
             }
         }
         catch(std::runtime_error& e) {

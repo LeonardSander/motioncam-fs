@@ -7,6 +7,7 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <charconv>
 #include <cmath>
 
 #include <chrono>
@@ -39,6 +40,7 @@ public:
     // Get value from cache, returns nullptr if not found
     // If another thread is already processing the same key, this thread will wait
     std::shared_ptr<std::vector<char>> get(const Entry& key, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+        const int frameNum = getFrameNumber(key);
         std::unique_lock<std::mutex> lock(mMutex);
 
         // Wait if another thread is currently processing this key, with timeout
@@ -54,15 +56,14 @@ public:
 
         // Track playback position for smart caching (BEFORE checking cache)
         // This allows us to detect sequential playback even on cache misses
-        int frameNum = extractFrameNumber(key);
         if (frameNum >= 0) {
             // Detect sequential access pattern (indicates playback)
             if (mLastAccessedFrame >= 0 && frameNum == mLastAccessedFrame + 1) {
                 mSequentialCount++;
                 if (mSequentialCount >= 3) {  // 3 sequential frames = playback detected
                     mCurrentPlaybackFrame = frameNum;
-                    spdlog::info("[SMART CACHE] Playback detected at frame {} (sequential count: {})",
-                                 frameNum, mSequentialCount);
+                    spdlog::debug("[SMART CACHE] Playback detected at frame {} (sequential count: {})",
+                                  frameNum, mSequentialCount);
                 }
             } else if (frameNum != mLastAccessedFrame) {
                 mSequentialCount = 0;  // Reset if not sequential
@@ -72,7 +73,7 @@ public:
 
         const bool streamingActive = mStreamingBypass && mCurrentPlaybackFrame >= 0;
         if (streamingActive) {
-            spdlog::info("[CACHE] BYPASS (streaming): {}", key.name);
+            spdlog::debug("[CACHE] BYPASS (streaming): {}", key.name);
             return nullptr;
         }
 
@@ -122,7 +123,7 @@ public:
         if (streamingActive) {
             mInProgress.erase(key);
             mCondition.notify_all();
-            spdlog::info("[CACHE] BYPASS STORE (streaming): {}", key.name);
+            spdlog::debug("[CACHE] BYPASS STORE (streaming): {}", key.name);
             return;
         }
 
@@ -146,39 +147,39 @@ public:
             size_t evictedBytes = 0;
 
             // If adding this would exceed max size, remove entries
-            while (!mCacheList.empty() && (mCurrentSize + valueSize > mMaxSize)) {
-                // Use playback-aware eviction if we have detected playback position
+            if (!mCacheList.empty() && (mCurrentSize + valueSize > mMaxSize)) {
                 if (mCurrentPlaybackFrame >= 0) {
-                    // Find the frame furthest from current playback position
-                    auto furthestIt = mCacheList.end();
-                    int maxDistance = -1;
-
+                    std::vector<std::pair<int, CacheList::iterator>> candidates;
+                    candidates.reserve(mCacheList.size());
                     for (auto it = mCacheList.begin(); it != mCacheList.end(); ++it) {
-                        int frameNum = extractFrameNumber(it->key);
+                        const int frameNum = getFrameNumber(it->key);
                         if (frameNum >= 0) {
-                            int distance = std::abs(frameNum - mCurrentPlaybackFrame);
-                            if (distance > maxDistance) {
-                                maxDistance = distance;
-                                furthestIt = it;
-                            }
+                            const int distance = std::abs(frameNum - mCurrentPlaybackFrame);
+                            candidates.emplace_back(distance, it);
+                        } else {
+                            // Unknown frame number: treat as least valuable
+                            candidates.emplace_back(-1, it);
                         }
                     }
 
-                    if (furthestIt != mCacheList.end()) {
-                        // Evict the furthest frame
-                        size_t removedSize = furthestIt->data->size();
+                    std::sort(candidates.begin(), candidates.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+                    for (auto& candidate : candidates) {
+                        if (mCurrentSize + valueSize <= mMaxSize) {
+                            break;
+                        }
+                        auto it = candidate.second;
+                        const size_t removedSize = it->data->size();
                         mCurrentSize -= removedSize;
                         evictedBytes += removedSize;
                         evictedCount++;
-                        mCacheMap.erase(furthestIt->key);
-                        mCacheList.erase(furthestIt);
-
-                        if (evictedCount == 1) {
-                            spdlog::warn("[SMART CACHE] Evicting frame furthest from playback position {} (distance: {})",
-                                         mCurrentPlaybackFrame, maxDistance);
-                        }
-                    } else {
-                        // Fall back to LRU if no frame numbers found
+                        mCacheMap.erase(it->key);
+                        mCacheList.erase(it);
+                    }
+                } else {
+                    while (!mCacheList.empty() && (mCurrentSize + valueSize > mMaxSize)) {
+                        // Standard LRU eviction (oldest first)
                         auto last = mCacheList.back();
                         size_t removedSize = last.data->size();
                         mCurrentSize -= removedSize;
@@ -187,21 +188,12 @@ public:
                         mCacheMap.erase(last.key);
                         mCacheList.pop_back();
                     }
-                } else {
-                    // Standard LRU eviction (oldest first)
-                    auto last = mCacheList.back();
-                    size_t removedSize = last.data->size();
-                    mCurrentSize -= removedSize;
-                    evictedBytes += removedSize;
-                    evictedCount++;
-                    mCacheMap.erase(last.key);
-                    mCacheList.pop_back();
                 }
             }
 
             if (evictedCount > 0 && mCurrentPlaybackFrame >= 0) {
-                spdlog::warn("[SMART CACHE] Evicted {} entries ({} MB) around playback frame {}",
-                            evictedCount, evictedBytes / (1024*1024), mCurrentPlaybackFrame);
+                spdlog::debug("[SMART CACHE] Evicted {} entries ({} MB) around playback frame {}",
+                              evictedCount, evictedBytes / (1024*1024), mCurrentPlaybackFrame);
             }
 
             // If the single item is too large for the cache, don't add it
@@ -324,19 +316,31 @@ private:
     using CacheMap = std::unordered_map<Entry, typename CacheList::iterator, Entry::Hash>;
 
     // Extract frame number from entry name (e.g., "video-000123.dng" -> 123)
-    int extractFrameNumber(const Entry& entry) const {
-        const std::string& name = entry.name;
-        size_t dashPos = name.rfind('-');
-        size_t dotPos = name.rfind('.');
-
-        if (dashPos != std::string::npos && dotPos != std::string::npos && dashPos < dotPos) {
-            try {
-                return std::stoi(name.substr(dashPos + 1, dotPos - dashPos - 1));
-            } catch (...) {
-                return -1;
-            }
+    int parseFrameNumber(const std::string& name) const {
+        const size_t dashPos = name.rfind('-');
+        const size_t dotPos = name.rfind('.');
+        if (dashPos == std::string::npos || dotPos == std::string::npos || dashPos >= dotPos) {
+            return -1;
         }
-        return -1;
+        int value = -1;
+        auto first = name.data() + dashPos + 1;
+        auto last = name.data() + dotPos;
+        auto res = std::from_chars(first, last, value);
+        if (res.ec != std::errc()) {
+            return -1;
+        }
+        return value;
+    }
+
+    int getFrameNumber(const Entry& entry) const {
+        std::lock_guard<std::mutex> lock(mFrameCacheMutex);
+        auto it = mFrameNumbers.find(entry);
+        if (it != mFrameNumbers.end()) {
+            return it->second;
+        }
+        const int value = parseFrameNumber(entry.name);
+        mFrameNumbers.emplace(entry, value);
+        return value;
     }
 
     CacheList mCacheList; // List of cache entries, most recently used at the front
@@ -347,6 +351,8 @@ private:
     std::chrono::seconds mTTL{0};  // 0 = disabled
     mutable std::mutex mMutex; // Mutex for thread safety
     mutable std::condition_variable mCondition; // Condition variable for waiting
+    mutable std::mutex mFrameCacheMutex;
+    mutable std::unordered_map<Entry, int, Entry::Hash> mFrameNumbers;
 
     // Playback-aware caching
     int mCurrentPlaybackFrame = -1;  // Detected current playback position
