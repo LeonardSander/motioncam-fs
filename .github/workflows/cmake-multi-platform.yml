@@ -197,8 +197,8 @@ jobs:
       shell: bash
       run: |
         mkdir -p artifacts
-        ref_safe="${{ github.ref_name }}"
-        ref_safe="${ref_safe//\//-}"
+        ref_safe="${GITHUB_REF_NAME//\//-}"
+        echo "Artifact base name: motioncam-${ref_safe}"
         if [[ "${{ runner.os }}" == "Windows" ]]; then
           cd build/${{ matrix.build_type }}
           exe=$(ls *.exe 2>/dev/null | head -n 1)
