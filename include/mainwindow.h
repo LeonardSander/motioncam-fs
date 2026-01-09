@@ -113,16 +113,7 @@ private slots:
     void onResetCfr();
 
 private:
-    struct RenderSettings {
-        motioncam::FileRenderOptions renderOptions = motioncam::RENDER_OPT_NONE;
-        int draftQuality = 2;
-        std::string cfrTarget;
-        std::string cropTarget;
-        std::string levels;
-        std::string logTransform;
-        std::string exposureCompensation;
-        std::string quadBayerOption;
-    };
+    using RenderSettings = motioncam::RenderSettings;
 
     bool mountFileBackend(const QString& filePath, motioncam::MountId& mountId, QString& errorMessage);
     void addMountedFileUi(const QString& filePath, motioncam::MountId mountId, const QString& mountPath);

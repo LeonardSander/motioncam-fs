@@ -93,19 +93,7 @@ public:
     ~Session();
 
 public:
-    void updateOptions(
-        FileRenderOptions options,
-        int draftScale,
-        std::string cfrTarget,
-        std::string cropTarget,
-        std::string cameraModel,
-        std::string levels,
-        std::string logTransform,
-        std::string exposureCompensation,
-        std::string quadBayerOption,
-        bool matrixOverrideEnabled,
-        std::string matrixProfile,
-        std::string matrixFilePath);
+    void updateOptions(const RenderSettings& settings);
     void expireMaterializedFiles(std::chrono::seconds ttl);
     void evictMaterializedByQuota(std::uint64_t quotaBytes);
     FileInfo getFileInfo() const;
@@ -186,34 +174,10 @@ Session::~Session() {
     Stop();
 }
 
-void Session::updateOptions(
-    FileRenderOptions options,
-    int draftScale,
-    std::string cfrTarget,
-    std::string cropTarget,
-    std::string cameraModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
-    bool matrixOverrideEnabled,
-    std::string matrixProfile,
-    std::string matrixFilePath) {
-    mOptions = options;
-    mDraftScale = draftScale;
-    mFs->updateOptions(
-        options,
-        draftScale,
-        cfrTarget,
-        cropTarget,
-        cameraModel,
-        levels,
-        logTransform,
-        exposureCompensation,
-        quadBayerOption,
-        false,
-        "",
-        "");
+void Session::updateOptions(const RenderSettings& settings) {
+    mOptions = settings.renderOptions;
+    mDraftScale = settings.draftQuality;
+    mFs->updateOptions(settings);
 
     // We need to clear out the cache
     auto files = mFs->listFiles();
@@ -825,20 +789,9 @@ void FuseFileSystemImpl_Win::evictMaterializedByGlobalQuota(std::uint64_t quotaB
 }
 
 MountId FuseFileSystemImpl_Win::mount(
-    FileRenderOptions options,
-    int draftScale,
-    std::string cfrTarget,
-    std::string cropTarget,
-    std::string cameraModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
-        bool matrixOverrideEnabled,
-        const std::string& matrixProfile,
-        const std::string& matrixFilePath,
-        const std::string& srcFile,
-        const std::string& dstPath) {
+    const RenderSettings& settings,
+    const std::string& srcFile,
+    const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -855,20 +808,20 @@ MountId FuseFileSystemImpl_Win::mount(
                 *mIoThreadPool,
                 *mProcessingThreadPool,
                 *mCache,
-                options,
-                draftScale,
-                cfrTarget,
-                cropTarget,
+                settings.renderOptions,
+                settings.draftQuality,
+                settings.cfrTarget,
+                settings.cropTarget,
                 srcFile,
                 baseName,
-                cameraModel,
-                levels,
-                logTransform,
-                exposureCompensation,
-                quadBayerOption,
-                false,
-                "",
-                "");
+                settings.cameraModel,
+                settings.levels,
+                settings.logTransform,
+                settings.exposureCompensation,
+                settings.quadBayerOption,
+                settings.matrixOverrideEnabled,
+                settings.matrixProfile,
+                settings.matrixFilePath);
 
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
@@ -888,34 +841,11 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
 
 void FuseFileSystemImpl_Win::updateOptions(
     MountId mountId,
-    FileRenderOptions options,
-    int draftScale,
-    std::string cfrTarget,
-    std::string cropTarget,
-    std::string cameraModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
-    bool matrixOverrideEnabled,
-    const std::string& matrixProfile,
-    const std::string& matrixFilePath) {
+    const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
-    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(
-        options,
-        draftScale,
-        cfrTarget,
-        cropTarget,
-        cameraModel,
-        levels,
-        logTransform,
-        exposureCompensation,
-        quadBayerOption,
-        matrixOverrideEnabled,
-        matrixProfile,
-        matrixFilePath);
+    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(settings);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {

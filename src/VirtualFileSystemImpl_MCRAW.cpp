@@ -1187,7 +1187,19 @@ void VirtualFileSystemImpl_MCRAW::forgetDngAccess(const Entry& entry) {
     mLastAccessTimes.erase(entry);
 }
 
-void VirtualFileSystemImpl_MCRAW::updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, bool matrixOverrideEnabled, const std::string& matrixProfile, const std::string& matrixFilePath) {
+void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {
+    FileRenderOptions options = settings.renderOptions;
+    const int draftScale = settings.draftQuality;
+    const auto& cfrTarget = settings.cfrTarget;
+    const auto& cropTarget = settings.cropTarget;
+    const auto& cameraModel = settings.cameraModel;
+    const auto& levels = settings.levels;
+    const auto& logTransform = settings.logTransform;
+    const auto& exposureCompensation = settings.exposureCompensation;
+    const auto& quadBayerOption = settings.quadBayerOption;
+    const bool matrixOverrideEnabled = settings.matrixOverrideEnabled;
+    const auto& matrixProfile = settings.matrixProfile;
+    const auto& matrixFilePath = settings.matrixFilePath;
     mDraftScale = draftScale;
     mOptions = options;
     mCFRTarget = cfrTarget;

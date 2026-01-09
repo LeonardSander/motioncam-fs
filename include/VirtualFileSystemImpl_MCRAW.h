@@ -61,7 +61,7 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(FileRenderOptions options, int draftScale, const std::string& cfrTarget, const std::string& cropTarget, const std::string& cameraModel, const std::string& levels, const std::string& logTransform, const std::string& exposureCompensation, const std::string& quadBayerOption, bool matrixOverrideEnabled, const std::string& matrixProfile, const std::string& matrixFilePath) override;
+    void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const;
     const std::string& getSourcePath() const { return mSrcPath; }
     const std::string& getLevels() const { return mLevels; }

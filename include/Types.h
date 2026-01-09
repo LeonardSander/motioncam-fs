@@ -161,4 +161,19 @@ static std::string optionsToString(FileRenderOptions options) {
     return result;
 }
 
+struct RenderSettings {
+    FileRenderOptions renderOptions = RENDER_OPT_NONE;
+    int draftQuality = 2;
+    std::string cfrTarget;
+    std::string cropTarget;
+    std::string cameraModel;
+    std::string levels;
+    std::string logTransform;
+    std::string exposureCompensation;
+    std::string quadBayerOption;
+    bool matrixOverrideEnabled = false;
+    std::string matrixProfile;
+    std::string matrixFilePath;
+};
+
 } // namespace

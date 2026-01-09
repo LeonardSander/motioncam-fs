@@ -89,19 +89,7 @@ public:
     Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs);
     ~Session();
 
-    void updateOptions(
-        FileRenderOptions options,
-        int draftScale,
-        std::string cfrTarget,
-        std::string cropTarget,
-        std::string cameraModel,
-        std::string levels,
-        std::string logTransform,
-        std::string exposureCompensation,
-        std::string quadBayerOption,
-        bool matrixOverrideEnabled,
-        std::string matrixProfile,
-        std::string matrixFilePath);
+    void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
 
 private:
@@ -218,32 +206,8 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
 
 }
 
-void Session::updateOptions(
-    FileRenderOptions options,
-    int draftScale,
-    std::string cfrTarget,
-    std::string cropTarget,
-    std::string cameraModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
-    bool matrixOverrideEnabled,
-    std::string matrixProfile,
-    std::string matrixFilePath) {
-    mFs->updateOptions(
-        options,
-        draftScale,
-        cfrTarget,
-        cropTarget,
-        cameraModel,
-        levels,
-        logTransform,
-        exposureCompensation,
-        quadBayerOption,
-        matrixOverrideEnabled,
-        matrixProfile,
-        matrixFilePath);
+void Session::updateOptions(const RenderSettings& settings) {
+    mFs->updateOptions(settings);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
@@ -436,18 +400,7 @@ void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
 }
 
 MountId FuseFileSystemImpl_MacOs::mount(
-    FileRenderOptions options,
-    int draftScale,
-    const std::string cfrTarget,
-    const std::string cropTarget,
-    const std::string cameraModel,
-    const std::string levels,
-    const std::string logTransform,
-    const std::string exposureCompensation,
-    const std::string quadBayerOption,
-    bool matrixOverrideEnabled,
-    const std::string& matrixProfile,
-    const std::string& matrixFilePath,
+    const RenderSettings& settings,
     const std::string& srcFile,
     const std::string& dstPath) {
     fs::path srcPath(srcFile);
@@ -483,20 +436,20 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
-                    options,
-                    draftScale,
-                    cfrTarget,
-                    cropTarget,
+                    settings.renderOptions,
+                    settings.draftQuality,
+                    settings.cfrTarget,
+                    settings.cropTarget,
                     srcFile,
                     baseName,
-                    cameraModel,
-                    levels,
-                    logTransform,
-                    exposureCompensation,
-                    quadBayerOption,
-                    false,
-                    "",
-                    ""
+                    settings.cameraModel,
+                    settings.levels,
+                    settings.logTransform,
+                    settings.exposureCompensation,
+                    settings.quadBayerOption,
+                    settings.matrixOverrideEnabled,
+                    settings.matrixProfile,
+                    settings.matrixFilePath
                 );
 
             auto session = std::make_unique<Session>(srcFile, dstPath, fs);
@@ -532,33 +485,10 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
 
 void FuseFileSystemImpl_MacOs::updateOptions(
     MountId mountId,
-    FileRenderOptions options,
-    int draftScale,
-    std::string cfrTarget,
-    std::string cropTarget,
-    std::string cameraModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
-    bool matrixOverrideEnabled,
-    const std::string& matrixProfile,
-    const std::string& matrixFilePath) {
+    const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
-        it->second->updateOptions(
-            options,
-            draftScale,
-            cfrTarget,
-            cropTarget,
-            cameraModel,
-            levels,
-            logTransform,
-            exposureCompensation,
-            quadBayerOption,
-            matrixOverrideEnabled,
-            matrixProfile,
-            matrixFilePath);
+        it->second->updateOptions(settings);
     }
 }
 

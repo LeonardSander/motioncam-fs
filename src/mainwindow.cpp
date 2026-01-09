@@ -844,19 +844,9 @@ bool MainWindow::mountFileBackend(const QString& filePath, motioncam::MountId& m
 #endif
 
     try {
+        auto settings = globalSettingsFromState();
         mountId = mFuseFilesystem->mount(
-            mGlobalRenderOptions,
-            mDraftQuality,
-            mCFRTarget,
-            mCropTarget,
-            mCameraModel,
-            mLevels,
-            mLogTransform,
-            mExposureCompensation,
-            mQuadBayerOption,
-            false,
-            "",
-            "",
+            settings,
             filePath.toStdString(),
             dstPath.toStdString());
     }
@@ -1566,6 +1556,7 @@ MainWindow::RenderSettings MainWindow::captureSettingsFromUi() const {
     settings.draftQuality = draftQualityFromUi();
     settings.cfrTarget = ui->cfrTarget->currentText().toStdString();
     settings.cropTarget = ui->cropTargetComboBox->currentText().toStdString();
+    settings.cameraModel = mCameraModel;
     settings.levels = ui->levelsComboBox->currentText().toStdString();
     settings.logTransform = "";
     settings.exposureCompensation = ui->exposureCompensationCombobox->currentText().toStdString();
@@ -1579,6 +1570,7 @@ MainWindow::RenderSettings MainWindow::globalSettingsFromState() const {
     settings.draftQuality = mDraftQuality;
     settings.cfrTarget = mCFRTarget;
     settings.cropTarget = mCropTarget;
+    settings.cameraModel = mCameraModel;
     settings.levels = mLevels;
     settings.logTransform = "";
     settings.exposureCompensation = mExposureCompensation;
@@ -1613,20 +1605,9 @@ void MainWindow::applySettingsToUi(const RenderSettings& settings) {
 }
 
 void MainWindow::applySettingsToMount(motioncam::MountId mountId, const RenderSettings& settings) {
-    mFuseFilesystem->updateOptions(
-        mountId,
-        settings.renderOptions,
-        settings.draftQuality,
-        settings.cfrTarget,
-        settings.cropTarget,
-        mCameraModel,
-        settings.levels,
-        settings.logTransform,
-        settings.exposureCompensation,
-        settings.quadBayerOption,
-        false,
-        "",
-        "");
+    auto settingsCopy = settings;
+    settingsCopy.cameraModel = mCameraModel;
+    mFuseFilesystem->updateOptions(mountId, settingsCopy);
 }
 
 void MainWindow::applySettingsToMounts(const QSet<motioncam::MountId>& mountIds, const RenderSettings& settings) {
@@ -2182,21 +2163,9 @@ void MainWindow::updateFpsLabels() {
 
     // Force recalculation of fps values by calling updateOptions for all mounted files
     for (const auto& mountedFile : mMountedFiles) {
-        const auto settings = effectiveSettingsForMount(mountedFile.mountId);
-        mFuseFilesystem->updateOptions(
-            mountedFile.mountId,
-            settings.renderOptions,
-            settings.draftQuality,
-            settings.cfrTarget,
-            settings.cropTarget,
-            mCameraModel,
-            settings.levels,
-            settings.logTransform,
-            settings.exposureCompensation,
-            settings.quadBayerOption,
-            false,
-            "",
-            "");
+        auto settings = effectiveSettingsForMount(mountedFile.mountId);
+        settings.cameraModel = mCameraModel;
+        mFuseFilesystem->updateOptions(mountedFile.mountId, settings);
     }
     
     // Find all fps labels in the scroll area
