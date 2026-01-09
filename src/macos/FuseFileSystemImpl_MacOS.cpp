@@ -1,6 +1,9 @@
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
+#include "CameraFrameMetadata.h"
 #include "LRUCache.h"
+#include "Utils.h"
+#include <motioncam/Decoder.hpp>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
@@ -112,6 +115,9 @@ private:
     VirtualFileSystemImpl_MCRAW* mFs;
     struct fuse_chan* mFuseCh;
     struct fuse* mFuse;
+
+public:
+    VirtualFileSystemImpl_MCRAW* getFileSystem() const { return mFs; }
 };
 
 
