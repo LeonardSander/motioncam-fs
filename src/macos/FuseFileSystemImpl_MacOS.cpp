@@ -1,6 +1,9 @@
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
+#include "CameraFrameMetadata.h"
 #include "LRUCache.h"
+#include "Utils.h"
+#include <motioncam/Decoder.hpp>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
@@ -90,7 +93,6 @@ public:
     ~Session();
 
     void updateOptions(const RenderSettings& settings);
-
     FileInfo getFileInfo() const;
 
 private:
@@ -113,6 +115,9 @@ private:
     VirtualFileSystemImpl_MCRAW* mFs;
     struct fuse_chan* mFuseCh;
     struct fuse* mFuse;
+
+public:
+    VirtualFileSystemImpl_MCRAW* getFileSystem() const { return mFs; }
 };
 
 
@@ -207,8 +212,7 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
 
 }
 
-void Session::updateOptions(const RenderSettings& settings)
-{
+void Session::updateOptions(const RenderSettings& settings) {
     mFs->updateOptions(settings);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
@@ -387,11 +391,24 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
     spdlog::info("Destroying FuseFileSystemImpl_MacOs()");
 }
 
+void FuseFileSystemImpl_MacOs::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+}
+
+void FuseFileSystemImpl_MacOs::setCacheQuotaBytes(std::uint64_t bytes) {        
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
+    if (mCache) {
+        mCache->cleanupExpired();
+    }
+}
+
 MountId FuseFileSystemImpl_MacOs::mount(
     const RenderSettings& settings,
     const std::string& srcFile,
-    const std::string& dstPath)
-{
+    const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -419,15 +436,26 @@ MountId FuseFileSystemImpl_MacOs::mount(
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-
+            
             auto* fs =
                 new VirtualFileSystemImpl_MCRAW(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
-                    settings,
+                    settings.renderOptions,
+                    settings.draftQuality,
+                    settings.cfrTarget,
+                    settings.cropTarget,
                     srcFile,
-                    baseName
+                    baseName,
+                    settings.cameraModel,
+                    settings.levels,
+                    std::string{},
+                    settings.exposureCompensation,
+                    std::string{},
+                    settings.matrixOverrideEnabled,
+                    settings.matrixProfile,
+                    settings.matrixFilePath
                 );
 
             auto session = std::make_unique<Session>(srcFile, dstPath, fs);
@@ -463,8 +491,7 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
 
 void FuseFileSystemImpl_MacOs::updateOptions(
     MountId mountId,
-    const RenderSettings& settings)
-{
+    const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
         it->second->updateOptions(settings);
@@ -477,6 +504,54 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
         return it->second->getFileInfo();
     }
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_MacOs::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        auto* fs = session->getFileSystem();
+        const std::string& srcPath = fs->getSourcePath();
+
+        Decoder decoder(srcPath);
+        auto frames = decoder.getFrames();
+        if(frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", srcPath);
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        const auto timestamp = frames[0];
+
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(timestamp, data, metadata);
+
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfiguration = CameraConfiguration::parse(decoder.getContainerMetadata());
+
+        const std::string& levels = fs->getLevels();
+        const std::string& exposureComp = fs->getExposureCompensation();
+
+        return utils::generateJpegThumbnail(
+            data,
+            frameMetadata,
+            cameraConfiguration,
+            outputPath,
+            width,
+            height,
+            levels,
+            exposureComp);
+    }
+    catch(const std::exception& e) {
+        spdlog::error("generateThumbnail(): Exception: {}", e.what());
+        return false;
+    }
 }
 
 } // namespace motioncam

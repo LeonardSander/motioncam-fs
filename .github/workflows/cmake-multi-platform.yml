@@ -197,13 +197,15 @@ jobs:
       shell: bash
       run: |
         mkdir -p artifacts
+        ref_safe="${GITHUB_REF_NAME//\//-}"
+        echo "Artifact base name: motioncam-${ref_safe}"
         if [[ "${{ runner.os }}" == "Windows" ]]; then
           cd build/${{ matrix.build_type }}
           exe=$(ls *.exe 2>/dev/null | head -n 1)
           if [ -n "$exe" ]; then
             echo "Running windeployqt on $exe"
             "${{ github.workspace }}/Qt/6.7.2/msvc2019_64/bin/windeployqt.exe" "$exe" || echo "windeployqt failed"
-            7z a ../../artifacts/motioncam-${{ github.ref_name }}-windows.zip ./*
+            7z a ../../artifacts/motioncam-${ref_safe}-windows.zip ./*
           fi
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
           cd build
@@ -211,7 +213,7 @@ jobs:
           if [ -n "$app" ]; then
             echo "Running macdeployqt on $app"
             macdeployqt "$app" -verbose=2 || echo "macdeployqt failed"
-            zip -r ../artifacts/motioncam-${{ github.ref_name }}-macos.zip "$app"
+            zip -r ../artifacts/motioncam-${ref_safe}-macos.zip "$app"
           fi
         fi
 

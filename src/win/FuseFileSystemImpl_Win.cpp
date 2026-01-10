@@ -4,18 +4,28 @@
 
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "LRUCache.h"
+#include "CameraFrameMetadata.h"
+#include "CameraMetadata.h"
+#include "Utils.h"
 
 #include <iostream>
 #include <ntstatus.h>
 #include <mutex>
+#include <chrono>
+#include <atomic>
 #include <filesystem>
+#include <optional>
 #include <shlobj.h>
+#include <algorithm>
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/locale.hpp>
 
 #include <BS_thread_pool.hpp>
+
+#include <motioncam/Decoder.hpp>
+#include <nlohmann/json.hpp>
 
 // Logging
 #include <spdlog/spdlog.h>
@@ -84,7 +94,12 @@ public:
 
 public:
     void updateOptions(const RenderSettings& settings);
+    void expireMaterializedFiles(std::chrono::seconds ttl);
+    void evictMaterializedByQuota(std::uint64_t quotaBytes);
     FileInfo getFileInfo() const;
+    VirtualFileSystemImpl_MCRAW* getFileSystem() { return mFs.get(); }
+    const std::wstring& getRootPath() const { return _rootPath; }
+    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT getInstanceHandle() const { return _instanceHandle; }
 
 protected:
     HRESULT StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) override;
@@ -160,8 +175,8 @@ Session::~Session() {
 }
 
 void Session::updateOptions(const RenderSettings& settings) {
-    mOptions = settings.options;
-    mDraftScale = settings.draftScale;
+    mOptions = settings.renderOptions;
+    mDraftScale = settings.draftQuality;
     mFs->updateOptions(settings);
 
     // We need to clear out the cache
@@ -182,27 +197,106 @@ void Session::updateOptions(const RenderSettings& settings) {
 
         auto fullPath = e.getFullPath().string();
 
-        // hr = PrjDeleteFile(_instanceHandle, fromUTF8(fullPath).c_str(), updateFlags, &failureReason);
-
         // Only DNG items need to be updated with options changes
         if(boost::ends_with(e.name, "dng")) {
-            PRJ_PLACEHOLDER_INFO placeholderInfo = {};
+            // Delete the file placeholder to force complete refresh
+            // This ensures all settings changes (not just proxy mode) trigger a full regeneration
+            hr = PrjDeleteFile(_instanceHandle, fromUTF8(fullPath).c_str(), updateFlags, &failureReason);
 
-            updatePlaceHolder(placeholderInfo, e, settings.options, settings.draftScale);
-
-            hr = PrjUpdateFileIfNeeded(
-                _instanceHandle,
-                fromUTF8(fullPath).c_str(),
-                &placeholderInfo,
-                sizeof(placeholderInfo),
-                PRJ_UPDATE_ALLOW_DIRTY_METADATA | PRJ_UPDATE_ALLOW_DIRTY_DATA | PRJ_UPDATE_ALLOW_READ_ONLY,
-                &failureReason
-            );
-
-            // Ignore file not found errors
-            if(failureReason != PRJ_UPDATE_FAILURE_CAUSE_NONE)
-                spdlog::error("Failed to refresh cache entry {} (error: 0x{:08x}, reason: {})",
+            // Ignore errors - file might not be materialized yet or already deleted
+            if(hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+                spdlog::debug("PrjDeleteFile for {} returned: 0x{:08x}, reason: {}",
                               fullPath, static_cast<unsigned int>(hr), static_cast<unsigned int>(failureReason));
+            }
+        }
+    }
+}
+
+void Session::expireMaterializedFiles(std::chrono::seconds ttl) {
+    if (ttl.count() <= 0) {
+        return;
+    }
+
+    const auto expired = mFs->getExpiredDngEntries(ttl);
+    if (expired.empty()) {
+        return;
+    }
+
+    PRJ_UPDATE_FAILURE_CAUSES failureReason;
+    PRJ_UPDATE_TYPES updateFlags =
+        PRJ_UPDATE_ALLOW_DIRTY_METADATA |
+        PRJ_UPDATE_ALLOW_DIRTY_DATA     |
+        PRJ_UPDATE_ALLOW_READ_ONLY;
+
+    for (const auto& entry : expired) {
+        if (entry.type != EntryType::FILE_ENTRY) {
+            continue;
+        }
+        if (!boost::ends_with(entry.name, "dng")) {
+            continue;
+        }
+
+        auto fullPath = entry.getFullPath().string();
+        auto hr = PrjDeleteFile(_instanceHandle, fromUTF8(fullPath).c_str(), updateFlags, &failureReason);
+        if (hr != S_OK && hr != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+            spdlog::debug("PrjDeleteFile for {} returned: 0x{:08x}, reason: {}",
+                          fullPath, static_cast<unsigned int>(hr), static_cast<unsigned int>(failureReason));
+        }
+    }
+}
+
+void Session::evictMaterializedByQuota(std::uint64_t quotaBytes) {
+    if (quotaBytes == 0) {
+        return;
+    }
+
+    auto entries = mFs->getDngAccessEntries();
+    if (entries.empty()) {
+        return;
+    }
+
+    std::uint64_t totalBytes = 0;
+    for (const auto& entry : entries) {
+        totalBytes += static_cast<std::uint64_t>(entry.first.size);
+    }
+    if (totalBytes <= quotaBytes) {
+        return;
+    }
+
+    std::sort(entries.begin(), entries.end(),
+        [](const auto& left, const auto& right) {
+            return left.second < right.second;
+        });
+
+    PRJ_UPDATE_FAILURE_CAUSES failureReason;
+    PRJ_UPDATE_TYPES updateFlags =
+        PRJ_UPDATE_ALLOW_DIRTY_METADATA |
+        PRJ_UPDATE_ALLOW_DIRTY_DATA     |
+        PRJ_UPDATE_ALLOW_READ_ONLY;
+
+    for (const auto& entryPair : entries) {
+        if (totalBytes <= quotaBytes) {
+            break;
+        }
+
+        const auto& entry = entryPair.first;
+        if (entry.type != EntryType::FILE_ENTRY) {
+            continue;
+        }
+        auto fullPath = entry.getFullPath().string();
+        auto hr = PrjDeleteFile(_instanceHandle, fromUTF8(fullPath).c_str(), updateFlags, &failureReason);
+        if (hr == S_OK || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+            if (entry.size < totalBytes) {
+                totalBytes -= static_cast<std::uint64_t>(entry.size);
+            } else {
+                totalBytes = 0;
+            }
+            mFs->forgetDngAccess(entry);
+        } else {
+            spdlog::debug("PrjDeleteFile for {} returned: 0x{:08x}, reason: {}",
+                          fullPath,
+                          static_cast<unsigned int>(hr),
+                          static_cast<unsigned int>(failureReason));
         }
     }
 }
@@ -340,16 +434,50 @@ HRESULT Session::GetPlaceholderInfo(_In_ const PRJ_CALLBACK_DATA* CallbackData) 
 }
 
 HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UINT64 byteOffset, _In_ UINT32 length) {
+    auto requestStartTime = std::chrono::high_resolution_clock::now();
+    auto t_entry = requestStartTime;
+    auto fileName = toUTF8(callbackData->FilePathName);
+    auto t_path = std::chrono::high_resolution_clock::now();
+    auto d_path = std::chrono::duration_cast<std::chrono::milliseconds>(t_path - t_entry).count();
+
+    spdlog::info("[TIMING] GetFileData() entry: file={} d_path={}ms", fileName, d_path);
+
     spdlog::debug("GetFileData(): Path [{}] (byteOffset: {} and length: {}) triggered by [{}]",
-                  toUTF8(callbackData->FilePathName),
+                  fileName,
                   byteOffset,
                   length,
-                  toUTF8(callbackData->TriggeringProcessImageFileName));
+                  toUTF8(callbackData->TriggeringProcessImageFileName));        
+    spdlog::info("[PERF] GetFileData() START: file={}, offset={}, length={} bytes",
+                  fileName, byteOffset, length);
+
+    // Track concurrent calls and lock wait timing
+    static std::atomic<int> concurrentCalls{0};
+    const int concurrent = concurrentCalls.fetch_add(1, std::memory_order_relaxed) + 1;
+    struct ConcurrentGuard {
+        std::atomic<int>& ref;
+        ~ConcurrentGuard() { ref.fetch_sub(1, std::memory_order_relaxed); }
+    } concurrentGuard{concurrentCalls};
+
+    // Fine-grained lock (previously coarse) - now removed to avoid contention.
+    // We keep timing to validate that lock wait stays near zero.
+    auto t_beforeLock = std::chrono::high_resolution_clock::now();
+    auto d_beforeLock = std::chrono::duration_cast<std::chrono::milliseconds>(t_beforeLock - t_entry).count();
+
+    spdlog::warn("[LOCK] Attempting lock: file={} concurrent_calls={} d_beforeLock={}ms",
+                 fileName, concurrent, d_beforeLock);
 
     HRESULT hr = S_OK;
+    std::optional<Entry> fsEntry;
+    fsEntry = mFs->findEntry(toUTF8(callbackData->FilePathName));
 
-    // Match file entry first
-    auto fsEntry = mFs->findEntry(toUTF8(callbackData->FilePathName));
+    auto t_afterLock = std::chrono::high_resolution_clock::now();
+    auto d_lockWait = std::chrono::duration_cast<std::chrono::milliseconds>(t_afterLock - t_beforeLock).count();
+    auto d_total = std::chrono::duration_cast<std::chrono::milliseconds>(t_afterLock - t_entry).count();
+    if (d_lockWait > 50) {
+        spdlog::warn("[LOCK] SLOW lock acquisition: file={} wait={}ms total={}ms concurrent={}",
+                     fileName, d_lockWait, d_total, concurrent);
+    }
+
     if(!fsEntry) {
         hr = E_FAIL;
         return hr;
@@ -368,7 +496,10 @@ HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UI
 
     auto commandId = callbackData->CommandId;
     auto dataStramId = callbackData->DataStreamId;
-    auto fileName = toUTF8(callbackData->FilePathName);
+
+    auto t_beforeDispatch = std::chrono::high_resolution_clock::now();
+    auto d_dispatchDelay = std::chrono::duration_cast<std::chrono::milliseconds>(t_beforeDispatch - t_entry).count();
+    spdlog::warn("[DISPATCH] GetFileData pre-dispatch: file={} dispatchDelay={}ms", fileName, d_dispatchDelay);
 
     // Allocate a buffer that adheres to the machine's memory alignment.  We have to do this in case
     // the caller who caused this callback to be invoked is performing non-cached I/O.  For more
@@ -381,7 +512,10 @@ HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UI
         return E_OUTOFMEMORY;
     }
 
-    auto completeTransaction = [this, writeBuffer, byteOffset, length, fileName, commandId, dataStramId](size_t readBytes, int error, bool isAsync) {
+    auto completeTransaction = [this, writeBuffer, byteOffset, length, fileName, commandId, dataStramId, requestStartTime](size_t readBytes, int error, bool isAsync) {
+        auto writeStartTime = std::chrono::high_resolution_clock::now();
+        auto readMs = std::chrono::duration_cast<std::chrono::milliseconds>(writeStartTime - requestStartTime).count();
+
         HRESULT hr = S_OK;
 
         if(readBytes == length) {
@@ -392,11 +526,19 @@ HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UI
             spdlog::error("GetFileData(): Failed to read file requested bytes {} but received {}", length, readBytes);
         }
 
+        auto writeEndTime = std::chrono::high_resolution_clock::now();
+        auto writeMs = std::chrono::duration_cast<std::chrono::milliseconds>(writeEndTime - writeStartTime).count();
+        auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(writeEndTime - requestStartTime).count();
+
         if (FAILED(hr))
         {
             // If this callback returns an error, ProjFS will return this error code to the thread that
             // issued the file read, and the target file will remain an empty placeholder.
             spdlog::error("GetFileData(): failed to write file for [%s]: 0x{:08x}", fileName, static_cast<unsigned int>(hr));
+        }
+        else {
+            spdlog::warn("[PERF] GetFileData() SUCCESS: file={}, read={}ms, write={}ms, TOTAL={}ms ({} bytes)",
+                fileName, readMs, writeMs, totalMs, length);
         }
 
         // Free the memory-aligned buffer we allocated.
@@ -542,12 +684,114 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     mNextMountId(0),
     mIoThreadPool(std::make_unique<BS::thread_pool>(IO_THREADS)),
     mProcessingThreadPool(std::make_unique<BS::thread_pool>()),
-    mCache(std::make_unique<LRUCache>(CACHE_SIZE))
+    mCache(std::make_unique<LRUCache>(CACHE_SIZE)),
+    mCachePolicy(CachePolicy::Quota),
+    mCacheQuotaBytes(0)
 {
     setupLogging();
 }
 
-MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std::string& srcFile, const std::string& dstPath) {
+void FuseFileSystemImpl_Win::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+}
+
+void FuseFileSystemImpl_Win::setCacheQuotaBytes(std::uint64_t bytes) {
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_Win::cleanupCacheExpired() {
+    if (mCache) {
+        mCache->cleanupExpired();
+    }
+
+    if (mCachePolicy == CachePolicy::Off) {
+        return;
+    }
+
+    if (mCachePolicy == CachePolicy::Quota && mCacheQuotaBytes > 0) {
+        evictMaterializedByGlobalQuota(mCacheQuotaBytes);
+    }
+}
+
+void FuseFileSystemImpl_Win::evictMaterializedByGlobalQuota(std::uint64_t quotaBytes) {
+    if (quotaBytes == 0) {
+        return;
+    }
+
+    struct GlobalCandidate {
+        Session* session;
+        Entry entry;
+        std::chrono::steady_clock::time_point lastAccess;
+    };
+
+    std::vector<GlobalCandidate> candidates;
+    std::uint64_t totalBytes = 0;
+
+    for (auto& entry : mMountedFiles) {
+        auto* session = dynamic_cast<Session*>(entry.second.get());
+        if (!session) {
+            continue;
+        }
+
+        auto accessEntries = session->getFileSystem()->getDngAccessEntries();
+        for (const auto& entryPair : accessEntries) {
+            const auto& fileEntry = entryPair.first;
+            totalBytes += static_cast<std::uint64_t>(fileEntry.size);
+            candidates.push_back({session, fileEntry, entryPair.second});
+        }
+    }
+
+    if (candidates.empty() || totalBytes <= quotaBytes) {
+        return;
+    }
+
+    std::sort(candidates.begin(), candidates.end(),
+        [](const GlobalCandidate& left, const GlobalCandidate& right) {
+            return left.lastAccess < right.lastAccess;
+        });
+
+    PRJ_UPDATE_FAILURE_CAUSES failureReason;
+    PRJ_UPDATE_TYPES updateFlags =
+        PRJ_UPDATE_ALLOW_DIRTY_METADATA |
+        PRJ_UPDATE_ALLOW_DIRTY_DATA     |
+        PRJ_UPDATE_ALLOW_READ_ONLY;
+
+    for (const auto& candidate : candidates) {
+        if (totalBytes <= quotaBytes) {
+            break;
+        }
+
+        const auto& fileEntry = candidate.entry;
+        if (fileEntry.type != EntryType::FILE_ENTRY) {
+            continue;
+        }
+
+        auto relativePath = fileEntry.getFullPath().string();
+        auto hr = PrjDeleteFile(candidate.session->getInstanceHandle(),
+                                fromUTF8(relativePath).c_str(),
+                                updateFlags,
+                                &failureReason);
+        if (hr == S_OK || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+            if (fileEntry.size < totalBytes) {
+                totalBytes -= static_cast<std::uint64_t>(fileEntry.size);
+            } else {
+                totalBytes = 0;
+            }
+
+            candidate.session->getFileSystem()->forgetDngAccess(fileEntry);
+        } else {
+            spdlog::debug("PrjDeleteFile for {} returned: 0x{:08x}, reason: {}",
+                          relativePath,
+                          static_cast<unsigned int>(hr),
+                          static_cast<unsigned int>(failureReason));
+        }
+    }
+}
+
+MountId FuseFileSystemImpl_Win::mount(
+    const RenderSettings& settings,
+    const std::string& srcFile,
+    const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -557,10 +801,28 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
         auto mountId = mNextMountId++;
 
         try {
-            // Extract base name from destination path
             fs::path dstPathObj(dstPath);
+            // Extract base name from destination path
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(
+                *mIoThreadPool,
+                *mProcessingThreadPool,
+                *mCache,
+                settings.renderOptions,
+                settings.draftQuality,
+                settings.cfrTarget,
+                settings.cropTarget,
+                srcFile,
+                baseName,
+                settings.cameraModel,
+                settings.levels,
+                std::string{},
+                settings.exposureCompensation,
+                std::string{},
+                settings.matrixOverrideEnabled,
+                settings.matrixProfile,
+                settings.matrixFilePath);
+
             mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
         }
         catch(std::runtime_error& e) {
@@ -577,7 +839,9 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
     mMountedFiles.erase(mountId);
 }
 
-void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings& settings) {
+void FuseFileSystemImpl_Win::updateOptions(
+    MountId mountId,
+    const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it == mMountedFiles.end())
         return;
@@ -590,6 +854,59 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
         return dynamic_cast<Session*>(it->second.get())->getFileInfo();
     }
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_Win::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        auto* fs = session->getFileSystem();
+        const std::string& srcPath = fs->getSourcePath();
+
+        // Create decoder and load frame 0
+        Decoder decoder(srcPath);
+        auto frames = decoder.getFrames();
+
+        if(frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", srcPath);
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        auto timestamp = frames[0]; // Get first frame
+
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+
+        decoder.loadFrame(timestamp, data, metadata);
+
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfiguration = CameraConfiguration::parse(decoder.getContainerMetadata());
+
+        // Get current settings
+        const std::string& levels = fs->getLevels();
+        const std::string& exposureComp = fs->getExposureCompensation();
+
+        return utils::generateJpegThumbnail(
+            data,
+            frameMetadata,
+            cameraConfiguration,
+            outputPath,
+            width,
+            height,
+            levels,
+            exposureComp
+        );
+    }
+    catch(const std::exception& e) {
+        spdlog::error("generateThumbnail(): Exception: {}", e.what());
+        return false;
+    }
 }
 
 }

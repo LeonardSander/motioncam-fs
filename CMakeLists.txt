@@ -26,6 +26,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/settingsdialog.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
@@ -33,6 +34,7 @@ set(PROJECT_SOURCES
         src/Utils.cpp
 
         include/mainwindow.h
+        include/settingsdialog.h
         include/Types.h
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h
@@ -141,9 +143,17 @@ target_include_directories(motioncam-decoder
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/include
 )
 
-# Find the packages using vcpkg
+# Find the packages using vcpkg (needed before linking)
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
+
+# Link spdlog to decoder to avoid ODR violations
+target_link_libraries(motioncam-decoder PRIVATE spdlog::spdlog fmt::fmt)
+
+# Add UTF-8 support for MSVC
+if (MSVC)
+    target_compile_options(motioncam-decoder PRIVATE /utf-8)
+endif()
 
 # Add boost
 set(Boost_USE_STATIC_LIBS        ON)
@@ -165,6 +175,19 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   fmt::fmt
   motioncam-decoder
   ${platform-specific})
+
+if(WIN32)
+  target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+  target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:projectedfslib.dll")
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/Enable_ProjFS.bat"
+      "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Enable_ProjFS.bat"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/Disable_ProjFS.bat"
+      "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Disable_ProjFS.bat"
+  )
+endif()
 
 set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
 
