@@ -19,11 +19,84 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QVBoxLayout>
+#include <QGuiApplication>
+#include <QDesktopServices>
+#include <QUrl>
 #include <spdlog/spdlog.h>
+
+#ifdef __APPLE__
+#include "CrashDebug.h"
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <cstring>
+#include <cstdio>
+#include <exception>
+#endif
 
 #ifdef _WIN32
 #include <Windows.h>
 #include <shellapi.h>
+#endif
+
+#ifdef __APPLE__
+namespace {
+int gCrashFd = -1;
+
+void writeCrashLine(const char* msg) {
+    if (gCrashFd >= 0) {
+        ::write(gCrashFd, msg, std::strlen(msg));
+    }
+}
+
+void crashHandler(int sig) {
+    writeCrashLine("\n==== MotionCamFuse crash ====\n");
+    char buf[64];
+    const int len = std::snprintf(buf, sizeof(buf), "Signal %d\n", sig);
+    if (len > 0 && gCrashFd >= 0) {
+        ::write(gCrashFd, buf, static_cast<size_t>(len));
+    }
+    motioncam::debug::dumpCrashContext(gCrashFd >= 0 ? gCrashFd : STDERR_FILENO);
+    void* stack[64];
+    const int frames = ::backtrace(stack, static_cast<int>(sizeof(stack) / sizeof(stack[0])));
+    const int fd = gCrashFd >= 0 ? gCrashFd : STDERR_FILENO;
+    ::backtrace_symbols_fd(stack, frames, fd);
+    if (gCrashFd >= 0) {
+        ::fsync(gCrashFd);
+    }
+    _Exit(128 + sig);
+}
+
+void installCrashHandler() {
+    const QString logDir = QDir(QDir::homePath()).filePath("Library/Logs/MotionCam Tools");
+    QDir().mkpath(logDir);
+    const QString logPath = QDir(logDir).filePath("crash.txt");
+    gCrashFd = ::open(logPath.toUtf8().constData(), O_CREAT | O_WRONLY | O_APPEND, 0644);
+
+    struct sigaction sa {};
+    sa.sa_handler = crashHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+    sigaction(SIGILL, &sa, nullptr);
+    sigaction(SIGFPE, &sa, nullptr);
+
+    std::set_terminate([]() {
+        writeCrashLine("\n==== MotionCamFuse terminate ====\n");
+        void* stack[64];
+        const int frames = ::backtrace(stack, static_cast<int>(sizeof(stack) / sizeof(stack[0])));
+        const int fd = gCrashFd >= 0 ? gCrashFd : STDERR_FILENO;
+        ::backtrace_symbols_fd(stack, frames, fd);
+        if (gCrashFd >= 0) {
+            ::fsync(gCrashFd);
+        }
+        _Exit(1);
+    });
+}
+} // namespace
 #endif
 
 void messageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
@@ -224,15 +297,144 @@ bool ensureProjectedFsAvailable()
 }
 #endif
 
+#ifdef __APPLE__
+bool ensureMacFuseAvailable()
+{
+    const QStringList candidates{
+        "/Library/Filesystems/macfuse.fs",
+        "/Library/Frameworks/macfuse.framework",
+        "/Library/Extensions/macfuse.kext",
+        "/Library/Frameworks/fuse_t.framework"
+    };
+
+    for (const auto& candidate : candidates) {
+        if (QFileInfo::exists(candidate)) {
+            return true;
+        }
+    }
+
+    QDialog dialog;
+    dialog.setWindowTitle("macFUSE Required");
+    dialog.setModal(true);
+    dialog.setMinimumWidth(520);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setSpacing(12);
+
+    auto* headerRow = new QHBoxLayout();
+    auto* logoLabel = new QLabel(&dialog);
+    QIcon appIcon(":/assets/app_icon_mac.png");
+    QPixmap logo = appIcon.pixmap(48, 48);
+    if (!logo.isNull()) {
+        logoLabel->setPixmap(logo);
+    }
+    auto* title = new QLabel("Welcome to MotionCam Fuse", &dialog);
+    title->setStyleSheet("font-size: 18px; font-weight: 600; color: #f0f0f0;");
+    headerRow->addStretch();
+    headerRow->addWidget(logoLabel);
+    headerRow->addSpacing(10);
+    headerRow->addWidget(title);
+    headerRow->addStretch();
+    layout->addLayout(headerRow);
+    layout->addSpacing(10);
+
+    auto* alertBox = new QLabel(&dialog);
+    alertBox->setText("macFUSE is missing or not approved.");
+    alertBox->setAlignment(Qt::AlignHCenter);
+    alertBox->setStyleSheet(
+        "font-size: 14px; color: #d1a53a; font-weight: 700;"
+        "background-color: transparent; border: 2px solid #d1a53a; border-radius: 6px;"
+        "padding: 8px 10px;");
+    alertBox->setFixedWidth(420);
+    auto* alertRow = new QHBoxLayout();
+    alertRow->addStretch();
+    alertRow->addWidget(alertBox);
+    alertRow->addStretch();
+    layout->addLayout(alertRow);
+
+    auto* body = new QLabel(&dialog);
+    body->setTextFormat(Qt::RichText);
+    body->setWordWrap(true);
+    body->setText(
+        "<div style='font-size: 13px; color: #d4d4d4;'>"
+        "<p style='margin: 0 0 8px 0;'>"
+        "MotionCam Fuse needs macFUSE to mount files."
+        "</p>"
+        "<p style='margin: 0;'>"
+        "<b>Step 1:</b> Install macFUSE (recommended) or run "
+        "<code>brew install --cask macfuse</code><br/>"
+        "<b>Step 2:</b> Open System Settings → Privacy &amp; Security and click <b>Allow</b><br/>"
+        "<b>Step 3:</b> Reboot if macOS asks"
+        "</p>"
+        "</div>");
+    layout->addWidget(body);
+
+    auto* downloadButton = new QPushButton("Open macFUSE Download", &dialog);
+    downloadButton->setDefault(true);
+    downloadButton->setAutoDefault(true);
+    downloadButton->setMinimumHeight(46);
+    downloadButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    downloadButton->setStyleSheet(
+        "QPushButton { background-color: #d1a53a; color: #111111; font-weight: 700; border-radius: 6px; }"
+        "QPushButton:hover { background-color: #e1b64a; }");
+    layout->addWidget(downloadButton);
+
+    auto* auxRow = new QHBoxLayout();
+    auxRow->setSpacing(8);
+    auxRow->setContentsMargins(0, 4, 0, 0);
+    auto* settingsButton = new QPushButton("Open Privacy & Security", &dialog);
+    auto* quitButton = new QPushButton("Quit", &dialog);
+    settingsButton->setMinimumHeight(40);
+    quitButton->setMinimumHeight(40);
+    settingsButton->setStyleSheet(
+        "QPushButton { background-color: #333333; color: #e0e0e0; border-radius: 6px; padding: 8px 12px; }"
+        "QPushButton:hover { background-color: #3a3a3a; }");
+    quitButton->setStyleSheet(
+        "QPushButton { background-color: #222222; color: #bdbdbd; border-radius: 6px; padding: 8px 12px; }"
+        "QPushButton:hover { background-color: #2a2a2a; }");
+    auxRow->addWidget(settingsButton);
+    auxRow->addWidget(quitButton);
+    layout->addLayout(auxRow);
+
+    QObject::connect(downloadButton, &QPushButton::clicked, [&dialog]() {
+        QDesktopServices::openUrl(QUrl("https://macfuse.github.io/"));
+    });
+    QObject::connect(settingsButton, &QPushButton::clicked, [&dialog]() {
+        QDesktopServices::openUrl(QUrl("x-apple.systempreferences:com.apple.preference.security?Privacy_Security"));
+    });
+    QObject::connect(quitButton, &QPushButton::clicked, &dialog, &QDialog::reject);
+
+    dialog.exec();
+    return false;
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     SingleApplication app(argc, argv);
+
+#ifdef __APPLE__
+    installCrashHandler();
+#endif
 
     // Set application properties
     app.setApplicationName("MotionCam Fuse");
     app.setApplicationVersion("1.0");
     app.setOrganizationName("MotionCam");
+#ifdef __APPLE__
+    app.setWindowIcon(QIcon(":/assets/app_icon_mac.png"));
+#else
     app.setWindowIcon(QIcon(":/assets/app_icon.png"));
+#endif
+
+#ifdef __APPLE__
+    QFont appFont = app.font();
+    if (appFont.pointSizeF() > 0) {
+        appFont.setPointSizeF(appFont.pointSizeF() + 2.0);
+        app.setFont(appFont);
+    }
+#endif
 
     // Load theme
     QFile themeFile(":qdarkstyle/dark/darkstyle.qss");
@@ -287,12 +489,36 @@ int main(int argc, char *argv[])
     }
 #endif
 
+#ifdef __APPLE__
+    if (!ensureMacFuseAvailable()) {
+        return 1;
+    }
+#endif
+
     // Create main window (initializes spdlog on Windows)
     MainWindow window;
     qInstallMessageHandler(messageHandler);
 
     // Show window first so any dialogs appear in front of the app
     window.show();
+
+#ifdef __APPLE__
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window,
+        [&window](Qt::ApplicationState state) {
+            if (state != Qt::ApplicationActive) {
+                return;
+            }
+            if (window.isVisible() && !window.isMinimized()) {
+                return;
+            }
+            window.show();
+            if (window.isMinimized()) {
+                window.showNormal();
+            }
+            window.raise();
+            window.activateWindow();
+        });
+#endif
 
     // Ask to resume previous session after showing the window
     const QString appData = qEnvironmentVariable("APPDATA");
