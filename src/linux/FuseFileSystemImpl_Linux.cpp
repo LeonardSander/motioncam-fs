@@ -2,13 +2,16 @@
 
 #include "linux/FuseFileSystemImpl_Linux.h"
 
+#include "CameraFrameMetadata.h"
 #include "LRUCache.h"
+#include "Utils.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 
 #include <BS_thread_pool.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 #include <fuse3/fuse.h>
+#include <motioncam/Decoder.hpp>
 #include <QDir>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -93,6 +96,7 @@ struct LinuxFuseSession {
         fuse_invalidate_path(mFuse, "/");
     }
     FileInfo getFileInfo() const { return mFs->getFileInfo(); }
+    VirtualFileSystemImpl_MCRAW* getFileSystem() const { return mFs; }
 
 private:
     static void* init(fuse_conn_info* connection, fuse_config* config) {
@@ -200,7 +204,8 @@ private:
 FuseFileSystemImpl_Linux::FuseFileSystemImpl_Linux()
     : mNextMountId(0), mIoThreadPool(std::make_unique<BS::thread_pool>(IO_THREADS)),
       mProcessingThreadPool(std::make_unique<BS::thread_pool>()),
-      mCache(std::make_unique<LRUCache>(CACHE_SIZE)) { setupLogging(); }
+      mCache(std::make_unique<LRUCache>(CACHE_SIZE)),
+      mCachePolicy(CachePolicy::Quota), mCacheQuotaBytes(0) { setupLogging(); }
 
 FuseFileSystemImpl_Linux::~FuseFileSystemImpl_Linux() {
     mMountedFiles.clear();
@@ -217,8 +222,12 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
         throw std::runtime_error("Failed to create " + dstPath);
     const MountId mountId = mNextMountId++;
     auto* filesystem = new VirtualFileSystemImpl_MCRAW(*mIoThreadPool,
-        *mProcessingThreadPool, *mCache, settings, srcFile,
-        fs::path(dstPath).filename().string());
+        *mProcessingThreadPool, *mCache, settings.renderOptions,
+        settings.draftQuality, settings.cfrTarget, settings.cropTarget, srcFile,
+        fs::path(dstPath).filename().string(), settings.cameraModel,
+        settings.levels, settings.logTransform, settings.exposureCompensation,
+        settings.quadBayerOption, settings.matrixOverrideEnabled,
+        settings.matrixProfile, settings.matrixFilePath);
     mMountedFiles.emplace(mountId,
         std::make_unique<LinuxFuseSession>(srcFile, dstPath, filesystem));
     return mountId;
@@ -232,5 +241,53 @@ std::optional<FileInfo> FuseFileSystemImpl_Linux::getFileInfo(MountId mountId) {
     if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
         return it->second->getFileInfo();
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_Linux::generateThumbnail(
+    MountId mountId, const std::string& outputPath, int width, int height) {
+    const auto it = mMountedFiles.find(mountId);
+    if (it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* filesystem = it->second->getFileSystem();
+        const std::string& srcPath = filesystem->getSourcePath();
+        Decoder decoder(srcPath);
+        auto frames = decoder.getFrames();
+        if (frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", srcPath);
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(frames.front(), data, metadata);
+
+        const auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        const auto cameraConfiguration =
+            CameraConfiguration::parse(decoder.getContainerMetadata());
+        return utils::generateJpegThumbnail(
+            data, frameMetadata, cameraConfiguration, outputPath, width, height,
+            filesystem->getLevels(), filesystem->getExposureCompensation());
+    } catch (const std::exception& error) {
+        spdlog::error("generateThumbnail(): Exception: {}", error.what());
+        return false;
+    }
+}
+
+void FuseFileSystemImpl_Linux::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+}
+
+void FuseFileSystemImpl_Linux::setCacheQuotaBytes(std::uint64_t bytes) {
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_Linux::cleanupCacheExpired() {
+    if (mCache)
+        mCache->cleanupExpired();
 }
 } // namespace motioncam

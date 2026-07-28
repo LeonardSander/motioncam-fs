@@ -3,12 +3,17 @@
 
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
+#include <array>
 
 #include <algorithm>
 #include <cmath>
 
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/back_inserter.hpp>
+#ifdef __APPLE__
+#include "CrashDebug.h"
+#include <sstream>
+#endif
 
 #define TINY_DNG_WRITER_IMPLEMENTATION 1
 
@@ -25,9 +30,94 @@ namespace {
     };
 
     bool isZeroMatrix(const std::array<float, 9>& matrix) {
-        for (const auto& value : matrix) 
-            if (value != 0.0f) 
+        for (const auto& value : matrix)
+            if (value != 0.0f)
                 return false;
+        return true;
+    }
+
+    const std::array<float, 3> D50_WHITE_POINT = { 0.9642f, 1.0f, 0.8251f };
+    const std::array<float, 9> D50_DIAGONAL_FORWARD = {
+        D50_WHITE_POINT[0], 0.0f, 0.0f,
+        0.0f, D50_WHITE_POINT[1], 0.0f,
+        0.0f, 0.0f, D50_WHITE_POINT[2]
+    };
+
+    std::array<float, 3> multiplyMatrixVector(const std::array<float, 9>& matrix, const std::array<float, 3>& vec) {
+        return {
+            matrix[0] * vec[0] + matrix[1] * vec[1] + matrix[2] * vec[2],
+            matrix[3] * vec[0] + matrix[4] * vec[1] + matrix[5] * vec[2],
+            matrix[6] * vec[0] + matrix[7] * vec[1] + matrix[8] * vec[2]
+        };
+    }
+
+    std::array<float, 3> forwardMatrixNeutralResponse(const std::array<float, 9>& matrix) {
+        return {
+            matrix[0] + matrix[1] + matrix[2],
+            matrix[3] + matrix[4] + matrix[5],
+            matrix[6] + matrix[7] + matrix[8]
+        };
+    }
+
+    bool normalizeForwardMatrixToD50(const std::array<float, 9>& matrix, std::array<float, 9>& normalizedMatrix) {
+        if (isZeroMatrix(matrix))
+            return false;
+
+        const auto response = forwardMatrixNeutralResponse(matrix);
+        if (std::any_of(response.begin(), response.end(), [](float v) { return std::abs(v) < 1e-9f; }))
+            return false;
+
+        normalizedMatrix = matrix;
+        for (size_t row = 0; row < 3; ++row) {
+            const float scale = D50_WHITE_POINT[row] / response[row];
+            normalizedMatrix[row * 3 + 0] *= scale;
+            normalizedMatrix[row * 3 + 1] *= scale;
+            normalizedMatrix[row * 3 + 2] *= scale;
+        }
+
+        const auto normalizedResponse = forwardMatrixNeutralResponse(normalizedMatrix);
+        const float tolerance = 1e-4f;
+        for (size_t row = 0; row < 3; ++row) {
+            if (std::abs(normalizedResponse[row] - D50_WHITE_POINT[row]) > tolerance)
+                return false;
+        }
+
+        return true;
+    }
+
+    float determinant3x3(const std::array<float, 9>& m) {
+        return m[0] * (m[4] * m[8] - m[5] * m[7]) -
+               m[1] * (m[3] * m[8] - m[5] * m[6]) +
+               m[2] * (m[3] * m[7] - m[4] * m[6]);
+    }
+
+    bool invert3x3(const std::array<float, 9>& m, std::array<float, 9>& inv) {
+        const float det = determinant3x3(m);
+        if (std::abs(det) < 1e-8f)
+            return false;
+
+        const float invDet = 1.0f / det;
+
+        inv[0] =  (m[4] * m[8] - m[5] * m[7]) * invDet;
+        inv[1] = -(m[1] * m[8] - m[2] * m[7]) * invDet;
+        inv[2] =  (m[1] * m[5] - m[2] * m[4]) * invDet;
+
+        inv[3] = -(m[3] * m[8] - m[5] * m[6]) * invDet;
+        inv[4] =  (m[0] * m[8] - m[2] * m[6]) * invDet;
+        inv[5] = -(m[0] * m[5] - m[2] * m[3]) * invDet;
+
+        inv[6] =  (m[3] * m[7] - m[4] * m[6]) * invDet;
+        inv[7] = -(m[0] * m[7] - m[1] * m[6]) * invDet;
+        inv[8] =  (m[0] * m[4] - m[1] * m[3]) * invDet;
+
+        return true;
+    }
+
+    bool deriveForwardFromColorMatrix(const std::array<float, 9>& colorMatrix, std::array<float, 9>& derivedForward) {
+        if (isZeroMatrix(colorMatrix))
+            return false;
+
+        derivedForward = colorMatrix;
         return true;
     }
 
@@ -472,17 +562,19 @@ void encodeTo2Bit(
 
 
 tinydngwriter::OpcodeList createLensShadingOpcodeList(
-    const CameraFrameMetadata& metadata,
+    const std::vector<std::vector<float>>& lensShadingMap,
+    int lensShadingMapWidth,
+    int lensShadingMapHeight,
     uint32_t imageWidth,
     uint32_t imageHeight,
     int left = 0,
     int top = 0)
 {
     tinydngwriter::OpcodeList opcodeList;
-    
-    if (metadata.lensShadingMap.empty() || 
-        metadata.lensShadingMapWidth <= 0 || 
-        metadata.lensShadingMapHeight <= 0) {
+
+    if (lensShadingMap.empty() ||
+        lensShadingMapWidth <= 0 ||
+        lensShadingMapHeight <= 0) {
         return opcodeList; // Return empty list if no shading map
     }
     
@@ -499,7 +591,7 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     // Apply starting from plane 0
     gainParams.plane = 0;
     // Determine number of planes available in the shading map (expect 4 for Bayer)
-    unsigned int availablePlanes = static_cast<unsigned int>(metadata.lensShadingMap.size());
+    unsigned int availablePlanes = static_cast<unsigned int>(lensShadingMap.size());
     if (availablePlanes == 0) availablePlanes = 1;
     if (availablePlanes >= 4) {
         gainParams.planes = 4;
@@ -510,8 +602,8 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     }
     
     // Grid size in the gain map
-    const unsigned int mapPointsV = static_cast<unsigned int>(metadata.lensShadingMapHeight);
-    const unsigned int mapPointsH = static_cast<unsigned int>(metadata.lensShadingMapWidth);
+    const unsigned int mapPointsV = static_cast<unsigned int>(lensShadingMapHeight);
+    const unsigned int mapPointsH = static_cast<unsigned int>(lensShadingMapWidth);
     gainParams.map_points_v = mapPointsV;
     gainParams.map_points_h = mapPointsH;
     
@@ -539,19 +631,19 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     gainParams.map_planes = gainParams.planes;
     
     // Fill gain data in plane-major, row-major order
-    if (!metadata.lensShadingMap.empty() && !metadata.lensShadingMap[0].empty()) {
+    if (!lensShadingMap.empty() && !lensShadingMap[0].empty()) {
         const size_t perPlaneSize = static_cast<size_t>(mapPointsV) * static_cast<size_t>(mapPointsH);
         const size_t expectedSize = perPlaneSize * static_cast<size_t>(gainParams.map_planes);
         gainParams.gain_data.reserve(expectedSize);
 
         for (unsigned int p = 0; p < gainParams.map_planes; ++p) {
-            const unsigned int srcPlane = (p < metadata.lensShadingMap.size()) ? p : 0;
+            const unsigned int srcPlane = (p < lensShadingMap.size()) ? p : 0;
             for (unsigned int v = 0; v < mapPointsV; ++v) {
                 for (unsigned int h = 0; h < mapPointsH; ++h) {
                     const size_t index = static_cast<size_t>(v) * mapPointsH + h;
                     float gain = 1.0f;
-                    if (index < metadata.lensShadingMap[srcPlane].size()) {
-                        gain = metadata.lensShadingMap[srcPlane][index];
+                    if (index < lensShadingMap[srcPlane].size()) {
+                        gain = lensShadingMap[srcPlane][index];
                         if (!std::isfinite(gain) || gain <= 0.0f) {
                             gain = 1.0f;
                         } else if (gain > 16.0f) {
@@ -587,8 +679,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     bool interpretAsQuadBayer,
     std::string cropTarget,
     std::string levels,
-    LogTransformMode logTransform,
-    QuadBayerMode quadBayerOption,
+    std::string logTransform,
+    std::string quadBayerOption,
     bool includeOpcode)
 {
     scale = (scale > 1 ? (scale / 2) * 2 : 1); // Ensure even scale for downscaling
@@ -719,66 +811,74 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
 
     int useBits = 0;
 
+    if(vignetteOnlyColor)
+        colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
+
     // When applying shading map, increase precision
     if(applyShadingMap) {
-        if(vignetteOnlyColor)
-            colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
         if(normaliseShadingMap) {
             normalizeShadingMap(lensShadingMap);
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
         } else {
-            if (debugShadingMap)
+            if (debugShadingMap) 
                 invertShadingMap(lensShadingMap);
-            else if (logTransform != LogTransformMode::Disabled) {
-                if (logTransform == LogTransformMode::KeepInput) {
+            else if (logTransform != "") {                 
+                if (logTransform == "Keep Input") {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0); //?
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-                } else if (logTransform == LogTransformMode::ReduceBy2Bit) {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
+                } else if (logTransform == "Reduce by 2bit") {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-                } else if (logTransform == LogTransformMode::ReduceBy4Bit) {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                } else if (logTransform == "Reduce by 4bit") {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-                } else if (logTransform == LogTransformMode::ReduceBy6Bit) {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                } else if (logTransform == "Reduce by 6bit") {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-                } else if (logTransform == LogTransformMode::ReduceBy8Bit) {
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
+                } else if (logTransform == "Reduce by 8bit") {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
                 } else {
                     useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                    dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
                 }
             } else {
                 useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+                dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
             }
         }
         for(auto& v : dstBlackLevel)
-            v = 0;
-    } else if (logTransform != LogTransformMode::Disabled) {
-        if (logTransform == LogTransformMode::ReduceBy2Bit) {
+            v = 0;                 
+    } else if (logTransform != "") {
+        if (logTransform == "Reduce by 2bit") {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == LogTransformMode::ReduceBy4Bit) {
+        } else if (logTransform == "Reduce by 4bit") {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == LogTransformMode::ReduceBy6Bit) {
+        } else if (logTransform == "Reduce by 6bit") {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == LogTransformMode::ReduceBy8Bit) {
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;        
+        } else if (logTransform == "Reduce by 8bit") {
             useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
+            dstWhiteLevel = std::pow(2.0f, useBits) - 1;        
         }
         for(auto& v : dstBlackLevel)
-            v = 0;
+            v = 0;       
     }
 
     // Create opcode list if requested and shading map is not applied to image data
     tinydngwriter::OpcodeList opcodeList2;
     if(includeOpcode && !applyShadingMap) {
         // Create lens shading map as opcode list 2 gain map
-        opcodeList2 = createLensShadingOpcodeList(metadata, inOutWidth, inOutHeight, left, top);
+        opcodeList2 = createLensShadingOpcodeList(
+            lensShadingMap,
+            metadata.lensShadingMapWidth,
+            metadata.lensShadingMapHeight,
+            inOutWidth,
+            inOutHeight,
+            left,
+            top);
     }
 
     //
@@ -818,40 +918,60 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                     s[3] = srcData[(srcY + cfaSize) * originalWidth + srcX + cfaSize];
                 }                
                 
-                if(applyShadingMap) {                              
-                    // Calculate position in shading map     
-                    shadingMapVals[0] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, cfa[0], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[1] = getShadingMapValue((srcX + left + scale) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, cfa[1], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[2] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + scale) * shadingMapScaleY, cfa[2], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[3] = getShadingMapValue((srcX + left + scale) * shadingMapScaleX, (srcY + top + scale) * shadingMapScaleY, cfa[3], lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                if(applyShadingMap) {
+                    // Calculate position in shading map for each pixel channel
+                    const uint32_t offsetsX[4] = {0, scale, 0, scale};
+                    const uint32_t offsetsY[4] = {0, 0, scale, scale};
+                    for (int i = 0; i < 4; i++) {
+                        const int channelIndex = cfa[i];
+                        shadingMapVals[i] = getShadingMapValue(
+                            (srcX + left + offsetsX[i]) * shadingMapScaleX,
+                            (srcY + top + offsetsY[i]) * shadingMapScaleY,
+                            channelIndex,
+                            lensShadingMap,
+                            metadata.lensShadingMapWidth,
+                            metadata.lensShadingMapHeight);
+                    }
                 }
 
                 std::array<float, 4> p;
 
                 if(debugShadingMap) {
-                    for (int i = 0; i < 4; i++)
-                        p[i] = std::max(0.0f, linear[i] * (srcWhiteLevel - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
-                } else if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
-                    for (int i = 0; i < 4; i++)
-                        p[i] = std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
-                } else {                                
+                    for (int i = 0; i < 4; i++) {
+                        const int channelIndex = cfa[i];
+                        p[i] = std::max(0.0f, linear[channelIndex] *
+                            (srcWhiteLevel - srcBlackLevel[channelIndex]) * shadingMapVals[i]) *
+                            (dstWhiteLevel - dstBlackLevel[channelIndex]);
+                    }
+                } else if (logTransform == "") {               // Linearize and (maybe) apply shading map
+                    for (int i = 0; i < 4; i++) {
+                        const int channelIndex = cfa[i];
+                        p[i] = std::max(0.0f, linear[channelIndex] *
+                            (s[i] - srcBlackLevel[channelIndex]) * shadingMapVals[i]) *
+                            (dstWhiteLevel - dstBlackLevel[channelIndex]);
+                    }
+                } else {
                     std::array<float, 4> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
-                    for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation                    
+                    for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
+                        const int channelIndex = cfa[i];
                         uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
                         // Apply multiple hash iterations to improve randomness
-                        seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
+                        seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;
                         // Generate triangular dither: sum of two uniform random values
-                        float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
+                        float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;
                         // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
                         dither[i] = (r1 + r2 - 1.0f) * 0.5f;
                         // Apply log2 transform that preserves black and white levels as identity points
-                        float logValue = std::log2(1.0f + 60.0f * std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i])) / std::log2(61.0f);                  
+                        float logValue = std::log2(1.0f + 60.0f * std::max(0.0f,
+                            linear[channelIndex] * (s[i] - srcBlackLevel[channelIndex]) * shadingMapVals[i])) / std::log2(61.0f);
                         p[i] = (logValue) * dstWhiteLevel + dither[i]; // Scale by dstWhiteLevel to match what the linearization table expects
                     }
                 }            
                 
-                for (int i = 0; i < 4; i++)
-                    s[i] = std::clamp(std::round((p[i] + dstBlackLevel[i])), 0.f, dstWhiteLevel);
+                for (int i = 0; i < 4; i++) {
+                    const int channelIndex = cfa[i];
+                    s[i] = std::clamp(std::round((p[i] + dstBlackLevel[channelIndex])), 0.f, dstWhiteLevel);
+                }
 
                 // Copy the 2x2 Bayer block
                 dstData[dstOffset]                 = static_cast<unsigned short>(s[0]);
@@ -868,30 +988,29 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                     srcData[(srcY + 2) * originalWidth + srcX + 2], srcData[(srcY + 2) * originalWidth + srcX + 3], srcData[(srcY + 3) * originalWidth + srcX + 2], srcData[(srcY + 3) * originalWidth + srcX + 3]
                 };
 
-                if(applyShadingMap) { 
-                    // Calculate position in shading map     
-                    shadingMapVals[0] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[1] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[2] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[3] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[4] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[5] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[6] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[7] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[8] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[9] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[10] = getShadingMapValue((srcX + left) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[11] = getShadingMapValue((srcX + left + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[12] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[13] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[14] = getShadingMapValue((srcX + left + cfaSize * 2) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[15] = getShadingMapValue((srcX + left + cfaSize * 2 + 1) * shadingMapScaleX, (srcY + top + cfaSize * 2 + 1) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                if(applyShadingMap) {
+                    for (int i = 0; i < 16; i++) {
+                        const int dx = i % 4;
+                        const int dy = i / 4;
+                        const int channelIndex = cfa[(dy % 2) * 2 + (dx % 2)];
+                        shadingMapVals[i] = getShadingMapValue(
+                            (srcX + left + dx) * shadingMapScaleX,
+                            (srcY + top + dy) * shadingMapScaleY,
+                            channelIndex,
+                            lensShadingMap,
+                            metadata.lensShadingMapWidth,
+                            metadata.lensShadingMapHeight);
+                    }
                 }
 
                 std::array<float, 16> p;
 
-                for (int i = 0; i < 16; i++)
-                    p[i] = linear[i%4] * (s[i] - srcBlackLevel[i%4]) * shadingMapVals[i];
+                for (int i = 0; i < 16; i++) {
+                    const int dx = i % 4;
+                    const int dy = i / 4;
+                    const int channelIndex = cfa[(dy % 2) * 2 + (dx % 2)];
+                    p[i] = linear[channelIndex] * (s[i] - srcBlackLevel[channelIndex]) * shadingMapVals[i];
+                }
 
                 std::array<float, 48> d;
 
@@ -1000,7 +1119,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 }*/
 
 
-                if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
+                if (logTransform == "") {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 16; i++)
                         p[i] = std::max(0.0f, p[i] * (dstWhiteLevel - dstBlackLevel[i%4]));
                 } else {                                
@@ -1063,8 +1182,15 @@ std::shared_ptr<std::vector<char>> generateDng(
     const CameraConfiguration& cameraConfiguration,
     float recordingFps,
     int frameNumber,
+    FileRenderOptions options,
+    int scale,
     double baselineExpValue,
-    const RenderSettings& settings)
+    std::string cropTarget, 
+    std::string camModel,
+    std::string levels,
+    std::string logTransform,
+    std::string exposureCompensation,
+    std::string quadBayerOption)
 {
     Measure m("generateDng");
 
@@ -1086,38 +1212,62 @@ std::shared_ptr<std::vector<char>> generateDng(
         throw std::runtime_error("Invalid sensor arrangement");
 
     // Scale down if requested
-    bool applyShadingMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    bool vignetteOnlyColor = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
-    bool normalizeShadingMap = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
-    bool debugShadingMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
-    bool normalizeExposure = settings.options & RENDER_OPT_NORMALIZE_EXPOSURE;
-    bool useLogCurve = settings.options & RENDER_OPT_LOG_TRANSFORM;
-    bool interpretAsQuadBayer = metadata.needRemosaic || settings.options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
+    bool applyShadingMap = options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;    
+    bool vignetteOnlyColor = options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    bool normalizeShadingMap = options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    bool debugShadingMap = options & RENDER_OPT_DEBUG_SHADING_MAP;
+    bool normalizeExposure = options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    bool useLogCurve = options & RENDER_OPT_LOG_TRANSFORM;
+    bool interpretAsQuadBayer = metadata.needRemosaic || options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
 
-    std::string cropTarget = settings.cropTarget;
-    if(!(settings.options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
+    if(!(options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
         cropTarget = "0x0";
 
+    auto preprocessStartTime = std::chrono::high_resolution_clock::now();
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2] = utils::preprocessData(
         data,
         width, height,
         metadata,
         cameraConfiguration,
         cfa,
-        settings.draftScale,
+        scale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap, interpretAsQuadBayer,
         cropTarget,
-        settings.levels,
-        settings.logTransform,
-        settings.quadBayerOption,
+        levels,
+        logTransform,
+        quadBayerOption,
         true  // includeOpcode = true to generate lens shading opcode when not applied to image
     );
+    auto preprocessMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - preprocessStartTime).count();
+    spdlog::warn("[PERF] DNG preprocessData: {}ms ({}x{})", preprocessMs, width, height);
+
+#ifdef __APPLE__
+    motioncam::debug::setDngContext(
+        frameNumber,
+        width,
+        height,
+        data.size(),
+        processedData.size());
+    motioncam::debug::setStage("generateDng: preprocessed");
+#endif
+
+    auto dngBuildStart = std::chrono::high_resolution_clock::now();
 
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
 
     // Encode to reduce size in container
     auto encodeBits = bitsNeeded(dstWhiteLevel);
+
+    // When scaling data (normalize shading map), don't drop below sensor/native depth.
+    if (normalizeShadingMap) {
+        const unsigned short sensorWhite =
+            static_cast<unsigned short>(std::round(std::max(metadata.dynamicWhiteLevel, cameraConfiguration.whiteLevel)));
+        const auto minBits = bitsNeeded(sensorWhite);
+        if (encodeBits < minBits)
+            encodeBits = minBits;
+    }
 
     if(encodeBits <= 2) {
         utils::encodeTo2Bit(processedData, width, height);
@@ -1151,6 +1301,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         encodeBits = 16;
     }
 
+
     // Create first frame
     tinydngwriter::DNGImage dng;
 
@@ -1174,12 +1325,12 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetIso(metadata.iso);
     dng.SetExposureTime(metadata.exposureTime / 1e9);
 
-    float exposureOffset = (settings.cameraModel == "Panasonic" ? -2.0f : 0.0f);
-
+    float exposureOffset = (camModel == "Panasonic" ? -2.0f : 0.0f);
+    
     // Parse float from exposureCompensation string and add to exposureOffset
-    if (!settings.exposureCompensation.empty()) {
+    if (!exposureCompensation.empty()) {
         try {
-            exposureOffset += std::stof(settings.exposureCompensation);
+            exposureOffset += std::stof(exposureCompensation);
         } catch (const std::exception&) {
             // If parsing fails, keep the original exposureOffset value
         }
@@ -1190,7 +1341,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         dng.SetBaselineExposure(exposureOffset);
 
-    if(interpretAsQuadBayer && settings.draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {   //de/remosaic need to be disabled and add ui option. 
+    if(interpretAsQuadBayer && scale == 1 && quadBayerOption == "Correct QBCFA Metadata") {   //de/remosaic need to be disabled and add ui option. 
         dng.SetCFARepeatPatternDim(4, 4);
         std::array<uint8_t, 4> cfa_pattern_0112 = {0,1,1,2};
         std::array<uint8_t, 4> cfa_pattern_2110 = {2,1,1,0};
@@ -1268,10 +1419,26 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (!isZeroMatrix(cameraConfiguration.colorMatrix2))
         dng.SetColorMatrix2(3, cameraConfiguration.colorMatrix2.data());
 
-    if (!isZeroMatrix(cameraConfiguration.forwardMatrix1))
-        dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
-    if (!isZeroMatrix(cameraConfiguration.forwardMatrix2))
-        dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
+    auto writeForwardMatrix = [&](const std::array<float, 9>& forwardMatrix,
+                                  const std::array<float, 9>& colorMatrix,
+                                  bool isFirst) {
+        std::array<float, 9> candidate;
+
+        if (!normalizeForwardMatrixToD50(forwardMatrix, candidate)) {
+            if (!deriveForwardFromColorMatrix(colorMatrix, candidate) ||
+                !normalizeForwardMatrixToD50(candidate, candidate)) {
+                candidate = D50_DIAGONAL_FORWARD;
+            }
+        }
+
+        if (isFirst)
+            dng.SetForwardMatrix1(3, candidate.data());
+        else
+            dng.SetForwardMatrix2(3, candidate.data());
+    };
+
+    writeForwardMatrix(cameraConfiguration.forwardMatrix1, cameraConfiguration.colorMatrix1, true);
+    writeForwardMatrix(cameraConfiguration.forwardMatrix2, cameraConfiguration.colorMatrix2, false);
 
     dng.SetCameraCalibration1(3, IDENTITY_MATRIX);
     dng.SetCameraCalibration2(3, IDENTITY_MATRIX);
@@ -1286,19 +1453,19 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetSoftware(software);
 
-
-    if(settings.cameraModel != ""){
-        if (settings.cameraModel == "Blackmagic") {
+    
+    if(camModel != ""){
+        if (camModel == "Blackmagic") {
             dng.SetUniqueCameraModel("Blackmagic Pocket Cinema Camera 4K");
-        } else if (settings.cameraModel == "Panasonic") {
+        } else if (camModel == "Panasonic") {
             dng.SetUniqueCameraModel("Panasonic Varicam RAW");
-        } else if (settings.cameraModel == "Fujifilm" || settings.cameraModel == "Fujifilm X-T5") {
+        } else if (camModel == "Fujifilm" || camModel == "Fujifilm X-T5") {
             dng.SetUniqueCameraModel("Fujifilm X-T5");
             dng.SetMake("Fujifilm");
             dng.SetCameraModelName("X-T5");
         } else {
             // Generic camera model
-            dng.SetUniqueCameraModel(settings.cameraModel);
+            dng.SetUniqueCameraModel(camModel);
         }
     } else {
         dng.SetUniqueCameraModel(cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
@@ -1306,6 +1473,9 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     // Add lens shading map as opcode list 2 if not applied to image data
     if (!opcodeList2.IsEmpty()) {
+#ifdef __APPLE__
+        motioncam::debug::setStage("generateDng: before opcode list");
+#endif
         dng.SetOpcodeList2(opcodeList2);
     }
 
@@ -1317,8 +1487,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetActiveArea(&activeArea[0]);
 
     // Add linearization table based on actual bit depth
-
-    if (settings.logTransform != LogTransformMode::Disabled && !(settings.logTransform == LogTransformMode::KeepInput && !applyShadingMap)) {
+    
+    if (logTransform != "" && !(logTransform == "Keep Input" && !applyShadingMap)) {
         // Create linearization table sized for the actual stored range
         // The stored values range from 0 to dstWhiteLevel, so we need dstWhiteLevel+1 entries
         const int tableSize = static_cast<int>(dstWhiteLevel) + 1;
@@ -1370,12 +1540,30 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Save to memory
     auto output = std::make_shared<std::vector<char>>();
 
+#ifdef __APPLE__
+    motioncam::debug::setStage("generateDng: before write");
+    std::ostringstream stream(std::ios::out | std::ios::binary);
+    writer.WriteToFile(stream, &err);
+    motioncam::debug::setStage("generateDng: after write");
+    const std::string payload = stream.str();
+    output->reserve(payload.size());
+    output->assign(payload.begin(), payload.end());
+#else
     // Reserve enough to fit the data
     output->reserve(width*height*sizeof(uint16_t) + 512*1024);
 
     utils::vector_ostream stream(*output);
 
     writer.WriteToFile(stream, &err);
+#endif
+
+    auto dngBuildMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::high_resolution_clock::now() - dngBuildStart).count();
+    spdlog::warn("[DNG_GEN] Frame {}: preprocess={}ms build={}ms total={}ms",
+                 frameNumber,
+                 preprocessMs,
+                 dngBuildMs,
+                 preprocessMs + dngBuildMs);
 
     return output;
 }
@@ -1407,6 +1595,187 @@ std::pair<int, int> toFraction(float frameRate, int base) {
     denominator /= divisor;
 
     return std::make_pair(numerator, denominator);
+}
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+bool generateJpegThumbnail(
+    std::vector<uint8_t>& data,
+    const CameraFrameMetadata& metadata,
+    const CameraConfiguration& cameraConfiguration,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight,
+    const std::string& levels,
+    const std::string& exposureCompensation)
+{
+    unsigned int width = metadata.width;
+    unsigned int height = metadata.height;
+
+    // Get CFA pattern indices (0=R, 1=G, 2=B)
+    std::array<uint8_t, 4> cfa;
+    if(cameraConfiguration.sensorArrangement == "rggb")
+        cfa = { 0, 1, 1, 2 };
+    else if(cameraConfiguration.sensorArrangement == "bggr")
+        cfa = { 2, 1, 1, 0 };
+    else if(cameraConfiguration.sensorArrangement == "grbg")
+        cfa = { 1, 0, 2, 1 };
+    else if(cameraConfiguration.sensorArrangement == "gbrg")
+        cfa = { 1, 2, 0, 1 };
+    else
+        cfa = { 0, 1, 1, 2 }; // Default to RGGB
+
+    // Get white balance multipliers (as shot neutral is 1/gain)
+    float rGain = 1.0f / metadata.asShotNeutral[0];
+    float gGain = 1.0f / metadata.asShotNeutral[1];
+    float bGain = 1.0f / metadata.asShotNeutral[2];
+
+    // Get black and white levels - start with dynamic metadata values
+    auto srcBlackLevel = metadata.dynamicBlackLevel;
+    float srcWhiteLevel = metadata.dynamicWhiteLevel;
+
+    // Apply levels override if specified
+    if (levels == "Static") {
+        srcBlackLevel = cameraConfiguration.blackLevel;
+        srcWhiteLevel = cameraConfiguration.whiteLevel;
+    } else if (!levels.empty()) {
+        const size_t separatorPos = levels.find('/');
+        if (separatorPos != std::string::npos) {
+            try {
+                const std::string whiteLevelStr = levels.substr(0, separatorPos);
+                const std::string blackLevelStr = levels.substr(separatorPos + 1);
+
+                // Parse white level
+                if (whiteLevelStr.find('.') != std::string::npos)
+                    srcWhiteLevel = std::stof(whiteLevelStr);
+                else
+                    srcWhiteLevel = static_cast<float>(std::stoi(whiteLevelStr));
+
+                // Parse black level
+                float blackLevelValue;
+                if (blackLevelStr.find('.') != std::string::npos)
+                    blackLevelValue = std::stof(blackLevelStr);
+                else
+                    blackLevelValue = static_cast<float>(std::stoi(blackLevelStr));
+
+                // Apply to all channels
+                srcBlackLevel[0] = blackLevelValue;
+                srcBlackLevel[1] = blackLevelValue;
+                srcBlackLevel[2] = blackLevelValue;
+                srcBlackLevel[3] = blackLevelValue;
+            } catch (const std::exception&) {
+                // If parsing fails, keep metadata values
+            }
+        }
+    }
+
+    float blackLevel = (srcBlackLevel[0] + srcBlackLevel[1] + srcBlackLevel[2] + srcBlackLevel[3]) / 4.0f;
+    float whiteLevel = srcWhiteLevel;
+    float range = whiteLevel - blackLevel;
+
+    // Parse exposure compensation
+    float exposureMultiplier = 1.0f;
+    if (!exposureCompensation.empty()) {
+        try {
+            float exposureOffset = std::stof(exposureCompensation);
+            exposureMultiplier = std::pow(2.0f, exposureOffset);
+        } catch (const std::exception&) {
+            // If parsing fails, use default
+        }
+    }
+
+    std::vector<uint8_t> rgbData(thumbWidth * thumbHeight * 3);
+
+    auto linearToSrgb = [](float v) {
+        if (v <= 0.0031308f) {
+            return 12.92f * v;
+        }
+        return 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    };
+
+    float scaleX = static_cast<float>(width) / thumbWidth;
+    float scaleY = static_cast<float>(height) / thumbHeight;
+
+    uint16_t* rawPtr = reinterpret_cast<uint16_t*>(data.data());
+
+    for (int y = 0; y < thumbHeight; ++y) {
+        for (int x = 0; x < thumbWidth; ++x) {
+            int srcX = static_cast<int>(x * scaleX) & ~1;
+            int srcY = static_cast<int>(y * scaleY) & ~1;
+
+            if (srcX >= width - 1 || srcY >= height - 1) continue;
+
+            // Get 2x2 Bayer block values
+            int idx = srcY * width + srcX;
+            uint16_t pixels[4];
+            pixels[0] = rawPtr[idx];              // top-left
+            pixels[1] = rawPtr[idx + 1];          // top-right
+            pixels[2] = rawPtr[idx + width];      // bottom-left
+            pixels[3] = rawPtr[idx + width + 1];  // bottom-right
+
+            // Demosaic based on CFA pattern
+            // cfa[i] tells us which color (0=R, 1=G, 2=B) is at position i
+            float r = 0, g = 0, b = 0;
+            int gCount = 0;
+
+            for (int i = 0; i < 4; ++i) {
+                if (cfa[i] == 0) r = pixels[i];
+                else if (cfa[i] == 1) { g += pixels[i]; gCount++; }
+                else if (cfa[i] == 2) b = pixels[i];
+            }
+
+            if (gCount > 0) g /= gCount;  // Average the green pixels
+
+            // Apply black level subtraction, normalize to 0-1 range
+            r = (r - blackLevel) / range;
+            g = (g - blackLevel) / range;
+            b = (b - blackLevel) / range;
+
+            // Clamp to valid range
+            r = std::max(0.0f, std::min(1.0f, r));
+            g = std::max(0.0f, std::min(1.0f, g));
+            b = std::max(0.0f, std::min(1.0f, b));
+
+            // Apply white balance
+            r *= rGain;
+            g *= gGain;
+            b *= bGain;
+
+            // Apply exposure compensation
+            r *= exposureMultiplier;
+            g *= exposureMultiplier;
+            b *= exposureMultiplier;
+
+            // Normalize so the brightest channel doesn't clip
+            float maxVal = std::max({r, g, b});
+            if (maxVal > 1.0f) {
+                r /= maxVal;
+                g /= maxVal;
+                b /= maxVal;
+            }
+
+            // Convert to sRGB for display
+            r = linearToSrgb(r);
+            g = linearToSrgb(g);
+            b = linearToSrgb(b);
+
+            r = std::max(0.0f, std::min(1.0f, r));
+            g = std::max(0.0f, std::min(1.0f, g));
+            b = std::max(0.0f, std::min(1.0f, b));
+
+            // Convert to 8-bit
+            float rgb[3] = {r * 255.0f, g * 255.0f, b * 255.0f};
+
+            int outIdx = (y * thumbWidth + x) * 3;
+            rgbData[outIdx + 0] = static_cast<uint8_t>(rgb[0]);
+            rgbData[outIdx + 1] = static_cast<uint8_t>(rgb[1]);
+            rgbData[outIdx + 2] = static_cast<uint8_t>(rgb[2]);
+        }
+    }
+
+    int result = stbi_write_jpg(outputPath.c_str(), thumbWidth, thumbHeight, 3, rgbData.data(), 85);
+    return result != 0;
 }
 
 } // namespace utils

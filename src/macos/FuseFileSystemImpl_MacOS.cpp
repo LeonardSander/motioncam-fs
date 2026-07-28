@@ -1,6 +1,9 @@
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
+#include "CameraFrameMetadata.h"
 #include "LRUCache.h"
+#include "Utils.h"
+#include <motioncam/Decoder.hpp>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
@@ -8,9 +11,19 @@
 #include <iostream>
 #include <pwd.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstring>
 
 #include <BS_thread_pool.hpp>
+#if __has_include(<fuse_t/fuse_t.h>)
 #include <fuse_t/fuse_t.h>
+#elif __has_include(<fuse/fuse.h>)
+#include <fuse/fuse.h>
+#elif __has_include(<fuse3/fuse.h>)
+#include <fuse3/fuse.h>
+#else
+#error "FUSE headers not found. Install macFUSE or provide FUSE headers."
+#endif
 #include <QDir>
 
 // Logging
@@ -90,7 +103,6 @@ public:
     ~Session();
 
     void updateOptions(const RenderSettings& settings);
-
     FileInfo getFileInfo() const;
 
 private:
@@ -113,6 +125,9 @@ private:
     VirtualFileSystemImpl_MCRAW* mFs;
     struct fuse_chan* mFuseCh;
     struct fuse* mFuse;
+
+public:
+    VirtualFileSystemImpl_MCRAW* getFileSystem() const { return mFs; }
 };
 
 
@@ -166,49 +181,76 @@ void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
     ops.open = fuseOpen;
     ops.read = fuseRead;
 
-    struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);
+    auto addFuseArgs = [](struct fuse_args& args, bool minimal) {
+        // argv[0] is required by macFUSE for argument parsing.
+        fuse_opt_add_arg(&args, "MotionCam Fuse");
+        // Read only
+        fuse_opt_add_arg(&args, "-r");
+        if (minimal) {
+            return;
+        }
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "nobrowse");
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "rwsize=262144");
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "nonamedattr");
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "nomtime");
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "noappledouble");
+        fuse_opt_add_arg(&args, "-o");
+        fuse_opt_add_arg(&args, "noapplexattr");
+    };
 
-    // Read only
-    fuse_opt_add_arg(&args, "-r");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "nobrowse");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "rwsize=262144");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "nonamedattr");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "nomtime");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "noappledouble");
-    fuse_opt_add_arg(&args, "-o");
-    fuse_opt_add_arg(&args, "noapplexattr");
+    auto createSession = [&](bool minimal, std::string& errorOut) -> bool {
+        struct fuse_args args = FUSE_ARGS_INIT(0, nullptr);
+        addFuseArgs(args, minimal);
 
-    auto* context = new FuseContext();
+        auto* context = new FuseContext();
+        context->fs = fs;
+        context->nextFileHandle = 0;
 
-    context->fs = fs;
-    context->nextFileHandle = 0;
+        struct fuse_chan* ch = fuse_mount(mDstPath.c_str(), &args);
+        if (ch == nullptr) {
+            const int err = errno;
+            errorOut = std::string("Failed to mount FUSE (") + std::strerror(err) + ")";
+            fuse_opt_free_args(&args);
+            delete context;
+            return false;
+        }
 
-    struct fuse_chan* ch = fuse_mount(mDstPath.c_str(), &args);
-    struct fuse* fuse = fuse_new(ch, &args, &ops, sizeof(ops), context);
+        struct fuse* fuse = fuse_new(ch, &args, &ops, sizeof(ops), context);
+        fuse_opt_free_args(&args);
 
-    // Clean up
-    fuse_opt_free_args(&args);
+        if (fuse == nullptr) {
+            const int err = errno;
+            errorOut = err == 0
+                ? "Failed to create FUSE session (errno=0). Check macFUSE approval or mount options."
+                : std::string("Failed to create FUSE session (") + std::strerror(err) + ")";
+            fuse_unmount(mDstPath.c_str(), ch);
+            delete context;
+            return false;
+        }
 
-    if (fuse == nullptr) {
-        delete context;
-        throw std::runtime_error("Failed to create mount point (path: " + mDstPath + ")");
+        mFuseCh = ch;
+        mFuse = fuse;
+        mThread = std::make_unique<std::thread>(&Session::fuseMain, this, ch, fuse);
+        return true;
+    };
+
+    std::string errorMessage;
+    if (!createSession(false, errorMessage)) {
+        spdlog::warn("FUSE session creation failed with full options: {}", errorMessage);
+        if (!createSession(true, errorMessage)) {
+            throw std::runtime_error(
+                "Failed to create FUSE session at " + mDstPath + " (error: " + errorMessage + ")");
+        }
     }
-
-    mFuseCh = ch;
-    mFuse = fuse;
-
-    // Start fuse thread
-    mThread = std::make_unique<std::thread>(&Session::fuseMain, this, ch, fuse);
 
 }
 
-void Session::updateOptions(const RenderSettings& settings)
-{
+void Session::updateOptions(const RenderSettings& settings) {
     mFs->updateOptions(settings);
 
     fuse_invalidate_path(mFuse, mDstPath.c_str());
@@ -387,11 +429,24 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
     spdlog::info("Destroying FuseFileSystemImpl_MacOs()");
 }
 
+void FuseFileSystemImpl_MacOs::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+}
+
+void FuseFileSystemImpl_MacOs::setCacheQuotaBytes(std::uint64_t bytes) {        
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_MacOs::cleanupCacheExpired() {
+    if (mCache) {
+        mCache->cleanupExpired();
+    }
+}
+
 MountId FuseFileSystemImpl_MacOs::mount(
     const RenderSettings& settings,
     const std::string& srcFile,
-    const std::string& dstPath)
-{
+    const std::string& dstPath) {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
@@ -408,6 +463,16 @@ MountId FuseFileSystemImpl_MacOs::mount(
             throw std::runtime_error("Failed to create " + dstPath);
         }
     }
+    else {
+        QFileInfo dstInfo(QString::fromStdString(dstPath));
+        if (dstInfo.exists() && !dstInfo.isDir()) {
+            throw std::runtime_error("Mount path is not a directory: " + dstPath);
+        }
+        const QStringList entries = dst.entryList(QDir::NoDotAndDotDot | QDir::AllEntries);
+        if (!entries.isEmpty()) {
+            throw std::runtime_error("Mount path is not empty. Choose an empty folder: " + dstPath);
+        }
+    }
 
     if(boost::iequals(extension, ".mcraw")) {
         auto mountId = mNextMountId++;
@@ -419,15 +484,26 @@ MountId FuseFileSystemImpl_MacOs::mount(
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-
+            
             auto* fs =
                 new VirtualFileSystemImpl_MCRAW(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
-                    settings,
+                    settings.renderOptions,
+                    settings.draftQuality,
+                    settings.cfrTarget,
+                    settings.cropTarget,
                     srcFile,
-                    baseName
+                    baseName,
+                    settings.cameraModel,
+                    settings.levels,
+                    std::string{},
+                    settings.exposureCompensation,
+                    std::string{},
+                    settings.matrixOverrideEnabled,
+                    settings.matrixProfile,
+                    settings.matrixFilePath
                 );
 
             auto session = std::make_unique<Session>(srcFile, dstPath, fs);
@@ -457,14 +533,17 @@ MountId FuseFileSystemImpl_MacOs::mount(
 void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
+        auto session = std::move(it->second);
         mMountedFiles.erase(it);
+        std::thread([session = std::move(session)]() mutable {
+            session.reset();
+        }).detach();
     }
 }
 
 void FuseFileSystemImpl_MacOs::updateOptions(
     MountId mountId,
-    const RenderSettings& settings)
-{
+    const RenderSettings& settings) {
     auto it = mMountedFiles.find(mountId);
     if(it != mMountedFiles.end()) {
         it->second->updateOptions(settings);
@@ -477,6 +556,54 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
         return it->second->getFileInfo();
     }
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_MacOs::generateThumbnail(MountId mountId, const std::string& outputPath, int width, int height) {
+    auto it = mMountedFiles.find(mountId);
+    if(it == mMountedFiles.end()) {
+        spdlog::error("generateThumbnail(): Invalid mount ID {}", mountId);
+        return false;
+    }
+
+    try {
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        auto* fs = session->getFileSystem();
+        const std::string& srcPath = fs->getSourcePath();
+
+        Decoder decoder(srcPath);
+        auto frames = decoder.getFrames();
+        if(frames.empty()) {
+            spdlog::error("generateThumbnail(): No frames in {}", srcPath);
+            return false;
+        }
+
+        std::sort(frames.begin(), frames.end());
+        const auto timestamp = frames[0];
+
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(timestamp, data, metadata);
+
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfiguration = CameraConfiguration::parse(decoder.getContainerMetadata());
+
+        const std::string& levels = fs->getLevels();
+        const std::string& exposureComp = fs->getExposureCompensation();
+
+        return utils::generateJpegThumbnail(
+            data,
+            frameMetadata,
+            cameraConfiguration,
+            outputPath,
+            width,
+            height,
+            levels,
+            exposureComp);
+    }
+    catch(const std::exception& e) {
+        spdlog::error("generateThumbnail(): Exception: {}", e.what());
+        return false;
+    }
 }
 
 } // namespace motioncam

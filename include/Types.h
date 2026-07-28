@@ -76,6 +76,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8,
     RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
     RENDER_OPT_INTERPRET_AS_QUAD_BAYER      = 1 << 10,
+    RENDER_OPT_FAST_MOUNT                   = 1 << 11,
+    RENDER_OPT_HIGH_QUALITY_FIRST_FRAME     = 1 << 12,
 };
 
 // Overload bitwise OR operator
@@ -143,7 +145,13 @@ static std::string optionsToString(FileRenderOptions options) {
     if (options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER) {
         flags.push_back("INTERPRET_AS_QUAD_BAYER");
     }
-    
+    if (options & RENDER_OPT_FAST_MOUNT) {
+        flags.push_back("FAST_MOUNT");
+    }
+    if (options & RENDER_OPT_HIGH_QUALITY_FIRST_FRAME) {
+        flags.push_back("HIGH_QUALITY_FIRST_FRAME");
+    }
+
     std::string result;
     for (size_t i = 0; i < flags.size(); ++i) {
         if (i > 0) result += " | ";
@@ -153,174 +161,19 @@ static std::string optionsToString(FileRenderOptions options) {
     return result;
 }
 
-enum class QuadBayerMode {
-    Remosaic,
-    WrongCFAMetadata,
-    CorrectQBCFAMetadata
-};
-
-enum class LogTransformMode {
-    Disabled,
-    KeepInput,
-    ReduceBy2Bit,
-    ReduceBy4Bit,
-    ReduceBy6Bit,
-    ReduceBy8Bit
-};
-
-enum class CFRMode {
-    Disabled,
-    PreferInteger,
-    PreferDropFrame,
-    MedianSlowMotion,
-    AverageTesting,
-    Custom
-};
-
-struct CFRTarget {
-    CFRMode mode;
-    float customValue; // Only used if mode == Custom
-
-    CFRTarget() : mode(CFRMode::PreferDropFrame), customValue(0.0f) {}
-    CFRTarget(CFRMode m, float val = 0.0f) : mode(m), customValue(val) {}
-};
-
-// Helper functions to convert between enums and strings
-inline std::string quadBayerModeToString(QuadBayerMode mode) {
-    switch(mode) {
-        case QuadBayerMode::Remosaic: return "Remosaic";
-        case QuadBayerMode::WrongCFAMetadata: return "Wrong CFA Metadata";
-        case QuadBayerMode::CorrectQBCFAMetadata: return "Correct QBCFA Metadata";
-        default: return "Remosaic";
-    }
-}
-
-inline QuadBayerMode stringToQuadBayerMode(const std::string& str) {
-    if (str == "Remosaic") return QuadBayerMode::Remosaic;
-    if (str == "Wrong CFA Metadata") return QuadBayerMode::WrongCFAMetadata;
-    if (str == "Correct QBCFA Metadata") return QuadBayerMode::CorrectQBCFAMetadata;
-    return QuadBayerMode::Remosaic;
-}
-
-inline std::string logTransformModeToString(LogTransformMode mode) {
-    switch(mode) {
-        case LogTransformMode::Disabled: return "";
-        case LogTransformMode::KeepInput: return "Keep Input";
-        case LogTransformMode::ReduceBy2Bit: return "Reduce by 2bit";
-        case LogTransformMode::ReduceBy4Bit: return "Reduce by 4bit";
-        case LogTransformMode::ReduceBy6Bit: return "Reduce by 6bit";
-        case LogTransformMode::ReduceBy8Bit: return "Reduce by 8bit";
-        default: return "Keep Input";
-    }
-}
-
-inline LogTransformMode stringToLogTransformMode(const std::string& str) {
-    if (str.empty() || str == "") return LogTransformMode::Disabled;
-    if (str == "Keep Input") return LogTransformMode::KeepInput;
-    if (str == "Reduce by 2bit") return LogTransformMode::ReduceBy2Bit;
-    if (str == "Reduce by 4bit") return LogTransformMode::ReduceBy4Bit;
-    if (str == "Reduce by 6bit") return LogTransformMode::ReduceBy6Bit;
-    if (str == "Reduce by 8bit") return LogTransformMode::ReduceBy8Bit;
-    return LogTransformMode::KeepInput;
-}
-
-inline CFRTarget stringToCFRTarget(const std::string& str) {
-    if (str.empty()) return CFRTarget(CFRMode::Disabled);
-    if (str == "Prefer Integer") return CFRTarget(CFRMode::PreferInteger);
-    if (str == "Prefer Drop Frame") return CFRTarget(CFRMode::PreferDropFrame);
-    if (str == "Median (Slowmotion)") return CFRTarget(CFRMode::MedianSlowMotion);
-    if (str == "Average (Testing)") return CFRTarget(CFRMode::AverageTesting);
-
-    // Try to parse as custom float
-    try {
-        float value = std::stof(str);
-        return CFRTarget(CFRMode::Custom, value);
-    } catch (...) {
-        return CFRTarget(CFRMode::PreferDropFrame);
-    }
-}
-
-inline std::string cfrTargetToString(const CFRTarget& target) {
-    switch(target.mode) {
-        case CFRMode::Disabled: return "";
-        case CFRMode::PreferInteger: return "Prefer Integer";
-        case CFRMode::PreferDropFrame: return "Prefer Drop Frame";
-        case CFRMode::MedianSlowMotion: return "Median (Slowmotion)";
-        case CFRMode::AverageTesting: return "Average (Testing)";
-        case CFRMode::Custom: return std::to_string(target.customValue);
-        default: return "Prefer Drop Frame";
-    }
-}
-
 struct RenderSettings {
-    FileRenderOptions options;
-    int draftScale;
-    CFRTarget cfrTarget;
+    FileRenderOptions renderOptions = RENDER_OPT_NONE;
+    int draftQuality = 2;
+    std::string cfrTarget;
     std::string cropTarget;
     std::string cameraModel;
     std::string levels;
-    LogTransformMode logTransform;
+    std::string logTransform;
     std::string exposureCompensation;
-    QuadBayerMode quadBayerOption;
-
-    // Constructor with defaults
-    RenderSettings()
-        : options(RENDER_OPT_NONE)
-        , draftScale(1)
-        , cfrTarget(CFRMode::PreferDropFrame)
-        , cropTarget("")
-        , cameraModel("Panasonic")
-        , levels("Dynamic")
-        , logTransform(LogTransformMode::KeepInput)
-        , exposureCompensation("0ev")
-        , quadBayerOption(QuadBayerMode::Remosaic)
-    {}
-
-    // Constructor with all parameters (strings for backward compatibility)
-    RenderSettings(
-        FileRenderOptions opts,
-        int draft,
-        const std::string& cfr,
-        const std::string& crop,
-        const std::string& camModel,
-        const std::string& lvls,
-        const std::string& logTrans,
-        const std::string& expComp,
-        const std::string& quadBayer
-    )
-        : options(opts)
-        , draftScale(draft)
-        , cfrTarget(stringToCFRTarget(cfr))
-        , cropTarget(crop)
-        , cameraModel(camModel)
-        , levels(lvls)
-        , logTransform(stringToLogTransformMode(logTrans))
-        , exposureCompensation(expComp)
-        , quadBayerOption(stringToQuadBayerMode(quadBayer))
-    {}
-
-    // Constructor with enum types directly
-    RenderSettings(
-        FileRenderOptions opts,
-        int draft,
-        const CFRTarget& cfr,
-        const std::string& crop,
-        const std::string& camModel,
-        const std::string& lvls,
-        LogTransformMode logTrans,
-        const std::string& expComp,
-        QuadBayerMode quadBayer
-    )
-        : options(opts)
-        , draftScale(draft)
-        , cfrTarget(cfr)
-        , cropTarget(crop)
-        , cameraModel(camModel)
-        , levels(lvls)
-        , logTransform(logTrans)
-        , exposureCompensation(expComp)
-        , quadBayerOption(quadBayer)
-    {}
+    std::string quadBayerOption;
+    bool matrixOverrideEnabled = false;
+    std::string matrixProfile;
+    std::string matrixFilePath;
 };
 
 } // namespace

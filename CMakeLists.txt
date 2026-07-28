@@ -7,6 +7,17 @@ if(POLICY CMP0167)
 endif()
 
 if(APPLE)
+  option(MOTIONCAMFUSE_MACOS_X86_64 "Build x86_64 on macOS (Intel / Rosetta)" OFF)
+  option(MOTIONCAMFUSE_MACOS_UNIVERSAL "Build universal macOS binary (x86_64 + arm64)" OFF)
+
+  if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
+    if(MOTIONCAMFUSE_MACOS_UNIVERSAL)
+      set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Build architectures for macOS" FORCE)
+    elseif(MOTIONCAMFUSE_MACOS_X86_64)
+      set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Build architectures for macOS" FORCE)
+    endif()
+  endif()
+
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
 endif()
 
@@ -36,6 +47,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/settingsdialog.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
@@ -43,6 +55,7 @@ set(PROJECT_SOURCES
         src/Utils.cpp
 
         include/mainwindow.h
+        include/settingsdialog.h
         include/Types.h
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h
@@ -80,10 +93,27 @@ if(WIN32)
 elseif(APPLE)
   list(APPEND PROJECT_SOURCES
       ${MACOS_BUNDLE_ICON_FILE}
+      src/CrashDebug.cpp
       src/macos/FuseFileSystemImpl_MacOS.cpp
+      include/CrashDebug.h
       include/macos/FuseFileSystemImpl_MacOS.h)
 
   find_library(FUSE_T_FRAMEWORK fuse_t)
+  if(NOT FUSE_T_FRAMEWORK)
+    find_library(FUSE_LIBRARY fuse)
+    if(FUSE_LIBRARY)
+      set(FUSE_T_FRAMEWORK ${FUSE_LIBRARY})
+    else()
+      find_library(FUSE3_LIBRARY fuse3)
+      if(FUSE3_LIBRARY)
+        set(FUSE_T_FRAMEWORK ${FUSE3_LIBRARY})
+      endif()
+    endif()
+  endif()
+
+  if(NOT FUSE_T_FRAMEWORK)
+    message(FATAL_ERROR "macFUSE not found. Install macFUSE or set FUSE_T_FRAMEWORK.")
+  endif()
 
   set(platform-specific ${FUSE_T_FRAMEWORK})
 
@@ -170,10 +200,35 @@ target_include_directories(motioncam-decoder
 )
 
 # Find the packages supplied by the active toolchain/package manager.
-# CI installs these through the host package manager.  This avoids building a
-# vcpkg tree for every workflow run.
+# Linux CI installs these through the host package manager; vcpkg provides the
+# same config packages on Windows and macOS.
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)  # Explicitly find fmt as well
+
+if(APPLE)
+  if(TARGET spdlog::spdlog_header_only)
+    set(MOTIONCAM_SPDLOG_TARGET spdlog::spdlog_header_only)
+  else()
+    set(MOTIONCAM_SPDLOG_TARGET spdlog::spdlog)
+  endif()
+
+  if(TARGET fmt::fmt-header-only)
+    set(MOTIONCAM_FMT_TARGET fmt::fmt-header-only)
+  else()
+    set(MOTIONCAM_FMT_TARGET fmt::fmt)
+  endif()
+else()
+  set(MOTIONCAM_SPDLOG_TARGET spdlog::spdlog)
+  set(MOTIONCAM_FMT_TARGET fmt::fmt)
+endif()
+
+# Link spdlog to decoder to avoid ODR violations
+target_link_libraries(motioncam-decoder PRIVATE ${MOTIONCAM_SPDLOG_TARGET} ${MOTIONCAM_FMT_TARGET})
+
+# Add UTF-8 support for MSVC
+if (MSVC)
+    target_compile_options(motioncam-decoder PRIVATE /utf-8)
+endif()
 
 # Add boost
 set(Boost_USE_STATIC_LIBS        ON)
@@ -199,10 +254,23 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   Boost::filesystem
   Boost::locale
   Boost::regex
-  spdlog::spdlog
-  fmt::fmt
+  ${MOTIONCAM_SPDLOG_TARGET}
+  ${MOTIONCAM_FMT_TARGET}
   motioncam-decoder
   ${platform-specific})
+
+if(WIN32)
+  target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+  target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:projectedfslib.dll")
+  add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/Enable_ProjFS.bat"
+      "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Enable_ProjFS.bat"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${CMAKE_CURRENT_SOURCE_DIR}/Disable_ProjFS.bat"
+      "$<TARGET_FILE_DIR:${PROJECT_NAME}>/Disable_ProjFS.bat"
+  )
+endif()
 
 set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
 

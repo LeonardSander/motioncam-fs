@@ -77,13 +77,30 @@ jobs:
         name: motioncam-Linux-AppImage
         path: artifacts/*.AppImage
 
-  build:
+  build-macos:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
-        build_type: [Release]
+        include:
+          - os: macos-15-intel
+            build_type: Release
+            build_dir: build-x86
+            mac_arch: x86_64
+            qt_arch: clang_64
+            vcpkg_triplet: x64-osx
+            artifact_suffix: macos-x86_64
+            qt_version: 6.7.2
+            qt_install: aqt
+          - os: macos-14
+            build_type: Release
+            build_dir: build-arm64
+            mac_arch: arm64
+            qt_arch: clang_arm64
+            vcpkg_triplet: arm64-osx
+            artifact_suffix: macos-arm64
+            qt_version: 6.7.2
+            qt_install: brew
 
     steps:
     # ---------- CHECKOUT ----------
@@ -99,205 +116,196 @@ jobs:
         path: |
           ~/.cache/vcpkg
           ~/Library/Caches/Homebrew
-          build/
-        key: ${{ runner.os }}-deps-${{ hashFiles('CMakeLists.txt', '.github/workflows/**') }}
+          ${{ matrix.build_dir }}
+        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', '.github/workflows/**') }}
         restore-keys: |
-          ${{ runner.os }}-deps-
+          ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-
 
     # ---------- QT ----------
-    - name: Install Qt
+    - name: Install Qt (macOS via aqt)
+      if: matrix.qt_install == 'aqt'
       uses: jurplel/install-qt-action@v3
       with:
-        version: "6.7.2"
-        host: ${{ matrix.os == 'windows-latest' && 'windows' || 'mac' }}
+        version: "${{ matrix.qt_version }}"
+        host: mac
+        target: desktop
+        arch: ${{ matrix.qt_arch }}
+        set-env: true
+
+    - name: Install Qt (macOS arm64 via Homebrew)
+      if: matrix.qt_install == 'brew'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        brew install qt@6
+        echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
 
     # ---------- VCPKG ----------
     - name: Install spdlog via vcpkg
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgArguments: spdlog
+        vcpkgTriplet: ${{ matrix.vcpkg_triplet }}
 
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macFUSE (macOS)
-      if: matrix.os == 'macos-latest'
       run: brew install --cask macfuse
 
-    - name: Install FUSE-T headers (macOS)
-      if: matrix.os == 'macos-latest'
-      shell: bash
-      run: |
-        set -euxo pipefail
-
-        FUSE_T_VERSION=1.0.49
-        PKG_URL="https://github.com/macos-fuse-t/fuse-t/releases/download/${FUSE_T_VERSION}/fuse-t-macos-installer-${FUSE_T_VERSION}.pkg"
-        echo "📦 Downloading FUSE-T from $PKG_URL"
-        curl -L -o /tmp/fuse-t.pkg "$PKG_URL"
-
-        # Clean temp dirs
-        sudo rm -rf /tmp/fuse-t-* /opt/homebrew/include/fuse_t
-        mkdir -p /tmp/fuse-t-expanded /tmp/fuse-t-payload
-
-        echo "📦 Extracting top-level pkg..."
-        if ! pkgutil --expand /tmp/fuse-t.pkg /tmp/fuse-t-expanded 2>/dev/null || [ ! "$(ls -A /tmp/fuse-t-expanded)" ]; then
-          echo "⚠️ pkgutil expand failed or empty — falling back to xar"
-          xar -xf /tmp/fuse-t.pkg -C /tmp/fuse-t-expanded || true
-        fi
-
-        echo "🔍 Searching recursively for Payload files..."
-        find /tmp/fuse-t-expanded -type f -name Payload | while read -r payload; do
-          echo "📂 Extracting payload: $payload"
-          mkdir -p /tmp/fuse-t-payload/tmp
-          cat "$payload" | gunzip -dc | (cd /tmp/fuse-t-payload && cpio -idm) || true
-        done
-
-        echo "📁 Listing extracted payload contents:"
-        find /tmp/fuse-t-payload | head -n 200 || true
-
-        # Look for Headers folders
-        HEADER_CANDIDATES=$(find /tmp/fuse-t-payload -type d \( -path "*/fuse_t.framework/Versions/A/Headers" -o -path "*/fuse_t.framework/Headers" \))
-        if [ -z "$HEADER_CANDIDATES" ]; then
-          echo "❌ Could not locate fuse_t.framework headers after extraction"
-          echo "Dumping directory tree for debugging:"
-          find /tmp/fuse-t-expanded /tmp/fuse-t-payload | head -n 300
-          exit 1
-        fi
-
-        echo "✅ Found fuse_t headers:"
-        echo "$HEADER_CANDIDATES"
-
-        sudo mkdir -p /opt/homebrew/include/fuse_t
-        for h in $HEADER_CANDIDATES; do
-          echo "📦 Copying headers from $h"
-          sudo cp -R "$h"/* /opt/homebrew/include/fuse_t/ || true
-        done
-
-        echo "✅ Final installed headers:"
-        ls -la /opt/homebrew/include/fuse_t
-
-        echo "📦 Installing fuse_t.framework to /Library/Frameworks..."
-        sudo mkdir -p /Library/Frameworks
-        sudo cp -R "/tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework" "/Library/Frameworks/"
-        sudo chmod -R 755 "/Library/Frameworks/fuse_t.framework"
-        echo "✅ Installed framework at /Library/Frameworks/fuse_t.framework"
-
-
-    - name: Debug FUSE-T header location
-      if: matrix.os == 'macos-latest'
-      continue-on-error: true
-      shell: bash
-      run: |
-        echo "🔍 Searching for fuse_t.h..."
-        find /opt/homebrew /usr/local /Library /Applications /private/tmp -type f -name fuse_t.h || true
-
     # ---------- CONFIGURE ----------
-    - name: Configure CMake (Windows)
-      if: matrix.os == 'windows-latest'
-      shell: pwsh
+    - name: Clean build directory (macOS)
+      shell: bash
       run: |
-        # run-vcpkg configures the GHA binary source, but the runtime cache
-        # credentials are not available during CMake's manifest install.
-        $env:VCPKG_BINARY_SOURCES = "clear"
-        cmake -S . -B build `
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
-          -DCMAKE_VERBOSE_MAKEFILE=ON `
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/msvc2019_64" `
-          -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
+        rm -rf "${{ matrix.build_dir }}"
 
     - name: Configure CMake (macOS)
-      if: matrix.os == 'macos-latest'
       shell: bash
       run: |
         export VCPKG_BINARY_SOURCES=clear
         BREW_PREFIX="$(brew --prefix)"
-        cmake -S . -B build \
+        FUSE_LIB=""
+        for candidate in "$BREW_PREFIX/lib/libfuse.2.dylib" "/usr/local/lib/libfuse.2.dylib" "/opt/homebrew/lib/libfuse.2.dylib"; do
+          if [ -f "$candidate" ]; then
+            FUSE_LIB="$candidate"
+            break
+          fi
+        done
+        if [ -z "$FUSE_LIB" ]; then
+          echo "macFUSE libfuse.2.dylib not found"
+          exit 1
+        fi
+        QT_PREFIX="${Qt6_ROOT_DIR:-${Qt6_DIR:-}}"
+        if [ -z "$QT_PREFIX" ] || [ ! -d "$QT_PREFIX" ]; then
+          if [ -d "${GITHUB_WORKSPACE}/Qt/${{ matrix.qt_version }}/macos" ]; then
+            QT_PREFIX="${GITHUB_WORKSPACE}/Qt/${{ matrix.qt_version }}/macos"
+          else
+            QT_PREFIX="$(brew --prefix qt@6)"
+          fi
+        fi
+        cmake -S . -B "${{ matrix.build_dir }}" \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX" \
-          -DCMAKE_CXX_FLAGS="-I/opt/homebrew/include -I/opt/homebrew/include/fuse_t" \
-          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Frameworks" \
-          -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"
-
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
+          -DCMAKE_OSX_ARCHITECTURES=${{ matrix.mac_arch }} \
+          -DCMAKE_PREFIX_PATH="${QT_PREFIX};$BREW_PREFIX" \
+          -DCMAKE_CXX_FLAGS="-I$BREW_PREFIX/include" \
+          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib" \
+          -DFUSE_T_FRAMEWORK="$FUSE_LIB"
 
     # ---------- BUILD ----------
     - name: Build
-      run: cmake --build build --config ${{ matrix.build_type }} --parallel
-
-
-
-    - name: Bundle fuse_t.framework into app (macOS)
-      if: matrix.os == 'macos-latest'
-      shell: bash
-      run: |
-        set -eux
-        APP_PATH=$(find build -name "*.app" | head -n 1)
-        if [ -z "$APP_PATH" ]; then
-          echo "❌ No .app found!"
-          exit 1
-        fi
-    
-        echo "📦 Bundling fuse_t.framework into $APP_PATH"
-        mkdir -p "$APP_PATH/Contents/Frameworks"
-    
-        # Locate the framework (from extracted FUSE-T)
-        FRAMEWORK_SRC="/tmp/fuse-t-payload/Library/Frameworks/fuse_t.framework"
-        if [ ! -d "$FRAMEWORK_SRC" ]; then
-          echo "❌ fuse_t.framework not found at $FRAMEWORK_SRC"
-          exit 1
-        fi
-    
-        # Copy into the app
-        cp -R "$FRAMEWORK_SRC" "$APP_PATH/Contents/Frameworks/"
-    
-        # Fix rpath so the app looks inside its own bundle
-        install_name_tool -change \
-          "/Library/Frameworks/fuse_t.framework/Versions/A/fuse_t" \
-          "@rpath/fuse_t.framework/Versions/A/fuse_t" \
-          "$APP_PATH/Contents/MacOS/MotionCamFuse"
-    
-        # Ensure the app searches its own Frameworks dir
-        install_name_tool -add_rpath "@executable_path/../Frameworks" \
-          "$APP_PATH/Contents/MacOS/MotionCamFuse"
-    
-        echo "✅ fuse_t.framework successfully bundled."
-        ls -R "$APP_PATH/Contents/Frameworks"
-
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
 
     # ---------- PACKAGE ----------
-    - name: Package binaries
+    - name: Package binaries (macOS)
       shell: bash
       run: |
         mkdir -p artifacts
-        if [[ "${{ runner.os }}" == "Windows" ]]; then
-          cd build/${{ matrix.build_type }}
-          exe=$(ls *.exe 2>/dev/null | head -n 1)
-          if [ -n "$exe" ]; then
-            echo "Running windeployqt on $exe"
-            "${{ github.workspace }}/Qt/6.7.2/msvc2019_64/bin/windeployqt.exe" "$exe" || echo "windeployqt failed"
-            7z a ../../artifacts/motioncam-${{ github.ref_name }}-windows.zip ./*
-          fi
-        elif [[ "${{ runner.os }}" == "macOS" ]]; then
-          cd build
-          app=$(find . -name "*.app" | head -n 1)
-          if [ -n "$app" ]; then
-            echo "Running macdeployqt on $app"
-            macdeployqt "$app" -verbose=2 || echo "macdeployqt failed"
-            zip -r ../artifacts/motioncam-${{ github.ref_name }}-macos.zip "$app"
-          fi
+        ref_safe="${GITHUB_REF_NAME//\//-}"
+        app=$(find "${{ matrix.build_dir }}" -name "*.app" | head -n 1)
+        if [ -n "$app" ]; then
+          echo "Packaging $app"
+          bash scripts/package_macos_app.sh "$app"
+          zip -r artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}.zip "$app"
         fi
 
     # ---------- UPLOAD ----------
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: motioncam-${{ runner.os }}
+        name: motioncam-${{ matrix.artifact_suffix }}
+        path: artifacts/*
+
+  build-windows:
+    runs-on: ${{ matrix.os }}
+    needs: build-macos
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            build_type: Release
+            build_dir: build
+            vcpkg_triplet: x64-windows
+            artifact_suffix: windows
+            qt_version: 6.7.2
+            qt_arch: win64_msvc2019_64
+
+    steps:
+    # ---------- CHECKOUT ----------
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    # ---------- CACHE ----------
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/vcpkg
+          build/
+        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', '.github/workflows/**') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-
+
+    # ---------- QT ----------
+    - name: Install Qt (Windows)
+      uses: jurplel/install-qt-action@v3
+      with:
+        version: "${{ matrix.qt_version }}"
+        host: windows
+        target: desktop
+        arch: ${{ matrix.qt_arch }}
+        set-env: true
+
+    # ---------- VCPKG ----------
+    - name: Install spdlog via vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgArguments: spdlog
+        vcpkgTriplet: ${{ matrix.vcpkg_triplet }}
+
+    # ---------- CONFIGURE ----------
+    - name: Configure CMake (Windows)
+      shell: pwsh
+      run: |
+        cmake -S . -B ${{ matrix.build_dir }} `
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+          -DCMAKE_VERBOSE_MAKEFILE=ON `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/${{ matrix.qt_version }}/${{ matrix.qt_arch }}" `
+          -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
+
+    # ---------- BUILD ----------
+    - name: Build
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
+
+    # ---------- PACKAGE ----------
+    - name: Package binaries (Windows)
+      shell: bash
+      run: |
+        mkdir -p artifacts
+        ref_safe="${GITHUB_REF_NAME//\//-}"
+        cd ${{ matrix.build_dir }}/${{ matrix.build_type }}
+        exe=$(ls *.exe 2>/dev/null | head -n 1)
+        if [ -n "$exe" ]; then
+          echo "Running windeployqt on $exe"
+          "${{ github.workspace }}/Qt/${{ matrix.qt_version }}/${{ matrix.qt_arch }}/bin/windeployqt.exe" "$exe" || echo "windeployqt failed"
+          7z a ../../artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}.zip ./*
+        fi
+
+    # ---------- UPLOAD ----------
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: motioncam-${{ matrix.artifact_suffix }}
         path: artifacts/*
 
   # ---------- RELEASE ----------
   release:
     name: Create GitHub Release
-    needs: [build, linux-appimage]
+    needs: [linux-appimage, build-macos, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -308,9 +316,3 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        with:
-          files: release-files/**/*
-          tag_name: ${{ github.ref_name }}
-          name: "MotionCam-FS ${{ github.ref_name }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
