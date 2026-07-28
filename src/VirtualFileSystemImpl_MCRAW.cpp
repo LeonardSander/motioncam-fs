@@ -485,8 +485,9 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mMatrixFilePath(""),
         mPrefetchWindow(6) {
 
-#ifdef __APPLE__
-    // macOS: match legacy behavior (always cache, no read-ahead prefetch).
+#if defined(__APPLE__) || defined(__linux__)
+    // FUSE-backed platforms use the legacy behavior: always cache generated
+    // frames and avoid speculative read-ahead from concurrent kernel reads.
     mCache.setStreamingBypass(false);
     mPrefetchWindow = 0;
 #else
@@ -572,7 +573,7 @@ void VirtualFileSystemImpl_MCRAW::init(FileRenderOptions options) {
         std::lock_guard<std::mutex> lock(mPrefetchMutex);
         mPrefetchFutures.clear();
         mPrefetchOrder.clear();
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__linux__)
         mPrefetchOrderIndex.clear();
 #endif
     }
@@ -912,7 +913,7 @@ std::shared_future<VirtualFileSystemImpl_MCRAW::FrameData> VirtualFileSystemImpl
         auto [it, inserted] = mPrefetchFutures.emplace(timestamp, sharedFuture);
         if (inserted) {
             mPrefetchOrder.push_back(timestamp);
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__linux__)
             mPrefetchOrderIndex[timestamp] = std::prev(mPrefetchOrder.end());
 #endif
             trimPrefetchLocked();
@@ -927,7 +928,7 @@ void VirtualFileSystemImpl_MCRAW::trimPrefetchLocked() {
     while (mPrefetchOrder.size() > mPrefetchWindow + 2) {
         auto oldest = mPrefetchOrder.front();
         mPrefetchOrder.pop_front();
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__linux__)
         mPrefetchOrderIndex.erase(oldest);
 #endif
         mPrefetchFutures.erase(oldest);
@@ -963,7 +964,7 @@ void VirtualFileSystemImpl_MCRAW::scheduleReadahead(size_t currentIndex) {
             std::lock_guard<std::mutex> lock(mPrefetchMutex);
             if (mPrefetchFutures.emplace(timestamp, fut).second) {
                 mPrefetchOrder.push_back(timestamp);
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__linux__)
                 mPrefetchOrderIndex[timestamp] = std::prev(mPrefetchOrder.end());
 #endif
                 trimPrefetchLocked();
@@ -975,7 +976,7 @@ void VirtualFileSystemImpl_MCRAW::scheduleReadahead(size_t currentIndex) {
 void VirtualFileSystemImpl_MCRAW::consumePrefetch(Timestamp timestamp) {
     std::lock_guard<std::mutex> lock(mPrefetchMutex);
     mPrefetchFutures.erase(timestamp);
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__linux__)
     auto it = std::find(mPrefetchOrder.begin(), mPrefetchOrder.end(), timestamp);
     if (it != mPrefetchOrder.end()) {
         mPrefetchOrder.erase(it);
@@ -1105,8 +1106,9 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
             // Add to cache
             if (cache.isStreamingBypassActive()) {
                 spdlog::debug("[CACHE] SKIP STORE (streaming): {}", entry.name);
-#ifdef __APPLE__
-                // Release any in-progress marker to avoid repeated timeouts on macOS.
+#if defined(__APPLE__) || defined(__linux__)
+                // Release any in-progress marker to avoid repeated timeouts on
+                // FUSE-backed platforms.
                 cache.markLoadFailed(entry);
 #endif
             } else {

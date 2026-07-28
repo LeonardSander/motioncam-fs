@@ -55,6 +55,8 @@
 #include <sys/mount.h>
 #elif __linux__
 #include "linux/FuseFileSystemImpl_Linux.h"
+#include <cerrno>
+#include <sys/stat.h>
 #endif
 
 namespace {
@@ -104,6 +106,30 @@ namespace {
         const double bps = kbps * 1024.0;
         return QString::number(bps, 'f', 0) + " B/s";
     }
+
+#ifdef __linux__
+    bool cleanupStaleLinuxFuseMount(const QString& mountPath, QString& errorMessage) {
+        const QByteArray nativePath = QFile::encodeName(QDir::cleanPath(mountPath));
+        struct stat pathStat {};
+        if (::lstat(nativePath.constData(), &pathStat) == 0 || errno != ENOTCONN) {
+            return true;
+        }
+
+        QProcess fusermount;
+        fusermount.start("fusermount3", {"-u", QDir::cleanPath(mountPath)});
+        if (!fusermount.waitForStarted() || !fusermount.waitForFinished(10000) ||
+            fusermount.exitStatus() != QProcess::NormalExit ||
+            fusermount.exitCode() != 0) {
+            const QString details = QString::fromLocal8Bit(fusermount.readAllStandardError()).trimmed();
+            errorMessage = QString("A stale FUSE mount exists at %1 and could not be detached%2.")
+                               .arg(QDir::cleanPath(mountPath),
+                                    details.isEmpty() ? QString() : QString(": %1").arg(details));
+            return false;
+        }
+
+        return true;
+    }
+#endif
 
     void applyRenderOptionsToUi(Ui::MainWindow& ui, motioncam::FileRenderOptions options) {
         QSignalBlocker blockDraft(ui.draftModeCheckBox);
@@ -931,15 +957,17 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 QString MainWindow::mountDestinationPath(const QFileInfo& fileInfo) const {
-#ifdef __APPLE__
     QString mountRoot = mCacheRootFolder;
+#ifdef __APPLE__
     if (mountRoot.isEmpty()) {
         mountRoot = QDir(QDir::homePath()).filePath("Mounts/MotionCamFuse");
     }
-    return QDir(mountRoot).filePath(fileInfo.baseName());
 #else
-    return (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
+    if (mountRoot.isEmpty()) {
+        mountRoot = fileInfo.path();
+    }
 #endif
+    return QDir::cleanPath(QDir(mountRoot).filePath(fileInfo.baseName()));
 }
 
 void MainWindow::deleteMountOutputIfRequested(const QString& mountPath) {
@@ -1008,6 +1036,10 @@ bool MainWindow::mountFileBackend(const QString& filePath, motioncam::MountId& m
 
 #ifdef __APPLE__
     cleanupStaleMacFuseMounts();
+#elif __linux__
+    if (!cleanupStaleLinuxFuseMount(dstPath, errorMessage)) {
+        return false;
+    }
 #endif
 
 #ifdef _WIN32
