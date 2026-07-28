@@ -53,7 +53,7 @@ jobs:
         DESTDIR="$PWD/AppDir" cmake --install build-linux --prefix /usr --strip
         install -Dm644 packaging/linux/com.motioncam.fuse.desktop \
           AppDir/usr/share/applications/com.motioncam.fuse.desktop
-        install -Dm644 assets/app_icon.png \
+        install -Dm644 assets/app_icon_linux.png \
           AppDir/usr/share/icons/hicolor/256x256/apps/motioncam-fuse.png
         curl -L --retry 3 -o linuxdeploy.AppImage \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
@@ -65,7 +65,7 @@ jobs:
         ./linuxdeploy.AppImage --appimage-extract-and-run \
           --appdir AppDir \
           --desktop-file packaging/linux/com.motioncam.fuse.desktop \
-          --icon-file assets/app_icon.png \
+          --icon-file assets/app_icon_linux.png \
           --plugin qt \
           --output appimage
         mkdir -p artifacts
