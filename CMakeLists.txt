@@ -1,10 +1,20 @@
 cmake_minimum_required(VERSION 3.16)
 
+# CMake 4 prefers Boost's package config; distributions still commonly ship
+# only the classic FindBoost metadata.
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 OLD)
+endif()
+
 if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
 endif()
 
 project(MotionCamFuse VERSION 1.0 LANGUAGES CXX)
+
+# The compiler is selected by the caller before project(); CI explicitly uses
+# Clang and this makes the resulting compile database available to developers.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -77,6 +87,16 @@ elseif(APPLE)
 
   set(platform-specific ${FUSE_T_FRAMEWORK})
 
+elseif(UNIX)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3)
+
+  list(APPEND PROJECT_SOURCES
+      src/linux/FuseFileSystemImpl_Linux.cpp
+      include/linux/FuseFileSystemImpl_Linux.h)
+
+  set(platform-specific PkgConfig::FUSE3)
+
 endif()
 
 set(CMAKE_AUTOUIC_SEARCH_PATHS ui)
@@ -106,7 +126,10 @@ endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=26)
+target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64)
+if(APPLE)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE FUSE_USE_VERSION=26)
+endif()
 
 # # Debug configuration with sanitizers
 # if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -134,6 +157,11 @@ add_library(motioncam-decoder STATIC
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData_Legacy.cpp)
 
+# The pinned decoder revision uses std::memcpy/std::memset in its legacy
+# decoder without directly including <cstring>. Keep this compatibility fix in
+# the parent project so a clean submodule checkout also builds with Clang.
+target_precompile_headers(motioncam-decoder PRIVATE <cstring>)
+
 target_include_directories(motioncam-decoder
     PUBLIC
     ${DEPENDENCIES_PATH}/bw64/include
@@ -141,9 +169,11 @@ target_include_directories(motioncam-decoder
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/include
 )
 
-# Find the packages using vcpkg
-find_package(spdlog CONFIG REQUIRED)
-find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
+# Find the packages supplied by the active toolchain/package manager.
+# CI installs these through the host package manager.  This avoids building a
+# vcpkg tree for every workflow run.
+find_package(spdlog REQUIRED)
+find_package(fmt REQUIRED)  # Explicitly find fmt as well
 
 # Add boost
 set(Boost_USE_STATIC_LIBS        ON)
@@ -152,15 +182,23 @@ set(Boost_USE_RELEASE_LIBS       ON)
 set(Boost_USE_MULTITHREADED      ON)
 set(Boost_USE_STATIC_RUNTIME    OFF)
 
-find_package(Boost 1.86.0 REQUIRED COMPONENTS filesystem algorithm locale)
-if(Boost_FOUND)
-  include_directories(${Boost_INCLUDE_DIRS})
-endif()
+find_package(Boost 1.74 REQUIRED COMPONENTS filesystem locale regex)
+
+# Header-only and pinned: fetching this is much quicker than a vcpkg setup.
+include(FetchContent)
+FetchContent_Declare(bs_thread_pool
+    GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
+    GIT_TAG v4.1.0
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(bs_thread_pool)
+target_include_directories(${PROJECT_NAME} PRIVATE ${bs_thread_pool_SOURCE_DIR}/include)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Network
-  ${Boost_FILESYSTEM_LIBRARY}
+  Boost::filesystem
+  Boost::locale
+  Boost::regex
   spdlog::spdlog
   fmt::fmt
   motioncam-decoder
