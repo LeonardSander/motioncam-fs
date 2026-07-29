@@ -46,6 +46,9 @@ jobs:
     - name: Build
       run: cmake --build build-linux --parallel
 
+    - name: Test
+      run: ctest --test-dir build-linux --output-on-failure
+
     - name: Create AppImage
       shell: bash
       run: |
@@ -223,6 +226,9 @@ jobs:
     # ---------- BUILD ----------
     - name: Build
       run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+    - name: Test
+      run: ctest --test-dir build --config ${{ matrix.build_type }} --output-on-failure
 
 
 

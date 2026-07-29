@@ -21,9 +21,7 @@ int main(int argc, char *argv[])
     // Load theme
     QFile themeFile(":qdarkstyle/dark/darkstyle.qss");
 
-    if (themeFile.exists())   {
-        themeFile.open(QFile::ReadOnly | QFile::Text);
-
+    if (themeFile.open(QFile::ReadOnly | QFile::Text)) {
         QTextStream ts(&themeFile);
         app.setStyleSheet(ts.readAll());
     }

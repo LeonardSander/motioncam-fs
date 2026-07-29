@@ -191,6 +191,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
         cameraConfig,
         mFps,
         0,
+        static_cast<int>(frames.size()),
         mBaselineExpValue,
         mSettings,
         exposureKeyframes,
@@ -332,8 +333,17 @@ void VirtualFileSystemImpl_MCRAW::init() {
 }
 
 std::vector<Entry> VirtualFileSystemImpl_MCRAW::listFiles(const std::string& filter) const {
-    // TODO: Use filter
-    return mFiles;
+    if (filter.empty()) {
+        return mFiles;
+    }
+
+    std::vector<Entry> filteredFiles;
+    for (const auto& entry : mFiles) {
+        if (entry.name.find(filter) != std::string::npos) {
+            filteredFiles.push_back(entry);
+        }
+    }
+    return filteredFiles;
 }
 
 std::optional<Entry> VirtualFileSystemImpl_MCRAW::findEntry(const std::string& fullPath) const {
@@ -442,19 +452,18 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 mQuadBayerOption
             );*/
             
-            bool enableCompression = settings.options & RENDER_OPT_JPEG_COMPRESSION;
-
             auto dngData = utils::generateDng(
                 *frameData,
                 frameMetadata,
                 containerMetadata,
                 fps,
                 frameIndex,
+                mFileInfo.totalFrames,
                 baselineExpValue,
                 settings,
                 exposureKeyframes,
                 calibration,
-                enableCompression);
+                false);
 
             if(dngData && pos < dngData->size()) {
                 // Calculate length to copy

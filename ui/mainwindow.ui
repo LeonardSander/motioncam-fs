@@ -586,7 +586,7 @@
          <item>
           <widget class="QCheckBox" name="dngCompressionCheckBox">
            <property name="text">
-            <string>Enable DNG Compression (JPEG)</string>
+            <string>Enable DNG Compression (Lossless JPEG)</string>
            </property>
            <property name="checked">
             <bool>false</bool>
@@ -596,7 +596,7 @@
          <item>
           <widget class="QLabel" name="compressionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply high-quality JPEG compression when finalizing DNG sequences. Reduces file size by 40-60% with near-lossless quality. Universal compatibility. Only works with Finalize button (not virtual filesystem).&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply lossless JPEG compression when finalizing MCRAW sequences. Pixel values are preserved exactly; file-size reduction depends on the footage. Compression is not used by the virtual filesystem.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

@@ -279,18 +279,30 @@ std::string getDisplayDataLevels(
         srcWhiteLevel = dynWhiteLevel;
         srcBlackLevel = dynBlackLevel;
     } else if (levels == "Static") {
-        srcWhiteLevel = dynWhiteLevel;
-        srcBlackLevel = dynBlackLevel;
+        srcWhiteLevel = statWhiteLevel;
+        srcBlackLevel = statBlackLevel;
     } else {
         const size_t separatorPos = levels.find('/');
         if (separatorPos != std::string::npos) {
             try {            
                 srcWhiteLevel = std::stof(levels.substr(0, separatorPos));
-                if (levels.substr(separatorPos + 1).find(',') == std::string::npos) {
-                    float blackLevelValue = std::stof(levels.substr(separatorPos + 1));
+                const std::string blackLevels = levels.substr(separatorPos + 1);
+                if (blackLevels.find(',') == std::string::npos) {
+                    float blackLevelValue = std::stof(blackLevels);
                     srcBlackLevel = {blackLevelValue, blackLevelValue, blackLevelValue, blackLevelValue};
                 } else {
-                    //TODO: implement different bl per channel like input 1023.0/64.0,63.8,63.9,63.9
+                    std::stringstream values(blackLevels);
+                    std::string value;
+                    size_t channel = 0;
+                    while (channel < srcBlackLevel.size() &&
+                           std::getline(values, value, ',')) {
+                        srcBlackLevel[channel++] = std::stof(value);
+                    }
+                    if (channel != srcBlackLevel.size() ||
+                        std::getline(values, value, ',')) {
+                        throw std::invalid_argument(
+                            "Expected exactly four black-level values");
+                    }
                 }
             } catch (const std::exception&) {
                 srcWhiteLevel = dynWhiteLevel;
@@ -325,7 +337,8 @@ std::string getDisplayDataLevels(
             useBits -= 6;
         if (logTransform == "Reduce by 8bit" || logTransform == "Reduce by 8bit lq")
             useBits -= 8;
-        dstWhiteLevel = std::pow(2.0f, std::min(16, useBits)) - 1;
+        useBits = std::clamp(useBits, 1, 16);
+        dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         for (auto& v : dstBlackLevel)
             v = 0;
     }    

@@ -144,6 +144,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     const CameraConfiguration& cameraConfiguration,
     float recordingFps,
     int frameNumber,
+    int totalFrames,
     double baselineExpValue,
     const RenderSettings& settings,
     const std::optional<ExposureKeyframes>& exposureKeyframes = std::nullopt,
@@ -162,17 +163,6 @@ void remosaicRGBToBayer(
     int width,
     int height,
     const std::string& cfaPhase = "bggr");
-
-// ============================================================================
-// Text Burn-in
-// ============================================================================
-
-void burnInText(
-    std::vector<uint8_t>& data,
-    uint32_t width,
-    uint32_t height,
-    const std::string& text,
-    uint16_t whiteLevel);
 
 } // namespace utils
 } // namespace motioncam

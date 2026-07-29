@@ -2,12 +2,15 @@
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <spdlog/spdlog.h>
 
 namespace motioncam {
 
 std::optional<ExposureKeyframes> ExposureKeyframes::parse(const std::string& input) {
-    if (input.empty()) {
+    // A single EV value (for example "0ev") is handled by RenderSettings.
+    // Keyframe syntax always contains at least one position/value separator.
+    if (input.empty() || input.find(':') == std::string::npos) {
         return std::nullopt;
     }
     
@@ -54,7 +57,11 @@ std::optional<ExposureKeyframes> ExposureKeyframes::parse(const std::string& inp
             position = 1.0f;
         } else {
             try {
-                position = std::stof(posStr);
+                size_t parsed = 0;
+                position = std::stof(posStr, &parsed);
+                if (parsed != posStr.size() || !std::isfinite(position)) {
+                    throw std::invalid_argument("invalid position");
+                }
             } catch (const std::exception& e) {
                 spdlog::warn("Invalid position value: {}", posStr);
                 continue;
@@ -70,7 +77,11 @@ std::optional<ExposureKeyframes> ExposureKeyframes::parse(const std::string& inp
         // Parse value
         float value;
         try {
-            value = std::stof(valStr);
+            size_t parsed = 0;
+            value = std::stof(valStr, &parsed);
+            if (parsed != valStr.size() || !std::isfinite(value)) {
+                throw std::invalid_argument("invalid exposure");
+            }
         } catch (const std::exception& e) {
             spdlog::warn("Invalid exposure value: {}", valStr);
             continue;
@@ -85,6 +96,20 @@ std::optional<ExposureKeyframes> ExposureKeyframes::parse(const std::string& inp
     
     // Sort keyframes by position
     std::sort(result.mKeyframes.begin(), result.mKeyframes.end());
+
+    // If a position is repeated, use its last specified value. This both makes
+    // the input deterministic and prevents zero-length interpolation segments.
+    std::vector<ExposureKeyframe> uniqueKeyframes;
+    uniqueKeyframes.reserve(result.mKeyframes.size());
+    for (const auto& keyframe : result.mKeyframes) {
+        if (!uniqueKeyframes.empty() &&
+            uniqueKeyframes.back().position == keyframe.position) {
+            uniqueKeyframes.back().value = keyframe.value;
+        } else {
+            uniqueKeyframes.push_back(keyframe);
+        }
+    }
+    result.mKeyframes = std::move(uniqueKeyframes);
     
     // Calculate derivatives based on rules:
     // - derivative = 0 for most keyframes (smooth)

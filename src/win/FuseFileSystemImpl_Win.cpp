@@ -287,13 +287,17 @@ HRESULT Session::GetDirEnum(
     if (!dirInfo->EntriesFilled())
     {
         // Fill the directory info structure
-        auto files = mFs->listFiles(toUTF8(SearchExpression));
+        auto files = mFs->listFiles("");
 
         for(auto& x : files) {
+            const auto wideName = fromUTF8(x.name);
+            if (!PrjFileNameMatch(wideName.c_str(), SearchExpression)) {
+                continue;
+            }
             if(x.type == EntryType::DIRECTORY_ENTRY)
-                dirInfo->FillDirEntry(fromUTF8(x.name).c_str());
+                dirInfo->FillDirEntry(wideName.c_str());
             else if(x.type == EntryType::FILE_ENTRY)
-                dirInfo->FillFileEntry(fromUTF8(x.name).c_str(), x.size);
+                dirInfo->FillFileEntry(wideName.c_str(), x.size);
         }
 
         // This will ensure the entries in the DirInfo are sorted the way the file system expects.

@@ -86,17 +86,15 @@ if(WIN32)
         include/win/FuseFileSystemImpl_Win.h
         include/win/virtualizationInstance.h)
 
-    # Find ProjectedFSLib for Windows
-    find_library(projected-fs 
-        NAMES ProjectedFSLib
-        PATHS 
-            "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64"
-            "C:/Program Files (x86)/Windows Kits/10/Lib/*/um/x64"
-        NO_DEFAULT_PATH
-    )
+    # Visual Studio and the Windows SDK expose this through their normal
+    # library search paths. CI may also provide it explicitly with
+    # -Dprojected-fs=<path>.
+    if(NOT projected-fs)
+        find_library(projected-fs NAMES ProjectedFSLib)
+    endif()
     
     if(NOT projected-fs)
-        message(FATAL_ERROR "ProjectedFSLib not found. Please install Windows SDK 10.0.26100.0 or later")
+        message(FATAL_ERROR "ProjectedFSLib not found. Install the Windows SDK and enable the Projected File System feature.")
     endif()
 
     set(platform-specific ${projected-fs})
@@ -149,9 +147,6 @@ endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 
-# Explicitly set lj92.c to be compiled as C
-set_source_files_properties(deps/motioncam-decoder/thirdparty/lj92/lj92.c PROPERTIES LANGUAGE C)
-
 target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64)
 if(APPLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE FUSE_USE_VERSION=26)
@@ -163,11 +158,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         # MSVC with PDB symbols (not LLDB-compatible)
         target_compile_options(${PROJECT_NAME} PRIVATE /Zi /Od /MDd)
         target_link_options(${PROJECT_NAME} PRIVATE /DEBUG:FASTLINK)
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         # Clang/GCC with DWARF symbols (LLDB-compatible)
         target_compile_options(${PROJECT_NAME} PRIVATE -g -O0 -gdwarf-4 -fno-omit-frame-pointer)
         # Better debugging experience
         target_compile_options(${PROJECT_NAME} PRIVATE -fno-limit-debug-info)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${PROJECT_NAME} PRIVATE -g -O0 -gdwarf-4 -fno-omit-frame-pointer)
     endif()
 endif()
 
@@ -352,6 +349,25 @@ install(TARGETS ${PROJECT_NAME}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(motioncam-core-tests
+        tests/core_tests.cpp
+        src/ExposureKeyframes.cpp)
+    target_include_directories(motioncam-core-tests PRIVATE include)
+    target_link_libraries(motioncam-core-tests PRIVATE spdlog::spdlog)
+    add_test(NAME motioncam-core-tests COMMAND motioncam-core-tests)
+
+    add_executable(motioncam-lossless-jpeg-test
+        tests/lossless_jpeg_test.cpp
+        deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
+    target_include_directories(motioncam-lossless-jpeg-test PRIVATE
+        deps/motioncam-decoder/thirdparty
+        deps/motioncam-decoder/thirdparty/liblj92)
+    add_test(NAME motioncam-lossless-jpeg-test
+        COMMAND motioncam-lossless-jpeg-test)
+endif()
 
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(${PROJECT_NAME})

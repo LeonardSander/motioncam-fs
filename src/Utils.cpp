@@ -1318,6 +1318,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     const CameraConfiguration& cameraConfiguration,
     float recordingFps,
     int frameNumber,
+    int totalFrames,
     double baselineExpValue,
     const RenderSettings& settings,
     const std::optional<ExposureKeyframes>& exposureKeyframes,
@@ -1396,19 +1397,13 @@ std::shared_ptr<std::vector<char>> generateDng(
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
 
-    // Burn in ISO text
-    std::string isoText = "ISO " + std::to_string(metadata.iso);
-    utils::burnInText(processedData, width, height, isoText, dstWhiteLevel);
-
     // Encode to reduce size in container
     auto actualBits = utils::bitsNeeded(dstWhiteLevel);
     auto encodeBits = actualBits;
 
     // Skip packing if compression is enabled - lj92 needs unpacked 16-bit data
     // The compression will handle the redundancy
-    spdlog::info("Before encoding check: compressionEnabled={}", compressionEnabled);
     if (!compressionEnabled) {
-        spdlog::info("Entering encoding branch (compression is disabled)");
         if(encodeBits <= 2) {
             utils::encodeTo2Bit(processedData, width, height);
             encodeBits = 2;
@@ -1463,13 +1458,11 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetBlackLevelRepeatDim(2, 2);
         
     // Set compression based on user preference (BEFORE SetImageData)
-    spdlog::info("About to check compressionEnabled, value is: {}", compressionEnabled);
     if (compressionEnabled) {
-        spdlog::info("Entering compression branch, calling SetCompression");
-        bool compressionSet = dng.SetCompression(tinydngwriter::COMPRESSION_JPEG);
-        spdlog::info("SetCompression(COMPRESSION_JPEG={}) returned: {}", static_cast<int>(tinydngwriter::COMPRESSION_JPEG), compressionSet);
+        if (!dng.SetCompression(tinydngwriter::COMPRESSION_JPEG)) {
+            throw std::runtime_error("Failed to enable lossless JPEG compression");
+        }
     } else {
-        spdlog::info("Entering NO compression branch");
         dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
     }
 
@@ -1481,7 +1474,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Calculate frame-specific exposure compensation
     std::string frameExposureComp = settings.exposureCompensation;
     if (exposureKeyframes.has_value()) {
-        float exposureValue = exposureKeyframes->getExposureAtFrame(frameNumber, 1000);
+        float exposureValue = exposureKeyframes->getExposureAtFrame(frameNumber, totalFrames);
         frameExposureComp = std::to_string(exposureValue);
     }
     
@@ -1655,7 +1648,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool needsLinearization = (settings.logTransform != LogTransformMode::Disabled && 
                                !(settings.logTransform == LogTransformMode::KeepInput && !applyShadingMap));
     
-    if (needsLinearization && dstWhiteLevel > 0 && dstWhiteLevel < 65536) {
+    if (needsLinearization && dstWhiteLevel > 0) {
         spdlog::debug("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}", 
                      logTransformModeToString(settings.logTransform), applyShadingMap, dstWhiteLevel);
         // Create linearization table sized for the actual stored range
@@ -1694,7 +1687,7 @@ std::shared_ptr<std::vector<char>> generateDng(
             spdlog::debug("Added linearization table with {} entries for log transform", tableSize);
             std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
             dng.SetBlackLevel(4, linearBlackLevel.data());
-            dng.SetWhiteLevel(65534);
+            dng.SetWhiteLevel(static_cast<unsigned short>(65534));
         }
     } else {           
         dng.SetBlackLevel(4, dstBlackLevel.data());
@@ -1708,12 +1701,6 @@ std::shared_ptr<std::vector<char>> generateDng(
         throw std::runtime_error("Failed to set image data: " + dng.Error());
     }
     
-    // Log any messages from compression (they're in Error() even on success)
-    std::string compressionInfo = dng.Error();
-    if (!compressionInfo.empty()) {
-        spdlog::info("DNG processing info: {}", compressionInfo);
-    }
-
     // Write DNG
     std::string err;
 

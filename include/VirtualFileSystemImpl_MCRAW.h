@@ -81,7 +81,7 @@ private:
     std::string mExposureCompensation;
     QuadBayerMode mQuadBayerOption;
     FileRenderOptions mOptions;*/
-    RenderSettings mSettings; //EVALUATE
+    RenderSettings mSettings;
     float mFps;
     FrameRateInfo mFrameRateInfo;
     FileInfo mFileInfo;

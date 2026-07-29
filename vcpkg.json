@@ -4,6 +4,8 @@
         "boost-filesystem",
         "boost-locale",
         "boost-iostreams",
+        "boost-regex",
+        "fmt",
         "spdlog",
         "bshoshany-thread-pool",
         {

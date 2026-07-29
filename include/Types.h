@@ -287,7 +287,7 @@ struct RenderSettings {
         , logTransform(LogTransformMode::KeepInput)
         , exposureCompensation("0ev")
         , quadBayerOption(QuadBayerMode::Remosaic)
-        , cfaPhase("bggr")
+        , cfaPhase("Don't override CFA")
     {}
 
     // Constructor with all parameters (strings for backward compatibility)
@@ -301,7 +301,7 @@ struct RenderSettings {
         const std::string& log,
         const std::string& exp = "0ev",
         const std::string& qb = "Remosaic",
-        const std::string& cfa = "bggr")
+        const std::string& cfa = "Don't override CFA")
         : options(opts)
         , draftScale(draft)
         , cfrTarget(stringToCFRTarget(cfr))
@@ -325,7 +325,7 @@ struct RenderSettings {
         LogTransformMode logTrans,
         const std::string& expComp,
         QuadBayerMode quadBayer,
-        const std::string& cfa = "bggr")
+        const std::string& cfa = "Don't override CFA")
         : options(opts)
         , draftScale(draft)
         , cfrTarget(cfr)

@@ -32,6 +32,7 @@ using namespace motioncam;
 #include <QFrame>
 #include <QProgressDialog>
 #include <QThread>
+#include <QUuid>
 #include <algorithm>
 #include <QTimer>
 #include <QtConcurrent>
@@ -548,6 +549,11 @@ void MainWindow::mountFile(const QString& filePath) {
     auto* finalizeButton = new QPushButton("Finalize", fileWidget);
     finalizeButton->setFixedSize(buttonWidth, buttonHeight);
     finalizeButton->setToolTip("Render all frames to disk with compression (if enabled), then unmount");
+    const bool canFinalize = filePath.endsWith(".mcraw", Qt::CaseInsensitive);
+    finalizeButton->setEnabled(canFinalize);
+    if (!canFinalize) {
+        finalizeButton->setToolTip("Finalizing is currently supported for MCRAW files only");
+    }
     buttonLayout->addWidget(finalizeButton);
 
     // Add stretch to push buttons to the left
@@ -723,6 +729,16 @@ void MainWindow::discardFile(QWidget* fileWidget) {
         spdlog::error("Discard failed: mount path not found");
         return;
     }
+
+    const auto answer = QMessageBox::warning(
+        this,
+        "Discard rendered files?",
+        QString("Unmount and permanently delete all files in:\n%1").arg(mountPath),
+        QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+    if (answer != QMessageBox::Discard) {
+        return;
+    }
     
     // First unmount
     bool ok = false;
@@ -832,24 +848,21 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     }
     
     int totalFrames = fileInfo->totalFrames - fileInfo->droppedFrames + fileInfo->duplicatedFrames;
-    
-    
-    // First unmountW
-    mFuseFilesystem->unmount(mountId);
+    if (totalFrames <= 0) {
+        QMessageBox::warning(this, "Finalize failed", "The clip contains no renderable frames.");
+        return;
+    }
     
     // Use a temporary directory to avoid ProjectedFS locks
     // We'll write to temp, then move files to the final location
-    QString tempPath = mountPath + "_temp";
+    QString tempPath = mountPath + ".finalizing-" +
+        QUuid::createUuid().toString(QUuid::WithoutBraces);
     QDir tempDir(tempPath);
-    
-    // Remove temp directory if it exists
-    if (tempDir.exists()) {
-        tempDir.removeRecursively();
-    }
     
     // Create temp directory
     if (!tempDir.mkpath(".")) {
         spdlog::error("Failed to create temp directory: {}", tempPath.toStdString());
+        QMessageBox::critical(this, "Finalize failed", "Could not create the temporary render directory.");
         return;
     }
     
@@ -865,13 +878,14 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     auto settings = buildRenderSettings();
     bool enableCompression = settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION;
 
-    spdlog::info("Starting finalize for {} ({} frames from fileInfo, compression: {})", 
+    spdlog::info("Starting finalize for {} ({} frames from fileInfo, compression: {})",
                  srcFile.toStdString(), totalFrames, enableCompression ? "enabled" : "disabled");
     spdlog::info("Compression checkbox state: {}", enableCompression);
     
     
     // Render all frames directly to disk (bypassing ProjectedFS)
     // This allows compression to work correctly with variable file sizes
+    bool mountReleased = false;
     try {
         // Open the decoder directly
         motioncam::Decoder decoder(srcFile.toStdString());
@@ -879,9 +893,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         std::sort(frames.begin(), frames.end());
         
         if (frames.empty()) {
-            spdlog::error("No frames found in source file");
-            progress.close();
-            return;
+            throw std::runtime_error("No frames found in source file");
         }
         
         spdlog::info("Found {} actual frames in source file", frames.size());
@@ -920,9 +932,6 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         // Get base name for files
         QString baseName = QFileInfo(srcFile).completeBaseName();
         
-        // Calculate scale using the same method as VirtualFileSystemImpl
-        int scale = motioncam::vfs::getScaleFromOptions(settings.options, settings.draftScale);
-        
         // Handle CFR conversion if enabled
         int lastPts = 0;
         int outputFrameCount = 0;
@@ -934,13 +943,6 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             decoder.loadFrame(frames[i], frameData, metadata);
             
             auto frameMetadata = motioncam::CameraFrameMetadata::parse(metadata);
-            
-            // Calculate frame-specific exposure compensation
-            std::string frameExposureComp = settings.exposureCompensation;
-            if (exposureKeyframes.has_value()) {
-                float exposureValue = exposureKeyframes->getExposureAtFrame(i, frames.size());
-                frameExposureComp = std::to_string(exposureValue);
-            }
             
             // Handle CFR conversion (duplicate frames if needed)
             int pts = lastPts;
@@ -956,20 +958,19 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 QApplication::processEvents();
                 
                 // Generate DNG
-                spdlog::info("MAINWINDOW: About to call generateDng with config.enableCompression={}", enableCompression);
                 auto dngData = motioncam::utils::generateDng(
                     frameData,
                     frameMetadata,
                     cameraConfig,
                     fps,
                     outputFrameCount,
+                    totalFrames,
                     baselineExpValue,
                     settings,
                     exposureKeyframes,
                     calibration,
                     enableCompression
                 );
-                spdlog::info("MAINWINDOW: generateDng returned");
                 
                 // Write to temp directory
                 if (dngData && dngData->size() > 0) {
@@ -984,20 +985,19 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                     }
                     
                     QFile file(framePath);
-                    if (file.open(QIODevice::WriteOnly)) {
-                        qint64 written = file.write(reinterpret_cast<const char*>(dngData->data()), dngData->size());
-                        file.close();
-                        
-                        if (written != static_cast<qint64>(dngData->size())) {
-                            spdlog::error("Frame {}: wrote {} bytes but expected {}", outputFrameCount, written, dngData->size());
-                        } else if (outputFrameCount == 0) {
-                            spdlog::info("First frame written successfully");
-                        }
-                    } else {
-                        spdlog::error("Failed to write frame {}: {}", outputFrameCount, file.errorString().toStdString());
+                    if (!file.open(QIODevice::WriteOnly)) {
+                        throw std::runtime_error(
+                            "Failed to open output frame: " + file.errorString().toStdString());
+                    }
+                    qint64 written = file.write(
+                        reinterpret_cast<const char*>(dngData->data()),
+                        static_cast<qint64>(dngData->size()));
+                    file.close();
+                    if (written != static_cast<qint64>(dngData->size())) {
+                        throw std::runtime_error("Failed to write a complete DNG frame");
                     }
                 } else {
-                    spdlog::error("Frame {}: DNG generation failed", outputFrameCount);
+                    throw std::runtime_error("DNG generation returned no data");
                 }
                 
                 outputFrameCount++;
@@ -1016,39 +1016,46 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             progress.setLabelText("Moving files to final location...");
             QApplication::processEvents();
             
-            // Clear the original mount directory
+            // Keep the active mount intact until rendering has fully succeeded.
+            mFuseFilesystem->unmount(mountId);
+            mountReleased = true;
+#ifdef _WIN32
+            QThread::msleep(150);
+#endif
+
             QDir mountDir(mountPath);
-            if (mountDir.exists()) {
-                mountDir.removeRecursively();
+            if (mountDir.exists() && !mountDir.removeRecursively()) {
+                throw std::runtime_error("Could not remove the unmounted output directory");
             }
-            mountDir.mkpath(".");
-            
-            // Move all files from temp to final location
-            QStringList tempFiles = tempDir.entryList(QStringList() << "*.dng", QDir::Files);
-            int movedCount = 0;
-            for (const QString& fileName : tempFiles) {
-                QString srcPath = tempDir.absoluteFilePath(fileName);
-                QString dstPath = mountDir.absoluteFilePath(fileName);
-                if (QFile::rename(srcPath, dstPath)) {
-                    movedCount++;
-                } else {
-                    spdlog::error("Failed to move file: {} to {}", srcPath.toStdString(), dstPath.toStdString());
-                }
+
+            QDir parentDir(QFileInfo(mountPath).absolutePath());
+            if (!parentDir.rename(tempPath, mountPath)) {
+                throw std::runtime_error("Could not move the completed render into place");
             }
-            
-            // Remove temp directory
-            tempDir.removeRecursively();
-            
-            spdlog::info("Finalize complete: {} frames rendered and moved to {}", movedCount, mountPath.toStdString());
+
+            spdlog::info("Finalize complete: {} frames rendered to {}",
+                         outputFrameCount, mountPath.toStdString());
         } else {
             spdlog::info("Finalize cancelled by user at frame {} of {}", outputFrameCount, totalFrames);
-            // Clean up temp directory
             tempDir.removeRecursively();
+            return;
         }
         
     } catch (const std::exception& e) {
         spdlog::error("Finalize failed: {}", e.what());
+        if (!mountReleased) {
+            tempDir.removeRecursively();
+        }
         progress.close();
+        QString message = QString::fromStdString(e.what());
+        if (mountReleased && tempDir.exists()) {
+            message += QString("\n\nThe completed temporary render was preserved at:\n%1")
+                           .arg(tempPath);
+        }
+        QMessageBox::critical(
+            this,
+            "Finalize failed",
+            message);
         return;
     }
     
