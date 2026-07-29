@@ -7,8 +7,7 @@
 
 namespace motioncam {
 
-// Forward declare AudioChunk from Types.h
-using AudioChunk = std::pair<Timestamp, std::vector<int16_t>>;
+struct AudioChunk;
 
 struct FrameRateInfo {
     float minFrameRate;

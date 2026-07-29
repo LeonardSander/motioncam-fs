@@ -226,7 +226,15 @@ void VirtualFileSystemImpl_MCRAW::init() {
 
     if(!audioChunks.empty()) {
         auto fpsFraction = utils::toFraction(mFps);
-        AudioWriter audioWriter(mAudioFile, decoder.numAudioChannels(), decoder.audioSampleRateHz(), fpsFraction.first, fpsFraction.second);
+        AudioSampleFormat audioFormat = audioChunks[0].format;
+        int bitDepth = audioFormat == AudioSampleFormat::Float32 ? 32 : 16;
+        AudioWriter audioWriter(
+            mAudioFile,
+            decoder.numAudioChannels(),
+            decoder.audioSampleRateHz(),
+            fpsFraction.first,
+            fpsFraction.second,
+            bitDepth);
 
         // Sync the audio to the video
         vfs::syncAudio(
@@ -238,8 +246,13 @@ void VirtualFileSystemImpl_MCRAW::init() {
         // Calculate total audio duration
         size_t totalSamples = 0;
         for(auto& x : audioChunks) {
-            audioWriter.write(x.second, x.second.size() / decoder.numAudioChannels());
-            totalSamples += x.second.size() / decoder.numAudioChannels();
+            int numFrames = x.sampleCount() / decoder.numAudioChannels();
+            if (audioFormat == AudioSampleFormat::Float32) {
+                audioWriter.write(x.float32Data, numFrames);
+            } else {
+                audioWriter.write(x.int16Data, numFrames);
+            }
+            totalSamples += numFrames;
         }
         
         if (decoder.audioSampleRateHz() > 0) {

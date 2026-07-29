@@ -1,4 +1,5 @@
 #include "VirtualFileSystemImpl.h"
+#include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -193,11 +194,13 @@ void syncAudio(
         return;
     }
 
-    auto audioVideoDriftMs = (audioChunks[0].first - videoTimestamp) * 1e-6f;
+    auto audioVideoDriftMs = (audioChunks[0].timestamp - videoTimestamp) * 1e-6f;
     if (std::abs(audioVideoDriftMs) > 1000) {
         spdlog::warn("Audio drift too large, not syncing audio");
         return;
     }
+
+    AudioSampleFormat format = audioChunks[0].format;
 
     if (audioVideoDriftMs > 0) {
         int audioFramesToRemove = static_cast<int>(std::round(audioVideoDriftMs * sampleRate / 1000));
@@ -209,13 +212,22 @@ void syncAudio(
         while (it != audioChunks.end() && samplesRemoved < samplesToRemove) {
             int remainingSamplesToRemove = samplesToRemove - samplesRemoved;
 
-            if (it->second.size() <= static_cast<size_t>(remainingSamplesToRemove)) {
-                samplesRemoved += it->second.size();
+            size_t chunkSize = it->sampleCount();
+            if (chunkSize <= static_cast<size_t>(remainingSamplesToRemove)) {
+                samplesRemoved += chunkSize;
                 it = audioChunks.erase(it);
             }
             else {
-                it->second.erase(it->second.begin(), it->second.begin() + remainingSamplesToRemove);
-                it->first += static_cast<Timestamp>(remainingSamplesToRemove * 1000 / sampleRate);
+                if (format == AudioSampleFormat::Float32) {
+                    it->float32Data.erase(
+                        it->float32Data.begin(),
+                        it->float32Data.begin() + remainingSamplesToRemove);
+                } else {
+                    it->int16Data.erase(
+                        it->int16Data.begin(),
+                        it->int16Data.begin() + remainingSamplesToRemove);
+                }
+                it->timestamp += static_cast<Timestamp>(remainingSamplesToRemove * 1000 / sampleRate);
                 break;
             }
         }
@@ -225,13 +237,19 @@ void syncAudio(
         int silenceFrames = static_cast<int>(std::round(silenceDuration * sampleRate / 1000));
         int silenceSamples = silenceFrames * numChannels;
 
-        std::vector<int16_t> silenceData(silenceSamples, 0);
-        AudioChunk silenceChunk = std::make_pair(videoTimestamp, silenceData);
+        AudioChunk silenceChunk;
+        silenceChunk.timestamp = videoTimestamp;
+        silenceChunk.format = format;
+        if (format == AudioSampleFormat::Float32) {
+            silenceChunk.float32Data.resize(silenceSamples, 0.0f);
+        } else {
+            silenceChunk.int16Data.resize(silenceSamples, 0);
+        }
 
-        audioChunks.insert(audioChunks.begin(), silenceChunk);
+        audioChunks.insert(audioChunks.begin(), std::move(silenceChunk));
 
         for (auto it = audioChunks.begin() + 1; it != audioChunks.end(); ++it) {
-            it->first += silenceDuration;
+            it->timestamp += silenceDuration;
         }
     }
 }

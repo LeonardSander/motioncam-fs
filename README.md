@@ -72,11 +72,16 @@ These cached files will remain in storage for now when unmounting MCRAW or closi
 
 ---
 
-### Platform Support
+### Linux build and AppImage
 
-Currently, **only Windows builds** are up to date with the presented functionality. For now to install the current version it is required to use an older Fuse installer first like mentioned [here](https://discord.com/channels/980884979955421255/1377309561219973121/1418033196762665093). 
+Linux requires FUSE3 (the user must be permitted to mount FUSE filesystems), Qt 6, Boost filesystem/locale/regex, fmt, spdlog, and Clang. On Debian/Ubuntu, install the native development packages and configure:
 
-For [Mac](https://discord.com/channels/980884979955421255/981049638079582208/1416131149528432672) and [Linux](https://discord.com/channels/980884979955421255/1377309561219973121/1390627443550851102) only older Fuse builds are available.
+```bash
+sudo apt install clang ninja-build pkg-config libfuse3-dev libboost-filesystem-dev libboost-locale-dev libboost-regex-dev libspdlog-dev libfmt-dev
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build --parallel
+```
+
 
 [Changelog](https://discord.com/channels/980884979955421255/1377309561219973121/1420903594198040717) in reply chain
 

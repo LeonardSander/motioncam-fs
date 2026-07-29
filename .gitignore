@@ -1,5 +1,8 @@
 build/
 build-clang-debug/
+build-*/
+AppDir/
+artifacts/
 .vs/
 .vscode/
 cache/

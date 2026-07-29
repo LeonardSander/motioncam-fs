@@ -45,6 +45,8 @@ using namespace motioncam;
 #include "win/FuseFileSystemImpl_Win.h"
 #elif __APPLE__
 #include "macos/FuseFileSystemImpl_MacOS.h"
+#elif __linux__
+#include "linux/FuseFileSystemImpl_Linux.h"
 #endif
 
 namespace {
@@ -139,6 +141,8 @@ MainWindow::MainWindow(QWidget *parent)
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Win>();
 #elif __APPLE__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_MacOs>();
+#elif __linux__
+    mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Linux>();
 #endif
 
     // Enable drag and drop on the scroll area
@@ -663,6 +667,8 @@ void MainWindow::openMountedDirectory(QWidget* fileWidget) {
     success = QProcess::startDetached("explorer", QStringList() << QDir::toNativeSeparators(mountPath));
 #elif __APPLE__
     success = QProcess::startDetached("/usr/bin/open", QStringList() << mountPath);
+#elif __linux__
+    success = QProcess::startDetached("xdg-open", QStringList() << mountPath);
 #endif
 
     if (!success)
