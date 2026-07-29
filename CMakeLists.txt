@@ -4,7 +4,7 @@ if(APPLE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
 endif()
 
-project(MotionCamFuse VERSION 1.0 LANGUAGES CXX)
+project(MotionCamFuse VERSION 1.0 LANGUAGES C CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -78,7 +78,18 @@ if(WIN32)
         include/win/FuseFileSystemImpl_Win.h
         include/win/virtualizationInstance.h)
 
-    find_library(projected-fs ProjectedFSLib)
+    # Find ProjectedFSLib for Windows
+    find_library(projected-fs 
+        NAMES ProjectedFSLib
+        PATHS 
+            "C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64"
+            "C:/Program Files (x86)/Windows Kits/10/Lib/*/um/x64"
+        NO_DEFAULT_PATH
+    )
+    
+    if(NOT projected-fs)
+        message(FATAL_ERROR "ProjectedFSLib not found. Please install Windows SDK 10.0.26100.0 or later")
+    endif()
 
     set(platform-specific ${projected-fs})
 elseif(APPLE)
@@ -120,7 +131,27 @@ endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE_VERSION=26)
+# Explicitly set lj92.c to be compiled as C
+set_source_files_properties(deps/motioncam-decoder/thirdparty/lj92/lj92.c PROPERTIES LANGUAGE C)
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE 
+    _FILE_OFFSET_BITS=64 
+    FUSE_USE_VERSION=26
+)
+
+# Debug symbols configuration
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        # MSVC with PDB symbols (not LLDB-compatible)
+        target_compile_options(${PROJECT_NAME} PRIVATE /Zi /Od /MDd)
+        target_link_options(${PROJECT_NAME} PRIVATE /DEBUG:FASTLINK)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # Clang/GCC with DWARF symbols (LLDB-compatible)
+        target_compile_options(${PROJECT_NAME} PRIVATE -g -O0 -gdwarf-4 -fno-omit-frame-pointer)
+        # Better debugging experience
+        target_compile_options(${PROJECT_NAME} PRIVATE -fno-limit-debug-info)
+    endif()
+endif()
 
 # # Debug configuration with sanitizers
 # if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -146,7 +177,8 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64 FUSE_USE
 add_library(motioncam-decoder STATIC
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Decoder.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData.cpp
-    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData_Legacy.cpp)
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData_Legacy.cpp
+    ${DEPENDENCIES_PATH}/motioncam-decoder/thirdparty/liblj92/lj92.c)
 
 target_include_directories(motioncam-decoder
     PUBLIC
@@ -181,7 +213,8 @@ if(FFMPEG_ROOT)
     endif()
 endif()
 
-if(NOT FFMPEG_FOUND)
+if(NOT FFMPEG_FOUND AND NOT WIN32)
+    # Skip pkg-config on Windows as it doesn't work well with vcpkg + Clang
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
@@ -207,12 +240,18 @@ endif()
 
 # Last resort: manually find libraries in vcpkg directory
 if(NOT FFMPEG_FOUND AND WIN32)
-    set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/vcpkg_installed/x64-windows")
+    set(VCPKG_INSTALLED_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows")
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/debug/lib")
     else()
         set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/lib")
     endif()
+    
+    # Clear cached values to force re-search
+    unset(AVFORMAT_LIBRARY CACHE)
+    unset(AVCODEC_LIBRARY CACHE)
+    unset(SWSCALE_LIBRARY CACHE)
+    unset(AVUTIL_LIBRARY CACHE)
     
     find_library(AVFORMAT_LIBRARY avformat PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
     find_library(AVCODEC_LIBRARY avcodec PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)

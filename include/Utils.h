@@ -12,6 +12,7 @@
 
 #include "Types.h"
 #include "CalibrationData.h"
+#include "ExposureKeyframes.h"
 
 namespace tinydngwriter {
     class OpcodeList;
@@ -63,6 +64,17 @@ public:
 // ============================================================================
 
 unsigned short bitsNeeded(unsigned short value);
+
+// ============================================================================
+// Bit Encoding Functions (RGB/Multi-Channel)
+// ============================================================================
+
+void encodeRGBTo4Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
+void encodeRGBTo6Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
+void encodeRGBTo8Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
+void encodeRGBTo10Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
+void encodeRGBTo12Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
+void encodeRGBTo14Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
 
 // ============================================================================
 // Bit Encoding Functions (Bayer/Single-Channel)
@@ -122,8 +134,8 @@ preprocessData(
     bool interpretAsQuadBayer,
     std::string cropTarget,
     std::string levels,
-    std::string logTransform,
-    std::string quadBayerOption,
+    LogTransformMode logTransform,
+    QuadBayerMode quadBayerOption,
     bool includeOpcode);
 
 std::shared_ptr<std::vector<char>> generateDng(
@@ -133,16 +145,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     float recordingFps,
     int frameNumber,
     double baselineExpValue,
-    const RenderSettings& settings
-    /*std::string cropTarget,
-    std::string camModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
+    const RenderSettings& settings,
+    const std::optional<ExposureKeyframes>& exposureKeyframes = std::nullopt,
     const std::optional<CalibrationData>& calibration = std::nullopt,
-    std::string cfaPhase = ""*/
-);
+    bool compressionEnabled = false);
 
 // ============================================================================
 // Utility Functions
@@ -156,6 +162,17 @@ void remosaicRGBToBayer(
     int width,
     int height,
     const std::string& cfaPhase = "bggr");
+
+// ============================================================================
+// Text Burn-in
+// ============================================================================
+
+void burnInText(
+    std::vector<uint8_t>& data,
+    uint32_t width,
+    uint32_t height,
+    const std::string& text,
+    uint16_t whiteLevel);
 
 } // namespace utils
 } // namespace motioncam

@@ -579,6 +579,33 @@
         </layout>
        </item>
        <item>
+        <layout class="QVBoxLayout" name="compressionSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>
+         <item>
+          <widget class="QCheckBox" name="dngCompressionCheckBox">
+           <property name="text">
+            <string>Enable DNG Compression (JPEG)</string>
+           </property>
+           <property name="checked">
+            <bool>false</bool>
+           </property>
+          </widget>
+         </item>
+         <item>
+          <widget class="QLabel" name="compressionLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply high-quality JPEG compression when finalizing DNG sequences. Reduces file size by 40-60% with near-lossless quality. Universal compatibility. Only works with Finalize button (not virtual filesystem).&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
         <layout class="QVBoxLayout" name="defaultSection">
          <property name="spacing">
           <number>8</number>

@@ -189,8 +189,6 @@ namespace {
         return (((value / 10) << 4) | (value % 10));
     }
 
-
-
     int getColorIlluminant(const std::string& value) {
         if(value == "standarda")
             return lsStandardLightA;
@@ -209,10 +207,6 @@ namespace {
         else
             return lsUnknown;
     }
-
-
-
-
 
     void colorOnlyShadingMapInternal(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
         if (shadingMap.empty() || shadingMap[0].empty())
@@ -536,6 +530,165 @@ void encodeTo2Bit(
     data.resize(newSize);
 }
 
+// Pack RGB data to 12-bit (2 pixels = 6 samples * 12 bits = 72 bits = 9 bytes)
+void encodeRGBTo12Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height) {
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+    
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x += 2) {
+            // Read 6 samples (2 RGB pixels)
+            uint16_t r0 = srcPtr[0];
+            uint16_t g0 = srcPtr[1];
+            uint16_t b0 = srcPtr[2];
+            uint16_t r1 = srcPtr[3];
+            uint16_t g1 = srcPtr[4];
+            uint16_t b1 = srcPtr[5];
+            
+            // Pack into 9 bytes
+            dstPtr[0] = r0 >> 4;
+            dstPtr[1] = ((r0 & 0x0F) << 4) | (g0 >> 8);
+            dstPtr[2] = g0 & 0xFF;
+            dstPtr[3] = b0 >> 4;
+            dstPtr[4] = ((b0 & 0x0F) << 4) | (r1 >> 8);
+            dstPtr[5] = r1 & 0xFF;
+            dstPtr[6] = g1 >> 4;
+            dstPtr[7] = ((g1 & 0x0F) << 4) | (b1 >> 8);
+            dstPtr[8] = b1 & 0xFF;
+            
+            srcPtr += 6;
+            dstPtr += 9;
+        }
+    }
+    
+    auto newSize = dstPtr - data.data();
+    data.resize(newSize);
+}
+
+// Pack RGB data to 10-bit (4 pixels = 12 samples * 10 bits = 120 bits = 15 bytes)
+void encodeRGBTo10Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height) {
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+    
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x += 4) {
+            // Read 12 samples (4 RGB pixels)
+            uint16_t s[12];
+            for (int i = 0; i < 12; i++) {
+                s[i] = srcPtr[i];
+            }
+            
+            // Pack 12 samples * 10 bits = 120 bits = 15 bytes
+            dstPtr[0] = s[0] >> 2;
+            dstPtr[1] = ((s[0] & 0x03) << 6) | (s[1] >> 4);
+            dstPtr[2] = ((s[1] & 0x0F) << 4) | (s[2] >> 6);
+            dstPtr[3] = ((s[2] & 0x3F) << 2) | (s[3] >> 8);
+            dstPtr[4] = s[3] & 0xFF;
+            
+            dstPtr[5] = s[4] >> 2;
+            dstPtr[6] = ((s[4] & 0x03) << 6) | (s[5] >> 4);
+            dstPtr[7] = ((s[5] & 0x0F) << 4) | (s[6] >> 6);
+            dstPtr[8] = ((s[6] & 0x3F) << 2) | (s[7] >> 8);
+            dstPtr[9] = s[7] & 0xFF;
+            
+            dstPtr[10] = s[8] >> 2;
+            dstPtr[11] = ((s[8] & 0x03) << 6) | (s[9] >> 4);
+            dstPtr[12] = ((s[9] & 0x0F) << 4) | (s[10] >> 6);
+            dstPtr[13] = ((s[10] & 0x3F) << 2) | (s[11] >> 8);
+            dstPtr[14] = s[11] & 0xFF;
+            
+            srcPtr += 12;
+            dstPtr += 15;
+        }
+    }
+    
+    auto newSize = dstPtr - data.data();
+    data.resize(newSize);
+}
+
+// Pack RGB data to 8-bit (1 pixel = 3 samples * 8 bits = 24 bits = 3 bytes)
+void encodeRGBTo8Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height) {
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+    
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            // Read 3 samples (1 RGB pixel)
+            dstPtr[0] = srcPtr[0] & 0xFF;
+            dstPtr[1] = srcPtr[1] & 0xFF;
+            dstPtr[2] = srcPtr[2] & 0xFF;
+            
+            srcPtr += 3;
+            dstPtr += 3;
+        }
+    }
+    
+    auto newSize = dstPtr - data.data();
+    data.resize(newSize);
+}
+
+// Pack RGB data to 6-bit (4 pixels = 12 samples * 6 bits = 72 bits = 9 bytes)
+void encodeRGBTo6Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height) {
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+    
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x += 4) {
+            // Read 12 samples (4 RGB pixels)
+            uint8_t v[12];
+            for (int i = 0; i < 12; i++) {
+                v[i] = srcPtr[i] & 0x3F;
+            }
+            
+            // Pack 12 samples * 6 bits = 72 bits = 9 bytes
+            dstPtr[0] = (v[0] << 2) | (v[1] >> 4);
+            dstPtr[1] = ((v[1] & 0x0F) << 4) | (v[2] >> 2);
+            dstPtr[2] = ((v[2] & 0x03) << 6) | v[3];
+            
+            dstPtr[3] = (v[4] << 2) | (v[5] >> 4);
+            dstPtr[4] = ((v[5] & 0x0F) << 4) | (v[6] >> 2);
+            dstPtr[5] = ((v[6] & 0x03) << 6) | v[7];
+            
+            dstPtr[6] = (v[8] << 2) | (v[9] >> 4);
+            dstPtr[7] = ((v[9] & 0x0F) << 4) | (v[10] >> 2);
+            dstPtr[8] = ((v[10] & 0x03) << 6) | v[11];
+            
+            srcPtr += 12;
+            dstPtr += 9;
+        }
+    }
+    
+    auto newSize = dstPtr - data.data();
+    data.resize(newSize);
+}
+
+// Pack RGB data to 4-bit (2 pixels = 6 samples * 4 bits = 24 bits = 3 bytes)
+void encodeRGBTo4Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height) {
+    uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
+    uint8_t* dstPtr = data.data();
+    
+    for (uint32_t y = 0; y < height; y++) {
+        for (uint32_t x = 0; x < width; x += 2) {
+            // Read 6 samples (2 RGB pixels)
+            uint8_t v[6];
+            for (int i = 0; i < 6; i++) {
+                v[i] = srcPtr[i] & 0x0F;
+            }
+            
+            // Pack 6 samples * 4 bits = 24 bits = 3 bytes
+            dstPtr[0] = (v[0] << 4) | v[1];
+            dstPtr[1] = (v[2] << 4) | v[3];
+            dstPtr[2] = (v[4] << 4) | v[5];
+            
+            srcPtr += 6;
+            dstPtr += 3;
+        }
+    }
+    
+    auto newSize = dstPtr - data.data();
+    data.resize(newSize);
+}
+
 
 tinydngwriter::OpcodeList createLensShadingOpcodeList(
     const CameraFrameMetadata& metadata,
@@ -658,6 +811,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     bool includeOpcode)
 {
     scale = (scale > 1 ? (scale / 2) * 2 : 1); // Ensure even scale for downscaling
+
+    if(!(includeOpcode))// || width != metadata.originalWidth || height != metadata.originalHeight)
+        cropTarget = "0x0";
 
     uint32_t cfaSize = (interpretAsQuadBayer ? 2 : 1);  //assume quadbayer for now
 
@@ -797,17 +953,18 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 utils::invertShadingMap(lensShadingMap);
             else if (logTransform != LogTransformMode::Disabled) {                 
                 if (logTransform == LogTransformMode::KeepInput) 
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0); //?
+                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0);
                 else if (logTransform == LogTransformMode::ReduceBy2Bit) 
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
+                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2));
                 else if (logTransform == LogTransformMode::ReduceBy4Bit) 
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
+                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4));
                 else if (logTransform == LogTransformMode::ReduceBy6Bit) 
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
+                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6));
                 else if (logTransform == LogTransformMode::ReduceBy8Bit) 
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
+                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8));
                 else 
                     useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
+                useBits = std::max(1, useBits); // Ensure at least 1 bit
                 dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
             } else {
                 useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
@@ -818,16 +975,16 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
             v = 0;
     } else if (logTransform != LogTransformMode::Disabled) {
         if (logTransform == LogTransformMode::ReduceBy2Bit) {
-            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2);
+            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2));
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         } else if (logTransform == LogTransformMode::ReduceBy4Bit) {
-            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4);
+            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4));
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         } else if (logTransform == LogTransformMode::ReduceBy6Bit) {
-            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6);
+            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6));
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         } else if (logTransform == LogTransformMode::ReduceBy8Bit) {
-            useBits = std::min(16, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8);
+            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8));
             dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         }
         for(auto& v : dstBlackLevel)
@@ -848,15 +1005,38 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     uint32_t originalWidth = inOutWidth;
     uint32_t dstOffset = 0;
 
+    // Validate parameters
+    if (dstWhiteLevel <= 0 || dstWhiteLevel > 65535) {
+        spdlog::error("Invalid dstWhiteLevel: {}", dstWhiteLevel);
+        throw std::runtime_error("Invalid white level in preprocessData");
+    }
+    
+    spdlog::debug("preprocessData: newWidth={}, newHeight={}, originalWidth={}, dstWhiteLevel={}, applyShadingMap={}, logTransform='{}'",
+                  newWidth, newHeight, originalWidth, dstWhiteLevel, applyShadingMap, logTransformModeToString(logTransform));
+
     // Reinterpret the input data as uint16_t for reading
     uint16_t* srcData = reinterpret_cast<uint16_t*>(data.data());
+    
+    if (data.size() < sizeof(uint16_t) * originalWidth * inOutHeight) {
+        spdlog::error("Input data buffer too small: {} bytes, need at least {}", 
+                      data.size(), sizeof(uint16_t) * originalWidth * inOutHeight);
+        throw std::runtime_error("Input buffer too small");
+    }
 
+    // Dithering is always enabled for log transforms
+    const bool disableDither = false;
+    
     // Process the image by copying and packing 2x2 Bayer blocks
     std::array<float, 16> shadingMapVals;
     shadingMapVals.fill(1.0f);
     std::vector<uint8_t> dst;
     dst.resize(sizeof(uint16_t) * newWidth * newHeight);
     uint16_t* dstData = reinterpret_cast<uint16_t*>(dst.data());
+    
+    if (dst.empty() || dstData == nullptr) {
+        spdlog::error("Failed to allocate destination buffer");
+        throw std::runtime_error("Destination buffer allocation failed");
+    }
 
     for (auto y = 0; y < newHeight; y += 2 * (scale < 2 ? cfaSize : 1)) {
         for (auto x = 0; x < newWidth; x += 2 * (scale < 2 ? cfaSize : 1)) {
@@ -894,16 +1074,20 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 } else if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 4; i++)
                         p[i] = std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
-                } else {                                
+                } else {
                     std::array<float, 4> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
-                    for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation                    
-                        uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
-                        // Apply multiple hash iterations to improve randomness
-                        seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
-                        // Generate triangular dither: sum of two uniform random values
-                        float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
-                        // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
-                        dither[i] = (r1 + r2 - 1.0f) * 0.5f;
+                    for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
+                        if (!disableDither) {
+                            uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
+                            // Apply multiple hash iterations to improve randomness
+                            seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
+                            // Generate triangular dither: sum of two uniform random values
+                            float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
+                            // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
+                            dither[i] = (r1 + r2 - 1.0f) * 0.5f;
+                        } else {
+                            dither[i] = 0.0f;
+                        }
                         // Apply log2 transform that preserves black and white levels as identity points
                         float logValue = std::log2(1.0f + 60.0f * std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i])) / std::log2(61.0f);                  
                         p[i] = (logValue) * dstWhiteLevel + dither[i]; // Scale by dstWhiteLevel to match what the linearization table expects
@@ -912,6 +1096,13 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 
                 for (int i = 0; i < 4; i++)
                     s[i] = std::clamp(std::round((p[i] + dstBlackLevel[i])), 0.f, dstWhiteLevel);
+
+                // Bounds check before writing
+                if (dstOffset + newWidth + 1 >= newWidth * newHeight) {
+                    spdlog::error("Buffer overflow detected: dstOffset={}, newWidth={}, newHeight={}, x={}, y={}", 
+                                  dstOffset, newWidth, newHeight, x, y);
+                    throw std::runtime_error("Destination buffer overflow");
+                }
 
                 // Copy the 2x2 Bayer block
                 dstData[dstOffset]                 = static_cast<unsigned short>(s[0]);
@@ -1063,16 +1254,20 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
                 if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 16; i++)
                         p[i] = std::max(0.0f, p[i] * (dstWhiteLevel - dstBlackLevel[i%4]));
-                } else {                                
+                } else {
                     std::array<float, 16> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
-                    for (int i = 0; i < 16; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation                    
-                        uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
-                        // Apply multiple hash iterations to improve randomness
-                        seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
-                        // Generate triangular dither: sum of two uniform random values
-                        float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
-                        // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
-                        dither[i] = (r1 + r2 - 1.0f) * 0.5f;
+                    for (int i = 0; i < 16; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
+                        if (!disableDither) {
+                            uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
+                            // Apply multiple hash iterations to improve randomness
+                            seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
+                            // Generate triangular dither: sum of two uniform random values
+                            float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
+                            // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
+                            dither[i] = (r1 + r2 - 1.0f) * 0.5f;
+                        } else {
+                            dither[i] = 0.0f;
+                        }
                         // Apply log2 transform that preserves black and white levels as identity points
                         float logValue = std::log2(1.0f + 60.0f * std::max(0.0f, p[i])) / std::log2(61.0f);                  
                         p[i] = (logValue) * dstWhiteLevel + dither[i]; // Scale by dstWhiteLevel to match what the linearization table expects
@@ -1124,15 +1319,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     float recordingFps,
     int frameNumber,
     double baselineExpValue,
-    /*std::string cropTarget, 
-    std::string camModel,
-    std::string levels,
-    std::string logTransform,
-    std::string exposureCompensation,
-    std::string quadBayerOption,
+    const RenderSettings& settings,
+    const std::optional<ExposureKeyframes>& exposureKeyframes,
     const std::optional<CalibrationData>& calibration,
-    std::string cfaPhase*/
-    const RenderSettings& settings)
+    bool compressionEnabled)
 {
     Measure m("generateDng");
 
@@ -1146,8 +1336,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     std::string sensorArrangement = cameraConfiguration.sensorArrangement;
     
     // Apply cfaPhase override if specified
-    if (!cfaPhase.empty() && cfaPhase != "Don't override CFA") {
-        std::string phase = cfaPhase;
+    if (!settings.cfaPhase.empty() && settings.cfaPhase != "Don't override CFA") {
+        std::string phase = settings.cfaPhase;
         std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
         if (phase == "bggr" || phase == "rggb" || phase == "grbg" || phase == "gbrg") {
             sensorArrangement = phase;
@@ -1175,7 +1365,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         throw std::runtime_error("Invalid sensor arrangement");
 
-    // Scale down if requested
+    // Extract options from settings
     bool applyShadingMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     bool vignetteOnlyColor = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
     bool normalizeShadingMap = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
@@ -1185,7 +1375,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool interpretAsQuadBayer = metadata.needRemosaic || settings.options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
 
     std::string cropTarget = settings.cropTarget;
-    if(!(settings.options & RENDER_OPT_CROPPING))// || width != metadata.originalWidth || height != metadata.originalHeight)
+    if(!(settings.options & RENDER_OPT_CROPPING))
         cropTarget = "0x0";
 
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2] = utils::preprocessData(
@@ -1206,40 +1396,52 @@ std::shared_ptr<std::vector<char>> generateDng(
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
 
-    // Encode to reduce size in container
-    auto encodeBits = utils::bitsNeeded(dstWhiteLevel);
+    // Burn in ISO text
+    std::string isoText = "ISO " + std::to_string(metadata.iso);
+    utils::burnInText(processedData, width, height, isoText, dstWhiteLevel);
 
-    if(encodeBits <= 2) {
-        utils::encodeTo2Bit(processedData, width, height);
-        encodeBits = 2;
+    // Encode to reduce size in container
+    auto actualBits = utils::bitsNeeded(dstWhiteLevel);
+    auto encodeBits = actualBits;
+
+    // Skip packing if compression is enabled - lj92 needs unpacked 16-bit data
+    // The compression will handle the redundancy
+    spdlog::info("Before encoding check: compressionEnabled={}", compressionEnabled);
+    if (!compressionEnabled) {
+        spdlog::info("Entering encoding branch (compression is disabled)");
+        if(encodeBits <= 2) {
+            utils::encodeTo2Bit(processedData, width, height);
+            encodeBits = 2;
+        }
+        else if(encodeBits <= 4) {
+            utils::encodeTo4Bit(processedData, width, height);
+            encodeBits = 4;
+        }
+        else if(encodeBits <= 6) {
+            utils::encodeTo6Bit(processedData, width, height);
+            encodeBits = 6;
+        }
+        else if(encodeBits <= 8) {
+            utils::encodeTo8Bit(processedData, width, height);
+            encodeBits = 8;
+        }
+        else if(encodeBits <= 10) {
+            utils::encodeTo10Bit(processedData, width, height);
+            encodeBits = 10;
+        }
+        else if(encodeBits <= 12) {
+            utils::encodeTo12Bit(processedData, width, height);
+            encodeBits = 12;
+        }
+        else if(encodeBits <= 14) {
+            utils::encodeTo14Bit(processedData, width, height);
+            encodeBits = 14;
+        }
+        else {
+            encodeBits = 16;
+        }
     }
-    else if(encodeBits <= 4) {
-        utils::encodeTo4Bit(processedData, width, height);
-        encodeBits = 4;
-    }
-    else if(encodeBits <= 6) {
-        utils::encodeTo6Bit(processedData, width, height);
-        encodeBits = 6;
-    }
-    else if(encodeBits <= 8) {
-        utils::encodeTo8Bit(processedData, width, height);
-        encodeBits = 8;
-    }
-    else if(encodeBits <= 10) {
-        utils::encodeTo10Bit(processedData, width, height);
-        encodeBits = 10;
-    }
-    else if(encodeBits <= 12) {
-        utils::encodeTo12Bit(processedData, width, height);
-        encodeBits = 12;
-    }
-    else if(encodeBits <= 14) {
-        utils::encodeTo14Bit(processedData, width, height);
-        encodeBits = 14;
-    }
-    else {
-        encodeBits = 16;
-    }
+    // For compressed data, keep as unpacked 16-bit but use actualBits for encoding
 
     // Create first frame
     tinydngwriter::DNGImage dng;
@@ -1247,7 +1449,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetBigEndian(false);
     dng.SetDNGVersion(1, 4, 0, 0);
     dng.SetDNGBackwardVersion(1, 1, 0, 0);
-    dng.SetImageData(reinterpret_cast<const unsigned char*>(processedData.data()), processedData.size());
+    
+    // Set image dimensions and format FIRST (before image data)
     dng.SetImageWidth(width);
     dng.SetImageLength(height);
     dng.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG);
@@ -1259,17 +1462,33 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetBlackLevelRepeatDim(2, 2);
         
-    dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
+    // Set compression based on user preference (BEFORE SetImageData)
+    spdlog::info("About to check compressionEnabled, value is: {}", compressionEnabled);
+    if (compressionEnabled) {
+        spdlog::info("Entering compression branch, calling SetCompression");
+        bool compressionSet = dng.SetCompression(tinydngwriter::COMPRESSION_JPEG);
+        spdlog::info("SetCompression(COMPRESSION_JPEG={}) returned: {}", static_cast<int>(tinydngwriter::COMPRESSION_JPEG), compressionSet);
+    } else {
+        spdlog::info("Entering NO compression branch");
+        dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
+    }
 
     dng.SetIso(metadata.iso);
     dng.SetExposureTime(metadata.exposureTime / 1e9);
 
     float exposureOffset = (settings.cameraModel == "Panasonic" ? -2.0f : 0.0f);
 
+    // Calculate frame-specific exposure compensation
+    std::string frameExposureComp = settings.exposureCompensation;
+    if (exposureKeyframes.has_value()) {
+        float exposureValue = exposureKeyframes->getExposureAtFrame(frameNumber, 1000);
+        frameExposureComp = std::to_string(exposureValue);
+    }
+    
     // Parse float from exposureCompensation string and add to exposureOffset
-    if (!settings.exposureCompensation.empty()) {
+    if (!frameExposureComp.empty()) {
         try {
-            exposureOffset += std::stof(settings.exposureCompensation);
+            exposureOffset += std::stof(frameExposureComp);
         } catch (const std::exception&) {
             // If parsing fails, keep the original exposureOffset value
         }
@@ -1280,7 +1499,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         dng.SetBaselineExposure(exposureOffset);
 
-    if(interpretAsQuadBayer && settings.draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {   //de/remosaic need to be disabled and add ui option. 
+    if(interpretAsQuadBayer && settings.draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {
         dng.SetCFARepeatPatternDim(4, 4);
         std::array<uint8_t, 4> cfa_pattern_0112 = {0,1,1,2};
         std::array<uint8_t, 4> cfa_pattern_2110 = {2,1,1,0};
@@ -1350,7 +1569,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Rectangular
     dng.SetCFALayout(1);
 
-    const uint16_t bps[1] = { encodeBits };
+    // For compressed: use actualBits (tells lj92 the real bit depth)
+    // For uncompressed: use encodeBits (the packed bit depth)
+    const uint16_t bps[1] = { compressionEnabled ? actualBits : encodeBits };
     dng.SetBitsPerSample(1, bps);
 
     // Apply calibration data to override, otherwise use camera configuration
@@ -1418,6 +1639,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Add lens shading map as opcode list 2 if not applied to image data
     if (!opcodeList2.IsEmpty()) {
         dng.SetOpcodeList2(opcodeList2);
+        spdlog::debug("Added OpcodeList2 (lens shading map)");
+    } else {
+        spdlog::debug("Skipping OpcodeList2 for compressed DNG to reduce size");
     }
 
 
@@ -1428,12 +1652,20 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetActiveArea(&activeArea[0]);
 
     // Add linearization table based on actual bit depth
-
-    if (settings.logTransform != LogTransformMode::Disabled && !(settings.logTransform == LogTransformMode::KeepInput && !applyShadingMap)) {
+    bool needsLinearization = (settings.logTransform != LogTransformMode::Disabled && 
+                               !(settings.logTransform == LogTransformMode::KeepInput && !applyShadingMap));
+    
+    if (needsLinearization && dstWhiteLevel > 0 && dstWhiteLevel < 65536) {
+        spdlog::debug("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}", 
+                     logTransformModeToString(settings.logTransform), applyShadingMap, dstWhiteLevel);
         // Create linearization table sized for the actual stored range
         // The stored values range from 0 to dstWhiteLevel, so we need dstWhiteLevel+1 entries
         const int tableSize = static_cast<int>(dstWhiteLevel) + 1;
-        std::vector<unsigned short> linearizationTable(tableSize);
+        
+        if (tableSize <= 0 || tableSize > 65536) {
+            spdlog::error("Invalid linearization table size: {}", tableSize);
+        } else {
+            std::vector<unsigned short> linearizationTable(tableSize);
         
         for (int i = 0; i < tableSize; i++) {
             // Convert stored log value back to linear
@@ -1443,7 +1675,7 @@ std::shared_ptr<std::vector<char>> generateDng(
             float logValue = static_cast<float>(i);
             float normalizedLogValue = logValue / dstWhiteLevel;  // Normalize by dstWhiteLevel to match forward transform
             
-            // Reverse the k=30 curve with guaranteed identity preservation
+            // Reverse the k=60 curve with guaranteed identity preservation
             float linearValue;
             
             if (i == 0) {
@@ -1457,15 +1689,30 @@ std::shared_ptr<std::vector<char>> generateDng(
             }            
             // Scale to 16-bit range            
             linearizationTable[i] = static_cast<unsigned short>(linearValue * 65535.0f);                  
-        }        
-        dng.SetLinearizationTable(tableSize, linearizationTable.data());
-        std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
-        dng.SetBlackLevel(4, linearBlackLevel.data());
-        dng.SetWhiteLevel(65534);  //idk why
+            }        
+            dng.SetLinearizationTable(tableSize, linearizationTable.data());
+            spdlog::debug("Added linearization table with {} entries for log transform", tableSize);
+            std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
+            dng.SetBlackLevel(4, linearBlackLevel.data());
+            dng.SetWhiteLevel(65534);
+        }
     } else {           
         dng.SetBlackLevel(4, dstBlackLevel.data());
         dng.SetWhiteLevel(dstWhiteLevel);
     }    
+
+    // Set image data AFTER all metadata is configured (including BitsPerSample and Compression)
+    spdlog::debug("Calling SetImageData with {} bytes, compression={}", processedData.size(), compressionEnabled);
+    if (!dng.SetImageData(reinterpret_cast<const unsigned char*>(processedData.data()), processedData.size())) {
+        spdlog::error("SetImageData failed: {}", dng.Error());
+        throw std::runtime_error("Failed to set image data: " + dng.Error());
+    }
+    
+    // Log any messages from compression (they're in Error() even on success)
+    std::string compressionInfo = dng.Error();
+    if (!compressionInfo.empty()) {
+        spdlog::info("DNG processing info: {}", compressionInfo);
+    }
 
     // Write DNG
     std::string err;
@@ -1712,6 +1959,114 @@ void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16
             int bayerIdx = y * width + x;
             bayerData[bayerIdx] = rgbData[rgbIdx];
         }
+    }
+}
+
+// Simple 5x7 bitmap font for digits and common characters
+namespace {
+    // Each character is 5 pixels wide, 7 pixels tall
+    // Stored as 7 bytes, each byte represents a row (5 LSBs used)
+    const uint8_t FONT_5x7[][7] = {
+        // '0'
+        {0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110},
+        // '1'
+        {0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110},
+        // '2'
+        {0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111},
+        // '3'
+        {0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110},
+        // '4'
+        {0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010},
+        // '5'
+        {0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110},
+        // '6'
+        {0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110},
+        // '7'
+        {0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000},
+        // '8'
+        {0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110},
+        // '9'
+        {0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100},
+        // 'I'
+        {0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110},
+        // 'S'
+        {0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110},
+        // 'O'
+        {0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110},
+        // ' ' (space)
+        {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000},
+    };
+    
+    int getCharIndex(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c == 'I') return 10;
+        if (c == 'S') return 11;
+        if (c == 'O') return 12;
+        if (c == ' ') return 13;
+        return 13; // Default to space
+    }
+}
+
+void burnInText(
+    std::vector<uint8_t>& data,
+    uint32_t width,
+    uint32_t height,
+    const std::string& text,
+    uint16_t whiteLevel)
+{
+    if (text.empty() || data.size() < width * height * sizeof(uint16_t)) {
+        return;
+    }
+    
+    uint16_t* pixels = reinterpret_cast<uint16_t*>(data.data());
+    
+    // Scale font size based on image width (roughly 1% of width per character)
+    const int baseCharWidth = 5;
+    const int baseCharHeight = 7;
+    const int scale = std::max(1, static_cast<int>(width / 800)); // Scale factor
+    const int charWidth = baseCharWidth * scale;
+    const int charHeight = baseCharHeight * scale;
+    const int charSpacing = 2 * scale;
+    
+    // Calculate text dimensions
+    const int textWidth = text.length() * (charWidth + charSpacing) - charSpacing;
+    const int textHeight = charHeight;
+    
+    // Position: lower middle of screen
+    const int startX = (width - textWidth) / 2;
+    const int startY = height - textHeight - (height / 20); // 5% from bottom
+    
+    // Ensure we don't go out of bounds
+    if (startY < 0 || startY + textHeight >= height || startX < 0) {
+        return;
+    }
+    
+    // Render each character
+    int xOffset = startX;
+    for (char c : text) {
+        int charIdx = getCharIndex(c);
+        
+        // Draw character
+        for (int row = 0; row < baseCharHeight; ++row) {
+            uint8_t rowData = FONT_5x7[charIdx][row];
+            for (int col = 0; col < baseCharWidth; ++col) {
+                if (rowData & (1 << (baseCharWidth - 1 - col))) {
+                    // Draw scaled pixel
+                    for (int sy = 0; sy < scale; ++sy) {
+                        for (int sx = 0; sx < scale; ++sx) {
+                            int px = xOffset + col * scale + sx;
+                            int py = startY + row * scale + sy;
+                            
+                            if (px >= 0 && px < width && py >= 0 && py < height) {
+                                pixels[py * width + px] = whiteLevel;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        xOffset += charWidth + charSpacing;
     }
 }
 

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <sstream>
 #include <iomanip>
+#include <array>
 #include <boost/filesystem.hpp>
 #include <spdlog/spdlog.h>
 
@@ -11,7 +12,7 @@ namespace vfs {
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
     if (frames.size() < 2) {
-        return {0.0f, 0.0f};
+        return {0,0,0,0,0,0};
     }
 
     double avgDuration = 0.0;
@@ -20,20 +21,54 @@ FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
     durations.reserve(frames.size() - 1);
 
     for (size_t i = 1; i < frames.size(); ++i) {
-        double duration = static_cast<double>(frames[i] - frames[i-1]);
+        double duration = static_cast<double>(frames[i] - frames[i - 1]);
         if (duration > 0) {
-            avgDuration = avgDuration + (duration - avgDuration) / (validFrames + 1);
+            avgDuration += (duration - avgDuration) / (validFrames + 1);
             durations.push_back(duration);
             validFrames++;
         }
     }
 
     if (validFrames == 0) {
-        return {0.0f, 0.0f};
+        return {0,0,0,0,0,0};
     }
 
     std::sort(durations.begin(), durations.end());
-    double medianDuration;
+
+    // Helper for percentile (with linear interpolation)
+    auto percentile = [&](double p) -> double {
+        if (durations.empty()) return 0.0;
+        double pos = p * (durations.size() - 1);
+        size_t idx = static_cast<size_t>(pos);
+        double frac = pos - idx;
+        if (idx + 1 < durations.size()) {
+            return durations[idx] * (1.0 - frac) + durations[idx + 1] * frac;
+        }
+        return durations.back();
+    };
+
+    // Duration percentiles (in nanoseconds)
+    double minDur = durations.front();
+    double q1Dur   = percentile(0.25);
+    double medianDur = percentile(0.5);
+    double q3Dur   = percentile(0.75);
+    double maxDur  = durations.back();
+
+    // Convert durations → frame rates (FPS)
+    auto toFps = [](double dur) -> float {
+        return dur > 0.0 ? static_cast<float>(1e9 / dur) : 0.0f;
+    };
+
+    return {
+        toFps(maxDur),  // minFrameRate (worst)
+        toFps(q3Dur),   // lower quartile
+        toFps(medianDur),
+        toFps(q1Dur),   // upper quartile
+        toFps(minDur),  // max FPS (best)
+        toFps(avgDuration)
+    };
+
+    /*double medianDuration;
     size_t mid = durations.size() / 2;
     if (durations.size() % 2 == 0) {
         medianDuration = (durations[mid - 1] + durations[mid]) / 2.0;
@@ -44,62 +79,62 @@ FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
     return {
         static_cast<float>(1000000000.0 / medianDuration),
         static_cast<float>(1000000000.0 / avgDuration)
-    };
+    };*/
 }
 
-float determineCFRTarget(float medianFps, const std::string& cfrTarget, bool applyCFRConversion) {
-    if (!applyCFRConversion || cfrTarget.empty()) {
-        try {
-            return std::stof(cfrTarget);
-        } catch (const std::exception&) {
-            spdlog::warn("Invalid CFR target '{}', using median frame rate", cfrTarget);
-            return medianFps;
+float determineCFRTarget(FrameRateInfo fpsInfo, const CFRTarget& cfrTarget, bool applyCFRConversion) {
+    if (!applyCFRConversion) {
+        if (cfrTarget.mode == CFRMode::Custom) {
+            return cfrTarget.customValue;
         }
+        return fpsInfo.averageFrameRate;
     }
-
-    if (cfrTarget == "Prefer Integer") {
-        if (medianFps <= 23.0 || medianFps >= 1000.0) return medianFps;
-        else if (medianFps < 24.5) return 24.0f;
-        else if (medianFps < 26.0) return 25.0f;
-        else if (medianFps < 33.0) return 30.0f;
-        else if (medianFps < 49.0) return 48.0f;
-        else if (medianFps < 52.0) return 50.0f;
-        else if (medianFps > 56.0 && medianFps < 63.0) return 60.0f;
-        else if (medianFps > 112.0 && medianFps < 125.0) return 120.0f;
-        else if (medianFps > 224.0 && medianFps < 250.0) return 240.0f;
-        else if (medianFps > 448.0 && medianFps < 500.0) return 480.0f;
-        else if (medianFps > 896.0 && medianFps < 1000.0) return 960.0f;
-        else if (medianFps >= 63.0) return 120.0f;
-        else return 60.0f;
-    }
-    else if (cfrTarget == "Prefer Drop Frame") {
-        if (medianFps <= 23.0 || medianFps >= 1000.0) return medianFps;
-        else if (medianFps < 24.5) return 23.976f;
-        else if (medianFps < 26.0) return 25.0f;
-        else if (medianFps < 33.0) return 29.97f;
-        else if (medianFps < 49.0) return 47.952f;
-        else if (medianFps < 52.0) return 50.0f;
-        else if (medianFps > 56.0 && medianFps < 63.0) return 59.94f;
-        else if (medianFps > 112.0 && medianFps < 125.0) return 119.88f;
-        else if (medianFps > 224.0 && medianFps < 250.0) return 240.0f;
-        else if (medianFps > 448.0 && medianFps < 500.0) return 480.0f;
-        else if (medianFps > 896.0 && medianFps < 1000.0) return 960.0f;
-        else if (medianFps >= 63.0) return 119.88f;
-        else return 59.94f;
-    }
-    else if (cfrTarget == "Median (Slowmotion)") {
-        return medianFps;
-    }
-    else if (cfrTarget == "Average (Testing)") {
-        return medianFps;
-    }
-    else {
-        try {
-            return std::stof(cfrTarget);
-        } catch (const std::exception&) {
-            spdlog::warn("Invalid CFR target '{}', using median frame rate", cfrTarget);
-            return medianFps;
-        }
+    
+    switch (cfrTarget.mode) {
+        case CFRMode::Disabled:
+            return fpsInfo.averageFrameRate;
+            
+        case CFRMode::PreferInteger:
+            if (fpsInfo.medianFrameRate <= 23.0 || fpsInfo.medianFrameRate >= 1000.0) return fpsInfo.medianFrameRate;
+            else if (fpsInfo.medianFrameRate < 24.5) return 24.0f;
+            else if (fpsInfo.medianFrameRate < 26.0) return 25.0f;
+            else if (fpsInfo.medianFrameRate < 33.0) return 30.0f;
+            else if (fpsInfo.medianFrameRate < 49.0) return 48.0f;
+            else if (fpsInfo.medianFrameRate < 52.0) return 50.0f;
+            else if (fpsInfo.medianFrameRate > 56.0 && fpsInfo.medianFrameRate < 63.0) return 60.0f;
+            else if (fpsInfo.medianFrameRate > 112.0 && fpsInfo.medianFrameRate < 125.0) return 120.0f;
+            else if (fpsInfo.medianFrameRate > 224.0 && fpsInfo.medianFrameRate < 250.0) return 240.0f;
+            else if (fpsInfo.medianFrameRate > 448.0 && fpsInfo.medianFrameRate < 500.0) return 480.0f;
+            else if (fpsInfo.medianFrameRate > 896.0 && fpsInfo.medianFrameRate < 1000.0) return 960.0f;
+            else if (fpsInfo.medianFrameRate >= 63.0) return 120.0f;
+            else return 60.0f;
+            
+        case CFRMode::PreferDropFrame:
+            if (fpsInfo.medianFrameRate <= 23.0 || fpsInfo.medianFrameRate >= 1000.0) return fpsInfo.medianFrameRate;
+            else if (fpsInfo.medianFrameRate < 24.5) return 23.976f;
+            else if (fpsInfo.medianFrameRate < 26.0) return 25.0f;
+            else if (fpsInfo.medianFrameRate < 33.0) return 29.97f;
+            else if (fpsInfo.medianFrameRate < 49.0) return 47.952f;
+            else if (fpsInfo.medianFrameRate < 52.0) return 50.0f;
+            else if (fpsInfo.medianFrameRate > 56.0 && fpsInfo.medianFrameRate < 63.0) return 59.94f;
+            else if (fpsInfo.medianFrameRate > 112.0 && fpsInfo.medianFrameRate < 125.0) return 119.88f;
+            else if (fpsInfo.medianFrameRate > 224.0 && fpsInfo.medianFrameRate < 250.0) return 240.0f;
+            else if (fpsInfo.medianFrameRate > 448.0 && fpsInfo.medianFrameRate < 500.0) return 480.0f;
+            else if (fpsInfo.medianFrameRate > 896.0 && fpsInfo.medianFrameRate < 1000.0) return 960.0f;
+            else if (fpsInfo.medianFrameRate >= 63.0) return 119.88f;
+            else return 59.94f;
+            
+        case CFRMode::MedianSlowMotion:
+            return fpsInfo.medianFrameRate;
+            
+        case CFRMode::AverageTesting:
+            return fpsInfo.averageFrameRate;
+            
+        case CFRMode::Custom:
+            return cfrTarget.customValue;
+            
+        default:
+            return fpsInfo.medianFrameRate;
     }
 }
 
@@ -199,6 +234,97 @@ void syncAudio(
             it->first += silenceDuration;
         }
     }
+}
+
+std::string getDisplayDataType(
+    bool directLogRGB, bool quadBayerCapture, bool interpretAsQuad, bool remosaic) {
+    if(!(quadBayerCapture || interpretAsQuad || directLogRGB)) 
+        return "Bayer CFA";
+    else if (directLogRGB)
+        return remosaic ? "RGB -> Bayer CFA" : "RGB";
+    else if (quadBayerCapture || interpretAsQuad)
+        //return remosaic ? "Quad -> Bayer CFA" : "Quad Bayer CFA";  // when QB demosaic and remosaic is implemented
+        return "Quad Bayer CFA";
+    return "ERROR";
+}
+
+std::string getDisplayDataLevels(
+    float dynWhiteLevel, std::array<float, 4> dynBlackLevel, 
+    float statWhiteLevel, std::array<float, 4> statBlackLevel, 
+    std::string levels, std::string logTransform,
+    bool applyShadingMap, bool normalizeShadingMap) {
+
+    float srcWhiteLevel = 0.0;
+    std::array<float, 4> srcBlackLevel = {0.0, 0.0, 0.0, 0.0};
+
+    if (levels == "Dynamic") {
+        srcWhiteLevel = dynWhiteLevel;
+        srcBlackLevel = dynBlackLevel;
+    } else if (levels == "Static") {
+        srcWhiteLevel = dynWhiteLevel;
+        srcBlackLevel = dynBlackLevel;
+    } else {
+        const size_t separatorPos = levels.find('/');
+        if (separatorPos != std::string::npos) {
+            try {            
+                srcWhiteLevel = std::stof(levels.substr(0, separatorPos));
+                if (levels.substr(separatorPos + 1).find(',') == std::string::npos) {
+                    float blackLevelValue = std::stof(levels.substr(separatorPos + 1));
+                    srcBlackLevel = {blackLevelValue, blackLevelValue, blackLevelValue, blackLevelValue};
+                } else {
+                    //TODO: implement different bl per channel like input 1023.0/64.0,63.8,63.9,63.9
+                }
+            } catch (const std::exception&) {
+                srcWhiteLevel = dynWhiteLevel;
+                srcBlackLevel = dynBlackLevel;
+            }
+        } else {
+            srcWhiteLevel = dynWhiteLevel;
+            srcBlackLevel = dynBlackLevel;
+        }   
+    }
+
+    float dstWhiteLevel = srcWhiteLevel;
+    std::array<float, 4> dstBlackLevel = srcBlackLevel;
+
+    int useBits = std::min(16, static_cast<int>(std::ceil(std::log2(srcWhiteLevel + 1))));
+
+    if(logTransform.empty()) {
+        if(applyShadingMap) {
+            useBits += 2;
+            if(normalizeShadingMap)
+                useBits += 2;
+            dstWhiteLevel = std::pow(2.0f, std::min(16, useBits)) - 1;
+            for (auto& v : dstBlackLevel)
+                v = 0;
+        }            
+    } else {
+        if (logTransform == "Reduce by 2bit" || logTransform == "Reduce by 2bit lq")
+            useBits -= 2;
+        if (logTransform == "Reduce by 4bit" || logTransform == "Reduce by 4bit lq")
+            useBits -= 4;
+        if (logTransform == "Reduce by 6bit" || logTransform == "Reduce by 6bit lq")
+            useBits -= 6;
+        if (logTransform == "Reduce by 8bit" || logTransform == "Reduce by 8bit lq")
+            useBits -= 8;
+        dstWhiteLevel = std::pow(2.0f, std::min(16, useBits)) - 1;
+        for (auto& v : dstBlackLevel)
+            v = 0;
+    }    
+    
+    std::string result = std::to_string(static_cast<int>(srcWhiteLevel)) + "/" + 
+                         std::to_string(static_cast<int>(srcBlackLevel[0]));    // Build levels info string
+    
+    if (srcBlackLevel[0] != dstBlackLevel[0]) {
+        result += " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" + 
+                           std::to_string(static_cast<int>(dstBlackLevel[0]));
+    }       // Show transformation if levels changed
+    
+    result += " RAW" + std::to_string(std::min(16, useBits));
+    if (!logTransform.empty()) 
+        result += " log";    
+
+    return result;
 }
 
 } // namespace vfs

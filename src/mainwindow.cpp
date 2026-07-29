@@ -1,6 +1,13 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "CalibrationData.h"
+#include "CameraFrameMetadata.h"
+#include "CameraMetadata.h"
+#include "Utils.h"
+#include "ExposureKeyframes.h"
+#include "VirtualFileSystemImpl.h"
+
+#include <motioncam/Decoder.hpp>
 
 // Prevent Windows.h macros from interfering with std::max/min
 #ifdef _WIN32
@@ -11,6 +18,8 @@
 
 #include <QDragEnterEvent>
 #include <QDropEvent>
+
+using namespace motioncam;
 #include <QMimeData>
 #include <QPushButton>
 #include <QFileInfo>
@@ -21,12 +30,16 @@
 #include <QDir>
 #include <QLabel>
 #include <QFrame>
+#include <QProgressDialog>
+#include <QThread>
 #include <algorithm>
 #include <QTimer>
 #include <QtConcurrent>
 #include <fstream>
 #include <sstream>
 #include <spdlog/spdlog.h>
+
+#include <boost/filesystem.hpp>
 
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
@@ -39,60 +52,63 @@ namespace {
     constexpr auto APP_NAME = "MotionCam FS";
 }
 
-motioncam::RenderConfig MainWindow::buildRenderConfig() const {
-    motioncam::RenderConfig config;
+motioncam::RenderSettings MainWindow::buildRenderSettings() const {
+    motioncam::RenderSettings settings;
     
     // Build options bitfield
-    config.options = motioncam::RENDER_OPT_NONE;
+    settings.options = motioncam::RENDER_OPT_NONE;
     
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_DRAFT;
+        settings.options |= motioncam::RENDER_OPT_DRAFT;
     
     if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+        settings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     
     if(ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+        settings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
     
     if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
+        settings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
     
     if(ui->debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
+        settings.options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
     
     if(ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
+        settings.options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
     
     if(ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+        settings.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
     
     if(ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_CROPPING;
+        settings.options |= motioncam::RENDER_OPT_CROPPING;
     
     if(ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
+        settings.options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
     
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+        settings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
     
     if(ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
+        settings.options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
     
     if(ui->remosaicCheckBox->checkState() == Qt::CheckState::Checked)
-        config.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+        settings.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+
+    if(ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked)
+        settings.options |= motioncam::RENDER_OPT_JPEG_COMPRESSION;
     
     // Copy all other settings from member variable
-    config.draftScale = mRenderConfig.draftScale;
-    config.cfrTarget = mRenderConfig.cfrTarget;
-    config.cropTarget = mRenderConfig.cropTarget;
-    config.cameraModel = mRenderConfig.cameraModel;
-    config.levels = mRenderConfig.levels;
-    config.logTransform = mRenderConfig.logTransform;
-    config.exposureCompensation = mRenderConfig.exposureCompensation;
-    config.quadBayerOption = mRenderConfig.quadBayerOption;
-    config.cfaPhase = mRenderConfig.cfaPhase;
-    
-    return config;
+    settings.draftScale = mRenderSettings.draftScale;
+    settings.cfrTarget = mRenderSettings.cfrTarget;
+    settings.cropTarget = mRenderSettings.cropTarget;
+    settings.cameraModel = mRenderSettings.cameraModel;
+    settings.levels = mRenderSettings.levels;
+    settings.logTransform = mRenderSettings.logTransform;
+    settings.exposureCompensation = mRenderSettings.exposureCompensation;
+    settings.quadBayerOption = mRenderSettings.quadBayerOption;
+    settings.cfaPhase = mRenderSettings.cfaPhase;
+
+    return settings;
 }
 
 MainWindow::MainWindow(QWidget *parent)
@@ -144,6 +160,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->quadBayerCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     //connect(ui->precacheCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onPrecacheCheckboxChanged);
     
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
@@ -226,16 +243,17 @@ void MainWindow::saveSettings() {
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("interpretAsQBEnabled", ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cachePath", mCacheRootFolder);
-    settings.setValue("draftQuality", mRenderConfig.draftScale);
-    settings.setValue("cfrTarget", QString::fromStdString(mRenderConfig.cfrTarget));
-    settings.setValue("cropTarget", QString::fromStdString(mRenderConfig.cropTarget));
-    settings.setValue("exposureCompensation", QString::fromStdString(mRenderConfig.exposureCompensation));
-    settings.setValue("camModelOverride", QString::fromStdString(mRenderConfig.cameraModel));
-    settings.setValue("levels", QString::fromStdString(mRenderConfig.levels));
-    settings.setValue("logTransform", QString::fromStdString(mRenderConfig.logTransform));
-    settings.setValue("quadBayerOption", QString::fromStdString(mRenderConfig.quadBayerOption));
-    settings.setValue("cfaPhase", QString::fromStdString(mRenderConfig.cfaPhase));
+    settings.setValue("draftQuality", mRenderSettings.draftScale);
+    settings.setValue("cfrTarget", QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
+    settings.setValue("cropTarget", QString::fromStdString(mRenderSettings.cropTarget));
+    settings.setValue("exposureCompensation", QString::fromStdString(mRenderSettings.exposureCompensation));
+    settings.setValue("camModelOverride", QString::fromStdString(mRenderSettings.cameraModel));
+    settings.setValue("levels", QString::fromStdString(mRenderSettings.levels));
+    settings.setValue("logTransform", QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
+    settings.setValue("quadBayerOption", QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    settings.setValue("cfaPhase", QString::fromStdString(mRenderSettings.cfaPhase));
     settings.setValue("precacheEnabled", ui->precacheCheckBox->checkState() == Qt::CheckState::Checked);
 
     // Save mounted files
@@ -291,32 +309,35 @@ void MainWindow::restoreSettings() {
     ui->precacheCheckBox->setCheckState(
         settings.value("precacheEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
-    mCacheRootFolder = settings.value("cachePath").toString();    
-    mRenderConfig.draftScale = std::max(1, settings.value("draftQuality").toInt());
-    mRenderConfig.cfrTarget = (!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
-    mRenderConfig.exposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
-    mRenderConfig.quadBayerOption = (!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
-    mRenderConfig.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
-    mRenderConfig.cropTarget = settings.value("cropTarget").toString().toStdString();
-    mRenderConfig.cameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
-    mRenderConfig.levels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
-    mRenderConfig.logTransform = (!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
+    ui->dngCompressionCheckBox->setCheckState(
+        settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
-    if(mRenderConfig.draftScale == 2)
+    mCacheRootFolder = settings.value("cachePath").toString();    
+    mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
+    mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
+    mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
+    mRenderSettings.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
+    mRenderSettings.cropTarget = settings.value("cropTarget").toString().toStdString();
+    mRenderSettings.cameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
+    mRenderSettings.levels = (!settings.contains("levels") ? "Dynamic" : settings.value("levels").toString().toStdString());
+    mRenderSettings.logTransform = stringToLogTransformMode(!settings.contains("logTransform") ? "Keep Input" : settings.value("logTransform").toString().toStdString());
+
+    if(mRenderSettings.draftScale == 2)
         ui->draftQuality->setCurrentIndex(0);
-    else if(mRenderConfig.draftScale == 4)
+    else if(mRenderSettings.draftScale == 4)
         ui->draftQuality->setCurrentIndex(1);
-    else if(mRenderConfig.draftScale == 8)
+    else if(mRenderSettings.draftScale == 8)
         ui->draftQuality->setCurrentIndex(2);
     
-    ui->cfrTarget->setCurrentText(QString::fromStdString(mRenderConfig.cfrTarget));
-    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderConfig.exposureCompensation));
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mRenderConfig.quadBayerOption));
-    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cfaPhase));
-    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cropTarget));    
-    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cameraModel));
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderConfig.levels));  
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mRenderConfig.logTransform));  
+    ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderSettings.exposureCompensation));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels));  
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));  
   
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
@@ -393,19 +414,7 @@ void MainWindow::mountFile(const QString& filePath) {
     motioncam::MountId mountId;
 
     try {
-        //auto config = buildRenderConfig();        TODO CONFIG
-        
-        motioncam::RenderSettings settings(
-            getRenderOptions(*ui),
-            mDraftQuality,
-            mCFRTarget,
-            mCropTarget,
-            mCameraModel,
-            mLevels,
-            mLogTransform,
-            mExposureCompensation,
-            mQuadBayerOption
-        );
+        auto settings = buildRenderSettings();
         mountId = mFuseFilesystem->mount(settings, filePath.toStdString(), dstPath.toStdString());
     }
     catch(std::runtime_error& e) {
@@ -477,8 +486,8 @@ void MainWindow::mountFile(const QString& filePath) {
         auto infoText2 = QString("<span style='color: #888888;'>Median / Average / Target FPS: %1 / %2 -> </span>"
                                  "<span style='color: white;'>%3</span>"
                                  "<span style='color: #888888;'> | Framecount: %4 | Dropped: -%5 | Duplicated: +%6</span>")
-                                .arg(QString::number(info.medFps, 'f', 2))
-                                .arg(QString::number(info.avgFps, 'f', 2))
+                                .arg(QString::number(info.frameRateInfo.medianFrameRate, 'f', 2))
+                                .arg(QString::number(info.frameRateInfo.averageFrameRate, 'f', 2))
                                 .arg(QString::number(info.fps, 'f', 2))
                                 .arg(info.totalFrames)
                                 .arg(info.droppedFrames)
@@ -524,6 +533,18 @@ void MainWindow::mountFile(const QString& filePath) {
     removeButton->setFixedSize(buttonWidth, buttonHeight);
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
     buttonLayout->addWidget(removeButton);
+    
+    // Create and add the discard button
+    auto* discardButton = new QPushButton("Discard", fileWidget);
+    discardButton->setFixedSize(buttonWidth, buttonHeight);
+    discardButton->setToolTip("Unmount and delete all written DNG files");
+    buttonLayout->addWidget(discardButton);
+    
+    // Create and add the finalize button
+    auto* finalizeButton = new QPushButton("Finalize", fileWidget);
+    finalizeButton->setFixedSize(buttonWidth, buttonHeight);
+    finalizeButton->setToolTip("Render all frames to disk with compression (if enabled), then unmount");
+    buttonLayout->addWidget(finalizeButton);
 
     // Add stretch to push buttons to the left
     buttonLayout->addStretch();
@@ -592,6 +613,14 @@ void MainWindow::mountFile(const QString& filePath) {
 
     connect(removeButton, &QPushButton::clicked, this, [this, fileWidget] {
         removeFile(fileWidget);
+    });
+    
+    connect(discardButton, &QPushButton::clicked, this, [this, fileWidget] {
+        discardFile(fileWidget);
+    });
+    
+    connect(finalizeButton, &QPushButton::clicked, this, [this, fileWidget] {
+        finalizeFile(fileWidget);
     });
     
     connect(calibButton, &QPushButton::clicked, this, [this, fileWidget] {
@@ -682,6 +711,373 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     }
 }
 
+void MainWindow::discardFile(QWidget* fileWidget) {
+    auto mountPath = fileWidget->property("mountPath").toString();
+    if (mountPath.isEmpty()) {
+        spdlog::error("Discard failed: mount path not found");
+        return;
+    }
+    
+    // First unmount
+    bool ok = false;
+    auto mountId = fileWidget->property("mountId").toInt(&ok);
+    if(ok) {
+        mFuseFilesystem->unmount(mountId);
+    }
+    
+    // Give Windows a moment to release file handles after unmounting
+    QThread::msleep(100);
+    
+    // Delete the entire mount directory recursively
+    QDir mountDir(mountPath);
+    if (mountDir.exists()) {
+        // Try to remove directory (includes all files)
+        bool removed = mountDir.removeRecursively();
+        
+        if (!removed) {
+            // If first attempt failed, wait a bit longer and try again
+            // (files might still be in use)
+            QThread::msleep(500);
+            removed = mountDir.removeRecursively();
+        }
+        
+        if (removed) {
+            spdlog::info("Discarded clip: removed directory and all files: {}", mountPath.toStdString());
+        } else {
+            // Directory couldn't be removed (likely files still in use)
+            // Try to delete individual files
+            QStringList allFiles = mountDir.entryList(QDir::Files | QDir::NoDotAndDotDot);
+            int deletedCount = 0;
+            
+            for (const QString& fileName : allFiles) {
+                QString filePath = mountDir.absoluteFilePath(fileName);
+                if (QFile::remove(filePath)) {
+                    deletedCount++;
+                }
+            }
+            
+            // Try one more time to remove the directory
+            if (mountDir.rmdir(".")) {
+                spdlog::info("Discarded clip: deleted {} files and removed directory: {}", 
+                            deletedCount, mountPath.toStdString());
+            } else {
+                spdlog::warn("Discarded clip: deleted {} files but directory remains (files may be in use): {}", 
+                            deletedCount, mountPath.toStdString());
+            }
+        }
+    }
+    
+    // Remove from UI (same as removeFile)
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
+    
+    int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
+    if (fileWidgetIndex > 0) {
+        auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
+        if (itemAbove && itemAbove->widget()) {
+            auto* widgetAbove = itemAbove->widget();
+            auto* frame = qobject_cast<QFrame*>(widgetAbove);
+            if (frame && frame->frameShape() == QFrame::HLine) {
+                scrollLayout->removeWidget(frame);
+                frame->deleteLater();
+            }
+        }
+    }
+    
+    scrollLayout->removeWidget(fileWidget);
+    fileWidget->deleteLater();
+    
+    // Remove from mounted files list
+    if(ok) {
+        auto it = std::find_if(
+            mMountedFiles.begin(), mMountedFiles.end(),
+            [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
+        if(it != mMountedFiles.end())
+            mMountedFiles.erase(it);
+    }
+    
+    if (mMountedFiles.empty()) {
+        ui->dragAndDropLabel->show();
+    }
+}
+
+void MainWindow::finalizeFile(QWidget* fileWidget) {
+    auto mountPath = fileWidget->property("mountPath").toString();
+    auto srcFile = fileWidget->property("filePath").toString();
+    
+    if (mountPath.isEmpty() || srcFile.isEmpty()) {
+        spdlog::error("Finalize failed: mount information not found (mountPath: {}, srcFile: {})", 
+                     mountPath.toStdString(), srcFile.toStdString());
+        return;
+    }
+    
+    // Get mount ID and file info
+    bool ok = false;
+    auto mountId = fileWidget->property("mountId").toInt(&ok);
+    if (!ok) {
+        spdlog::error("Finalize failed: invalid mount ID");
+        return;
+    }
+    
+    auto fileInfo = mFuseFilesystem->getFileInfo(mountId);
+    if (!fileInfo.has_value()) {
+        spdlog::error("Finalize failed: could not get file information");
+        return;
+    }
+    
+    int totalFrames = fileInfo->totalFrames - fileInfo->droppedFrames + fileInfo->duplicatedFrames;
+    
+    
+    // First unmountW
+    mFuseFilesystem->unmount(mountId);
+    
+    // Use a temporary directory to avoid ProjectedFS locks
+    // We'll write to temp, then move files to the final location
+    QString tempPath = mountPath + "_temp";
+    QDir tempDir(tempPath);
+    
+    // Remove temp directory if it exists
+    if (tempDir.exists()) {
+        tempDir.removeRecursively();
+    }
+    
+    // Create temp directory
+    if (!tempDir.mkpath(".")) {
+        spdlog::error("Failed to create temp directory: {}", tempPath.toStdString());
+        return;
+    }
+    
+    spdlog::info("Using temp directory: {}", tempPath.toStdString());
+    
+    // Create progress dialog
+    QProgressDialog progress("Rendering DNG sequence...", "Cancel", 0, totalFrames, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setValue(0);
+    
+    // Get current render config
+    auto settings = buildRenderSettings();
+    bool enableCompression = settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION;
+
+    spdlog::info("Starting finalize for {} ({} frames from fileInfo, compression: {})", 
+                 srcFile.toStdString(), totalFrames, enableCompression ? "enabled" : "disabled");
+    spdlog::info("Compression checkbox state: {}", enableCompression);
+    
+    
+    // Render all frames directly to disk (bypassing ProjectedFS)
+    // This allows compression to work correctly with variable file sizes
+    try {
+        // Open the decoder directly
+        motioncam::Decoder decoder(srcFile.toStdString());
+        auto frames = decoder.getFrames();
+        std::sort(frames.begin(), frames.end());
+        
+        if (frames.empty()) {
+            spdlog::error("No frames found in source file");
+            progress.close();
+            return;
+        }
+        
+        spdlog::info("Found {} actual frames in source file", frames.size());
+        spdlog::info("Config compression setting: {}", enableCompression);
+        spdlog::info("Will render to temp directory: {}", tempPath.toStdString());
+        
+        // Get container metadata
+        auto cameraConfig = motioncam::CameraConfiguration::parse(decoder.getContainerMetadata());
+        spdlog::info("Camera config parsed successfully");
+        
+        // Calculate baseline exposure
+        double baselineExpValue = std::numeric_limits<double>::max();
+        for (const auto& frame : frames) {
+            nlohmann::json metadata;
+            decoder.loadFrameMetadata(frame, metadata);
+            const auto& cameraFrameMetadata = motioncam::CameraFrameMetadata::limitedParse(metadata);
+            baselineExpValue = std::min(baselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
+        }
+        
+        // Get FPS
+        auto frameRateInfo = motioncam::vfs::calculateFrameRate(frames);
+        bool applyCFRConversion = settings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+        float fps = motioncam::vfs::determineCFRTarget(frameRateInfo, settings.cfrTarget, applyCFRConversion);
+        
+        // Load calibration if exists
+        std::optional<motioncam::CalibrationData> calibration;
+        boost::filesystem::path srcPath(srcFile.toStdString());
+        boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+        if (boost::filesystem::exists(calibPath)) {
+            calibration = motioncam::CalibrationData::loadFromFile(calibPath.string());
+        }
+        
+        // Parse exposure keyframes
+        std::optional<motioncam::ExposureKeyframes> exposureKeyframes = motioncam::ExposureKeyframes::parse(settings.exposureCompensation);
+        
+        // Get base name for files
+        QString baseName = QFileInfo(srcFile).completeBaseName();
+        
+        // Calculate scale using the same method as VirtualFileSystemImpl
+        int scale = motioncam::vfs::getScaleFromOptions(settings.options, settings.draftScale);
+        
+        // Handle CFR conversion if enabled
+        int lastPts = 0;
+        int outputFrameCount = 0;
+        
+        for (size_t i = 0; i < frames.size() && !progress.wasCanceled(); ++i) {
+            // Load frame data
+            std::vector<uint8_t> frameData;
+            nlohmann::json metadata;
+            decoder.loadFrame(frames[i], frameData, metadata);
+            
+            auto frameMetadata = motioncam::CameraFrameMetadata::parse(metadata);
+            
+            // Calculate frame-specific exposure compensation
+            std::string frameExposureComp = settings.exposureCompensation;
+            if (exposureKeyframes.has_value()) {
+                float exposureValue = exposureKeyframes->getExposureAtFrame(i, frames.size());
+                frameExposureComp = std::to_string(exposureValue);
+            }
+            
+            // Handle CFR conversion (duplicate frames if needed)
+            int pts = lastPts;
+            if (applyCFRConversion) {
+                pts = motioncam::vfs::getFrameNumberFromTimestamp(frames[i], frames[0], fps);
+            }
+            
+            // Duplicate frames to fill gaps (CFR conversion)
+            while (lastPts <= pts && !progress.wasCanceled()) {
+                // Update progress
+                progress.setValue(outputFrameCount);
+                progress.setLabelText(QString("Rendering frame %1 of %2...").arg(outputFrameCount + 1).arg(totalFrames));
+                QApplication::processEvents();
+                
+                // Generate DNG
+                spdlog::info("MAINWINDOW: About to call generateDng with config.enableCompression={}", enableCompression);
+                auto dngData = motioncam::utils::generateDng(
+                    frameData,
+                    frameMetadata,
+                    cameraConfig,
+                    fps,
+                    outputFrameCount,
+                    baselineExpValue,
+                    settings,
+                    exposureKeyframes,
+                    calibration,
+                    enableCompression
+                );
+                spdlog::info("MAINWINDOW: generateDng returned");
+                
+                // Write to temp directory
+                if (dngData && dngData->size() > 0) {
+                    QString frameName = QString("%1-%2.dng")
+                        .arg(baseName)
+                        .arg(outputFrameCount, 6, 10, QChar('0'));
+                    QString framePath = tempDir.absoluteFilePath(frameName);
+                    
+                    if (outputFrameCount == 0) {
+                        spdlog::info("First frame size: {} bytes, compression: {}", dngData->size(), enableCompression);
+                        spdlog::info("Writing to temp: {}", framePath.toStdString());
+                    }
+                    
+                    QFile file(framePath);
+                    if (file.open(QIODevice::WriteOnly)) {
+                        qint64 written = file.write(reinterpret_cast<const char*>(dngData->data()), dngData->size());
+                        file.close();
+                        
+                        if (written != static_cast<qint64>(dngData->size())) {
+                            spdlog::error("Frame {}: wrote {} bytes but expected {}", outputFrameCount, written, dngData->size());
+                        } else if (outputFrameCount == 0) {
+                            spdlog::info("First frame written successfully");
+                        }
+                    } else {
+                        spdlog::error("Failed to write frame {}: {}", outputFrameCount, file.errorString().toStdString());
+                    }
+                } else {
+                    spdlog::error("Frame {}: DNG generation failed", outputFrameCount);
+                }
+                
+                outputFrameCount++;
+                lastPts++;
+                
+                if (!applyCFRConversion) break; // Only one iteration if no CFR
+            }
+        }
+        
+        progress.setValue(outputFrameCount);
+        
+        if (!progress.wasCanceled()) {
+            spdlog::info("Rendered {} frames to temp directory", outputFrameCount);
+            
+            // Now move files from temp to final location
+            progress.setLabelText("Moving files to final location...");
+            QApplication::processEvents();
+            
+            // Clear the original mount directory
+            QDir mountDir(mountPath);
+            if (mountDir.exists()) {
+                mountDir.removeRecursively();
+            }
+            mountDir.mkpath(".");
+            
+            // Move all files from temp to final location
+            QStringList tempFiles = tempDir.entryList(QStringList() << "*.dng", QDir::Files);
+            int movedCount = 0;
+            for (const QString& fileName : tempFiles) {
+                QString srcPath = tempDir.absoluteFilePath(fileName);
+                QString dstPath = mountDir.absoluteFilePath(fileName);
+                if (QFile::rename(srcPath, dstPath)) {
+                    movedCount++;
+                } else {
+                    spdlog::error("Failed to move file: {} to {}", srcPath.toStdString(), dstPath.toStdString());
+                }
+            }
+            
+            // Remove temp directory
+            tempDir.removeRecursively();
+            
+            spdlog::info("Finalize complete: {} frames rendered and moved to {}", movedCount, mountPath.toStdString());
+        } else {
+            spdlog::info("Finalize cancelled by user at frame {} of {}", outputFrameCount, totalFrames);
+            // Clean up temp directory
+            tempDir.removeRecursively();
+        }
+        
+    } catch (const std::exception& e) {
+        spdlog::error("Finalize failed: {}", e.what());
+        progress.close();
+        return;
+    }
+    
+    // Remove from UI
+    auto* scrollContent = ui->dragAndDropScrollArea->widget();
+    auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
+    
+    int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
+    if (fileWidgetIndex > 0) {
+        auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
+        if (itemAbove && itemAbove->widget()) {
+            auto* widgetAbove = itemAbove->widget();
+            auto* frame = qobject_cast<QFrame*>(widgetAbove);
+            if (frame && frame->frameShape() == QFrame::HLine) {
+                scrollLayout->removeWidget(frame);
+                frame->deleteLater();
+            }
+        }
+    }
+    
+    scrollLayout->removeWidget(fileWidget);
+    fileWidget->deleteLater();
+    
+    // Remove from mounted files list
+    auto it = std::find_if(
+        mMountedFiles.begin(), mMountedFiles.end(),
+        [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
+    if(it != mMountedFiles.end())
+        mMountedFiles.erase(it);
+    
+    if (mMountedFiles.empty()) {
+        ui->dragAndDropLabel->show();
+    }
+}
+
 void MainWindow::updateUi() {
     // Draft quality only enabled when draft mode is on
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked) {
@@ -755,20 +1151,7 @@ void MainWindow::updateFpsLabels() {
         return;
     }
 
-    //auto config = buildRenderConfig();
-    
-    // Force recalculation of fps values by calling updateOptions for all mounted files
-    motioncam::RenderSettings settings(
-        getRenderOptions(*ui),
-        mDraftQuality,
-        mCFRTarget,
-        mCropTarget,
-        mCameraModel,
-        mLevels,
-        mLogTransform,
-        mExposureCompensation,
-        mQuadBayerOption
-    );
+    auto settings = buildRenderSettings();
 
     for (const auto& mountedFile : mMountedFiles) {
         mFuseFilesystem->updateOptions(mountedFile.mountId, settings);
@@ -827,8 +1210,8 @@ void MainWindow::updateFpsLabels() {
             auto infoText2 = QString("<span style='color: #888888;'>Median / Average / Target FPS: %1 / %2 -> </span>"
                                      "<span style='color: white;'>%3</span>"
                                      "<span style='color: #888888;'> | Framecount: %4 | Dropped: -%5 | Duplicated: +%6</span>")
-                                    .arg(QString::number(info.medFps, 'f', 2))
-                                    .arg(QString::number(info.avgFps, 'f', 2))
+                                    .arg(QString::number(info.frameRateInfo.medianFrameRate, 'f', 2))
+                                    .arg(QString::number(info.frameRateInfo.averageFrameRate, 'f', 2))
                                     .arg(QString::number(info.fps, 'f', 2))
                                     .arg(info.totalFrames)
                                     .arg(info.droppedFrames)
@@ -839,25 +1222,17 @@ void MainWindow::updateFpsLabels() {
     }
 }
 
-void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
-    auto it = mMountedFiles.begin();
-    motioncam::RenderSettings settings(
-        getRenderOptions(*ui),
-        mDraftQuality,
-        mCFRTarget,
-        mCropTarget,
-        mCameraModel,
-        mLevels,
-        mLogTransform,
-        mExposureCompensation,
-        mQuadBayerOption
-    );
-
+void MainWindow::onRenderSettingsChanged(Qt::CheckState checkState) {
+    auto settings = buildRenderSettings();
+    
     updateUi();
     scheduleOptionsUpdate();
+    
+    auto it = mMountedFiles.begin();
     while(it != mMountedFiles.end()) {
         mFuseFilesystem->updateOptions(it->mountId, settings);
         ++it;
+    }
 }
 
 void MainWindow::scheduleOptionsUpdate() {
@@ -874,7 +1249,7 @@ void MainWindow::scheduleOptionsUpdate() {
     mProcessingInProgress = true;
     
     // Capture current settings
-    auto config = buildRenderConfig();
+    auto settings = buildRenderSettings();
     auto mountedFiles = mMountedFiles;
     auto filesystem = mFuseFilesystem.get();
     
@@ -882,12 +1257,12 @@ void MainWindow::scheduleOptionsUpdate() {
     onProcessingStarted();
     
     // Run processing in background thread using QtConcurrent
-    QFuture<void> future = QtConcurrent::run([this, filesystem, config, mountedFiles]() {
+    QFuture<void> future = QtConcurrent::run([this, filesystem, settings, mountedFiles]() {
         int current = 0;
         int total = mountedFiles.size();
         
         for (const auto& file : mountedFiles) {
-            filesystem->updateOptions(file.mountId, config);
+            filesystem->updateOptions(file.mountId, settings);
             current++;
             
             // Update progress on main thread
@@ -933,52 +1308,52 @@ void MainWindow::onProcessingFinished() {
 
 void MainWindow::onDraftModeQualityChanged(int index) {
     if(index == 0)
-        mRenderConfig.draftScale = 2;
+        mRenderSettings.draftScale = 2;
     else if(index == 1)
-        mRenderConfig.draftScale = 4;
+        mRenderSettings.draftScale = 4;
     else if(index == 2)
-        mRenderConfig.draftScale = 8;
+        mRenderSettings.draftScale = 8;
 
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCFRTargetChanged(std::string input) {
-    mRenderConfig.cfrTarget = input;
+    mRenderSettings.cfrTarget = stringToCFRTarget(input);
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCropTargetChanged(std::string input) {
-    mRenderConfig.cropTarget = input;
+    mRenderSettings.cropTarget = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCamModelOverrideChanged(std::string input) {
-    mRenderConfig.cameraModel = input;
+    mRenderSettings.cameraModel = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onLevelsChanged(std::string input) {
-    mRenderConfig.levels = input;
+    mRenderSettings.levels = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onLogTransformChanged(std::string input) {
-    mRenderConfig.logTransform = input;
+    mRenderSettings.logTransform = stringToLogTransformMode(input);
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onExposureCompensationChanged(std::string input) {
-    mRenderConfig.exposureCompensation = input;
+    mRenderSettings.exposureCompensation = input;
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onQuadBayerChanged(std::string input) {
-    mRenderConfig.quadBayerOption = input;
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode(input);
     scheduleOptionsUpdate();
 }
 
 void MainWindow::onCfaPhaseChanged(std::string input) {
-    mRenderConfig.cfaPhase = input;
+    mRenderSettings.cfaPhase = input;
     scheduleOptionsUpdate();
 }
 
@@ -1016,23 +1391,23 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->quadBayerCheckBox->setCheckState(Qt::CheckState::Unchecked);
 
-    mRenderConfig.draftScale = 1;
-    mRenderConfig.cfrTarget = "Prefer Drop Frame";
-    mRenderConfig.exposureCompensation = "0ev";
-    mRenderConfig.cameraModel = "Panasonic";
-    mRenderConfig.levels = "Dynamic";
-    mRenderConfig.logTransform = "Keep Input";
-    mRenderConfig.quadBayerOption = "Wrong CFA Metadata";
-    mRenderConfig.cfaPhase = "Don't override CFA";
+    mRenderSettings.draftScale = 1;
+    mRenderSettings.cfrTarget = stringToCFRTarget("Prefer Drop Frame");
+    mRenderSettings.exposureCompensation = "0ev";
+    mRenderSettings.cameraModel = "Panasonic";
+    mRenderSettings.levels = "Dynamic";
+    mRenderSettings.logTransform = stringToLogTransformMode("Keep Input");
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode("Wrong CFA Metadata");
+    mRenderSettings.cfaPhase = "Don't override CFA";
 
-    ui->cfrTarget->setCurrentText(QString::fromStdString(mRenderConfig.cfrTarget));
-    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderConfig.exposureCompensation));
-    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cameraModel));    
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderConfig.levels)); 
-    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cropTarget));    
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(mRenderConfig.logTransform));  
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(mRenderConfig.quadBayerOption));
-    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderConfig.cfaPhase));   
+    ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
+    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderSettings.exposureCompensation));
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));    
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels)); 
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));  
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));   
 
     updateUi();
 }

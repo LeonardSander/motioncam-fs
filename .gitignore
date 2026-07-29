@@ -1,4 +1,5 @@
 build/
+build-clang-debug/
 .vs/
 .vscode/
 cache/

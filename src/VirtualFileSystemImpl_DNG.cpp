@@ -23,7 +23,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderConfig& config,
+        const RenderSettings& config,
         const std::string& file,
         const std::string& baseName) :
         mCache(lruCache),
@@ -241,7 +241,7 @@ size_t VirtualFileSystemImpl_DNG::generateFrame(
     }
 }
 
-void VirtualFileSystemImpl_DNG::updateOptions(const RenderConfig& config) {
+void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     std::lock_guard<std::mutex> lock(mMutex);
     
     mConfig = config;
@@ -251,8 +251,8 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderConfig& config) {
 
 FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     FileInfo info;
-    info.medFps = mMedFps;
-    info.avgFps = mAvgFps;
+    info.frameRateInfo.medianFrameRate = mMedFps;
+    info.frameRateInfo.averageFrameRate = mAvgFps;
     info.fps = mFps;
     info.totalFrames = mTotalFrames;
     info.droppedFrames = mDroppedFrames;

@@ -4,7 +4,6 @@
 #include <memory>
 
 #include "IFuseFileSystem.h"
-#include "RenderConfig.h"
 
 namespace BS {
     class thread_pool;

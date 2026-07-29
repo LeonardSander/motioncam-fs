@@ -4,7 +4,7 @@
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
 #include <ExposureKeyframes.h>
-#include <RenderConfig.h>
+#include <VirtualFileSystemImpl.h>
 
 namespace BS {
 class thread_pool;
@@ -40,7 +40,7 @@ public:
         bool async=true) override;
 
     void updateOptions(const RenderSettings& settings) override;
-    FileInfo getFileInfo() const; //override;
+    FileInfo getFileInfo() const;
 
 private:
     void init();
@@ -83,20 +83,11 @@ private:
     FileRenderOptions mOptions;*/
     RenderSettings mSettings; //EVALUATE
     float mFps;
-    float mMedFps;
-    float mAvgFps;
-    int mTotalFrames;
-    int mDroppedFrames;
-    int mDuplicatedFrames;
-    int mWidth;
-    int mHeight;
+    FrameRateInfo mFrameRateInfo;
+    FileInfo mFileInfo;
     double mBaselineExpValue;
     std::optional<CalibrationData> mCalibration;
     std::mutex mMutex;
-    bool mNeedRemosaic;
-    float mSrcWhiteLevel;
-    std::array<float, 4> mSrcBlackLevel;
-    float mAudioDurationSeconds;
 };
 
 } // namespace motioncam

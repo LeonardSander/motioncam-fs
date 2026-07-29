@@ -1,8 +1,6 @@
 #pragma once
 
 #include "Types.h"
-#include "IFuseFileSystem.h"
-#include "RenderConfig.h"
 
 #include <optional>
 #include <string>
@@ -10,6 +8,8 @@
 #include <functional>
 
 namespace motioncam {
+
+struct FileInfo;
 
 class IVirtualFileSystem {
 public:

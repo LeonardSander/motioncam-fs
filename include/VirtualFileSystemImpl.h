@@ -10,20 +10,36 @@ namespace motioncam {
 // Forward declare AudioChunk from Types.h
 using AudioChunk = std::pair<Timestamp, std::vector<int16_t>>;
 
-namespace vfs {
-
-// Frame rate calculation
 struct FrameRateInfo {
-    float medianFrameRate;
+    float minFrameRate;
+    float lowerQuartileFrameRate;  // 25th percentile
+    float medianFrameRate;         // 50th percentile
+    float upperQuartileFrameRate;  // 75th percentile
+    float maxFrameRate;
     float averageFrameRate;
 };
+
+struct FileInfo {
+    FrameRateInfo frameRateInfo;
+    float fps;
+    int totalFrames;
+    int droppedFrames;
+    int duplicatedFrames;
+    int width;
+    int height;
+    std::string dataType;        // "Bayer CFA", "Quad Bayer CFA", or "RGB"
+    std::string levelsInfo;      // e.g., "1023/64 -> 1023/0 RAW10"
+    float runtimeSeconds;        // Runtime in seconds based on audio track
+};
+
+namespace vfs {
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames);
 
 // CFR (Constant Frame Rate) conversion
 float determineCFRTarget(
-    float medianFps,
-    const std::string& cfrTarget,
+    FrameRateInfo fpsInfo,
+    const CFRTarget& cfrTarget,
     bool applyCFRConversion);
 
 int getFrameNumberFromTimestamp(
@@ -68,6 +84,15 @@ void syncAudio(
     std::vector<AudioChunk>& audioChunks,
     int sampleRate,
     int numChannels);
+
+std::string getDisplayDataType(
+    bool directLogRGB, bool quadBayerCapture, bool interpretAsQuad, bool remosaic);
+
+std::string getDisplayDataLevels(
+    float dynWhiteLevel, std::array<float, 4> dynBlackLevel, 
+    float statWhiteLevel, std::array<float, 4> statBlackLevel, 
+    std::string levels, std::string logTransform,
+    bool applyShadingMap, bool normalizeShadingMap);
 
 } // namespace vfs
 } // namespace motioncam

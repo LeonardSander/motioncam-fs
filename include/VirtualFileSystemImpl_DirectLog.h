@@ -2,9 +2,10 @@
 
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
+#include <VirtualFileSystemImpl.h>
 #include <CalibrationData.h>
 #include <ExposureKeyframes.h>
-#include <RenderConfig.h>
+#include <Types.h>
 #include <memory>
 
 namespace BS {
@@ -23,7 +24,7 @@ public:
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderConfig& config,
+        const RenderSettings& config,
         const std::string& file,
         const std::string& baseName);
 
@@ -40,8 +41,8 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(const RenderConfig& config) override;
-    FileInfo getFileInfo() const override;
+    void updateOptions(const RenderSettings& config) override;
+    FileInfo getFileInfo() const;
 
 private:
     void init();
@@ -67,11 +68,10 @@ private:
     const std::string mBaseName;
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
-    RenderConfig mConfig;
+    RenderSettings mConfig;
     std::optional<ExposureKeyframes> mExposureKeyframes;
     float mFps;
-    float mMedFps;
-    float mAvgFps;
+    FrameRateInfo mFrameRateInfo;
     int mTotalFrames;
     int mDroppedFrames;
     int mDuplicatedFrames;

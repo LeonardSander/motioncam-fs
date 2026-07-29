@@ -3,7 +3,6 @@
 
 #include "IFuseFileSystem.h"
 #include "CalibrationData.h"
-#include "RenderConfig.h"
 
 #include <QMainWindow>
 #include <QList>
@@ -80,7 +79,7 @@ private slots:
     void onProcessingProgress(int current, int total);
 
 private slots:
-    void onRenderSettingsChanged(const Qt::CheckState &state);
+    void onRenderSettingsChanged(Qt::CheckState state);
     void onDraftModeQualityChanged(int index);
     void onSetCacheFolder(bool checked);
     void onCFRTargetChanged(std::string input);
@@ -96,6 +95,8 @@ private slots:
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
+    void discardFile(QWidget* fileWidget);
+    void finalizeFile(QWidget* fileWidget);
     void createCalibrationJson(QWidget* fileWidget);
     void updateCalibrationButtonStates();
 
@@ -107,14 +108,14 @@ private:
     void scheduleOptionsUpdate();
 
 private:
-    motioncam::RenderConfig buildRenderConfig() const;
+    motioncam::RenderSettings buildRenderSettings() const;
 
 private:
     Ui::MainWindow *ui;
     std::unique_ptr<motioncam::IFuseFileSystem> mFuseFilesystem;
     QList<motioncam::MountedFile> mMountedFiles;
     QString mCacheRootFolder;
-    motioncam::RenderConfig mRenderConfig;
+    motioncam::RenderSettings mRenderSettings;
     std::optional<motioncam::CalibrationData> mGlobalCalibration;
     
     QFutureWatcher<void>* mProcessingWatcher;

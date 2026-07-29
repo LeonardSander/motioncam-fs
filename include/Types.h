@@ -4,6 +4,8 @@
 #include <string>
 #include <variant>
 #include <cstdint>
+#include <string>
+#include <sstream>
 
 #include <boost/filesystem.hpp>
 
@@ -65,7 +67,6 @@ struct Entry {
     }
 };
 
-
 enum FileRenderOptions : unsigned int {
     RENDER_OPT_NONE                         = 0,
     RENDER_OPT_DRAFT                        = 1 << 0,    
@@ -79,7 +80,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_CAMMODEL_OVERRIDE            = 1 << 8,
     RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
     RENDER_OPT_INTERPRET_AS_QUAD_BAYER      = 1 << 10,
-    RENDER_OPT_REMOSAIC_TO_BAYER            = 1 << 11,
+    RENDER_OPT_REMOSAIC_TO_BAYER            = 1 << 11,    
+    RENDER_OPT_JPEG_COMPRESSION             = 1 << 12
 };
 
 // Overload bitwise OR operator
@@ -149,6 +151,9 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_REMOSAIC_TO_BAYER) {
         flags.push_back("REMOSAIC_TO_BAYER");
+    }
+    if (options & RENDER_OPT_JPEG_COMPRESSION) {
+        flags.push_back("JPEG_COMPRESSION");
     }
     
     std::string result;
@@ -269,6 +274,7 @@ struct RenderSettings {
     LogTransformMode logTransform;
     std::string exposureCompensation;
     QuadBayerMode quadBayerOption;
+    std::string cfaPhase;
 
     // Constructor with defaults
     RenderSettings()
@@ -281,6 +287,7 @@ struct RenderSettings {
         , logTransform(LogTransformMode::KeepInput)
         , exposureCompensation("0ev")
         , quadBayerOption(QuadBayerMode::Remosaic)
+        , cfaPhase("bggr")
     {}
 
     // Constructor with all parameters (strings for backward compatibility)
@@ -289,21 +296,22 @@ struct RenderSettings {
         int draft,
         const std::string& cfr,
         const std::string& crop,
-        const std::string& camModel,
-        const std::string& lvls,
-        const std::string& logTrans,
-        const std::string& expComp,
-        const std::string& quadBayer
-    )
+        const std::string& cam,
+        const std::string& lvl,
+        const std::string& log,
+        const std::string& exp = "0ev",
+        const std::string& qb = "Remosaic",
+        const std::string& cfa = "bggr")
         : options(opts)
         , draftScale(draft)
         , cfrTarget(stringToCFRTarget(cfr))
         , cropTarget(crop)
-        , cameraModel(camModel)
-        , levels(lvls)
-        , logTransform(stringToLogTransformMode(logTrans))
-        , exposureCompensation(expComp)
-        , quadBayerOption(stringToQuadBayerMode(quadBayer))
+        , cameraModel(cam)
+        , levels(lvl)
+        , logTransform(stringToLogTransformMode(log))
+        , exposureCompensation(exp)
+        , quadBayerOption(stringToQuadBayerMode(qb))
+        , cfaPhase(cfa)
     {}
 
     // Constructor with enum types directly
@@ -316,8 +324,8 @@ struct RenderSettings {
         const std::string& lvls,
         LogTransformMode logTrans,
         const std::string& expComp,
-        QuadBayerMode quadBayer
-    )
+        QuadBayerMode quadBayer,
+        const std::string& cfa = "bggr")
         : options(opts)
         , draftScale(draft)
         , cfrTarget(cfr)
@@ -327,6 +335,7 @@ struct RenderSettings {
         , logTransform(logTrans)
         , exposureCompensation(expComp)
         , quadBayerOption(quadBayer)
+        , cfaPhase(cfa)
     {}
 };
 

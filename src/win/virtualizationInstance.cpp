@@ -169,6 +169,8 @@ HRESULT VirtualizationInstance::EnsureVirtualizationRoot()
     GUID instanceId;
 
     // Try creating our virtualization root.
+    bool needsInitialization = false;
+    
     if (!::CreateDirectory(_rootPath.c_str(), nullptr))
     {
         win32error = GetLastError();
@@ -186,25 +188,37 @@ HRESULT VirtualizationInstance::EnsureVirtualizationRoot()
             if (idFileHandle == INVALID_HANDLE_VALUE)
             {
                 win32error = GetLastError();
-                return HRESULT_FROM_WIN32(win32error);
+                
+                // If the instance ID file doesn't exist, treat this as a new directory
+                // that needs initialization (e.g., empty folder created by user)
+                if (win32error == ERROR_FILE_NOT_FOUND)
+                {
+                    needsInitialization = true;
+                }
+                else
+                {
+                    return HRESULT_FROM_WIN32(win32error);
+                }
             }
-
-            DWORD bytesRead;
-            if (!::ReadFile(idFileHandle, &instanceId, sizeof(GUID), &bytesRead, nullptr))
+            else
             {
-                win32error = GetLastError();
-                ::CloseHandle(idFileHandle);
-                return HRESULT_FROM_WIN32(win32error);
-            }
+                DWORD bytesRead;
+                if (!::ReadFile(idFileHandle, &instanceId, sizeof(GUID), &bytesRead, nullptr))
+                {
+                    win32error = GetLastError();
+                    ::CloseHandle(idFileHandle);
+                    return HRESULT_FROM_WIN32(win32error);
+                }
 
-            // If we didn't read sizeof(GUID) bytes then this might not be our directory.
-            if (bytesRead != sizeof(GUID))
-            {
-                ::CloseHandle(idFileHandle);
-                return HRESULT_FROM_WIN32(ERROR_BAD_CONFIGURATION);
-            }
+                // If we didn't read sizeof(GUID) bytes then this might not be our directory.
+                if (bytesRead != sizeof(GUID))
+                {
+                    ::CloseHandle(idFileHandle);
+                    return HRESULT_FROM_WIN32(ERROR_BAD_CONFIGURATION);
+                }
 
-            ::CloseHandle(idFileHandle);
+                ::CloseHandle(idFileHandle);
+            }
         }
         else
         {
@@ -213,7 +227,14 @@ HRESULT VirtualizationInstance::EnsureVirtualizationRoot()
     }
     else
     {
-        // We created a new directory.  Create a virtualization instance ID.
+        // We created a new directory - needs initialization
+        needsInitialization = true;
+    }
+    
+    // Initialize the directory if needed (new directory or existing empty directory)
+    if (needsInitialization)
+    {
+        // Create a virtualization instance ID.
         ::CoCreateGuid(&instanceId);
 
         // Store the ID in the directory as a way for us to detect that this is our directory in

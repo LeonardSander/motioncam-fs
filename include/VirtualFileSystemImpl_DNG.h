@@ -3,7 +3,6 @@
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
-#include <RenderConfig.h>
 #include <memory>
 
 namespace BS {
@@ -22,7 +21,7 @@ public:
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderConfig& config,
+        const RenderSettings& config,
         const std::string& file,
         const std::string& baseName);
 
@@ -39,8 +38,8 @@ public:
         std::function<void(size_t, int)> result,
         bool async=true) override;
 
-    void updateOptions(const RenderConfig& config) override;
-    FileInfo getFileInfo() const override;
+    void updateOptions(const RenderSettings& config) override;
+    FileInfo getFileInfo() const;
 
 private:
     void init();
@@ -63,7 +62,7 @@ private:
     const std::string mBaseName;
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
-    RenderConfig mConfig;
+    RenderSettings mConfig;
     float mFps;
     float mMedFps;
     float mAvgFps;

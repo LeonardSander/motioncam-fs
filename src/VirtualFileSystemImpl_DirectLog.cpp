@@ -28,7 +28,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
-        const RenderConfig& config,
+        const RenderSettings& config,
         const std::string& file,
         const std::string& baseName) :
         mCache(lruCache),
@@ -38,8 +38,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mBaseName(baseName),
         mTypicalDngSize(0),
         mFps(0),
-        mMedFps(0),
-        mAvgFps(0),
+        mFrameRateInfo(),
         mTotalFrames(0),
         mDroppedFrames(0),
         mDuplicatedFrames(0),
@@ -78,7 +77,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         calculateFrameRateStats();
         
         spdlog::info("DirectLog video loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames, format: {}, HLG: {}", 
-                     mWidth, mHeight, mFps, mAvgFps, mMedFps, mTotalFrames, mPixelFormat, mIsHLG);
+                     mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate, mTotalFrames, mPixelFormat, mIsHLG);
     }
     catch (const std::exception& e) {
         spdlog::error("Failed to initialize DirectLogDecoder: {}", e.what());
@@ -113,7 +112,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
     
     // Determine target FPS based on CFR conversion options
     bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
-    mFps = vfs::determineCFRTarget(mMedFps, mConfig.cfrTarget, applyCFRConversion);
+    mFps = vfs::determineCFRTarget(mFrameRateInfo, mConfig.cfrTarget, applyCFRConversion);
     
     spdlog::info("DirectLog target FPS: {:.2f} (CFR conversion: {})", mFps, applyCFRConversion);
     
@@ -310,168 +309,6 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
     }
 }
 
-namespace {
-    // Pack RGB data to 12-bit (2 pixels = 6 samples * 12 bits = 72 bits = 9 bytes)
-    void encodeRGBTo12Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 2) {
-                // Read 6 samples (2 RGB pixels)
-                uint16_t r0 = srcPtr[0];
-                uint16_t g0 = srcPtr[1];
-                uint16_t b0 = srcPtr[2];
-                uint16_t r1 = srcPtr[3];
-                uint16_t g1 = srcPtr[4];
-                uint16_t b1 = srcPtr[5];
-                
-                // Pack into 9 bytes
-                dstPtr[0] = r0 >> 4;
-                dstPtr[1] = ((r0 & 0x0F) << 4) | (g0 >> 8);
-                dstPtr[2] = g0 & 0xFF;
-                dstPtr[3] = b0 >> 4;
-                dstPtr[4] = ((b0 & 0x0F) << 4) | (r1 >> 8);
-                dstPtr[5] = r1 & 0xFF;
-                dstPtr[6] = g1 >> 4;
-                dstPtr[7] = ((g1 & 0x0F) << 4) | (b1 >> 8);
-                dstPtr[8] = b1 & 0xFF;
-                
-                srcPtr += 6;
-                dstPtr += 9;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    // Pack RGB data to 10-bit (4 pixels = 12 samples * 10 bits = 120 bits = 15 bytes)
-    void encodeRGBTo10Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 4) {
-                // Read 12 samples (4 RGB pixels)
-                uint16_t s[12];
-                for (int i = 0; i < 12; i++) {
-                    s[i] = srcPtr[i];
-                }
-                
-                // Pack 12 samples * 10 bits = 120 bits = 15 bytes
-                dstPtr[0] = s[0] >> 2;
-                dstPtr[1] = ((s[0] & 0x03) << 6) | (s[1] >> 4);
-                dstPtr[2] = ((s[1] & 0x0F) << 4) | (s[2] >> 6);
-                dstPtr[3] = ((s[2] & 0x3F) << 2) | (s[3] >> 8);
-                dstPtr[4] = s[3] & 0xFF;
-                
-                dstPtr[5] = s[4] >> 2;
-                dstPtr[6] = ((s[4] & 0x03) << 6) | (s[5] >> 4);
-                dstPtr[7] = ((s[5] & 0x0F) << 4) | (s[6] >> 6);
-                dstPtr[8] = ((s[6] & 0x3F) << 2) | (s[7] >> 8);
-                dstPtr[9] = s[7] & 0xFF;
-                
-                dstPtr[10] = s[8] >> 2;
-                dstPtr[11] = ((s[8] & 0x03) << 6) | (s[9] >> 4);
-                dstPtr[12] = ((s[9] & 0x0F) << 4) | (s[10] >> 6);
-                dstPtr[13] = ((s[10] & 0x3F) << 2) | (s[11] >> 8);
-                dstPtr[14] = s[11] & 0xFF;
-                
-                srcPtr += 12;
-                dstPtr += 15;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    // Pack RGB data to 8-bit (1 pixel = 3 samples * 8 bits = 24 bits = 3 bytes)
-    void encodeRGBTo8Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x++) {
-                // Read 3 samples (1 RGB pixel)
-                dstPtr[0] = srcPtr[0] & 0xFF;
-                dstPtr[1] = srcPtr[1] & 0xFF;
-                dstPtr[2] = srcPtr[2] & 0xFF;
-                
-                srcPtr += 3;
-                dstPtr += 3;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    // Pack RGB data to 6-bit (4 pixels = 12 samples * 6 bits = 72 bits = 9 bytes)
-    void encodeRGBTo6Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 4) {
-                // Read 12 samples (4 RGB pixels)
-                uint8_t v[12];
-                for (int i = 0; i < 12; i++) {
-                    v[i] = srcPtr[i] & 0x3F;
-                }
-                
-                // Pack 12 samples * 6 bits = 72 bits = 9 bytes
-                dstPtr[0] = (v[0] << 2) | (v[1] >> 4);
-                dstPtr[1] = ((v[1] & 0x0F) << 4) | (v[2] >> 2);
-                dstPtr[2] = ((v[2] & 0x03) << 6) | v[3];
-                
-                dstPtr[3] = (v[4] << 2) | (v[5] >> 4);
-                dstPtr[4] = ((v[5] & 0x0F) << 4) | (v[6] >> 2);
-                dstPtr[5] = ((v[6] & 0x03) << 6) | v[7];
-                
-                dstPtr[6] = (v[8] << 2) | (v[9] >> 4);
-                dstPtr[7] = ((v[9] & 0x0F) << 4) | (v[10] >> 2);
-                dstPtr[8] = ((v[10] & 0x03) << 6) | v[11];
-                
-                srcPtr += 12;
-                dstPtr += 9;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-    // Pack RGB data to 4-bit (2 pixels = 6 samples * 4 bits = 24 bits = 3 bytes)
-    void encodeRGBTo4Bit(std::vector<uint8_t>& data, uint32_t width, uint32_t height) {
-        uint16_t* srcPtr = reinterpret_cast<uint16_t*>(data.data());
-        uint8_t* dstPtr = data.data();
-        
-        for (uint32_t y = 0; y < height; y++) {
-            for (uint32_t x = 0; x < width; x += 2) {
-                // Read 6 samples (2 RGB pixels)
-                uint8_t v[6];
-                for (int i = 0; i < 6; i++) {
-                    v[i] = srcPtr[i] & 0x0F;
-                }
-                
-                // Pack 6 samples * 4 bits = 24 bits = 3 bytes
-                dstPtr[0] = (v[0] << 4) | v[1];
-                dstPtr[1] = (v[2] << 4) | v[3];
-                dstPtr[2] = (v[4] << 4) | v[5];
-                
-                srcPtr += 6;
-                dstPtr += 3;
-            }
-        }
-        
-        auto newSize = dstPtr - data.data();
-        data.resize(newSize);
-    }
-
-}
-
 bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     const std::vector<uint16_t>& rgbData, 
     std::vector<uint8_t>& dngData, 
@@ -484,20 +321,20 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         const int height = videoInfo.height;
         
         // Determine if we should apply log curve and bit reduction
-        bool applyLogCurve = !mConfig.logTransform.empty();
+        bool applyLogCurve = (mConfig.logTransform != LogTransformMode::Disabled);
         int bitReduction = 0;
         
         if (applyLogCurve) {
             // Parse bit reduction from logTransform option
-            if (mConfig.logTransform == "Reduce by 2bit") {
+            if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) {
                 bitReduction = 2;
-            } else if (mConfig.logTransform == "Reduce by 4bit") {
+            } else if (mConfig.logTransform == LogTransformMode::ReduceBy4Bit) {
                 bitReduction = 4;
-            } else if (mConfig.logTransform == "Reduce by 6bit") {
+            } else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) {
                 bitReduction = 6;
-            } else if (mConfig.logTransform == "Reduce by 8bit") {
+            } else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) {
                 bitReduction = 8;
-            } else if (mConfig.logTransform == "Keep Input") {
+            } else if (mConfig.logTransform == LogTransformMode::KeepInput) {
                 bitReduction = 0;
             }
         }
@@ -584,45 +421,36 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
         
         if (applyLogCurve) {
+            uint32_t w = width, h = height;
             if (encodeBits <= 4) {
-                if (shouldRemosaic) {
-                    uint32_t w = width, h = height;
+                if (shouldRemosaic)                    
                     utils::encodeTo4Bit(imageBytes, w, h);
-                } else {
-                    encodeRGBTo4Bit(imageBytes, width, height);
-                }
+                else 
+                    utils::encodeRGBTo4Bit(imageBytes, w, h);                
                 encodeBits = 4;
             } else if (encodeBits <= 6) {
-                if (shouldRemosaic) {
-                    uint32_t w = width, h = height;
+                if (shouldRemosaic)
                     utils::encodeTo6Bit(imageBytes, w, h);
-                } else {
-                    encodeRGBTo6Bit(imageBytes, width, height);
-                }
+                else
+                    utils::encodeRGBTo6Bit(imageBytes, w, h);                
                 encodeBits = 6;
             } else if (encodeBits <= 8) {
-                if (shouldRemosaic) {
-                    uint32_t w = width, h = height;
+                if (shouldRemosaic) 
                     utils::encodeTo8Bit(imageBytes, w, h);
-                } else {
-                    encodeRGBTo8Bit(imageBytes, width, height);
-                }
+                else 
+                    utils::encodeRGBTo8Bit(imageBytes, w, h);                
                 encodeBits = 8;
             } else if (encodeBits <= 10) {
-                if (shouldRemosaic) {
-                    uint32_t w = width, h = height;
+                if (shouldRemosaic) 
                     utils::encodeTo10Bit(imageBytes, w, h);
-                } else {
-                    encodeRGBTo10Bit(imageBytes, width, height);
-                }
+                else 
+                    utils::encodeRGBTo10Bit(imageBytes, w, h);                
                 encodeBits = 10;
             } else if (encodeBits <= 12) {
-                if (shouldRemosaic) {
-                    uint32_t w = width, h = height;
+                if (shouldRemosaic) 
                     utils::encodeTo12Bit(imageBytes, w, h);
-                } else {
-                    encodeRGBTo12Bit(imageBytes, width, height);
-                }
+                else 
+                    utils::encodeRGBTo12Bit(imageBytes, w, h);                
                 encodeBits = 12;
             }
             // else keep 16-bit
@@ -792,7 +620,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     }
 }
 
-void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderConfig& config) {
+void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
     std::lock_guard<std::mutex> lock(mMutex);
     
     mConfig = config;
@@ -815,8 +643,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderConfig& config) 
 
 FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     FileInfo info;
-    info.medFps = mMedFps;
-    info.avgFps = mAvgFps;
+    info.frameRateInfo = mFrameRateInfo;
     info.fps = mFps;
     info.totalFrames = mTotalFrames;
     info.droppedFrames = mDroppedFrames;
@@ -829,19 +656,20 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.dataType = shouldRemosaic ? "Bayer CFA" : "RGB";
     
     // Determine levels info
-    bool applyLogCurve = !mConfig.logTransform.empty();
+    bool applyLogCurve = (mConfig.logTransform != LogTransformMode::Disabled);
     int srcBits = 16;
     int dstBits = 16;
     
     if (applyLogCurve) {
+        // Strip " lq" suffix if present for comparison
         dstBits = 12; // Start with 12-bit log
-        if (mConfig.logTransform == "Reduce by 2bit") {
+        if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) {
             dstBits = 10;
-        } else if (mConfig.logTransform == "Reduce by 4bit") {
+        } else if (mConfig.logTransform == LogTransformMode::ReduceBy4Bit) {
             dstBits = 8;
-        } else if (mConfig.logTransform == "Reduce by 6bit") {
+        } else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) {
             dstBits = 6;
-        } else if (mConfig.logTransform == "Reduce by 8bit") {
+        } else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) {
             dstBits = 4;
         }
     }
@@ -867,8 +695,6 @@ void VirtualFileSystemImpl_DirectLog::calculateFrameRateStats() {
     const auto& frames = mDecoder->getFrames();
     
     if (frames.size() < 2) {
-        mMedFps = mFps;
-        mAvgFps = mFps;
         return;
     }
     
@@ -879,11 +705,9 @@ void VirtualFileSystemImpl_DirectLog::calculateFrameRateStats() {
         timestamps.push_back(frame.timestamp);
     }
     
-    auto frameRateInfo = vfs::calculateFrameRate(timestamps);
-    mMedFps = frameRateInfo.medianFrameRate;
-    mAvgFps = frameRateInfo.averageFrameRate;
+    mFrameRateInfo = vfs::calculateFrameRate(timestamps);
     
-    spdlog::debug("DirectLog frame rate stats: avg={:.2f}fps, median={:.2f}fps", mAvgFps, mMedFps);
+    spdlog::debug("DirectLog frame rate stats: avg={:.2f}fps, median={:.2f}fps", mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
 }
 
 } // namespace motioncam

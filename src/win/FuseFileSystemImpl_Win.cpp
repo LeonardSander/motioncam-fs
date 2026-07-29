@@ -56,7 +56,7 @@ namespace {
         return lcv::utf_to_utf<char>(std::wstring(ws == nullptr ? L"" : ws));
     }
 
-    void updatePlaceHolder(PRJ_PLACEHOLDER_INFO& placeholderInfo, const Entry& entry, const RenderConfig& config) {
+    void updatePlaceHolder(PRJ_PLACEHOLDER_INFO& placeholderInfo, const Entry& entry, const RenderSettings& config) {
         placeholderInfo.FileBasicInfo.IsDirectory = entry.type == EntryType::DIRECTORY_ENTRY;
         placeholderInfo.FileBasicInfo.FileSize = entry.size;
         placeholderInfo.FileBasicInfo.FileAttributes =
@@ -116,7 +116,7 @@ protected:
         _Inout_ PRJ_NOTIFICATION_PARAMETERS* NotificationParameters) override;
 
 private:
-    RenderConfig mConfig;
+    RenderSettings mConfig;
     std::mutex mOpLock;
     std::unique_ptr<IVirtualFileSystem> mFs;
     std::map<GUID, std::unique_ptr<DirInfo>, GUIDComparer> mActiveEnumSessions;
@@ -166,9 +166,7 @@ Session::~Session() {
 }
 
 void Session::updateOptions(const RenderSettings& settings) {
-    mOptions = settings.options;
-    mDraftScale = settings.draftScale;
-    /*mConfig = config;*/
+    mConfig = settings;
     mFs->updateOptions(settings);
 
     // We need to clear out the cache
@@ -195,7 +193,7 @@ void Session::updateOptions(const RenderSettings& settings) {
         if(boost::ends_with(e.name, "dng")) {
             PRJ_PLACEHOLDER_INFO placeholderInfo = {};
 
-            updatePlaceHolder(placeholderInfo, e, /*config*/settings.options, settings.draftScale);
+            updatePlaceHolder(placeholderInfo, e, mConfig);
 
             hr = PrjUpdateFileIfNeeded(
                 _instanceHandle,
@@ -215,7 +213,16 @@ void Session::updateOptions(const RenderSettings& settings) {
 }
 
 FileInfo Session::getFileInfo() const {
-    return mFs->getFileInfo();
+    // Try to cast to concrete types that have getFileInfo
+    if (auto mcraw = dynamic_cast<VirtualFileSystemImpl_MCRAW*>(mFs.get())) {
+        return mcraw->getFileInfo();
+    } else if (auto dng = dynamic_cast<VirtualFileSystemImpl_DNG*>(mFs.get())) {
+        return dng->getFileInfo();
+    } else if (auto directlog = dynamic_cast<VirtualFileSystemImpl_DirectLog*>(mFs.get())) {
+        return directlog->getFileInfo();
+    }
+    // Return default FileInfo if cast fails
+    return FileInfo();
 }
 
 HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
@@ -388,11 +395,16 @@ HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UI
         return E_OUTOFMEMORY;
     }
 
-    auto completeTransaction = [this, writeBuffer, byteOffset, length, fileName, commandId, dataStramId](size_t readBytes, int error, bool isAsync) {
+    auto completeTransaction = [this, writeBuffer, byteOffset, length, fileName, commandId, dataStramId, fsEntry](size_t readBytes, int error, bool isAsync) {
         HRESULT hr = S_OK;
 
-        if(readBytes == length) {
-            hr = WriteFileData(&dataStramId, reinterpret_cast<PVOID>(writeBuffer), byteOffset, length);
+        if(readBytes > 0 && readBytes <= length) {
+            // Write the actual bytes read (may be less than requested for compressed files)
+            hr = WriteFileData(&dataStramId, reinterpret_cast<PVOID>(writeBuffer), byteOffset, static_cast<DWORD>(readBytes));
+            
+            if(readBytes < length) {
+                spdlog::debug("GetFileData(): Wrote {} bytes (requested {}), file may be compressed", readBytes, length);
+            }
         }
         else {
             hr = E_FAIL;
@@ -553,6 +565,8 @@ FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
 {
     setupLogging();
 }
+
+FuseFileSystemImpl_Win::~FuseFileSystemImpl_Win() = default;
 
 MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std::string& srcFile, const std::string& dstPath) {
     fs::path srcPath(srcFile);

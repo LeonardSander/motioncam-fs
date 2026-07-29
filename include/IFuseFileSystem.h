@@ -4,27 +4,14 @@
 #include <optional>
 
 #include "Types.h"
-#include "RenderConfig.h"
 
 namespace motioncam {
+
+struct FileInfo;
 
 using MountId = int;
 
 constexpr auto InvalidMountId = -1;
-
-struct FileInfo {
-    float medFps;
-    float avgFps;
-    float fps;
-    int totalFrames;
-    int droppedFrames;
-    int duplicatedFrames;
-    int width;
-    int height;
-    std::string dataType;        // "Bayer CFA", "Quad Bayer CFA", or "RGB"
-    std::string levelsInfo;      // e.g., "1023/64 -> 1023/0 RAW10"
-    float runtimeSeconds;        // Runtime in seconds based on audio track
-};
 
 class IFuseFileSystem {
 public:
