@@ -28,6 +28,7 @@ using namespace motioncam;
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QSignalBlocker>
 #include <QLabel>
 #include <QFrame>
 #include <QProgressDialog>
@@ -101,7 +102,8 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
         settings.options |= motioncam::RENDER_OPT_JPEG_COMPRESSION;
     
     // Copy all other settings from member variable
-    settings.draftScale = mRenderSettings.draftScale;
+    settings.draftScale =
+        ui->draftModeCheckBox->isChecked() ? mRenderSettings.draftScale : 1;
     settings.cfrTarget = mRenderSettings.cfrTarget;
     settings.cropTarget = mRenderSettings.cropTarget;
     settings.cameraModel = mRenderSettings.cameraModel;
@@ -153,7 +155,17 @@ MainWindow::MainWindow(QWidget *parent)
     restoreSettings();
 
     // Connect to widgets
-    connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState state) {
+        const QSignalBlocker draftQualitySignals(ui->draftQuality);
+        if(state == Qt::CheckState::Checked) {
+            ui->draftQuality->setCurrentIndex(0);
+            mRenderSettings.draftScale = 2;
+        } else {
+            ui->draftQuality->setCurrentIndex(-1);
+            mRenderSettings.draftScale = 1;
+        }
+        onRenderSettingsChanged(state);
+    });
     connect(ui->vignetteCorrectionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -1093,10 +1105,17 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 
 void MainWindow::updateUi() {
     // Draft quality only enabled when draft mode is on
+    const QSignalBlocker draftQualitySignals(ui->draftQuality);
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked) {
+        if(ui->draftQuality->currentIndex() < 0) {
+            ui->draftQuality->setCurrentIndex(0);
+            mRenderSettings.draftScale = 2;
+        }
         ui->draftQuality->setEnabled(true);
         ui->quadBayerComboBox->setEnabled(false);
     } else {
+        ui->draftQuality->setCurrentIndex(-1);
+        mRenderSettings.draftScale = 1;
         ui->draftQuality->setEnabled(false);
         ui->quadBayerComboBox->setEnabled(true);
     }
@@ -1236,9 +1255,9 @@ void MainWindow::updateFpsLabels() {
 }
 
 void MainWindow::onRenderSettingsChanged(Qt::CheckState checkState) {
-    auto settings = buildRenderSettings();
-    
     updateUi();
+
+    auto settings = buildRenderSettings();
     scheduleOptionsUpdate();
     
     auto it = mMountedFiles.begin();

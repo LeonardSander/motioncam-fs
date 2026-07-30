@@ -2,11 +2,11 @@ name: CMake Multi-Platform Build and Release
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "experimental", "v10" ]
     tags:
       - "v*"
   pull_request:
-    branches: [ "master" ]
+    branches: [ "master", "experimental", "v10" ]
   workflow_dispatch:
 
 jobs:

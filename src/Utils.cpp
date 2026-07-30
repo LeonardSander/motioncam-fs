@@ -1366,6 +1366,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         throw std::runtime_error("Invalid sensor arrangement");
 
+    // The quality combo retains its selected scale while proxy mode is disabled.
+    const int draftScale =
+        settings.options & RENDER_OPT_DRAFT ? settings.draftScale : 1;
+
     // Extract options from settings
     bool applyShadingMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     bool vignetteOnlyColor = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
@@ -1385,7 +1389,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         metadata,
         cameraConfiguration,
         cfa,
-        settings.draftScale,
+        draftScale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap, interpretAsQuadBayer,
         cropTarget,
         settings.levels,
@@ -1492,7 +1496,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         dng.SetBaselineExposure(exposureOffset);
 
-    if(interpretAsQuadBayer && settings.draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {
+    if(interpretAsQuadBayer && draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {
         dng.SetCFARepeatPatternDim(4, 4);
         std::array<uint8_t, 4> cfa_pattern_0112 = {0,1,1,2};
         std::array<uint8_t, 4> cfa_pattern_2110 = {2,1,1,0};

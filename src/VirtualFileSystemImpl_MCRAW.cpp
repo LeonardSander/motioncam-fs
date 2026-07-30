@@ -35,6 +35,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mSrcPath(file),
         mBaseName(baseName),
         mSettings(settings) {
+    mSettings.draftScale =
+        vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     
     // Load calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);
@@ -549,6 +551,8 @@ int VirtualFileSystemImpl_MCRAW::readFile(
 
 void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {
     mSettings = settings;
+    mSettings.draftScale =
+        vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     mCache.clear();
     init();
 }
