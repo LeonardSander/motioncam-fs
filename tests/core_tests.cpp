@@ -1,4 +1,5 @@
 #include "ExposureKeyframes.h"
+#include "CalibrationData.h"
 #include "Types.h"
 
 #include <cassert>
@@ -39,6 +40,16 @@ int main() {
     auto customRate = stringToCFRTarget("48");
     assert(customRate.mode == CFRMode::Custom);
     assert(nearlyEqual(customRate.customValue, 48.0f));
+
+    const auto whitespaceCalibration = CalibrationData::parse(std::string(R"({
+        "colorMatrix1": [1.1 -0.2 0.1 0.0 1.0 0.0 0.2 -0.1 0.9],
+        "forwardMatrix1": [0.9 0.1 0.0 0.0 1.0 0.0 0.1 0.2 0.7]
+    })"));
+    assert(whitespaceCalibration.has_value());
+    assert(whitespaceCalibration->hasColorMatrix1);
+    assert(whitespaceCalibration->hasForwardMatrix1);
+    assert(nearlyEqual(whitespaceCalibration->colorMatrix1[1], -0.2f));
+    assert(nearlyEqual(whitespaceCalibration->forwardMatrix1[8], 0.7f));
 
     return 0;
 }

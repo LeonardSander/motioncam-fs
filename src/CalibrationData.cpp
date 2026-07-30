@@ -8,6 +8,53 @@ using json = nlohmann::json;
 namespace motioncam {
 
 namespace {
+    std::string normalizeWhitespaceSeparatedArrays(std::string jsonText) {
+        static const std::array<const char*, 5> keys = {
+            "colorMatrix1", "colorMatrix2", "forwardMatrix1",
+            "forwardMatrix2", "asShotNeutral"
+        };
+
+        for (const char* key : keys) {
+            const std::string quotedKey = std::string("\"") + key + "\"";
+            const auto keyPos = jsonText.find(quotedKey);
+            if (keyPos == std::string::npos) {
+                continue;
+            }
+
+            const auto openBracket = jsonText.find('[', keyPos + quotedKey.size());
+            if (openBracket == std::string::npos) {
+                continue;
+            }
+            const auto closeBracket = jsonText.find(']', openBracket + 1);
+            if (closeBracket == std::string::npos) {
+                continue;
+            }
+
+            std::string values =
+                jsonText.substr(openBracket + 1, closeBracket - openBracket - 1);
+            if (values.find(',') != std::string::npos) {
+                continue;
+            }
+
+            std::istringstream input(values);
+            std::ostringstream normalized;
+            std::string value;
+            bool first = true;
+            while (input >> value) {
+                if (!first) {
+                    normalized << ", ";
+                }
+                normalized << value;
+                first = false;
+            }
+
+            jsonText.replace(
+                openBracket + 1, closeBracket - openBracket - 1, normalized.str());
+        }
+
+        return jsonText;
+    }
+
     // Helper to parse array from JSON - supports both comma-separated and space-separated
     template<typename T, size_t N>
     std::array<T, N> parseArray(const json& j) {
@@ -19,8 +66,9 @@ namespace {
                 result[i] = j[i].get<T>();
             }
         } else if (j.is_string()) {
-            // Parse space-separated values
+            // Parse comma- or space-separated values
             std::string str = j.get<std::string>();
+            std::replace(str.begin(), str.end(), ',', ' ');
             std::istringstream iss(str);
             for (size_t i = 0; i < N && iss >> result[i]; ++i) {
                 // Continue reading
@@ -39,8 +87,9 @@ std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& 
             return std::nullopt;
         }
         
-        json j;
-        file >> j;
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        json j = json::parse(normalizeWhitespaceSeparatedArrays(buffer.str()));
         return parse(j);
     } catch (const std::exception& e) {
         spdlog::error("Error loading calibration file {}: {}", filePath, e.what());
@@ -50,7 +99,7 @@ std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& 
 
 std::optional<CalibrationData> CalibrationData::parse(const std::string& jsonString) {
     try {
-        json j = json::parse(jsonString);
+        json j = json::parse(normalizeWhitespaceSeparatedArrays(jsonString));
         return parse(j);
     } catch (const std::exception& e) {
         spdlog::error("Error parsing calibration JSON: {}", e.what());

@@ -132,7 +132,7 @@ std::optional<Entry> VirtualFileSystemImpl_DNG::findEntry(const std::string& ful
     std::lock_guard<std::mutex> lock(mMutex);
     
     for (const auto& entry : mFiles) {
-        if (entry.getFullPath().string() == fullPath) {
+        if (entry.getFullPath() == boost::filesystem::path(fullPath).relative_path()) {
             return entry;
         }
     }

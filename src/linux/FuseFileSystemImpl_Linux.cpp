@@ -3,6 +3,10 @@
 #include "linux/FuseFileSystemImpl_Linux.h"
 
 #include "LRUCache.h"
+#include "DNGDecoder.h"
+#include "IVirtualFileSystem.h"
+#include "VirtualFileSystemImpl_DNG.h"
+#include "VirtualFileSystemImpl_DirectLog.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 
 #include <BS_thread_pool.hpp>
@@ -14,8 +18,10 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <ctime>
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
@@ -61,8 +67,9 @@ void setupLogging() {
 }
 
 struct FuseContext {
-    VirtualFileSystemImpl_MCRAW* fs;
+    IVirtualFileSystem* fs;
     std::atomic_uint64_t nextFileHandle{0};
+    std::atomic<std::time_t> mountTime;
 };
 
 FuseContext* context() {
@@ -72,8 +79,8 @@ FuseContext* context() {
 
 struct LinuxFuseSession {
     LinuxFuseSession(const std::string& source, const std::string& destination,
-                     VirtualFileSystemImpl_MCRAW* filesystem)
-        : mDstPath(destination), mFs(filesystem) { start(); }
+                     std::unique_ptr<IVirtualFileSystem> filesystem)
+        : mDstPath(destination), mFs(std::move(filesystem)) { start(); }
 
     ~LinuxFuseSession() {
         if (mFuse) {
@@ -89,6 +96,11 @@ struct LinuxFuseSession {
 
     void updateOptions(const RenderSettings& settings) {
         mFs->updateOptions(settings);
+        if (mState) {
+            const auto previous = mState->mountTime.load();
+            mState->mountTime.store(
+                std::max(std::time(nullptr), previous + 1));
+        }
         // Render settings alter file bytes, so discard old kernel page cache.
         fuse_invalidate_path(mFuse, "/");
     }
@@ -110,17 +122,21 @@ private:
     }
     static void destroy(void* privateData) {
         auto* state = static_cast<FuseContext*>(privateData);
-        delete state->fs;
         delete state;
     }
     static int getattr(const char* path, struct stat* statBuffer, fuse_file_info*) {
         std::memset(statBuffer, 0, sizeof(*statBuffer));
+        const auto* state = context();
+        const auto mountTime = state->mountTime.load();
+        statBuffer->st_atime = mountTime;
+        statBuffer->st_mtime = mountTime;
+        statBuffer->st_ctime = mountTime;
         if (std::string(path) == "/") {
             statBuffer->st_mode = S_IFDIR | 0755;
             statBuffer->st_nlink = 2;
             return 0;
         }
-        const auto entry = context()->fs->findEntry(path);
+        const auto entry = state->fs->findEntry(path);
         if (!entry)
             return -ENOENT;
         statBuffer->st_mode = entry->type == DIRECTORY_ENTRY ? S_IFDIR | 0755 : S_IFREG | 0444;
@@ -136,8 +152,8 @@ private:
             return -ENOENT;
         filler(buffer, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
         filler(buffer, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
-        for (const auto& entry : context()->fs->listFiles("/"))
-            filler(buffer, entry.getFullPath().string().c_str(), nullptr, 0,
+        for (const auto& entry : context()->fs->listFiles(""))
+            filler(buffer, entry.name.c_str(), nullptr, 0,
                    static_cast<fuse_fill_dir_flags>(0));
         return 0;
     }
@@ -171,11 +187,12 @@ private:
         // fuse_parse_cmdline expects argv[0] even when the filesystem is
         // embedded in a GUI application.
         fuse_opt_add_arg(&args, "MotionCamFuse");
-        auto* state = new FuseContext{mFs};
+        auto* state = new FuseContext{mFs.get(), 0, std::time(nullptr)};
+        mState = state;
         mFuse = fuse_new(&args, &operations, sizeof(operations), state);
         fuse_opt_free_args(&args);
         if (!mFuse) {
-            delete state->fs;
+            mState = nullptr;
             delete state;
             throw std::runtime_error("Failed to create FUSE session");
         }
@@ -192,7 +209,8 @@ private:
     }
 
     std::string mDstPath;
-    VirtualFileSystemImpl_MCRAW* mFs;
+    std::unique_ptr<IVirtualFileSystem> mFs;
+    FuseContext* mState = nullptr;
     fuse* mFuse = nullptr;
     std::thread mThread;
 };
@@ -211,16 +229,39 @@ FuseFileSystemImpl_Linux::~FuseFileSystemImpl_Linux() {
 MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
                                         const std::string& srcFile,
                                         const std::string& dstPath) {
-    if (!boost::iequals(fs::path(srcFile).extension().string(), ".mcraw"))
-        throw std::runtime_error("Invalid format");
+    const fs::path sourcePath(srcFile);
+    const std::string extension = sourcePath.extension().string();
+    const std::string filename = sourcePath.filename().string();
+
     if (!QDir().mkpath(QString::fromStdString(dstPath)))
         throw std::runtime_error("Failed to create " + dstPath);
+
+    const std::string baseName = fs::path(dstPath).filename().string();
+    std::unique_ptr<IVirtualFileSystem> filesystem;
+    if (boost::iequals(extension, ".mcraw")) {
+        filesystem = std::make_unique<VirtualFileSystemImpl_MCRAW>(
+            *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
+            srcFile, baseName);
+    } else if ((boost::iequals(extension, ".mov") ||
+                boost::iequals(extension, ".mp4")) &&
+               boost::icontains(filename, "NATIVE")) {
+        filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
+            *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
+            srcFile, baseName);
+    } else if (boost::iequals(extension, ".dng") ||
+               DNGDecoder::isDNGSequence(srcFile)) {
+        filesystem = std::make_unique<VirtualFileSystemImpl_DNG>(
+            *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
+            srcFile, baseName);
+    } else {
+        throw std::runtime_error("Invalid format");
+    }
+
     const MountId mountId = mNextMountId++;
-    auto* filesystem = new VirtualFileSystemImpl_MCRAW(*mIoThreadPool,
-        *mProcessingThreadPool, *mCache, settings, srcFile,
-        fs::path(dstPath).filename().string());
-    mMountedFiles.emplace(mountId,
-        std::make_unique<LinuxFuseSession>(srcFile, dstPath, filesystem));
+    mMountedFiles.emplace(
+        mountId,
+        std::make_unique<LinuxFuseSession>(
+            srcFile, dstPath, std::move(filesystem)));
     return mountId;
 }
 void FuseFileSystemImpl_Linux::unmount(MountId mountId) { mMountedFiles.erase(mountId); }

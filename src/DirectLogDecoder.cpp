@@ -224,12 +224,45 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
                     mCodecContext->pix_fmt == AV_PIX_FMT_YUV422P10LE);
     int bitDepth = is10bit ? 10 : 8;
     int maxInput = (1 << bitDepth) - 1;  // 255 for 8-bit, 1023 for 10-bit
-    
-    // Limited range parameters
-    double yMin = 16.0 * (maxInput / 255.0);
-    double yMax = 235.0 * (maxInput / 255.0);
-    double cMin = 16.0 * (maxInput / 255.0);
-    double cMax = 240.0 * (maxInput / 255.0);
+
+    // Some Camera Native full-range exports are incorrectly tagged as TV
+    // range. Detect only unambiguous excursions, leaving ordinary ProRes
+    // overshoot on limited-range clips alone.
+    if (!mFullRange.has_value()) {
+        int minY = maxInput;
+        int maxY = 0;
+        for (int y = 0; y < height; ++y) {
+            if (is10bit) {
+                const auto* row = reinterpret_cast<const uint16_t*>(
+                    yuvFrame->data[0] + y * yuvFrame->linesize[0]);
+                for (int x = 0; x < width; ++x) {
+                    minY = std::min(minY, static_cast<int>(row[x]));
+                    maxY = std::max(maxY, static_cast<int>(row[x]));
+                }
+            } else {
+                const auto* row = yuvFrame->data[0] + y * yuvFrame->linesize[0];
+                for (int x = 0; x < width; ++x) {
+                    minY = std::min(minY, static_cast<int>(row[x]));
+                    maxY = std::max(maxY, static_cast<int>(row[x]));
+                }
+            }
+        }
+
+        const int rangeScale = 1 << (bitDepth - 8);
+        mFullRange =
+            yuvFrame->color_range == AVCOL_RANGE_JPEG ||
+            minY < 8 * rangeScale ||
+            maxY > 248 * rangeScale;
+        spdlog::info(
+            "DirectLogDecoder: treating clip as {} range (Y {}..{})",
+            *mFullRange ? "full" : "limited", minY, maxY);
+    }
+    const bool fullRange = *mFullRange;
+
+    double yMin = fullRange ? 0.0 : 16.0 * (maxInput / 255.0);
+    double yMax = fullRange ? maxInput : 235.0 * (maxInput / 255.0);
+    double cMin = fullRange ? 0.0 : 16.0 * (maxInput / 255.0);
+    double cMax = fullRange ? maxInput : 240.0 * (maxInput / 255.0);
     
     // Get plane pointers and strides
     uint8_t* yPlane = yuvFrame->data[0];
@@ -272,8 +305,16 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
             
             // Convert from limited range to full range [0, 1]
             double yNorm = (yVal - yMin) / (yMax - yMin);
-            double uNorm = (uVal - cMin) / (cMax - cMin) - 0.5;
-            double vNorm = (vVal - cMin) / (cMax - cMin) - 0.5;
+            double uNorm;
+            double vNorm;
+            if (fullRange) {
+                const double chromaCenter = 1 << (bitDepth - 1);
+                uNorm = (uVal - chromaCenter) / maxInput;
+                vNorm = (vVal - chromaCenter) / maxInput;
+            } else {
+                uNorm = (uVal - cMin) / (cMax - cMin) - 0.5;
+                vNorm = (vVal - cMin) / (cMax - cMin) - 0.5;
+            }
             
             // Clamp normalized values
             yNorm = std::clamp(yNorm, 0.0, 1.0);

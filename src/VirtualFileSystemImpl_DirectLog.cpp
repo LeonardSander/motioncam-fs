@@ -144,15 +144,15 @@ void VirtualFileSystemImpl_DirectLog::init() {
         for (size_t i = 0; i < frames.size(); ++i) {
             int pts = vfs::getFrameNumberFromTimestamp(frames[i].timestamp, frames[0].timestamp, mFps);
             
-            // Count duplicated frames before this frame
-            mDuplicatedFrames += std::max(0, pts - lastPts - 1);
-            
-            if (lastPts > 0 && lastPts == pts) {
+            if (pts < lastPts) {
                 mDroppedFrames += 1;
+                continue;
             }
-            
-            // Duplicate frames to account for dropped frames
-            while (lastPts < pts) {
+
+            // Fill any missing output positions, then emit this frame's
+            // position. lastPts is the next output index to create.
+            mDuplicatedFrames += std::max(0, pts - lastPts);
+            while (lastPts <= pts) {
                 Entry dngEntry;
                 dngEntry.type = EntryType::FILE_ENTRY;
                 dngEntry.pathParts = {};
@@ -202,7 +202,7 @@ std::optional<Entry> VirtualFileSystemImpl_DirectLog::findEntry(const std::strin
     std::lock_guard<std::mutex> lock(mMutex);
     
     for (const auto& entry : mFiles) {
-        if (entry.getFullPath().string() == fullPath) {
+        if (entry.getFullPath() == boost::filesystem::path(fullPath).relative_path()) {
             return entry;
         }
     }
@@ -244,7 +244,18 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
     void* dst,
     std::function<void(size_t, int)> result,
     bool async) {
-    
+
+    auto cachedData = mCache.get(entry);
+    if (cachedData) {
+        const size_t copyLen =
+            pos < cachedData->size() ? std::min(len, cachedData->size() - pos) : 0;
+        if (copyLen > 0) {
+            std::memcpy(dst, cachedData->data() + pos, copyLen);
+        }
+        result(copyLen, 0);
+        return copyLen;
+    }
+
     auto task = [this, entry, pos, len, dst, result]() {
         try {
             // Extract timestamp from entry userData
@@ -265,6 +276,7 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
             
             if (frameNumber == -1) {
                 spdlog::error("Failed to find frame with timestamp {}", timestamp);
+                mCache.markLoadFailed(entry);
                 result(0, -1);
                 return;
             }
@@ -273,6 +285,7 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
             std::vector<uint16_t> rgbData;
             if (!mDecoder->extractFrame(frameNumber, rgbData)) {
                 spdlog::error("Failed to extract frame {} (timestamp: {})", frameNumber, timestamp);
+                mCache.markLoadFailed(entry);
                 result(0, -1);
                 return;
             }
@@ -281,14 +294,20 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
             std::vector<uint8_t> dngData;
             if (!convertRGBToDNG(rgbData, dngData, frameNumber, timestamp)) {
                 spdlog::error("Failed to convert RGB to DNG for frame {}", frameNumber);
+                mCache.markLoadFailed(entry);
                 result(0, -1);
                 return;
             }
-            
+
+            auto cacheData = std::make_shared<std::vector<char>>(
+                dngData.begin(), dngData.end());
+            mCache.put(entry, cacheData);
+
             // Copy requested portion of DNG data
-            size_t copyLen = std::min(len, dngData.size() - pos);
-            if (copyLen > 0 && pos < dngData.size()) {
-                memcpy(dst, dngData.data() + pos, copyLen);
+            const size_t copyLen =
+                pos < cacheData->size() ? std::min(len, cacheData->size() - pos) : 0;
+            if (copyLen > 0) {
+                memcpy(dst, cacheData->data() + pos, copyLen);
                 result(copyLen, 0);
             } else {
                 result(0, 0);
@@ -296,6 +315,7 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
         }
         catch (const std::exception& e) {
             spdlog::error("Error generating frame: {}", e.what());
+            mCache.markLoadFailed(entry);
             result(0, -1);
         }
     };
@@ -401,7 +421,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         std::vector<uint8_t> imageBytes;
         int samplesPerPixel = 3;
-        int photometric = 2; // RGB
+        int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
         
         if (shouldRemosaic) {
             // Convert RGB to Bayer CFA pattern
@@ -464,6 +484,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetImageWidth(width);
         dng.SetImageLength(height);
         dng.SetSamplesPerPixel(samplesPerPixel);
+        dng.SetRowsPerStrip(height);
         
         unsigned short bitsPerSample[3] = {
             static_cast<unsigned short>(encodeBits),
@@ -492,18 +513,40 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             } else { // gbrg
                 cfaPattern[0] = 1; cfaPattern[1] = 2; cfaPattern[2] = 0; cfaPattern[3] = 1; // G B R G
             }
+            dng.SetCFARepeatPatternDim(2, 2);
             dng.SetCFAPattern(4, cfaPattern);
             dng.SetCFALayout(1); // Rectangular (or square) layout
+            dng.SetBlackLevelRepeatDim(2, 2);
+            const unsigned int activeArea[4] = {
+                0, 0, static_cast<unsigned int>(height),
+                static_cast<unsigned int>(width)
+            };
+            dng.SetActiveArea(activeArea);
         }
         
         // Set DNG version
         dng.SetDNGVersion(1, 4, 0, 0);
-        dng.SetDNGBackwardVersion(1, 4, 0, 0);
+        if (shouldRemosaic) {
+            dng.SetDNGBackwardVersion(1, 1, 0, 0);
+        } else {
+            dng.SetDNGBackwardVersion(1, 4, 0, 0);
+        }
         
         // Set camera/software metadata
-        dng.SetMake("DirectLog");
-        dng.SetCameraModelName(mConfig.cameraModel.empty() ? "DirectLog Video" : mConfig.cameraModel);
-        dng.SetUniqueCameraModel(mConfig.cameraModel.empty() ? "DirectLog Video" : mConfig.cameraModel);
+        if (mConfig.cameraModel == "Blackmagic") {
+            dng.SetUniqueCameraModel("Blackmagic Pocket Cinema Camera 4K");
+        } else if (mConfig.cameraModel == "Panasonic") {
+            dng.SetUniqueCameraModel("Panasonic Varicam RAW");
+        } else if (mConfig.cameraModel == "Fujifilm" ||
+                   mConfig.cameraModel == "Fujifilm X-T5") {
+            dng.SetUniqueCameraModel("Fujifilm X-T5");
+            dng.SetMake("Fujifilm");
+            dng.SetCameraModelName("X-T5");
+        } else if (!mConfig.cameraModel.empty()) {
+            dng.SetUniqueCameraModel(mConfig.cameraModel);
+        } else {
+            dng.SetUniqueCameraModel("DirectLog Video");
+        }
         dng.SetSoftware("MotionCam DirectLog Decoder");
         
         // Set image description with frame info
@@ -524,7 +567,10 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetXResolution(72.0f);
         dng.SetYResolution(72.0f);
         dng.SetResolutionUnit(2); // inches
-        
+        if (mFps > 0.0f) {
+            dng.SetFrameRate(mFps);
+        }
+
         // Set baseline exposure with keyframe support
         float exposureOffset = (mConfig.cameraModel == "Panasonic" ? -2.0f : 0.0f);
         if (mExposureKeyframes.has_value()) {
@@ -566,20 +612,29 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             dng.SetLinearizationTable(tableSize, linearizationTable.data());
             
             // Set black level to 0 and white level to 65534 (as per MCRAW implementation)
-            unsigned short blackLevel[3] = {0, 0, 0};
-            dng.SetBlackLevel(3, blackLevel);
+            unsigned short blackLevel[4] = {0, 0, 0, 0};
+            dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
             dng.SetWhiteLevel(65534);
         } else {
-            // No log curve - use standard levels
-            dng.SetWhiteLevel(65535);
-            unsigned short blackLevel[3] = {0, 0, 0};
-            dng.SetBlackLevel(3, blackLevel);
+            // Without a linearization table, white level is the maximum value
+            // representable by the stored sample bit depth.
+            const unsigned int whiteLevel =
+                (static_cast<unsigned int>(1) << encodeBits) - 1;
+            dng.SetWhiteLevel(whiteLevel);
+            unsigned short blackLevel[4] = {0, 0, 0, 0};
+            dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
         }
         
         dng.SetImageData(imageBytes.data(), imageBytes.size());
         
         // Apply calibration if available
         if (mCalibration.has_value()) {
+            if (mCalibration->hasColorMatrix1 || mCalibration->hasForwardMatrix1) {
+                dng.SetCalibrationIlluminant1(21); // D65
+            }
+            if (mCalibration->hasColorMatrix2 || mCalibration->hasForwardMatrix2) {
+                dng.SetCalibrationIlluminant2(17); // Standard Light A
+            }
             if (mCalibration->hasColorMatrix1) {
                 dng.SetColorMatrix1(3, mCalibration->colorMatrix1.data());
             }
@@ -622,7 +677,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
     std::lock_guard<std::mutex> lock(mMutex);
-    
+
+    mCache.clear();
     mConfig = config;
     
     // Re-parse exposure keyframes
@@ -631,6 +687,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     // Reload calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);
     boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    mCalibration.reset();
     if (boost::filesystem::exists(calibPath)) {
         mCalibration = CalibrationData::loadFromFile(calibPath.string());
         if (mCalibration.has_value()) {

@@ -589,7 +589,7 @@ void MainWindow::mountFile(const QString& filePath) {
     
     // Connect refresh button to update calibration
     connect(refreshButton, &QPushButton::clicked, this, [this] {
-        updateCalibrationButtonStates();
+        updateFpsLabels();
     });
 
     // Add button layout to main layout

@@ -354,8 +354,11 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(motioncam-core-tests
         tests/core_tests.cpp
-        src/ExposureKeyframes.cpp)
-    target_include_directories(motioncam-core-tests PRIVATE include)
+        src/ExposureKeyframes.cpp
+        src/CalibrationData.cpp)
+    target_include_directories(motioncam-core-tests PRIVATE
+        include
+        deps/motioncam-decoder/thirdparty)
     target_link_libraries(motioncam-core-tests PRIVATE spdlog::spdlog)
     add_test(NAME motioncam-core-tests COMMAND motioncam-core-tests)
 

@@ -29,7 +29,7 @@ public:
         bool async) = 0;
 
     virtual void updateOptions(const RenderSettings& settings) = 0;
-    //virtual FileInfo getFileInfo() const = 0;
+    virtual FileInfo getFileInfo() const = 0;
 
 protected:
     IVirtualFileSystem() = default;

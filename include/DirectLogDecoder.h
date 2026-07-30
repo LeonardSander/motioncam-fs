@@ -5,6 +5,7 @@
 #include <memory>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -71,7 +72,8 @@ private:
     
     int mVideoStreamIndex;
     AVRational mTimeBase;
-    
+    std::optional<bool> mFullRange;
+
     mutable std::mutex mMutex;
 };
 

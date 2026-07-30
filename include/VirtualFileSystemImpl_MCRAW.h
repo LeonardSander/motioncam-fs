@@ -40,7 +40,7 @@ public:
         bool async=true) override;
 
     void updateOptions(const RenderSettings& settings) override;
-    FileInfo getFileInfo() const;
+    FileInfo getFileInfo() const override;
 
 private:
     void init();
