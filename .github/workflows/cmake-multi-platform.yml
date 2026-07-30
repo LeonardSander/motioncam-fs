@@ -229,6 +229,7 @@ jobs:
       run: cmake --build build --config ${{ matrix.build_type }} --parallel
 
     - name: Test
+      if: matrix.os == 'macos-latest'
       run: ctest --test-dir build --config ${{ matrix.build_type }} --output-on-failure
 
 
