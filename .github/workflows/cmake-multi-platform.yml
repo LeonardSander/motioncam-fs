@@ -26,7 +26,8 @@ jobs:
         sudo apt-get install -y \
           clang ninja-build pkg-config \
           libboost-filesystem-dev libboost-locale-dev libboost-regex-dev \
-          libspdlog-dev libfmt-dev libfuse3-dev libxcb-cursor0
+          libspdlog-dev libfmt-dev libfuse3-dev libxcb-cursor0 \
+          libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
