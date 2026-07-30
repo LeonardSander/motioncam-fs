@@ -241,7 +241,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mDuplicatedFrames(0),
         mWidth(0),
         mHeight(0),
-        mDraftScale(settings.draftScale),
+        mDraftScale(settings.options & RENDER_OPT_DRAFT ? settings.draftScale : 1),
         mCFRTarget(settings.cfrTarget),
         mCropTarget(settings.cropTarget),
         mCameraModel(settings.cameraModel),
@@ -694,7 +694,8 @@ int VirtualFileSystemImpl_MCRAW::readFile(
 }
 
 void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {
-    mDraftScale = settings.draftScale;
+    mDraftScale =
+        settings.options & RENDER_OPT_DRAFT ? settings.draftScale : 1;
     mOptions = settings.options;
     mCFRTarget = settings.cfrTarget;
     mCropTarget = settings.cropTarget;
@@ -722,4 +723,3 @@ FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
 }
 
 } // namespace motioncam
-

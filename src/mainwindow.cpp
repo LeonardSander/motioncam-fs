@@ -11,6 +11,7 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QDir>
+#include <QSignalBlocker>
 #include <algorithm>
 #include <QTimer>
 
@@ -88,7 +89,17 @@ MainWindow::MainWindow(QWidget *parent)
     restoreSettings();
 
     // Connect to widgets
-    connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState state) {
+        const QSignalBlocker draftQualitySignals(ui->draftQuality);
+        if(state == Qt::CheckState::Checked) {
+            ui->draftQuality->setCurrentIndex(0);
+            mDraftQuality = 2;
+        } else {
+            ui->draftQuality->setCurrentIndex(-1);
+            mDraftQuality = 1;
+        }
+        onRenderSettingsChanged(state);
+    });
     connect(ui->vignetteCorrectionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -301,7 +312,7 @@ void MainWindow::mountFile(const QString& filePath) {
     try {
         motioncam::RenderSettings settings(
             getRenderOptions(*ui),
-            mDraftQuality,
+            ui->draftModeCheckBox->isChecked() ? mDraftQuality : 1,
             mCFRTarget,
             mCropTarget,
             mCameraModel,
@@ -517,10 +528,17 @@ void MainWindow::removeFile(QWidget* fileWidget) {
 
 void MainWindow::updateUi() {
     // Draft quality only enabled when draft mode is on
+    const QSignalBlocker draftQualitySignals(ui->draftQuality);
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked) {
+        if(ui->draftQuality->currentIndex() < 0) {
+            ui->draftQuality->setCurrentIndex(0);
+            mDraftQuality = 2;
+        }
         ui->draftQuality->setEnabled(true);
         ui->quadBayerComboBox->setEnabled(false);
     } else {
+        ui->draftQuality->setCurrentIndex(-1);
+        mDraftQuality = 1;
         ui->draftQuality->setEnabled(false);
         ui->quadBayerComboBox->setEnabled(true);
     }
@@ -588,7 +606,7 @@ void MainWindow::updateFpsLabels() {
     // Force recalculation of fps values by calling updateOptions for all mounted files
     motioncam::RenderSettings settings(
         getRenderOptions(*ui),
-        mDraftQuality,
+        ui->draftModeCheckBox->isChecked() ? mDraftQuality : 1,
         mCFRTarget,
         mCropTarget,
         mCameraModel,
@@ -633,10 +651,12 @@ void MainWindow::updateFpsLabels() {
 }
 
 void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
+    updateUi();
+
     auto it = mMountedFiles.begin();
     motioncam::RenderSettings settings(
         getRenderOptions(*ui),
-        mDraftQuality,
+        ui->draftModeCheckBox->isChecked() ? mDraftQuality : 1,
         mCFRTarget,
         mCropTarget,
         mCameraModel,
@@ -645,8 +665,6 @@ void MainWindow::onRenderSettingsChanged(const Qt::CheckState &checkState) {
         mExposureCompensation,
         mQuadBayerOption
     );
-
-    updateUi();
 
     while(it != mMountedFiles.end()) {
         mFuseFilesystem->updateOptions(it->mountId, settings);
