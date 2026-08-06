@@ -348,54 +348,19 @@
           </widget>
          </item>
          <item>
-            <widget class="QComboBox" name="exposureCompensationCombobox">
+            <widget class="QLineEdit" name="exposureCompensationLineEdit">
              <property name="minimumSize">
               <size>
                <width>60</width>
                <height>25</height>
               </size>
              </property>
-             <property name="editable">
-                <bool>true</bool>
-              </property>
-             <property name="toolTip">
-              <string>Enter constant value (e.g., "2ev") or keyframes (e.g., "0.2:-4, 0.4:2.4" or "start:-2, 0.5:0, end:2")</string>
+             <property name="placeholderText">
+              <string>offset gain</string>
              </property>
-             <item>
-              <property name="text">
-               <string>0ev</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>1ev</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>2ev</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>3ev</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>-1ev</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>-2ev</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>start:-2, 0.5:0, end:2</string>
-              </property>
-             </item>
+             <property name="toolTip">
+              <string>Enter a gain offset (for example, 2ev or -1ev)</string>
+             </property>
             </widget>
            </item>
            </layout>
@@ -403,7 +368,7 @@
          <item>
           <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings. Use constant value (e.g., "2ev") or keyframes for smooth transitions (e.g., "0.2:-4, 0.4:2.4"). Keyframe positions are normalized (0-1 or "start"/"end").&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings using each DNG's Baseline Exposure tag. An optional gain offset can be entered above.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

@@ -1318,10 +1318,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     const CameraConfiguration& cameraConfiguration,
     float recordingFps,
     int frameNumber,
-    int totalFrames,
     double baselineExpValue,
     const RenderSettings& settings,
-    const std::optional<ExposureKeyframes>& exposureKeyframes,
     const std::optional<CalibrationData>& calibration,
     bool compressionEnabled)
 {
@@ -1475,26 +1473,20 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     float exposureOffset = (settings.cameraModel == "Panasonic" ? -2.0f : 0.0f);
 
-    // Calculate frame-specific exposure compensation
-    std::string frameExposureComp = settings.exposureCompensation;
-    if (exposureKeyframes.has_value()) {
-        float exposureValue = exposureKeyframes->getExposureAtFrame(frameNumber, totalFrames);
-        frameExposureComp = std::to_string(exposureValue);
-    }
-    
     // Parse float from exposureCompensation string and add to exposureOffset
-    if (!frameExposureComp.empty()) {
+    if (!settings.exposureCompensation.empty()) {
         try {
-            exposureOffset += std::stof(frameExposureComp);
+            exposureOffset += std::stof(settings.exposureCompensation);
         } catch (const std::exception&) {
             // If parsing fails, keep the original exposureOffset value
         }
     }
 
-    if (normalizeExposure)
-        dng.SetBaselineExposure(std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime)) + exposureOffset);
-    else
-        dng.SetBaselineExposure(exposureOffset);
+    float normalizedExposureOffset = 0.0f;
+    if (normalizeExposure) {
+        normalizedExposureOffset = std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime));
+    }
+    dng.SetBaselineExposure(normalizedExposureOffset + exposureOffset);
 
     if(interpretAsQuadBayer && draftScale == 1 && settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {
         dng.SetCFARepeatPatternDim(4, 4);

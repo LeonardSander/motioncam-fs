@@ -285,7 +285,7 @@ struct RenderSettings {
         , cameraModel("Panasonic")
         , levels("Dynamic")
         , logTransform(LogTransformMode::KeepInput)
-        , exposureCompensation("0ev")
+        , exposureCompensation("")
         , quadBayerOption(QuadBayerMode::Remosaic)
         , cfaPhase("Don't override CFA")
     {}

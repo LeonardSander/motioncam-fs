@@ -12,7 +12,6 @@
 
 #include "Types.h"
 #include "CalibrationData.h"
-#include "ExposureKeyframes.h"
 
 namespace tinydngwriter {
     class OpcodeList;
@@ -144,10 +143,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     const CameraConfiguration& cameraConfiguration,
     float recordingFps,
     int frameNumber,
-    int totalFrames,
     double baselineExpValue,
     const RenderSettings& settings,
-    const std::optional<ExposureKeyframes>& exposureKeyframes = std::nullopt,
     const std::optional<CalibrationData>& calibration = std::nullopt,
     bool compressionEnabled = false);
 

@@ -3,7 +3,6 @@
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
-#include <ExposureKeyframes.h>
 #include <VirtualFileSystemImpl.h>
 
 namespace BS {
@@ -70,8 +69,7 @@ private:
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
     std::vector<uint8_t> mAudioFile;
-    /*RenderConfig mConfig;
-    std::optional<ExposureKeyframes> mExposureKeyframes;*/
+    /*RenderConfig mConfig;*/
     /*int mDraftScale;
     CFRTarget mCFRTarget;
     std::string mCropTarget;

@@ -4,7 +4,6 @@
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
 #include "Utils.h"
-#include "ExposureKeyframes.h"
 #include "VirtualFileSystemImpl.h"
 
 #include <motioncam/Decoder.hpp>
@@ -185,7 +184,7 @@ MainWindow::MainWindow(QWidget *parent)
         onCFRTargetChanged(text.toStdString());
         QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
     });
-    connect(ui->exposureCompensationCombobox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+    connect(ui->exposureCompensationLineEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
         onExposureCompensationChanged(text.toStdString());
     });
     connect(ui->cropTargetComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
@@ -332,7 +331,7 @@ void MainWindow::restoreSettings() {
     mCacheRootFolder = settings.value("cachePath").toString();    
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
-    mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "0ev" : settings.value("exposureCompensation").toString().toStdString());
+    mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
     mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
     mRenderSettings.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
     mRenderSettings.cropTarget = settings.value("cropTarget").toString().toStdString();
@@ -348,7 +347,7 @@ void MainWindow::restoreSettings() {
         ui->draftQuality->setCurrentIndex(2);
     
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
-    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderSettings.exposureCompensation));
+    ui->exposureCompensationLineEdit->setText(QString::fromStdString(mRenderSettings.exposureCompensation));
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    
@@ -938,9 +937,6 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             calibration = motioncam::CalibrationData::loadFromFile(calibPath.string());
         }
         
-        // Parse exposure keyframes
-        std::optional<motioncam::ExposureKeyframes> exposureKeyframes = motioncam::ExposureKeyframes::parse(settings.exposureCompensation);
-        
         // Get base name for files
         QString baseName = QFileInfo(srcFile).completeBaseName();
         
@@ -976,10 +972,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                     cameraConfig,
                     fps,
                     outputFrameCount,
-                    totalFrames,
                     baselineExpValue,
                     settings,
-                    exposureKeyframes,
                     calibration,
                     enableCompression
                 );
@@ -1425,7 +1419,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
 
     mRenderSettings.draftScale = 1;
     mRenderSettings.cfrTarget = stringToCFRTarget("Prefer Drop Frame");
-    mRenderSettings.exposureCompensation = "0ev";
+    mRenderSettings.exposureCompensation.clear();
     mRenderSettings.cameraModel = "Panasonic";
     mRenderSettings.levels = "Dynamic";
     mRenderSettings.logTransform = stringToLogTransformMode("Keep Input");
@@ -1433,7 +1427,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     mRenderSettings.cfaPhase = "Don't override CFA";
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
-    ui->exposureCompensationCombobox->setCurrentText(QString::fromStdString(mRenderSettings.exposureCompensation));
+    ui->exposureCompensationLineEdit->setText(QString::fromStdString(mRenderSettings.exposureCompensation));
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));    
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels)); 
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    

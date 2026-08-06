@@ -45,7 +45,6 @@ set(PROJECT_SOURCES
         src/CalibrationData.cpp
         src/AudioWriter.cpp
         src/Utils.cpp
-        src/ExposureKeyframes.cpp
 
         include/mainwindow.h
         include/Types.h
@@ -65,7 +64,6 @@ set(PROJECT_SOURCES
         include/CameraFrameMetadata.h
         include/CalibrationData.h
         include/Utils.h
-        include/ExposureKeyframes.h
 
         ui/mainwindow.ui
 )
@@ -354,7 +352,6 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(motioncam-core-tests
         tests/core_tests.cpp
-        src/ExposureKeyframes.cpp
         src/CalibrationData.cpp)
     target_include_directories(motioncam-core-tests PRIVATE
         include

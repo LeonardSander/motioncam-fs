@@ -47,9 +47,6 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mConfig(config),
         mIsHLG(false) {
     
-    // Parse exposure keyframes if the input contains keyframe syntax
-    mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
-    
     // Load calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);
     boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
@@ -571,11 +568,9 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             dng.SetFrameRate(mFps);
         }
 
-        // Set baseline exposure with keyframe support
+        // Set baseline exposure with the optional gain offset
         float exposureOffset = (mConfig.cameraModel == "Panasonic" ? -2.0f : 0.0f);
-        if (mExposureKeyframes.has_value()) {
-            exposureOffset += mExposureKeyframes->getExposureAtFrame(frameNumber, mTotalFrames);
-        } else if (!mConfig.exposureCompensation.empty()) {
+        if (!mConfig.exposureCompensation.empty()) {
             try {
                 exposureOffset += std::stof(mConfig.exposureCompensation);
             } catch (const std::exception&) {
@@ -680,9 +675,6 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
 
     mCache.clear();
     mConfig = config;
-    
-    // Re-parse exposure keyframes
-    mExposureKeyframes = ExposureKeyframes::parse(config.exposureCompensation);
     
     // Reload calibration JSON if it exists
     boost::filesystem::path srcPath(mSrcPath);

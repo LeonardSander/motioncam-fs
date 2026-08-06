@@ -4,7 +4,6 @@
 #include <IFuseFileSystem.h>
 #include <VirtualFileSystemImpl.h>
 #include <CalibrationData.h>
-#include <ExposureKeyframes.h>
 #include <Types.h>
 #include <memory>
 
@@ -69,7 +68,6 @@ private:
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
     RenderSettings mConfig;
-    std::optional<ExposureKeyframes> mExposureKeyframes;
     float mFps;
     FrameRateInfo mFrameRateInfo;
     int mTotalFrames;

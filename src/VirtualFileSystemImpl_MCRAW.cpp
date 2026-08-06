@@ -174,9 +174,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
    
-    // Parse exposure keyframes if the input contains keyframe syntax
-    std::optional<ExposureKeyframes> exposureKeyframes = ExposureKeyframes::parse(mSettings.exposureCompensation);
-
         // Store frame information
     /*mWidth = cameraFrameMetadata.width;
     mHeight = cameraFrameMetadata.height;
@@ -193,10 +190,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
         cameraConfig,
         mFps,
         0,
-        static_cast<int>(frames.size()),
         mBaselineExpValue,
         mSettings,
-        exposureKeyframes,
         mCalibration,
         false  // Compression always false for virtual filesystem
     );
@@ -434,15 +429,7 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
 
             spdlog::debug("Generating {}", entry.name);
 
-            // Parse exposure keyframes if the input contains keyframe syntax
-            std::optional<ExposureKeyframes> exposureKeyframes = ExposureKeyframes::parse(settings.exposureCompensation);
-
-            /*std::string frameExposureComp = mConfig.exposureCompensation;
-            if (mExposureKeyframes.has_value()) {
-                float exposureValue = mExposureKeyframes->getExposureAtFrame(frameIndex, mTotalFrames);
-                frameExposureComp = std::to_string(exposureValue);
-            }
-            RenderSettings settings(
+            /*RenderSettings settings(
                 options,
                 draftScale,
                 mCFRTarget,
@@ -460,10 +447,8 @@ size_t VirtualFileSystemImpl_MCRAW::generateFrame(
                 containerMetadata,
                 fps,
                 frameIndex,
-                mFileInfo.totalFrames,
                 baselineExpValue,
                 settings,
-                exposureKeyframes,
                 calibration,
                 false);
 
