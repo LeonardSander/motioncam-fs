@@ -332,7 +332,7 @@ void MainWindow::restoreSettings() {
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
-    mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Wrong CFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Correct QBCFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
     mRenderSettings.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
     mRenderSettings.cropTarget = settings.value("cropTarget").toString().toStdString();
     mRenderSettings.cameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
@@ -1423,7 +1423,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     mRenderSettings.cameraModel = "Panasonic";
     mRenderSettings.levels = "Dynamic";
     mRenderSettings.logTransform = stringToLogTransformMode("Keep Input");
-    mRenderSettings.quadBayerOption = stringToQuadBayerMode("Wrong CFA Metadata");
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode("Correct QBCFA Metadata");
     mRenderSettings.cfaPhase = "Don't override CFA";
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));

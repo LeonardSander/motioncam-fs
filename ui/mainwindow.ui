@@ -1046,9 +1046,6 @@
                <height>30</height>
               </size>
              </property>
-             <property name="editable">
-                <bool>true</bool>
-              </property>
              <!-- <item>
               <property name="text">
                <string>Remosaic</string>
@@ -1061,12 +1058,12 @@
              </item> -->
              <item>
               <property name="text">
-               <string>Wrong CFA Metadata</string>
+               <string>Correct QBCFA Metadata</string>
               </property>
              </item>
              <item>
               <property name="text">
-               <string>Correct QBCFA Metadata</string>
+               <string>Wrong CFA Metadata</string>
               </property>
              </item>             
              <!-- <item>

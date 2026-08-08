@@ -203,7 +203,7 @@ inline std::string quadBayerModeToString(QuadBayerMode mode) {
         case QuadBayerMode::Remosaic: return "Remosaic";
         case QuadBayerMode::WrongCFAMetadata: return "Wrong CFA Metadata";
         case QuadBayerMode::CorrectQBCFAMetadata: return "Correct QBCFA Metadata";
-        default: return "Remosaic";
+        default: return "Correct QBCFA Metadata";
     }
 }
 
@@ -211,7 +211,7 @@ inline QuadBayerMode stringToQuadBayerMode(const std::string& str) {
     if (str == "Remosaic") return QuadBayerMode::Remosaic;
     if (str == "Wrong CFA Metadata") return QuadBayerMode::WrongCFAMetadata;
     if (str == "Correct QBCFA Metadata") return QuadBayerMode::CorrectQBCFAMetadata;
-    return QuadBayerMode::Remosaic;
+    return QuadBayerMode::CorrectQBCFAMetadata;
 }
 
 inline std::string logTransformModeToString(LogTransformMode mode) {
@@ -286,7 +286,7 @@ struct RenderSettings {
         , levels("Dynamic")
         , logTransform(LogTransformMode::KeepInput)
         , exposureCompensation("")
-        , quadBayerOption(QuadBayerMode::Remosaic)
+        , quadBayerOption(QuadBayerMode::CorrectQBCFAMetadata)
         , cfaPhase("Don't override CFA")
     {}
 
@@ -300,7 +300,7 @@ struct RenderSettings {
         const std::string& lvl,
         const std::string& log,
         const std::string& exp = "0ev",
-        const std::string& qb = "Remosaic",
+        const std::string& qb = "Correct QBCFA Metadata",
         const std::string& cfa = "Don't override CFA")
         : options(opts)
         , draftScale(draft)
