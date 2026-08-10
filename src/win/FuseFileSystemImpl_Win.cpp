@@ -56,7 +56,8 @@ namespace {
         return lcv::utf_to_utf<char>(std::wstring(ws == nullptr ? L"" : ws));
     }
 
-    void updatePlaceHolder(PRJ_PLACEHOLDER_INFO& placeholderInfo, const Entry& entry, const RenderSettings& config) {
+    void updatePlaceHolder(PRJ_PLACEHOLDER_INFO& placeholderInfo, const Entry& entry,
+                           const RenderSettings& config, uint64_t contentVersion) {
         placeholderInfo.FileBasicInfo.IsDirectory = entry.type == EntryType::DIRECTORY_ENTRY;
         placeholderInfo.FileBasicInfo.FileSize = entry.size;
         placeholderInfo.FileBasicInfo.FileAttributes =
@@ -68,6 +69,10 @@ namespace {
         placeholderInfo.VersionInfo.ContentID[2] = static_cast<UINT8>((config.options >> 16) & 0xFF);
         placeholderInfo.VersionInfo.ContentID[3] = static_cast<UINT8>((config.options >> 24) & 0xFF);
         placeholderInfo.VersionInfo.ContentID[4] = static_cast<UINT8>(config.draftScale);
+        for (size_t i = 0; i < sizeof(contentVersion); ++i) {
+            placeholderInfo.VersionInfo.ContentID[8 + i] =
+                static_cast<UINT8>((contentVersion >> (i * 8)) & 0xff);
+        }
 
         // Use current time
         FILETIME currentTime;
@@ -120,6 +125,7 @@ protected:
 private:
     RenderSettings mConfig;
     std::mutex mOpLock;
+    std::atomic_uint64_t mContentVersion{0};
     std::unique_ptr<IVirtualFileSystem> mFs;
     std::map<GUID, std::unique_ptr<DirInfo>, GUIDComparer> mActiveEnumSessions;
 };
@@ -170,6 +176,7 @@ Session::~Session() {
 void Session::updateOptions(const RenderSettings& settings) {
     mConfig = settings;
     mFs->updateOptions(settings);
+    ++mContentVersion;
 
     // We need to clear out the cache
     auto files = mFs->listFiles("");
@@ -195,7 +202,7 @@ void Session::updateOptions(const RenderSettings& settings) {
         if(boost::ends_with(e.name, "dng")) {
             PRJ_PLACEHOLDER_INFO placeholderInfo = {};
 
-            updatePlaceHolder(placeholderInfo, e, mConfig);
+            updatePlaceHolder(placeholderInfo, e, mConfig, mContentVersion.load());
 
             hr = PrjUpdateFileIfNeeded(
                 _instanceHandle,
@@ -344,7 +351,7 @@ HRESULT Session::GetPlaceholderInfo(_In_ const PRJ_CALLBACK_DATA* CallbackData) 
 
     PRJ_PLACEHOLDER_INFO placeholderInfo = {};
 
-    updatePlaceHolder(placeholderInfo, entry, mConfig);
+    updatePlaceHolder(placeholderInfo, entry, mConfig, mContentVersion.load());
 
     // Create the on-disk placeholder.
     HRESULT hr = WritePlaceholderInfo(

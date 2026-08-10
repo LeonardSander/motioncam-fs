@@ -20,6 +20,38 @@
 
 using motioncam::Timestamp;
 
+namespace {
+
+std::vector<uint8_t> packSamples(
+    const std::vector<uint16_t>& samples,
+    size_t samplesPerRow,
+    unsigned int bitsPerSample) {
+    if (samplesPerRow == 0 || samples.size() % samplesPerRow != 0)
+        throw std::invalid_argument("Invalid dimensions for sample packing");
+    const size_t rows = samples.size() / samplesPerRow;
+    const size_t rowBytes =
+        (samplesPerRow * static_cast<size_t>(bitsPerSample) + 7) / 8;
+    std::vector<uint8_t> output(rows * rowBytes, 0);
+    const uint16_t mask = bitsPerSample == 16
+        ? 0xffffu
+        : static_cast<uint16_t>((1u << bitsPerSample) - 1u);
+
+    for (size_t row = 0; row < rows; ++row) {
+        size_t bitOffset = row * rowBytes * 8;
+        for (size_t column = 0; column < samplesPerRow; ++column) {
+            const uint16_t sample = samples[row * samplesPerRow + column] & mask;
+            for (int bit = static_cast<int>(bitsPerSample) - 1; bit >= 0; --bit) {
+                output[bitOffset / 8] |= static_cast<uint8_t>(
+                    ((sample >> bit) & 1u) << (7 - bitOffset % 8));
+                ++bitOffset;
+            }
+        }
+    }
+    return output;
+}
+
+} // namespace
+
 namespace motioncam {
 
 
@@ -274,10 +306,12 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         const int height = videoInfo.height;
         
         // Determine if we should apply log curve and bit reduction
-        bool applyLogCurve = (mConfig.logTransform != LogTransformMode::Disabled);
+        const bool applyLogCurve =
+            (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+            mConfig.logTransform != LogTransformMode::Disabled;
         int bitReduction = 0;
         
-        if (applyLogCurve && !jpegCompression) {
+        if (applyLogCurve) {
             // Parse bit reduction from logTransform option
             if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) {
                 bitReduction = 2;
@@ -352,7 +386,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         // Convert to lowercase for consistency
         std::transform(cfaPhase.begin(), cfaPhase.end(), cfaPhase.begin(), ::tolower);
         
-        std::vector<uint8_t> imageBytes;
+        std::vector<uint16_t> imageSamples;
         int samplesPerPixel = 3;
         int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
         
@@ -362,51 +396,24 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             utils::remosaicRGBToBayer(processedRgbData, bayerData, width, height, cfaPhase);
             
             // Pack Bayer data to actual bit depth
-            imageBytes.resize(width * height * 2);
-            std::memcpy(imageBytes.data(), bayerData.data(), bayerData.size() * sizeof(uint16_t));
+            imageSamples = std::move(bayerData);
             
             samplesPerPixel = 1; // Single channel for CFA
             photometric = 32803; // CFA (Color Filter Array)
         } else {
             // Pack RGB data to actual bit depth
-            imageBytes.resize(width * height * 3 * 2);
-            std::memcpy(imageBytes.data(), processedRgbData.data(), processedRgbData.size() * sizeof(uint16_t));
+            imageSamples = std::move(processedRgbData);
         }
-        
-        if (applyLogCurve && !jpegCompression) {
-            uint32_t w = width, h = height;
-            if (encodeBits <= 4) {
-                if (shouldRemosaic)                    
-                    utils::encodeTo4Bit(imageBytes, w, h);
-                else 
-                    utils::encodeRGBTo4Bit(imageBytes, w, h);                
-                encodeBits = 4;
-            } else if (encodeBits <= 6) {
-                if (shouldRemosaic)
-                    utils::encodeTo6Bit(imageBytes, w, h);
-                else
-                    utils::encodeRGBTo6Bit(imageBytes, w, h);                
-                encodeBits = 6;
-            } else if (encodeBits <= 8) {
-                if (shouldRemosaic) 
-                    utils::encodeTo8Bit(imageBytes, w, h);
-                else 
-                    utils::encodeRGBTo8Bit(imageBytes, w, h);                
-                encodeBits = 8;
-            } else if (encodeBits <= 10) {
-                if (shouldRemosaic) 
-                    utils::encodeTo10Bit(imageBytes, w, h);
-                else 
-                    utils::encodeRGBTo10Bit(imageBytes, w, h);                
-                encodeBits = 10;
-            } else if (encodeBits <= 12) {
-                if (shouldRemosaic) 
-                    utils::encodeTo12Bit(imageBytes, w, h);
-                else 
-                    utils::encodeRGBTo12Bit(imageBytes, w, h);                
-                encodeBits = 12;
-            }
-            // else keep 16-bit
+
+        std::vector<uint8_t> imageBytes;
+        if (jpegCompression || encodeBits == 16) {
+            imageBytes.resize(imageSamples.size() * sizeof(uint16_t));
+            std::memcpy(imageBytes.data(), imageSamples.data(), imageBytes.size());
+        } else {
+            imageBytes = packSamples(
+                imageSamples,
+                static_cast<size_t>(width) * samplesPerPixel,
+                static_cast<unsigned int>(encodeBits));
         }
         
         // Create DNG image
@@ -558,7 +565,9 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
         }
         
-        dng.SetImageData(imageBytes.data(), imageBytes.size());
+        if (!dng.SetImageData(imageBytes.data(), imageBytes.size())) {
+            throw std::runtime_error("Failed to attach DirectLog image data");
+        }
         
         // Apply calibration if available
         if (mCalibration.has_value()) {
@@ -682,7 +691,9 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.dataType = shouldRemosaic ? "Bayer CFA" : "RGB";
     
     // Determine levels info
-    bool applyLogCurve = (mConfig.logTransform != LogTransformMode::Disabled);
+    const bool applyLogCurve =
+        (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+        mConfig.logTransform != LogTransformMode::Disabled;
     int srcBits = 16;
     int dstBits = 16;
     
