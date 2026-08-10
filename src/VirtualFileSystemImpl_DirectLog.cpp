@@ -429,10 +429,6 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         // Photometric interpretation
         dng.SetPhotometric(photometric);
         dng.SetPlanarConfig(1); // Chunky
-        if (jpegCompression && !shouldRemosaic) {
-            throw std::runtime_error(
-                "LJ92 compression requires remosaiced single-channel DirectLog output");
-        }
         dng.SetCompression(jpegCompression
             ? tinydngwriter::COMPRESSION_JPEG
             : tinydngwriter::COMPRESSION_NONE);

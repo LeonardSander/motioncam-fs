@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -79,6 +80,46 @@ int main() {
         LJ92_ERROR_NONE);
     lj92_close(decoder);
     assert(decoded == pixels);
+
+    constexpr unsigned int rgbWidth = 19;
+    constexpr unsigned int rgbHeight = 13;
+    constexpr int rgbComponents = 3;
+    std::vector<uint16_t> rgb(rgbWidth * rgbHeight * rgbComponents);
+    for (unsigned int y = 0; y < rgbHeight; ++y) {
+        for (unsigned int x = 0; x < rgbWidth; ++x) {
+            const auto offset = (y * rgbWidth + x) * rgbComponents;
+            rgb[offset + 0] = static_cast<uint16_t>((x * 37 + y * 11) & 0x0fff);
+            rgb[offset + 1] = static_cast<uint16_t>((x * 13 + y * 43 + 700) & 0x0fff);
+            rgb[offset + 2] = static_cast<uint16_t>((x * 29 + y * 7 + 1400) & 0x0fff);
+        }
+    }
+
+    uint8_t* rgbEncoded = nullptr;
+    int rgbEncodedSize = 0;
+    assert(lj92_encode(
+        rgb.data(), rgbWidth, rgbHeight, bits, rgbComponents,
+        rgbWidth * rgbComponents, 0, nullptr, 0,
+        &rgbEncoded, &rgbEncodedSize) == LJ92_ERROR_NONE);
+    assert(rgbEncoded != nullptr);
+    assert(rgbEncodedSize > 0);
+
+    decoder = nullptr;
+    assert(lj92_open(
+        &decoder, rgbEncoded, rgbEncodedSize,
+        &decodedWidth, &decodedHeight, &decodedBits,
+        &decodedComponents) == LJ92_ERROR_NONE);
+    assert(decodedWidth == static_cast<int>(rgbWidth));
+    assert(decodedHeight == static_cast<int>(rgbHeight));
+    assert(decodedBits == bits);
+    assert(decodedComponents == rgbComponents);
+
+    std::vector<uint16_t> decodedRgb(rgb.size());
+    assert(lj92_decode(
+        decoder, decodedRgb.data(), decodedWidth * rgbComponents,
+        0, nullptr, 0) == LJ92_ERROR_NONE);
+    lj92_close(decoder);
+    free(rgbEncoded);
+    assert(decodedRgb == rgb);
 
     return 0;
 }
