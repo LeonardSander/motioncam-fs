@@ -1,6 +1,8 @@
 #include "CalibrationData.h"
+#include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <cctype>
 #include <spdlog/spdlog.h>
 
 using json = nlohmann::json;
@@ -139,11 +141,27 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
         if (j.contains("cfaPhase")) {
             data.cfaPhase = j["cfaPhase"].get<std::string>();
         }
+
+        if (j.contains("dataLevels")) {
+            const std::string levels = j["dataLevels"].get<std::string>();
+            std::string normalized = levels;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (normalized == "auto" || normalized == "full" || normalized == "limited") {
+                normalized[0] = static_cast<char>(std::toupper(normalized[0]));
+                data.dataLevels = normalized;
+                data.hasDataLevels = true;
+            } else {
+                spdlog::warn(
+                    "Ignoring invalid dataLevels '{}'; expected Auto, Full, or Limited",
+                    levels);
+            }
+        }
         
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 || 
             data.hasForwardMatrix1 || data.hasForwardMatrix2 || 
-            data.hasAsShotNeutral || !data.cfaPhase.empty()) {
+            data.hasAsShotNeutral || data.hasDataLevels || !data.cfaPhase.empty()) {
             return data;
         }
         
@@ -167,7 +185,9 @@ std::string CalibrationData::createExampleJson() {
   "_forwardMatrix2": [0.6875, 0.1563, 0.125, 0.2734, 0.7578, -0.0313, 0.0859, -0.4688, 1.2109],
   "_asShotNeutral": [0.5, 1.0, 0.5],
   "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
-  "_cfaPhase": "bggr"
+  "_cfaPhase": "bggr",
+  "_comment5": "DirectLog input levels: Auto uses video metadata; Full or Limited overrides it per clip",
+  "dataLevels": "Auto"
 })";
 }
 

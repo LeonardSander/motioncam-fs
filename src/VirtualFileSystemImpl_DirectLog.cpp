@@ -92,6 +92,12 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     // Initialize DirectLogDecoder
     try {
         mDecoder = std::make_unique<DirectLogDecoder>(mSrcPath);
+        if (mCalibration && mCalibration->hasDataLevels) {
+            if (mCalibration->dataLevels == "Full")
+                mDecoder->setFullRangeOverride(true);
+            else if (mCalibration->dataLevels == "Limited")
+                mDecoder->setFullRangeOverride(false);
+        }
         const auto& videoInfo = mDecoder->getVideoInfo();
         
         mWidth = videoInfo.width;
@@ -593,7 +599,6 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 dng.SetAsShotNeutral(3, mCalibration->asShotNeutral.data());
             }
         }
-        
         // Write DNG to memory stream
         std::ostringstream oss;
         tinydngwriter::DNGWriter writer(false); // little-endian
@@ -671,6 +676,13 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
         if (mCalibration.has_value()) {
             spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
         }
+    }
+    mDecoder->setFullRangeOverride(std::nullopt);
+    if (mCalibration && mCalibration->hasDataLevels) {
+        if (mCalibration->dataLevels == "Full")
+            mDecoder->setFullRangeOverride(true);
+        else if (mCalibration->dataLevels == "Limited")
+            mDecoder->setFullRangeOverride(false);
     }
     
     init();

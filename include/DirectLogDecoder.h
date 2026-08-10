@@ -12,6 +12,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
 }
 
@@ -49,6 +50,7 @@ public:
     
     bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData);
     bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint16_t>& rgbData);
+    void setFullRangeOverride(std::optional<bool> fullRange);
     
     static bool isHLGVideo(const std::string& filePath);
 
@@ -73,6 +75,7 @@ private:
     int mVideoStreamIndex;
     AVRational mTimeBase;
     std::optional<bool> mFullRange;
+    std::optional<bool> mFullRangeOverride;
 
     mutable std::mutex mMutex;
 };

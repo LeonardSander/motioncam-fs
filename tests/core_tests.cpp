@@ -15,6 +15,19 @@ bool nearlyEqual(float lhs, float rhs) {
 int main() {
     using namespace motioncam;
 
+    const auto levelsCalibration = CalibrationData::parse(std::string(R"({"dataLevels":"full"})"));
+    assert(levelsCalibration.has_value());
+    assert(levelsCalibration->hasDataLevels);
+    assert(levelsCalibration->dataLevels == "Full");
+
+    const auto exampleCalibration = CalibrationData::parse(CalibrationData::createExampleJson());
+    assert(exampleCalibration.has_value());
+    assert(exampleCalibration->hasDataLevels);
+    assert(exampleCalibration->dataLevels == "Auto");
+
+    const auto invalidLevelsCalibration = CalibrationData::parse(std::string(R"({"dataLevels":"Video"})"));
+    assert(!invalidLevelsCalibration.has_value());
+
     RenderSettings defaults;
     assert(defaults.cfaPhase == "Don't override CFA");
     assert(defaults.cfrTarget.mode == CFRMode::PreferDropFrame);

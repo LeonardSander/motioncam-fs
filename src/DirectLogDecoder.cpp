@@ -203,6 +203,12 @@ bool DirectLogDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<
     return extractFrame(frameNumber, rgbData);
 }
 
+void DirectLogDecoder::setFullRangeOverride(std::optional<bool> fullRange) {
+    std::lock_guard<std::mutex> lock(mMutex);
+    mFullRangeOverride = fullRange;
+    mFullRange.reset();
+}
+
 bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData) {
     // Manual YUV to RGB conversion using Rec.2020 color space
     // Input: YUV with limited range (16-235 for Y, 16-240 for UV in 8-bit, scaled for 10-bit)
@@ -225,44 +231,28 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     int bitDepth = is10bit ? 10 : 8;
     int maxInput = (1 << bitDepth) - 1;  // 255 for 8-bit, 1023 for 10-bit
 
-    // Some Camera Native full-range exports are incorrectly tagged as TV
-    // range. Detect only unambiguous excursions, leaving ordinary ProRes
-    // overshoot on limited-range clips alone.
     if (!mFullRange.has_value()) {
-        int minY = maxInput;
-        int maxY = 0;
-        for (int y = 0; y < height; ++y) {
-            if (is10bit) {
-                const auto* row = reinterpret_cast<const uint16_t*>(
-                    yuvFrame->data[0] + y * yuvFrame->linesize[0]);
-                for (int x = 0; x < width; ++x) {
-                    minY = std::min(minY, static_cast<int>(row[x]));
-                    maxY = std::max(maxY, static_cast<int>(row[x]));
-                }
-            } else {
-                const auto* row = yuvFrame->data[0] + y * yuvFrame->linesize[0];
-                for (int x = 0; x < width; ++x) {
-                    minY = std::min(minY, static_cast<int>(row[x]));
-                    maxY = std::max(maxY, static_cast<int>(row[x]));
-                }
-            }
+        AVColorRange colorRange = yuvFrame->color_range;
+        if (colorRange == AVCOL_RANGE_UNSPECIFIED) {
+            colorRange = mCodecContext->color_range;
         }
 
-        const int rangeScale = 1 << (bitDepth - 8);
-        mFullRange =
-            yuvFrame->color_range == AVCOL_RANGE_JPEG ||
-            minY < 8 * rangeScale ||
-            maxY > 248 * rangeScale;
+        mFullRange = mFullRangeOverride.value_or(colorRange == AVCOL_RANGE_JPEG);
         spdlog::info(
-            "DirectLogDecoder: treating clip as {} range (Y {}..{})",
-            *mFullRange ? "full" : "limited", minY, maxY);
+            "DirectLogDecoder: treating clip as {} range (metadata: {}, override: {})",
+            *mFullRange ? "full" : "limited", av_color_range_name(colorRange),
+            mFullRangeOverride.has_value() ? (*mFullRangeOverride ? "Full" : "Limited") : "Auto");
     }
     const bool fullRange = *mFullRange;
 
-    double yMin = fullRange ? 0.0 : 16.0 * (maxInput / 255.0);
-    double yMax = fullRange ? maxInput : 235.0 * (maxInput / 255.0);
-    double cMin = fullRange ? 0.0 : 16.0 * (maxInput / 255.0);
-    double cMax = fullRange ? maxInput : 240.0 * (maxInput / 255.0);
+    // Scale the 8-bit nominal levels across the complete sample range. This
+    // matches how DirectLog's 10-bit exports are quantized and avoids a small
+    // chroma expansion in the shadows.
+    const double rangeScale = maxInput / 255.0;
+    double yMin = fullRange ? 0.0 : 16.0 * rangeScale;
+    double yMax = fullRange ? maxInput : 235.0 * rangeScale;
+    double cMin = fullRange ? 0.0 : 16.0 * rangeScale;
+    double cMax = fullRange ? maxInput : 240.0 * rangeScale;
     
     // Get plane pointers and strides
     uint8_t* yPlane = yuvFrame->data[0];
