@@ -81,7 +81,9 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_LOG_TRANSFORM                = 1 << 9,
     RENDER_OPT_INTERPRET_AS_QUAD_BAYER      = 1 << 10,
     RENDER_OPT_REMOSAIC_TO_BAYER            = 1 << 11,    
-    RENDER_OPT_JPEG_COMPRESSION             = 1 << 12
+    RENDER_OPT_JPEG_COMPRESSION             = 1 << 12,
+    RENDER_OPT_SMOOTH_EXPOSURE              = 1 << 13,
+    RENDER_OPT_SMOOTH_WHITE_BALANCE         = 1 << 14
 };
 
 // Overload bitwise OR operator
@@ -133,6 +135,12 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_NORMALIZE_EXPOSURE) {
         flags.push_back("NORMALIZE_EXPOSURE");
+    }
+    if (options & RENDER_OPT_SMOOTH_EXPOSURE) {
+        flags.push_back("SMOOTH_EXPOSURE");
+    }
+    if (options & RENDER_OPT_SMOOTH_WHITE_BALANCE) {
+        flags.push_back("SMOOTH_WHITE_BALANCE");
     }
     if (options & RENDER_OPT_FRAMERATE_CONVERSION) {
         flags.push_back("FRAMERATE_CONVERSION");

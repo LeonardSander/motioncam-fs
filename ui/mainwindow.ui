@@ -364,7 +364,34 @@
             </widget>
            </item>
            </layout>
-           </item>         
+           </item>
+         <item>
+          <layout class="QHBoxLayout" name="exposureSmoothingLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QCheckBox" name="smoothExposureCheckBox">
+             <property name="text">
+              <string>Smooth Exposure</string>
+             </property>
+             <property name="toolTip">
+              <string>Smooth exposure changes with a large lookahead window. Requires Normalize Exposure.</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QCheckBox" name="smoothWhiteBalanceCheckBox">
+             <property name="text">
+              <string>Smooth White Balance</string>
+             </property>
+             <property name="toolTip">
+              <string>Smooth per-frame AsShotNeutral values with a large lookahead window.</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
          <item>
           <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">

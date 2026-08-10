@@ -1321,7 +1321,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     double baselineExpValue,
     const RenderSettings& settings,
     const std::optional<CalibrationData>& calibration,
-    bool compressionEnabled)
+    bool compressionEnabled,
+    const std::optional<float>& baselineExposureOverride,
+    const std::optional<std::array<float, 3>>& asShotNeutralOverride)
 {
     Measure m("generateDng");
 
@@ -1483,7 +1485,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     }
 
     float normalizedExposureOffset = 0.0f;
-    if (normalizeExposure) {
+    if (baselineExposureOverride.has_value()) {
+        normalizedExposureOffset = *baselineExposureOverride;
+    } else if (normalizeExposure) {
         normalizedExposureOffset = std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime));
     }
     dng.SetBaselineExposure(normalizedExposureOffset + exposureOffset);
@@ -1595,6 +1599,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Apply asShotNeutral from calibration if available, otherwise from metadata
     if (calibration.has_value() && calibration->hasAsShotNeutral) {
         dng.SetAsShotNeutral(3, calibration->asShotNeutral.data());
+    } else if (asShotNeutralOverride.has_value()) {
+        dng.SetAsShotNeutral(3, asShotNeutralOverride->data());
     } else {
         dng.SetAsShotNeutral(3, metadata.asShotNeutral.data());
     }

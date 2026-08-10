@@ -4,6 +4,8 @@
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
 #include <VirtualFileSystemImpl.h>
+#include <array>
+#include <map>
 
 namespace BS {
 class thread_pool;
@@ -86,6 +88,8 @@ private:
     FrameRateInfo mFrameRateInfo;
     FileInfo mFileInfo;
     double mBaselineExpValue;
+    std::map<Timestamp, float> mSmoothedExposureOffsets;
+    std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     std::optional<CalibrationData> mCalibration;
     std::mutex mMutex;
 };

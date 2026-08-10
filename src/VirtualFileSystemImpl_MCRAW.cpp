@@ -18,7 +18,49 @@
 #include <audiofile/AudioFile.h>
 
 #include <algorithm>
+#include <cmath>
 #include <tuple>
+
+namespace {
+
+// A wide centred median strongly rejects alternating auto-adjustments and
+// isolated manual jumps.  The centred window deliberately provides lookahead.
+std::vector<double> temporalMedian(const std::vector<double>& values, int radius) {
+    std::vector<double> result(values.size());
+    std::vector<double> window;
+    window.reserve(static_cast<size_t>(radius * 2 + 1));
+    for (size_t i = 0; i < values.size(); ++i) {
+        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
+        const size_t end = std::min(values.size(), i + static_cast<size_t>(radius) + 1);
+        window.assign(values.begin() + begin, values.begin() + end);
+        const auto middle = window.begin() + window.size() / 2;
+        std::nth_element(window.begin(), middle, window.end());
+        result[i] = *middle;
+    }
+    return result;
+}
+
+std::vector<double> temporalSmooth(const std::vector<double>& values, int radius) {
+    const auto stable = temporalMedian(values, radius);
+    std::vector<double> result(values.size());
+    const double sigma = std::max(1.0, radius / 2.0);
+    for (size_t i = 0; i < stable.size(); ++i) {
+        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
+        const size_t end = std::min(stable.size(), i + static_cast<size_t>(radius) + 1);
+        double sum = 0.0;
+        double weightSum = 0.0;
+        for (size_t j = begin; j < end; ++j) {
+            const double distance = static_cast<double>(j) - static_cast<double>(i);
+            const double weight = std::exp(-0.5 * distance * distance / (sigma * sigma));
+            sum += stable[j] * weight;
+            weightSum += weight;
+        }
+        result[i] = sum / weightSum;
+    }
+    return result;
+}
+
+} // namespace
 
 namespace motioncam {
 
@@ -55,10 +97,41 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         return;
     mBaselineExpValue = std::numeric_limits<double>::max();    
     nlohmann::json metadata;
+    std::vector<double> logExposures;
+    std::array<std::vector<double>, 3> logNeutrals;
+    logExposures.reserve(frames.size());
     for(const auto& frame : frames) {
         decoder.loadFrameMetadata(frame, metadata);
-        const auto& cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
+        const auto cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
         mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
+        logExposures.push_back(std::log2(std::max(1e-12, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime)));
+        for (size_t channel = 0; channel < 3; ++channel) {
+            const double neutral = metadata.contains("asShotNeutral") &&
+                    metadata["asShotNeutral"].is_array() &&
+                    metadata["asShotNeutral"].size() > channel
+                ? metadata["asShotNeutral"][channel].get<double>()
+                : 1.0;
+            logNeutrals[channel].push_back(std::log(std::max(1e-6, neutral)));
+        }
+    }
+
+    // Two seconds on either side is intentionally large enough to absorb
+    // aggressive frame-to-frame changes while retaining deliberate trends.
+    const double frameRate = frames.size() > 1
+        ? vfs::calculateFrameRate(frames).medianFrameRate
+        : 30.0;
+    const int smoothingRadius = std::max(1, static_cast<int>(std::lround(2.0 * frameRate)));
+    const auto smoothExposure = temporalSmooth(logExposures, smoothingRadius);
+    std::array<std::vector<double>, 3> smoothNeutral;
+    for (size_t channel = 0; channel < 3; ++channel)
+        smoothNeutral[channel] = temporalSmooth(logNeutrals[channel], smoothingRadius);
+    for (size_t i = 0; i < frames.size(); ++i) {
+        mSmoothedExposureOffsets[frames[i]] = static_cast<float>(smoothExposure[i] - logExposures[i]);
+        std::array<float, 3> neutral;
+        const double green = smoothNeutral[1][i];
+        for (size_t channel = 0; channel < 3; ++channel)
+            neutral[channel] = static_cast<float>(std::exp(smoothNeutral[channel][i] - green));
+        mSmoothedAsShotNeutrals[frames[i]] = neutral;
     }
     this->init(/*mOptions*/);
 }
@@ -408,6 +481,13 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         decoder->loadFrame(timestamp, frameData, metadata);
         const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
         const int outputFrameNumber = std::stoi(frameDigits);
+        std::optional<float> exposureOverride;
+        if ((mSettings.options & RENDER_OPT_NORMALIZE_EXPOSURE) &&
+            (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE))
+            exposureOverride = mSmoothedExposureOffsets.at(timestamp);
+        std::optional<std::array<float, 3>> neutralOverride;
+        if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
+            neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
         auto output = utils::generateDng(
             frameData,
             CameraFrameMetadata::parse(metadata),
@@ -417,7 +497,9 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             mBaselineExpValue,
             mSettings,
             mCalibration,
-            jpegCompression);
+            jpegCompression,
+            exposureOverride,
+            neutralOverride);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
         if (!jpegCompression)

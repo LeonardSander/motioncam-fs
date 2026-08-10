@@ -78,6 +78,12 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     
     if(ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
+
+    if(ui->smoothExposureCheckBox->checkState() == Qt::CheckState::Checked)
+        settings.options |= motioncam::RENDER_OPT_SMOOTH_EXPOSURE;
+
+    if(ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked)
+        settings.options |= motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE;
     
     if(ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
@@ -170,6 +176,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->smoothExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->smoothWhiteBalanceCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -252,6 +260,8 @@ void MainWindow::saveSettings() {
     settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("smoothExposure", ui->smoothExposureCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("smoothWhiteBalance", ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
@@ -299,6 +309,11 @@ void MainWindow::restoreSettings() {
     ui->normalizeExposureCheckBox->setCheckState(
         !settings.contains("normalizeExposure") ? Qt::CheckState::Checked :
         (settings.value("normalizeExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
+
+    ui->smoothExposureCheckBox->setCheckState(
+        settings.value("smoothExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    ui->smoothWhiteBalanceCheckBox->setCheckState(
+        settings.value("smoothWhiteBalance").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     ui->cfrConversionCheckBox->setCheckState(
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
@@ -999,6 +1014,11 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 }
 
 void MainWindow::updateUi() {
+    // Exposure smoothing operates on the normalized exposure correction.
+    ui->smoothExposureCheckBox->setEnabled(ui->normalizeExposureCheckBox->isChecked());
+    if (!ui->normalizeExposureCheckBox->isChecked())
+        ui->smoothExposureCheckBox->setChecked(false);
+
     // Draft quality only enabled when draft mode is on
     const QSignalBlocker draftQualitySignals(ui->draftQuality);
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked) {
@@ -1312,6 +1332,8 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->normalizeExposureCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->smoothExposureCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->smoothWhiteBalanceCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);

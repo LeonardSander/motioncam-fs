@@ -146,7 +146,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     double baselineExpValue,
     const RenderSettings& settings,
     const std::optional<CalibrationData>& calibration = std::nullopt,
-    bool compressionEnabled = false);
+    bool compressionEnabled = false,
+    const std::optional<float>& baselineExposureOverride = std::nullopt,
+    const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt);
 
 // ============================================================================
 // Utility Functions
