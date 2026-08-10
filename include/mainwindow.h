@@ -95,7 +95,9 @@ private slots:
     void playFile(const QString& path);
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
+#ifdef _WIN32
     void discardFile(QWidget* fileWidget);
+#endif
     void finalizeFile(QWidget* fileWidget);
     void createCalibrationJson(QWidget* fileWidget);
     void updateCalibrationButtonStates();

@@ -177,8 +177,6 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->quadBayerCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
-    //connect(ui->precacheCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onPrecacheCheckboxChanged);
-    
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCFRTargetChanged(text.toStdString());
@@ -270,8 +268,6 @@ void MainWindow::saveSettings() {
     settings.setValue("logTransform", QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
     settings.setValue("quadBayerOption", QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
     settings.setValue("cfaPhase", QString::fromStdString(mRenderSettings.cfaPhase));
-    settings.setValue("precacheEnabled", ui->precacheCheckBox->checkState() == Qt::CheckState::Checked);
-
     // Save mounted files
     settings.beginWriteArray("mountedFiles");
 
@@ -322,9 +318,6 @@ void MainWindow::restoreSettings() {
     ui->quadBayerCheckBox->setCheckState(
         settings.value("interpretAsQBEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
     
-    ui->precacheCheckBox->setCheckState(
-        settings.value("precacheEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
-
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
@@ -550,11 +543,14 @@ void MainWindow::mountFile(const QString& filePath) {
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
     buttonLayout->addWidget(removeButton);
     
-    // Create and add the discard button
+#ifdef _WIN32
+    // ProjFS leaves hydrated files on disk after unmounting, so Windows needs
+    // an explicit way to remove them.
     auto* discardButton = new QPushButton("Discard", fileWidget);
     discardButton->setFixedSize(buttonWidth, buttonHeight);
     discardButton->setToolTip("Unmount and delete all written DNG files");
     buttonLayout->addWidget(discardButton);
+#endif
     
     // Create and add the finalize button
     auto* finalizeButton = new QPushButton("Finalize", fileWidget);
@@ -632,9 +628,11 @@ void MainWindow::mountFile(const QString& filePath) {
         removeFile(fileWidget);
     });
     
+#ifdef _WIN32
     connect(discardButton, &QPushButton::clicked, this, [this, fileWidget] {
         discardFile(fileWidget);
     });
+#endif
     
     connect(finalizeButton, &QPushButton::clicked, this, [this, fileWidget] {
         finalizeFile(fileWidget);
@@ -730,6 +728,7 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     }
 }
 
+#ifdef _WIN32
 void MainWindow::discardFile(QWidget* fileWidget) {
     auto mountPath = fileWidget->property("mountPath").toString();
     if (mountPath.isEmpty()) {
@@ -829,6 +828,7 @@ void MainWindow::discardFile(QWidget* fileWidget) {
         ui->dragAndDropLabel->show();
     }
 }
+#endif
 
 void MainWindow::finalizeFile(QWidget* fileWidget) {
     auto mountPath = fileWidget->property("mountPath").toString();
