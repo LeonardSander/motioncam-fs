@@ -42,6 +42,8 @@ public:
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
+    std::shared_ptr<std::vector<char>> materializeFile(
+        const Entry& entry, bool jpegCompression = false) override;
 
 private:
     void init();
@@ -56,7 +58,7 @@ private:
 
     bool isHLGVideo() const;
     void calculateFrameRateStats();
-    bool convertRGBToDNG(const std::vector<uint16_t>& rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp);
+    bool convertRGBToDNG(const std::vector<uint16_t>& rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp, bool jpegCompression = false);
 
 
 private:

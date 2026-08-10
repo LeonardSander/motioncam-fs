@@ -1,5 +1,8 @@
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
+#include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl_DNG.h"
+#include "DNGDecoder.h"
 #include "LRUCache.h"
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -83,21 +86,23 @@ void setupLogging() {
 //
 
 struct FuseContext {
-    VirtualFileSystemImpl_MCRAW* fs;
+    IVirtualFileSystem* fs;
     std::atomic_int nextFileHandle;
 };
 
 class Session {
 public:
-    Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs);
+    Session(const std::string& srcFile, const std::string& dstPath, std::unique_ptr<IVirtualFileSystem> fs);
     ~Session();
 
     void updateOptions(const RenderSettings& settings);
 
     FileInfo getFileInfo() const;
+    void finalize(const std::string&, bool,
+        const std::function<bool(size_t, size_t, const std::string&)>&);
 
 private:
-    void init(VirtualFileSystemImpl_MCRAW* fs);
+    void init(IVirtualFileSystem* fs);
 
     void fuseMain(struct fuse_chan* ch, struct fuse* fuse);
 
@@ -113,20 +118,20 @@ private:
     std::string mSrcFile;
     std::string mDstPath;
     std::unique_ptr<std::thread> mThread;
-    VirtualFileSystemImpl_MCRAW* mFs;
+    std::unique_ptr<IVirtualFileSystem> mFs;
     struct fuse_chan* mFuseCh;
     struct fuse* mFuse;
 };
 
 
-Session::Session(const std::string& srcFile, const std::string& dstPath, VirtualFileSystemImpl_MCRAW* fs) :
+Session::Session(const std::string& srcFile, const std::string& dstPath, std::unique_ptr<IVirtualFileSystem> fs) :
     mSrcFile(srcFile),
     mDstPath(dstPath),
-    mFs(fs),
+    mFs(std::move(fs)),
     mFuseCh(nullptr),
     mFuse(nullptr)
 {
-    init(fs);
+    init(mFs.get());
 }
 
 Session::~Session() {
@@ -157,7 +162,7 @@ Session::~Session() {
     spdlog::debug("Exiting session for {}", mSrcFile);
 }
 
-void Session::init(VirtualFileSystemImpl_MCRAW* fs) {
+void Session::init(IVirtualFileSystem* fs) {
     // FUSE operations structure
     struct fuse_operations ops = {};
 
@@ -219,6 +224,12 @@ void Session::updateOptions(const RenderSettings& settings)
 
 FileInfo Session::getFileInfo() const {
     return mFs->getFileInfo();
+}
+
+void Session::finalize(
+    const std::string& destination, bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    vfs::finalize(*mFs, destination, jpegCompression, progress);
 }
 
 void Session::fuseMain(struct fuse_chan* ch, struct fuse* fuse) {
@@ -412,19 +423,20 @@ MountId FuseFileSystemImpl_MacOs::mount(
         }
     }
 
-    if(boost::iequals(extension, ".mcraw")) {
+    if (boost::iequals(extension, ".mcraw") ||
+        ((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4")) &&
+         boost::icontains(fs::path(srcFile).filename().string(), "NATIVE")) ||
+        boost::iequals(extension, ".dng") || DNGDecoder::isDNGSequence(srcFile)) {
         auto mountId = mNextMountId++;
-
-        void* stack_addr = nullptr;
-        size_t stack_size = 0;
 
         try {
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
 
-            auto* fs =
-                new VirtualFileSystemImpl_MCRAW(
+            std::unique_ptr<IVirtualFileSystem> filesystem;
+            if (boost::iequals(extension, ".mcraw")) {
+                filesystem = std::make_unique<VirtualFileSystemImpl_MCRAW>(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
@@ -432,8 +444,18 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     srcFile,
                     baseName
                 );
+            } else if (boost::iequals(extension, ".dng") || DNGDecoder::isDNGSequence(srcFile)) {
+                filesystem = std::make_unique<VirtualFileSystemImpl_DNG>(
+                    *mIoThreadPool, *mProcessingThreadPool, *mCache,
+                    settings, srcFile, baseName);
+            } else {
+                filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
+                    *mIoThreadPool, *mProcessingThreadPool, *mCache,
+                    settings, srcFile, baseName);
+            }
 
-            auto session = std::make_unique<Session>(srcFile, dstPath, fs);
+            auto session = std::make_unique<Session>(
+                srcFile, dstPath, std::move(filesystem));
 
             if(!session) {
                 spdlog::error("Failed to mount {} to {}", srcFile, dstPath);
@@ -480,6 +502,15 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
         return it->second->getFileInfo();
     }
     return std::nullopt;
+}
+
+void FuseFileSystemImpl_MacOs::finalize(
+    MountId mountId, const std::string& destination, bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    const auto it = mMountedFiles.find(mountId);
+    if (it == mMountedFiles.end())
+        throw std::runtime_error("Mount not found");
+    it->second->finalize(destination, jpegCompression, progress);
 }
 
 } // namespace motioncam

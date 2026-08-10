@@ -3,7 +3,10 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include "Types.h"
+#include "IVirtualFileSystem.h"
 
 namespace motioncam {
 
@@ -32,6 +35,12 @@ struct FileInfo {
 };
 
 namespace vfs {
+
+void finalize(
+    IVirtualFileSystem& filesystem,
+    const std::string& destination,
+    bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress);
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames);
 

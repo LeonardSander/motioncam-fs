@@ -5,11 +5,56 @@
 #include <sstream>
 #include <iomanip>
 #include <array>
+#include <fstream>
+#include <filesystem>
 #include <boost/filesystem.hpp>
 #include <spdlog/spdlog.h>
 
 namespace motioncam {
 namespace vfs {
+
+void finalize(
+    IVirtualFileSystem& filesystem,
+    const std::string& destination,
+    bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    namespace stdfs = std::filesystem;
+
+    auto entries = filesystem.listFiles("");
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& entry) {
+        return entry.type != EntryType::FILE_ENTRY || entry.name == "desktop.ini";
+    }), entries.end());
+
+    stdfs::create_directories(destination);
+    size_t completed = 0;
+    for (const auto& entry : entries) {
+        if (progress && !progress(completed, entries.size(), entry.name)) {
+            throw std::runtime_error("Finalization cancelled");
+        }
+
+        auto data = filesystem.materializeFile(entry, jpegCompression);
+        if (!data) {
+            throw std::runtime_error("Failed to render " + entry.name);
+        }
+
+        stdfs::path output = stdfs::path(destination);
+        for (const auto& part : entry.pathParts)
+            output /= part;
+        output /= entry.name;
+        stdfs::create_directories(output.parent_path());
+
+        std::ofstream stream(output, std::ios::binary | std::ios::trunc);
+        if (!stream)
+            throw std::runtime_error("Could not create " + output.string());
+        stream.write(data->data(), static_cast<std::streamsize>(data->size()));
+        if (!stream)
+            throw std::runtime_error("Could not completely write " + output.string());
+        ++completed;
+    }
+
+    if (progress)
+        progress(completed, entries.size(), "");
+}
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {
     if (frames.size() < 2) {

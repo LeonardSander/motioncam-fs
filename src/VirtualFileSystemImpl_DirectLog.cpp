@@ -242,95 +242,31 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
     std::function<void(size_t, int)> result,
     bool async) {
 
-    auto cachedData = mCache.get(entry);
-    if (cachedData) {
-        const size_t copyLen =
-            pos < cachedData->size() ? std::min(len, cachedData->size() - pos) : 0;
-        if (copyLen > 0) {
-            std::memcpy(dst, cachedData->data() + pos, copyLen);
-        }
-        result(copyLen, 0);
-        return copyLen;
-    }
-
-    auto task = [this, entry, pos, len, dst, result]() {
+    auto renderTask = [this, entry, pos, len, dst, result]() -> size_t {
         try {
-            // Extract timestamp from entry userData
-            Timestamp timestamp = 0;
-            if (std::holds_alternative<int64_t>(entry.userData)) {
-                timestamp = std::get<int64_t>(entry.userData);
-            }
-            
-            // Find frame by timestamp
-            const auto& frames = mDecoder->getFrames();
-            int frameNumber = -1;
-            for (size_t i = 0; i < frames.size(); ++i) {
-                if (frames[i].timestamp == timestamp) {
-                    frameNumber = static_cast<int>(i);
-                    break;
-                }
-            }
-            
-            if (frameNumber == -1) {
-                spdlog::error("Failed to find frame with timestamp {}", timestamp);
-                mCache.markLoadFailed(entry);
-                result(0, -1);
-                return;
-            }
-            
-            // Extract RGB data from video frame (16-bit per channel)
-            std::vector<uint16_t> rgbData;
-            if (!mDecoder->extractFrame(frameNumber, rgbData)) {
-                spdlog::error("Failed to extract frame {} (timestamp: {})", frameNumber, timestamp);
-                mCache.markLoadFailed(entry);
-                result(0, -1);
-                return;
-            }
-            
-            // Convert RGB to DNG
-            std::vector<uint8_t> dngData;
-            if (!convertRGBToDNG(rgbData, dngData, frameNumber, timestamp)) {
-                spdlog::error("Failed to convert RGB to DNG for frame {}", frameNumber);
-                mCache.markLoadFailed(entry);
-                result(0, -1);
-                return;
-            }
-
-            auto cacheData = std::make_shared<std::vector<char>>(
-                dngData.begin(), dngData.end());
-            mCache.put(entry, cacheData);
-
-            // Copy requested portion of DNG data
-            const size_t copyLen =
-                pos < cacheData->size() ? std::min(len, cacheData->size() - pos) : 0;
-            if (copyLen > 0) {
-                memcpy(dst, cacheData->data() + pos, copyLen);
-                result(copyLen, 0);
-            } else {
-                result(0, 0);
-            }
-        }
-        catch (const std::exception& e) {
-            spdlog::error("Error generating frame: {}", e.what());
-            mCache.markLoadFailed(entry);
+            auto data = materializeFile(entry, false);
+            const size_t count = data && pos < data->size()
+                ? std::min(len, data->size() - pos) : 0;
+            if (count)
+                std::memcpy(dst, data->data() + pos, count);
+            result(count, 0);
+            return count;
+        } catch (const std::exception& e) {
+            spdlog::error("Error generating DirectLog frame: {}", e.what());
             result(0, -1);
+            return 0;
         }
     };
-    
-    if (async) {
-        mProcessingThreadPool.detach_task(task);
-        return 0;
-    } else {
-        task();
-        return len;
-    }
+    auto renderFuture = mProcessingThreadPool.submit_task(renderTask);
+    return async ? 0 : renderFuture.get();
 }
 
 bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     const std::vector<uint16_t>& rgbData, 
     std::vector<uint8_t>& dngData, 
     int frameNumber, 
-    Timestamp timestamp) {
+    Timestamp timestamp,
+    bool jpegCompression) {
     
     try {
         const auto& videoInfo = mDecoder->getVideoInfo();
@@ -341,7 +277,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         bool applyLogCurve = (mConfig.logTransform != LogTransformMode::Disabled);
         int bitReduction = 0;
         
-        if (applyLogCurve) {
+        if (applyLogCurve && !jpegCompression) {
             // Parse bit reduction from logTransform option
             if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) {
                 bitReduction = 2;
@@ -437,7 +373,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             std::memcpy(imageBytes.data(), processedRgbData.data(), processedRgbData.size() * sizeof(uint16_t));
         }
         
-        if (applyLogCurve) {
+        if (applyLogCurve && !jpegCompression) {
             uint32_t w = width, h = height;
             if (encodeBits <= 4) {
                 if (shouldRemosaic)                    
@@ -493,7 +429,13 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         // Photometric interpretation
         dng.SetPhotometric(photometric);
         dng.SetPlanarConfig(1); // Chunky
-        dng.SetCompression(1);  // No compression
+        if (jpegCompression && !shouldRemosaic) {
+            throw std::runtime_error(
+                "LJ92 compression requires remosaiced single-channel DirectLog output");
+        }
+        dng.SetCompression(jpegCompression
+            ? tinydngwriter::COMPRESSION_JPEG
+            : tinydngwriter::COMPRESSION_NONE);
         
         unsigned short sampleFormat[3] = {1, 1, 1}; // Unsigned integer
         dng.SetSampleFormat(samplesPerPixel, sampleFormat);
@@ -667,6 +609,45 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     catch (const std::exception& e) {
         spdlog::error("Exception in convertRGBToDNG for frame {}: {}", frameNumber, e.what());
         return false;
+    }
+}
+
+std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeFile(
+    const Entry& entry, bool jpegCompression) {
+    if (!jpegCompression) {
+        if (auto cached = mCache.get(entry)) {
+            mCache.put(entry, cached);
+            return cached;
+        }
+    }
+
+    try {
+        const auto timestamp = std::get<Timestamp>(entry.userData);
+        const auto& frames = mDecoder->getFrames();
+        const auto it = std::find_if(frames.begin(), frames.end(), [timestamp](const auto& frame) {
+            return frame.timestamp == timestamp;
+        });
+        if (it == frames.end())
+            throw std::runtime_error("DirectLog source frame not found");
+        const int frameNumber = static_cast<int>(std::distance(frames.begin(), it));
+
+        std::vector<uint16_t> rgbData;
+        if (!mDecoder->extractFrame(frameNumber, rgbData))
+            throw std::runtime_error("Could not decode DirectLog frame");
+        const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
+        const int outputFrameNumber = std::stoi(frameDigits);
+        std::vector<uint8_t> dngData;
+        if (!convertRGBToDNG(rgbData, dngData, outputFrameNumber, timestamp, jpegCompression))
+            throw std::runtime_error("Could not generate DirectLog DNG");
+
+        auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
+        if (!jpegCompression)
+            mCache.put(entry, output);
+        return output;
+    } catch (...) {
+        if (!jpegCompression)
+            mCache.markLoadFailed(entry);
+        throw;
     }
 }
 

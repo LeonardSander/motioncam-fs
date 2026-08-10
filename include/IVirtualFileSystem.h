@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <memory>
 
 namespace motioncam {
 
@@ -27,6 +28,13 @@ public:
         void* dst,
         std::function<void(size_t, int)> result,
         bool async) = 0;
+
+    // Produce the complete bytes for an entry. Mounted range reads and
+    // permanent exports must share this path so they cannot render different
+    // frame sequences or metadata.
+    virtual std::shared_ptr<std::vector<char>> materializeFile(
+        const Entry& entry,
+        bool jpegCompression = false) = 0;
 
     virtual void updateOptions(const RenderSettings& settings) = 0;
     virtual FileInfo getFileInfo() const = 0;

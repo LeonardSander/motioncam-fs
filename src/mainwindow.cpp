@@ -560,11 +560,7 @@ void MainWindow::mountFile(const QString& filePath) {
     auto* finalizeButton = new QPushButton("Finalize", fileWidget);
     finalizeButton->setFixedSize(buttonWidth, buttonHeight);
     finalizeButton->setToolTip("Render all frames to disk with compression (if enabled), then unmount");
-    const bool canFinalize = filePath.endsWith(".mcraw", Qt::CaseInsensitive);
-    finalizeButton->setEnabled(canFinalize);
-    if (!canFinalize) {
-        finalizeButton->setToolTip("Finalizing is currently supported for MCRAW files only");
-    }
+    finalizeButton->setEnabled(true);
     buttonLayout->addWidget(finalizeButton);
 
     // Add stretch to push buttons to the left
@@ -898,122 +894,24 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     // This allows compression to work correctly with variable file sizes
     bool mountReleased = false;
     try {
-        // Open the decoder directly
-        motioncam::Decoder decoder(srcFile.toStdString());
-        auto frames = decoder.getFrames();
-        std::sort(frames.begin(), frames.end());
-        
-        if (frames.empty()) {
-            throw std::runtime_error("No frames found in source file");
-        }
-        
-        spdlog::info("Found {} actual frames in source file", frames.size());
-        spdlog::info("Config compression setting: {}", enableCompression);
-        spdlog::info("Will render to temp directory: {}", tempPath.toStdString());
-        
-        // Get container metadata
-        auto cameraConfig = motioncam::CameraConfiguration::parse(decoder.getContainerMetadata());
-        spdlog::info("Camera config parsed successfully");
-        
-        // Calculate baseline exposure
-        double baselineExpValue = std::numeric_limits<double>::max();
-        for (const auto& frame : frames) {
-            nlohmann::json metadata;
-            decoder.loadFrameMetadata(frame, metadata);
-            const auto& cameraFrameMetadata = motioncam::CameraFrameMetadata::limitedParse(metadata);
-            baselineExpValue = std::min(baselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
-        }
-        
-        // Get FPS
-        auto frameRateInfo = motioncam::vfs::calculateFrameRate(frames);
-        bool applyCFRConversion = settings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
-        float fps = motioncam::vfs::determineCFRTarget(frameRateInfo, settings.cfrTarget, applyCFRConversion);
-        
-        // Load calibration if exists
-        std::optional<motioncam::CalibrationData> calibration;
-        boost::filesystem::path srcPath(srcFile.toStdString());
-        boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
-        if (boost::filesystem::exists(calibPath)) {
-            calibration = motioncam::CalibrationData::loadFromFile(calibPath.string());
-        }
-        
-        // Get base name for files
-        QString baseName = QFileInfo(srcFile).completeBaseName();
-        
-        // Handle CFR conversion if enabled
-        int lastPts = 0;
         int outputFrameCount = 0;
-        
-        for (size_t i = 0; i < frames.size() && !progress.wasCanceled(); ++i) {
-            // Load frame data
-            std::vector<uint8_t> frameData;
-            nlohmann::json metadata;
-            decoder.loadFrame(frames[i], frameData, metadata);
-            
-            auto frameMetadata = motioncam::CameraFrameMetadata::parse(metadata);
-            
-            // Handle CFR conversion (duplicate frames if needed)
-            int pts = lastPts;
-            if (applyCFRConversion) {
-                pts = motioncam::vfs::getFrameNumberFromTimestamp(frames[i], frames[0], fps);
-            }
-            
-            // Duplicate frames to fill gaps (CFR conversion)
-            while (lastPts <= pts && !progress.wasCanceled()) {
-                // Update progress
-                progress.setValue(outputFrameCount);
-                progress.setLabelText(QString("Rendering frame %1 of %2...").arg(outputFrameCount + 1).arg(totalFrames));
-                QApplication::processEvents();
-                
-                // Generate DNG
-                auto dngData = motioncam::utils::generateDng(
-                    frameData,
-                    frameMetadata,
-                    cameraConfig,
-                    fps,
-                    outputFrameCount,
-                    baselineExpValue,
-                    settings,
-                    calibration,
-                    enableCompression
-                );
-                
-                // Write to temp directory
-                if (dngData && dngData->size() > 0) {
-                    QString frameName = QString("%1-%2.dng")
-                        .arg(baseName)
-                        .arg(outputFrameCount, 6, 10, QChar('0'));
-                    QString framePath = tempDir.absoluteFilePath(frameName);
-                    
-                    if (outputFrameCount == 0) {
-                        spdlog::info("First frame size: {} bytes, compression: {}", dngData->size(), enableCompression);
-                        spdlog::info("Writing to temp: {}", framePath.toStdString());
-                    }
-                    
-                    QFile file(framePath);
-                    if (!file.open(QIODevice::WriteOnly)) {
-                        throw std::runtime_error(
-                            "Failed to open output frame: " + file.errorString().toStdString());
-                    }
-                    qint64 written = file.write(
-                        reinterpret_cast<const char*>(dngData->data()),
-                        static_cast<qint64>(dngData->size()));
-                    file.close();
-                    if (written != static_cast<qint64>(dngData->size())) {
-                        throw std::runtime_error("Failed to write a complete DNG frame");
-                    }
-                } else {
-                    throw std::runtime_error("DNG generation returned no data");
+        mFuseFilesystem->finalize(
+            mountId,
+            tempPath.toStdString(),
+            enableCompression,
+            [&](size_t completed, size_t count, const std::string& name) {
+                outputFrameCount = static_cast<int>(completed);
+                progress.setMaximum(static_cast<int>(count));
+                progress.setValue(static_cast<int>(completed));
+                if (!name.empty()) {
+                    progress.setLabelText(
+                        QString("Rendering %1 of %2: %3")
+                            .arg(completed + 1).arg(count)
+                            .arg(QString::fromStdString(name)));
                 }
-                
-                outputFrameCount++;
-                lastPts++;
-                
-                if (!applyCFRConversion) break; // Only one iteration if no CFR
-            }
-        }
-        
-        progress.setValue(outputFrameCount);
+                QApplication::processEvents();
+                return !progress.wasCanceled();
+            });
         
         if (!progress.wasCanceled()) {
             spdlog::info("Rendered {} frames to temp directory", outputFrameCount);
@@ -1053,6 +951,9 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             tempDir.removeRecursively();
         }
         progress.close();
+        if (std::string(e.what()) == "Finalization cancelled") {
+            return;
+        }
         QString message = QString::fromStdString(e.what());
         if (mountReleased && tempDir.exists()) {
             message += QString("\n\nThe completed temporary render was preserved at:\n%1")

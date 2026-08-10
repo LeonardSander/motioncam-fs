@@ -92,6 +92,8 @@ public:
 public:
     void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
+    void finalize(const std::string&, bool,
+        const std::function<bool(size_t, size_t, const std::string&)>&);
 
 protected:
     HRESULT StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) override;
@@ -213,16 +215,13 @@ void Session::updateOptions(const RenderSettings& settings) {
 }
 
 FileInfo Session::getFileInfo() const {
-    // Try to cast to concrete types that have getFileInfo
-    if (auto mcraw = dynamic_cast<VirtualFileSystemImpl_MCRAW*>(mFs.get())) {
-        return mcraw->getFileInfo();
-    } else if (auto dng = dynamic_cast<VirtualFileSystemImpl_DNG*>(mFs.get())) {
-        return dng->getFileInfo();
-    } else if (auto directlog = dynamic_cast<VirtualFileSystemImpl_DirectLog*>(mFs.get())) {
-        return directlog->getFileInfo();
-    }
-    // Return default FileInfo if cast fails
-    return FileInfo();
+    return mFs->getFileInfo();
+}
+
+void Session::finalize(
+    const std::string& destination, bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    vfs::finalize(*mFs, destination, jpegCompression, progress);
 }
 
 HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
@@ -649,6 +648,15 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
         return dynamic_cast<Session*>(it->second.get())->getFileInfo();
     }
     return std::nullopt;
+}
+
+void FuseFileSystemImpl_Win::finalize(
+    MountId mountId, const std::string& destination, bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    const auto it = mMountedFiles.find(mountId);
+    if (it == mMountedFiles.end())
+        throw std::runtime_error("Mount not found");
+    dynamic_cast<Session*>(it->second.get())->finalize(destination, jpegCompression, progress);
 }
 
 }

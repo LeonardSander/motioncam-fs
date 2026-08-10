@@ -2,6 +2,7 @@
 
 #include <string>
 #include <optional>
+#include <functional>
 
 #include "Types.h"
 
@@ -24,6 +25,11 @@ public:
     virtual void unmount(MountId mountId) = 0;
     virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
+    virtual void finalize(
+        MountId mountId,
+        const std::string& destination,
+        bool jpegCompression,
+        const std::function<bool(size_t, size_t, const std::string&)>& progress) = 0;
 
 protected:
     IFuseFileSystem() = default;

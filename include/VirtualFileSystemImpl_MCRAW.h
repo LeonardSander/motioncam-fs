@@ -40,6 +40,8 @@ public:
 
     void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const override;
+    std::shared_ptr<std::vector<char>> materializeFile(
+        const Entry& entry, bool jpegCompression = false) override;
 
 private:
     void init();

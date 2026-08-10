@@ -105,6 +105,10 @@ struct LinuxFuseSession {
         fuse_invalidate_path(mFuse, "/");
     }
     FileInfo getFileInfo() const { return mFs->getFileInfo(); }
+    void finalize(const std::string& destination, bool jpegCompression,
+                  const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+        vfs::finalize(*mFs, destination, jpegCompression, progress);
+    }
 
 private:
     static void* init(fuse_conn_info* connection, fuse_config* config) {
@@ -273,5 +277,13 @@ std::optional<FileInfo> FuseFileSystemImpl_Linux::getFileInfo(MountId mountId) {
     if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
         return it->second->getFileInfo();
     return std::nullopt;
+}
+void FuseFileSystemImpl_Linux::finalize(
+    MountId mountId, const std::string& destination, bool jpegCompression,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    const auto it = mMountedFiles.find(mountId);
+    if (it == mMountedFiles.end())
+        throw std::runtime_error("Mount not found");
+    it->second->finalize(destination, jpegCompression, progress);
 }
 } // namespace motioncam

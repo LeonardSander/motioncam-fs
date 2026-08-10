@@ -103,12 +103,12 @@ void VirtualFileSystemImpl_DNG::init() {
         dngEntry.type = EntryType::FILE_ENTRY;
         dngEntry.pathParts = {};
         dngEntry.name = vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
-        dngEntry.size = 50 * 1024 * 1024; // Estimate DNG size
+        dngEntry.size = boost::filesystem::file_size(frames[i].filePath);
         dngEntry.userData = frames[i].timestamp;
         mFiles.push_back(dngEntry);
     }
 
-    mTypicalDngSize = 50 * 1024 * 1024;
+    mTypicalDngSize = mFiles.empty() ? 0 : mFiles.back().size;
 }
 
 std::vector<Entry> VirtualFileSystemImpl_DNG::listFiles(const std::string& filter) const {
@@ -174,71 +174,41 @@ size_t VirtualFileSystemImpl_DNG::generateFrame(
     void* dst,
     std::function<void(size_t, int)> result,
     bool async) {
-    
     auto task = [this, entry, pos, len, dst, result]() {
         try {
-            // Extract timestamp from entry userData
-            Timestamp timestamp = 0;
-            if (std::holds_alternative<int64_t>(entry.userData)) {
-                timestamp = std::get<int64_t>(entry.userData);
-            }
-            
-            // Find frame by timestamp
-            const auto& frames = mDecoder->getFrames();
-            int frameNumber = -1;
-            for (size_t i = 0; i < frames.size(); ++i) {
-                if (frames[i].timestamp == timestamp) {
-                    frameNumber = static_cast<int>(i);
-                    break;
-                }
-            }
-            
-            if (frameNumber == -1) {
-                spdlog::error("Failed to find frame with timestamp {}", timestamp);
-                result(0, -1);
-                return;
-            }
-            
-            // Extract DNG data directly from sequence
-            std::vector<uint8_t> dngData;
-            if (!mDecoder->extractFrame(frameNumber, dngData)) {
-                spdlog::error("Failed to extract frame {} (timestamp: {})", frameNumber, timestamp);
-                result(0, -1);
-                return;
-            }
-            
-            // Apply vignette correction if enabled and gain map is available
-            if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
-                GainMap gainMap;
-                if (mDecoder->getGainMap(frameNumber, gainMap)) {
-                    // Apply vignette correction to DNG data
-                    // This would require proper DNG parsing and modification
-                    spdlog::debug("Applying vignette correction for frame {}", frameNumber);
-                }
-            }
-            
-            // Copy requested portion of DNG data
-            size_t copyLen = std::min(len, dngData.size() - pos);
-            if (copyLen > 0 && pos < dngData.size()) {
-                memcpy(dst, dngData.data() + pos, copyLen);
-                result(copyLen, 0);
-            } else {
-                result(0, 0);
-            }
-        }
-        catch (const std::exception& e) {
-            spdlog::error("Error generating frame: {}", e.what());
+            auto data = materializeFile(entry, false);
+            const size_t count = data && pos < data->size()
+                ? std::min(len, data->size() - pos) : 0;
+            if (count)
+                std::memcpy(dst, data->data() + pos, count);
+            result(count, 0);
+        } catch (const std::exception& e) {
+            spdlog::error("Error reading DNG frame: {}", e.what());
             result(0, -1);
         }
     };
-    
     if (async) {
         mProcessingThreadPool.detach_task(task);
         return 0;
-    } else {
-        task();
-        return len;
     }
+    task();
+    return 0;
+}
+
+std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
+    const Entry& entry, bool /*jpegCompression*/) {
+    const auto timestamp = std::get<Timestamp>(entry.userData);
+    const auto& frames = mDecoder->getFrames();
+    const auto it = std::find_if(frames.begin(), frames.end(), [timestamp](const auto& frame) {
+        return frame.timestamp == timestamp;
+    });
+    if (it == frames.end())
+        throw std::runtime_error("DNG source frame not found");
+
+    std::vector<uint8_t> bytes;
+    if (!mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), it)), bytes))
+        throw std::runtime_error("Could not read source DNG");
+    return std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
 }
 
 void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
