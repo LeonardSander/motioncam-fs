@@ -5,6 +5,7 @@
 #include <memory>
 #include <cstdint>
 #include <unordered_map>
+#include <array>
 
 namespace motioncam {
 
@@ -27,6 +28,16 @@ struct DNGSequenceInfo {
     int64_t totalFrames;
 };
 
+struct DNGFrameMetadata {
+    double exposureTime = 0.0;
+    double iso = 0.0;
+    double baselineExposure = 0.0;
+    std::array<float, 3> asShotNeutral = {1.0f, 1.0f, 1.0f};
+    bool hasExposure = false;
+    bool hasBaselineExposure = false;
+    bool hasAsShotNeutral = false;
+};
+
 struct GainMap {
     float top, left, bottom, right;
     uint32_t width, height;
@@ -45,6 +56,10 @@ public:
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
     bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
+    bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
+    static bool updateMetadata(std::vector<uint8_t>& dngData,
+                               const double* baselineExposure,
+                               const std::array<float, 3>* asShotNeutral);
     
     static bool isDNGSequence(const std::string& path);
 

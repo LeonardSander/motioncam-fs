@@ -4,6 +4,8 @@
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
 #include <memory>
+#include <array>
+#include <map>
 
 namespace BS {
 class thread_pool;
@@ -75,6 +77,11 @@ private:
     int mHeight;
     std::unique_ptr<DNGDecoder> mDecoder;
     std::optional<CalibrationData> mCalibration;
+    std::map<Timestamp, float> mNormalizedExposureOffsets;
+    std::map<Timestamp, float> mSmoothedExposureOffsets;
+    std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
+    std::map<Timestamp, bool> mHasBaselineExposure;
+    std::map<Timestamp, bool> mHasAsShotNeutral;
     mutable std::mutex mMutex;
 };
 

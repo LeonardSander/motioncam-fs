@@ -13,9 +13,50 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 
 using motioncam::Timestamp;
+
+namespace {
+
+std::vector<double> temporalMedian(const std::vector<double>& values, int radius) {
+    std::vector<double> result(values.size());
+    std::vector<double> window;
+    window.reserve(static_cast<size_t>(radius * 2 + 1));
+    for (size_t i = 0; i < values.size(); ++i) {
+        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
+        const size_t end = std::min(values.size(), i + static_cast<size_t>(radius) + 1);
+        window.assign(values.begin() + begin, values.begin() + end);
+        const auto middle = window.begin() + window.size() / 2;
+        std::nth_element(window.begin(), middle, window.end());
+        result[i] = *middle;
+    }
+    return result;
+}
+
+std::vector<double> temporalSmooth(const std::vector<double>& values, int radius) {
+    const auto stable = temporalMedian(values, radius);
+    std::vector<double> result(values.size());
+    const double sigma = std::max(1.0, radius / 2.0);
+    for (size_t i = 0; i < stable.size(); ++i) {
+        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
+        const size_t end = std::min(stable.size(), i + static_cast<size_t>(radius) + 1);
+        double sum = 0.0;
+        double weightSum = 0.0;
+        for (size_t j = begin; j < end; ++j) {
+            const double distance = static_cast<double>(j) - static_cast<double>(i);
+            const double weight = std::exp(-0.5 * distance * distance / (sigma * sigma));
+            sum += stable[j] * weight;
+            weightSum += weight;
+        }
+        result[i] = sum / weightSum;
+    }
+    return result;
+}
+
+} // namespace
 
 namespace motioncam {
 
@@ -66,6 +107,43 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         
         // Calculate frame rate statistics
         calculateFrameRateStats();
+
+        const auto& frames = mDecoder->getFrames();
+        std::vector<double> effectiveExposures;
+        std::array<std::vector<double>, 3> logNeutrals;
+        std::vector<DNGFrameMetadata> metadata(frames.size());
+        effectiveExposures.reserve(frames.size());
+        double minimumEffectiveExposure = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < frames.size(); ++i) {
+            if (!mDecoder->getFrameMetadata(static_cast<int>(i), metadata[i]) ||
+                !metadata[i].hasExposure) {
+                throw std::runtime_error("DNG frame is missing ISO or ExposureTime: " + frames[i].filePath);
+            }
+            const double logExposure = std::log2(metadata[i].iso * metadata[i].exposureTime);
+            const double effective = logExposure + metadata[i].baselineExposure;
+            effectiveExposures.push_back(effective);
+            minimumEffectiveExposure = std::min(minimumEffectiveExposure, effective);
+            mHasBaselineExposure[frames[i].timestamp] = metadata[i].hasBaselineExposure;
+            mHasAsShotNeutral[frames[i].timestamp] = metadata[i].hasAsShotNeutral;
+            for (size_t c = 0; c < 3; ++c)
+                logNeutrals[c].push_back(std::log(std::max(1e-6f, metadata[i].asShotNeutral[c])));
+        }
+        const int radius = std::max(1, static_cast<int>(std::lround(2.0 * std::max(1.0f, mMedFps))));
+        const auto smoothedExposure = temporalSmooth(effectiveExposures, radius);
+        std::array<std::vector<double>, 3> smoothedNeutral;
+        for (size_t c = 0; c < 3; ++c)
+            smoothedNeutral[c] = temporalSmooth(logNeutrals[c], radius);
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const double logExposure = std::log2(metadata[i].iso * metadata[i].exposureTime);
+            mNormalizedExposureOffsets[frames[i].timestamp] =
+                static_cast<float>(minimumEffectiveExposure - logExposure);
+            mSmoothedExposureOffsets[frames[i].timestamp] =
+                static_cast<float>(smoothedExposure[i] - logExposure);
+            const double green = smoothedNeutral[1][i];
+            for (size_t c = 0; c < 3; ++c)
+                mSmoothedAsShotNeutrals[frames[i].timestamp][c] =
+                    static_cast<float>(std::exp(smoothedNeutral[c][i] - green));
+        }
         
         spdlog::info("DNG sequence loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames", 
                      mWidth, mHeight, mFps, mAvgFps, mMedFps, mTotalFrames);
@@ -105,6 +183,21 @@ void VirtualFileSystemImpl_DNG::init() {
         dngEntry.name = vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
         dngEntry.size = boost::filesystem::file_size(frames[i].filePath);
         dngEntry.userData = frames[i].timestamp;
+        const bool addBaseline = (mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE) &&
+                                 !mHasBaselineExposure[frames[i].timestamp];
+        const bool addNeutral = (mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE) &&
+                                !mHasAsShotNeutral[frames[i].timestamp];
+        if (addBaseline || addNeutral) {
+            std::vector<uint8_t> sizedData;
+            if (!mDecoder->extractFrame(static_cast<int>(i), sizedData))
+                throw std::runtime_error("Could not size transformed DNG");
+            double baseline = mNormalizedExposureOffsets.at(frames[i].timestamp);
+            const auto& neutral = mSmoothedAsShotNeutrals.at(frames[i].timestamp);
+            if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
+                                            addNeutral ? &neutral : nullptr))
+                throw std::runtime_error("Could not size transformed DNG metadata");
+            dngEntry.size = sizedData.size();
+        }
         mFiles.push_back(dngEntry);
     }
 
@@ -208,6 +301,25 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     std::vector<uint8_t> bytes;
     if (!mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), it)), bytes))
         throw std::runtime_error("Could not read source DNG");
+
+    const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
+    const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
+    if (normalize || smoothWhiteBalance) {
+        double baseline = smoothExposure
+            ? mSmoothedExposureOffsets.at(timestamp)
+            : mNormalizedExposureOffsets.at(timestamp);
+        if (!mConfig.exposureCompensation.empty()) {
+            try { baseline += std::stof(mConfig.exposureCompensation); }
+            catch (const std::exception&) {}
+        }
+        const auto neutralIt = mSmoothedAsShotNeutrals.find(timestamp);
+        const double* baselinePtr = normalize ? &baseline : nullptr;
+        const std::array<float, 3>* neutralPtr = smoothWhiteBalance
+            ? &neutralIt->second : nullptr;
+        if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
+            throw std::runtime_error("Could not update DNG exposure/white-balance tags");
+    }
     return std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
 }
 
