@@ -187,10 +187,18 @@ void VirtualFileSystemImpl_DNG::init() {
                                  !mHasBaselineExposure[frames[i].timestamp];
         const bool addNeutral = (mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE) &&
                                 !mHasAsShotNeutral[frames[i].timestamp];
-        if (addBaseline || addNeutral) {
+        GainMap sizeGainMap;
+        const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+                                 mDecoder->getGainMap(static_cast<int>(i), sizeGainMap);
+        if (addBaseline || addNeutral || bakeGainMap) {
             std::vector<uint8_t> sizedData;
             if (!mDecoder->extractFrame(static_cast<int>(i), sizedData))
                 throw std::runtime_error("Could not size transformed DNG");
+            if (bakeGainMap && !DNGDecoder::bakeGainMaps(
+                    sizedData,
+                    mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+                    mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
+                throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frames[i].filePath);
             double baseline = mNormalizedExposureOffsets.at(frames[i].timestamp);
             const auto& neutral = mSmoothedAsShotNeutrals.at(frames[i].timestamp);
             if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
@@ -301,6 +309,16 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     std::vector<uint8_t> bytes;
     if (!mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), it)), bytes))
         throw std::runtime_error("Could not read source DNG");
+
+    const int frameIndex = static_cast<int>(std::distance(frames.begin(), it));
+    GainMap gainMap;
+    if ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+        mDecoder->getGainMap(frameIndex, gainMap) &&
+        !DNGDecoder::bakeGainMaps(
+            bytes,
+            mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+            mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
+        throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
 
     const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;

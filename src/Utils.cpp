@@ -717,16 +717,11 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     
     // Apply starting from plane 0
     gainParams.plane = 0;
-    // Determine number of planes available in the shading map (expect 4 for Bayer)
+    // A CFA image has one stored image plane; the map itself carries the four
+    // Bayer-phase gain planes.
     unsigned int availablePlanes = static_cast<unsigned int>(metadata.lensShadingMap.size());
     if (availablePlanes == 0) availablePlanes = 1;
-    if (availablePlanes >= 4) {
-        gainParams.planes = 4;
-    } else if (availablePlanes >= 3) {
-        gainParams.planes = 3;
-    } else {
-        gainParams.planes = 1;
-    }
+    gainParams.planes = 1;
     
     // Grid size in the gain map
     const unsigned int mapPointsV = static_cast<unsigned int>(metadata.lensShadingMapHeight);
@@ -738,24 +733,18 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     // If only a single point along a dimension, pitch covers the full extent
     const unsigned int imageRows = imageHeight;
     const unsigned int imageCols = imageWidth;
-    unsigned int rowPitch = (mapPointsV > 1)
-        ? static_cast<unsigned int>(std::max(1u, (imageRows - 1) / (mapPointsV - 1)))
-        : imageRows;
-    unsigned int colPitch = (mapPointsH > 1)
-        ? static_cast<unsigned int>(std::max(1u, (imageCols - 1) / (mapPointsH - 1)))
-        : imageCols;
-    gainParams.row_pitch = rowPitch;
-    gainParams.col_pitch = colPitch;
+    gainParams.row_pitch = 1;
+    gainParams.col_pitch = 1;
     
     // Map spacing and origin in relative coordinates
     // Spacing is relative pitch to image size; origin is relative to active area
-    gainParams.map_spacing_v = (imageRows > 0) ? static_cast<double>(rowPitch) / static_cast<double>(imageRows) : 0.0;
-    gainParams.map_spacing_h = (imageCols > 0) ? static_cast<double>(colPitch) / static_cast<double>(imageCols) : 0.0;
-    gainParams.map_origin_v = (imageRows > 0) ? static_cast<double>(std::max(0, top)) / static_cast<double>(imageRows) : 0.0;
-    gainParams.map_origin_h = (imageCols > 0) ? static_cast<double>(std::max(0, left)) / static_cast<double>(imageCols) : 0.0;
+    gainParams.map_spacing_v = mapPointsV > 1 ? 1.0 / (mapPointsV - 1) : 1.0;
+    gainParams.map_spacing_h = mapPointsH > 1 ? 1.0 / (mapPointsH - 1) : 1.0;
+    gainParams.map_origin_v = 0.0;
+    gainParams.map_origin_h = 0.0;
     
     // Number of planes in the gain map payload (match planes when available)
-    gainParams.map_planes = gainParams.planes;
+    gainParams.map_planes = std::min(4u, availablePlanes);
     
     // Fill gain data in plane-major, row-major order
     if (!metadata.lensShadingMap.empty() && !metadata.lensShadingMap[0].empty()) {

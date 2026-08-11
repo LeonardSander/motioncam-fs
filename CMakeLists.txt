@@ -361,10 +361,14 @@ if(BUILD_TESTING)
 
     add_executable(motioncam-lossless-jpeg-test
         tests/lossless_jpeg_test.cpp
+        src/DNGDecoder.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
     target_include_directories(motioncam-lossless-jpeg-test PRIVATE
         deps/motioncam-decoder/thirdparty
         deps/motioncam-decoder/thirdparty/liblj92)
+    target_include_directories(motioncam-lossless-jpeg-test PRIVATE include)
+    target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
+        Boost::filesystem Boost::regex spdlog::spdlog)
     add_test(NAME motioncam-lossless-jpeg-test
         COMMAND motioncam-lossless-jpeg-test)
 endif()

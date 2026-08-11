@@ -39,9 +39,11 @@ struct DNGFrameMetadata {
 };
 
 struct GainMap {
-    float top, left, bottom, right;
-    uint32_t width, height;
-    int channels;
+    uint32_t top, left, bottom, right;
+    uint32_t plane, planes;
+    uint32_t rowPitch, colPitch;
+    uint32_t width, height, channels;
+    double spacingV, spacingH, originV, originH;
     std::vector<float> data;
 };
 
@@ -56,10 +58,14 @@ public:
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
     bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
+    bool getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,
                                const std::array<float, 3>* asShotNeutral);
+    static bool bakeGainMaps(std::vector<uint8_t>& dngData,
+                             bool normalizeGainMaps,
+                             bool colorOnly);
     
     static bool isDNGSequence(const std::string& path);
 
@@ -69,7 +75,8 @@ private:
     void extractTimestampsFromFilenames();
     bool readDNGFile(const std::string& filePath, std::vector<uint8_t>& data);
     bool readDNGGainMap(const std::string& dngPath, GainMap& gainMap);
-    bool parseOpcodeGainMap(const uint8_t* opcodeData, size_t opcodeSize, GainMap& gainMap);
+    static bool parseOpcodeGainMaps(const uint8_t* opcodeData, size_t opcodeSize,
+                                    std::vector<GainMap>& gainMaps);
 
 private:
     std::string mSequencePath;

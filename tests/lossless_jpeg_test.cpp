@@ -1,6 +1,7 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "liblj92/lj92.h"
+#include "DNGDecoder.h"
 
 #include <algorithm>
 #include <cassert>
@@ -120,6 +121,29 @@ int main() {
     lj92_close(decoder);
     free(rgbEncoded);
     assert(decodedRgb == rgb);
+
+    tinydngwriter::GainMapParams gainMap{};
+    gainMap.top = 0; gainMap.left = 0; gainMap.bottom = height; gainMap.right = width;
+    gainMap.plane = 0; gainMap.planes = 1;
+    gainMap.row_pitch = 1; gainMap.col_pitch = 1;
+    gainMap.map_points_v = 2; gainMap.map_points_h = 2;
+    gainMap.map_spacing_v = 1.0; gainMap.map_spacing_h = 1.0;
+    gainMap.map_origin_v = 0.0; gainMap.map_origin_h = 0.0;
+    gainMap.map_planes = 4;
+    gainMap.gain_data.resize(16);
+    for (size_t plane = 0; plane < 4; ++plane)
+        for (size_t point = 0; point < 4; ++point)
+            gainMap.gain_data[plane * 4 + point] = 1.0f + 0.1f * plane + 0.05f * point;
+    tinydngwriter::OpcodeList opcodes;
+    opcodes.AddGainMap(gainMap);
+    assert(image.SetOpcodeList2(opcodes));
+    std::ostringstream gainMapOutput(std::ios::binary);
+    assert(writer.WriteToFile(gainMapOutput, &error));
+    const std::string gainMapDng = gainMapOutput.str();
+    std::vector<uint8_t> baked(gainMapDng.begin(), gainMapDng.end());
+    const size_t originalSize = baked.size();
+    assert(motioncam::DNGDecoder::bakeGainMaps(baked, false, false));
+    assert(baked.size() > originalSize);
 
     return 0;
 }

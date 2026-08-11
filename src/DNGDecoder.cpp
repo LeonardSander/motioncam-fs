@@ -9,6 +9,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include "liblj92/lj92.h"
 
 #ifdef _MSC_VER
 #include <stdlib.h>
@@ -39,6 +40,20 @@ namespace {
     constexpr uint16_t TIFF_TYPE_LONG = 4;
     constexpr uint16_t TIFF_TYPE_RATIONAL = 5;
     constexpr uint16_t TIFF_TYPE_SRATIONAL = 10;
+    constexpr uint16_t TIFF_TAG_IMAGE_WIDTH = 256;
+    constexpr uint16_t TIFF_TAG_IMAGE_HEIGHT = 257;
+    constexpr uint16_t TIFF_TAG_BITS_PER_SAMPLE = 258;
+    constexpr uint16_t TIFF_TAG_COMPRESSION = 259;
+    constexpr uint16_t TIFF_TAG_PHOTOMETRIC = 262;
+    constexpr uint16_t TIFF_TAG_STRIP_OFFSETS = 273;
+    constexpr uint16_t TIFF_TAG_ROWS_PER_STRIP = 278;
+    constexpr uint16_t TIFF_TAG_STRIP_BYTE_COUNTS = 279;
+    constexpr uint16_t TIFF_TAG_BLACK_LEVEL = 50714;
+    constexpr uint16_t TIFF_TAG_WHITE_LEVEL = 50717;
+    constexpr uint16_t TIFF_TAG_LINEARIZATION_TABLE = 50712;
+    constexpr uint16_t TIFF_PHOTOMETRIC_CFA = 32803;
+    constexpr uint16_t TIFF_COMPRESSION_NONE = 1;
+    constexpr uint16_t TIFF_COMPRESSION_JPEG = 7;
 
     uint16_t read16(const uint8_t* p, bool little) {
         return little ? static_cast<uint16_t>(p[0] | (p[1] << 8))
@@ -48,6 +63,20 @@ namespace {
         return little
             ? static_cast<uint32_t>(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24))
             : static_cast<uint32_t>((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]);
+    }
+    uint32_t readBE32(const uint8_t* p) { return read32(p, false); }
+    float readBEFloat(const uint8_t* p) {
+        const uint32_t bits = readBE32(p);
+        float value;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+    double readBEDouble(const uint8_t* p) {
+        uint64_t bits = 0;
+        for (int i = 0; i < 8; ++i) bits = (bits << 8) | p[i];
+        double value;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
     }
     void write32(uint8_t* p, uint32_t value, bool little) {
         for (int i = 0; i < 4; ++i) {
@@ -70,6 +99,8 @@ namespace {
         uint16_t type;
         uint32_t count;
         size_t valueOffset;
+        uint32_t ifdOffset;
+        size_t entryOffset;
     };
 
     std::vector<TiffEntry> findTiffEntries(const std::vector<uint8_t>& data, bool& little) {
@@ -100,7 +131,7 @@ namespace {
                 const size_t bytes = typeSize * static_cast<size_t>(itemCount);
                 const size_t valueOffset = bytes <= 4 ? pos + 8 : rawOffset;
                 if (valueOffset <= data.size() && bytes <= data.size() - valueOffset)
-                    result.push_back({tag, type, itemCount, valueOffset});
+                    result.push_back({tag, type, itemCount, valueOffset, ifd, pos});
                 if (tag == TIFF_TAG_EXIF_IFD && type == TIFF_TYPE_LONG && itemCount == 1)
                     pending.push_back(rawOffset);
                 if (tag == TIFF_TAG_SUB_IFDS && (type == TIFF_TYPE_LONG)) {
@@ -359,6 +390,18 @@ bool DNGDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
     return false;
 }
 
+bool DNGDecoder::getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps) {
+    std::vector<uint8_t> data;
+    if (!extractFrame(frameNumber, data)) return false;
+    bool little = true;
+    for (const auto& entry : findTiffEntries(data, little)) {
+        if (entry.tag == TIFF_TAG_OPCODE_LIST_2 && entry.count &&
+            parseOpcodeGainMaps(data.data() + entry.valueOffset, entry.count, gainMaps))
+            return true;
+    }
+    return false;
+}
+
 bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
@@ -422,6 +465,150 @@ bool DNGDecoder::updateMetadata(std::vector<uint8_t>& data,
     return baselineWritten && neutralWritten;
 }
 
+bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
+                              bool normalizeGainMaps,
+                              bool colorOnly) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    auto scalar = [&](const TiffEntry& e, uint32_t index = 0) -> uint32_t {
+        const size_t pos = e.valueOffset + index * (e.type == TIFF_TYPE_SHORT ? 2 : 4);
+        return e.type == TIFF_TYPE_SHORT ? read16(data.data() + pos, little)
+                                         : read32(data.data() + pos, little);
+    };
+    const TiffEntry* photo = nullptr;
+    for (const auto& e : entries)
+        if (e.tag == TIFF_TAG_PHOTOMETRIC && scalar(e) == TIFF_PHOTOMETRIC_CFA) {
+            photo = &e;
+            break;
+        }
+    if (!photo) return false;
+    const uint32_t rawIfd = photo->ifdOffset;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& e : entries) if (e.ifdOffset == rawIfd && e.tag == tag) return &e;
+        return nullptr;
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto opcodeE = find(TIFF_TAG_OPCODE_LIST_2);
+    if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE ||
+        !opcodeE || offsetsE->count != 1 || countsE->count != 1)
+        return false;
+    if (find(TIFF_TAG_LINEARIZATION_TABLE)) return false;
+    const uint32_t width = scalar(*widthE), height = scalar(*heightE);
+    const uint32_t bits = scalar(*bitsE), compression = scalar(*compressionE);
+    const uint32_t stripOffset = scalar(*offsetsE), stripBytes = scalar(*countsE);
+    if (!width || !height || bits < 8 || bits > 16 || stripOffset > data.size() ||
+        stripBytes > data.size() - stripOffset) return false;
+
+    std::vector<GainMap> maps;
+    if (!parseOpcodeGainMaps(data.data() + opcodeE->valueOffset, opcodeE->count, maps))
+        return false;
+    std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
+    if (compression == TIFF_COMPRESSION_JPEG) {
+        lj92 decoder = nullptr;
+        int decodedWidth = 0, decodedHeight = 0, decodedBits = 0, components = 0;
+        if (lj92_open(&decoder, data.data() + stripOffset, stripBytes, &decodedWidth,
+                      &decodedHeight, &decodedBits, &components) != LJ92_ERROR_NONE)
+            return false;
+        const bool valid = decodedWidth == static_cast<int>(width) &&
+                           decodedHeight == static_cast<int>(height) && components == 1 &&
+                           lj92_decode(decoder, pixels.data(), width, 0, nullptr, 0) == LJ92_ERROR_NONE;
+        lj92_close(decoder);
+        if (!valid) return false;
+    } else if (compression == TIFF_COMPRESSION_NONE) {
+        const size_t rowBytes = (static_cast<size_t>(width) * bits + 7) / 8;
+        if (rowBytes * height > stripBytes) return false;
+        for (uint32_t y = 0; y < height; ++y) {
+            size_t bitOffset = static_cast<size_t>(y) * rowBytes * 8;
+            for (uint32_t x = 0; x < width; ++x) {
+                uint16_t value = 0;
+                for (uint32_t b = 0; b < bits; ++b, ++bitOffset)
+                    value = static_cast<uint16_t>((value << 1) |
+                        ((data[stripOffset + bitOffset / 8] >> (7 - bitOffset % 8)) & 1));
+                pixels[static_cast<size_t>(y) * width + x] = value;
+            }
+        }
+    } else return false;
+
+    auto mapGain = [&](const GainMap& map, uint32_t x, uint32_t y) {
+        if (x < map.left || x >= map.right || y < map.top || y >= map.bottom ||
+            !map.rowPitch || !map.colPitch || (y - map.top) % map.rowPitch ||
+            (x - map.left) % map.colPitch) return 1.0f;
+        const double nx = static_cast<double>(x) / std::max(1u, width);
+        const double ny = static_cast<double>(y) / std::max(1u, height);
+        const double gx = map.spacingH > 0 ? (nx - map.originH) / map.spacingH : 0;
+        const double gy = map.spacingV > 0 ? (ny - map.originV) / map.spacingV : 0;
+        const size_t x0 = std::min<size_t>(map.width - 1, static_cast<size_t>(std::max(0.0, std::floor(gx))));
+        const size_t y0 = std::min<size_t>(map.height - 1, static_cast<size_t>(std::max(0.0, std::floor(gy))));
+        const size_t x1 = std::min<size_t>(map.width - 1, x0 + 1), y1 = std::min<size_t>(map.height - 1, y0 + 1);
+        const float fx = static_cast<float>(std::clamp(gx - std::floor(gx), 0.0, 1.0));
+        const float fy = static_cast<float>(std::clamp(gy - std::floor(gy), 0.0, 1.0));
+        const size_t channel = map.channels >= 4
+            ? std::min<size_t>(map.channels - 1, (y & 1u) * 2 + (x & 1u))
+            : 0;
+        auto at = [&](size_t xx, size_t yy) { return map.data[(yy * map.width + xx) * map.channels + channel]; };
+        return (at(x0,y0) * (1-fx) + at(x1,y0) * fx) * (1-fy) +
+               (at(x0,y1) * (1-fx) + at(x1,y1) * fx) * fy;
+    };
+    float maximumGain = 1.0f;
+    for (const auto& map : maps)
+        for (float gain : map.data) if (std::isfinite(gain)) maximumGain = std::max(maximumGain, gain);
+    const auto blackE = find(TIFF_TAG_BLACK_LEVEL), whiteE = find(TIFF_TAG_WHITE_LEVEL);
+    double black = 0.0, white = static_cast<double>((1u << std::min(16u, bits)) - 1);
+    if (blackE && blackE->count) black = blackE->type == TIFF_TYPE_RATIONAL
+        ? readRational(data, *blackE, 0, little) : scalar(*blackE);
+    if (whiteE && whiteE->count) white = whiteE->type == TIFF_TYPE_RATIONAL
+        ? readRational(data, *whiteE, 0, little) : scalar(*whiteE);
+    const double destinationWhite = normalizeGainMaps ? white : 65535.0;
+    for (uint32_t y = 0; y < height; ++y) for (uint32_t x = 0; x < width; ++x) {
+        float gain = 1.0f;
+        for (const auto& map : maps) gain *= mapGain(map, x, y);
+        if (colorOnly) {
+            float localMinimum = gain;
+            for (uint32_t phaseY = 0; phaseY < 2; ++phaseY)
+                for (uint32_t phaseX = 0; phaseX < 2; ++phaseX) {
+                    float phaseGain = 1.0f;
+                    const uint32_t px = std::min(width - 1, (x & ~1u) + phaseX);
+                    const uint32_t py = std::min(height - 1, (y & ~1u) + phaseY);
+                    for (const auto& map : maps) phaseGain *= mapGain(map, px, py);
+                    localMinimum = std::min(localMinimum, phaseGain);
+                }
+            if (localMinimum > 0) gain /= localMinimum;
+        }
+        if (normalizeGainMaps) gain /= maximumGain;
+        const size_t index = static_cast<size_t>(y) * width + x;
+        const double linear = std::max(0.0, (pixels[index] - black) / std::max(1.0, white - black));
+        pixels[index] = static_cast<uint16_t>(std::clamp(std::lround(linear * gain * destinationWhite), 0l, 65535l));
+    }
+
+    if (data.size() & 1u) data.push_back(0);
+    const uint32_t newOffset = static_cast<uint32_t>(data.size());
+    const uint32_t newBytes = width * height * 2;
+    data.resize(data.size() + newBytes);
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        if (little) { data[newOffset + i*2] = pixels[i] & 0xff; data[newOffset + i*2+1] = pixels[i] >> 8; }
+        else { data[newOffset + i*2] = pixels[i] >> 8; data[newOffset + i*2+1] = pixels[i] & 0xff; }
+    }
+    auto writeScalar = [&](const TiffEntry& e, uint32_t value, uint32_t index = 0) {
+        const size_t pos = e.valueOffset + index * (e.type == TIFF_TYPE_SHORT ? 2 : 4);
+        if (e.type == TIFF_TYPE_SHORT) write16(data.data() + pos, static_cast<uint16_t>(value), little);
+        else write32(data.data() + pos, value, little);
+    };
+    writeScalar(*bitsE, 16); writeScalar(*compressionE, TIFF_COMPRESSION_NONE);
+    writeScalar(*offsetsE, newOffset); writeScalar(*countsE, newBytes);
+    if (whiteE) writeScalar(*whiteE, static_cast<uint32_t>(destinationWhite));
+    if (blackE) {
+        if (blackE->type == TIFF_TYPE_RATIONAL)
+            for (uint32_t i = 0; i < blackE->count; ++i) writeRational(data, *blackE, i, 0.0, little);
+        else for (uint32_t i = 0; i < blackE->count; ++i) writeScalar(*blackE, 0, i);
+    }
+    // Keep the valid OpcodeList2 tag, but make its list empty to prevent a second application.
+    write32(data.data() + opcodeE->valueOffset, 0, false);
+    return true;
+}
+
 bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data) {
     std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) {
@@ -453,134 +640,52 @@ bool DNGDecoder::readDNGGainMap(const std::string& dngPath, GainMap& gainMap) {
         return false;
     }
     
-    if (dngData.size() < 8) {
-        return false;
-    }
-    
-    // Check TIFF header
-    bool littleEndian = false;
-    uint16_t byteOrder = *reinterpret_cast<const uint16_t*>(dngData.data());
-    
-    if (byteOrder == TIFF_LITTLE_ENDIAN) {
-        littleEndian = true;
-    } else if (byteOrder != TIFF_BIG_ENDIAN) {
-        spdlog::debug("Invalid TIFF header in DNG: {}", dngPath);
-        return false;
-    }
-    
-    // Read TIFF magic number
-    uint16_t magic = *reinterpret_cast<const uint16_t*>(dngData.data() + 2);
-    uint16_t expectedMagic = littleEndian ? magic : __builtin_bswap16(magic);
-    if (expectedMagic != TIFF_MAGIC) {
-        spdlog::debug("Invalid TIFF magic in DNG: {}", dngPath);
-        return false;
-    }
-    
-    // Read first IFD offset
-    uint32_t ifdOffset = *reinterpret_cast<const uint32_t*>(dngData.data() + 4);
-    if (!littleEndian) {
-        ifdOffset = __builtin_bswap32(ifdOffset);
-    }
-    
-    // Parse IFD to find opcode lists
-    while (ifdOffset != 0 && ifdOffset < dngData.size()) {
-        if (ifdOffset + 2 > dngData.size()) break;
-        
-        uint16_t numEntries = *reinterpret_cast<const uint16_t*>(dngData.data() + ifdOffset);
-        if (!littleEndian) {
-            numEntries = __builtin_bswap16(numEntries);
-        }
-        
-        size_t entryOffset = ifdOffset + 2;
-        
-        for (uint16_t i = 0; i < numEntries && entryOffset + 12 <= dngData.size(); ++i) {
-            const uint8_t* entry = dngData.data() + entryOffset;
-            
-            uint16_t tag = *reinterpret_cast<const uint16_t*>(entry);
-            uint32_t count = *reinterpret_cast<const uint32_t*>(entry + 4);
-            uint32_t valueOffset = *reinterpret_cast<const uint32_t*>(entry + 8);
-            
-            if (!littleEndian) {
-                tag = __builtin_bswap16(tag);
-                count = __builtin_bswap32(count);
-                valueOffset = __builtin_bswap32(valueOffset);
-            }
-            
-            // Check for opcode lists
-            if (tag == TIFF_TAG_OPCODE_LIST_2 || tag == TIFF_TAG_OPCODE_LIST_3) {
-                if (valueOffset < dngData.size() && valueOffset + count <= dngData.size()) {
-                    if (parseOpcodeGainMap(dngData.data() + valueOffset, count, gainMap)) {
-                        spdlog::debug("Found gain map in DNG: {}", dngPath);
-                        return true;
-                    }
-                }
-            }
-            
-            entryOffset += 12;
-        }
-        
-        // Read next IFD offset
-        if (entryOffset + 4 <= dngData.size()) {
-            ifdOffset = *reinterpret_cast<const uint32_t*>(dngData.data() + entryOffset);
-            if (!littleEndian) {
-                ifdOffset = __builtin_bswap32(ifdOffset);
-            }
-        } else {
-            break;
+    bool little = true;
+    std::vector<GainMap> maps;
+    for (const auto& entry : findTiffEntries(dngData, little)) {
+        if (entry.tag == TIFF_TAG_OPCODE_LIST_2 && entry.count &&
+            parseOpcodeGainMaps(dngData.data() + entry.valueOffset, entry.count, maps) &&
+            !maps.empty()) {
+            gainMap = maps.front();
+            return true;
         }
     }
-    
     return false;
 }
 
-bool DNGDecoder::parseOpcodeGainMap(const uint8_t* opcodeData, size_t opcodeSize, GainMap& gainMap) {
+bool DNGDecoder::parseOpcodeGainMaps(const uint8_t* opcodeData, size_t opcodeSize,
+                                    std::vector<GainMap>& gainMaps) {
     if (opcodeSize < 4) return false;
-    
-    // Read number of opcodes
-    uint32_t numOpcodes = *reinterpret_cast<const uint32_t*>(opcodeData);
-    // Assume little endian for now - should check TIFF header
-    
+    const uint32_t numOpcodes = readBE32(opcodeData);
     size_t offset = 4;
-    
-    for (uint32_t i = 0; i < numOpcodes && offset < opcodeSize; ++i) {
-        if (offset + 8 > opcodeSize) break;
-        
-        uint32_t opcodeId = *reinterpret_cast<const uint32_t*>(opcodeData + offset);
-        uint32_t opcodeSize = *reinterpret_cast<const uint32_t*>(opcodeData + offset + 4);
-        
-        offset += 8;
-        
-        if (opcodeId == OPCODE_GAIN_MAP && offset + opcodeSize <= opcodeSize) {
-            // Parse gain map opcode
-            if (opcodeSize >= 24) {
-                const uint8_t* gainMapData = opcodeData + offset;
-                
-                gainMap.top = *reinterpret_cast<const float*>(gainMapData);
-                gainMap.left = *reinterpret_cast<const float*>(gainMapData + 4);
-                gainMap.bottom = *reinterpret_cast<const float*>(gainMapData + 8);
-                gainMap.right = *reinterpret_cast<const float*>(gainMapData + 12);
-                gainMap.width = *reinterpret_cast<const uint32_t*>(gainMapData + 16);
-                gainMap.height = *reinterpret_cast<const uint32_t*>(gainMapData + 20);
-                
-                // Read gain map data
-                size_t dataSize = gainMap.width * gainMap.height * sizeof(float);
-                if (opcodeSize >= 24 + dataSize) {
-                    gainMap.data.resize(gainMap.width * gainMap.height);
-                    std::memcpy(gainMap.data.data(), gainMapData + 24, dataSize);
-                    gainMap.channels = 1; // Assuming single channel for now
-                    
-                    spdlog::debug("Parsed gain map: {}x{}, bounds: {},{} to {},{}", 
-                                  gainMap.width, gainMap.height, 
-                                  gainMap.left, gainMap.top, gainMap.right, gainMap.bottom);
-                    return true;
-                }
-            }
+    for (uint32_t i = 0; i < numOpcodes; ++i) {
+        if (offset + 16 > opcodeSize) return false;
+        const uint32_t id = readBE32(opcodeData + offset);
+        const uint32_t bytes = readBE32(opcodeData + offset + 12);
+        offset += 16;
+        if (bytes > opcodeSize - offset) return false;
+        if (id == OPCODE_GAIN_MAP && bytes >= 76) {
+            const uint8_t* p = opcodeData + offset;
+            GainMap map{};
+            map.top = readBE32(p); map.left = readBE32(p + 4);
+            map.bottom = readBE32(p + 8); map.right = readBE32(p + 12);
+            map.plane = readBE32(p + 16); map.planes = readBE32(p + 20);
+            map.rowPitch = readBE32(p + 24); map.colPitch = readBE32(p + 28);
+            map.height = readBE32(p + 32); map.width = readBE32(p + 36);
+            map.spacingV = readBEDouble(p + 40); map.spacingH = readBEDouble(p + 48);
+            map.originV = readBEDouble(p + 56); map.originH = readBEDouble(p + 64);
+            map.channels = readBE32(p + 72);
+            const uint64_t samples = static_cast<uint64_t>(map.width) * map.height * map.channels;
+            if (!map.width || !map.height || !map.channels || samples > (bytes - 76) / 4)
+                return false;
+            map.data.resize(static_cast<size_t>(samples));
+            for (size_t sample = 0; sample < map.data.size(); ++sample)
+                map.data[sample] = readBEFloat(p + 76 + sample * 4);
+            gainMaps.push_back(std::move(map));
         }
-        
-        offset += opcodeSize;
+        offset += bytes;
     }
-    
-    return false;
+    return !gainMaps.empty();
 }
 
 } // namespace motioncam
