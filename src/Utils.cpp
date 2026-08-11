@@ -780,7 +780,8 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     return opcodeList;
 }
 
-std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, tinydngwriter::OpcodeList> preprocessData(
+std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
+           tinydngwriter::OpcodeList, tinydngwriter::OpcodeList> preprocessData(
     std::vector<uint8_t>& data,
     uint32_t& inOutWidth,
     uint32_t& inOutHeight,
@@ -930,10 +931,26 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
 
     int useBits = 0;
 
+    tinydngwriter::OpcodeList opcodeList3;
+
     // When applying shading map, increase precision
     if(applyShadingMap) {
-        if(vignetteOnlyColor)
+        if(vignetteOnlyColor) {
+            CameraFrameMetadata luminanceMetadata = metadata;
+            const size_t points = static_cast<size_t>(metadata.lensShadingMapWidth) *
+                                  metadata.lensShadingMapHeight;
+            luminanceMetadata.lensShadingMap.assign(1, std::vector<float>(points, 1.0f));
+            for (size_t point = 0; point < points; ++point) {
+                float minimum = std::numeric_limits<float>::max();
+                for (const auto& channel : lensShadingMap)
+                    if (point < channel.size()) minimum = std::min(minimum, channel[point]);
+                if (std::isfinite(minimum) && minimum > 0.0f)
+                    luminanceMetadata.lensShadingMap[0][point] = minimum;
+            }
+            opcodeList3 = createLensShadingOpcodeList(
+                luminanceMetadata, inOutWidth, inOutHeight, left, top);
             utils::colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
+        }
         if(normaliseShadingMap) {
             utils::normalizeShadingMap(lensShadingMap);
             useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
@@ -1298,7 +1315,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, 
     for(auto i = 0; i < dstBlackLevel.size(); ++i)
         blackLevelResult[i] = static_cast<unsigned short>(std::round(dstBlackLevel[i]));
 
-    return std::make_tuple(dst, blackLevelResult, static_cast<unsigned short>(dstWhiteLevel), opcodeList2);
+    return std::make_tuple(dst, blackLevelResult, static_cast<unsigned short>(dstWhiteLevel),
+                           opcodeList2, opcodeList3);
 }
 
 std::shared_ptr<std::vector<char>> generateDng(
@@ -1372,7 +1390,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     if(!(settings.options & RENDER_OPT_CROPPING))
         cropTarget = "0x0";
 
-    auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2] = utils::preprocessData(
+    auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
         width, height,
         metadata,
@@ -1625,7 +1643,11 @@ std::shared_ptr<std::vector<char>> generateDng(
         dng.SetOpcodeList2(opcodeList2);
         spdlog::debug("Added OpcodeList2 (lens shading map)");
     } else {
-        spdlog::debug("Skipping OpcodeList2 for compressed DNG to reduce size");
+        spdlog::debug("No OpcodeList2 lens shading map generated");
+    }
+    if (!opcodeList3.IsEmpty()) {
+        dng.SetOpcodeList3(opcodeList3);
+        spdlog::debug("Added OpcodeList3 (deferred luminance vignette correction)");
     }
 
 

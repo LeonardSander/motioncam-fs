@@ -78,6 +78,42 @@ namespace {
         std::memcpy(&value, &bits, sizeof(value));
         return value;
     }
+    void appendBE32(std::vector<uint8_t>& out, uint32_t value) {
+        out.push_back(static_cast<uint8_t>(value >> 24));
+        out.push_back(static_cast<uint8_t>(value >> 16));
+        out.push_back(static_cast<uint8_t>(value >> 8));
+        out.push_back(static_cast<uint8_t>(value));
+    }
+    void appendBEFloat(std::vector<uint8_t>& out, float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        appendBE32(out, bits);
+    }
+    void appendBEDouble(std::vector<uint8_t>& out, double value) {
+        uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        for (int shift = 56; shift >= 0; shift -= 8)
+            out.push_back(static_cast<uint8_t>(bits >> shift));
+    }
+    std::vector<uint8_t> serializeGainMap(const GainMap& map) {
+        std::vector<uint8_t> payload;
+        payload.reserve(96 + map.data.size() * 4);
+        appendBE32(payload, 1);               // opcode count
+        appendBE32(payload, OPCODE_GAIN_MAP);
+        appendBE32(payload, 0x01030000);      // minimum DNG version
+        appendBE32(payload, 0);               // flags
+        appendBE32(payload, static_cast<uint32_t>(76 + map.data.size() * 4));
+        appendBE32(payload, map.top); appendBE32(payload, map.left);
+        appendBE32(payload, map.bottom); appendBE32(payload, map.right);
+        appendBE32(payload, 0); appendBE32(payload, 1);
+        appendBE32(payload, map.rowPitch); appendBE32(payload, map.colPitch);
+        appendBE32(payload, map.height); appendBE32(payload, map.width);
+        appendBEDouble(payload, map.spacingV); appendBEDouble(payload, map.spacingH);
+        appendBEDouble(payload, map.originV); appendBEDouble(payload, map.originH);
+        appendBE32(payload, 1);
+        for (float gain : map.data) appendBEFloat(payload, gain);
+        return payload;
+    }
     void write32(uint8_t* p, uint32_t value, bool little) {
         for (int i = 0; i < 4; ++i) {
             const int shift = little ? i * 8 : (3 - i) * 8;
@@ -505,6 +541,32 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     std::vector<GainMap> maps;
     if (!parseOpcodeGainMaps(data.data() + opcodeE->valueOffset, opcodeE->count, maps))
         return false;
+    std::vector<uint8_t> luminanceOpcode;
+    bool gridColorSeparated = false;
+    if (colorOnly && !maps.empty()) {
+        GainMap luminance = maps.front();
+        luminance.plane = 0; luminance.planes = 1; luminance.channels = 1;
+        luminance.data.assign(static_cast<size_t>(luminance.width) * luminance.height, 1.0f);
+        for (size_t point = 0; point < luminance.data.size(); ++point) {
+            float minimum = std::numeric_limits<float>::max();
+            for (auto& map : maps) {
+                if (map.width != luminance.width || map.height != luminance.height) continue;
+                for (uint32_t channel = 0; channel < map.channels; ++channel)
+                    minimum = std::min(minimum, map.data[point * map.channels + channel]);
+            }
+            if (!std::isfinite(minimum) || minimum <= 0.0f) minimum = 1.0f;
+            luminance.data[point] = minimum;
+            for (auto& map : maps) {
+                if (map.width != luminance.width || map.height != luminance.height ||
+                    map.channels < 2) continue;
+                gridColorSeparated = true;
+                for (uint32_t channel = 0; channel < map.channels; ++channel)
+                    map.data[point * map.channels + channel] /= minimum;
+            }
+        }
+        luminanceOpcode = serializeGainMap(luminance);
+        if (luminanceOpcode.size() > opcodeE->count) return false;
+    }
     std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
     if (compression == TIFF_COMPRESSION_JPEG) {
         lj92 decoder = nullptr;
@@ -565,7 +627,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     for (uint32_t y = 0; y < height; ++y) for (uint32_t x = 0; x < width; ++x) {
         float gain = 1.0f;
         for (const auto& map : maps) gain *= mapGain(map, x, y);
-        if (colorOnly) {
+        if (colorOnly && !gridColorSeparated) {
             float localMinimum = gain;
             for (uint32_t phaseY = 0; phaseY < 2; ++phaseY)
                 for (uint32_t phaseX = 0; phaseX < 2; ++phaseX) {
@@ -604,8 +666,17 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             for (uint32_t i = 0; i < blackE->count; ++i) writeRational(data, *blackE, i, 0.0, little);
         else for (uint32_t i = 0; i < blackE->count; ++i) writeScalar(*blackE, 0, i);
     }
-    // Keep the valid OpcodeList2 tag, but make its list empty to prevent a second application.
-    write32(data.data() + opcodeE->valueOffset, 0, false);
+    if (colorOnly) {
+        std::copy(luminanceOpcode.begin(), luminanceOpcode.end(),
+                  data.begin() + opcodeE->valueOffset);
+        write16(data.data() + opcodeE->entryOffset, TIFF_TAG_OPCODE_LIST_3, little);
+        write32(data.data() + opcodeE->entryOffset + 4,
+                static_cast<uint32_t>(luminanceOpcode.size()), little);
+    } else {
+        // Keep a valid OpcodeList2 tag, but make its list empty to prevent double application.
+        write32(data.data() + opcodeE->valueOffset, 0, false);
+        write32(data.data() + opcodeE->entryOffset + 4, 4, little);
+    }
     return true;
 }
 

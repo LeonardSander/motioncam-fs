@@ -145,5 +145,13 @@ int main() {
     assert(motioncam::DNGDecoder::bakeGainMaps(baked, false, false));
     assert(baked.size() > originalSize);
 
+    std::vector<uint8_t> colorBaked(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::bakeGainMaps(colorBaked, false, true));
+    // OpcodeList2 (51009 / 0xc741) is replaced by OpcodeList3
+    // (51022 / 0xc74e) in this little-endian test DNG.
+    const std::array<uint8_t, 2> opcodeList3Tag = {0x4e, 0xc7};
+    assert(std::search(colorBaked.begin(), colorBaked.end(),
+                       opcodeList3Tag.begin(), opcodeList3Tag.end()) != colorBaked.end());
+
     return 0;
 }

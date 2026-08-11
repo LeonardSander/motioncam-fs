@@ -117,7 +117,8 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     int left = 0,
     int top = 0);
 
-std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short, tinydngwriter::OpcodeList> 
+std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
+           tinydngwriter::OpcodeList, tinydngwriter::OpcodeList>
 preprocessData(
     std::vector<uint8_t>& data,
     uint32_t& inOutWidth,
