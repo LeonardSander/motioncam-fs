@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <array>
+#include "Types.h"
 
 namespace motioncam {
 
@@ -60,12 +61,20 @@ public:
     bool getGainMap(int frameNumber, GainMap& gainMap);
     bool getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
+    bool getCFAMetadata(int frameNumber, int& repeatSize, std::array<uint8_t, 4>& phase);
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,
                                const std::array<float, 3>* asShotNeutral);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,
                              bool normalizeGainMaps,
                              bool colorOnly);
+    static bool processHigherCFA(std::vector<uint8_t>& dngData,
+                                 int repeatSize,
+                                 const std::array<uint8_t, 4>& phase,
+                                 QuadBayerMode mode,
+                                 bool remosaic,
+                                 int proxyScale = 1,
+                                 bool higherCfaHq = true);
     
     static bool isDNGSequence(const std::string& path);
 

@@ -63,7 +63,11 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     frame.iso = j.value("iso", 0);
     frame.lensShadingMapHeight = j.value("lensShadingMapHeight", 0);
     frame.lensShadingMapWidth = j.value("lensShadingMapWidth", 0);
-    frame.needRemosaic = j.value("needRemosaic", false);
+    const bool legacyRemosaic = j.value("enableRemosaic", j.value("needRemosaic", false));
+    frame.cfaSize = j.value("cfaSize", legacyRemosaic ? 4 : 2);
+    if (frame.cfaSize < 2 || (frame.cfaSize % 2) != 0)
+        frame.cfaSize = 2;
+    frame.needRemosaic = frame.cfaSize > 2;
     frame.offset = j.value("offset", "");
     frame.orientation = static_cast<ScreenOrientation>(j.value("orientation", ScreenOrientation::INVALID));
     frame.originalHeight = j.value("originalHeight", 0);

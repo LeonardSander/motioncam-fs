@@ -45,6 +45,7 @@ set(PROJECT_SOURCES
         src/CalibrationData.cpp
         src/AudioWriter.cpp
         src/Utils.cpp
+        src/HigherCFADemosaic.cpp
 
         include/mainwindow.h
         include/Types.h
@@ -362,6 +363,7 @@ if(BUILD_TESTING)
     add_executable(motioncam-lossless-jpeg-test
         tests/lossless_jpeg_test.cpp
         src/DNGDecoder.cpp
+        src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
     target_include_directories(motioncam-lossless-jpeg-test PRIVATE
         deps/motioncam-decoder/thirdparty

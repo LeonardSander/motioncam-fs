@@ -85,7 +85,9 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
     
     // Load calibration JSON if it exists (for DNG folder)
     boost::filesystem::path srcPath(mSrcPath);
-    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    boost::filesystem::path calibPath = boost::filesystem::is_directory(srcPath)
+        ? srcPath / (srcPath.filename().string() + ".json")
+        : srcPath.parent_path() / (srcPath.stem().string() + ".json");
     if (boost::filesystem::exists(calibPath)) {
         mCalibration = CalibrationData::loadFromFile(calibPath.string());
         if (mCalibration.has_value()) {
@@ -104,6 +106,9 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mTotalFrames = static_cast<int>(sequenceInfo.totalFrames);
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
+        mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
+        if (mCalibration && mCalibration->hasCfaSize)
+            mCfaSize = mCalibration->cfaSize;
         
         // Calculate frame rate statistics
         calculateFrameRateStats();
@@ -190,7 +195,8 @@ void VirtualFileSystemImpl_DNG::init() {
         GainMap sizeGainMap;
         const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
                                  mDecoder->getGainMap(static_cast<int>(i), sizeGainMap);
-        if (addBaseline || addNeutral || bakeGainMap) {
+        const bool processHigher = mCfaSize > 2;
+        if (addBaseline || addNeutral || bakeGainMap || processHigher) {
             std::vector<uint8_t> sizedData;
             if (!mDecoder->extractFrame(static_cast<int>(i), sizedData))
                 throw std::runtime_error("Could not size transformed DNG");
@@ -199,6 +205,12 @@ void VirtualFileSystemImpl_DNG::init() {
                     mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
                     mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
                 throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frames[i].filePath);
+            if (processHigher && !DNGDecoder::processHigherCFA(
+                    sizedData, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
+                    mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
+                    vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
+                    mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
+                throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + frames[i].filePath);
             double baseline = mNormalizedExposureOffsets.at(frames[i].timestamp);
             const auto& neutral = mSmoothedAsShotNeutrals.at(frames[i].timestamp);
             if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
@@ -320,6 +332,13 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
 
+    if (mCfaSize > 2 && !DNGDecoder::processHigherCFA(
+            bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
+            mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
+            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
+            mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
+        throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + it->filePath);
+
     const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
     const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
@@ -361,7 +380,13 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     info.height = mHeight;
     
     // DNG sequences are pass-through, so we show source format
-    info.dataType = "Bayer CFA (DNG)";
+    if (mCfaSize > 2 && (mConfig.quadBayerOption == QuadBayerMode::Demosaic ||
+                         mConfig.quadBayerOption == QuadBayerMode::DemosaicOCL))
+        info.dataType = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? "Higher CFA -> Bayer CFA" : "RGB (DNG)";
+    else if (mCfaSize > 2)
+        info.dataType = "Higher CFA " + std::to_string(mCfaSize) + "x" + std::to_string(mCfaSize) + " (DNG)";
+    else
+        info.dataType = "Bayer CFA (DNG)";
     info.levelsInfo = "Source DNG";
     
     // Calculate runtime from frame count and fps

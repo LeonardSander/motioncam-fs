@@ -157,11 +157,32 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
                     levels);
             }
         }
+
+        if (j.contains("cfaSize")) {
+            int size = 0;
+            if (j["cfaSize"].is_number_integer()) {
+                size = j["cfaSize"].get<int>();
+            } else if (j["cfaSize"].is_string()) {
+                const std::string value = j["cfaSize"].get<std::string>();
+                size_t consumed = 0;
+                size = std::stoi(value, &consumed);
+                if (consumed != value.size())
+                    throw std::invalid_argument("cfaSize contains non-numeric characters");
+            } else {
+                throw std::invalid_argument("cfaSize must be an integer or numeric string");
+            }
+            if (size >= 2 && (size % 2) == 0) {
+                data.cfaSize = size;
+                data.hasCfaSize = true;
+            } else {
+                spdlog::warn("Ignoring invalid cfaSize {}; expected an even integer >= 2", size);
+            }
+        }
         
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 || 
             data.hasForwardMatrix1 || data.hasForwardMatrix2 || 
-            data.hasAsShotNeutral || data.hasDataLevels || !data.cfaPhase.empty()) {
+            data.hasAsShotNeutral || data.hasDataLevels || data.hasCfaSize || !data.cfaPhase.empty()) {
             return data;
         }
         
@@ -187,7 +208,9 @@ std::string CalibrationData::createExampleJson() {
   "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
   "_cfaPhase": "bggr",
   "_comment5": "DirectLog input levels: Auto uses video metadata; Full or Limited overrides it per clip",
-  "dataLevels": "Auto"
+  "dataLevels": "Auto",
+  "_comment6": "Per-clip CFA repeat size: 2 for Bayer, 4/6/8 for higher CFA sensors",
+  "cfaSize": 2
 })";
 }
 

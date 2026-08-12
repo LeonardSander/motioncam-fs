@@ -66,9 +66,13 @@ These cached files will remain in storage for now when unmounting MCRAW or closi
   
   16:9 sensor modes are commonly used by modern devices when 60fps capture is requested. However many of these devices do not provide the suitable raw output configuration which results in an captured image with a buffer underflow. The empty data recorded in the bottom part of the image can be conveniently cropped out using this option. This is the only way to have properly aligned vignette correction on a capture like this. Only full sensor captures without cropping are compatible (Also reselect lens when choosing 60fps slot to not capture junk data in underflown image area).
 
-- **Quad Bayer CFA Support**
+- **Higher CFA Support**
   
-  Unbinned quad bayer cfa footage requires modified camera drivers to be captured if not for Pixel phones. These captures are identified as such if 'Enable Remosaic' was enabled during capture or if the 'Interpret as QBCFA' checkbox is checked in Fuse. So far Fuse is able to apply vignette correction and the log transfer curve to both the unbinned data or after it is binned via the 2x binning option mentioned above. If left unbinned by default DNGs will still report a normal bayer cfa and will be misinterpreted. Defining the proper 4by4 QBCFA in DNG metadata is possible as well, but compatability will vary. RawTherapee crashes upon opening QBCFA DNGs for example. Further treatment options like Quad Bayer Demosaic and Remosaic are planned. The latter is necessary as DaVinci Resolve does not support demosaiced DNGs. 
+  Fuse detects the CFA repeat size from MCRAW metadata (`cfaSize`, with the legacy remosaic flag mapping to 4x4), DNG CFA tags, or the per-clip JSON sidecar. The Higher CFA Processing control can demosaic 4x4 footage to RGB, use an OCL/4PD-oriented anti-aliasing variant, retain correct 4x4/6x6/8x8 CFA metadata, or deliberately label it as ordinary 2x2 Bayer for compatibility. Enabling Remosaic converts a demosaiced result back to ordinary Bayer for applications that do not accept RGB DNGs.
+
+  Proxy reduction converts each higher-CFA color block to one ordinary Bayer sample. With **HQ** enabled all values in the block are summed and the black/white levels are scaled by the block area. With HQ disabled Fuse selects the upper-left central sample (indices 0, 4, and 5 for 2x2, 3x3, and 4x4 blocks).
+
+  At the 2x proxy setting, 6x6 CFA is reduced directly from each 3x3 color block to ordinary Bayer. For 8x8 CFA in either demosaic mode, 2x proxy first reduces 2x2 sub-blocks to a half-resolution 4x4 CFA and then runs the selected quad-Bayer demosaic. Selecting 4x proxy on 8x8 CFA reduces each complete 4x4 color block and produces quarter-resolution ordinary Bayer. Other proxy factors are rounded up to a CFA-aligned block multiple.
 
 ---
 

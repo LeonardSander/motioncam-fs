@@ -122,6 +122,7 @@ private:
     
     QFutureWatcher<void>* mProcessingWatcher;
     bool mProcessingInProgress;
+    bool mOptionsUpdatePending;
     
 #ifdef _WIN32
     ITaskbarList3* mTaskbarList;

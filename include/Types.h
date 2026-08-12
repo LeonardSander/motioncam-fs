@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <string>
 #include <sstream>
+#include <algorithm>
+#include <cmath>
 
 #include <boost/filesystem.hpp>
 
@@ -83,7 +85,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_REMOSAIC_TO_BAYER            = 1 << 11,    
     RENDER_OPT_JPEG_COMPRESSION             = 1 << 12,
     RENDER_OPT_SMOOTH_EXPOSURE              = 1 << 13,
-    RENDER_OPT_SMOOTH_WHITE_BALANCE         = 1 << 14
+    RENDER_OPT_SMOOTH_WHITE_BALANCE         = 1 << 14,
+    RENDER_OPT_HIGHER_CFA_HQ                = 1 << 15
 };
 
 // Overload bitwise OR operator
@@ -142,6 +145,9 @@ static std::string optionsToString(FileRenderOptions options) {
     if (options & RENDER_OPT_SMOOTH_WHITE_BALANCE) {
         flags.push_back("SMOOTH_WHITE_BALANCE");
     }
+    if (options & RENDER_OPT_HIGHER_CFA_HQ) {
+        flags.push_back("HIGHER_CFA_HQ");
+    }
     if (options & RENDER_OPT_FRAMERATE_CONVERSION) {
         flags.push_back("FRAMERATE_CONVERSION");
     }
@@ -174,9 +180,10 @@ static std::string optionsToString(FileRenderOptions options) {
 }
 
 enum class QuadBayerMode {
-    Remosaic,
-    WrongCFAMetadata,
-    CorrectQBCFAMetadata
+    Demosaic,
+    DemosaicOCL,
+    CorrectQBCFAMetadata,
+    WrongCFAMetadata
 };
 
 enum class LogTransformMode {
@@ -208,18 +215,20 @@ struct CFRTarget {
 // Helper functions to convert between enums and strings
 inline std::string quadBayerModeToString(QuadBayerMode mode) {
     switch(mode) {
-        case QuadBayerMode::Remosaic: return "Remosaic";
-        case QuadBayerMode::WrongCFAMetadata: return "Wrong CFA Metadata";
-        case QuadBayerMode::CorrectQBCFAMetadata: return "Correct QBCFA Metadata";
-        default: return "Correct QBCFA Metadata";
+        case QuadBayerMode::Demosaic: return "Demosaic";
+        case QuadBayerMode::DemosaicOCL: return "Demosaic (OCL)";
+        case QuadBayerMode::CorrectQBCFAMetadata: return "Keep CFA";
+        case QuadBayerMode::WrongCFAMetadata: return "Mislabel as 2x2";
+        default: return "Demosaic";
     }
 }
 
 inline QuadBayerMode stringToQuadBayerMode(const std::string& str) {
-    if (str == "Remosaic") return QuadBayerMode::Remosaic;
-    if (str == "Wrong CFA Metadata") return QuadBayerMode::WrongCFAMetadata;
-    if (str == "Correct QBCFA Metadata") return QuadBayerMode::CorrectQBCFAMetadata;
-    return QuadBayerMode::CorrectQBCFAMetadata;
+    if (str == "Demosaic" || str == "Remosaic") return QuadBayerMode::Demosaic;
+    if (str == "Demosaic (OCL)") return QuadBayerMode::DemosaicOCL;
+    if (str == "Wrong CFA Metadata" || str == "Mislabel as 2x2") return QuadBayerMode::WrongCFAMetadata;
+    if (str == "Correct QBCFA Metadata" || str == "Keep CFA") return QuadBayerMode::CorrectQBCFAMetadata;
+    return QuadBayerMode::Demosaic;
 }
 
 inline std::string logTransformModeToString(LogTransformMode mode) {
@@ -294,7 +303,7 @@ struct RenderSettings {
         , levels("Dynamic")
         , logTransform(LogTransformMode::KeepInput)
         , exposureCompensation("")
-        , quadBayerOption(QuadBayerMode::CorrectQBCFAMetadata)
+        , quadBayerOption(QuadBayerMode::Demosaic)
         , cfaPhase("Don't override CFA")
     {}
 
@@ -308,7 +317,7 @@ struct RenderSettings {
         const std::string& lvl,
         const std::string& log,
         const std::string& exp = "0ev",
-        const std::string& qb = "Correct QBCFA Metadata",
+        const std::string& qb = "Demosaic",
         const std::string& cfa = "Don't override CFA")
         : options(opts)
         , draftScale(draft)

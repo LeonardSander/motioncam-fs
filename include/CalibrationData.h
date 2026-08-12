@@ -15,6 +15,7 @@ struct CalibrationData {
     std::array<float, 3> asShotNeutral;
     std::string cfaPhase;  // Bayer pattern: "bggr", "rggb", "grbg", "gbrg"
     std::string dataLevels = "Auto";  // DirectLog: "Auto", "Full", or "Limited"
+    int cfaSize = 0; // Per-clip CFA repeat size. 0 means detect from input metadata.
     
     bool hasColorMatrix1 = false;
     bool hasColorMatrix2 = false;
@@ -22,6 +23,7 @@ struct CalibrationData {
     bool hasForwardMatrix2 = false;
     bool hasAsShotNeutral = false;
     bool hasDataLevels = false;
+    bool hasCfaSize = false;
     
     // Parse from JSON file
     static std::optional<CalibrationData> loadFromFile(const std::string& filePath);

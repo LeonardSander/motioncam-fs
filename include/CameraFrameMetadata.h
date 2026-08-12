@@ -31,6 +31,7 @@ struct CameraFrameMetadata {
     int lensShadingMapHeight;
     int lensShadingMapWidth;
     bool needRemosaic;
+    int cfaSize;
     std::string offset;
     ScreenOrientation orientation;
     int originalHeight;

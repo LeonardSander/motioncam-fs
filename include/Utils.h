@@ -131,6 +131,8 @@ preprocessData(
     bool vignetteOnlyColor,
     bool normaliseShadingMap,
     bool debugShadingMap,
+    uint32_t cfaRepeatSize,
+    bool higherCfaHq,
     bool interpretAsQuadBayer,
     std::string cropTarget,
     std::string levels,
@@ -163,6 +165,17 @@ void remosaicRGBToBayer(
     int width,
     int height,
     const std::string& cfaPhase = "bggr");
+
+// Luma-guided higher-CFA demosaic. The OCL variant compensates the radial
+// response difference between pixels sharing an on-sensor lens.
+void demosaicHigherCFA(
+    const std::vector<uint16_t>& cfaData,
+    std::vector<uint16_t>& rgbData,
+    int width,
+    int height,
+    int cfaRepeatSize,
+    const std::array<uint8_t, 4>& bayerPhase,
+    bool ocl);
 
 } // namespace utils
 } // namespace motioncam

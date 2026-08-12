@@ -1,4 +1,5 @@
 #include "DNGDecoder.h"
+#include "Utils.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -45,9 +46,14 @@ namespace {
     constexpr uint16_t TIFF_TAG_BITS_PER_SAMPLE = 258;
     constexpr uint16_t TIFF_TAG_COMPRESSION = 259;
     constexpr uint16_t TIFF_TAG_PHOTOMETRIC = 262;
+    constexpr uint16_t TIFF_TAG_SAMPLES_PER_PIXEL = 277;
+    constexpr uint16_t TIFF_TAG_SAMPLE_FORMAT = 339;
+    constexpr uint16_t TIFF_TAG_CFA_REPEAT_PATTERN_DIM = 33421;
+    constexpr uint16_t TIFF_TAG_CFA_PATTERN = 33422;
     constexpr uint16_t TIFF_TAG_STRIP_OFFSETS = 273;
     constexpr uint16_t TIFF_TAG_ROWS_PER_STRIP = 278;
     constexpr uint16_t TIFF_TAG_STRIP_BYTE_COUNTS = 279;
+    constexpr uint16_t TIFF_TAG_BLACK_LEVEL_REPEAT_DIM = 50713;
     constexpr uint16_t TIFF_TAG_BLACK_LEVEL = 50714;
     constexpr uint16_t TIFF_TAG_WHITE_LEVEL = 50717;
     constexpr uint16_t TIFF_TAG_LINEARIZATION_TABLE = 50712;
@@ -127,6 +133,16 @@ namespace {
         } else {
             p[0] = static_cast<uint8_t>(value >> 8);
             p[1] = static_cast<uint8_t>(value & 0xff);
+        }
+    }
+
+    void remosaicCFA(const std::vector<uint16_t>& rgb, std::vector<uint16_t>& bayer,
+                  int width, int height, const std::array<uint8_t, 4>& phase) {
+        bayer.resize(static_cast<size_t>(width) * height);
+        for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+            const int c = phase[(y & 1) * 2 + (x & 1)];
+            const size_t i = static_cast<size_t>(y) * width + x;
+            bayer[i] = rgb[i * 3 + c];
         }
     }
 
@@ -466,6 +482,32 @@ bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
     return true;
 }
 
+bool DNGDecoder::getCFAMetadata(int frameNumber, int& repeatSize,
+                                std::array<uint8_t, 4>& phase) {
+    std::vector<uint8_t> data;
+    if (!extractFrame(frameNumber, data)) return false;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    for (const auto& dim : entries) {
+        if (dim.tag != TIFF_TAG_CFA_REPEAT_PATTERN_DIM || dim.type != TIFF_TYPE_SHORT || dim.count < 2)
+            continue;
+        const int width = read16(data.data() + dim.valueOffset, little);
+        const int height = read16(data.data() + dim.valueOffset + 2, little);
+        if (width != height || width < 2 || (width % 2)) continue;
+        for (const auto& pattern : entries) {
+            if (pattern.ifdOffset != dim.ifdOffset || pattern.tag != TIFF_TAG_CFA_PATTERN ||
+                pattern.count < static_cast<uint32_t>(width * height)) continue;
+            repeatSize = width;
+            const int group = width / 2;
+            phase = {data[pattern.valueOffset], data[pattern.valueOffset + group],
+                     data[pattern.valueOffset + static_cast<size_t>(group) * width],
+                     data[pattern.valueOffset + static_cast<size_t>(group) * width + group]};
+            return true;
+        }
+    }
+    return false;
+}
+
 bool DNGDecoder::updateMetadata(std::vector<uint8_t>& data,
                                 const double* baselineExposure,
                                 const std::array<float, 3>* asShotNeutral) {
@@ -499,6 +541,286 @@ bool DNGDecoder::updateMetadata(std::vector<uint8_t>& data,
         }
     }
     return baselineWritten && neutralWritten;
+}
+
+bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
+                                  int repeatSize,
+                                  const std::array<uint8_t, 4>& phase,
+                                  QuadBayerMode mode,
+                                  bool remosaic,
+                                  int proxyScale,
+                                  bool higherCfaHq) {
+    if (repeatSize <= 2) return true;
+    const bool proxy = proxyScale > 1;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    auto scalar = [&](const TiffEntry& e) -> uint32_t {
+        return e.type == TIFF_TYPE_SHORT ? read16(data.data() + e.valueOffset, little)
+                                         : read32(data.data() + e.valueOffset, little);
+    };
+    const TiffEntry* photo = nullptr;
+    for (const auto& e : entries)
+        if (e.tag == TIFF_TAG_PHOTOMETRIC && scalar(e) == TIFF_PHOTOMETRIC_CFA) { photo = &e; break; }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& e : entries) if (e.ifdOffset == photo->ifdOffset && e.tag == tag) return &e;
+        return nullptr;
+    };
+    const auto dimE = find(TIFF_TAG_CFA_REPEAT_PATTERN_DIM), patternE = find(TIFF_TAG_CFA_PATTERN);
+    if (!proxy && mode == QuadBayerMode::CorrectQBCFAMetadata) return true;
+    if (!proxy && mode == QuadBayerMode::WrongCFAMetadata) {
+        if (!dimE || !patternE) return false;
+        write32(data.data() + dimE->entryOffset + 4, 2, little);
+        write16(data.data() + dimE->entryOffset + 8, 2, little);
+        write16(data.data() + dimE->entryOffset + 10, 2, little);
+        write32(data.data() + patternE->entryOffset + 4, 4, little);
+        for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
+        return true;
+    }
+
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE || !sppE ||
+        offsetsE->count != 1 || countsE->count != 1) return false;
+    const uint32_t width = scalar(*widthE), height = scalar(*heightE), bits = scalar(*bitsE);
+    const uint32_t compression = scalar(*compressionE), stripOffset = scalar(*offsetsE);
+    const uint32_t stripBytes = scalar(*countsE);
+    if (!width || !height || bits < 8 || bits > 16 || stripOffset > data.size() ||
+        stripBytes > data.size() - stripOffset || find(TIFF_TAG_LINEARIZATION_TABLE)) return false;
+    std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
+    if (compression == TIFF_COMPRESSION_JPEG) {
+        lj92 decoder = nullptr;
+        int dw = 0, dh = 0, db = 0, components = 0;
+        if (lj92_open(&decoder, data.data() + stripOffset, stripBytes, &dw, &dh, &db, &components) != LJ92_ERROR_NONE)
+            return false;
+        const bool valid = dw == static_cast<int>(width) && dh == static_cast<int>(height) && components == 1 &&
+            lj92_decode(decoder, pixels.data(), width, 0, nullptr, 0) == LJ92_ERROR_NONE;
+        lj92_close(decoder);
+        if (!valid) return false;
+    } else if (compression == TIFF_COMPRESSION_NONE) {
+        const size_t rowBytes = (static_cast<size_t>(width) * bits + 7) / 8;
+        if (rowBytes * height > stripBytes) return false;
+        for (uint32_t y = 0; y < height; ++y) {
+            size_t bit = static_cast<size_t>(y) * rowBytes * 8;
+            for (uint32_t x = 0; x < width; ++x) {
+                uint16_t value = 0;
+                for (uint32_t b = 0; b < bits; ++b, ++bit)
+                    value = static_cast<uint16_t>((value << 1) |
+                        ((data[stripOffset + bit / 8] >> (7 - bit % 8)) & 1));
+                pixels[static_cast<size_t>(y) * width + x] = value;
+            }
+        }
+    } else return false;
+
+    std::array<double, 4> sourceBlack = {0.0, 0.0, 0.0, 0.0};
+    const auto blackLevelEntry = find(TIFF_TAG_BLACK_LEVEL);
+    if (blackLevelEntry && blackLevelEntry->count) {
+        for (uint32_t i = 0; i < 4; ++i) {
+            const uint32_t source = std::min(i, blackLevelEntry->count - 1);
+            if (blackLevelEntry->type == TIFF_TYPE_RATIONAL) {
+                sourceBlack[i] = readRational(data, *blackLevelEntry, source, little);
+            } else {
+                const size_t pos = blackLevelEntry->valueOffset + source *
+                    (blackLevelEntry->type == TIFF_TYPE_SHORT ? 2 : 4);
+                sourceBlack[i] = blackLevelEntry->type == TIFF_TYPE_SHORT
+                    ? read16(data.data() + pos, little)
+                    : read32(data.data() + pos, little);
+            }
+        }
+    }
+
+    std::vector<uint16_t> output;
+    uint32_t outputWidth = width, outputHeight = height;
+    uint32_t hqReductionShift = 0;
+    uint32_t hqReductionArea = 1;
+    std::array<double, 3> outputChannelBlack = {0.0, 0.0, 0.0};
+    bool rgbOutput = false;
+    auto demosaicWithRgbBlackMetadata = [&](const std::vector<uint16_t>& input,
+                                             std::vector<uint16_t>& rgb,
+                                             uint32_t imageWidth,
+                                             uint32_t imageHeight,
+                                             int imageRepeatSize,
+                                             double levelScale) {
+        std::array<double, 4> phaseBlack{};
+        for (int i = 0; i < 4; ++i) phaseBlack[i] = sourceBlack[i] * levelScale;
+        std::array<double, 3> sums = {0.0, 0.0, 0.0};
+        std::array<int, 3> counts = {0, 0, 0};
+        for (int i = 0; i < 4; ++i) {
+            sums[phase[i]] += phaseBlack[i];
+            ++counts[phase[i]];
+        }
+        for (int channel = 0; channel < 3; ++channel)
+            outputChannelBlack[channel] = counts[channel] ? sums[channel] / counts[channel] : 0.0;
+
+        utils::demosaicHigherCFA(
+            input, rgb, imageWidth, imageHeight, imageRepeatSize, phase,
+            mode == QuadBayerMode::DemosaicOCL);
+        rgbOutput = !remosaic;
+    };
+    if (proxy) {
+        const uint32_t group = repeatSize / 2;
+        const bool staged8x8Demosaic = repeatSize == 8 && proxyScale == 2 &&
+            (mode == QuadBayerMode::Demosaic || mode == QuadBayerMode::DemosaicOCL);
+        const uint32_t reductionGroup = staged8x8Demosaic ? 2u : group;
+        hqReductionArea = reductionGroup * reductionGroup;
+        if (higherCfaHq) {
+            double largestLevel = 0.0;
+            if (const auto white = find(TIFF_TAG_WHITE_LEVEL))
+                largestLevel = scalar(*white) * static_cast<double>(hqReductionArea);
+            if (const auto black = find(TIFF_TAG_BLACK_LEVEL)) {
+                for (uint32_t i = 0; i < black->count; ++i) {
+                    double level = 0.0;
+                    if (black->type == TIFF_TYPE_RATIONAL) {
+                        level = readRational(data, *black, i, little);
+                    } else {
+                        const size_t pos = black->valueOffset + i *
+                            (black->type == TIFF_TYPE_SHORT ? 2 : 4);
+                        level = black->type == TIFF_TYPE_SHORT
+                            ? read16(data.data() + pos, little)
+                            : read32(data.data() + pos, little);
+                    }
+                    largestLevel = std::max(
+                        largestLevel, level * static_cast<double>(hqReductionArea));
+                }
+            }
+            while (largestLevel > std::numeric_limits<uint16_t>::max()) {
+                largestLevel *= 0.5;
+                ++hqReductionShift;
+            }
+        }
+        const uint32_t sourceScale = staged8x8Demosaic
+            ? 2u
+            : reductionGroup * std::max(1u,
+                (static_cast<uint32_t>(proxyScale) + reductionGroup - 1) / reductionGroup);
+        outputWidth = (width / sourceScale) & ~3u;
+        outputHeight = (height / sourceScale) & ~3u;
+        if (!outputWidth || !outputHeight) return false;
+        output.resize(static_cast<size_t>(outputWidth) * outputHeight);
+        const uint32_t selection = (reductionGroup - 1) / 2;
+        for (uint32_t y = 0; y < outputHeight; y += 2) for (uint32_t x = 0; x < outputWidth; x += 2) {
+            const uint32_t srcX = x * sourceScale, srcY = y * sourceScale;
+            for (uint32_t by = 0; by < 2; ++by) for (uint32_t bx = 0; bx < 2; ++bx) {
+                const uint32_t anchorX = srcX + bx * reductionGroup;
+                const uint32_t anchorY = srcY + by * reductionGroup;
+                uint32_t value = 0;
+                if (higherCfaHq) {
+                    for (uint32_t gy = 0; gy < reductionGroup; ++gy)
+                        for (uint32_t gx = 0; gx < reductionGroup; ++gx)
+                            value += pixels[static_cast<size_t>(anchorY + gy) * width + anchorX + gx];
+                } else {
+                    value = pixels[static_cast<size_t>(anchorY + selection) * width + anchorX + selection];
+                }
+                value >>= hqReductionShift;
+                output[static_cast<size_t>(y + by) * outputWidth + x + bx] =
+                    static_cast<uint16_t>(value);
+            }
+        }
+        if (staged8x8Demosaic) {
+            std::vector<uint16_t> rgb;
+            const double levelScale = static_cast<double>(hqReductionArea) /
+                static_cast<double>(uint32_t{1} << hqReductionShift);
+            demosaicWithRgbBlackMetadata(
+                output, rgb, outputWidth, outputHeight, 4, levelScale);
+            if (remosaic) remosaicCFA(rgb, output, outputWidth, outputHeight, phase);
+            else output = std::move(rgb);
+        } else {
+            remosaic = true; // Full block reduction is already ordinary 2x2 Bayer.
+        }
+    } else {
+        std::vector<uint16_t> rgb;
+        demosaicWithRgbBlackMetadata(pixels, rgb, width, height, repeatSize, 1.0);
+        if (remosaic) remosaicCFA(rgb, output, width, height, phase);
+        else output = std::move(rgb);
+    }
+
+    if (data.size() & 1u) data.push_back(0);
+    const uint32_t newOffset = static_cast<uint32_t>(data.size());
+    const uint32_t newBytes = static_cast<uint32_t>(output.size() * sizeof(uint16_t));
+    data.resize(data.size() + newBytes);
+    for (size_t i = 0; i < output.size(); ++i) {
+        data[newOffset + i * 2] = little ? output[i] & 0xff : output[i] >> 8;
+        data[newOffset + i * 2 + 1] = little ? output[i] >> 8 : output[i] & 0xff;
+    }
+    auto setScalar = [&](const TiffEntry& e, uint32_t value) {
+        if (e.type == TIFF_TYPE_SHORT) write16(data.data() + e.valueOffset, value, little);
+        else write32(data.data() + e.valueOffset, value, little);
+    };
+    setScalar(*compressionE, TIFF_COMPRESSION_NONE); setScalar(*offsetsE, newOffset);
+    setScalar(*countsE, newBytes); setScalar(*sppE, remosaic ? 1 : 3);
+    setScalar(*photo, remosaic ? TIFF_PHOTOMETRIC_CFA : 34892); // LinearRaw
+    setScalar(*widthE, outputWidth); setScalar(*heightE, outputHeight);
+    if (proxy && higherCfaHq) {
+        const double levelScale = static_cast<double>(hqReductionArea) /
+            static_cast<double>(uint32_t{1} << hqReductionShift);
+        if (const auto white = find(TIFF_TAG_WHITE_LEVEL))
+            setScalar(*white, static_cast<uint32_t>(std::lround(scalar(*white) * levelScale)));
+        if (const auto black = find(TIFF_TAG_BLACK_LEVEL)) {
+            if (black->type == TIFF_TYPE_RATIONAL) {
+                for (uint32_t i = 0; i < black->count; ++i)
+                    writeRational(data, *black, i,
+                                  readRational(data, *black, i, little) * levelScale, little);
+            } else {
+                for (uint32_t i = 0; i < black->count; ++i) {
+                    const size_t pos = black->valueOffset + i * (black->type == TIFF_TYPE_SHORT ? 2 : 4);
+                    const uint32_t old = black->type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + pos, little) : read32(data.data() + pos, little);
+                    const uint32_t scaled = static_cast<uint32_t>(std::lround(old * levelScale));
+                    if (black->type == TIFF_TYPE_SHORT) write16(data.data() + pos, scaled, little);
+                    else write32(data.data() + pos, scaled, little);
+                }
+            }
+        }
+    }
+    if (rgbOutput && blackLevelEntry && blackLevelEntry->count >= 3) {
+        write32(data.data() + blackLevelEntry->entryOffset + 4, 3, little);
+        for (uint32_t channel = 0; channel < 3; ++channel) {
+            if (blackLevelEntry->type == TIFF_TYPE_RATIONAL) {
+                writeRational(data, *blackLevelEntry, channel,
+                              outputChannelBlack[channel], little);
+            } else {
+                const size_t pos = blackLevelEntry->valueOffset + channel *
+                    (blackLevelEntry->type == TIFF_TYPE_SHORT ? 2 : 4);
+                const uint32_t value = static_cast<uint32_t>(
+                    std::lround(outputChannelBlack[channel]));
+                if (blackLevelEntry->type == TIFF_TYPE_SHORT) write16(data.data() + pos, value, little);
+                else write32(data.data() + pos, value, little);
+            }
+        }
+        if (const auto repeat = find(TIFF_TAG_BLACK_LEVEL_REPEAT_DIM)) {
+            if (repeat->type == TIFF_TYPE_SHORT && repeat->count >= 2) {
+                write16(data.data() + repeat->valueOffset, 1, little);
+                write16(data.data() + repeat->valueOffset + 2, 1, little);
+            }
+        }
+    }
+    if (!remosaic) {
+        const uint32_t bitsOffset = static_cast<uint32_t>(data.size());
+        data.resize(data.size() + 6);
+        for (int c = 0; c < 3; ++c) write16(data.data() + bitsOffset + c * 2, 16, little);
+        write32(data.data() + bitsE->entryOffset + 4, 3, little);
+        write32(data.data() + bitsE->entryOffset + 8, bitsOffset, little);
+        if (const auto sampleFormat = find(TIFF_TAG_SAMPLE_FORMAT)) {
+            const uint32_t formatOffset = static_cast<uint32_t>(data.size());
+            data.resize(data.size() + 6);
+            for (int c = 0; c < 3; ++c) write16(data.data() + formatOffset + c * 2, 1, little);
+            write32(data.data() + sampleFormat->entryOffset + 4, 3, little);
+            write32(data.data() + sampleFormat->entryOffset + 8, formatOffset, little);
+        }
+        if (dimE) write16(data.data() + dimE->entryOffset, 65000, little);
+        if (patternE) write16(data.data() + patternE->entryOffset, 65001, little);
+    } else if (dimE && patternE) {
+        write32(data.data() + bitsE->entryOffset + 4, 1, little);
+        write16(data.data() + bitsE->entryOffset + 8, 16, little);
+        write16(data.data() + bitsE->entryOffset + 10, 0, little);
+        write32(data.data() + dimE->entryOffset + 4, 2, little);
+        write16(data.data() + dimE->entryOffset + 8, 2, little);
+        write16(data.data() + dimE->entryOffset + 10, 2, little);
+        write32(data.data() + patternE->entryOffset + 4, 4, little);
+        for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
+    }
+    return true;
 }
 
 bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,

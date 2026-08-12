@@ -75,6 +75,8 @@ private:
     int mDuplicatedFrames;
     int mWidth;
     int mHeight;
+    int mCfaSize = 2;
+    std::array<uint8_t, 4> mCfaPhase = {0, 1, 1, 2};
     std::unique_ptr<DNGDecoder> mDecoder;
     std::optional<CalibrationData> mCalibration;
     std::map<Timestamp, float> mNormalizedExposureOffsets;

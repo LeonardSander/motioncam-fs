@@ -97,11 +97,11 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
     
-    if(ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_INTERPRET_AS_QUAD_BAYER;
-    
     if(ui->remosaicCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+
+    if(ui->higherCfaHqCheckBox->isChecked())
+        settings.options |= motioncam::RENDER_OPT_HIGHER_CFA_HQ;
 
     if(ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_JPEG_COMPRESSION;
@@ -126,6 +126,7 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
     , mProcessingWatcher(nullptr)
     , mProcessingInProgress(false)
+    , mOptionsUpdatePending(false)
 #ifdef _WIN32
     , mTaskbarList(nullptr)
 #endif
@@ -182,8 +183,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
-    connect(ui->quadBayerCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->higherCfaHqCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
@@ -266,8 +267,8 @@ void MainWindow::saveSettings() {
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
-    settings.setValue("interpretAsQBEnabled", ui->quadBayerCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
     settings.setValue("cfrTarget", QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
@@ -330,17 +331,16 @@ void MainWindow::restoreSettings() {
         !settings.contains("logTransformEnabled") ? Qt::CheckState::Checked :
         (settings.value("logTransformEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
 
-    ui->quadBayerCheckBox->setCheckState(
-        settings.value("interpretAsQBEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
-    
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    ui->higherCfaHqCheckBox->setChecked(
+        !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
 
     mCacheRootFolder = settings.value("cachePath").toString();    
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
-    mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Correct QBCFA Metadata" : settings.value("quadBayerOption").toString().toStdString());
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Demosaic" : settings.value("quadBayerOption").toString().toStdString());
     mRenderSettings.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
     mRenderSettings.cropTarget = settings.value("cropTarget").toString().toStdString();
     mRenderSettings.cameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
@@ -356,7 +356,8 @@ void MainWindow::restoreSettings() {
     
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
     ui->exposureCompensationLineEdit->setText(QString::fromStdString(mRenderSettings.exposureCompensation));
-    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    ui->quadBayerComboBox->setCurrentText(QString::fromStdString(
+        quadBayerModeToString(mRenderSettings.quadBayerOption)));
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));
@@ -1027,11 +1028,13 @@ void MainWindow::updateUi() {
             mRenderSettings.draftScale = 2;
         }
         ui->draftQuality->setEnabled(true);
+        ui->higherCfaHqCheckBox->setEnabled(true);
         ui->quadBayerComboBox->setEnabled(false);
     } else {
         ui->draftQuality->setCurrentIndex(-1);
         mRenderSettings.draftScale = 1;
         ui->draftQuality->setEnabled(false);
+        ui->higherCfaHqCheckBox->setEnabled(false);
         ui->quadBayerComboBox->setEnabled(true);
     }
 
@@ -1098,12 +1101,6 @@ void MainWindow::updateFpsLabels() {
         return;
     }
 
-    auto settings = buildRenderSettings();
-
-    for (const auto& mountedFile : mMountedFiles) {
-        mFuseFilesystem->updateOptions(mountedFile.mountId, settings);
-    }
-    
     // Find all info labels in the scroll area
     auto allLabels = scrollContent->findChildren<QLabel*>();
     
@@ -1172,19 +1169,14 @@ void MainWindow::updateFpsLabels() {
 void MainWindow::onRenderSettingsChanged(Qt::CheckState checkState) {
     updateUi();
 
-    auto settings = buildRenderSettings();
     scheduleOptionsUpdate();
-    
-    auto it = mMountedFiles.begin();
-    while(it != mMountedFiles.end()) {
-        mFuseFilesystem->updateOptions(it->mountId, settings);
-        ++it;
-    }
 }
 
 void MainWindow::scheduleOptionsUpdate() {
-    // Don't start new processing if already in progress
+    // Coalesce edits made while a rebuild is active, then apply the newest
+    // settings immediately after it completes instead of silently dropping it.
     if (mProcessingInProgress || (mProcessingWatcher && mProcessingWatcher->isRunning())) {
+        mOptionsUpdatePending = true;
         return;
     }
     
@@ -1194,6 +1186,7 @@ void MainWindow::scheduleOptionsUpdate() {
     }
     
     mProcessingInProgress = true;
+    mOptionsUpdatePending = false;
     
     // Capture current settings
     auto settings = buildRenderSettings();
@@ -1248,7 +1241,14 @@ void MainWindow::onProcessingFinished() {
     }
 #endif
     mProcessingInProgress = false;
-    
+
+    if (mOptionsUpdatePending) {
+        // QFutureWatcher may still report isRunning() from inside its finished
+        // callback. Start the coalesced update on the next event-loop turn.
+        QTimer::singleShot(0, this, &MainWindow::scheduleOptionsUpdate);
+        return;
+    }
+
     // Update FPS labels after processing completes
     updateFpsLabels();
 }
@@ -1338,7 +1338,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
-    ui->quadBayerCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->higherCfaHqCheckBox->setChecked(true);
 
     mRenderSettings.draftScale = 1;
     mRenderSettings.cfrTarget = stringToCFRTarget("Prefer Drop Frame");
@@ -1346,7 +1346,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     mRenderSettings.cameraModel = "Panasonic";
     mRenderSettings.levels = "Dynamic";
     mRenderSettings.logTransform = stringToLogTransformMode("Keep Input");
-    mRenderSettings.quadBayerOption = stringToQuadBayerMode("Correct QBCFA Metadata");
+    mRenderSettings.quadBayerOption = stringToQuadBayerMode("Demosaic");
     mRenderSettings.cfaPhase = "Don't override CFA";
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
@@ -1369,7 +1369,9 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     }
     
     QFileInfo fileInfo(filePath);
-    QString jsonPath = fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
+    QString jsonPath = fileInfo.isDir()
+        ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
+        : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
     
     // Check if JSON already exists
     if (QFile::exists(jsonPath)) {
@@ -1431,7 +1433,9 @@ void MainWindow::updateCalibrationButtonStates() {
         
         auto filePath = fileWidget->property("filePath").toString();
         QFileInfo fileInfo(filePath);
-        QString jsonPath = fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
+        QString jsonPath = fileInfo.isDir()
+            ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
+            : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
         
         // Find the calibration button, status container, label, and refresh button
         QPushButton* actualCalibButton = nullptr;
