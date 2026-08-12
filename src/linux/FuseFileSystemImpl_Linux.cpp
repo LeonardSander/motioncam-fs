@@ -14,6 +14,7 @@
 #include <boost/filesystem.hpp>
 #include <fuse3/fuse.h>
 #include <QDir>
+#include <QProcess>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -41,6 +42,27 @@ namespace {
 constexpr auto CACHE_SIZE = 1024 * 1024 * 1024;
 constexpr auto IO_THREADS = 4;
 constexpr auto MAX_READ = 1024 * 1024;
+
+void recoverStaleMount(const std::string& path) {
+    struct stat statBuffer {};
+    if (::stat(path.c_str(), &statBuffer) == 0 || errno != ENOTCONN)
+        return;
+
+    spdlog::warn("Recovering stale FUSE mount at {}", path);
+    const int result = QProcess::execute(
+        QStringLiteral("fusermount3"),
+        {QStringLiteral("-u"), QStringLiteral("-z"),
+         QString::fromStdString(path)});
+    if (result != 0) {
+        throw std::runtime_error(
+            "Failed to unmount stale FUSE mount " + path +
+            " (fusermount3 exit code " + std::to_string(result) + ")");
+    }
+
+    errno = 0;
+    if (::stat(path.c_str(), &statBuffer) != 0 && errno == ENOTCONN)
+        throw std::runtime_error("Stale FUSE mount remains at " + path);
+}
 
 void setupLogging() {
     try {
@@ -237,6 +259,7 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     const std::string extension = sourcePath.extension().string();
     const std::string filename = sourcePath.filename().string();
 
+    recoverStaleMount(dstPath);
     if (!QDir().mkpath(QString::fromStdString(dstPath)))
         throw std::runtime_error("Failed to create " + dstPath);
 
