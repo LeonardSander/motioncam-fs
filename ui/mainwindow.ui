@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1520</width>
-    <height>740</height>
+    <height>840</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -333,7 +333,7 @@
           <number>8</number>
          </property>
          <item>
-         <layout class="QHBoxLayout" name="normalizeExposureLayout">
+         <layout class="QHBoxLayout" name="normalizeExposureLayout" stretch="1,1">
            <property name="spacing">
             <number>8</number>
            </property>
@@ -349,6 +349,12 @@
          </item>
          <item>
             <widget class="QLineEdit" name="exposureCompensationLineEdit">
+             <property name="sizePolicy">
+              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+               <horstretch>0</horstretch>
+               <verstretch>0</verstretch>
+              </sizepolicy>
+             </property>
              <property name="minimumSize">
               <size>
                <width>60</width>
@@ -395,7 +401,7 @@
          <item>
           <widget class="QLabel" name="normalizeExposureLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings using each DNG's Baseline Exposure tag. An optional gain offset can be entered above.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Compensate for changes in exposure settings using each DNG's Baseline Exposure tag.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -551,7 +557,7 @@
          <item>
           <widget class="QCheckBox" name="dngCompressionCheckBox">
            <property name="text">
-            <string>Enable DNG Compression (Lossless JPEG)</string>
+            <string>Compress Finalized DNGs</string>
            </property>
            <property name="checked">
             <bool>false</bool>
@@ -561,7 +567,7 @@
          <item>
           <widget class="QLabel" name="compressionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply lossless JPEG compression when finalizing sequences. Pixel values are preserved exactly; file-size reduction depends on the footage. Compression is not used by the virtual filesystem.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Uses lossless JPEG compression for finalized sequences. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -826,7 +832,7 @@
           <number>8</number>
          </property>
          <item>
-          <layout class="QHBoxLayout" name="draftLayout">
+          <layout class="QHBoxLayout" name="draftLayout" stretch="1,1">
            <property name="spacing">
             <number>8</number>
            </property>
@@ -838,7 +844,18 @@
             </widget>
            </item>
            <item>
+            <layout class="QHBoxLayout" name="draftControlsLayout">
+             <property name="spacing">
+              <number>8</number>
+             </property>
+             <item>
             <widget class="QComboBox" name="draftQuality">
+             <property name="sizePolicy">
+              <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+               <horstretch>0</horstretch>
+               <verstretch>0</verstretch>
+              </sizepolicy>
+             </property>
              <property name="minimumSize">
               <size>
                <width>60</width>
@@ -860,9 +877,9 @@
                <string>8x</string>
               </property>
              </item>
-            </widget>
-           </item>
-           <item>
+           </widget>
+             </item>
+             <item>
             <widget class="QCheckBox" name="higherCfaHqCheckBox">
              <property name="toolTip">
               <string>Sum every pixel while reducing higher CFA blocks to 2x2 Bayer. When disabled, select the upper-left central pixel instead.</string>
@@ -874,13 +891,15 @@
               <bool>true</bool>
              </property>
             </widget>
+             </item>
+            </layout>
            </item>
           </layout>
          </item>
          <item>
           <widget class="QLabel" name="draftModeLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Scale down DNGs to improve performance while editing. HQ sums higher-CFA blocks before any further ordinary Bayer reduction; disabling it selects one representative pixel per block.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Scale down DNGs to improve performance while editing. HQ only affects quad bayer clip to either average or discard pixel values.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -915,43 +934,43 @@
               </size>
              </property>
              <property name="editable">
-                <bool>true</bool>
+              <bool>true</bool>
+             </property>
+             <item>
+              <property name="text">
+               <string>4096x2304</string>
               </property>
-              <item>
-            <property name="text">
-             <string>4096x2304</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4096x2560</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4080x2296</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4080x2288</string>
-            </property>
-           </item>
-           <item>
-            <property name="text">
-             <string>4000x2256</string>
-            </property>
-           </item>           
-           <item>
-            <property name="text">
-             <string>4000x3000</string>
-            </property>
-          </item>           
-           <item>
-            <property name="text">
-             <string>4624x2608</string>
-            </property>
-           </item>
+             </item>
+             <item>
+              <property name="text">
+               <string>4096x2560</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4080x2296</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4080x2288</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4000x2256</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4000x3000</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>4624x2608</string>
+              </property>
+             </item>
             </widget>
            </item>
           </layout>
@@ -969,10 +988,71 @@
         </layout>
        </item>
        <item>
-        <layout class="QVBoxLayout" name="remosaicSection">
+        <layout class="QVBoxLayout" name="quadBayerSection">
          <property name="spacing">
           <number>8</number>
          </property>
+         <item>
+          <layout class="QHBoxLayout" name="quadBayerLayout">
+           <property name="spacing">
+            <number>8</number>
+           </property>
+           <item>
+            <widget class="QLabel" name="quadBayerCheckBox">
+             <property name="text">
+              <string>Higher CFA Processing</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="quadBayerComboBox">
+             <property name="minimumSize">
+              <size>
+               <width>80</width>
+               <height>30</height>
+              </size>
+             </property>
+             <item>
+              <property name="text">
+               <string>Demosaic</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Demosaic (OCL)</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Keep CFA</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Mislabel as 2x2</string>
+              </property>
+             </item>
+            </widget>
+           </item>
+          </layout>
+         </item>
+         <item>
+          <widget class="QLabel" name="remosaicLabel">
+           <property name="text">
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Options to treat quad bayer clips.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+           </property>
+           <property name="wordWrap">
+            <bool>true</bool>
+           </property>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="remosaicSection">
+         <property name="spacing">
+          <number>8</number>
+         </property>         
          <item>
           <layout class="QHBoxLayout" name="remosaicLayout">
            <property name="spacing">
@@ -1025,78 +1105,7 @@
          <item>
           <widget class="QLabel" name="remosaicInfoLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Convert DirectLog RGB to Bayer mosaic CFA pattern.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
-           </property>
-           <property name="wordWrap">
-            <bool>true</bool>
-           </property>
-          </widget>
-         </item>
-        </layout>
-       </item>
-       <item>
-        <layout class="QVBoxLayout" name="quadBayerSection">
-         <property name="spacing">
-          <number>8</number>
-         </property>         
-         <item>
-          <layout class="QHBoxLayout" name="quadBayerLayout">
-           <property name="spacing">
-            <number>8</number>
-           </property>
-           <item>
-            <widget class="QLabel" name="quadBayerCheckBox">
-             <property name="text">
-              <string>Higher CFA Processing</string>
-             </property>
-            </widget>
-           </item>
-           <item>
-            <widget class="QComboBox" name="quadBayerComboBox">
-             <property name="minimumSize">
-              <size>
-               <width>80</width>
-               <height>30</height>
-              </size>
-             </property>
-             <item>
-              <property name="text">
-               <string>Demosaic</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>Demosaic (OCL)</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>Keep CFA</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>Mislabel as 2x2</string>
-              </property>
-             </item>             
-             <!-- <item>
-              <property name="text">
-               <string>3by3 CFA</string>
-              </property>
-             </item>
-             <item>
-              <property name="text">
-               <string>4by4 CFA</string>
-              </property>
-             </item> -->
-            </widget>
-           </item>
-          </layout>
-         </item>
-         <item>
-          <widget class="QLabel" name="remosaicLabel">
-           <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Process CFA repeat patterns larger than standard 2x2 Bayer. CFA size is detected from the clip or its JSON sidecar.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Reduce DirectLog or demosaiced quad bayer clips to bayer CFA.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
