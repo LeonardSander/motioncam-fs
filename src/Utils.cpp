@@ -1322,7 +1322,15 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool normalizeShadingMap = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     bool debugShadingMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = settings.options & RENDER_OPT_NORMALIZE_EXPOSURE;
-    bool useLogCurve = settings.options & RENDER_OPT_LOG_TRANSFORM;
+    LogTransformMode effectiveLogTransform =
+        settings.options & RENDER_OPT_LOG_TRANSFORM
+            ? settings.logTransform
+            : LogTransformMode::Disabled;
+    // Keep Input exists to avoid losing precision when vignette correction is
+    // baked into the pixels. Without that processing the input is already
+    // linear, so adding a log curve and LinearizationTable would be incorrect.
+    if (effectiveLogTransform == LogTransformMode::KeepInput && !applyShadingMap)
+        effectiveLogTransform = LogTransformMode::Disabled;
     int cfaRepeatSize = calibration && calibration->hasCfaSize
         ? calibration->cfaSize : metadata.cfaSize;
     if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0)
@@ -1350,7 +1358,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         cfaRepeatSize == 4,
         cropTarget,
         settings.levels,
-        settings.logTransform,
+        effectiveLogTransform,
         settings.quadBayerOption,
         true  // includeOpcode = true to generate lens shading opcode when not applied to image
     );
@@ -1659,12 +1667,12 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetActiveArea(&activeArea[0]);
 
     // Add linearization table based on actual bit depth
-    bool needsLinearization = (settings.logTransform != LogTransformMode::Disabled && 
-                               !(settings.logTransform == LogTransformMode::KeepInput && !applyShadingMap));
+    const bool needsLinearization =
+        effectiveLogTransform != LogTransformMode::Disabled;
     
     if (needsLinearization && dstWhiteLevel > 0) {
         spdlog::debug("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}", 
-                     logTransformModeToString(settings.logTransform), applyShadingMap, dstWhiteLevel);
+                     logTransformModeToString(effectiveLogTransform), applyShadingMap, dstWhiteLevel);
         // Create linearization table sized for the actual stored range
         // The stored values range from 0 to dstWhiteLevel, so we need dstWhiteLevel+1 entries
         const int tableSize = static_cast<int>(dstWhiteLevel) + 1;
