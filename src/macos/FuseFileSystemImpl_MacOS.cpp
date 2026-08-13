@@ -409,6 +409,10 @@ MountId FuseFileSystemImpl_MacOs::mount(
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
 
+    if (fs::absolute(srcPath).lexically_normal() ==
+        fs::absolute(fs::path(dstPath)).lexically_normal())
+        throw std::runtime_error("Source and mount destination must be different paths");
+
     spdlog::debug("Mounting file {} to {}", srcFile, dstPath);
 
     QDir dst(dstPath.c_str());

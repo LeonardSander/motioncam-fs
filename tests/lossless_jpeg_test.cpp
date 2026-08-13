@@ -25,6 +25,7 @@ int main() {
     }
 
     tinydngwriter::DNGImage image;
+    image.SetBigEndian(false);
     assert(image.SetImageWidth(width));
     assert(image.SetImageLength(height));
     assert(image.SetRowsPerStrip(height));

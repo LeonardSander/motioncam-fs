@@ -117,6 +117,7 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     settings.exposureCompensation = mRenderSettings.exposureCompensation;
     settings.quadBayerOption = mRenderSettings.quadBayerOption;
     settings.cfaPhase = mRenderSettings.cfaPhase;
+    settings.jxlDistance = mRenderSettings.jxlDistance;
 
     return settings;
 }
@@ -186,6 +187,11 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->higherCfaHqCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->dngCompressionModeComboBox, &QComboBox::currentIndexChanged, this, [this](int index) {
+        static constexpr float modes[] = {-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
+        mRenderSettings.jxlDistance = modes[std::clamp(index, 0, 5)];
+        onRenderSettingsChanged(Qt::CheckState::Unchecked);
+    });
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCFRTargetChanged(text.toStdString());
@@ -268,6 +274,7 @@ void MainWindow::saveSettings() {
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("jxlDistance", mRenderSettings.jxlDistance);
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
@@ -333,6 +340,12 @@ void MainWindow::restoreSettings() {
 
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    mRenderSettings.jxlDistance = settings.value("jxlDistance", -1.0).toFloat();
+    const std::array<float, 6> jxlDistances = {-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
+    auto nearestJxl = std::min_element(jxlDistances.begin(), jxlDistances.end(), [this](float a, float b) {
+        return std::abs(a - mRenderSettings.jxlDistance) < std::abs(b - mRenderSettings.jxlDistance);
+    });
+    ui->dngCompressionModeComboBox->setCurrentIndex(static_cast<int>(nearestJxl - jxlDistances.begin()));
     ui->higherCfaHqCheckBox->setChecked(
         !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
 
@@ -395,7 +408,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) || 
                           filePath.endsWith(".mp4", Qt::CaseInsensitive))) ||
-                        filePath.endsWith(".dng", Qt::CaseInsensitive)) {
+                        filePath.endsWith(".dng", Qt::CaseInsensitive) ||
+                        QFileInfo(filePath).isDir()) {
                         dragEvent->acceptProposedAction();
                         return true;
                     }
@@ -416,7 +430,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) || 
                           filePath.endsWith(".mp4", Qt::CaseInsensitive))) ||
-                        filePath.endsWith(".dng", Qt::CaseInsensitive)) {
+                        filePath.endsWith(".dng", Qt::CaseInsensitive) ||
+                        QFileInfo(filePath).isDir()) {
                         mountFile(filePath);
                     }
                 }
@@ -435,7 +450,13 @@ void MainWindow::mountFile(const QString& filePath) {
     // Extract just the filename from the path
     QFileInfo fileInfo(filePath);
     auto fileName = fileInfo.fileName();
-    auto dstPath = (mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder) + "/" + fileInfo.baseName();
+    const QString destinationRoot = mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder;
+    // A sequence directory cannot be mounted onto itself: doing so hides the
+    // source DNGs and makes every projected read recursively enter FUSE.
+    const QString mountName = fileInfo.isDir()
+        ? fileInfo.fileName() + "-mounted"
+        : fileInfo.baseName();
+    auto dstPath = destinationRoot + "/" + mountName;
     motioncam::MountId mountId;
 
     try {

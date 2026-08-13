@@ -411,6 +411,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             imageSamples = std::move(processedRgbData);
         }
 
+        const bool jpegXlCompression = jpegCompression && mConfig.jxlDistance >= 0.0f;
         std::vector<uint8_t> imageBytes;
         if (jpegCompression || encodeBits == 16) {
             imageBytes.resize(imageSamples.size() * sizeof(uint16_t));
@@ -433,9 +434,9 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetRowsPerStrip(height);
         
         unsigned short bitsPerSample[3] = {
-            static_cast<unsigned short>(encodeBits),
-            static_cast<unsigned short>(encodeBits),
-            static_cast<unsigned short>(encodeBits)
+            static_cast<unsigned short>(jpegXlCompression ? 16 : encodeBits),
+            static_cast<unsigned short>(jpegXlCompression ? 16 : encodeBits),
+            static_cast<unsigned short>(jpegXlCompression ? 16 : encodeBits)
         };
         dng.SetBitsPerSample(samplesPerPixel, bitsPerSample);
         
@@ -443,8 +444,11 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetPhotometric(photometric);
         dng.SetPlanarConfig(1); // Chunky
         dng.SetCompression(jpegCompression
-            ? tinydngwriter::COMPRESSION_JPEG
+            ? (mConfig.jxlDistance < 0.0f ? tinydngwriter::COMPRESSION_JPEG
+                                         : tinydngwriter::COMPRESSION_JPEG_XL)
             : tinydngwriter::COMPRESSION_NONE);
+        if (jpegCompression && mConfig.jxlDistance >= 0.0f)
+            dng.SetJXLDistance(mConfig.jxlDistance);
         
         unsigned short sampleFormat[3] = {1, 1, 1}; // Unsigned integer
         dng.SetSampleFormat(samplesPerPixel, sampleFormat);
@@ -473,8 +477,10 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
         
         // Set DNG version
-        dng.SetDNGVersion(1, 4, 0, 0);
-        if (shouldRemosaic) {
+        dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
+        if (jpegXlCompression) {
+            dng.SetDNGBackwardVersion(1, 7, 0, 0);
+        } else if (shouldRemosaic) {
             dng.SetDNGBackwardVersion(1, 1, 0, 0);
         } else {
             dng.SetDNGBackwardVersion(1, 4, 0, 0);

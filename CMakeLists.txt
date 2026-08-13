@@ -205,6 +205,24 @@ target_include_directories(motioncam-decoder
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
 
+# JPEG XL is the DNG 1.7 compression backend. Prefer pkg-config (used by
+# distro packages and vcpkg), with a conventional library fallback.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(JXL QUIET IMPORTED_TARGET libjxl)
+endif()
+if(TARGET PkgConfig::JXL)
+    set(JXL_TARGET PkgConfig::JXL)
+else()
+    find_path(JXL_INCLUDE_DIR jxl/encode.h REQUIRED)
+    find_library(JXL_LIBRARY NAMES jxl REQUIRED)
+    add_library(MotionCamJXL UNKNOWN IMPORTED)
+    set_target_properties(MotionCamJXL PROPERTIES
+        IMPORTED_LOCATION "${JXL_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${JXL_INCLUDE_DIR}")
+    set(JXL_TARGET MotionCamJXL)
+endif()
+
 # Find FFmpeg - try manual path first, then pkg-config, then vcpkg
 set(FFMPEG_ROOT "" CACHE PATH "Path to FFmpeg installation (e.g., C:/ffmpeg)")
 
@@ -316,8 +334,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   spdlog::spdlog
   fmt::fmt
   motioncam-decoder
+  ${JXL_TARGET}
   ${FFMPEG_LIBRARIES}
   ${platform-specific})
+target_compile_definitions(${PROJECT_NAME} PRIVATE TINY_DNG_ENABLE_JPEG_XL)
 
 set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
 
@@ -370,9 +390,33 @@ if(BUILD_TESTING)
         deps/motioncam-decoder/thirdparty/liblj92)
     target_include_directories(motioncam-lossless-jpeg-test PRIVATE include)
     target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
-        Boost::filesystem Boost::regex spdlog::spdlog)
+        Boost::filesystem Boost::regex spdlog::spdlog ${JXL_TARGET})
     add_test(NAME motioncam-lossless-jpeg-test
         COMMAND motioncam-lossless-jpeg-test)
+
+    add_executable(motioncam-jpeg-xl-test
+        tests/jpeg_xl_test.cpp
+        src/DNGDecoder.cpp
+        src/HigherCFADemosaic.cpp
+        deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
+    target_include_directories(motioncam-jpeg-xl-test PRIVATE
+        deps/motioncam-decoder/thirdparty)
+    target_include_directories(motioncam-jpeg-xl-test PRIVATE include)
+    target_link_libraries(motioncam-jpeg-xl-test PRIVATE
+        ${JXL_TARGET} Boost::filesystem Boost::regex spdlog::spdlog)
+    target_compile_definitions(motioncam-jpeg-xl-test PRIVATE TINY_DNG_ENABLE_JPEG_XL)
+    add_test(NAME motioncam-jpeg-xl-test COMMAND motioncam-jpeg-xl-test)
+
+    # These standalone tests intentionally use assert() for both execution and
+    # validation. Keep it enabled in Release builds so the tested operations
+    # are not compiled out.
+    foreach(test_target motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test)
+        if(MSVC)
+            target_compile_options(${test_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test_target} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
 endif()
 
 if(QT_VERSION_MAJOR EQUAL 6)

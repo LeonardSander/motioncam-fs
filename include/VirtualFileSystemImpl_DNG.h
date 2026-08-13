@@ -84,6 +84,7 @@ private:
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     std::map<Timestamp, bool> mHasBaselineExposure;
     std::map<Timestamp, bool> mHasAsShotNeutral;
+    std::map<Timestamp, double> mExposureTimes;
     mutable std::mutex mMutex;
 };
 

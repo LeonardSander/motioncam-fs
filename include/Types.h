@@ -292,6 +292,9 @@ struct RenderSettings {
     std::string exposureCompensation;
     QuadBayerMode quadBayerOption;
     std::string cfaPhase;
+    // JPEG XL distance used when finalizing compressed DNGs. Zero is
+    // mathematically lossless; positive values enable experimental lossy JXL.
+    float jxlDistance;
 
     // Constructor with defaults
     RenderSettings()
@@ -305,6 +308,7 @@ struct RenderSettings {
         , exposureCompensation("")
         , quadBayerOption(QuadBayerMode::Demosaic)
         , cfaPhase("Don't override CFA")
+        , jxlDistance(-1.0f)
     {}
 
     // Constructor with all parameters (strings for backward compatibility)
@@ -329,6 +333,7 @@ struct RenderSettings {
         , exposureCompensation(exp)
         , quadBayerOption(stringToQuadBayerMode(qb))
         , cfaPhase(cfa)
+        , jxlDistance(-1.0f)
     {}
 
     // Constructor with enum types directly
@@ -353,6 +358,7 @@ struct RenderSettings {
         , exposureCompensation(expComp)
         , quadBayerOption(quadBayer)
         , cfaPhase(cfa)
+        , jxlDistance(-1.0f)
     {}
 };
 

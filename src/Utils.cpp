@@ -1410,8 +1410,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Encode to reduce size in container
     auto actualBits = utils::bitsNeeded(dstWhiteLevel);
     auto encodeBits = actualBits;
+    const bool jpegXlCompression = compressionEnabled && settings.jxlDistance >= 0.0f;
 
-    // Skip packing if compression is enabled - lj92 needs unpacked 16-bit data
+    // Compressed codecs consume unpacked uint16 samples.
     // The compression will handle the redundancy
     if (!compressionEnabled) {
         if (demosaic && !remosaic) {
@@ -1460,8 +1461,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     tinydngwriter::DNGImage dng;
 
     dng.SetBigEndian(false);
-    dng.SetDNGVersion(1, 4, 0, 0);
-    dng.SetDNGBackwardVersion(1, 1, 0, 0);
+    dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
+    dng.SetDNGBackwardVersion(1, jpegXlCompression ? 7 : 1, 0, 0);
     
     // Set image dimensions and format FIRST (before image data)
     dng.SetImageWidth(width);
@@ -1483,9 +1484,12 @@ std::shared_ptr<std::vector<char>> generateDng(
         
     // Set compression based on user preference (BEFORE SetImageData)
     if (compressionEnabled) {
-        if (!dng.SetCompression(tinydngwriter::COMPRESSION_JPEG)) {
-            throw std::runtime_error("Failed to enable lossless JPEG compression");
-        }
+        if (settings.jxlDistance < 0.0f) {
+            if (!dng.SetCompression(tinydngwriter::COMPRESSION_JPEG))
+                throw std::runtime_error("Failed to enable JPEG 92 compression");
+        } else if (!dng.SetCompression(tinydngwriter::COMPRESSION_JPEG_XL) ||
+                   !dng.SetJXLDistance(settings.jxlDistance))
+            throw std::runtime_error("Failed to enable JPEG XL compression");
     } else {
         dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
     }
@@ -1577,9 +1581,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Rectangular
     dng.SetCFALayout(1);
 
-    // For compressed: use actualBits (tells lj92 the real bit depth)
+    // DNG 1.7 JPEG XL is decoded through a uint16 pixel buffer. Keep sensor
+    // values unchanged and describe their meaningful range with WhiteLevel.
     // For uncompressed: use encodeBits (the packed bit depth)
-    const uint16_t storedBits = compressionEnabled ? actualBits : encodeBits;
+    const uint16_t storedBits = jpegXlCompression ? 16 : actualBits;
     const uint16_t bps[3] = { storedBits, storedBits, storedBits };
     dng.SetBitsPerSample(samplesPerPixel, bps);
 

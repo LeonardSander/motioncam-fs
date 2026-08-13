@@ -583,6 +583,13 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
     std::string extension = srcPath.extension().string();
     std::string filename = srcPath.filename().string();
 
+    auto normalizedSource = fs::absolute(srcPath).lexically_normal().wstring();
+    auto normalizedDestination = fs::absolute(fs::path(dstPath)).lexically_normal().wstring();
+    std::transform(normalizedSource.begin(), normalizedSource.end(), normalizedSource.begin(), ::towlower);
+    std::transform(normalizedDestination.begin(), normalizedDestination.end(), normalizedDestination.begin(), ::towlower);
+    if (normalizedSource == normalizedDestination)
+        throw std::runtime_error("Source and mount destination must be different paths");
+
     spdlog::debug("Mounting file {} to {}", srcFile, dstPath);
 
     if(boost::iequals(extension, ".mcraw")) {

@@ -555,19 +555,31 @@
           <number>8</number>
          </property>
          <item>
-          <widget class="QCheckBox" name="dngCompressionCheckBox">
-           <property name="text">
-            <string>Compress Finalized DNGs</string>
-           </property>
-           <property name="checked">
-            <bool>false</bool>
-           </property>
-          </widget>
+          <layout class="QHBoxLayout" name="compressionLayout">
+           <property name="spacing"><number>8</number></property>
+           <item>
+            <widget class="QCheckBox" name="dngCompressionCheckBox">
+             <property name="text"><string>Compress Finalized DNGs</string></property>
+             <property name="checked"><bool>false</bool></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="dngCompressionModeComboBox">
+             <property name="minimumSize"><size><width>100</width><height>30</height></size></property>
+             <item><property name="text"><string>JPEG 92 Lossless</string></property></item>
+             <item><property name="text"><string>JPEG XL Lossless</string></property></item>
+             <item><property name="text"><string>JPEG XL Lossy 0.1</string></property></item>
+             <item><property name="text"><string>JPEG XL Lossy 0.3</string></property></item>
+             <item><property name="text"><string>JPEG XL Lossy 0.5</string></property></item>
+             <item><property name="text"><string>JPEG XL Lossy 1.0</string></property></item>
+            </widget>
+           </item>
+          </layout>
          </item>
          <item>
           <widget class="QLabel" name="compressionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Uses lossless JPEG compression for finalized sequences. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Uses JPEG and JPEG XL compression for finalization. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

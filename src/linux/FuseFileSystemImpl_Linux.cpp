@@ -123,7 +123,12 @@ struct LinuxFuseSession {
             mState->mountTime.store(
                 std::max(std::time(nullptr), previous + 1));
         }
-        // Render settings alter file bytes, so discard old kernel page cache.
+        // Render settings alter file bytes and often their sizes. Invalidating
+        // only the root leaves cached child attributes/pages behind.
+        for (const auto& entry : mFs->listFiles("")) {
+            const std::string path = "/" + entry.getFullPath().generic_string();
+            fuse_invalidate_path(mFuse, path.c_str());
+        }
         fuse_invalidate_path(mFuse, "/");
     }
     FileInfo getFileInfo() const { return mFs->getFileInfo(); }
@@ -197,8 +202,20 @@ private:
         const auto entry = context()->fs->findEntry(path);
         if (!entry)
             return -ENOENT;
-        return context()->fs->readFile(*entry, static_cast<size_t>(offset), size,
-                                       buffer, [](auto, auto) {}, false);
+        size_t bytesRead = 0;
+        int readError = 0;
+        context()->fs->readFile(
+            *entry, static_cast<size_t>(offset), size, buffer,
+            [&bytesRead, &readError](size_t count, int error) {
+                bytesRead = count;
+                readError = error;
+            },
+            false);
+        if (readError != 0)
+            return readError < 0 ? readError : -EIO;
+        if (bytesRead > static_cast<size_t>(std::numeric_limits<int>::max()))
+            return -EOVERFLOW;
+        return static_cast<int>(bytesRead);
     }
     void start() {
         fuse_operations operations{};
@@ -258,6 +275,11 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     const fs::path sourcePath(srcFile);
     const std::string extension = sourcePath.extension().string();
     const std::string filename = sourcePath.filename().string();
+
+    const auto normalizedSource = std::filesystem::absolute(srcFile).lexically_normal();
+    const auto normalizedDestination = std::filesystem::absolute(dstPath).lexically_normal();
+    if (normalizedSource == normalizedDestination)
+        throw std::runtime_error("Source and mount destination must be different paths");
 
     recoverStaleMount(dstPath);
     if (!QDir().mkpath(QString::fromStdString(dstPath)))

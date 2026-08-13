@@ -130,6 +130,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             minimumEffectiveExposure = std::min(minimumEffectiveExposure, effective);
             mHasBaselineExposure[frames[i].timestamp] = metadata[i].hasBaselineExposure;
             mHasAsShotNeutral[frames[i].timestamp] = metadata[i].hasAsShotNeutral;
+            mExposureTimes[frames[i].timestamp] = metadata[i].exposureTime;
             for (size_t c = 0; c < 3; ++c)
                 logNeutrals[c].push_back(std::log(std::max(1e-6f, metadata[i].asShotNeutral[c])));
         }
@@ -186,7 +187,6 @@ void VirtualFileSystemImpl_DNG::init() {
         dngEntry.type = EntryType::FILE_ENTRY;
         dngEntry.pathParts = {};
         dngEntry.name = vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
-        dngEntry.size = boost::filesystem::file_size(frames[i].filePath);
         dngEntry.userData = frames[i].timestamp;
         const bool addBaseline = (mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE) &&
                                  !mHasBaselineExposure[frames[i].timestamp];
@@ -195,11 +195,14 @@ void VirtualFileSystemImpl_DNG::init() {
         GainMap sizeGainMap;
         const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
                                  mDecoder->getGainMap(static_cast<int>(i), sizeGainMap);
-        const bool processHigher = mCfaSize > 2;
-        if (addBaseline || addNeutral || bakeGainMap || processHigher) {
+        const bool processHigher = mCfaSize > 2 ||
+            (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+        {
             std::vector<uint8_t> sizedData;
-            if (!mDecoder->extractFrame(static_cast<int>(i), sizedData))
-                throw std::runtime_error("Could not size transformed DNG");
+            if (!mDecoder->extractFrame(static_cast<int>(i), sizedData) ||
+                !DNGDecoder::ensureUncompressed(sizedData))
+                throw std::runtime_error("Could not size uncompressed DNG");
+            DNGDecoder::repairExposureTime(sizedData, mExposureTimes.at(frames[i].timestamp));
             if (bakeGainMap && !DNGDecoder::bakeGainMaps(
                     sizedData,
                     mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
@@ -216,6 +219,8 @@ void VirtualFileSystemImpl_DNG::init() {
             if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
                                             addNeutral ? &neutral : nullptr))
                 throw std::runtime_error("Could not size transformed DNG metadata");
+            if (!DNGDecoder::packUncompressedToWhiteLevel(sizedData))
+                throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
             dngEntry.size = sizedData.size();
         }
         mFiles.push_back(dngEntry);
@@ -309,7 +314,12 @@ size_t VirtualFileSystemImpl_DNG::generateFrame(
 }
 
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
-    const Entry& entry, bool /*jpegCompression*/) {
+    const Entry& entry, bool jpegCompression) {
+    if (!jpegCompression) if (auto cached = mCache.get(entry)) {
+        mCache.put(entry, cached);
+        return cached;
+    }
+    try {
     const auto timestamp = std::get<Timestamp>(entry.userData);
     const auto& frames = mDecoder->getFrames();
     const auto it = std::find_if(frames.begin(), frames.end(), [timestamp](const auto& frame) {
@@ -321,6 +331,9 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     std::vector<uint8_t> bytes;
     if (!mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), it)), bytes))
         throw std::runtime_error("Could not read source DNG");
+    if (!DNGDecoder::ensureUncompressed(bytes))
+        throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
+    DNGDecoder::repairExposureTime(bytes, mExposureTimes.at(timestamp));
 
     const int frameIndex = static_cast<int>(std::distance(frames.begin(), it));
     GainMap gainMap;
@@ -332,7 +345,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
 
-    if (mCfaSize > 2 && !DNGDecoder::processHigherCFA(
+    if ((mCfaSize > 2 || (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
+        !DNGDecoder::processHigherCFA(
             bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
             mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
@@ -357,12 +371,26 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
             throw std::runtime_error("Could not update DNG exposure/white-balance tags");
     }
-    return std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
+    if (!DNGDecoder::packUncompressedToWhiteLevel(bytes))
+        throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
+    if (jpegCompression) {
+        const bool compressed = mConfig.jxlDistance < 0.0f
+            ? DNGDecoder::compressLosslessJPEG(bytes)
+            : DNGDecoder::compressJPEGXL(bytes, mConfig.jxlDistance);
+        if (!compressed) throw std::runtime_error("Could not compress finalized DNG");
+    }
+    auto output = std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
+    if (!jpegCompression) mCache.put(entry, output);
+    return output;
+    } catch (...) {
+        if (!jpegCompression) mCache.markLoadFailed(entry);
+        throw;
+    }
 }
 
 void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     std::lock_guard<std::mutex> lock(mMutex);
-    
+    mCache.clear();
     mConfig = config;
     
     init();
