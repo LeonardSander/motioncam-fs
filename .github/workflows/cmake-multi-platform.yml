@@ -12,7 +12,8 @@ on:
 jobs:
   linux-appimage:
     name: Linux AppImage (Clang)
-    runs-on: ubuntu-22.04
+    # libjxl-dev is not available from the Ubuntu 22.04 runner repositories.
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout source
       uses: actions/checkout@v4
