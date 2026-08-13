@@ -67,6 +67,8 @@ public:
                                const std::array<float, 3>* asShotNeutral);
     static bool repairExposureTime(std::vector<uint8_t>& dngData, double exposureTime);
     static bool ensureUncompressed(std::vector<uint8_t>& dngData);
+    static bool overrideDataLevels(std::vector<uint8_t>& dngData,
+                                   const std::string& levels);
     static bool packUncompressedToWhiteLevel(std::vector<uint8_t>& dngData);
     static bool compressJPEGXL(std::vector<uint8_t>& dngData, float distance);
     static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);

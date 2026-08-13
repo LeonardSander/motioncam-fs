@@ -1,5 +1,6 @@
 #include "CalibrationData.h"
 #include "Types.h"
+#include "DataLevels.h"
 
 #include <cassert>
 #include <cmath>
@@ -45,6 +46,27 @@ int main() {
     assert(defaults.cfrTarget.mode == CFRMode::PreferDropFrame);
     assert(defaults.quadBayerOption == QuadBayerMode::Demosaic);
     assert(stringToQuadBayerMode("Correct QBCFA Metadata") == QuadBayerMode::CorrectQBCFAMetadata);
+
+    const std::array<float, 4> dynamicBlack{60, 61, 62, 63};
+    const std::array<float, 4> staticBlack{64, 65, 66, 67};
+    auto mixed = resolveDataLevels("Static/Dynamic", 1000, dynamicBlack, 1023, staticBlack);
+    assert(nearlyEqual(mixed.white, 1023));
+    assert(mixed.black == dynamicBlack);
+    mixed = resolveDataLevels("Dynamic/Static", 1000, dynamicBlack, 1023, staticBlack);
+    assert(nearlyEqual(mixed.white, 1000));
+    assert(mixed.black == staticBlack);
+    mixed = resolveDataLevels("1023/Dynamic", 1000, dynamicBlack, 1023, staticBlack);
+    assert(nearlyEqual(mixed.white, 1023));
+    assert(mixed.black == dynamicBlack);
+    mixed = resolveDataLevels("1023/Static", 1000, dynamicBlack, 1023, staticBlack);
+    assert(nearlyEqual(mixed.white, 1023));
+    assert(mixed.black == staticBlack);
+    mixed = resolveDataLevels("Dynamic/64", 1000, dynamicBlack, 1023, staticBlack);
+    assert(nearlyEqual(mixed.white, 1000));
+    assert(mixed.black[0] == 64 && mixed.black[3] == 64);
+    mixed = resolveDataLevels("Static/64", 1000, dynamicBlack, 1023, staticBlack);
+    assert(nearlyEqual(mixed.white, 1023));
+    assert(mixed.black == std::array<float, 4>{64, 64, 64, 64});
 
     auto customRate = stringToCFRTarget("48");
     assert(customRate.mode == CFRMode::Custom);

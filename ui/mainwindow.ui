@@ -545,6 +545,12 @@
              <string>16383/0</string>
             </property>
            </item>
+           <item><property name="text"><string>Static/Dynamic</string></property></item>
+           <item><property name="text"><string>Dynamic/Static</string></property></item>
+           <item><property name="text"><string>1023/Dynamic</string></property></item>
+           <item><property name="text"><string>1023/Static</string></property></item>
+           <item><property name="text"><string>Dynamic/64</string></property></item>
+           <item><property name="text"><string>Static/64</string></property></item>
             </widget>
            </item>
           </layout>

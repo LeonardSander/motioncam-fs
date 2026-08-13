@@ -3,6 +3,7 @@
 
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
+#include "DataLevels.h"
 
 #include <algorithm>
 #include <cmath>
@@ -852,61 +853,11 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     newWidth = (newWidth / 4) * 4;
     newHeight = (newHeight / 4) * 4;    
 
-    auto srcBlackLevel = metadata.dynamicBlackLevel;
-    auto srcWhiteLevel = metadata.dynamicWhiteLevel;
-
-    if (levels == "Static") {
-        srcBlackLevel = cameraConfiguration.blackLevel;
-        srcWhiteLevel = cameraConfiguration.whiteLevel;
-    } else if (!levels.empty()) {
-        const size_t separatorPos = levels.find('/');
-        if (separatorPos != std::string::npos) {
-            try {
-                const std::string whiteLevelStr = levels.substr(0, separatorPos);
-                const std::string blackLevelStr = levels.substr(separatorPos + 1);
-                
-                // Parse white level (int or float)
-                if (whiteLevelStr.find('.') != std::string::npos) 
-                    srcWhiteLevel = std::stof(whiteLevelStr);
-                else 
-                    srcWhiteLevel = std::stoul(whiteLevelStr);                
-                
-                // Parse black level (single value or comma-separated values)
-                if (blackLevelStr.find(',') != std::string::npos) {
-                    // Parse comma-separated values
-                    std::array<float, 4> blackValues = {0.0f, 0.0f, 0.0f, 0.0f};
-                    size_t start = 0;
-                    size_t valueIndex = 0;
-                    
-                    while (start < blackLevelStr.length() && valueIndex < 4) {
-                        size_t commaPos = blackLevelStr.find(',', start);
-                        if (commaPos == std::string::npos) commaPos = blackLevelStr.length();
-                        
-                        std::string valueStr = blackLevelStr.substr(start, commaPos - start);
-                        if (valueStr.find('.') != std::string::npos) {
-                            blackValues[valueIndex] = std::stof(valueStr);
-                        } else {
-                            blackValues[valueIndex] = std::stoul(valueStr);
-                        }
-                        
-                        valueIndex++;
-                        start = commaPos + 1;
-                    }                    
-                    srcBlackLevel = blackValues;
-                } else {
-                    // Parse single value for all channels
-                    float blackLevelValue;
-                    if (blackLevelStr.find('.') != std::string::npos) 
-                        blackLevelValue = std::stof(blackLevelStr);
-                    else 
-                        blackLevelValue = std::stoul(blackLevelStr);                                
-                    srcBlackLevel = {blackLevelValue, blackLevelValue, blackLevelValue, blackLevelValue};
-                }
-            } catch (const std::exception&) {
-                // Handle exception silently
-            }
-        }
-    }
+    const auto resolvedLevels = resolveDataLevels(
+        levels, metadata.dynamicWhiteLevel, metadata.dynamicBlackLevel,
+        cameraConfiguration.whiteLevel, cameraConfiguration.blackLevel);
+    auto srcBlackLevel = resolvedLevels.black;
+    auto srcWhiteLevel = resolvedLevels.white;
 
     uint32_t hqReductionShift = 0;
     if(cfaRepeatSize > 2 && scale > 1 && higherCfaHq) {

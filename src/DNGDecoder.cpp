@@ -1,4 +1,5 @@
 #include "DNGDecoder.h"
+#include "DataLevels.h"
 #include "Utils.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
@@ -1281,6 +1282,85 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
     setScalar(*offsetsE, stripOffset);
     setScalar(*countsE, newBytes);
     return replaceTiffStrip(data, stripOffset, stripBytes, decoded, little);
+}
+
+bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::string& levels) {
+    // Dynamic and Static deliberately mean the same thing for DNG input: the
+    // levels stored in this particular source frame.
+    if (levels.empty() || levels == "Dynamic" || levels == "Static" ||
+        levels == "Dynamic/Dynamic" || levels == "Dynamic/Static" ||
+        levels == "Static/Dynamic" || levels == "Static/Static")
+        return true;
+
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    auto scalar = [&](const TiffEntry& entry, uint32_t index = 0) -> float {
+        index = std::min(index, entry.count - 1);
+        if (entry.type == TIFF_TYPE_RATIONAL)
+            return static_cast<float>(readRational(data, entry, index, little));
+        const size_t offset = entry.valueOffset + static_cast<size_t>(index) *
+            (entry.type == TIFF_TYPE_SHORT ? 2 : 4);
+        return entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + offset, little)
+            : read32(data.data() + offset, little);
+    };
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            (scalar(entry) == TIFF_PHOTOMETRIC_CFA || scalar(entry) == 34892)) {
+            photo = &entry;
+            break;
+        }
+    }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag && entry.count)
+                return &entry;
+        return nullptr;
+    };
+    const auto white = find(TIFF_TAG_WHITE_LEVEL);
+    const auto black = find(TIFF_TAG_BLACK_LEVEL);
+    if (!white) return false;
+
+    std::array<float, 4> sourceBlack{0, 0, 0, 0};
+    if (black) for (uint32_t i = 0; i < sourceBlack.size(); ++i)
+        sourceBlack[i] = scalar(*black, i);
+    const float sourceWhite = scalar(*white);
+    const auto resolved = resolveDataLevels(
+        levels, sourceWhite, sourceBlack, sourceWhite, sourceBlack);
+
+    const bool overridesWhite = levels.substr(0, levels.find('/')) != "Dynamic" &&
+                                levels.substr(0, levels.find('/')) != "Static";
+    const auto separator = levels.find('/');
+    const std::string blackSelection = separator == std::string::npos
+        ? std::string{} : levels.substr(separator + 1);
+    const bool overridesBlack = !blackSelection.empty() &&
+        blackSelection != "Dynamic" && blackSelection != "Static";
+    if (overridesBlack && !black) return false;
+
+    auto writeLevel = [&](const TiffEntry& entry, uint32_t index, float value) {
+        index = std::min(index, entry.count - 1);
+        if (entry.type == TIFF_TYPE_RATIONAL) {
+            writeRational(data, entry, index, value, little);
+        } else {
+            const uint32_t rounded = static_cast<uint32_t>(std::clamp(
+                std::round(static_cast<double>(value)), 0.0,
+                static_cast<double>(std::numeric_limits<uint32_t>::max())));
+            const size_t offset = entry.valueOffset + static_cast<size_t>(index) *
+                (entry.type == TIFF_TYPE_SHORT ? 2 : 4);
+            if (entry.type == TIFF_TYPE_SHORT)
+                write16(data.data() + offset, static_cast<uint16_t>(std::min<uint32_t>(rounded, 65535)), little);
+            else
+                write32(data.data() + offset, rounded, little);
+        }
+    };
+    if (overridesWhite)
+        for (uint32_t i = 0; i < white->count; ++i) writeLevel(*white, i, resolved.white);
+    if (overridesBlack)
+        for (uint32_t i = 0; i < black->count; ++i)
+            writeLevel(*black, i, resolved.black[std::min<uint32_t>(i, 3)]);
+    return true;
 }
 
 bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {

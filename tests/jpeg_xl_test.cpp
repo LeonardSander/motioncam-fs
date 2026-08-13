@@ -348,6 +348,13 @@ int main() {
     assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));
+    auto overriddenRgb = mountedRgb;
+    assert(motioncam::DNGDecoder::overrideDataLevels(overriddenRgb, "Static"));
+    assert(tiffTagValue(overriddenRgb, 50717) == 1023);
+    assert(motioncam::DNGDecoder::overrideDataLevels(overriddenRgb, "4095/Dynamic"));
+    assert(tiffTagValue(overriddenRgb, 50717) == 4095);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(overriddenRgb));
+    assert(tiffTagValue(overriddenRgb, 258) == 12);
     assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(mountedRgb));
     assert(tiffTagValue(mountedRgb, 258) == 10);
     assert(tiffTagValue(mountedRgb, 279) ==

@@ -32,7 +32,7 @@ These cached files will remain in storage for now when unmounting MCRAW or closi
 
 - **Override Data Levels**
   
-  White and Black Levels used in Fuse will default to their dynamic tags stored in MCRAW. Static tags are also still available to choose as a fallback option (choose that to apply levels override from calibration.json).
+  White and Black Levels used in Fuse will default to their dynamic tags stored in MCRAW. Static tags are also available as a fallback (choose that to apply the levels override from calibration.json). White and black sources can be mixed independently, for example `Static/Dynamic`, `Dynamic/Static`, `1023/Dynamic`, or `Static/64`. DNG levels can also be overridden; for DNG inputs, both Dynamic and Static refer to the levels stored in each individual DNG. DirectLog uses its separate input-level handling.
 
 ---
 

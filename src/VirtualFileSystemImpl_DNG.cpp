@@ -202,6 +202,8 @@ void VirtualFileSystemImpl_DNG::init() {
             if (!mDecoder->extractFrame(static_cast<int>(i), sizedData) ||
                 !DNGDecoder::ensureUncompressed(sizedData))
                 throw std::runtime_error("Could not size uncompressed DNG");
+            if (!DNGDecoder::overrideDataLevels(sizedData, mConfig.levels))
+                throw std::runtime_error("Could not override source DNG data levels");
             DNGDecoder::repairExposureTime(sizedData, mExposureTimes.at(frames[i].timestamp));
             if (bakeGainMap && !DNGDecoder::bakeGainMaps(
                     sizedData,
@@ -333,6 +335,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         throw std::runtime_error("Could not read source DNG");
     if (!DNGDecoder::ensureUncompressed(bytes))
         throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
+    if (!DNGDecoder::overrideDataLevels(bytes, mConfig.levels))
+        throw std::runtime_error("Could not override source DNG data levels");
     DNGDecoder::repairExposureTime(bytes, mExposureTimes.at(timestamp));
 
     const int frameIndex = static_cast<int>(std::distance(frames.begin(), it));
@@ -415,7 +419,11 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         info.dataType = "Higher CFA " + std::to_string(mCfaSize) + "x" + std::to_string(mCfaSize) + " (DNG)";
     else
         info.dataType = "Bayer CFA (DNG)";
-    info.levelsInfo = "Source DNG";
+    const bool sourceLevels = mConfig.levels.empty() || mConfig.levels == "Dynamic" ||
+        mConfig.levels == "Static" || mConfig.levels == "Dynamic/Dynamic" ||
+        mConfig.levels == "Dynamic/Static" || mConfig.levels == "Static/Dynamic" ||
+        mConfig.levels == "Static/Static";
+    info.levelsInfo = sourceLevels ? "Source DNG" : mConfig.levels + " (DNG override)";
     
     // Calculate runtime from frame count and fps
     info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(mTotalFrames) / mFps) : 0.0f;

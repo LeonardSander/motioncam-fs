@@ -49,6 +49,7 @@ set(PROJECT_SOURCES
 
         include/mainwindow.h
         include/Types.h
+        include/DataLevels.h
         include/IVirtualFileSystem.h
         include/IFuseFileSystem.h
         include/VirtualFileSystemImpl.h
