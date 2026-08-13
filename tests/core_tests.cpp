@@ -66,7 +66,7 @@ int main() {
     assert(mixed.black[0] == 64 && mixed.black[3] == 64);
     mixed = resolveDataLevels("Static/64", 1000, dynamicBlack, 1023, staticBlack);
     assert(nearlyEqual(mixed.white, 1023));
-    assert(mixed.black == std::array<float, 4>{64, 64, 64, 64});
+    assert((mixed.black == std::array<float, 4>{64, 64, 64, 64}));
 
     auto customRate = stringToCFRTarget("48");
     assert(customRate.mode == CFRMode::Custom);
