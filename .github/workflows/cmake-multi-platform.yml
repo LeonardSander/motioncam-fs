@@ -127,6 +127,10 @@ jobs:
         vcpkgArguments: spdlog
 
     # ---------- MACOS DEPENDENCIES ----------
+    - name: Install macOS build tools
+      if: matrix.os == 'macos-latest'
+      run: brew install nasm
+
     - name: Install macFUSE (macOS)
       if: matrix.os == 'macos-latest'
       run: brew install --cask macfuse
