@@ -241,7 +241,7 @@ jobs:
 
     - name: Test
       if: matrix.os == 'macos-latest'
-      run: ctest --test-dir build --config ${{ matrix.build_type }} --output-on-failure
+      run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
 
 
 
