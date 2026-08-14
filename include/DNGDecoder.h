@@ -34,9 +34,17 @@ struct DNGFrameMetadata {
     double iso = 0.0;
     double baselineExposure = 0.0;
     std::array<float, 3> asShotNeutral = {1.0f, 1.0f, 1.0f};
+    std::array<float, 9> colorMatrix1{};
+    std::array<float, 9> colorMatrix2{};
+    std::array<float, 9> forwardMatrix1{};
+    std::array<float, 9> forwardMatrix2{};
     bool hasExposure = false;
     bool hasBaselineExposure = false;
     bool hasAsShotNeutral = false;
+    bool hasColorMatrix1 = false;
+    bool hasColorMatrix2 = false;
+    bool hasForwardMatrix1 = false;
+    bool hasForwardMatrix2 = false;
 };
 
 struct GainMap {
@@ -61,6 +69,8 @@ public:
     bool getGainMap(int frameNumber, GainMap& gainMap);
     bool getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
+    static bool getColorMetadata(const std::vector<uint8_t>& dngData,
+                                 DNGFrameMetadata& metadata);
     bool getCFAMetadata(int frameNumber, int& repeatSize, std::array<uint8_t, 4>& phase);
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,
@@ -70,6 +80,10 @@ public:
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,
                                    const std::string& levels);
     static bool packUncompressedToWhiteLevel(std::vector<uint8_t>& dngData);
+    static bool extractUncompressedRGB16(const std::vector<uint8_t>& dngData,
+                                         std::vector<uint8_t>& rgbData,
+                                         uint32_t& width,
+                                         uint32_t& height);
     static bool compressJPEGXL(std::vector<uint8_t>& dngData, float distance);
     static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,

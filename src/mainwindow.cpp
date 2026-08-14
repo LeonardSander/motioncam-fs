@@ -3,6 +3,7 @@
 #include "CalibrationData.h"
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
+#include "DNGDecoder.h"
 #include "Utils.h"
 #include "VirtualFileSystemImpl.h"
 
@@ -33,6 +34,8 @@ using namespace motioncam;
 #include <QProgressDialog>
 #include <QThread>
 #include <QUuid>
+#include <QTemporaryDir>
+#include <QStandardPaths>
 #include <algorithm>
 #include <QTimer>
 #include <QtConcurrent>
@@ -189,7 +192,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionModeComboBox, &QComboBox::currentIndexChanged, this, [this](int index) {
         static constexpr float modes[] = {-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
-        mRenderSettings.jxlDistance = modes[std::clamp(index, 0, 5)];
+        if (index < 6)
+            mRenderSettings.jxlDistance = modes[std::clamp(index, 0, 5)];
         onRenderSettingsChanged(Qt::CheckState::Unchecked);
     });
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
@@ -275,6 +279,8 @@ void MainWindow::saveSettings() {
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jxlDistance", mRenderSettings.jxlDistance);
+    settings.setValue("cameraNativeFinalization",
+        ui->dngCompressionModeComboBox->currentText() == "Camera Native");
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
@@ -345,7 +351,9 @@ void MainWindow::restoreSettings() {
     auto nearestJxl = std::min_element(jxlDistances.begin(), jxlDistances.end(), [this](float a, float b) {
         return std::abs(a - mRenderSettings.jxlDistance) < std::abs(b - mRenderSettings.jxlDistance);
     });
-    ui->dngCompressionModeComboBox->setCurrentIndex(static_cast<int>(nearestJxl - jxlDistances.begin()));
+    ui->dngCompressionModeComboBox->setCurrentIndex(
+        settings.value("cameraNativeFinalization", false).toBool()
+            ? 6 : static_cast<int>(nearestJxl - jxlDistances.begin()));
     ui->higherCfaHqCheckBox->setChecked(
         !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
 
@@ -867,7 +875,312 @@ void MainWindow::discardFile(QWidget* fileWidget) {
 }
 #endif
 
+void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
+    const QString srcFile = fileWidget->property("filePath").toString();
+    const QString mountPath = fileWidget->property("mountPath").toString();
+    bool mountOk = false;
+    const auto mountId = fileWidget->property("mountId").toInt(&mountOk);
+    if (!mountOk || srcFile.isEmpty() || mountPath.isEmpty()) {
+        QMessageBox::warning(this, "Camera Native finalization", "Mount information is unavailable.");
+        return;
+    }
+
+    // Camera Native is deliberately fed linear RGB. LOG60 is applied once by
+    // FFmpeg immediately before RGB-to-YUV conversion, without dithering.
+    auto stagingSettings = buildRenderSettings();
+    stagingSettings.options &= ~motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+    stagingSettings.options &= ~motioncam::RENDER_OPT_JPEG_COMPRESSION;
+    stagingSettings.options &= ~motioncam::RENDER_OPT_LOG_TRANSFORM;
+    stagingSettings.logTransform = motioncam::LogTransformMode::Disabled;
+    stagingSettings.cameraNativeStaging = true;
+    mFuseFilesystem->updateOptions(mountId, stagingSettings);
+
+    const auto info = mFuseFilesystem->getFileInfo(mountId);
+    if (!info) {
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        QMessageBox::warning(this, "Camera Native finalization", "Clip information is unavailable.");
+        return;
+    }
+    // FileInfo::dataType is a display label and deliberately continues to say
+    // "Quad Bayer CFA" even when the selected finalization path demosaics it.
+    // Inspect the source CFA metadata instead so 4x4 demosaic is accepted while
+    // confirmed 2x2 CFA is rejected before rendering.
+    bool unsupportedBayer = false;
+    const bool demosaicHigherCfa =
+        stagingSettings.quadBayerOption == motioncam::QuadBayerMode::Demosaic ||
+        stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicOCL;
+    try {
+        const QFileInfo inputInfo(srcFile);
+        const QString calibrationPath = inputInfo.isDir()
+            ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + ".json")
+            : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + ".json";
+        const auto calibration = QFile::exists(calibrationPath)
+            ? CalibrationData::loadFromFile(calibrationPath.toStdString())
+            : std::nullopt;
+        const int cfaSizeOverride = calibration && calibration->hasCfaSize && calibration->cfaSize > 0
+            ? calibration->cfaSize : 0;
+        if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive)) {
+            Decoder decoder(srcFile.toStdString());
+            const auto frames = decoder.getFrames();
+            if (!frames.empty()) {
+                std::vector<uint8_t> frameData;
+                nlohmann::json frameJson;
+                decoder.loadFrame(frames.front(), frameData, frameJson);
+                const auto metadata = CameraFrameMetadata::parse(frameJson);
+                const int cfaSize = cfaSizeOverride > 0 ? cfaSizeOverride : metadata.cfaSize;
+                unsupportedBayer = cfaSize <= 2 || !demosaicHigherCfa;
+            }
+        } else if (DNGDecoder::isDNGSequence(srcFile.toStdString())) {
+            DNGDecoder decoder(srcFile.toStdString());
+            int cfaSize = 0;
+            std::array<uint8_t, 4> cfaPhase{};
+            const bool hasCfa = decoder.getCFAMetadata(0, cfaSize, cfaPhase);
+            if (cfaSizeOverride > 0) cfaSize = cfaSizeOverride;
+            if (hasCfa || cfaSizeOverride > 0)
+                unsupportedBayer = cfaSize <= 2 || !demosaicHigherCfa;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("Could not preflight Camera Native CFA metadata: {}", e.what());
+    }
+    if (unsupportedBayer) {
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        QMessageBox::warning(this, "Camera Native finalization",
+            "Camera Native currently requires an RGB sequence. Enable demosaic for higher-CFA footage. "
+            "2x2 Bayer demosaic will be added later.");
+        return;
+    }
+
+    const QFileInfo sourceInfo(srcFile);
+    const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE";
+    const QDir outputDir(QFileInfo(mountPath).absolutePath());
+    const QString outputPath = outputDir.absoluteFilePath(outputBase + ".mov");
+    const QString jsonPath = outputDir.absoluteFilePath(outputBase + ".json");
+    if ((QFile::exists(outputPath) || QFile::exists(jsonPath)) &&
+        QMessageBox::question(this, "Replace Camera Native output?",
+            QString("Replace existing output for %1?").arg(outputBase),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        return;
+    }
+
+    QTemporaryDir staging(outputDir.absoluteFilePath(".camera-native-XXXXXX"));
+    if (!staging.isValid()) {
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        QMessageBox::critical(this, "Camera Native finalization", "Could not create the staging directory.");
+        return;
+    }
+
+    QProgressDialog progress("Rendering linear RGB sequence...", "Cancel", 0,
+        std::max(1, info->totalFrames - info->droppedFrames + info->duplicatedFrames), this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+
+    try {
+        mFuseFilesystem->finalize(mountId, staging.path().toStdString(), false,
+            [&](size_t completed, size_t count, const std::string& name) {
+                progress.setMaximum(static_cast<int>(count));
+                progress.setValue(static_cast<int>(completed));
+                if (!name.empty())
+                    progress.setLabelText(QString("Rendering RGB %1 of %2: %3")
+                        .arg(completed + 1).arg(count).arg(QString::fromStdString(name)));
+                QApplication::processEvents();
+                return !progress.wasCanceled();
+            });
+
+        QDir stageDir(staging.path());
+        const QStringList dngs = stageDir.entryList({"*.dng", "*.DNG"}, QDir::Files, QDir::Name);
+        if (dngs.isEmpty())
+            throw std::runtime_error("The rendered sequence contains no DNG frames");
+
+        // Feed our parser's RGB output directly to FFmpeg. This avoids both
+        // FFmpeg's unsupported 16-bit RGB DNG path and a sequence-sized raw
+        // intermediate file.
+        const QString partialPath = stageDir.absoluteFilePath(outputBase + ".mov");
+        const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
+        QStringList args{
+            "-hide_banner", "-y", "-f", "rawvideo", "-pixel_format", "rgb48le",
+            "-video_size", QString("%1x%2").arg(info->width).arg(info->height),
+            "-framerate", QString::number(info->fps, 'g', 9), "-i", "pipe:0"
+        };
+        const QString audioPath = stageDir.absoluteFilePath("audio.wav");
+        if (QFile::exists(audioPath))
+            args << "-i" << audioPath;
+        const QString log60 =
+            "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:"
+            "g=log(1+60*val/maxval)/log(61)*maxval:"
+            "b=log(1+60*val/maxval)/log(61)*maxval,"
+            "zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=none,"
+            "format=yuv420p10le";
+        args << "-map" << "0:v:0";
+        if (QFile::exists(audioPath))
+            args << "-map" << "1:a:0" << "-c:a" << "copy";
+        args << "-vf" << log60 << "-c:v" << "libx265" << "-preset" << "slow"
+             << "-crf" << "14" << "-pix_fmt" << "yuv420p10le"
+             << "-color_range" << "pc" << "-colorspace" << "bt2020nc"
+             << "-color_primaries" << "bt2020" << "-x265-params"
+             << "range=full:colorprim=bt2020:colormatrix=bt2020nc"
+             << "-fps_mode" << "cfr" << "-r" << QString::number(info->fps, 'g', 9)
+             << "-movflags" << "+write_colr" << "-frames:v" << QString::number(dngs.size())
+             << partialPath;
+
+        QString ffmpeg;
+#ifdef _WIN32
+        const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg.exe";
+#else
+        const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg";
+#endif
+        if (QFileInfo(bundled).isExecutable()) ffmpeg = bundled;
+        else ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+        if (ffmpeg.isEmpty())
+            throw std::runtime_error(
+                "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
+
+        progress.setRange(0, dngs.size());
+        progress.setValue(0);
+        progress.setLabelText("Encoding LOG60 Camera Native frame 1...");
+        QProcess encoder;
+        encoder.setProcessChannelMode(QProcess::MergedChannels);
+        encoder.start(ffmpeg, args, QIODevice::ReadWrite);
+        if (!encoder.waitForStarted())
+            throw std::runtime_error("Could not start FFmpeg: " + encoder.errorString().toStdString());
+
+        QByteArray diagnostic;
+        DNGFrameMetadata colorMetadata;
+        for (int frameIndex = 0; frameIndex < dngs.size(); ++frameIndex) {
+            const QString& dngName = dngs[frameIndex];
+            QFile dngFile(stageDir.absoluteFilePath(dngName));
+            if (!dngFile.open(QIODevice::ReadOnly))
+                throw std::runtime_error("Could not open staged frame " + dngName.toStdString());
+            const QByteArray dngArray = dngFile.readAll();
+            std::vector<uint8_t> dngBytes(dngArray.begin(), dngArray.end());
+            if (frameIndex == 0 && !DNGDecoder::getColorMetadata(dngBytes, colorMetadata))
+                throw std::runtime_error("Could not read color metadata from the staged DNG");
+            std::vector<uint8_t> rgbBytes;
+            uint32_t frameWidth = 0, frameHeight = 0;
+            if (!DNGDecoder::extractUncompressedRGB16(
+                    dngBytes, rgbBytes, frameWidth, frameHeight) ||
+                frameWidth != static_cast<uint32_t>(info->width) ||
+                frameHeight != static_cast<uint32_t>(info->height))
+                throw std::runtime_error("Could not extract RGB16 from staged frame " + dngName.toStdString());
+
+            constexpr qint64 chunkSize = 1024 * 1024;
+            qint64 offset = 0;
+            while (offset < static_cast<qint64>(rgbBytes.size())) {
+                if (progress.wasCanceled()) {
+                    encoder.kill();
+                    encoder.waitForFinished();
+                    throw std::runtime_error("Finalization cancelled");
+                }
+                if (encoder.state() == QProcess::NotRunning) {
+                    diagnostic += encoder.readAll();
+                    throw std::runtime_error(("FFmpeg stopped while receiving frame data:\n" +
+                        QString::fromUtf8(diagnostic.right(4000))).toStdString());
+                }
+                const qint64 count = std::min(chunkSize,
+                    static_cast<qint64>(rgbBytes.size()) - offset);
+                const qint64 written = encoder.write(
+                    reinterpret_cast<const char*>(rgbBytes.data()) + offset, count);
+                if (written < 0)
+                    throw std::runtime_error("Could not stream RGB frame data to FFmpeg");
+                offset += written;
+                while (encoder.bytesToWrite() > 2 * chunkSize) {
+                    encoder.waitForBytesWritten(100);
+                    QApplication::processEvents();
+                    diagnostic += encoder.readAll();
+                    if (diagnostic.size() > 8000) diagnostic = diagnostic.right(4000);
+                    if (progress.wasCanceled()) {
+                        encoder.kill();
+                        encoder.waitForFinished();
+                        throw std::runtime_error("Finalization cancelled");
+                    }
+                    if (encoder.state() == QProcess::NotRunning)
+                        throw std::runtime_error(("FFmpeg stopped while receiving frame data:\n" +
+                            QString::fromUtf8(diagnostic.right(4000))).toStdString());
+                }
+            }
+            progress.setValue(frameIndex + 1);
+            if (frameIndex + 1 < dngs.size())
+                progress.setLabelText(QString("Encoding LOG60 Camera Native frame %1 of %2...")
+                    .arg(frameIndex + 2).arg(dngs.size()));
+            QApplication::processEvents();
+        }
+        encoder.closeWriteChannel();
+        progress.setLabelText("Finishing LOG60 Camera Native MOV...");
+        while (encoder.state() != QProcess::NotRunning) {
+            encoder.waitForFinished(100);
+            QApplication::processEvents();
+            diagnostic += encoder.readAll();
+            if (diagnostic.size() > 8000) diagnostic = diagnostic.right(4000);
+            if (progress.wasCanceled()) {
+                encoder.kill();
+                encoder.waitForFinished();
+                throw std::runtime_error("Finalization cancelled");
+            }
+        }
+        if (encoder.exitStatus() != QProcess::NormalExit || encoder.exitCode() != 0) {
+            diagnostic += encoder.readAll();
+            throw std::runtime_error(("FFmpeg failed:\n" +
+                QString::fromUtf8(diagnostic.right(4000))).toStdString());
+        }
+
+        nlohmann::json sidecar;
+        sidecar["transferFunction"] = "LOG60";
+        sidecar["dataLevels"] = "Full";
+        if (colorMetadata.hasColorMatrix1) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
+        if (colorMetadata.hasColorMatrix2) sidecar["colorMatrix2"] = colorMetadata.colorMatrix2;
+        if (colorMetadata.hasForwardMatrix1) sidecar["forwardMatrix1"] = colorMetadata.forwardMatrix1;
+        if (colorMetadata.hasForwardMatrix2) sidecar["forwardMatrix2"] = colorMetadata.forwardMatrix2;
+        if (colorMetadata.hasAsShotNeutral) sidecar["asShotNeutral"] = colorMetadata.asShotNeutral;
+        std::ofstream jsonFile(partialJsonPath.toStdString(), std::ios::trunc);
+        if (!jsonFile)
+            throw std::runtime_error("Could not create Camera Native JSON sidecar");
+        jsonFile << sidecar.dump(2) << '\n';
+        if (!jsonFile)
+            throw std::runtime_error("Could not write Camera Native JSON sidecar");
+        jsonFile.close();
+
+        // Commit the pair together. Existing outputs are retained until both
+        // temporary files are complete and are restored if either rename fails.
+        const QString backupId = ".camera-native-backup-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const QString movBackup = outputPath + backupId;
+        const QString jsonBackup = jsonPath + backupId;
+        const bool hadMov = QFile::exists(outputPath);
+        const bool hadJson = QFile::exists(jsonPath);
+        if ((hadMov && !QFile::rename(outputPath, movBackup)) ||
+            (hadJson && !QFile::rename(jsonPath, jsonBackup))) {
+            if (QFile::exists(movBackup)) QFile::rename(movBackup, outputPath);
+            throw std::runtime_error("Could not preserve the existing Camera Native output");
+        }
+        const bool movCommitted = QFile::rename(partialPath, outputPath);
+        const bool jsonCommitted = movCommitted && QFile::rename(partialJsonPath, jsonPath);
+        if (!jsonCommitted) {
+            if (movCommitted) QFile::remove(outputPath);
+            if (QFile::exists(movBackup)) QFile::rename(movBackup, outputPath);
+            if (QFile::exists(jsonBackup)) QFile::rename(jsonBackup, jsonPath);
+            throw std::runtime_error("Could not commit the completed Camera Native MOV and JSON");
+        }
+        QFile::remove(movBackup);
+        QFile::remove(jsonBackup);
+
+        progress.close();
+        QMessageBox::information(this, "Camera Native finalization",
+            QString("Created:\n%1\n%2").arg(outputPath, jsonPath));
+    } catch (const std::exception& e) {
+        progress.close();
+        if (std::string(e.what()) != "Finalization cancelled")
+            QMessageBox::critical(this, "Camera Native finalization", QString::fromStdString(e.what()));
+    }
+
+    // Restore the mounted view; Camera Native settings affect finalization only.
+    mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+}
+
 void MainWindow::finalizeFile(QWidget* fileWidget) {
+    if (ui->dngCompressionCheckBox->isChecked() &&
+        ui->dngCompressionModeComboBox->currentText() == "Camera Native") {
+        finalizeCameraNative(fileWidget);
+        return;
+    }
     auto mountPath = fileWidget->property("mountPath").toString();
     auto srcFile = fileWidget->property("filePath").toString();
     

@@ -37,6 +37,7 @@ struct DirectLogVideoInfo {
     int64_t totalFrames;
     std::string pixelFormat;
     bool isHLG;
+    bool isLOG60;
     double duration;
 };
 
@@ -53,6 +54,7 @@ public:
     void setFullRangeOverride(std::optional<bool> fullRange);
     
     static bool isHLGVideo(const std::string& filePath);
+    static bool isLOG60Video(const std::string& filePath);
 
 private:
     void initFFmpeg();
@@ -60,6 +62,7 @@ private:
     void cleanup();
     bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData);
     void applyHLGToLinear(std::vector<uint16_t>& rgbData);
+    void applyLOG60ToLinear(std::vector<uint16_t>& rgbData);
 
 private:
     std::string mFilePath;

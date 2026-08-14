@@ -704,9 +704,11 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.width = mWidth;
     info.height = mHeight;
     
-    // Determine data type based on remosaic option
-    bool shouldRemosaic = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
-    info.dataType = shouldRemosaic ? "Bayer CFA" : "RGB";
+    // This describes the input, not the selected DNG render operation. A
+    // companion JSON may explicitly reinterpret the input CFA size.
+    const int cfaSize = mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0
+        ? mCalibration->cfaSize : 0;
+    info.dataType = vfs::getDisplayDataType(true, cfaSize);
     
     // Determine levels info
     const bool applyLogCurve =

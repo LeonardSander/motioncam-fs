@@ -39,6 +39,10 @@ namespace {
     constexpr uint16_t TIFF_TAG_ISO = 34855;
     constexpr uint16_t TIFF_TAG_SUB_IFDS = 330;
     constexpr uint16_t TIFF_TAG_AS_SHOT_NEUTRAL = 50728;
+    constexpr uint16_t TIFF_TAG_COLOR_MATRIX_1 = 50721;
+    constexpr uint16_t TIFF_TAG_COLOR_MATRIX_2 = 50722;
+    constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_1 = 50964;
+    constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_2 = 50965;
     constexpr uint16_t TIFF_TAG_BASELINE_EXPOSURE = 50730;
     constexpr uint16_t TIFF_TYPE_BYTE = 1;
     constexpr uint16_t TIFF_TYPE_SHORT = 3;
@@ -710,9 +714,23 @@ bool DNGDecoder::getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps) {
 bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
+    if (!getColorMetadata(data, metadata)) return false;
+    metadata.hasExposure = metadata.iso > 0.0 && metadata.exposureTime > 0.0;
+    return true;
+}
+
+bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
+                                  DNGFrameMetadata& metadata) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
+    auto readMatrix = [&](const TiffEntry& entry, std::array<float, 9>& matrix,
+                          bool& present) {
+        if (entry.type != TIFF_TYPE_SRATIONAL || entry.count < matrix.size()) return;
+        for (uint32_t i = 0; i < matrix.size(); ++i)
+            matrix[i] = static_cast<float>(readRational(data, entry, i, little));
+        present = true;
+    };
     for (const auto& entry : entries) {
         if (entry.tag == TIFF_TAG_EXPOSURE_TIME && entry.type == TIFF_TYPE_RATIONAL && entry.count)
             metadata.exposureTime = readRational(data, entry, 0, little);
@@ -729,9 +747,15 @@ bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
             for (uint32_t c = 0; c < 3; ++c)
                 metadata.asShotNeutral[c] = static_cast<float>(readRational(data, entry, c, little));
             metadata.hasAsShotNeutral = true;
-        }
+        } else if (entry.tag == TIFF_TAG_COLOR_MATRIX_1)
+            readMatrix(entry, metadata.colorMatrix1, metadata.hasColorMatrix1);
+        else if (entry.tag == TIFF_TAG_COLOR_MATRIX_2)
+            readMatrix(entry, metadata.colorMatrix2, metadata.hasColorMatrix2);
+        else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_1)
+            readMatrix(entry, metadata.forwardMatrix1, metadata.hasForwardMatrix1);
+        else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_2)
+            readMatrix(entry, metadata.forwardMatrix2, metadata.hasForwardMatrix2);
     }
-    metadata.hasExposure = metadata.iso > 0.0 && metadata.exposureTime > 0.0;
     return true;
 }
 
@@ -1424,6 +1448,99 @@ bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
     if (countsE->type == TIFF_TYPE_SHORT) write16(data.data() + countsE->valueOffset, packedBytes, little);
     else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(packedBytes), little);
     return replaceTiffStrip(data, oldOffset, oldBytes, packed, little);
+}
+
+bool DNGDecoder::extractUncompressedRGB16(const std::vector<uint8_t>& data,
+                                          std::vector<uint8_t>& rgbData,
+                                          uint32_t& width,
+                                          uint32_t& height) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    auto scalar = [&](const TiffEntry& entry) -> uint32_t {
+        return entry.type == TIFF_TYPE_SHORT ? read16(data.data() + entry.valueOffset, little)
+                                             : read32(data.data() + entry.valueOffset, little);
+    };
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_PHOTOMETRIC) continue;
+        const uint32_t value = scalar(entry);
+        if (value == 2 || value == 34892) { photo = &entry; break; }
+    }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag) return &entry;
+        return nullptr;
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE ||
+        !sppE || offsetsE->count != 1 || countsE->count != 1 ||
+        scalar(*compressionE) != TIFF_COMPRESSION_NONE || scalar(*sppE) != 3)
+        return false;
+    width = scalar(*widthE);
+    height = scalar(*heightE);
+    const uint32_t bits = scalar(*bitsE);
+    const uint32_t offset = scalar(*offsetsE), bytes = scalar(*countsE);
+    if (!width || !height || bits < 8 || bits > 16 || offset > data.size() ||
+        bytes > data.size() - offset) return false;
+
+    const size_t samplesPerRow = static_cast<size_t>(width) * 3;
+    const size_t rowBytes = (samplesPerRow * bits + 7) / 8;
+    if (rowBytes > bytes / height) return false;
+
+    auto level = [&](const TiffEntry* entry, uint32_t channel,
+                     double fallback) -> double {
+        if (!entry || !entry->count) return fallback;
+        const uint32_t index = std::min(channel, entry->count - 1);
+        if (entry->type == TIFF_TYPE_RATIONAL || entry->type == TIFF_TYPE_SRATIONAL)
+            return readRational(data, *entry, index, little);
+        const size_t pos = entry->valueOffset + static_cast<size_t>(index) *
+            (entry->type == TIFF_TYPE_SHORT ? 2 : 4);
+        return entry->type == TIFF_TYPE_SHORT
+            ? read16(data.data() + pos, little) : read32(data.data() + pos, little);
+    };
+    const auto blackE = find(TIFF_TAG_BLACK_LEVEL);
+    const auto whiteE = find(TIFF_TAG_WHITE_LEVEL);
+    const double defaultWhite = static_cast<double>((uint32_t{1} << bits) - 1);
+    std::array<double, 3> black{}, white{};
+    for (uint32_t channel = 0; channel < 3; ++channel) {
+        black[channel] = level(blackE, channel, 0.0);
+        white[channel] = level(whiteE, channel, defaultWhite);
+        if (!(white[channel] > black[channel])) return false;
+    }
+
+    const size_t sampleCount = samplesPerRow * height;
+    if (sampleCount > std::numeric_limits<size_t>::max() / sizeof(uint16_t)) return false;
+    rgbData.resize(sampleCount * sizeof(uint16_t));
+    for (uint32_t y = 0; y < height; ++y) {
+        size_t bit = static_cast<size_t>(y) * rowBytes * 8;
+        for (size_t x = 0; x < samplesPerRow; ++x) {
+            uint16_t value = 0;
+            if (bits == 16) {
+                value = read16(data.data() + offset + static_cast<size_t>(y) * rowBytes + x * 2,
+                               little);
+            } else {
+                for (uint32_t b = 0; b < bits; ++b, ++bit)
+                    value = static_cast<uint16_t>((value << 1) |
+                        ((data[offset + bit / 8] >> (7 - bit % 8)) & 1));
+            }
+            const uint32_t channel = static_cast<uint32_t>(x % 3);
+            const double normalized = std::clamp(
+                (static_cast<double>(value) - black[channel]) /
+                    (white[channel] - black[channel]),
+                0.0, 1.0);
+            const uint16_t output = static_cast<uint16_t>(std::lround(normalized * 65535.0));
+            const size_t outputOffset =
+                (static_cast<size_t>(y) * samplesPerRow + x) * sizeof(uint16_t);
+            // FFmpeg is explicitly configured for rgb48le regardless of the DNG byte order.
+            rgbData[outputOffset] = static_cast<uint8_t>(output & 0xff);
+            rgbData[outputOffset + 1] = static_cast<uint8_t>(output >> 8);
+        }
+    }
+    return true;
 }
 
 bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {

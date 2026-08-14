@@ -75,6 +75,7 @@ private:
     int mDuplicatedFrames;
     int mWidth;
     int mHeight;
+    bool mHasCfa = false;
     int mCfaSize = 2;
     std::array<uint8_t, 4> mCfaPhase = {0, 1, 1, 2};
     std::unique_ptr<DNGDecoder> mDecoder;

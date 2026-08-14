@@ -295,6 +295,9 @@ struct RenderSettings {
     // JPEG XL distance used when finalizing compressed DNGs. Zero is
     // mathematically lossless; positive values enable experimental lossy JXL.
     float jxlDistance;
+    // Internal export mode: write normalized, unpacked 16-bit RGB staging DNGs
+    // for the Camera Native encoder. This is never persisted as a UI option.
+    bool cameraNativeStaging;
 
     // Constructor with defaults
     RenderSettings()
@@ -309,6 +312,7 @@ struct RenderSettings {
         , quadBayerOption(QuadBayerMode::Demosaic)
         , cfaPhase("Don't override CFA")
         , jxlDistance(-1.0f)
+        , cameraNativeStaging(false)
     {}
 
     // Constructor with all parameters (strings for backward compatibility)
@@ -334,6 +338,7 @@ struct RenderSettings {
         , quadBayerOption(stringToQuadBayerMode(qb))
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
+        , cameraNativeStaging(false)
     {}
 
     // Constructor with enum types directly
@@ -359,6 +364,7 @@ struct RenderSettings {
         , quadBayerOption(quadBayer)
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
+        , cameraNativeStaging(false)
     {}
 };
 

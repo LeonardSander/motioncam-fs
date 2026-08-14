@@ -300,16 +300,12 @@ void syncAudio(
     }
 }
 
-std::string getDisplayDataType(
-    bool directLogRGB, bool quadBayerCapture, bool interpretAsQuad, bool remosaic) {
-    if(!(quadBayerCapture || interpretAsQuad || directLogRGB)) 
+std::string getDisplayDataType(bool sourceRgb, int cfaSize) {
+    if (cfaSize > 2)
+        return "Higher CFA " + std::to_string(cfaSize) + "x" + std::to_string(cfaSize);
+    if (cfaSize == 2 || !sourceRgb)
         return "Bayer CFA";
-    else if (directLogRGB)
-        return remosaic ? "RGB -> Bayer CFA" : "RGB";
-    else if (quadBayerCapture || interpretAsQuad)
-        //return remosaic ? "Quad -> Bayer CFA" : "Quad Bayer CFA";  // when QB demosaic and remosaic is implemented
-        return "Quad Bayer CFA";
-    return "ERROR";
+    return "RGB";
 }
 
 std::string getDisplayDataLevels(

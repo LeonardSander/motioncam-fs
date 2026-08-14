@@ -106,9 +106,11 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mTotalFrames = static_cast<int>(sequenceInfo.totalFrames);
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
-        mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
-        if (mCalibration && mCalibration->hasCfaSize)
+        mHasCfa = mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
+        if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
             mCfaSize = mCalibration->cfaSize;
+            mHasCfa = mCfaSize >= 2;
+        }
         
         // Calculate frame rate statistics
         calculateFrameRateStats();
@@ -375,7 +377,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
             throw std::runtime_error("Could not update DNG exposure/white-balance tags");
     }
-    if (!DNGDecoder::packUncompressedToWhiteLevel(bytes))
+    if (!mConfig.cameraNativeStaging && !DNGDecoder::packUncompressedToWhiteLevel(bytes))
         throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
     if (jpegCompression) {
         const bool compressed = mConfig.jxlDistance < 0.0f
@@ -412,13 +414,7 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     info.height = mHeight;
     
     // DNG sequences are pass-through, so we show source format
-    if (mCfaSize > 2 && (mConfig.quadBayerOption == QuadBayerMode::Demosaic ||
-                         mConfig.quadBayerOption == QuadBayerMode::DemosaicOCL))
-        info.dataType = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? "Higher CFA -> Bayer CFA" : "RGB (DNG)";
-    else if (mCfaSize > 2)
-        info.dataType = "Higher CFA " + std::to_string(mCfaSize) + "x" + std::to_string(mCfaSize) + " (DNG)";
-    else
-        info.dataType = "Bayer CFA (DNG)";
+    info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";
     const bool sourceLevels = mConfig.levels.empty() || mConfig.levels == "Dynamic" ||
         mConfig.levels == "Static" || mConfig.levels == "Dynamic/Dynamic" ||
         mConfig.levels == "Dynamic/Static" || mConfig.levels == "Static/Dynamic" ||

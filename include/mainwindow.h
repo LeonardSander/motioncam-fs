@@ -99,6 +99,7 @@ private slots:
     void discardFile(QWidget* fileWidget);
 #endif
     void finalizeFile(QWidget* fileWidget);
+    void finalizeCameraNative(QWidget* fileWidget);
     void createCalibrationJson(QWidget* fileWidget);
     void updateCalibrationButtonStates();
 

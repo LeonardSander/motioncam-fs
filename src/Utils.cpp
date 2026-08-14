@@ -1010,9 +1010,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         throw std::runtime_error("Input buffer too small");
     }
 
-    // Dithering is always enabled for log transforms
+    // Dithering is always enabled for DNG log transforms.
     const bool disableDither = false;
-    
+
     // Process the image by copying and packing 2x2 Bayer blocks
     std::array<float, 16> shadingMapVals;
     shadingMapVals.fill(1.0f);
@@ -1352,6 +1352,23 @@ std::shared_ptr<std::vector<char>> generateDng(
             processedData.resize(rgbSamples.size() * sizeof(uint16_t));
             std::memcpy(processedData.data(), rgbSamples.data(), processedData.size());
             dstBlackLevel = {channelBlack[0], channelBlack[1], channelBlack[2], 0};
+
+            // FFmpeg's TIFF/DNG decoder rejects packed 10/12-bit RGB. Camera
+            // Native staging uses a conventional unpacked 16-bit linear RGB
+            // image. LOG60 is applied by FFmpeg immediately before YUV conversion.
+            if (settings.cameraNativeStaging) {
+                auto* rgb = reinterpret_cast<uint16_t*>(processedData.data());
+                for (size_t i = 0; i < rgbSamples.size(); ++i) {
+                    const size_t channel = i % 3;
+                    const float black = static_cast<float>(dstBlackLevel[channel]);
+                    const float range = std::max(1.0f, static_cast<float>(dstWhiteLevel) - black);
+                    const float normalized = std::clamp((static_cast<float>(rgb[i]) - black) / range, 0.0f, 1.0f);
+                    rgb[i] = static_cast<uint16_t>(std::lround(normalized * 65535.0f));
+                }
+
+                dstBlackLevel = {0, 0, 0, 0};
+                dstWhiteLevel = 65535;
+            }
         }
     }
 
@@ -1365,7 +1382,7 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     // Compressed codecs consume unpacked uint16 samples.
     // The compression will handle the redundancy
-    if (!compressionEnabled) {
+    if (!compressionEnabled && !settings.cameraNativeStaging) {
         if (demosaic && !remosaic) {
             if (encodeBits <= 4) encodeRGBTo4Bit(processedData, width, height), encodeBits = 4;
             else if (encodeBits <= 6) encodeRGBTo6Bit(processedData, width, height), encodeBits = 6;

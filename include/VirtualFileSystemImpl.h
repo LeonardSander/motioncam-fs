@@ -93,8 +93,7 @@ void syncAudio(
     int sampleRate,
     int numChannels);
 
-std::string getDisplayDataType(
-    bool directLogRGB, bool quadBayerCapture, bool interpretAsQuad, bool remosaic);
+std::string getDisplayDataType(bool sourceRgb, int cfaSize);
 
 std::string getDisplayDataLevels(
     float dynWhiteLevel, std::array<float, 4> dynBlackLevel, 

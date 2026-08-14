@@ -388,11 +388,10 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo.duplicatedFrames = duplicatedFrames;
     mFileInfo.width = cameraFrameMetadata.width;
     mFileInfo.height = cameraFrameMetadata.height;
-    mFileInfo.dataType = vfs::getDisplayDataType(
-        false,
-        cameraFrameMetadata.needRemosaic, 
-        mSettings.options & RENDER_OPT_INTERPRET_AS_QUAD_BAYER,
-        mSettings.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+    int displayCfaSize = cameraFrameMetadata.cfaSize;
+    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
+        displayCfaSize = mCalibration->cfaSize;
+    mFileInfo.dataType = vfs::getDisplayDataType(false, displayCfaSize);
     mFileInfo.levelsInfo = vfs::getDisplayDataLevels(
         cameraFrameMetadata.dynamicWhiteLevel, cameraFrameMetadata.dynamicBlackLevel,
         cameraConfig.whiteLevel, cameraConfig.blackLevel,
