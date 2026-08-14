@@ -83,7 +83,9 @@ jobs:
         path: artifacts/*.AppImage
 
   build:
-    runs-on: ${{ matrix.os }}
+    # Qt 6.7.2 still links the legacy AGL framework. The macos-latest image
+    # now uses the macOS 26 SDK, where AGL has been removed.
+    runs-on: ${{ matrix.os == 'macos-latest' && 'macos-14' || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
