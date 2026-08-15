@@ -6,6 +6,7 @@
 #include "Utils.h"
 #include "AudioWriter.h"
 #include "LRUCache.h"
+#include "DNGDecoder.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -269,6 +270,13 @@ void VirtualFileSystemImpl_MCRAW::init() {
         false  // Compression always false for virtual filesystem
     );
 
+    {
+        std::vector<uint8_t> timed(dngData->begin(), dngData->end());
+        if (!DNGDecoder::setTimingMetadata(timed, mFps, 0))
+            throw std::runtime_error("Could not size DNG timing metadata");
+        dngData = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
+    }
+
     mTypicalDngSize = dngData->size();
 
     // Generate file entries
@@ -342,7 +350,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
     int duplicatedFrames = 0;
     int droppedFrames = 0;
 
-    // Add video frames
+    // Add video frames. When filling a timestamp gap, hold the most recently
+    // displayed frame until the newly arrived frame's mapped position.
+    Timestamp previousTimestamp = frames.front();
     for(auto& x : frames) {
         if(applyCFRConversion) {
             int pts = vfs::getFrameNumberFromTimestamp(x, frames[0], mFps);
@@ -350,22 +360,25 @@ void VirtualFileSystemImpl_MCRAW::init() {
                 ++droppedFrames;
                 continue;
             }
-            duplicatedFrames += std::max(0, pts - lastPts);
-
-            // lastPts is the next output position. Fill gaps and emit the
-            // current frame at its mapped position.
-            while(lastPts <= pts) {
+            while(lastPts < pts) {
                 Entry entry;
-
-                // Add main entry
                 entry.type = EntryType::FILE_ENTRY;
                 entry.size = mTypicalDngSize;
-                entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
-                entry.userData = x;
-
+                entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");
+                entry.userData = previousTimestamp;
                 mFiles.emplace_back(entry);
                 ++lastPts;
+                ++duplicatedFrames;
             }
+
+            Entry entry;
+            entry.type = EntryType::FILE_ENTRY;
+            entry.size = mTypicalDngSize;
+            entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");
+            entry.userData = x;
+            mFiles.emplace_back(entry);
+            ++lastPts;
+            previousTimestamp = x;
         } else {
             Entry entry;
 
@@ -398,7 +411,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mSettings.levels, logTransformModeToString(mSettings.logTransform),
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
         mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
-    mFileInfo.runtimeSeconds = audioDurationSec;   
+    mFileInfo.runtimeSeconds = audioDurationSec;
 }
 
 std::vector<Entry> VirtualFileSystemImpl_MCRAW::listFiles(const std::string& filter) const {
@@ -501,6 +514,14 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             neutralOverride);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
+        const bool converted = mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION;
+        const Timestamp outputTimestamp = converted
+            ? static_cast<Timestamp>(std::llround(outputFrameNumber * 1e9 / mFps))
+            : timestamp - frames.front();
+        std::vector<uint8_t> timed(output->begin(), output->end());
+        if (!DNGDecoder::setTimingMetadata(timed, mFps, outputTimestamp))
+            throw std::runtime_error("Could not write DNG timing metadata");
+        output = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
         if (!jpegCompression)
             mCache.put(entry, output);
         return output;

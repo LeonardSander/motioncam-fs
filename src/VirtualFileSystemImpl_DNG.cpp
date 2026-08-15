@@ -172,6 +172,13 @@ void VirtualFileSystemImpl_DNG::init() {
     spdlog::debug("VirtualFileSystemImpl_DNG::init(options={})", optionsToString(mConfig.options));
     
     mFiles.clear();
+    mDroppedFrames = 0;
+    mDuplicatedFrames = 0;
+    const bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+    FrameRateInfo frameRateInfo{};
+    frameRateInfo.medianFrameRate = mMedFps;
+    frameRateInfo.averageFrameRate = mAvgFps;
+    mFps = vfs::determineCFRTarget(frameRateInfo, mConfig.cfrTarget, applyCFRConversion);
 
 #ifdef _WIN32
     Entry desktopIni;
@@ -182,8 +189,11 @@ void VirtualFileSystemImpl_DNG::init() {
     mFiles.push_back(desktopIni);
 #endif
 
-    // Generate DNG files for each frame using actual timestamps
+    // Size a source entry for each DNG, then map those entries to the output
+    // cadence in exactly the same way as MCRAW and DirectLog.
     const auto& frames = mDecoder->getFrames();
+    std::vector<Entry> sourceEntries;
+    sourceEntries.reserve(frames.size());
     for (size_t i = 0; i < frames.size(); ++i) {
         Entry dngEntry;
         dngEntry.type = EntryType::FILE_ENTRY;
@@ -223,11 +233,41 @@ void VirtualFileSystemImpl_DNG::init() {
             if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
                                             addNeutral ? &neutral : nullptr))
                 throw std::runtime_error("Could not size transformed DNG metadata");
+            if (!DNGDecoder::setTimingMetadata(sizedData, mFps, 0))
+                throw std::runtime_error("Could not size DNG timing metadata");
             if (!DNGDecoder::packUncompressedToWhiteLevel(sizedData))
                 throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
             dngEntry.size = sizedData.size();
         }
-        mFiles.push_back(dngEntry);
+        sourceEntries.push_back(dngEntry);
+    }
+
+    int nextOutput = 0;
+    if (applyCFRConversion && !sourceEntries.empty()) {
+        size_t previousSource = 0;
+        for (size_t i = 0; i < sourceEntries.size(); ++i) {
+            const int pts = vfs::getFrameNumberFromTimestamp(
+                frames[i].timestamp, frames.front().timestamp, mFps);
+            if (pts < nextOutput) {
+                ++mDroppedFrames;
+                continue;
+            }
+            while (nextOutput < pts) {
+                Entry held = sourceEntries[previousSource];
+                held.name = vfs::constructFrameFilename(mBaseName, nextOutput++, 6, "dng");
+                mFiles.push_back(std::move(held));
+                ++mDuplicatedFrames;
+            }
+            Entry current = sourceEntries[i];
+            current.name = vfs::constructFrameFilename(mBaseName, nextOutput++, 6, "dng");
+            mFiles.push_back(std::move(current));
+            previousSource = i;
+        }
+    } else {
+        for (auto& entry : sourceEntries) {
+            entry.name = vfs::constructFrameFilename(mBaseName, nextOutput++, 6, "dng");
+            mFiles.push_back(std::move(entry));
+        }
     }
 
     mTypicalDngSize = mFiles.empty() ? 0 : mFiles.back().size;
@@ -341,6 +381,15 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         throw std::runtime_error("Could not override source DNG data levels");
     DNGDecoder::repairExposureTime(bytes, mExposureTimes.at(timestamp));
 
+    const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
+    const int outputFrameNumber = std::stoi(frameDigits);
+    const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+    const Timestamp outputTimestamp = converted
+        ? static_cast<Timestamp>(std::llround(outputFrameNumber * 1e9 / mFps))
+        : timestamp - frames.front().timestamp;
+    if (!DNGDecoder::setTimingMetadata(bytes, mFps, outputTimestamp))
+        throw std::runtime_error("Could not update DNG timing metadata");
+
     const int frameIndex = static_cast<int>(std::distance(frames.begin(), it));
     GainMap gainMap;
     if ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
@@ -422,7 +471,8 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     info.levelsInfo = sourceLevels ? "Source DNG" : mConfig.levels + " (DNG override)";
     
     // Calculate runtime from frame count and fps
-    info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(mTotalFrames) / mFps) : 0.0f;
+    const int outputFrames = mTotalFrames - mDroppedFrames + mDuplicatedFrames;
+    info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(outputFrames) / mFps) : 0.0f;
     
     return info;
 }

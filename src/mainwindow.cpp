@@ -45,6 +45,12 @@ using namespace motioncam;
 
 #include <boost/filesystem.hpp>
 
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libavutil/error.h>
+}
+
 #ifdef _WIN32
 #include "win/FuseFileSystemImpl_Win.h"
 #elif __APPLE__
@@ -56,6 +62,116 @@ using namespace motioncam;
 namespace {
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
+
+    std::string avError(int error) {
+        char text[AV_ERROR_MAX_STRING_SIZE]{};
+        av_strerror(error, text, sizeof(text));
+        return text;
+    }
+
+    class NutVideoPipe {
+    public:
+        NutVideoPipe(QProcess& process, QByteArray& diagnostic, int width, int height)
+            : mProcess(process), mDiagnostic(diagnostic) {
+            int error = avformat_alloc_output_context2(&mContext, nullptr, "nut", nullptr);
+            if (error < 0 || !mContext) throw std::runtime_error("Could not create NUT muxer");
+            AVStream* stream = avformat_new_stream(mContext, nullptr);
+            if (!stream) throw std::runtime_error("Could not create NUT video stream");
+            mStreamIndex = stream->index;
+            mStream = stream;
+            stream->time_base = {1, 1000000000};
+            stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
+            stream->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
+            stream->codecpar->format = AV_PIX_FMT_RGB48LE;
+            stream->codecpar->width = width;
+            stream->codecpar->height = height;
+            constexpr int bufferSize = 64 * 1024;
+            auto* buffer = static_cast<unsigned char*>(av_malloc(bufferSize));
+            if (!buffer) throw std::runtime_error("Could not allocate NUT output buffer");
+            mIo = avio_alloc_context(buffer, bufferSize, 1, this, nullptr, &writePacket, nullptr);
+            if (!mIo) {
+                av_free(buffer);
+                throw std::runtime_error("Could not create NUT output stream");
+            }
+            mContext->pb = mIo;
+            mContext->flags |= AVFMT_FLAG_CUSTOM_IO;
+            error = avformat_write_header(mContext, nullptr);
+            if (error < 0) throw std::runtime_error("Could not write NUT header: " + avError(error));
+            mHeaderWritten = true;
+        }
+
+        ~NutVideoPipe() {
+            if (mContext && mHeaderWritten && !mFinished) av_write_trailer(mContext);
+            if (mIo) {
+                av_freep(&mIo->buffer);
+                avio_context_free(&mIo);
+            }
+            avformat_free_context(mContext);
+        }
+
+        void writeFrame(const std::vector<uint8_t>& rgb, int64_t pts, int64_t duration) {
+            AVPacket* packet = av_packet_alloc();
+            if (!packet) throw std::runtime_error("Could not allocate NUT video packet");
+            const int error = av_new_packet(packet, static_cast<int>(rgb.size()));
+            if (error < 0) {
+                av_packet_free(&packet);
+                throw std::runtime_error("Could not allocate NUT frame: " + avError(error));
+            }
+            std::memcpy(packet->data, rgb.data(), rgb.size());
+            packet->stream_index = mStreamIndex;
+            packet->pts = packet->dts = av_rescale_q(pts, {1, 1000000000}, mStream->time_base);
+            packet->duration = std::max<int64_t>(1,
+                av_rescale_q(duration, {1, 1000000000}, mStream->time_base));
+            packet->flags |= AV_PKT_FLAG_KEY;
+            const int writeError = av_write_frame(mContext, packet);
+            av_packet_free(&packet);
+            if (writeError < 0)
+                throw std::runtime_error("Could not stream NUT frame: " + avError(writeError));
+        }
+
+        void finish() {
+            if (!mFinished) {
+                const int error = av_write_trailer(mContext);
+                if (error < 0) throw std::runtime_error("Could not finish NUT stream: " + avError(error));
+                avio_flush(mIo);
+                mFinished = true;
+            }
+        }
+
+    private:
+        static int writePacket(void* opaque, const uint8_t* data, int size) {
+            auto& self = *static_cast<NutVideoPipe*>(opaque);
+            self.mDiagnostic += self.mProcess.readAll();
+            if (self.mDiagnostic.size() > 8000)
+                self.mDiagnostic = self.mDiagnostic.right(4000);
+            int offset = 0;
+            while (offset < size) {
+                if (self.mProcess.state() == QProcess::NotRunning) return AVERROR(EIO);
+                const qint64 written = self.mProcess.write(
+                    reinterpret_cast<const char*>(data) + offset, size - offset);
+                if (written < 0) return AVERROR(EIO);
+                offset += static_cast<int>(written);
+                while (self.mProcess.bytesToWrite() > 2 * 1024 * 1024) {
+                    if (!self.mProcess.waitForBytesWritten(100) &&
+                        self.mProcess.state() == QProcess::NotRunning) return AVERROR(EIO);
+                    QApplication::processEvents();
+                    self.mDiagnostic += self.mProcess.readAll();
+                    if (self.mDiagnostic.size() > 8000)
+                        self.mDiagnostic = self.mDiagnostic.right(4000);
+                }
+            }
+            return size;
+        }
+
+        QProcess& mProcess;
+        QByteArray& mDiagnostic;
+        AVFormatContext* mContext = nullptr;
+        AVIOContext* mIo = nullptr;
+        AVStream* mStream = nullptr;
+        int mStreamIndex = 0;
+        bool mHeaderWritten = false;
+        bool mFinished = false;
+    };
 }
 
 motioncam::RenderSettings MainWindow::buildRenderSettings() const {
@@ -997,11 +1113,20 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         // intermediate file.
         const QString partialPath = stageDir.absoluteFilePath(outputBase + ".mov");
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
-        QStringList args{
-            "-hide_banner", "-y", "-f", "rawvideo", "-pixel_format", "rgb48le",
-            "-video_size", QString("%1x%2").arg(info->width).arg(info->height),
-            "-framerate", QString::number(info->fps, 'g', 9), "-i", "pipe:0"
-        };
+        const bool convertToCfr =
+            stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+        std::vector<Timestamp> frameTimestamps;
+        {
+            DNGDecoder stagedTiming(staging.path().toStdString());
+            const auto& timedFrames = stagedTiming.getFrames();
+            if (timedFrames.size() != static_cast<size_t>(dngs.size()) ||
+                std::any_of(timedFrames.begin(), timedFrames.end(),
+                    [](const auto& frame) { return !frame.hasExactPresentationTimestamp; }))
+                throw std::runtime_error("The staged DNG sequence is missing frame timestamps");
+            frameTimestamps.reserve(timedFrames.size());
+            for (const auto& frame : timedFrames) frameTimestamps.push_back(frame.timestamp);
+        }
+        QStringList args{"-hide_banner", "-y", "-f", "nut", "-i", "pipe:0"};
         const QString audioPath = stageDir.absoluteFilePath("audio.wav");
         if (QFile::exists(audioPath))
             args << "-i" << audioPath;
@@ -1019,8 +1144,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
              << "-color_range" << "pc" << "-colorspace" << "bt2020nc"
              << "-color_primaries" << "bt2020" << "-x265-params"
              << "range=full:colorprim=bt2020:colormatrix=bt2020nc"
-             << "-fps_mode" << "cfr" << "-r" << QString::number(info->fps, 'g', 9)
-             << "-movflags" << "+write_colr" << "-frames:v" << QString::number(dngs.size())
+             << "-fps_mode" << (convertToCfr ? "cfr" : "vfr");
+        if (convertToCfr)
+            args << "-r" << QString::number(info->fps, 'g', 9);
+        args << "-movflags" << "+write_colr" << "-frames:v" << QString::number(dngs.size())
              << partialPath;
 
         QString ffmpeg;
@@ -1043,8 +1170,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         encoder.start(ffmpeg, args, QIODevice::ReadWrite);
         if (!encoder.waitForStarted())
             throw std::runtime_error("Could not start FFmpeg: " + encoder.errorString().toStdString());
-
         QByteArray diagnostic;
+        NutVideoPipe videoPipe(encoder, diagnostic, info->width, info->height);
         DNGFrameMetadata colorMetadata;
         for (int frameIndex = 0; frameIndex < dngs.size(); ++frameIndex) {
             const QString& dngName = dngs[frameIndex];
@@ -1063,47 +1190,23 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
                 frameHeight != static_cast<uint32_t>(info->height))
                 throw std::runtime_error("Could not extract RGB16 from staged frame " + dngName.toStdString());
 
-            constexpr qint64 chunkSize = 1024 * 1024;
-            qint64 offset = 0;
-            while (offset < static_cast<qint64>(rgbBytes.size())) {
-                if (progress.wasCanceled()) {
-                    encoder.kill();
-                    encoder.waitForFinished();
-                    throw std::runtime_error("Finalization cancelled");
-                }
-                if (encoder.state() == QProcess::NotRunning) {
-                    diagnostic += encoder.readAll();
-                    throw std::runtime_error(("FFmpeg stopped while receiving frame data:\n" +
-                        QString::fromUtf8(diagnostic.right(4000))).toStdString());
-                }
-                const qint64 count = std::min(chunkSize,
-                    static_cast<qint64>(rgbBytes.size()) - offset);
-                const qint64 written = encoder.write(
-                    reinterpret_cast<const char*>(rgbBytes.data()) + offset, count);
-                if (written < 0)
-                    throw std::runtime_error("Could not stream RGB frame data to FFmpeg");
-                offset += written;
-                while (encoder.bytesToWrite() > 2 * chunkSize) {
-                    encoder.waitForBytesWritten(100);
-                    QApplication::processEvents();
-                    diagnostic += encoder.readAll();
-                    if (diagnostic.size() > 8000) diagnostic = diagnostic.right(4000);
-                    if (progress.wasCanceled()) {
-                        encoder.kill();
-                        encoder.waitForFinished();
-                        throw std::runtime_error("Finalization cancelled");
-                    }
-                    if (encoder.state() == QProcess::NotRunning)
-                        throw std::runtime_error(("FFmpeg stopped while receiving frame data:\n" +
-                            QString::fromUtf8(diagnostic.right(4000))).toStdString());
-                }
+            if (progress.wasCanceled()) {
+                encoder.kill();
+                encoder.waitForFinished();
+                throw std::runtime_error("Finalization cancelled");
             }
+            const int64_t pts = frameTimestamps[static_cast<size_t>(frameIndex)];
+            const int64_t duration = frameIndex + 1 < dngs.size()
+                ? frameTimestamps[static_cast<size_t>(frameIndex + 1)] - pts
+                : static_cast<int64_t>(std::llround(1e9 / info->fps));
+            videoPipe.writeFrame(rgbBytes, pts, std::max<int64_t>(1, duration));
             progress.setValue(frameIndex + 1);
             if (frameIndex + 1 < dngs.size())
                 progress.setLabelText(QString("Encoding LOG60 Camera Native frame %1 of %2...")
                     .arg(frameIndex + 2).arg(dngs.size()));
             QApplication::processEvents();
         }
+        videoPipe.finish();
         encoder.closeWriteChannel();
         progress.setLabelText("Finishing LOG60 Camera Native MOV...");
         while (encoder.state() != QProcess::NotRunning) {

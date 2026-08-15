@@ -1,6 +1,7 @@
 #include "VirtualFileSystemImpl_DirectLog.h"
 #include "VirtualFileSystemImpl.h"
 #include "DirectLogDecoder.h"
+#include "DNGDecoder.h"
 #include "CalibrationData.h"
 #include "Utils.h"
 #include "LRUCache.h"
@@ -157,6 +158,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
         if (mDecoder->extractFrame(0, sampleRgbData)) {
             std::vector<uint8_t> sampleDngData;
             if (convertRGBToDNG(sampleRgbData, sampleDngData, 0, frames[0].timestamp)) {
+                if (!DNGDecoder::setTimingMetadata(sampleDngData, mFps, 0))
+                    throw std::runtime_error("Could not size DirectLog DNG timing metadata");
                 mTypicalDngSize = sampleDngData.size();
                 spdlog::info("DirectLog DNG size determined from sample: {} bytes ({:.2f} MB)", 
                             mTypicalDngSize, mTypicalDngSize / (1024.0 * 1024.0));
@@ -176,6 +179,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
     
     if (applyCFRConversion) {
         // CFR conversion: duplicate/drop frames to match target framerate
+        Timestamp previousTimestamp = frames.front().timestamp;
         for (size_t i = 0; i < frames.size(); ++i) {
             int pts = vfs::getFrameNumberFromTimestamp(frames[i].timestamp, frames[0].timestamp, mFps);
             
@@ -184,19 +188,28 @@ void VirtualFileSystemImpl_DirectLog::init() {
                 continue;
             }
 
-            // Fill any missing output positions, then emit this frame's
-            // position. lastPts is the next output index to create.
-            mDuplicatedFrames += std::max(0, pts - lastPts);
-            while (lastPts <= pts) {
+            // Hold the preceding frame through gaps, then switch to the
+            // current frame at its mapped output position.
+            while (lastPts < pts) {
                 Entry dngEntry;
                 dngEntry.type = EntryType::FILE_ENTRY;
                 dngEntry.pathParts = {};
                 dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
                 dngEntry.size = mTypicalDngSize;
-                dngEntry.userData = frames[i].timestamp;
+                dngEntry.userData = previousTimestamp;
                 mFiles.push_back(dngEntry);
                 ++lastPts;
+                ++mDuplicatedFrames;
             }
+            Entry dngEntry;
+            dngEntry.type = EntryType::FILE_ENTRY;
+            dngEntry.pathParts = {};
+            dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
+            dngEntry.size = mTypicalDngSize;
+            dngEntry.userData = frames[i].timestamp;
+            mFiles.push_back(dngEntry);
+            ++lastPts;
+            previousTimestamp = frames[i].timestamp;
         }
     } else {
         // No CFR conversion: use frames as-is
@@ -655,6 +668,12 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
         std::vector<uint8_t> dngData;
         if (!convertRGBToDNG(rgbData, dngData, outputFrameNumber, timestamp, jpegCompression))
             throw std::runtime_error("Could not generate DirectLog DNG");
+        const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+        const Timestamp outputTimestamp = converted
+            ? static_cast<Timestamp>(std::llround(outputFrameNumber * 1e9 / mFps))
+            : timestamp - frames.front().timestamp;
+        if (!DNGDecoder::setTimingMetadata(dngData, mFps, outputTimestamp))
+            throw std::runtime_error("Could not write DirectLog DNG timing metadata");
 
         auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
         if (!jpegCompression)

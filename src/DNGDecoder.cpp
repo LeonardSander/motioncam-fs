@@ -11,6 +11,8 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <sstream>
+#include <iomanip>
 #include "liblj92/lj92.h"
 #include <jxl/decode.h>
 #include <jxl/encode.h>
@@ -44,6 +46,9 @@ namespace {
     constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_1 = 50964;
     constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_2 = 50965;
     constexpr uint16_t TIFF_TAG_BASELINE_EXPOSURE = 50730;
+    constexpr uint16_t TIFF_TAG_TIME_CODES = 51043;
+    constexpr uint16_t TIFF_TAG_FRAME_RATE = 51044;
+    constexpr uint16_t TIFF_TAG_XMP = 700;
     constexpr uint16_t TIFF_TYPE_BYTE = 1;
     constexpr uint16_t TIFF_TYPE_SHORT = 3;
     constexpr uint16_t TIFF_TYPE_LONG = 4;
@@ -448,6 +453,154 @@ namespace {
         return true;
     }
 
+    bool addMissingTimingEntries(std::vector<uint8_t>& data, bool addFrameRate,
+                                 bool addTimeCode, bool addXmp, uint32_t xmpBytes, bool little) {
+        const int additions = addFrameRate + addTimeCode + addXmp;
+        if (!additions) return true;
+        const uint32_t oldIfd = read32(data.data() + 4, little);
+        if (oldIfd + 2 > data.size()) return false;
+        const uint16_t oldCount = read16(data.data() + oldIfd, little);
+        const size_t oldEnd = static_cast<size_t>(oldIfd) + 2 + static_cast<size_t>(oldCount) * 12;
+        if (oldEnd + 4 > data.size() || oldCount > std::numeric_limits<uint16_t>::max() - additions)
+            return false;
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t newIfd = static_cast<uint32_t>(data.size());
+        const uint16_t newCount = static_cast<uint16_t>(oldCount + additions);
+        const size_t tableSize = 2 + static_cast<size_t>(newCount) * 12 + 4;
+        const size_t externalSize = (addFrameRate ? 8 : 0) + (addTimeCode ? 8 : 0) +
+                                    (addXmp ? xmpBytes : 0);
+        data.resize(data.size() + tableSize + externalSize, 0);
+        std::vector<std::array<uint8_t, 12>> entries;
+        entries.reserve(newCount);
+        for (uint16_t i = 0; i < oldCount; ++i) {
+            std::array<uint8_t, 12> entry{};
+            std::memcpy(entry.data(), data.data() + oldIfd + 2 + static_cast<size_t>(i) * 12, 12);
+            entries.push_back(entry);
+        }
+        uint32_t valuePos = newIfd + static_cast<uint32_t>(tableSize);
+        auto add = [&](uint16_t tag, uint16_t type, uint32_t count, uint32_t bytes) {
+            std::array<uint8_t, 12> entry{};
+            write16(entry.data(), tag, little);
+            write16(entry.data() + 2, type, little);
+            write32(entry.data() + 4, count, little);
+            write32(entry.data() + 8, valuePos, little);
+            entries.push_back(entry);
+            valuePos += bytes;
+        };
+        if (addFrameRate) add(TIFF_TAG_FRAME_RATE, TIFF_TYPE_RATIONAL, 1, 8);
+        if (addTimeCode) add(TIFF_TAG_TIME_CODES, TIFF_TYPE_BYTE, 8, 8);
+        if (addXmp) add(TIFF_TAG_XMP, TIFF_TYPE_BYTE, xmpBytes, xmpBytes);
+        std::sort(entries.begin(), entries.end(), [little](const auto& a, const auto& b) {
+            return read16(a.data(), little) < read16(b.data(), little);
+        });
+        write16(data.data() + newIfd, newCount, little);
+        size_t pos = static_cast<size_t>(newIfd) + 2;
+        for (const auto& entry : entries) {
+            std::memcpy(data.data() + pos, entry.data(), 12);
+            pos += 12;
+        }
+        std::memcpy(data.data() + pos, data.data() + oldEnd, 4);
+        write32(data.data() + 4, newIfd, little);
+        return true;
+    }
+
+    uint8_t toBcd(int value) {
+        return static_cast<uint8_t>(((value / 10) << 4) | (value % 10));
+    }
+
+    int fromBcd(uint8_t value) {
+        return ((value >> 4) & 0x03) * 10 + (value & 0x0f);
+    }
+
+    int64_t dropFrameNumber(int64_t frame, int nominalFps) {
+        const int droppedPerMinute = nominalFps == 60 ? 4 : 2;
+        const int64_t framesPerMinute = nominalFps * 60 - droppedPerMinute;
+        const int64_t framesPerTenMinutes = nominalFps * 600 - droppedPerMinute * 9;
+        const int64_t tenMinuteBlocks = frame / framesPerTenMinutes;
+        const int64_t remainder = frame % framesPerTenMinutes;
+        return frame + droppedPerMinute * 9 * tenMinuteBlocks +
+            (remainder >= droppedPerMinute
+                ? droppedPerMinute * ((remainder - droppedPerMinute) / framesPerMinute)
+                : 0);
+    }
+
+    constexpr auto RELATIVE_PRESENTATION_TIMESTAMP_NS =
+        "rpt:RelativePresentationTimestampNs=";
+    constexpr auto RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE =
+        "https://github.com/motioncam-app/motioncam-fs";
+
+    std::string relativePresentationTimestampXmp(Timestamp timestampNs) {
+        std::ostringstream value;
+        value << std::setw(20) << std::setfill('0') << timestampNs;
+        return "<?xpacket begin=''?>"
+               "<x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+               "<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>"
+               "<rdf:Description xmlns:rpt='" +
+               std::string(RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) + "' "
+               "rpt:RelativePresentationTimestampNs='" + value.str() + "'/>"
+               "</rdf:RDF></x:xmpmeta><?xpacket end='w'?>";
+    }
+
+    bool readRelativePresentationTimestamp(const std::vector<uint8_t>& data,
+                                           const TiffEntry& entry, Timestamp& timestamp) {
+        if (entry.tag != TIFF_TAG_XMP || entry.type != TIFF_TYPE_BYTE || !entry.count) return false;
+        const std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
+        if (xmp.find(RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) == std::string::npos) return false;
+        const std::string marker = RELATIVE_PRESENTATION_TIMESTAMP_NS;
+        const auto markerPos = xmp.find(marker);
+        if (markerPos == std::string::npos || markerPos + marker.size() >= xmp.size()) return false;
+        const char quote = xmp[markerPos + marker.size()];
+        if (quote != '\'' && quote != '"') return false;
+        const auto begin = markerPos + marker.size() + 1;
+        const auto end = xmp.find(quote, begin);
+        if (end == std::string::npos) return false;
+        try {
+            const auto value = std::stoull(xmp.substr(begin, end - begin));
+            if (value > static_cast<uint64_t>(std::numeric_limits<Timestamp>::max())) return false;
+            timestamp = static_cast<Timestamp>(value);
+            return true;
+        } catch (...) { return false; }
+    }
+
+    bool writeRelativePresentationTimestamp(std::vector<uint8_t>& data, const TiffEntry& entry,
+                                            Timestamp timestamp, bool little) {
+        std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
+        std::ostringstream value;
+        value << std::setw(20) << std::setfill('0') << timestamp;
+        const bool hasTimingNamespace =
+            xmp.find(RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) != std::string::npos;
+        const std::string marker = RELATIVE_PRESENTATION_TIMESTAMP_NS;
+        const auto markerPos = xmp.find(marker);
+        if (hasTimingNamespace && markerPos != std::string::npos &&
+            markerPos + marker.size() < xmp.size()) {
+            const char quote = xmp[markerPos + marker.size()];
+            const auto begin = markerPos + marker.size() + 1;
+            const auto end = xmp.find(quote, begin);
+            if ((quote == '\'' || quote == '"') && end != std::string::npos) {
+                xmp.replace(begin, end - begin, value.str());
+            }
+        } else {
+            const auto rdfEnd = xmp.find("</rdf:RDF>");
+            if (rdfEnd == std::string::npos) return false;
+            xmp.insert(rdfEnd,
+                "<rdf:Description xmlns:rpt='" +
+                std::string(RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) + "' "
+                "rpt:RelativePresentationTimestampNs='" +
+                value.str() + "'/>");
+        }
+        if (xmp.size() == entry.count) {
+            std::memcpy(data.data() + entry.valueOffset, xmp.data(), xmp.size());
+            return true;
+        }
+        if (data.size() & 1u) data.push_back(0);
+        if (data.size() > std::numeric_limits<uint32_t>::max() - xmp.size()) return false;
+        const uint32_t offset = static_cast<uint32_t>(data.size());
+        data.insert(data.end(), xmp.begin(), xmp.end());
+        write32(data.data() + entry.entryOffset + 4, static_cast<uint32_t>(xmp.size()), little);
+        write32(data.data() + entry.entryOffset + 8, offset, little);
+        return true;
+    }
+
     bool addCfaEntries(std::vector<uint8_t>& data, uint32_t ifdOffset,
                        const std::array<uint8_t, 4>& phase, bool little) {
         if (read32(data.data() + 4, little) != ifdOffset || ifdOffset + 2 > data.size())
@@ -549,7 +702,7 @@ void DNGDecoder::analyzeSequence() {
                 (mFrames.back().timestamp - mFrames.front().timestamp) / 1000000000.0;
             mSequenceInfo.fps = totalDuration > 0.0
                 ? (mFrames.size() - 1) / totalDuration : 30.0;
-        } else {
+        } else if (!(mSequenceInfo.fps > 0.0)) {
             mSequenceInfo.fps = 30.0; // Default
         }
     }
@@ -604,6 +757,46 @@ void DNGDecoder::findDNGFiles() {
         if (!readDNGFile(frame.filePath, bytes)) continue;
         bool little = true;
         const auto entries = findTiffEntries(bytes, little);
+        double frameRate = 0.0;
+        for (const auto& entry : entries) {
+            Timestamp embeddedTimestamp = 0;
+            if (readRelativePresentationTimestamp(bytes, entry, embeddedTimestamp)) {
+                frame.timestamp = embeddedTimestamp;
+                frame.hasExactPresentationTimestamp = true;
+            }
+            if (entry.tag == TIFF_TAG_FRAME_RATE && entry.type == TIFF_TYPE_RATIONAL && entry.count) {
+                frameRate = readRational(bytes, entry, 0, little);
+                if (!(mSequenceInfo.fps > 0.0)) mSequenceInfo.fps = frameRate;
+            }
+        }
+        if (!frame.hasExactPresentationTimestamp && frameRate > 0.0) {
+            for (const auto& entry : entries) {
+                if (entry.tag != TIFF_TAG_TIME_CODES || entry.type != TIFF_TYPE_BYTE || entry.count < 8)
+                    continue;
+                const auto* tc = bytes.data() + entry.valueOffset;
+                const int nominal = frameRate >= 47.0 && frameRate <= 61.0
+                    ? static_cast<int>(std::lround(frameRate / 2.0))
+                    : std::max(1, std::min(30, static_cast<int>(std::lround(frameRate))));
+                const int fieldsPerCode = frameRate >= 47.0 && frameRate <= 61.0 ? 2 : 1;
+                const int field = fieldsPerCode == 2
+                    ? ((nominal == 25 ? tc[3] : tc[1]) & 0x80 ? 1 : 0) : 0;
+                const int secondsPart = fromBcd(tc[1] & 0x7f);
+                const int minutesPart = fromBcd(tc[2] & 0x7f);
+                const int hoursPart = fromBcd(tc[3] & 0x3f);
+                const int64_t seconds = secondsPart + 60LL * minutesPart + 3600LL * hoursPart;
+                const int timeCodeFrame = fromBcd(tc[0] & 0x3f);
+                int64_t addressFrame = seconds * nominal + timeCodeFrame;
+                if (tc[0] & 0x40) {
+                    const int64_t totalMinutes = hoursPart * 60LL + minutesPart;
+                    const int droppedPerMinute = nominal == 30 ? 2 : 4;
+                    addressFrame -= droppedPerMinute * (totalMinutes - totalMinutes / 10);
+                }
+                const int64_t sourceFrame = addressFrame * fieldsPerCode + field;
+                frame.timestamp = static_cast<Timestamp>(std::llround(sourceFrame * 1e9 / frameRate));
+                frame.hasTimeCodeTimestamp = true;
+                break;
+            }
+        }
         const TiffEntry* photo = nullptr;
         for (const auto& entry : entries) {
             if (entry.tag == TIFF_TAG_PHOTOMETRIC) {
@@ -637,12 +830,14 @@ void DNGDecoder::extractTimestampsFromFilenames() {
         boost::filesystem::path p(frame.filePath);
         std::string filename = p.stem().string();
         
-        if (boost::regex_search(filename, match, frameNumberRegex)) {
+        if (!frame.hasExactPresentationTimestamp && !frame.hasTimeCodeTimestamp &&
+            boost::regex_search(filename, match, frameNumberRegex)) {
             int extractedFrameNumber = std::stoi(match[1].str());
             frame.frameNumber = extractedFrameNumber;
             
             // Update timestamp based on extracted frame number
-            frame.timestamp = static_cast<Timestamp>(extractedFrameNumber * 1000000000.0 / 30.0);
+            const double fallbackFps = mSequenceInfo.fps > 0.0 ? mSequenceInfo.fps : 30.0;
+            frame.timestamp = static_cast<Timestamp>(extractedFrameNumber * 1000000000.0 / fallbackFps);
         }
     }
     
@@ -820,6 +1015,67 @@ bool DNGDecoder::updateMetadata(std::vector<uint8_t>& data,
         }
     }
     return baselineWritten && neutralWritten;
+}
+
+bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
+                                   double frameRate,
+                                   Timestamp timestampNs) {
+    if (!(frameRate > 0.0) || !std::isfinite(frameRate) || timestampNs < 0) return false;
+    bool little = true;
+    auto entries = findTiffEntries(data, little);
+    bool hasFrameRate = false, hasTimeCode = false, hasXmp = false;
+    for (const auto& entry : entries) {
+        hasFrameRate |= entry.tag == TIFF_TAG_FRAME_RATE && entry.type == TIFF_TYPE_RATIONAL && entry.count;
+        hasTimeCode |= entry.tag == TIFF_TAG_TIME_CODES && entry.type == TIFF_TYPE_BYTE && entry.count >= 8;
+        hasXmp |= entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count;
+    }
+    const auto newXmp = relativePresentationTimestampXmp(timestampNs);
+    if (!addMissingTimingEntries(data, !hasFrameRate, !hasTimeCode, !hasXmp,
+                                 static_cast<uint32_t>(newXmp.size()), little))
+        return false;
+    entries = findTiffEntries(data, little);
+    const bool pairedRate = frameRate >= 47.0 && frameRate <= 61.0;
+    const int nominalFps = pairedRate
+        ? static_cast<int>(std::lround(frameRate / 2.0))
+        : std::max(1, std::min(30, static_cast<int>(std::lround(frameRate))));
+    const int64_t sourceFrame = static_cast<int64_t>(std::llround(timestampNs * frameRate / 1e9));
+    const int field = pairedRate ? static_cast<int>(sourceFrame & 1) : 0;
+    int64_t addressFrame = pairedRate ? sourceFrame / 2 :
+        static_cast<int64_t>(std::llround(timestampNs * nominalFps / 1e9));
+    const bool dropFrame = std::abs(frameRate - 29.97) < 0.02 ||
+                           std::abs(frameRate - 59.94) < 0.02;
+    if (dropFrame) addressFrame = dropFrameNumber(addressFrame, nominalFps);
+    const int frames = static_cast<int>(addressFrame % nominalFps);
+    const int64_t totalSeconds = addressFrame / nominalFps;
+    uint8_t timeCode[8] = {
+        static_cast<uint8_t>((toBcd(frames) & 0x3f) | (dropFrame ? 0x40 : 0)),
+        static_cast<uint8_t>(toBcd(static_cast<int>(totalSeconds % 60)) & 0x7f),
+        static_cast<uint8_t>(toBcd(static_cast<int>((totalSeconds / 60) % 60)) & 0x7f),
+        static_cast<uint8_t>(toBcd(static_cast<int>((totalSeconds / 3600) % 24)) & 0x3f),
+        0, 0, 0, 0
+    };
+    if (field) {
+        if (nominalFps == 25) timeCode[3] |= 0x80;
+        else timeCode[1] |= 0x80;
+    }
+    bool frameRateWritten = false, timeCodeWritten = false, timestampWritten = false;
+    for (const auto& entry : entries) {
+        if (entry.tag == TIFF_TAG_FRAME_RATE && entry.type == TIFF_TYPE_RATIONAL && entry.count) {
+            writeRational(data, entry, 0, frameRate, little);
+            frameRateWritten = true;
+        } else if (entry.tag == TIFF_TAG_TIME_CODES && entry.type == TIFF_TYPE_BYTE && entry.count >= 8) {
+            std::memcpy(data.data() + entry.valueOffset, timeCode, sizeof(timeCode));
+            timeCodeWritten = true;
+        } else if (entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count) {
+            if (!hasXmp && entry.count == newXmp.size()) {
+                std::memcpy(data.data() + entry.valueOffset, newXmp.data(), newXmp.size());
+                timestampWritten = true;
+            } else {
+                timestampWritten = writeRelativePresentationTimestamp(data, entry, timestampNs, little);
+            }
+        }
+    }
+    return frameRateWritten && timeCodeWritten && timestampWritten;
 }
 
 bool DNGDecoder::repairExposureTime(std::vector<uint8_t>& data, double exposureTime) {

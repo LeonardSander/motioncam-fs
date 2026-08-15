@@ -19,6 +19,8 @@ struct DNGFrameInfo {
     int width;
     int height;
     bool hasGainMap;
+    bool hasExactPresentationTimestamp = false;
+    bool hasTimeCodeTimestamp = false;
 };
 
 struct DNGSequenceInfo {
@@ -75,6 +77,9 @@ public:
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,
                                const std::array<float, 3>* asShotNeutral);
+    static bool setTimingMetadata(std::vector<uint8_t>& dngData,
+                                  double frameRate,
+                                  Timestamp timestampNs);
     static bool repairExposureTime(std::vector<uint8_t>& dngData, double exposureTime);
     static bool ensureUncompressed(std::vector<uint8_t>& dngData);
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,

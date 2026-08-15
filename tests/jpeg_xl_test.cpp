@@ -255,18 +255,27 @@ int main() {
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(sequencePath);
     for (int frame = 0; frame < 2; ++frame) {
+        auto timedBytes = legacyBytes;
+        const motioncam::Timestamp timestamp = frame == 0 ? 0 : 40000000;
+        assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
+        const size_t timedSize = timedBytes.size();
+        assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
+        assert(timedBytes.size() == timedSize);
         const auto filename = sequencePath /
             ("260524_165247_IMAGE_qb__-00000" + std::to_string(frame) + ".dng");
         std::ofstream output(filename, std::ios::binary);
-        output.write(reinterpret_cast<const char*>(legacyBytes.data()),
-                     static_cast<std::streamsize>(legacyBytes.size()));
+        output.write(reinterpret_cast<const char*>(timedBytes.data()),
+                     static_cast<std::streamsize>(timedBytes.size()));
         assert(output.good());
     }
     {
         motioncam::DNGDecoder sequence(sequencePath.string());
         const auto& info = sequence.getSequenceInfo();
         assert(info.width == higherWidth && info.height == higherHeight);
-        assert(info.totalFrames == 2 && std::abs(info.fps - 30.0) < 0.001);
+        assert(info.totalFrames == 2 && std::abs(info.fps - 25.0) < 0.001);
+        const auto& frames = sequence.getFrames();
+        assert(frames[0].hasExactPresentationTimestamp && frames[0].timestamp == 0);
+        assert(frames[1].hasExactPresentationTimestamp && frames[1].timestamp == 40000000);
         motioncam::DNGFrameMetadata metadata;
         assert(sequence.getFrameMetadata(0, metadata));
         assert(metadata.hasExposure && metadata.iso == 100);
