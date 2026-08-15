@@ -1007,6 +1007,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
     stagingSettings.options &= ~motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
     stagingSettings.options &= ~motioncam::RENDER_OPT_JPEG_COMPRESSION;
     stagingSettings.options &= ~motioncam::RENDER_OPT_LOG_TRANSFORM;
+    stagingSettings.draftScale = 1;
     stagingSettings.logTransform = motioncam::LogTransformMode::Disabled;
     stagingSettings.cameraNativeStaging = true;
     mFuseFilesystem->updateOptions(mountId, stagingSettings);
@@ -1019,10 +1020,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
     }
     // FileInfo::dataType is a display label and deliberately continues to say
     // "Quad Bayer CFA" even when the selected finalization path demosaics it.
-    // Inspect the source CFA metadata instead so 4x4 demosaic is accepted while
-    // confirmed 2x2 CFA is rejected before rendering.
+    // Inspect source CFA metadata so every CFA source has demosaic enabled
+    // before Camera Native staging requests a linear RGB sequence.
     bool unsupportedBayer = false;
-    const bool demosaicHigherCfa =
+    const bool demosaicCfa =
         stagingSettings.quadBayerOption == motioncam::QuadBayerMode::Demosaic ||
         stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicOCL;
     try {
@@ -1044,7 +1045,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
                 decoder.loadFrame(frames.front(), frameData, frameJson);
                 const auto metadata = CameraFrameMetadata::parse(frameJson);
                 const int cfaSize = cfaSizeOverride > 0 ? cfaSizeOverride : metadata.cfaSize;
-                unsupportedBayer = cfaSize <= 2 || !demosaicHigherCfa;
+                unsupportedBayer = cfaSize >= 2 && !demosaicCfa;
             }
         } else if (DNGDecoder::isDNGSequence(srcFile.toStdString())) {
             DNGDecoder decoder(srcFile.toStdString());
@@ -1053,7 +1054,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
             const bool hasCfa = decoder.getCFAMetadata(0, cfaSize, cfaPhase);
             if (cfaSizeOverride > 0) cfaSize = cfaSizeOverride;
             if (hasCfa || cfaSizeOverride > 0)
-                unsupportedBayer = cfaSize <= 2 || !demosaicHigherCfa;
+                unsupportedBayer = cfaSize >= 2 && !demosaicCfa;
         }
     } catch (const std::exception& e) {
         spdlog::warn("Could not preflight Camera Native CFA metadata: {}", e.what());
@@ -1061,8 +1062,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
     if (unsupportedBayer) {
         mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
         QMessageBox::warning(this, "Camera Native finalization",
-            "Camera Native currently requires an RGB sequence. Enable demosaic for higher-CFA footage. "
-            "2x2 Bayer demosaic will be added later.");
+            "Camera Native requires an RGB sequence. Enable CFA demosaic before finalizing.");
         return;
     }
 

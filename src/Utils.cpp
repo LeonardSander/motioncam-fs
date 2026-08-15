@@ -1288,7 +1288,8 @@ std::shared_ptr<std::vector<char>> generateDng(
         cfaRepeatSize = metadata.needRemosaic ? 4 : 2;
     const bool higherCFA = cfaRepeatSize > 2;
     const bool staged8x8Demosaic = cfaRepeatSize == 8 && draftScale == 2;
-    const bool demosaic = higherCFA && (draftScale == 1 || staged8x8Demosaic) &&
+    const bool demosaic = (higherCFA || settings.cameraNativeStaging) &&
+        (draftScale == 1 || staged8x8Demosaic) &&
         (settings.quadBayerOption == QuadBayerMode::Demosaic ||
          settings.quadBayerOption == QuadBayerMode::DemosaicOCL);
     const bool remosaic = demosaic && (settings.options & RENDER_OPT_REMOSAIC_TO_BAYER);

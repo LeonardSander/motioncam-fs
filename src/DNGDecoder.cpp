@@ -1119,7 +1119,8 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         }
     }
     if (!photo) return false;
-    if (!sourceIsRgb && repeatSize <= 2) return true;
+    // Ordinary Bayer is normally left untouched, but callers may request this
+    // routine when an RGB staging image is required.
     auto find = [&](uint16_t tag) -> const TiffEntry* {
         for (const auto& e : entries) if (e.ifdOffset == photo->ifdOffset && e.tag == tag) return &e;
         return nullptr;

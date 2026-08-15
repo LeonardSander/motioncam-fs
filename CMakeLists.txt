@@ -372,6 +372,14 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-demosaic-test
+        tests/demosaic_test.cpp
+        src/HigherCFADemosaic.cpp)
+    target_include_directories(motioncam-demosaic-test PRIVATE
+        include
+        deps/motioncam-decoder/thirdparty)
+    add_test(NAME motioncam-demosaic-test COMMAND motioncam-demosaic-test)
+
     add_executable(motioncam-core-tests
         tests/core_tests.cpp
         src/CalibrationData.cpp)
@@ -411,7 +419,7 @@ if(BUILD_TESTING)
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations
     # are not compiled out.
-    foreach(test_target motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test)
+    foreach(test_target motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test)
         if(MSVC)
             target_compile_options(${test_target} PRIVATE /UNDEBUG)
         else()

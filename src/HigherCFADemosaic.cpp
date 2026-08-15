@@ -7,6 +7,155 @@
 namespace motioncam {
 namespace utils {
 
+namespace {
+
+// Directional colour-difference demosaic for an ordinary Bayer mosaic.  The
+// green pass uses an RCD-inspired directional correction; red and blue are
+// then reconstructed from C-G differences.  As
+// in VNG4, directions whose gradient is more than 30 raw codes above the best
+// direction are rejected.  Restricting chroma to one or two accepted axes
+// avoids the broad colour averaging used by the higher-CFA path.
+void demosaicBayer(
+    const std::vector<uint16_t>& cfaData,
+    std::vector<uint16_t>& rgbData,
+    int width,
+    int height,
+    const std::array<uint8_t, 4>& phase)
+{
+    constexpr float gradientThreshold = 30.0f;
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    auto index = [width](int x, int y) { return static_cast<size_t>(y) * width + x; };
+    auto color = [&](int x, int y) { return static_cast<int>(phase[(y & 1) * 2 + (x & 1)]); };
+    auto inside = [=](int x, int y) { return x >= 0 && y >= 0 && x < width && y < height; };
+    auto raw = [&](int x, int y) { return static_cast<float>(cfaData[index(x, y)]); };
+
+    std::vector<float> green(pixelCount);
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        const size_t i = index(x, y);
+        if (color(x, y) == 1) {
+            green[i] = raw(x, y);
+            continue;
+        }
+
+        struct Candidate { float value; float gradient; };
+        std::array<Candidate, 2> candidates{};
+        int count = 0;
+        for (const auto [dx, dy] : {std::pair<int, int>{1, 0}, {0, 1}}) {
+            float adjacent = 0.0f, same = 0.0f;
+            int adjacentCount = 0, sameCount = 0;
+            float adjacentDifference = 0.0f, sameDifference = 0.0f;
+            if (inside(x - dx, y - dy)) {
+                adjacent += raw(x - dx, y - dy); ++adjacentCount;
+            }
+            if (inside(x + dx, y + dy)) {
+                const float value = raw(x + dx, y + dy);
+                if (adjacentCount) adjacentDifference = std::abs(value - adjacent);
+                adjacent += value; ++adjacentCount;
+            }
+            if (!adjacentCount) continue;
+            if (inside(x - 2 * dx, y - 2 * dy)) {
+                same += raw(x - 2 * dx, y - 2 * dy); ++sameCount;
+            }
+            if (inside(x + 2 * dx, y + 2 * dy)) {
+                const float value = raw(x + 2 * dx, y + 2 * dy);
+                if (sameCount) sameDifference = std::abs(value - same);
+                same += value; ++sameCount;
+            }
+            const float correction = sameCount
+                ? 0.5f * (raw(x, y) - same / sameCount) : 0.0f;
+            candidates[count++] = {
+                adjacent / adjacentCount + correction,
+                adjacentDifference + sameDifference};
+        }
+        if (!count) green[i] = raw(x, y);
+        else if (count == 1) green[i] = candidates[0].value;
+        else {
+            const float best = std::min(candidates[0].gradient, candidates[1].gradient);
+            float sum = 0.0f, weights = 0.0f;
+            for (const Candidate& candidate : candidates) {
+                if (candidate.gradient > best + gradientThreshold) continue;
+                const float weight = 1.0f / (1.0f + candidate.gradient);
+                sum += candidate.value * weight; weights += weight;
+            }
+            green[i] = sum / weights;
+        }
+        green[i] = std::clamp(green[i], 0.0f, 65535.0f);
+    }
+
+    std::array<std::vector<float>, 3> planes;
+    for (auto& plane : planes) plane.assign(pixelCount, 0.0f);
+    planes[1] = green;
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        const int native = color(x, y);
+        if (native != 1) planes[native][index(x, y)] = raw(x, y);
+    }
+
+    auto interpolateDifference = [&](int x, int y, int channel) {
+        struct Direction { int dx; int dy; };
+        std::array<Direction, 2> directions{};
+        int directionCount = 0;
+        if (color(x, y) == 1) {
+            // At green, one chroma colour lies horizontally and the other vertically.
+            if ((inside(x - 1, y) && color(x - 1, y) == channel) ||
+                (inside(x + 1, y) && color(x + 1, y) == channel))
+                directions[directionCount++] = {1, 0};
+            else
+                directions[directionCount++] = {0, 1};
+        } else {
+            directions[directionCount++] = {1, 1};
+            directions[directionCount++] = {1, -1};
+        }
+
+        struct Candidate { float difference; float gradient; };
+        std::array<Candidate, 2> candidates{};
+        int count = 0;
+        for (int d = 0; d < directionCount; ++d) {
+            const int dx = directions[d].dx, dy = directions[d].dy;
+            float difference = 0.0f, firstGreen = 0.0f;
+            int samples = 0;
+            float gradient = 0.0f;
+            for (int sign : {-1, 1}) {
+                const int sx = x + sign * dx, sy = y + sign * dy;
+                if (!inside(sx, sy) || color(sx, sy) != channel) continue;
+                const float sampleGreen = green[index(sx, sy)];
+                difference += raw(sx, sy) - sampleGreen;
+                if (samples) gradient += std::abs(sampleGreen - firstGreen);
+                else firstGreen = sampleGreen;
+                ++samples;
+            }
+            if (samples) candidates[count++] = {difference / samples, gradient};
+        }
+        if (!count) return 0.0f;
+        const float best = std::min_element(candidates.begin(), candidates.begin() + count,
+            [](const Candidate& a, const Candidate& b) { return a.gradient < b.gradient; })->gradient;
+        float sum = 0.0f, weights = 0.0f;
+        for (int i = 0; i < count; ++i) {
+            if (candidates[i].gradient > best + gradientThreshold) continue;
+            const float weight = 1.0f / (1.0f + candidates[i].gradient);
+            sum += candidates[i].difference * weight; weights += weight;
+        }
+        return sum / weights;
+    };
+
+    rgbData.resize(pixelCount * 3);
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        const size_t i = index(x, y);
+        const int native = color(x, y);
+        for (int channel : {0, 2}) if (native != channel)
+            planes[channel][i] = green[i] + interpolateDifference(x, y, channel);
+
+        // Chroma comes from colour differences; restore the measured sample at
+        // the end so interpolation can never soften the pixel's native luma detail.
+        std::array<float, 3> rgb = {planes[0][i], planes[1][i], planes[2][i]};
+        rgb[native] = raw(x, y);
+        for (int channel = 0; channel < 3; ++channel)
+            rgbData[i * 3 + channel] = static_cast<uint16_t>(
+                std::clamp(std::lround(rgb[channel]), 0l, 65535l));
+    }
+}
+
+} // namespace
+
 void demosaicHigherCFA(
     const std::vector<uint16_t>& cfaData,
     std::vector<uint16_t>& rgbData,
@@ -16,9 +165,14 @@ void demosaicHigherCFA(
     const std::array<uint8_t, 4>& bayerPhase,
     bool ocl)
 {
-    if (width <= 0 || height <= 0 || cfaRepeatSize < 4 ||
+    if (width <= 0 || height <= 0 || cfaRepeatSize < 2 || (cfaRepeatSize & 1) ||
         cfaData.size() < static_cast<size_t>(width) * height)
         throw std::invalid_argument("Invalid higher-CFA demosaic input");
+
+    if (cfaRepeatSize == 2) {
+        demosaicBayer(cfaData, rgbData, width, height, bayerPhase);
+        return;
+    }
 
     const int group = cfaRepeatSize / 2;
     const int lowWidth = (width + group - 1) / group;

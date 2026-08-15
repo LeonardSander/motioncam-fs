@@ -166,8 +166,8 @@ void remosaicRGBToBayer(
     int height,
     const std::string& cfaPhase = "bggr");
 
-// Luma-guided higher-CFA demosaic. The OCL variant compensates the radial
-// response difference between pixels sharing an on-sensor lens.
+// Edge- and luma-guided Bayer/higher-CFA demosaic. The OCL variant compensates
+// the radial response difference between pixels sharing an on-sensor lens.
 void demosaicHigherCFA(
     const std::vector<uint16_t>& cfaData,
     std::vector<uint16_t>& rgbData,
