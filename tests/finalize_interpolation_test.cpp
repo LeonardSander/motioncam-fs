@@ -1,0 +1,183 @@
+#define TINY_DNG_WRITER_IMPLEMENTATION
+#include "tinydng/tiny_dng_writer.h"
+#include "DNGDecoder.h"
+#include "VirtualFileSystemImpl.h"
+
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+
+namespace {
+struct TagValue { uint32_t value = 0, count = 0; };
+TagValue tagValue(const std::vector<uint8_t>& dng, uint16_t wanted) {
+    auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
+    auto u32 = [&](size_t offset) { return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+        dng[offset + 2] << 16 | dng[offset + 3] << 24); };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t entries = u16(ifd);
+        for (uint16_t i = 0; i < entries; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) != wanted) continue;
+            const uint16_t type = u16(entry + 2);
+            const uint32_t count = u32(entry + 4);
+            const uint32_t typeSize = type == 1 ? 1 : type == 3 ? 2 : 4;
+            const size_t position = count * typeSize > 4 ? u32(entry + 8) : entry + 8;
+            return {type == 3 ? u16(position) : u32(position), count};
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + entries * 12);
+    }
+    return {};
+}
+
+std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
+                             float baseline, const std::array<float, 3>& neutral,
+                             motioncam::Timestamp timestamp) {
+    constexpr uint32_t width = 8, height = 8;
+    std::vector<uint16_t> pixels(width * height * 3, value);
+    tinydngwriter::DNGImage image;
+    image.SetBigEndian(false);
+    const unsigned short bits[3] = {16, 16, 16};
+    assert(image.SetImageWidth(width) && image.SetImageLength(height));
+    assert(image.SetRowsPerStrip(height) && image.SetSamplesPerPixel(3));
+    assert(image.SetBitsPerSample(3, bits));
+    assert(image.SetCompression(tinydngwriter::COMPRESSION_NONE));
+    assert(image.SetPhotometric(tinydngwriter::PHOTOMETRIC_LINEARRAW));
+    assert(image.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+    assert(image.SetWhiteLevel(65535));
+    assert(image.SetExposureTime(exposure) && image.SetIso(iso));
+    assert(image.SetBaselineExposure(baseline));
+    assert(image.SetAsShotNeutral(3, neutral.data()));
+    assert(image.SetDNGVersion(1, 4, 0, 0));
+    assert(image.SetDNGBackwardVersion(1, 4, 0, 0));
+    assert(image.SetImageData(reinterpret_cast<const uint8_t*>(pixels.data()), pixels.size() * 2));
+    tinydngwriter::DNGWriter writer(false);
+    assert(writer.AddImage(&image));
+    std::ostringstream output(std::ios::binary);
+    std::string error;
+    assert(writer.WriteToFile(output, &error));
+    const auto bytes = output.str();
+    std::vector<uint8_t> result(bytes.begin(), bytes.end());
+    assert(motioncam::DNGDecoder::setTimingMetadata(result, 24.0, timestamp));
+    return result;
+}
+
+std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp) {
+    constexpr uint32_t width = 32, height = 32;
+    std::vector<uint16_t> pixels(width * height, value);
+    std::vector<uint16_t> linearization(1024);
+    for (size_t i = 0; i < linearization.size(); ++i)
+        linearization[i] = static_cast<uint16_t>(std::min<size_t>(65535, i * 64));
+    const unsigned short bits = 16, black[4] = {0, 0, 0, 0};
+    const unsigned char pattern[4] = {0, 1, 1, 2};
+    tinydngwriter::DNGImage image;
+    image.SetBigEndian(false);
+    assert(image.SetImageWidth(width) && image.SetImageLength(height));
+    assert(image.SetRowsPerStrip(height) && image.SetSamplesPerPixel(1));
+    assert(image.SetBitsPerSample(1, &bits));
+    assert(image.SetCompression(tinydngwriter::COMPRESSION_NONE));
+    assert(image.SetPhotometric(tinydngwriter::PHOTOMETRIC_CFA));
+    assert(image.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+    assert(image.SetCFARepeatPatternDim(2, 2) && image.SetCFAPattern(4, pattern));
+    assert(image.SetBlackLevelRepeatDim(2, 2) && image.SetBlackLevel(4, black));
+    assert(image.SetWhiteLevel(1023));
+    assert(image.SetLinearizationTable(linearization.size(), linearization.data()));
+    assert(image.SetExposureTime(0.01f) && image.SetIso(100));
+    const float neutral[3] = {1.0f, 1.0f, 1.0f};
+    assert(image.SetBaselineExposure(0.0f) && image.SetAsShotNeutral(3, neutral));
+    assert(image.SetDNGVersion(1, 4, 0, 0) && image.SetDNGBackwardVersion(1, 4, 0, 0));
+    assert(image.SetImageData(reinterpret_cast<const uint8_t*>(pixels.data()), pixels.size() * 2));
+    tinydngwriter::DNGWriter writer(false);
+    assert(writer.AddImage(&image));
+    std::ostringstream output(std::ios::binary);
+    std::string error;
+    assert(writer.WriteToFile(output, &error));
+    const auto bytes = output.str();
+    std::vector<uint8_t> result(bytes.begin(), bytes.end());
+    assert(motioncam::DNGDecoder::setTimingMetadata(result, 24.0, timestamp));
+    return result;
+}
+
+class FakeFileSystem final : public motioncam::IVirtualFileSystem {
+public:
+    FakeFileSystem(std::vector<uint8_t> left, std::vector<uint8_t> right)
+        : mLeft(std::move(left)), mRight(std::move(right)) {
+        for (int i = 0; i < 3; ++i) {
+            motioncam::Entry entry;
+            entry.type = motioncam::EntryType::FILE_ENTRY;
+            entry.name = "frame-00000" + std::to_string(i) + ".dng";
+            entry.size = i == 2 ? mRight.size() : mLeft.size();
+            entry.userData = static_cast<int64_t>(i == 2 ? 2 : 0);
+            mEntries.push_back(entry);
+        }
+    }
+    std::vector<motioncam::Entry> listFiles(const std::string&) const override { return mEntries; }
+    std::optional<motioncam::Entry> findEntry(const std::string&) const override { return {}; }
+    int readFile(const motioncam::Entry&, size_t, size_t, void*,
+                 std::function<void(size_t, int)>, bool) override { return -1; }
+    std::shared_ptr<std::vector<char>> materializeFile(const motioncam::Entry& entry, bool) override {
+        const auto& source = std::get<int64_t>(entry.userData) == 2 ? mRight : mLeft;
+        return std::make_shared<std::vector<char>>(source.begin(), source.end());
+    }
+    void updateOptions(const motioncam::RenderSettings&) override {}
+    motioncam::FileInfo getFileInfo() const override { return {}; }
+private:
+    std::vector<uint8_t> mLeft, mRight;
+    std::vector<motioncam::Entry> mEntries;
+};
+} // namespace
+
+int main() {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
+    fs::remove_all(root);
+    fs::create_directories(root / "rife");
+    std::ofstream(root / "rife" / "inference_img.py") << "# protocol double\n";
+    FakeFileSystem filesystem(
+        makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
+        makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2));
+    motioncam::FinalizeOptions options;
+    options.interpolateDuplicatedFrames = true;
+    options.rifeDirectory = (root / "rife").string();
+    options.rifePythonExecutable = RIFE_FAKE_EXECUTABLE;
+    bool sawInterpolation = false, sawRebuild = false;
+    size_t previous = 0;
+    motioncam::vfs::finalize(filesystem, (root / "out").string(), false, options,
+        [&](size_t completed, size_t total, const std::string& label) {
+            assert(completed >= previous && completed <= total);
+            previous = completed;
+            sawInterpolation |= label.find("Interpolating") != std::string::npos;
+            sawRebuild |= label.find("Rebuilt") != std::string::npos;
+            return true;
+        });
+    assert(sawInterpolation && sawRebuild);
+    std::ifstream stream(root / "out" / "frame-000001.dng", std::ios::binary);
+    std::vector<uint8_t> dng{std::istreambuf_iterator<char>(stream), {}};
+    std::vector<uint8_t> rgb;
+    uint32_t width = 0, height = 0;
+    assert(motioncam::DNGDecoder::extractUncompressedRGB16(dng, rgb, width, height));
+    assert(rgb[0] == 0 && rgb[1] == 128);
+    motioncam::DNGFrameMetadata metadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
+    assert(std::abs(metadata.exposureTime - 0.02) < 1e-5);
+    assert(std::abs(metadata.iso - 200.0) < 1.0);
+    assert(std::abs(metadata.baselineExposure - 1.0) < 1e-5);
+    for (const auto neutral : metadata.asShotNeutral) assert(std::abs(neutral - 2.0f) < 1e-4f);
+    const std::string marker = "rpt:SyntheticFrame='true'";
+    assert(std::search(dng.begin(), dng.end(), marker.begin(), marker.end()) != dng.end());
+
+    FakeFileSystem cfaFilesystem(makeLogCfaDng(0, 0), makeLogCfaDng(1023, 2));
+    motioncam::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});
+    std::ifstream cfaStream(root / "cfa-out" / "frame-000001.dng", std::ios::binary);
+    std::vector<uint8_t> cfa{std::istreambuf_iterator<char>(cfaStream), {}};
+    int repeat = 0;
+    std::array<uint8_t, 4> phase{};
+    assert(motioncam::DNGDecoder::getCFAMetadata(cfa, repeat, phase) && repeat == 2);
+    assert(std::search(cfa.begin(), cfa.end(), marker.begin(), marker.end()) != cfa.end());
+    assert(tagValue(cfa, 50712).count == 1024); // LinearizationTable survived.
+    assert(tagValue(cfa, 50717).value == 1023); // Original log code range survived.
+    assert(tagValue(cfa, 258).value == 10); // Synthetic CFA is packed like ordinary output.
+    assert(tagValue(cfa, 279).value == 32 * 32 * 10 / 8);
+    fs::remove_all(root);
+}

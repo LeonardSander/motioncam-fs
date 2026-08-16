@@ -98,7 +98,7 @@ public:
     void updateOptions(const RenderSettings& settings);
 
     FileInfo getFileInfo() const;
-    void finalize(const std::string&, bool,
+    void finalize(const std::string&, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&);
 
 private:
@@ -227,9 +227,9 @@ FileInfo Session::getFileInfo() const {
 }
 
 void Session::finalize(
-    const std::string& destination, bool jpegCompression,
+    const std::string& destination, bool jpegCompression, const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress) {
-    vfs::finalize(*mFs, destination, jpegCompression, progress);
+    vfs::finalize(*mFs, destination, jpegCompression, options, progress);
 }
 
 void Session::fuseMain(struct fuse_chan* ch, struct fuse* fuse) {
@@ -510,11 +510,12 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
 
 void FuseFileSystemImpl_MacOs::finalize(
     MountId mountId, const std::string& destination, bool jpegCompression,
+    const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress) {
     const auto it = mMountedFiles.find(mountId);
     if (it == mMountedFiles.end())
         throw std::runtime_error("Mount not found");
-    it->second->finalize(destination, jpegCompression, progress);
+    it->second->finalize(destination, jpegCompression, options, progress);
 }
 
 } // namespace motioncam

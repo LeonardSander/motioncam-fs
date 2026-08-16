@@ -36,6 +36,11 @@ using namespace motioncam;
 #include <QUuid>
 #include <QTemporaryDir>
 #include <QStandardPaths>
+#include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QSaveFile>
+#include <QCryptographicHash>
 #include <algorithm>
 #include <QTimer>
 #include <QtConcurrent>
@@ -62,6 +67,14 @@ extern "C" {
 namespace {
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
+    constexpr auto RIFE_REVISION = "b0542ef99f380f0fe17a1b44151ac6935e8b82d4";
+    constexpr auto RIFE_ARCHIVE_SHA256 =
+        "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
+
+    QString rifeRuntimeRoot() {
+        return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+            .absoluteFilePath("rife-" + QString(RIFE_REVISION));
+    }
 
     std::string avError(int error) {
         char text[AV_ERROR_MAX_STRING_SIZE]{};
@@ -72,7 +85,8 @@ namespace {
     class NutVideoPipe {
     public:
         NutVideoPipe(QProcess& process, QByteArray& diagnostic, int width, int height)
-            : mProcess(process), mDiagnostic(diagnostic) {
+            : mProcess(process), mDiagnostic(diagnostic),
+              mExpectedFrameBytes(static_cast<size_t>(width) * height * 3 * sizeof(uint16_t)) {
             int error = avformat_alloc_output_context2(&mContext, nullptr, "nut", nullptr);
             if (error < 0 || !mContext) throw std::runtime_error("Could not create NUT muxer");
             AVStream* stream = avformat_new_stream(mContext, nullptr);
@@ -83,8 +97,12 @@ namespace {
             stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
             stream->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
             stream->codecpar->format = AV_PIX_FMT_RGB48LE;
+            stream->codecpar->codec_tag = avcodec_pix_fmt_to_codec_tag(AV_PIX_FMT_RGB48LE);
+            stream->codecpar->bits_per_coded_sample = 48;
             stream->codecpar->width = width;
             stream->codecpar->height = height;
+            if (!stream->codecpar->codec_tag)
+                throw std::runtime_error("FFmpeg has no raw-video tag for RGB48LE");
             constexpr int bufferSize = 64 * 1024;
             auto* buffer = static_cast<unsigned char*>(av_malloc(bufferSize));
             if (!buffer) throw std::runtime_error("Could not allocate NUT output buffer");
@@ -110,6 +128,8 @@ namespace {
         }
 
         void writeFrame(const std::vector<uint8_t>& rgb, int64_t pts, int64_t duration) {
+            if (rgb.size() != mExpectedFrameBytes)
+                throw std::runtime_error("Invalid RGB48LE frame size");
             AVPacket* packet = av_packet_alloc();
             if (!packet) throw std::runtime_error("Could not allocate NUT video packet");
             const int error = av_new_packet(packet, static_cast<int>(rgb.size()));
@@ -168,6 +188,7 @@ namespace {
         AVFormatContext* mContext = nullptr;
         AVIOContext* mIo = nullptr;
         AVStream* mStream = nullptr;
+        size_t mExpectedFrameBytes = 0;
         int mStreamIndex = 0;
         bool mHeaderWritten = false;
         bool mFinished = false;
@@ -300,6 +321,27 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->smoothExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->smoothWhiteBalanceCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->rifeInterpolationCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) { saveSettings(); });
+    connect(ui->rifeRemoveButton, &QPushButton::clicked, this, [this] {
+        const QString runtimeRoot = rifeRuntimeRoot();
+        const QString archivePath = QDir(QStandardPaths::writableLocation(
+            QStandardPaths::AppLocalDataLocation)).absoluteFilePath("rife-download.zip");
+        if (!QFileInfo::exists(runtimeRoot) && !QFileInfo::exists(archivePath)) {
+            QMessageBox::information(this, "Frame interpolation", "No downloaded RIFE runtime was found.");
+            return;
+        }
+        if (QMessageBox::question(this, "Remove frame interpolation runtime",
+            "Delete the downloaded RIFE repository, model, and private Python environment?\n\n"
+            "They will be downloaded and installed again the next time interpolated finalization is used.",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        const bool runtimeRemoved = !QFileInfo::exists(runtimeRoot) || QDir(runtimeRoot).removeRecursively();
+        const bool archiveRemoved = !QFileInfo::exists(archivePath) || QFile::remove(archivePath);
+        if (!runtimeRemoved || !archiveRemoved)
+            QMessageBox::critical(this, "Frame interpolation", "Could not completely remove the RIFE runtime.");
+        else
+            QMessageBox::information(this, "Frame interpolation", "The RIFE runtime was removed.");
+    });
     connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -390,6 +432,7 @@ void MainWindow::saveSettings() {
     settings.setValue("smoothExposure", ui->smoothExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("smoothWhiteBalance", ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("rifeInterpolation", ui->rifeInterpolationCheckBox->isChecked());
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
@@ -448,6 +491,7 @@ void MainWindow::restoreSettings() {
     ui->cfrConversionCheckBox->setCheckState(
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
         (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
+    ui->rifeInterpolationCheckBox->setChecked(settings.value("rifeInterpolation", false).toBool());
 
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
@@ -991,6 +1035,168 @@ void MainWindow::discardFile(QWidget* fileWidget) {
 }
 #endif
 
+std::optional<QString> MainWindow::ensureRifeRuntime() {
+    const QString dataRoot = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    const QString runtimeRoot = rifeRuntimeRoot();
+#ifdef _WIN32
+    const QString runtimePython = QDir(runtimeRoot).absoluteFilePath(".venv/Scripts/python.exe");
+#else
+    const QString runtimePython = QDir(runtimeRoot).absoluteFilePath(".venv/bin/python");
+#endif
+    const QString readyMarker = QDir(runtimeRoot).absoluteFilePath(".motioncam-ready");
+    if (QFileInfo::exists(readyMarker) && QFileInfo::exists(runtimePython) &&
+        QFileInfo::exists(QDir(runtimeRoot).absoluteFilePath("inference_img.py")))
+        return runtimeRoot;
+
+    const auto answer = QMessageBox::question(this, "Install frame interpolation",
+        "MotionCam Fuse needs to download and install its private RIFE runtime. "
+        "PyTorch and the model dependencies can require several gigabytes.\n\n"
+        "Install it now?", QMessageBox::Yes | QMessageBox::No);
+    if (answer != QMessageBox::Yes) return std::nullopt;
+
+    QString bootstrapPython = QStandardPaths::findExecutable("python3");
+#ifdef _WIN32
+    if (bootstrapPython.isEmpty()) bootstrapPython = QStandardPaths::findExecutable("python");
+#endif
+    if (bootstrapPython.isEmpty()) {
+        QMessageBox::critical(this, "Frame interpolation",
+            "Python 3 was not found. Install Python 3, then try interpolation again.");
+        return std::nullopt;
+    }
+
+    QDir().mkpath(dataRoot);
+    const QString archivePath = QDir(dataRoot).absoluteFilePath("rife-download.zip");
+    QProgressDialog progress("Downloading RIFE...", "Cancel", 0, 0, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.show();
+
+    QNetworkAccessManager network;
+    QNetworkRequest request(QUrl(QString("https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS/archive/%1.zip")
+        .arg(RIFE_REVISION)));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = network.get(request);
+    QSaveFile archive(archivePath);
+    if (!archive.open(QIODevice::WriteOnly)) {
+        reply->abort();
+        reply->deleteLater();
+        QMessageBox::critical(this, "Frame interpolation", "Could not create the RIFE download file.");
+        return std::nullopt;
+    }
+    bool writeFailed = false;
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::readyRead, this, [&] {
+        const QByteArray chunk = reply->readAll();
+        if (archive.write(chunk) != chunk.size()) { writeFailed = true; reply->abort(); }
+    });
+    connect(reply, &QNetworkReply::downloadProgress, this, [&](qint64 received, qint64 total) {
+        if (total > 0) { progress.setMaximum(1000); progress.setValue(static_cast<int>(received * 1000 / total)); }
+        QApplication::processEvents();
+        if (progress.wasCanceled()) reply->abort();
+    });
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    if (reply->bytesAvailable()) {
+        const QByteArray chunk = reply->readAll();
+        writeFailed |= archive.write(chunk) != chunk.size();
+    }
+    if (reply->error() != QNetworkReply::NoError || writeFailed) {
+        const QString error = progress.wasCanceled() ? "Installation cancelled." : reply->errorString();
+        archive.cancelWriting(); reply->deleteLater();
+        QMessageBox::warning(this, "Frame interpolation", writeFailed ? "Could not save the RIFE download." : error);
+        return std::nullopt;
+    }
+    if (!archive.commit()) {
+        reply->deleteLater();
+        QMessageBox::critical(this, "Frame interpolation", "Could not save the RIFE download.");
+        return std::nullopt;
+    }
+    reply->deleteLater();
+
+    QFile downloadedArchive(archivePath);
+    if (!downloadedArchive.open(QIODevice::ReadOnly)) {
+        QMessageBox::critical(this, "Frame interpolation", "Could not verify the RIFE download.");
+        return std::nullopt;
+    }
+    QCryptographicHash archiveHash(QCryptographicHash::Sha256);
+    while (!downloadedArchive.atEnd()) {
+        const QByteArray chunk = downloadedArchive.read(1024 * 1024);
+        if (chunk.isEmpty() && downloadedArchive.error() != QFileDevice::NoError) {
+            downloadedArchive.close();
+            QFile::remove(archivePath);
+            QMessageBox::critical(this, "Frame interpolation", "Could not verify the RIFE download.");
+            return std::nullopt;
+        }
+        archiveHash.addData(chunk);
+    }
+    downloadedArchive.close();
+    const QByteArray actualHash = archiveHash.result().toHex();
+    if (actualHash != QByteArray(RIFE_ARCHIVE_SHA256)) {
+        QFile::remove(archivePath);
+        QMessageBox::critical(this, "Frame interpolation",
+            "The downloaded RIFE archive failed its SHA-256 integrity check. "
+            "The file was deleted and will not be installed.\n\nExpected: " +
+            QString(RIFE_ARCHIVE_SHA256) + "\nReceived: " + QString::fromLatin1(actualHash));
+        return std::nullopt;
+    }
+
+    QDir(runtimeRoot).removeRecursively();
+    QDir().mkpath(runtimeRoot);
+    progress.setRange(0, 0);
+    progress.setLabelText("Preparing RIFE and installing Python dependencies...");
+    const QString setupCode = QString::fromUtf8(R"PY(
+import pathlib, subprocess, sys, zipfile
+archive, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(archive) as z:
+    for item in z.infolist():
+        parts = pathlib.PurePosixPath(item.filename).parts[1:]
+        if not parts or '..' in parts: continue
+        target = root.joinpath(*parts)
+        if item.is_dir(): target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(item) as source, target.open('wb') as output: output.write(source.read())
+subprocess.check_call([sys.executable, '-m', 'venv', str(root / '.venv')])
+python = root / '.venv' / ('Scripts/python.exe' if sys.platform == 'win32' else 'bin/python')
+subprocess.check_call([str(python), '-m', 'pip', 'install', '--upgrade', 'pip'])
+subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 'requirements.txt')])
+)PY");
+    QProcess setup;
+    setup.setProcessChannelMode(QProcess::MergedChannels);
+    setup.start(bootstrapPython, {"-c", setupCode, archivePath, runtimeRoot});
+    if (!setup.waitForStarted()) {
+        QMessageBox::critical(this, "Frame interpolation", "Could not start the Python installer.");
+        return std::nullopt;
+    }
+    QByteArray setupDiagnostic;
+    while (setup.state() != QProcess::NotRunning) {
+        setup.waitForFinished(100);
+        setupDiagnostic += setup.readAll();
+        if (setupDiagnostic.size() > 16000) setupDiagnostic = setupDiagnostic.right(16000);
+        QApplication::processEvents();
+        if (progress.wasCanceled()) {
+            setup.kill(); setup.waitForFinished();
+            QMessageBox::information(this, "Frame interpolation", "Installation cancelled.");
+            return std::nullopt;
+        }
+    }
+    setupDiagnostic += setup.readAll();
+    if (setup.exitStatus() != QProcess::NormalExit || setup.exitCode() != 0) {
+        QMessageBox::critical(this, "Frame interpolation",
+            "RIFE installation failed:\n\n" + QString::fromUtf8(setupDiagnostic).right(4000));
+        return std::nullopt;
+    }
+    QFile marker(readyMarker);
+    if (!marker.open(QIODevice::WriteOnly) || marker.write(RIFE_REVISION) < 0) {
+        QMessageBox::critical(this, "Frame interpolation", "Could not finish the RIFE installation.");
+        return std::nullopt;
+    }
+    QFile::remove(archivePath);
+    return runtimeRoot;
+}
+
 void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
     const QString srcFile = fileWidget->property("filePath").toString();
     const QString mountPath = fileWidget->property("mountPath").toString();
@@ -1086,13 +1292,26 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         return;
     }
 
+    const bool interpolateFrames =
+        ui->rifeInterpolationCheckBox->isChecked() && info->duplicatedFrames > 0;
+    const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
+    if (!rifeRuntime) {
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        return;
+    }
+
     QProgressDialog progress("Rendering linear RGB sequence...", "Cancel", 0,
         std::max(1, info->totalFrames - info->droppedFrames + info->duplicatedFrames), this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
 
     try {
-        mFuseFilesystem->finalize(mountId, staging.path().toStdString(), false,
+        motioncam::FinalizeOptions finalizeOptions;
+        finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
+        finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
+        mFuseFilesystem->finalize(mountId, staging.path().toStdString(), false, finalizeOptions,
             [&](size_t completed, size_t count, const std::string& name) {
                 progress.setMaximum(static_cast<int>(count));
                 progress.setValue(static_cast<int>(completed));
@@ -1165,6 +1384,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         progress.setRange(0, dngs.size());
         progress.setValue(0);
         progress.setLabelText("Encoding LOG60 Camera Native frame 1...");
+        progress.show();
+        QApplication::processEvents();
         QProcess encoder;
         encoder.setProcessChannelMode(QProcess::MergedChannels);
         encoder.start(ffmpeg, args, QIODevice::ReadWrite);
@@ -1328,15 +1549,26 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     
     spdlog::info("Using temp directory: {}", tempPath.toStdString());
     
+    const bool interpolateFrames =
+        ui->rifeInterpolationCheckBox->isChecked() && fileInfo->duplicatedFrames > 0;
+    const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
+    if (!rifeRuntime) return;
+
     // Create progress dialog
     QProgressDialog progress("Rendering DNG sequence...", "Cancel", 0, totalFrames, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
     progress.setValue(0);
     
     // Get current render config
     auto settings = buildRenderSettings();
     bool enableCompression = settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION;
+    motioncam::FinalizeOptions finalizeOptions;
+    finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
+    finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
+    finalizeOptions.jxlDistance = settings.jxlDistance;
 
     spdlog::info("Starting finalize for {} ({} frames from fileInfo, compression: {})",
                  srcFile.toStdString(), totalFrames, enableCompression ? "enabled" : "disabled");
@@ -1347,27 +1579,26 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     // This allows compression to work correctly with variable file sizes
     bool mountReleased = false;
     try {
-        int outputFrameCount = 0;
         mFuseFilesystem->finalize(
             mountId,
             tempPath.toStdString(),
             enableCompression,
+            finalizeOptions,
             [&](size_t completed, size_t count, const std::string& name) {
-                outputFrameCount = static_cast<int>(completed);
                 progress.setMaximum(static_cast<int>(count));
                 progress.setValue(static_cast<int>(completed));
                 if (!name.empty()) {
                     progress.setLabelText(
-                        QString("Rendering %1 of %2: %3")
-                            .arg(completed + 1).arg(count)
+                        QString("Finalizing—step %1 of %2: %3")
+                            .arg(std::min(completed + 1, count)).arg(count)
                             .arg(QString::fromStdString(name)));
                 }
                 QApplication::processEvents();
                 return !progress.wasCanceled();
             });
-        
+
         if (!progress.wasCanceled()) {
-            spdlog::info("Rendered {} frames to temp directory", outputFrameCount);
+            spdlog::info("Rendered {} frames to temp directory", totalFrames);
             
             // Now move files from temp to final location
             progress.setLabelText("Moving files to final location...");
@@ -1391,9 +1622,9 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             }
 
             spdlog::info("Finalize complete: {} frames rendered to {}",
-                         outputFrameCount, mountPath.toStdString());
+                         totalFrames, mountPath.toStdString());
         } else {
-            spdlog::info("Finalize cancelled by user at frame {} of {}", outputFrameCount, totalFrames);
+            spdlog::info("Finalize cancelled by user");
             tempDir.removeRecursively();
             return;
         }

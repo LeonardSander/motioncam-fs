@@ -97,7 +97,7 @@ public:
 public:
     void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
-    void finalize(const std::string&, bool,
+    void finalize(const std::string&, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&);
 
 protected:
@@ -226,9 +226,9 @@ FileInfo Session::getFileInfo() const {
 }
 
 void Session::finalize(
-    const std::string& destination, bool jpegCompression,
+    const std::string& destination, bool jpegCompression, const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress) {
-    vfs::finalize(*mFs, destination, jpegCompression, progress);
+    vfs::finalize(*mFs, destination, jpegCompression, options, progress);
 }
 
 HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
@@ -666,11 +666,12 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
 
 void FuseFileSystemImpl_Win::finalize(
     MountId mountId, const std::string& destination, bool jpegCompression,
+    const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress) {
     const auto it = mMountedFiles.find(mountId);
     if (it == mMountedFiles.end())
         throw std::runtime_error("Mount not found");
-    dynamic_cast<Session*>(it->second.get())->finalize(destination, jpegCompression, progress);
+    dynamic_cast<Session*>(it->second.get())->finalize(destination, jpegCompression, options, progress);
 }
 
 }

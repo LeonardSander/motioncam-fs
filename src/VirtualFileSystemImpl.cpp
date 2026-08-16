@@ -1,5 +1,6 @@
 #include "VirtualFileSystemImpl.h"
 #include "DataLevels.h"
+#include "DNGDecoder.h"
 #include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
@@ -8,6 +9,8 @@
 #include <array>
 #include <fstream>
 #include <filesystem>
+#include <QProcess>
+#include <QTemporaryDir>
 #include <boost/filesystem.hpp>
 #include <spdlog/spdlog.h>
 
@@ -18,6 +21,7 @@ void finalize(
     IVirtualFileSystem& filesystem,
     const std::string& destination,
     bool jpegCompression,
+    const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress) {
     namespace stdfs = std::filesystem;
 
@@ -26,35 +30,269 @@ void finalize(
         return entry.type != EntryType::FILE_ENTRY || entry.name == "desktop.ini";
     }), entries.end());
 
-    stdfs::create_directories(destination);
+    auto outputPath = [&](const Entry& entry) {
+        stdfs::path path(destination);
+        for (const auto& part : entry.pathParts) path /= part;
+        return path / entry.name;
+    };
+    auto readBytes = [](const stdfs::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) throw std::runtime_error("Could not read " + path.string());
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(stream)), {});
+    };
+    auto writeBytes = [](const stdfs::path& path, const std::vector<uint8_t>& bytes) {
+        stdfs::create_directories(path.parent_path());
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!stream) throw std::runtime_error("Could not write " + path.string());
+    };
+
+    struct Gap { size_t left, right; std::vector<size_t> frames; };
+    std::vector<Gap> gaps;
+    if (options.interpolateDuplicatedFrames) {
+        for (size_t i = 1; i + 1 < entries.size();) {
+            if (entries[i].name == "audio.wav" || entries[i - 1].name == "audio.wav" ||
+                std::get<int64_t>(entries[i].userData) != std::get<int64_t>(entries[i - 1].userData)) {
+                ++i;
+                continue;
+            }
+            Gap gap{i - 1, i + 1, {}};
+            while (gap.right < entries.size() && entries[gap.right].name != "audio.wav" &&
+                   std::get<int64_t>(entries[gap.right].userData) ==
+                       std::get<int64_t>(entries[gap.left].userData))
+                ++gap.right;
+            if (gap.right == entries.size() || entries[gap.right].name == "audio.wav") break;
+            for (size_t frame = i; frame < gap.right; ++frame) gap.frames.push_back(frame);
+            gaps.push_back(std::move(gap));
+            i = gaps.back().right;
+        }
+    }
+    const bool interpolate = !gaps.empty();
+    if (options.interpolateDuplicatedFrames)
+        spdlog::info("RIFE interpolation found {} gap(s) containing {} duplicated frame(s)",
+            gaps.size(), [&] { size_t count = 0; for (const auto& gap : gaps) count += gap.frames.size(); return count; }());
+    if (interpolate && (options.rifeDirectory.empty() ||
+        !stdfs::is_regular_file(stdfs::path(options.rifeDirectory) / "inference_img.py")))
+        throw std::runtime_error("RIFE interpolation is enabled, but inference_img.py was not found in the configured RIFE directory");
+
+    std::vector<int> gapForRight(entries.size(), -1);
+    std::vector<int> lastGapForMember(entries.size(), -1);
+    std::vector<bool> gapMember(entries.size(), false);
+    size_t syntheticCount = 0, delayedCompressionCount = 0;
+    for (size_t g = 0; g < gaps.size(); ++g) {
+        gapForRight[gaps[g].right] = static_cast<int>(g);
+        gapMember[gaps[g].left] = gapMember[gaps[g].right] = true;
+        lastGapForMember[gaps[g].left] = lastGapForMember[gaps[g].right] = static_cast<int>(g);
+        for (const auto frame : gaps[g].frames) {
+            gapMember[frame] = true;
+            lastGapForMember[frame] = static_cast<int>(g);
+        }
+        syntheticCount += gaps[g].frames.size();
+    }
+    if (jpegCompression)
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (gapMember[i] && entries[i].name.size() >= 4 &&
+                entries[i].name.substr(entries[i].name.size() - 4) == ".dng")
+                ++delayedCompressionCount;
+    const size_t totalWork = entries.size() + syntheticCount + delayedCompressionCount;
     size_t completed = 0;
-    for (const auto& entry : entries) {
-        if (progress && !progress(completed, entries.size(), entry.name)) {
+    auto report = [&](const std::string& label) {
+        if (progress && !progress(completed, totalWork, label))
             throw std::runtime_error("Finalization cancelled");
+    };
+    auto compressDng = [&](size_t index) {
+        auto dng = readBytes(outputPath(entries[index]));
+        const bool ok = options.jxlDistance >= 0.0f
+            ? DNGDecoder::compressJPEGXL(dng, options.jxlDistance)
+            : DNGDecoder::compressLosslessJPEG(dng);
+        if (!ok) throw std::runtime_error("Could not compress " + entries[index].name);
+        writeBytes(outputPath(entries[index]), dng);
+    };
+
+    QTemporaryDir staging;
+    QProcess rife;
+    if (interpolate) {
+        if (!staging.isValid()) throw std::runtime_error("Could not create RIFE staging directory");
+        const QString code = QString::fromUtf8(R"PY(
+import os, sys, types, numpy as np, torch
+from torch.nn import functional as F
+repo = sys.argv.pop(1)
+os.chdir(repo); sys.path.insert(0, repo)
+# MotionCam supplies raw tensors directly; RIFE's OpenCV image I/O is unused.
+# Avoid importing its binary cv2 wheel, which may target an older NumPy ABI.
+sys.modules['cv2'] = types.ModuleType('cv2')
+import inference_img as rife
+rife.LoadModel(None); rife.StartModel()
+print('MOTIONCAM_READY',flush=True)
+def load(path,width,height):
+    a=np.fromfile(path,dtype='<u2').reshape(height,width,3).astype(np.float32)/65535.0
+    t=torch.tensor(a.transpose(2,0,1)).to(rife.DEVICE).unsqueeze(0)
+    ph=(height+63)//64*64; pw=(width+63)//64*64
+    return F.pad(t,(0,pw-width,0,ph-height)).half() if rife.GPU_FP16 else F.pad(t,(0,pw-width,0,ph-height))
+for line in sys.stdin:
+    parts=line.rstrip('\n').split('\t'); width,height=int(parts[0]),int(parts[1])
+    left,right=parts[2],parts[3]; a,b=load(left,width,height),load(right,width,height)
+    for item in parts[4:]:
+        ratio,out=item.split('|',1)
+        image=rife.RatioSplit(a,b,float(ratio))[0,:,:height,:width]
+        pixels=(image.float().clamp(0,1).cpu().numpy().transpose(1,2,0)*65535.0+0.5).astype('<u2')
+        pixels.tofile(out)
+    del a,b,image,pixels
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
+    print('MOTIONCAM_DONE',flush=True)
+)PY");
+        QString python = options.rifePythonExecutable.empty()
+            ? QString("python3") : QString::fromStdString(options.rifePythonExecutable);
+#ifdef _WIN32
+        const stdfs::path venvPython = stdfs::path(options.rifeDirectory) / "venv/Scripts/python.exe";
+        const stdfs::path dotVenvPython = stdfs::path(options.rifeDirectory) / ".venv/Scripts/python.exe";
+        if (options.rifePythonExecutable.empty()) {
+            if (stdfs::exists(venvPython)) python = QString::fromStdString(venvPython.string());
+            else if (stdfs::exists(dotVenvPython)) python = QString::fromStdString(dotVenvPython.string());
+            else python = "python";
         }
-
-        auto data = filesystem.materializeFile(entry, jpegCompression);
-        if (!data) {
-            throw std::runtime_error("Failed to render " + entry.name);
+#else
+        const stdfs::path venvPython = stdfs::path(options.rifeDirectory) / "venv/bin/python";
+        const stdfs::path dotVenvPython = stdfs::path(options.rifeDirectory) / ".venv/bin/python";
+        if (options.rifePythonExecutable.empty()) {
+            if (stdfs::exists(venvPython)) python = QString::fromStdString(venvPython.string());
+            else if (stdfs::exists(dotVenvPython)) python = QString::fromStdString(dotVenvPython.string());
         }
-
-        stdfs::path output = stdfs::path(destination);
-        for (const auto& part : entry.pathParts)
-            output /= part;
-        output /= entry.name;
-        stdfs::create_directories(output.parent_path());
-
-        std::ofstream stream(output, std::ios::binary | std::ios::trunc);
-        if (!stream)
-            throw std::runtime_error("Could not create " + output.string());
-        stream.write(data->data(), static_cast<std::streamsize>(data->size()));
-        if (!stream)
-            throw std::runtime_error("Could not completely write " + output.string());
-        ++completed;
+#endif
+        rife.setProcessChannelMode(QProcess::MergedChannels);
+        rife.start(python, {"-c", code, QString::fromStdString(options.rifeDirectory)}, QIODevice::ReadWrite);
+        if (!rife.waitForStarted()) throw std::runtime_error("Could not start the RIFE Python environment");
+        QByteArray startupDiagnostic;
+        while (!startupDiagnostic.contains("MOTIONCAM_READY")) {
+            if (!rife.waitForReadyRead(250) && rife.state() == QProcess::NotRunning) {
+                startupDiagnostic += rife.readAll();
+                const std::string detail = startupDiagnostic.toStdString();
+                spdlog::error("RIFE initialization failed: {}", detail);
+                throw std::runtime_error("RIFE initialization failed:\n" + detail);
+            }
+            startupDiagnostic += rife.readAll();
+            if (progress && !progress(0, totalWork, "Loading the RIFE model")) {
+                rife.kill();
+                rife.waitForFinished();
+                throw std::runtime_error("Finalization cancelled");
+            }
+        }
     }
 
-    if (progress)
-        progress(completed, entries.size(), "");
+    stdfs::create_directories(destination);
+    for (size_t index = 0; index < entries.size(); ++index) {
+        report("Rendering " + entries[index].name);
+        const bool delayCompression = interpolate && gapMember[index];
+        auto data = filesystem.materializeFile(entries[index],
+            delayCompression ? false : jpegCompression);
+        if (!data) throw std::runtime_error("Failed to render " + entries[index].name);
+        writeBytes(outputPath(entries[index]),
+            std::vector<uint8_t>(data->begin(), data->end()));
+        ++completed;
+
+        if (!interpolate || gapForRight[index] < 0) continue;
+        const size_t gapIndex = static_cast<size_t>(gapForRight[index]);
+        const auto& gap = gaps[gapIndex];
+        auto leftDng = readBytes(outputPath(entries[gap.left]));
+        auto rightDng = readBytes(outputPath(entries[gap.right]));
+        auto extractRgb = [&](std::vector<uint8_t> dng, const std::string& name,
+                              uint32_t& width, uint32_t& height) {
+            int repeat = 0;
+            std::array<uint8_t, 4> phase{};
+            const bool remosaic = DNGDecoder::getCFAMetadata(dng, repeat, phase);
+            if (!DNGDecoder::ensureUncompressed(dng) ||
+                (remosaic && !DNGDecoder::processHigherCFA(
+                    dng, repeat, phase, QuadBayerMode::Demosaic, false)))
+                throw std::runtime_error("Could not demosaic RIFE input " + name);
+            std::vector<uint8_t> rgb;
+            if (!DNGDecoder::extractUncompressedRGB16(dng, rgb, width, height))
+                throw std::runtime_error("Could not extract RGB pixels from " + name);
+            return rgb;
+        };
+        uint32_t width = 0, height = 0, rightWidth = 0, rightHeight = 0;
+        auto leftRgb = extractRgb(leftDng, entries[gap.left].name, width, height);
+        auto rightRgb = extractRgb(rightDng, entries[gap.right].name, rightWidth, rightHeight);
+        if (width != rightWidth || height != rightHeight)
+            throw std::runtime_error("RIFE input dimensions changed within the sequence");
+        const stdfs::path stageRoot(staging.path().toStdString());
+        const auto leftRaw = stageRoot / "left.rgb16", rightRaw = stageRoot / "right.rgb16";
+        writeBytes(leftRaw, leftRgb); writeBytes(rightRaw, rightRgb);
+        std::vector<stdfs::path> outputs;
+        std::ostringstream command;
+        command << width << '\t' << height << '\t' << leftRaw.string() << '\t' << rightRaw.string();
+        for (size_t j = 0; j < gap.frames.size(); ++j) {
+            outputs.push_back(stageRoot / ("output-" + std::to_string(j) + ".rgb16"));
+            command << '\t' << std::setprecision(17)
+                    << static_cast<double>(j + 1) / static_cast<double>(gap.frames.size() + 1)
+                    << '|' << outputs.back().string();
+        }
+        command << '\n';
+        const QByteArray request = QByteArray::fromStdString(command.str());
+        if (rife.write(request) != request.size() || !rife.waitForBytesWritten()) {
+            const std::string detail = (rife.readAll() + QByteArray("\n") +
+                rife.errorString().toUtf8()).toStdString();
+            spdlog::error("Could not send a frame gap to RIFE: {}", detail);
+            throw std::runtime_error("Could not send a frame gap to RIFE:\n" + detail);
+        }
+        QByteArray diagnostic;
+        bool done = false;
+        while (!done) {
+            if (!rife.waitForReadyRead(250) && rife.state() == QProcess::NotRunning)
+                throw std::runtime_error("RIFE failed: " + (diagnostic + rife.readAll()).toStdString());
+            diagnostic += rife.readAll();
+            done = diagnostic.contains("MOTIONCAM_DONE");
+            const std::string label = "Interpolating " + std::to_string(gap.frames.size()) +
+                " duplicated frame(s) with RIFE";
+            if (progress && !progress(completed, totalWork, label)) {
+                rife.kill();
+                rife.waitForFinished();
+                throw std::runtime_error("Finalization cancelled");
+            }
+        }
+        for (size_t j = 0; j < gap.frames.size(); ++j) {
+            const size_t frame = gap.frames[j];
+            auto dng = readBytes(outputPath(entries[frame]));
+            int repeat = 0;
+            std::array<uint8_t, 4> phase{};
+            const bool remosaic = DNGDecoder::getCFAMetadata(dng, repeat, phase);
+            if (!DNGDecoder::ensureUncompressed(dng) ||
+                (remosaic && !DNGDecoder::processHigherCFA(
+                    dng, repeat, phase, QuadBayerMode::Demosaic, false)))
+                throw std::runtime_error("Could not prepare synthesized DNG " + entries[frame].name);
+            const double ratio = static_cast<double>(j + 1) / static_cast<double>(gap.frames.size() + 1);
+            const auto rgb = readBytes(outputs[j]);
+            if (!DNGDecoder::replaceUncompressedRGB16(dng, rgb, width, height) ||
+                !DNGDecoder::interpolateFrameMetadata(dng, leftDng, rightDng, ratio) ||
+                (remosaic && (!DNGDecoder::processHigherCFA(
+                    dng, 2, phase, QuadBayerMode::Demosaic, true) ||
+                    !DNGDecoder::packUncompressedToWhiteLevel(dng))) ||
+                !DNGDecoder::markSyntheticFrame(dng))
+                throw std::runtime_error("Could not rebuild synthesized DNG " + entries[frame].name);
+            writeBytes(outputPath(entries[frame]), dng);
+            ++completed;
+            report("Rebuilt interpolated frame " + entries[frame].name);
+        }
+        leftRgb.clear(); leftRgb.shrink_to_fit();
+        rightRgb.clear(); rightRgb.shrink_to_fit();
+        for (const auto& output : outputs) stdfs::remove(output);
+        stdfs::remove(leftRaw); stdfs::remove(rightRaw);
+        if (jpegCompression) {
+            std::vector<size_t> members{gap.left};
+            members.insert(members.end(), gap.frames.begin(), gap.frames.end());
+            members.push_back(gap.right);
+            for (const auto member : members) {
+                if (lastGapForMember[member] != static_cast<int>(gapIndex)) continue;
+                report("Compressing " + entries[member].name);
+                compressDng(member);
+                ++completed;
+            }
+        }
+    }
+    if (interpolate) {
+        rife.closeWriteChannel();
+        if (!rife.waitForFinished(5000)) { rife.kill(); rife.waitForFinished(); }
+    }
+    if (progress) progress(totalWork, totalWork, "Finalization complete");
 }
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames) {

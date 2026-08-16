@@ -416,10 +416,29 @@ if(BUILD_TESTING)
     target_compile_definitions(motioncam-jpeg-xl-test PRIVATE TINY_DNG_ENABLE_JPEG_XL)
     add_test(NAME motioncam-jpeg-xl-test COMMAND motioncam-jpeg-xl-test)
 
+    add_executable(motioncam-rife-fake tests/rife_fake.cpp)
+    add_executable(motioncam-finalize-interpolation-test
+        tests/finalize_interpolation_test.cpp
+        src/VirtualFileSystemImpl.cpp
+        src/DNGDecoder.cpp
+        src/HigherCFADemosaic.cpp
+        deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
+    target_include_directories(motioncam-finalize-interpolation-test PRIVATE
+        include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
+    target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex
+        spdlog::spdlog motioncam-decoder)
+    target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
+        TINY_DNG_ENABLE_JPEG_XL
+        RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:motioncam-rife-fake>")
+    add_dependencies(motioncam-finalize-interpolation-test motioncam-rife-fake)
+    add_test(NAME motioncam-finalize-interpolation-test
+        COMMAND motioncam-finalize-interpolation-test)
+
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations
     # are not compiled out.
-    foreach(test_target motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test)
+    foreach(test_target motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test motioncam-finalize-interpolation-test)
         if(MSVC)
             target_compile_options(${test_target} PRIVATE /UNDEBUG)
         else()

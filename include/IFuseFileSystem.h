@@ -29,6 +29,7 @@ public:
         MountId mountId,
         const std::string& destination,
         bool jpegCompression,
+        const FinalizeOptions& options,
         const std::function<bool(size_t, size_t, const std::string&)>& progress) = 0;
 
 protected:

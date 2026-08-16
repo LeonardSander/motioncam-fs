@@ -89,6 +89,16 @@ public:
                                          std::vector<uint8_t>& rgbData,
                                          uint32_t& width,
                                          uint32_t& height);
+    static bool replaceUncompressedRGB16(std::vector<uint8_t>& dngData,
+                                         const std::vector<uint8_t>& rgbData,
+                                         uint32_t width, uint32_t height);
+    static bool markSyntheticFrame(std::vector<uint8_t>& dngData);
+    static bool interpolateFrameMetadata(std::vector<uint8_t>& dngData,
+                                         const std::vector<uint8_t>& leftDng,
+                                         const std::vector<uint8_t>& rightDng,
+                                         double ratio);
+    static bool getCFAMetadata(const std::vector<uint8_t>& dngData,
+                               int& repeatSize, std::array<uint8_t, 4>& phase);
     static bool compressJPEGXL(std::vector<uint8_t>& dngData, float distance);
     static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,

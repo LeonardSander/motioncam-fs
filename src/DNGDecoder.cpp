@@ -958,6 +958,11 @@ bool DNGDecoder::getCFAMetadata(int frameNumber, int& repeatSize,
                                 std::array<uint8_t, 4>& phase) {
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
+    return getCFAMetadata(data, repeatSize, phase);
+}
+
+bool DNGDecoder::getCFAMetadata(const std::vector<uint8_t>& data, int& repeatSize,
+                                std::array<uint8_t, 4>& phase) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     for (const auto& dim : entries) {
@@ -1241,7 +1246,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     const uint32_t compression = scalar(*compressionE), stripOffset = scalar(*offsetsE);
     const uint32_t stripBytes = scalar(*countsE);
     if (!width || !height || bits < 8 || bits > 16 || stripOffset > data.size() ||
-        stripBytes > data.size() - stripOffset || find(TIFF_TAG_LINEARIZATION_TABLE)) return false;
+        stripBytes > data.size() - stripOffset) return false;
     std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
     if (compression == TIFF_COMPRESSION_JPEG) {
         lj92 decoder = nullptr;
@@ -1521,8 +1526,7 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
     const uint32_t bits = scalar(*bitsE), channels = scalar(*sppE);
     const uint32_t stripOffset = scalar(*offsetsE), stripBytes = scalar(*countsE);
     if (!width || !height || !channels || channels > 4 || bits < 8 || bits > 16 ||
-        stripOffset > data.size() || stripBytes > data.size() - stripOffset ||
-        find(TIFF_TAG_LINEARIZATION_TABLE)) return false;
+        stripOffset > data.size() || stripBytes > data.size() - stripOffset) return false;
 
     std::vector<uint16_t> pixels(static_cast<size_t>(width) * height * channels);
     if (compression == TIFF_COMPRESSION_JPEG_XL) {
@@ -1798,6 +1802,131 @@ bool DNGDecoder::extractUncompressedRGB16(const std::vector<uint8_t>& data,
         }
     }
     return true;
+}
+
+bool DNGDecoder::replaceUncompressedRGB16(std::vector<uint8_t>& data,
+                                          const std::vector<uint8_t>& rgbData,
+                                          uint32_t width, uint32_t height) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    auto scalar = [&](const TiffEntry& entry) -> uint32_t {
+        return entry.type == TIFF_TYPE_SHORT ? read16(data.data() + entry.valueOffset, little)
+                                             : read32(data.data() + entry.valueOffset, little);
+    };
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC &&
+            (scalar(entry) == 2 || scalar(entry) == 34892)) { photo = &entry; break; }
+    }
+    if (!photo || rgbData.size() != static_cast<size_t>(width) * height * 6) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag) return &entry;
+        return nullptr;
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE || !sppE ||
+        scalar(*widthE) != width || scalar(*heightE) != height || scalar(*bitsE) != 16 ||
+        scalar(*compressionE) != TIFF_COMPRESSION_NONE || scalar(*sppE) != 3 ||
+        offsetsE->count != 1 || countsE->count != 1) return false;
+    const uint32_t offset = scalar(*offsetsE), bytes = scalar(*countsE);
+    auto level = [&](const TiffEntry* entry, uint32_t channel, double fallback) {
+        if (!entry || !entry->count) return fallback;
+        const uint32_t index = std::min(channel, entry->count - 1);
+        if (entry->type == TIFF_TYPE_RATIONAL || entry->type == TIFF_TYPE_SRATIONAL)
+            return readRational(data, *entry, index, little);
+        const size_t position = entry->valueOffset + static_cast<size_t>(index) *
+            (entry->type == TIFF_TYPE_SHORT ? 2 : 4);
+        return entry->type == TIFF_TYPE_SHORT
+            ? static_cast<double>(read16(data.data() + position, little))
+            : static_cast<double>(read32(data.data() + position, little));
+    };
+    const auto black = find(TIFF_TAG_BLACK_LEVEL);
+    const auto white = find(TIFF_TAG_WHITE_LEVEL);
+    std::vector<uint8_t> encoded(rgbData.size());
+    for (size_t i = 0; i < rgbData.size() / 2; ++i) {
+        const uint16_t normalized = static_cast<uint16_t>(rgbData[i * 2] | rgbData[i * 2 + 1] << 8);
+        const uint32_t channel = static_cast<uint32_t>(i % 3);
+        const double blackValue = level(black, channel, 0.0);
+        const double whiteValue = level(white, channel, 65535.0);
+        if (!(whiteValue > blackValue)) return false;
+        const uint16_t value = static_cast<uint16_t>(std::clamp(std::lround(
+            blackValue + normalized / 65535.0 * (whiteValue - blackValue)), 0l, 65535l));
+        encoded[i * 2] = little ? value & 0xff : value >> 8;
+        encoded[i * 2 + 1] = little ? value >> 8 : value & 0xff;
+    }
+    return replaceTiffStrip(data, offset, bytes, encoded, little);
+}
+
+bool DNGDecoder::markSyntheticFrame(std::vector<uint8_t>& data) {
+    bool little = true;
+    for (const auto& entry : findTiffEntries(data, little)) {
+        if (entry.tag != TIFF_TAG_XMP || entry.type != TIFF_TYPE_BYTE || !entry.count) continue;
+        std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
+        if (xmp.find("rpt:SyntheticFrame=") != std::string::npos) return true;
+        const auto position = xmp.find("/>");
+        if (position == std::string::npos) return false;
+        xmp.insert(position, " rpt:SyntheticFrame='true'");
+        while (data.size() % 4) data.push_back(0);
+        const uint32_t offset = static_cast<uint32_t>(data.size());
+        data.insert(data.end(), xmp.begin(), xmp.end());
+        write32(data.data() + entry.entryOffset + 4, static_cast<uint32_t>(xmp.size()), little);
+        write32(data.data() + entry.entryOffset + 8, offset, little);
+        return true;
+    }
+    return false;
+}
+
+bool DNGDecoder::interpolateFrameMetadata(std::vector<uint8_t>& data,
+                                          const std::vector<uint8_t>& leftDng,
+                                          const std::vector<uint8_t>& rightDng,
+                                          double ratio) {
+    if (!(ratio >= 0.0 && ratio <= 1.0)) return false;
+    DNGFrameMetadata left, right;
+    if (!getColorMetadata(leftDng, left) || !getColorMetadata(rightDng, right)) return false;
+    auto geometric = [ratio](double a, double b) {
+        return a > 0.0 && b > 0.0
+            ? std::exp(std::log(a) * (1.0 - ratio) + std::log(b) * ratio)
+            : a * (1.0 - ratio) + b * ratio;
+    };
+    double baseline = 0.0;
+    const double* baselinePtr = nullptr;
+    if (left.hasBaselineExposure && right.hasBaselineExposure) {
+        baseline = left.baselineExposure * (1.0 - ratio) + right.baselineExposure * ratio;
+        baselinePtr = &baseline;
+    }
+    std::array<float, 3> neutral{};
+    const std::array<float, 3>* neutralPtr = nullptr;
+    if (left.hasAsShotNeutral && right.hasAsShotNeutral) {
+        for (size_t channel = 0; channel < neutral.size(); ++channel)
+            neutral[channel] = static_cast<float>(geometric(
+                left.asShotNeutral[channel], right.asShotNeutral[channel]));
+        neutralPtr = &neutral;
+    }
+    if (!updateMetadata(data, baselinePtr, neutralPtr)) return false;
+
+    bool little = true;
+    bool exposureWritten = !(left.exposureTime > 0.0 && right.exposureTime > 0.0);
+    bool isoWritten = !(left.iso > 0.0 && right.iso > 0.0);
+    for (const auto& entry : findTiffEntries(data, little)) {
+        if (!exposureWritten && entry.tag == TIFF_TAG_EXPOSURE_TIME &&
+            entry.type == TIFF_TYPE_RATIONAL && entry.count) {
+            writeRational(data, entry, 0, geometric(left.exposureTime, right.exposureTime), little);
+            exposureWritten = true;
+        } else if (!isoWritten && entry.tag == TIFF_TAG_ISO && entry.count) {
+            const uint32_t iso = static_cast<uint32_t>(std::lround(geometric(left.iso, right.iso)));
+            if (entry.type == TIFF_TYPE_SHORT)
+                write16(data.data() + entry.valueOffset, static_cast<uint16_t>(std::min(iso, 65535u)), little);
+            else if (entry.type == TIFF_TYPE_LONG)
+                write32(data.data() + entry.valueOffset, iso, little);
+            else continue;
+            isoWritten = true;
+        }
+    }
+    return exposureWritten && isoWritten;
 }
 
 bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {

@@ -40,6 +40,7 @@ void finalize(
     IVirtualFileSystem& filesystem,
     const std::string& destination,
     bool jpegCompression,
+    const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress);
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames);

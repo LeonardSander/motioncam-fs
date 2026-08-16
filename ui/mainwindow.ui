@@ -593,6 +593,22 @@
            </property>
           </widget>
          </item>
+         <item>
+          <layout class="QHBoxLayout" name="rifeInterpolationLayout">
+           <item>
+            <widget class="QCheckBox" name="rifeInterpolationCheckBox">
+             <property name="text"><string>Interpolate Duplicated Frames</string></property>
+             <property name="toolTip"><string>Replace CFR hold frames with RIFE interpolation during DNG and Camera Native finalization. Leave unchecked to use ordinary duplicated frames.</string></property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="rifeRemoveButton">
+             <property name="text"><string>Remove RIFE</string></property>
+             <property name="toolTip"><string>Delete the downloaded RIFE repository, model, and private Python environment.</string></property>
+            </widget>
+           </item>
+          </layout>
+         </item>
         </layout>
        </item>
        <item>
@@ -626,9 +642,9 @@
          </property>
         </spacer>
        </item>
+          </layout>
+         </item>
         </layout>
-       </item>
-      </layout>
      </item>
      <item>
       <spacer name="verticalSpacer2">

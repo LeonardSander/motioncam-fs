@@ -357,6 +357,30 @@ int main() {
     assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));
+    auto syntheticRgb = mountedRgb;
+    assert(motioncam::DNGDecoder::setTimingMetadata(syntheticRgb, 24.0, 0));
+    std::vector<uint8_t> replacement(static_cast<size_t>(rgbWidth) * rgbHeight * channels * 2);
+    for (size_t i = 0; i < replacement.size(); i += 2) {
+        const uint16_t value = static_cast<uint16_t>((i / 2) * 997u);
+        replacement[i] = static_cast<uint8_t>(value & 0xff);
+        replacement[i + 1] = static_cast<uint8_t>(value >> 8);
+    }
+    assert(motioncam::DNGDecoder::replaceUncompressedRGB16(
+        syntheticRgb, replacement, rgbWidth, rgbHeight));
+    std::vector<uint8_t> replaced;
+    uint32_t replacedWidth = 0, replacedHeight = 0;
+    assert(motioncam::DNGDecoder::extractUncompressedRGB16(
+        syntheticRgb, replaced, replacedWidth, replacedHeight));
+    assert(replaced.size() == replacement.size());
+    for (size_t i = 0; i < replaced.size(); i += 2) {
+        const int actual = replaced[i] | replaced[i + 1] << 8;
+        const int wanted = replacement[i] | replacement[i + 1] << 8;
+        assert(std::abs(actual - wanted) <= 33);
+    }
+    assert(motioncam::DNGDecoder::markSyntheticFrame(syntheticRgb));
+    const std::string syntheticMarker = "rpt:SyntheticFrame='true'";
+    assert(std::search(syntheticRgb.begin(), syntheticRgb.end(),
+        syntheticMarker.begin(), syntheticMarker.end()) != syntheticRgb.end());
     auto overriddenRgb = mountedRgb;
     assert(motioncam::DNGDecoder::overrideDataLevels(overriddenRgb, "Static"));
     assert(tiffTagValue(overriddenRgb, 50717) == 1023);

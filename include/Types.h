@@ -368,4 +368,12 @@ struct RenderSettings {
     {}
 };
 
+struct FinalizeOptions {
+    bool interpolateDuplicatedFrames = false;
+    std::string rifeDirectory;
+    // Optional interpreter override, also used by deterministic integration tests.
+    std::string rifePythonExecutable;
+    float jxlDistance = -1.0f;
+};
+
 } // namespace

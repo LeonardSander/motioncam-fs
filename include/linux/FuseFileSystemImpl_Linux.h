@@ -24,7 +24,7 @@ public:
     void unmount(MountId mountId) override;
     void updateOptions(MountId mountId, const RenderSettings& settings) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
-    void finalize(MountId, const std::string&, bool,
+    void finalize(MountId, const std::string&, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&) override;
 
 private:

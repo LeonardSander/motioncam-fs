@@ -109,6 +109,7 @@ private:
     void updateUi();
     void updateFpsLabels();
     void scheduleOptionsUpdate();
+    std::optional<QString> ensureRifeRuntime();
 
 private:
     motioncam::RenderSettings buildRenderSettings() const;
