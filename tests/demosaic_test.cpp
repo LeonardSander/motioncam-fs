@@ -30,5 +30,9 @@ int main() {
     mosaic[detailPixel] = 4095;
     motioncam::utils::demosaicHigherCFA(mosaic, rgb, width, height, 2, phase, false);
     assert(rgb[detailPixel * 3] == 4095);
+    // Detail is reconstructed through the brightness estimate, not left only
+    // in the native red plane as colour-difference demosaic would do.
+    assert(rgb[detailPixel * 3 + 1] > flatColor[1] * 3);
+    assert(rgb[detailPixel * 3 + 2] > flatColor[2] * 3);
     return 0;
 }
