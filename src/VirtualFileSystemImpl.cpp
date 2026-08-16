@@ -55,6 +55,7 @@ void finalize(
         if (!stream) throw std::runtime_error("Could not write " + path.string());
     };
 
+    constexpr size_t maxInterpolatedGapFrames = 31;
     struct Gap { size_t left, right; std::vector<size_t> frames; };
     std::vector<Gap> gaps;
     if (options.interpolateDuplicatedFrames) {
@@ -71,8 +72,15 @@ void finalize(
                 ++gap.right;
             if (gap.right == entries.size() || entries[gap.right].name == "audio.wav") break;
             for (size_t frame = i; frame < gap.right; ++frame) gap.frames.push_back(frame);
-            gaps.push_back(std::move(gap));
-            i = gaps.back().right;
+            const size_t right = gap.right;
+            if (gap.frames.size() <= maxInterpolatedGapFrames) {
+                gaps.push_back(std::move(gap));
+            } else {
+                spdlog::info("RIFE interpolation skipped a gap containing {} duplicated "
+                             "frames (maximum is {})",
+                    gap.frames.size(), maxInterpolatedGapFrames);
+            }
+            i = right;
         }
     }
     const bool interpolate = !gaps.empty();

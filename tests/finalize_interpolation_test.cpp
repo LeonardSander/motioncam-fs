@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 
@@ -101,14 +102,18 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
 
 class FakeFileSystem final : public motioncam::IVirtualFileSystem {
 public:
-    FakeFileSystem(std::vector<uint8_t> left, std::vector<uint8_t> right)
+    FakeFileSystem(std::vector<uint8_t> left, std::vector<uint8_t> right,
+                   size_t duplicatedFrames = 1)
         : mLeft(std::move(left)), mRight(std::move(right)) {
-        for (int i = 0; i < 3; ++i) {
+        for (size_t i = 0; i < duplicatedFrames + 2; ++i) {
             motioncam::Entry entry;
             entry.type = motioncam::EntryType::FILE_ENTRY;
-            entry.name = "frame-00000" + std::to_string(i) + ".dng";
-            entry.size = i == 2 ? mRight.size() : mLeft.size();
-            entry.userData = static_cast<int64_t>(i == 2 ? 2 : 0);
+            char name[32];
+            std::snprintf(name, sizeof(name), "frame-%06zu.dng", i);
+            entry.name = name;
+            entry.size = i == duplicatedFrames + 1 ? mRight.size() : mLeft.size();
+            entry.userData = static_cast<int64_t>(i == duplicatedFrames + 1
+                ? duplicatedFrames + 1 : 0);
             mEntries.push_back(entry);
         }
     }
@@ -117,9 +122,11 @@ public:
     int readFile(const motioncam::Entry&, size_t, size_t, void*,
                  std::function<void(size_t, int)>, bool) override { return -1; }
     std::shared_ptr<std::vector<char>> materializeFile(const motioncam::Entry& entry, bool) override {
-        const auto& source = std::get<int64_t>(entry.userData) == 2 ? mRight : mLeft;
+        const auto& source = std::get<int64_t>(entry.userData) == 0 ? mLeft : mRight;
         auto timed = source;
-        const auto frame = static_cast<motioncam::Timestamp>(entry.name[11] - '0');
+        const auto frame = static_cast<motioncam::Timestamp>(
+            std::distance(mEntries.begin(), std::find_if(mEntries.begin(), mEntries.end(),
+                [&](const auto& candidate) { return candidate.name == entry.name; })));
         assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
         return std::make_shared<std::vector<char>>(timed.begin(), timed.end());
     }
@@ -223,6 +230,25 @@ int main() {
         }, false);
     assert(compressedFrames == 3);
     assert(fs::is_empty(root / "compressed-stream-out"));
+
+    FakeFileSystem longGapFilesystem(
+        makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
+        makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 33), 32);
+    bool interpolatedLongGap = false;
+    size_t longGapFrames = 0;
+    motioncam::vfs::finalize(longGapFilesystem, (root / "long-gap-out").string(),
+        false, options,
+        [&](size_t, size_t, const std::string& label) {
+            interpolatedLongGap |= label.find("Interpolating") != std::string::npos;
+            return true;
+        },
+        [&](const std::vector<uint8_t>& heldDng, motioncam::Timestamp) {
+            assert(std::search(heldDng.begin(), heldDng.end(), marker.begin(), marker.end()) ==
+                heldDng.end());
+            ++longGapFrames;
+        }, false);
+    assert(!interpolatedLongGap);
+    assert(longGapFrames == 34);
 
     bool rejectedMissingCallback = false;
     try {
