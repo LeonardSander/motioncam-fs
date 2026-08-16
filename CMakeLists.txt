@@ -105,8 +105,19 @@ elseif(APPLE)
       include/macos/FuseFileSystemImpl_MacOS.h)
 
   find_library(FUSE_T_FRAMEWORK fuse_t)
+  find_library(AUDIO_TOOLBOX_FRAMEWORK AudioToolbox)
+  find_library(CORE_MEDIA_FRAMEWORK CoreMedia)
+  find_library(CORE_VIDEO_FRAMEWORK CoreVideo)
+  find_library(SECURITY_FRAMEWORK Security)
+  find_library(VIDEO_TOOLBOX_FRAMEWORK VideoToolbox)
 
-  set(platform-specific ${FUSE_T_FRAMEWORK})
+  set(platform-specific
+      ${FUSE_T_FRAMEWORK}
+      ${AUDIO_TOOLBOX_FRAMEWORK}
+      ${CORE_MEDIA_FRAMEWORK}
+      ${CORE_VIDEO_FRAMEWORK}
+      ${SECURITY_FRAMEWORK}
+      ${VIDEO_TOOLBOX_FRAMEWORK})
 
 elseif(UNIX)
   find_package(PkgConfig REQUIRED)
