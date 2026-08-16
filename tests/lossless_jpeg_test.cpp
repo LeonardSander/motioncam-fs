@@ -123,6 +123,29 @@ int main() {
     free(rgbEncoded);
     assert(decodedRgb == rgb);
 
+    // Alternating mosaiced data can be strongly correlated diagonally. The
+    // former hard-coded JPEG predictor 6 compares unlike neighboring samples
+    // and compresses this kind of data poorly; select diagonal predictor 3.
+    constexpr int cfaWidth = 256;
+    constexpr int cfaHeight = 192;
+    std::vector<uint16_t> cfa(cfaWidth * cfaHeight);
+    for (int y = 0; y < cfaHeight; ++y)
+        for (int x = 0; x < cfaWidth; ++x)
+            cfa[y * cfaWidth + x] = ((x + y) & 1) ? 3000 : 600;
+    uint8_t* cfaEncoded = nullptr;
+    int cfaEncodedSize = 0;
+    assert(lj92_encode(cfa.data(), cfaWidth, cfaHeight, bits, 1,
+                      cfaWidth, 0, nullptr, 0,
+                      &cfaEncoded, &cfaEncodedSize) == LJ92_ERROR_NONE);
+    assert(cfaEncodedSize < static_cast<int>(cfa.size() * sizeof(uint16_t) / 8));
+    const std::array<uint8_t, 2> startOfScan = {0xff, 0xda};
+    const auto sos = std::search(cfaEncoded, cfaEncoded + cfaEncodedSize,
+                                 startOfScan.begin(), startOfScan.end());
+    assert(sos != cfaEncoded + cfaEncodedSize);
+    const int componentsInScan = sos[4];
+    assert(sos[5 + componentsInScan * 2] == 3);
+    free(cfaEncoded);
+
     tinydngwriter::GainMapParams gainMap{};
     gainMap.top = 0; gainMap.left = 0; gainMap.bottom = height; gainMap.right = width;
     gainMap.plane = 0; gainMap.planes = 1;
