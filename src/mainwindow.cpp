@@ -167,7 +167,7 @@ namespace {
         }
 
     private:
-        static int writePacket(void* opaque, const uint8_t* data, int size) {
+        static int writePacket(void* opaque, uint8_t* data, int size) {
             auto& self = *static_cast<NutVideoPipe*>(opaque);
             self.mDiagnostic += self.mProcess.readAll();
             if (self.mDiagnostic.size() > 8000)
