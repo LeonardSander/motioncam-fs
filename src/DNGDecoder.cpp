@@ -1083,6 +1083,15 @@ bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
     return frameRateWritten && timeCodeWritten && timestampWritten;
 }
 
+bool DNGDecoder::getTimingMetadata(const std::vector<uint8_t>& data,
+                                   Timestamp& timestampNs) {
+    bool little = true;
+    bool found = false;
+    for (const auto& entry : findTiffEntries(data, little))
+        if (readRelativePresentationTimestamp(data, entry, timestampNs)) found = true;
+    return found;
+}
+
 bool DNGDecoder::repairExposureTime(std::vector<uint8_t>& data, double exposureTime) {
     if (!(exposureTime > 0.0) || !std::isfinite(exposureTime)) return false;
     bool little = true;

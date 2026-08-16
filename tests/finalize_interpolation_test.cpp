@@ -118,7 +118,10 @@ public:
                  std::function<void(size_t, int)>, bool) override { return -1; }
     std::shared_ptr<std::vector<char>> materializeFile(const motioncam::Entry& entry, bool) override {
         const auto& source = std::get<int64_t>(entry.userData) == 2 ? mRight : mLeft;
-        return std::make_shared<std::vector<char>>(source.begin(), source.end());
+        auto timed = source;
+        const auto frame = static_cast<motioncam::Timestamp>(entry.name[11] - '0');
+        assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
+        return std::make_shared<std::vector<char>>(timed.begin(), timed.end());
     }
     void updateOptions(const motioncam::RenderSettings&) override {}
     motioncam::FileInfo getFileInfo() const override { return {}; }
@@ -142,6 +145,8 @@ int main() {
     options.rifeDirectory = (root / "rife").string();
     options.rifePythonExecutable = RIFE_FAKE_EXECUTABLE;
     bool sawInterpolation = false, sawRebuild = false;
+    std::vector<std::string> readyNames;
+    std::vector<motioncam::Timestamp> readyTimestamps;
     size_t previous = 0;
     motioncam::vfs::finalize(filesystem, (root / "out").string(), false, options,
         [&](size_t completed, size_t total, const std::string& label) {
@@ -150,8 +155,19 @@ int main() {
             sawInterpolation |= label.find("Interpolating") != std::string::npos;
             sawRebuild |= label.find("Rebuilt") != std::string::npos;
             return true;
+        },
+        [&](const std::vector<uint8_t>& readyDng, motioncam::Timestamp timestamp) {
+            readyNames.push_back("frame-" + std::to_string(readyNames.size()));
+            readyTimestamps.push_back(timestamp);
+            if (readyNames.size() == 2) {
+                const std::string synthetic = "rpt:SyntheticFrame='true'";
+                assert(std::search(readyDng.begin(), readyDng.end(),
+                    synthetic.begin(), synthetic.end()) != readyDng.end());
+            }
         });
     assert(sawInterpolation && sawRebuild);
+    assert((readyNames == std::vector<std::string>{"frame-0", "frame-1", "frame-2"}));
+    assert((readyTimestamps == std::vector<motioncam::Timestamp>{0, 1, 2}));
     std::ifstream stream(root / "out" / "frame-000001.dng", std::ios::binary);
     std::vector<uint8_t> dng{std::istreambuf_iterator<char>(stream), {}};
     std::vector<uint8_t> rgb;
@@ -179,5 +195,42 @@ int main() {
     assert(tagValue(cfa, 50717).value == 1023); // Original log code range survived.
     assert(tagValue(cfa, 258).value == 10); // Synthetic CFA is packed like ordinary output.
     assert(tagValue(cfa, 279).value == 32 * 32 * 10 / 8);
+
+    FakeFileSystem streamingFilesystem(
+        makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
+        makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2));
+    size_t streamedFrames = 0;
+    motioncam::vfs::finalize(streamingFilesystem, (root / "stream-out").string(),
+        false, options, {},
+        [&](const std::vector<uint8_t>& streamedDng, motioncam::Timestamp) {
+            assert(!streamedDng.empty());
+            ++streamedFrames;
+        }, false);
+    assert(streamedFrames == 3);
+    assert(fs::is_empty(root / "stream-out"));
+
+    FakeFileSystem compressedStreamingFilesystem(
+        makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
+        makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2));
+    auto compressedOptions = options;
+    compressedOptions.jxlDistance = 0.0f;
+    size_t compressedFrames = 0;
+    motioncam::vfs::finalize(compressedStreamingFilesystem,
+        (root / "compressed-stream-out").string(), true, compressedOptions, {},
+        [&](const std::vector<uint8_t>& streamedDng, motioncam::Timestamp) {
+            assert(tagValue(streamedDng, 259).value == 52546);
+            ++compressedFrames;
+        }, false);
+    assert(compressedFrames == 3);
+    assert(fs::is_empty(root / "compressed-stream-out"));
+
+    bool rejectedMissingCallback = false;
+    try {
+        motioncam::vfs::finalize(streamingFilesystem,
+            (root / "invalid-stream-out").string(), false, options, {}, {}, false);
+    } catch (const std::invalid_argument&) {
+        rejectedMissingCallback = true;
+    }
+    assert(rejectedMissingCallback);
     fs::remove_all(root);
 }

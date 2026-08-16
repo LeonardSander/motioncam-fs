@@ -22,8 +22,13 @@ void finalize(
     const std::string& destination,
     bool jpegCompression,
     const FinalizeOptions& options,
-    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    const std::function<bool(size_t, size_t, const std::string&)>& progress,
+    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
+    bool writeFiles) {
     namespace stdfs = std::filesystem;
+
+    if (!writeFiles && !fileReady)
+        throw std::invalid_argument("Streaming finalization requires a frame callback");
 
     auto entries = filesystem.listFiles("");
     entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& entry) {
@@ -34,6 +39,9 @@ void finalize(
         stdfs::path path(destination);
         for (const auto& part : entry.pathParts) path /= part;
         return path / entry.name;
+    };
+    auto isDng = [](const Entry& entry) {
+        return entry.name.size() >= 4 && entry.name.substr(entry.name.size() - 4) == ".dng";
     };
     auto readBytes = [](const stdfs::path& path) {
         std::ifstream stream(path, std::ios::binary);
@@ -78,6 +86,7 @@ void finalize(
     std::vector<int> gapForRight(entries.size(), -1);
     std::vector<int> lastGapForMember(entries.size(), -1);
     std::vector<bool> gapMember(entries.size(), false);
+    std::vector<bool> syntheticMember(entries.size(), false);
     size_t syntheticCount = 0, delayedCompressionCount = 0;
     for (size_t g = 0; g < gaps.size(); ++g) {
         gapForRight[gaps[g].right] = static_cast<int>(g);
@@ -85,6 +94,7 @@ void finalize(
         lastGapForMember[gaps[g].left] = lastGapForMember[gaps[g].right] = static_cast<int>(g);
         for (const auto frame : gaps[g].frames) {
             gapMember[frame] = true;
+            syntheticMember[frame] = true;
             lastGapForMember[frame] = static_cast<int>(g);
         }
         syntheticCount += gaps[g].frames.size();
@@ -96,17 +106,40 @@ void finalize(
                 ++delayedCompressionCount;
     const size_t totalWork = entries.size() + syntheticCount + delayedCompressionCount;
     size_t completed = 0;
+    size_t nextReady = 0;
+    std::vector<bool> ready(entries.size(), false);
+    std::vector<std::vector<uint8_t>> finalizedDngs(entries.size());
+    auto emitReady = [&] {
+        while (nextReady < entries.size() && ready[nextReady]) {
+            const auto& entry = entries[nextReady++];
+            if (fileReady && entry.name.size() >= 4 &&
+                entry.name.substr(entry.name.size() - 4) == ".dng") {
+                Timestamp timestamp = 0;
+                auto& bytes = finalizedDngs[nextReady - 1];
+                if (bytes.empty() && writeFiles) bytes = readBytes(outputPath(entry));
+                if (!DNGDecoder::getTimingMetadata(bytes, timestamp))
+                    throw std::runtime_error("Finalized DNG is missing timing metadata: " + entry.name);
+                fileReady(bytes, timestamp);
+                if (writeFiles || !gapMember[nextReady - 1]) {
+                    bytes.clear();
+                    bytes.shrink_to_fit();
+                }
+            }
+        }
+    };
     auto report = [&](const std::string& label) {
         if (progress && !progress(completed, totalWork, label))
             throw std::runtime_error("Finalization cancelled");
     };
     auto compressDng = [&](size_t index) {
-        auto dng = readBytes(outputPath(entries[index]));
+        auto dng = writeFiles
+            ? readBytes(outputPath(entries[index])) : finalizedDngs[index];
         const bool ok = options.jxlDistance >= 0.0f
             ? DNGDecoder::compressJPEGXL(dng, options.jxlDistance)
             : DNGDecoder::compressLosslessJPEG(dng);
         if (!ok) throw std::runtime_error("Could not compress " + entries[index].name);
-        writeBytes(outputPath(entries[index]), dng);
+        if (writeFiles) writeBytes(outputPath(entries[index]), dng);
+        if (fileReady) finalizedDngs[index] = std::move(dng);
     };
 
     QTemporaryDir staging;
@@ -186,15 +219,28 @@ for line in sys.stdin:
         auto data = filesystem.materializeFile(entries[index],
             delayCompression ? false : jpegCompression);
         if (!data) throw std::runtime_error("Failed to render " + entries[index].name);
-        writeBytes(outputPath(entries[index]),
-            std::vector<uint8_t>(data->begin(), data->end()));
+        std::vector<uint8_t> rendered(data->begin(), data->end());
+        if (writeFiles || !isDng(entries[index]))
+            writeBytes(outputPath(entries[index]), rendered);
+        if (fileReady && isDng(entries[index]))
+            finalizedDngs[index] = rendered;
         ++completed;
+
+        // Gap placeholders are overwritten by RIFE below. Everything else is
+        // immutable now and may be consumed by a streaming finalizer.
+        if ((!interpolate || !syntheticMember[index]) &&
+            (!jpegCompression || !gapMember[index])) {
+            ready[index] = true;
+            emitReady();
+        }
 
         if (!interpolate || gapForRight[index] < 0) continue;
         const size_t gapIndex = static_cast<size_t>(gapForRight[index]);
         const auto& gap = gaps[gapIndex];
-        auto leftDng = readBytes(outputPath(entries[gap.left]));
-        auto rightDng = readBytes(outputPath(entries[gap.right]));
+        auto leftDng = writeFiles
+            ? readBytes(outputPath(entries[gap.left])) : finalizedDngs[gap.left];
+        auto rightDng = writeFiles
+            ? readBytes(outputPath(entries[gap.right])) : finalizedDngs[gap.right];
         auto extractRgb = [&](std::vector<uint8_t> dng, const std::string& name,
                               uint32_t& width, uint32_t& height) {
             int repeat = 0;
@@ -251,7 +297,8 @@ for line in sys.stdin:
         }
         for (size_t j = 0; j < gap.frames.size(); ++j) {
             const size_t frame = gap.frames[j];
-            auto dng = readBytes(outputPath(entries[frame]));
+            auto dng = writeFiles
+                ? readBytes(outputPath(entries[frame])) : finalizedDngs[frame];
             int repeat = 0;
             std::array<uint8_t, 4> phase{};
             const bool remosaic = DNGDecoder::getCFAMetadata(dng, repeat, phase);
@@ -268,10 +315,13 @@ for line in sys.stdin:
                     !DNGDecoder::packUncompressedToWhiteLevel(dng))) ||
                 !DNGDecoder::markSyntheticFrame(dng))
                 throw std::runtime_error("Could not rebuild synthesized DNG " + entries[frame].name);
-            writeBytes(outputPath(entries[frame]), dng);
+            if (writeFiles) writeBytes(outputPath(entries[frame]), dng);
+            if (fileReady) finalizedDngs[frame] = dng;
+            if (!jpegCompression) ready[frame] = true;
             ++completed;
             report("Rebuilt interpolated frame " + entries[frame].name);
         }
+        emitReady();
         leftRgb.clear(); leftRgb.shrink_to_fit();
         rightRgb.clear(); rightRgb.shrink_to_fit();
         for (const auto& output : outputs) stdfs::remove(output);
@@ -284,7 +334,19 @@ for line in sys.stdin:
                 if (lastGapForMember[member] != static_cast<int>(gapIndex)) continue;
                 report("Compressing " + entries[member].name);
                 compressDng(member);
+                ready[member] = true;
                 ++completed;
+            }
+            emitReady();
+        }
+        if (!writeFiles) {
+            std::vector<size_t> releasable{gap.left};
+            releasable.insert(releasable.end(), gap.frames.begin(), gap.frames.end());
+            releasable.push_back(gap.right);
+            for (const auto member : releasable) {
+                if (lastGapForMember[member] != static_cast<int>(gapIndex)) continue;
+                finalizedDngs[member].clear();
+                finalizedDngs[member].shrink_to_fit();
             }
         }
     }

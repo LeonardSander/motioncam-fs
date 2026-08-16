@@ -99,7 +99,8 @@ public:
 
     FileInfo getFileInfo() const;
     void finalize(const std::string&, bool, const FinalizeOptions&,
-        const std::function<bool(size_t, size_t, const std::string&)>&);
+        const std::function<bool(size_t, size_t, const std::string&)>&,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>&, bool);
 
 private:
     void init(IVirtualFileSystem* fs);
@@ -228,8 +229,10 @@ FileInfo Session::getFileInfo() const {
 
 void Session::finalize(
     const std::string& destination, bool jpegCompression, const FinalizeOptions& options,
-    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
-    vfs::finalize(*mFs, destination, jpegCompression, options, progress);
+    const std::function<bool(size_t, size_t, const std::string&)>& progress,
+    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
+    bool writeFiles) {
+    vfs::finalize(*mFs, destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
 
 void Session::fuseMain(struct fuse_chan* ch, struct fuse* fuse) {
@@ -511,11 +514,13 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
 void FuseFileSystemImpl_MacOs::finalize(
     MountId mountId, const std::string& destination, bool jpegCompression,
     const FinalizeOptions& options,
-    const std::function<bool(size_t, size_t, const std::string&)>& progress) {
+    const std::function<bool(size_t, size_t, const std::string&)>& progress,
+    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
+    bool writeFiles) {
     const auto it = mMountedFiles.find(mountId);
     if (it == mMountedFiles.end())
         throw std::runtime_error("Mount not found");
-    it->second->finalize(destination, jpegCompression, options, progress);
+    it->second->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
 
 } // namespace motioncam

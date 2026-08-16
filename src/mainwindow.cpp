@@ -42,6 +42,12 @@ using namespace motioncam;
 #include <QSaveFile>
 #include <QCryptographicHash>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <QTimer>
 #include <QtConcurrent>
 #include <fstream>
@@ -115,11 +121,13 @@ namespace {
             mContext->flags |= AVFMT_FLAG_CUSTOM_IO;
             error = avformat_write_header(mContext, nullptr);
             if (error < 0) throw std::runtime_error("Could not write NUT header: " + avError(error));
-            mHeaderWritten = true;
         }
 
         ~NutVideoPipe() {
-            if (mContext && mHeaderWritten && !mFinished) av_write_trailer(mContext);
+            // finish() is deliberately explicit. During cancellation FFmpeg is
+            // already dead, so attempting to write a trailer from this
+            // destructor would call writePacket() with a defunct QProcess while
+            // the stack is unwinding.
             if (mIo) {
                 av_freep(&mIo->buffer);
                 avio_context_free(&mIo);
@@ -190,7 +198,6 @@ namespace {
         AVStream* mStream = nullptr;
         size_t mExpectedFrameBytes = 0;
         int mStreamIndex = 0;
-        bool mHeaderWritten = false;
         bool mFinished = false;
     };
 }
@@ -1311,21 +1318,94 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         motioncam::FinalizeOptions finalizeOptions;
         finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
         finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
-        mFuseFilesystem->finalize(mountId, staging.path().toStdString(), false, finalizeOptions,
-            [&](size_t completed, size_t count, const std::string& name) {
-                progress.setMaximum(static_cast<int>(count));
-                progress.setValue(static_cast<int>(completed));
-                if (!name.empty())
-                    progress.setLabelText(QString("Rendering RGB %1 of %2: %3")
-                        .arg(completed + 1).arg(count).arg(QString::fromStdString(name)));
-                QApplication::processEvents();
-                return !progress.wasCanceled();
-            });
-
         QDir stageDir(staging.path());
-        const QStringList dngs = stageDir.entryList({"*.dng", "*.DNG"}, QDir::Files, QDir::Name);
-        if (dngs.isEmpty())
-            throw std::runtime_error("The rendered sequence contains no DNG frames");
+
+        struct NativeFrame {
+            std::vector<uint8_t> rgb;
+            Timestamp timestamp = 0;
+            DNGFrameMetadata colorMetadata;
+        };
+        std::mutex queueMutex;
+        std::condition_variable queueChanged;
+        std::deque<NativeFrame> frameQueue;
+        std::atomic_bool cancelled{false};
+        bool renderDone = false;
+        std::exception_ptr renderError;
+        size_t renderCompleted = 0, renderCount = 1;
+        std::string renderLabel;
+
+        std::thread renderer([&] {
+            try {
+                mFuseFilesystem->finalize(mountId, staging.path().toStdString(), false,
+                    finalizeOptions,
+                    [&](size_t completed, size_t count, const std::string& name) {
+                        {
+                            std::lock_guard lock(queueMutex);
+                            renderCompleted = completed;
+                            renderCount = count;
+                            renderLabel = name;
+                        }
+                        queueChanged.notify_all();
+                        return !cancelled.load();
+                    },
+                    [&](const std::vector<uint8_t>& dng, Timestamp timestamp) {
+                        NativeFrame frame;
+                        frame.timestamp = timestamp;
+                        uint32_t width = 0, height = 0;
+                        if (!DNGDecoder::extractUncompressedRGB16(dng, frame.rgb, width, height) ||
+                            width != static_cast<uint32_t>(info->width) ||
+                            height != static_cast<uint32_t>(info->height) ||
+                            !DNGDecoder::getColorMetadata(dng, frame.colorMetadata))
+                            throw std::runtime_error("Could not extract RGB16 from rendered frame");
+                        std::unique_lock lock(queueMutex);
+                        queueChanged.wait(lock, [&] {
+                            return frameQueue.size() < 3 || cancelled.load();
+                        });
+                        if (cancelled.load()) throw std::runtime_error("Finalization cancelled");
+                        frameQueue.push_back(std::move(frame));
+                        lock.unlock();
+                        queueChanged.notify_all();
+                    }, false);
+            } catch (...) {
+                renderError = std::current_exception();
+            }
+            {
+                std::lock_guard lock(queueMutex);
+                renderDone = true;
+            }
+            queueChanged.notify_all();
+        });
+        struct RendererGuard {
+            std::atomic_bool& cancelled;
+            std::condition_variable& changed;
+            std::thread& thread;
+            ~RendererGuard() {
+                cancelled.store(true);
+                changed.notify_all();
+                if (thread.joinable()) thread.join();
+            }
+        } rendererGuard{cancelled, queueChanged, renderer};
+
+        // Audio is the first finalized entry. Once the first video frame is
+        // queued, its staged WAV (if any) is ready and FFmpeg can start.
+        while (true) {
+            std::unique_lock lock(queueMutex);
+            if (!frameQueue.empty() || renderDone) break;
+            queueChanged.wait_for(lock, std::chrono::milliseconds(50));
+            const auto completed = renderCompleted;
+            const auto count = renderCount;
+            const auto label = renderLabel;
+            lock.unlock();
+            progress.setMaximum(static_cast<int>(count));
+            progress.setValue(static_cast<int>(completed));
+            if (!label.empty()) progress.setLabelText(QString::fromStdString(label));
+            QApplication::processEvents();
+            if (progress.wasCanceled()) cancelled.store(true);
+        }
+        if (renderError) std::rethrow_exception(renderError);
+        if (frameQueue.empty()) throw std::runtime_error("The rendered sequence contains no DNG frames");
+
+        const int frameCount = info->totalFrames - info->droppedFrames + info->duplicatedFrames;
 
         // Feed our parser's RGB output directly to FFmpeg. This avoids both
         // FFmpeg's unsupported 16-bit RGB DNG path and a sequence-sized raw
@@ -1334,17 +1414,6 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
-        std::vector<Timestamp> frameTimestamps;
-        {
-            DNGDecoder stagedTiming(staging.path().toStdString());
-            const auto& timedFrames = stagedTiming.getFrames();
-            if (timedFrames.size() != static_cast<size_t>(dngs.size()) ||
-                std::any_of(timedFrames.begin(), timedFrames.end(),
-                    [](const auto& frame) { return !frame.hasExactPresentationTimestamp; }))
-                throw std::runtime_error("The staged DNG sequence is missing frame timestamps");
-            frameTimestamps.reserve(timedFrames.size());
-            for (const auto& frame : timedFrames) frameTimestamps.push_back(frame.timestamp);
-        }
         QStringList args{"-hide_banner", "-y", "-f", "nut", "-i", "pipe:0"};
         const QString audioPath = stageDir.absoluteFilePath("audio.wav");
         if (QFile::exists(audioPath))
@@ -1366,7 +1435,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
              << "-fps_mode" << (convertToCfr ? "cfr" : "vfr");
         if (convertToCfr)
             args << "-r" << QString::number(info->fps, 'g', 9);
-        args << "-movflags" << "+write_colr" << "-frames:v" << QString::number(dngs.size())
+        args << "-movflags" << "+write_colr" << "-frames:v" << QString::number(frameCount)
              << partialPath;
 
         QString ffmpeg;
@@ -1381,7 +1450,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
             throw std::runtime_error(
                 "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
 
-        progress.setRange(0, dngs.size());
+        progress.setRange(0, frameCount);
         progress.setValue(0);
         progress.setLabelText("Encoding LOG60 Camera Native frame 1...");
         progress.show();
@@ -1394,39 +1463,67 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         QByteArray diagnostic;
         NutVideoPipe videoPipe(encoder, diagnostic, info->width, info->height);
         DNGFrameMetadata colorMetadata;
-        for (int frameIndex = 0; frameIndex < dngs.size(); ++frameIndex) {
-            const QString& dngName = dngs[frameIndex];
-            QFile dngFile(stageDir.absoluteFilePath(dngName));
-            if (!dngFile.open(QIODevice::ReadOnly))
-                throw std::runtime_error("Could not open staged frame " + dngName.toStdString());
-            const QByteArray dngArray = dngFile.readAll();
-            std::vector<uint8_t> dngBytes(dngArray.begin(), dngArray.end());
-            if (frameIndex == 0 && !DNGDecoder::getColorMetadata(dngBytes, colorMetadata))
-                throw std::runtime_error("Could not read color metadata from the staged DNG");
-            std::vector<uint8_t> rgbBytes;
-            uint32_t frameWidth = 0, frameHeight = 0;
-            if (!DNGDecoder::extractUncompressedRGB16(
-                    dngBytes, rgbBytes, frameWidth, frameHeight) ||
-                frameWidth != static_cast<uint32_t>(info->width) ||
-                frameHeight != static_cast<uint32_t>(info->height))
-                throw std::runtime_error("Could not extract RGB16 from staged frame " + dngName.toStdString());
-
+        std::optional<NativeFrame> pendingFrame;
+        int frameIndex = 0;
+        while (true) {
             if (progress.wasCanceled()) {
+                cancelled.store(true);
+                queueChanged.notify_all();
                 encoder.kill();
                 encoder.waitForFinished();
                 throw std::runtime_error("Finalization cancelled");
             }
-            const int64_t pts = frameTimestamps[static_cast<size_t>(frameIndex)];
-            const int64_t duration = frameIndex + 1 < dngs.size()
-                ? frameTimestamps[static_cast<size_t>(frameIndex + 1)] - pts
-                : static_cast<int64_t>(std::llround(1e9 / info->fps));
-            videoPipe.writeFrame(rgbBytes, pts, std::max<int64_t>(1, duration));
-            progress.setValue(frameIndex + 1);
-            if (frameIndex + 1 < dngs.size())
-                progress.setLabelText(QString("Encoding LOG60 Camera Native frame %1 of %2...")
-                    .arg(frameIndex + 2).arg(dngs.size()));
+
+            NativeFrame frame;
+            bool haveFrame = false;
+            bool done = false;
+            size_t completed = 0, count = 1;
+            std::string label;
+            {
+                std::unique_lock lock(queueMutex);
+                if (frameQueue.empty() && !renderDone)
+                    queueChanged.wait_for(lock, std::chrono::milliseconds(50));
+                if (!frameQueue.empty()) {
+                    frame = std::move(frameQueue.front());
+                    frameQueue.pop_front();
+                    haveFrame = true;
+                }
+                done = renderDone && frameQueue.empty();
+                completed = renderCompleted;
+                count = renderCount;
+                label = renderLabel;
+            }
+            queueChanged.notify_all();
+
+            if (haveFrame) {
+                if (!pendingFrame) colorMetadata = frame.colorMetadata;
+                if (pendingFrame) {
+                    const int64_t duration = frame.timestamp - pendingFrame->timestamp;
+                    videoPipe.writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
+                        std::max<int64_t>(1, duration));
+                    ++frameIndex;
+                    progress.setValue(frameIndex);
+                }
+                pendingFrame = std::move(frame);
+            }
+            if (done) {
+                if (renderError) std::rethrow_exception(renderError);
+                break;
+            }
+            progress.setMaximum(std::max(frameCount, static_cast<int>(count)));
+            if (!haveFrame) progress.setValue(static_cast<int>(completed));
+            progress.setLabelText(haveFrame
+                ? QString("Rendering and encoding LOG60 Camera Native frame %1 of %2...")
+                    .arg(frameIndex + 1).arg(frameCount)
+                : QString::fromStdString(label));
             QApplication::processEvents();
         }
+        if (!pendingFrame) throw std::runtime_error("The rendered sequence contains no video frames");
+        videoPipe.writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
+            std::max<int64_t>(1, static_cast<int64_t>(std::llround(1e9 / info->fps))));
+        ++frameIndex;
+        if (frameIndex != frameCount)
+            throw std::runtime_error("Rendered frame count did not match the clip metadata");
         videoPipe.finish();
         encoder.closeWriteChannel();
         progress.setLabelText("Finishing LOG60 Camera Native MOV...");

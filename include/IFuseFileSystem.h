@@ -30,7 +30,9 @@ public:
         const std::string& destination,
         bool jpegCompression,
         const FinalizeOptions& options,
-        const std::function<bool(size_t, size_t, const std::string&)>& progress) = 0;
+        const std::function<bool(size_t, size_t, const std::string&)>& progress,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady = {},
+        bool writeFiles = true) = 0;
 
 protected:
     IFuseFileSystem() = default;

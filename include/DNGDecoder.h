@@ -80,6 +80,8 @@ public:
     static bool setTimingMetadata(std::vector<uint8_t>& dngData,
                                   double frameRate,
                                   Timestamp timestampNs);
+    static bool getTimingMetadata(const std::vector<uint8_t>& dngData,
+                                  Timestamp& timestampNs);
     static bool repairExposureTime(std::vector<uint8_t>& dngData, double exposureTime);
     static bool ensureUncompressed(std::vector<uint8_t>& dngData);
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,
