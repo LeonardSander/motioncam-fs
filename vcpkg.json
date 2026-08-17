@@ -17,6 +17,11 @@
     ],
     "overrides": [
         {
+            "name": "fmt",
+            "version": "12.2.0",
+            "port-version": 0
+        },
+        {
             "name": "ffmpeg",
             "version": "8.1.2",
             "port-version": 3
