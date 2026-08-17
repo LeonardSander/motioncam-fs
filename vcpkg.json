@@ -10,26 +10,15 @@
         "libjxl",
         {
             "name": "ffmpeg",
-            "version>=": "8.1.2",
+            "version>=": "6.1.1",
             "default-features": false,
-            "features": ["avcodec", "avformat", "svt-av1", "swresample", "swscale"]
+            "features": ["avcodec", "avformat", "swresample", "swscale"]
         }
     ],
     "overrides": [
         {
-            "name": "fmt",
-            "version": "12.2.0",
-            "port-version": 0
-        },
-        {
-            "name": "spdlog",
-            "version-semver": "1.17.0",
-            "port-version": 0
-        },
-        {
             "name": "ffmpeg",
-            "version": "8.1.2",
-            "port-version": 3
+            "version": "6.1.1"
         }
     ]
 }

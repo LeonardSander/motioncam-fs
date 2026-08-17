@@ -20,18 +20,6 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Cache vcpkg dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cache/vcpkg
-          .vcpkg-binary-cache
-          vcpkg/downloads
-          build-linux/vcpkg_installed
-        key: Linux-vcpkg-${{ hashFiles('vcpkg.json', '.github/workflows/**') }}
-        restore-keys: |
-          Linux-vcpkg-
-
     - name: Install native build dependencies
       shell: bash
       run: |
@@ -40,7 +28,8 @@ jobs:
           clang ninja-build pkg-config \
           libboost-filesystem-dev libboost-locale-dev libboost-regex-dev \
           libspdlog-dev libfmt-dev libfuse3-dev libjxl-dev libxcb-cursor0 \
-          nasm
+          libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
+          libswscale-dev
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
@@ -49,27 +38,13 @@ jobs:
         host: linux
         target: desktop
 
-    - name: Install FFmpeg via vcpkg
-      uses: lukka/run-vcpkg@v11
-      with:
-        vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
-
     - name: Configure with LLVM
       shell: bash
       run: |
-        export VCPKG_BINARY_SOURCES="clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
-        for attempt in 1 2 3; do
-          if cmake -S . -B build-linux -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-            -DCMAKE_EXE_LINKER_FLAGS="-L${{ github.workspace }}/build-linux/vcpkg_installed/x64-linux/lib"; then
-            break
-          fi
-          if [ "$attempt" -eq 3 ]; then exit 1; fi
-          sleep $((30 * attempt))
-        done
+        cmake -S . -B build-linux -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++
 
     - name: Build
       run: cmake --build build-linux --parallel
@@ -132,8 +107,6 @@ jobs:
         path: |
           ~/.cache/vcpkg
           ~/Library/Caches/Homebrew
-          .vcpkg-binary-cache
-          vcpkg/downloads
           build/
         key: ${{ runner.os }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', '.github/workflows/**') }}
         restore-keys: |
@@ -153,7 +126,7 @@ jobs:
         # Keep the ports and tool version reproducible. The action's old
         # implicit snapshot referenced MSYS2 archives that are no longer
         # available, which prevented libjxl's dependencies from installing.
-        vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
         vcpkgArguments: spdlog
 
     # ---------- MACOS DEPENDENCIES ----------
@@ -237,41 +210,30 @@ jobs:
       if: matrix.os == 'windows-latest'
       shell: pwsh
       run: |
-        # Use a persistent file cache because x-gha was removed from vcpkg.
-        $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-          cmake -S . -B build `
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
-            -DCMAKE_VERBOSE_MAKEFILE=ON `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/msvc2019_64" `
-            -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
-          if ($LASTEXITCODE -eq 0) { break }
-          if ($attempt -eq 3) { exit $LASTEXITCODE }
-          Start-Sleep -Seconds (30 * $attempt)
-        }
+        # Manifest installation reuses the restored build directory cache.
+        $env:VCPKG_BINARY_SOURCES = "clear"
+        cmake -S . -B build `
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+          -DCMAKE_VERBOSE_MAKEFILE=ON `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/msvc2019_64" `
+          -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
 
     - name: Configure CMake (macOS)
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
-        export VCPKG_BINARY_SOURCES="clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
+        export VCPKG_BINARY_SOURCES=clear
         BREW_PREFIX="$(brew --prefix)"
-        for attempt in 1 2 3; do
-          if cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_VERBOSE_MAKEFILE=ON \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX" \
-            -DCMAKE_CXX_FLAGS="-I/opt/homebrew/include -I/opt/homebrew/include/fuse_t" \
-            -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Frameworks" \
-            -DCMAKE_EXE_LINKER_FLAGS="-L${{ github.workspace }}/build/vcpkg_installed/arm64-osx/lib" \
-            -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"; then
-            break
-          fi
-          if [ "$attempt" -eq 3 ]; then exit 1; fi
-          sleep $((30 * attempt))
-        done
+        cmake -S . -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/macos;$BREW_PREFIX" \
+          -DCMAKE_CXX_FLAGS="-I/opt/homebrew/include -I/opt/homebrew/include/fuse_t" \
+          -DCMAKE_LIBRARY_PATH="$BREW_PREFIX/lib;/Library/Frameworks" \
+          -DCMAKE_EXE_LINKER_FLAGS="-L${{ github.workspace }}/build/vcpkg_installed/arm64-osx/lib" \
+          -DFUSE_T_FRAMEWORK="/Library/Frameworks/fuse_t.framework"
 
 
     # ---------- BUILD ----------
