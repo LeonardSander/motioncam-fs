@@ -611,7 +611,8 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
         }
         return mountId;
     }
-    else if((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4")) && 
+    else if((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4") ||
+             boost::iequals(extension, ".mkv")) &&
             boost::icontains(filename, "NATIVE")) {
         auto mountId = mNextMountId++;
 

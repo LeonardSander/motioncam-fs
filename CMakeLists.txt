@@ -245,12 +245,13 @@ if(FFMPEG_ROOT)
     
     find_library(AVFORMAT_LIBRARY avformat PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
     find_library(AVCODEC_LIBRARY avcodec PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
+    find_library(SWRESAMPLE_LIBRARY swresample PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
     find_library(SWSCALE_LIBRARY swscale PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
     find_library(AVUTIL_LIBRARY avutil PATHS ${FFMPEG_LIBRARY_DIRS} NO_DEFAULT_PATH)
-    
-    if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
+
+    if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWRESAMPLE_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
         set(FFMPEG_FOUND TRUE)
-        set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
+        set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWRESAMPLE_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
         include_directories(${FFMPEG_INCLUDE_DIRS})
         link_directories(${FFMPEG_LIBRARY_DIRS})
         message(STATUS "Found FFmpeg at: ${FFMPEG_ROOT}")
@@ -264,6 +265,7 @@ if(NOT FFMPEG_FOUND AND NOT WIN32)
         pkg_check_modules(FFMPEG QUIET IMPORTED_TARGET
             libavformat
             libavcodec
+            libswresample
             libswscale
             libavutil
         )
@@ -278,7 +280,7 @@ if(NOT FFMPEG_FOUND)
     find_package(ffmpeg CONFIG QUIET)
     if(ffmpeg_FOUND)
         set(FFMPEG_FOUND TRUE)
-        set(FFMPEG_LIBRARIES ffmpeg::avformat ffmpeg::avcodec ffmpeg::swscale ffmpeg::avutil)
+        set(FFMPEG_LIBRARIES ffmpeg::avformat ffmpeg::avcodec ffmpeg::swresample ffmpeg::swscale ffmpeg::avutil)
     endif()
 endif()
 
@@ -294,17 +296,19 @@ if(NOT FFMPEG_FOUND AND WIN32)
     # Clear cached values to force re-search
     unset(AVFORMAT_LIBRARY CACHE)
     unset(AVCODEC_LIBRARY CACHE)
+    unset(SWRESAMPLE_LIBRARY CACHE)
     unset(SWSCALE_LIBRARY CACHE)
     unset(AVUTIL_LIBRARY CACHE)
     
     find_library(AVFORMAT_LIBRARY avformat PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
     find_library(AVCODEC_LIBRARY avcodec PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
+    find_library(SWRESAMPLE_LIBRARY swresample PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
     find_library(SWSCALE_LIBRARY swscale PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
     find_library(AVUTIL_LIBRARY avutil PATHS ${VCPKG_LIB_DIR} NO_DEFAULT_PATH)
     
-    if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
+    if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWRESAMPLE_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
         set(FFMPEG_FOUND TRUE)
-        set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
+        set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWRESAMPLE_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
         message(STATUS "Found FFmpeg in vcpkg: ${VCPKG_LIB_DIR}")
     endif()
 endif()

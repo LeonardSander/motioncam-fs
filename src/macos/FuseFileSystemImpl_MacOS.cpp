@@ -431,7 +431,8 @@ MountId FuseFileSystemImpl_MacOs::mount(
     }
 
     if (boost::iequals(extension, ".mcraw") ||
-        ((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4")) &&
+        ((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4") ||
+          boost::iequals(extension, ".mkv")) &&
          boost::icontains(fs::path(srcFile).filename().string(), "NATIVE")) ||
         boost::iequals(extension, ".dng") || DNGDecoder::isDNGSequence(srcFile)) {
         auto mountId = mNextMountId++;

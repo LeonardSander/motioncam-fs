@@ -90,7 +90,7 @@ namespace {
 
     class NutVideoPipe {
     public:
-        NutVideoPipe(QProcess& process, QByteArray& diagnostic, int width, int height)
+        NutVideoPipe(QProcess& process, QByteArray& diagnostic, int width, int height, double fps)
             : mProcess(process), mDiagnostic(diagnostic),
               mExpectedFrameBytes(static_cast<size_t>(width) * height * 3 * sizeof(uint16_t)) {
             int error = avformat_alloc_output_context2(&mContext, nullptr, "nut", nullptr);
@@ -100,6 +100,9 @@ namespace {
             mStreamIndex = stream->index;
             mStream = stream;
             stream->time_base = {1, 1000000000};
+            const AVRational frameRate = av_d2q(fps > 0.0 ? fps : 24.0, 1000000);
+            stream->avg_frame_rate = frameRate;
+            stream->r_frame_rate = frameRate;
             stream->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
             stream->codecpar->codec_id = AV_CODEC_ID_RAWVIDEO;
             stream->codecpar->format = AV_PIX_FMT_RGB48LE;
@@ -153,8 +156,13 @@ namespace {
             packet->flags |= AV_PKT_FLAG_KEY;
             const int writeError = av_write_frame(mContext, packet);
             av_packet_free(&packet);
-            if (writeError < 0)
-                throw std::runtime_error("Could not stream NUT frame: " + avError(writeError));
+            if (writeError < 0) {
+                mProcess.waitForFinished(500);
+                mDiagnostic += mProcess.readAll();
+                const QString detail = QString::fromUtf8(mDiagnostic).trimmed().right(4000);
+                throw std::runtime_error(("Could not stream NUT frame: " + avError(writeError) +
+                    (detail.isEmpty() ? "" : "\n\nFFmpeg:\n" + detail.toStdString())));
+            }
         }
 
         void finish() {
@@ -167,7 +175,13 @@ namespace {
         }
 
     private:
-        static int writePacket(void* opaque, uint8_t* data, int size) {
+        static int writePacket(void* opaque,
+#if LIBAVFORMAT_VERSION_MAJOR >= 61
+                               const uint8_t* data,
+#else
+                               uint8_t* data,
+#endif
+                               int size) {
             auto& self = *static_cast<NutVideoPipe*>(opaque);
             self.mDiagnostic += self.mProcess.readAll();
             if (self.mDiagnostic.size() > 8000)
@@ -445,8 +459,9 @@ void MainWindow::saveSettings() {
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jxlDistance", mRenderSettings.jxlDistance);
-    settings.setValue("cameraNativeFinalization",
-        ui->dngCompressionModeComboBox->currentText() == "Camera Native");
+    const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
+    settings.setValue("cameraNativeFinalization", compressionMode.startsWith("Camera Native"));
+    settings.setValue("cameraNativeMode", compressionMode);
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
@@ -518,9 +533,15 @@ void MainWindow::restoreSettings() {
     auto nearestJxl = std::min_element(jxlDistances.begin(), jxlDistances.end(), [this](float a, float b) {
         return std::abs(a - mRenderSettings.jxlDistance) < std::abs(b - mRenderSettings.jxlDistance);
     });
-    ui->dngCompressionModeComboBox->setCurrentIndex(
-        settings.value("cameraNativeFinalization", false).toBool()
-            ? 6 : static_cast<int>(nearestJxl - jxlDistances.begin()));
+    int compressionIndex = static_cast<int>(nearestJxl - jxlDistances.begin());
+    if (settings.contains("cameraNativeMode")) {
+        const int savedIndex = ui->dngCompressionModeComboBox->findText(
+            settings.value("cameraNativeMode").toString());
+        if (savedIndex >= 0) compressionIndex = savedIndex;
+    } else if (settings.value("cameraNativeFinalization", false).toBool()) {
+        compressionIndex = 6;
+    }
+    ui->dngCompressionModeComboBox->setCurrentIndex(compressionIndex);
     ui->higherCfaHqCheckBox->setChecked(
         !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
 
@@ -581,8 +602,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                     // Accept MCRAW files, MOV/MP4 files with NATIVE suffix, or DNG files/directories
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
-                         (filePath.endsWith(".mov", Qt::CaseInsensitive) || 
-                          filePath.endsWith(".mp4", Qt::CaseInsensitive))) ||
+                         (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
+                          filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
+                          filePath.endsWith(".mkv", Qt::CaseInsensitive))) ||
                         filePath.endsWith(".dng", Qt::CaseInsensitive) ||
                         QFileInfo(filePath).isDir()) {
                         dragEvent->acceptProposedAction();
@@ -603,8 +625,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                     auto filePath = url.toLocalFile();
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
-                         (filePath.endsWith(".mov", Qt::CaseInsensitive) || 
-                          filePath.endsWith(".mp4", Qt::CaseInsensitive))) ||
+                         (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
+                          filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
+                          filePath.endsWith(".mkv", Qt::CaseInsensitive))) ||
                         filePath.endsWith(".dng", Qt::CaseInsensitive) ||
                         QFileInfo(filePath).isDir()) {
                         mountFile(filePath);
@@ -1204,7 +1227,7 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
     return runtimeRoot;
 }
 
-void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
+void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoise) {
     const QString srcFile = fileWidget->property("filePath").toString();
     const QString mountPath = fileWidget->property("mountPath").toString();
     bool mountOk = false;
@@ -1280,9 +1303,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
     }
 
     const QFileInfo sourceInfo(srcFile);
-    const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE";
+    const QString codecSuffix = av1 ? (hdrNoise ? "_AV1_HDR_NOISE" : "_AV1") : "";
+    const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
+    const QString containerExtension = av1 ? ".mp4" : ".mov";
     const QDir outputDir(QFileInfo(mountPath).absolutePath());
-    const QString outputPath = outputDir.absoluteFilePath(outputBase + ".mov");
+    const QString outputPath = outputDir.absoluteFilePath(outputBase + containerExtension);
     const QString jsonPath = outputDir.absoluteFilePath(outputBase + ".json");
     if ((QFile::exists(outputPath) || QFile::exists(jsonPath)) &&
         QMessageBox::question(this, "Replace Camera Native output?",
@@ -1319,6 +1344,31 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
         finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
         QDir stageDir(staging.path());
+
+        QString ffmpeg;
+#ifdef _WIN32
+        const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg.exe";
+#else
+        const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg";
+#endif
+        if (QFileInfo(bundled).isExecutable()) ffmpeg = bundled;
+        else ffmpeg = QStandardPaths::findExecutable("ffmpeg");
+        if (ffmpeg.isEmpty())
+            throw std::runtime_error(
+                "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
+        if (av1) {
+            QProcess probe;
+            probe.setProcessChannelMode(QProcess::MergedChannels);
+            probe.start(ffmpeg, {"-hide_banner", "-h", "encoder=libsvtav1"});
+            if (!probe.waitForStarted() || !probe.waitForFinished(10000) || probe.exitCode() != 0 ||
+                !probe.readAll().contains("Encoder libsvtav1")) {
+                probe.kill();
+                probe.waitForFinished();
+                throw std::runtime_error(
+                    "This FFmpeg executable does not provide the libsvtav1 encoder. "
+                    "Install an FFmpeg build with SVT-AV1 support or place it beside MotionCam Fuse.");
+            }
+        }
 
         struct NativeFrame {
             std::vector<uint8_t> rgb;
@@ -1410,7 +1460,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         // Feed our parser's RGB output directly to FFmpeg. This avoids both
         // FFmpeg's unsupported 16-bit RGB DNG path and a sequence-sized raw
         // intermediate file.
-        const QString partialPath = stageDir.absoluteFilePath(outputBase + ".mov");
+        const QString partialPath = stageDir.absoluteFilePath(outputBase + containerExtension);
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
@@ -1427,28 +1477,37 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         args << "-map" << "0:v:0";
         if (QFile::exists(audioPath))
             args << "-map" << "1:a:0" << "-c:a" << "copy";
-        args << "-vf" << log60 << "-c:v" << "libx265" << "-preset" << "slow"
-             << "-crf" << "14" << "-pix_fmt" << "yuv420p10le"
+        args << "-vf" << log60;
+        if (av1) {
+            // SVT 4 defaults to parallelism level 6 (305 PPCS at 4K), which
+            // can exhaust a desktop process's memory during encoder startup.
+            // Level 4 keeps preset/quality unchanged while bounding its frame
+            // pipeline (148 PPCS in SVT-AV1 4.1).
+            QString svtParams = "lp=4:keyint=10s:tune=0:enable-overlays=1:scd=1:scm=0";
+            if (hdrNoise)
+                svtParams = "lp=4:keyint=10s:tune=5:noise=8:enable-overlays=1:scd=1:scm=0";
+            args << "-c:v" << "libsvtav1" << "-crf" << (hdrNoise ? "18" : "12")
+                 << "-preset" << (hdrNoise ? "2" : "4")
+                 << "-svtav1-params" << svtParams;
+        } else {
+            args << "-c:v" << "libx265" << "-preset" << "slow" << "-crf" << "14"
+                 << "-x265-params" << "range=full:colorprim=bt2020:colormatrix=bt2020nc";
+        }
+        args << "-pix_fmt" << "yuv420p10le"
              << "-color_range" << "pc" << "-colorspace" << "bt2020nc"
-             << "-color_primaries" << "bt2020" << "-x265-params"
-             << "range=full:colorprim=bt2020:colormatrix=bt2020nc"
-             << "-fps_mode" << (convertToCfr ? "cfr" : "vfr");
+             << "-color_primaries" << "bt2020"
+             << "-fps_mode" << (convertToCfr ? "cfr" : "passthrough");
         if (convertToCfr)
             args << "-r" << QString::number(info->fps, 'g', 9);
-        args << "-movflags" << "+write_colr" << "-frames:v" << QString::number(frameCount)
-             << partialPath;
-
-        QString ffmpeg;
-#ifdef _WIN32
-        const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg.exe";
-#else
-        const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg";
-#endif
-        if (QFileInfo(bundled).isExecutable()) ffmpeg = bundled;
-        else ffmpeg = QStandardPaths::findExecutable("ffmpeg");
-        if (ffmpeg.isEmpty())
-            throw std::runtime_error(
-                "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
+        else
+            // Match the MP4 track scale: fine enough for source VFR timing,
+            // without exposing NUT's 1 ns time base to the encoder.
+            args << "-enc_time_base:v" << "1:1000000";
+        args << "-movflags" << "+write_colr"
+             // MOV permits a finer track time scale than FFmpeg's Matroska
+             // muxer, preserving sub-millisecond VFR presentation times.
+             << "-video_track_timescale" << "1000000";
+        args << "-frames:v" << QString::number(frameCount) << partialPath;
 
         progress.setRange(0, frameCount);
         progress.setValue(0);
@@ -1461,7 +1520,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         if (!encoder.waitForStarted())
             throw std::runtime_error("Could not start FFmpeg: " + encoder.errorString().toStdString());
         QByteArray diagnostic;
-        NutVideoPipe videoPipe(encoder, diagnostic, info->width, info->height);
+        // SVT-AV1 needs a sane nominal rate, but FFmpeg must not use the VFR
+        // average as a synchronization target. The timestamps remain the
+        // authority in passthrough mode.
+        const double encoderNominalFps = convertToCfr
+            ? info->fps : info->frameRateInfo.medianFrameRate;
+        NutVideoPipe videoPipe(encoder, diagnostic, info->width, info->height, encoderNominalFps);
         DNGFrameMetadata colorMetadata;
         std::optional<NativeFrame> pendingFrame;
         int frameIndex = 0;
@@ -1526,7 +1590,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
             throw std::runtime_error("Rendered frame count did not match the clip metadata");
         videoPipe.finish();
         encoder.closeWriteChannel();
-        progress.setLabelText("Finishing LOG60 Camera Native MOV...");
+        progress.setLabelText(QString("Finishing LOG60 Camera Native %1...")
+            .arg(av1 ? "MP4" : "MOV"));
         while (encoder.state() != QProcess::NotRunning) {
             encoder.waitForFinished(100);
             QApplication::processEvents();
@@ -1547,6 +1612,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         nlohmann::json sidecar;
         sidecar["transferFunction"] = "LOG60";
         sidecar["dataLevels"] = "Full";
+        sidecar["videoCodec"] = av1 ? "AV1" : "HEVC";
+        sidecar["encoder"] = av1 ? "libsvtav1" : "libx265";
+        if (hdrNoise) sidecar["noiseSynthesis"] = 8;
         if (colorMetadata.hasColorMatrix1) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
         if (colorMetadata.hasColorMatrix2) sidecar["colorMatrix2"] = colorMetadata.colorMatrix2;
         if (colorMetadata.hasForwardMatrix1) sidecar["forwardMatrix1"] = colorMetadata.forwardMatrix1;
@@ -1563,24 +1631,24 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
         // Commit the pair together. Existing outputs are retained until both
         // temporary files are complete and are restored if either rename fails.
         const QString backupId = ".camera-native-backup-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
-        const QString movBackup = outputPath + backupId;
+        const QString mediaBackup = outputPath + backupId;
         const QString jsonBackup = jsonPath + backupId;
-        const bool hadMov = QFile::exists(outputPath);
+        const bool hadMedia = QFile::exists(outputPath);
         const bool hadJson = QFile::exists(jsonPath);
-        if ((hadMov && !QFile::rename(outputPath, movBackup)) ||
+        if ((hadMedia && !QFile::rename(outputPath, mediaBackup)) ||
             (hadJson && !QFile::rename(jsonPath, jsonBackup))) {
-            if (QFile::exists(movBackup)) QFile::rename(movBackup, outputPath);
+            if (QFile::exists(mediaBackup)) QFile::rename(mediaBackup, outputPath);
             throw std::runtime_error("Could not preserve the existing Camera Native output");
         }
-        const bool movCommitted = QFile::rename(partialPath, outputPath);
-        const bool jsonCommitted = movCommitted && QFile::rename(partialJsonPath, jsonPath);
+        const bool mediaCommitted = QFile::rename(partialPath, outputPath);
+        const bool jsonCommitted = mediaCommitted && QFile::rename(partialJsonPath, jsonPath);
         if (!jsonCommitted) {
-            if (movCommitted) QFile::remove(outputPath);
-            if (QFile::exists(movBackup)) QFile::rename(movBackup, outputPath);
+            if (mediaCommitted) QFile::remove(outputPath);
+            if (QFile::exists(mediaBackup)) QFile::rename(mediaBackup, outputPath);
             if (QFile::exists(jsonBackup)) QFile::rename(jsonBackup, jsonPath);
-            throw std::runtime_error("Could not commit the completed Camera Native MOV and JSON");
+            throw std::runtime_error("Could not commit the completed Camera Native video and JSON");
         }
-        QFile::remove(movBackup);
+        QFile::remove(mediaBackup);
         QFile::remove(jsonBackup);
 
         progress.close();
@@ -1597,9 +1665,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget) {
 }
 
 void MainWindow::finalizeFile(QWidget* fileWidget) {
-    if (ui->dngCompressionCheckBox->isChecked() &&
-        ui->dngCompressionModeComboBox->currentText() == "Camera Native") {
-        finalizeCameraNative(fileWidget);
+    const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
+    if (ui->dngCompressionCheckBox->isChecked() && compressionMode.startsWith("Camera Native")) {
+        const bool av1 = compressionMode.contains("AV1");
+        finalizeCameraNative(fileWidget, av1, compressionMode.contains("HDR"));
         return;
     }
     auto mountPath = fileWidget->property("mountPath").toString();

@@ -28,7 +28,7 @@ jobs:
           clang ninja-build pkg-config \
           libboost-filesystem-dev libboost-locale-dev libboost-regex-dev \
           libspdlog-dev libfmt-dev libfuse3-dev libjxl-dev libxcb-cursor0 \
-          libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+          nasm
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
@@ -37,13 +37,21 @@ jobs:
         host: linux
         target: desktop
 
+    - name: Install FFmpeg via vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+
     - name: Configure with LLVM
       shell: bash
       run: |
+        export VCPKG_BINARY_SOURCES=clear
         cmake -S . -B build-linux -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
-          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DCMAKE_EXE_LINKER_FLAGS="-L${{ github.workspace }}/build-linux/vcpkg_installed/x64-linux/lib"
 
     - name: Build
       run: cmake --build build-linux --parallel
@@ -125,7 +133,7 @@ jobs:
         # Keep the ports and tool version reproducible. The action's old
         # implicit snapshot referenced MSYS2 archives that are no longer
         # available, which prevented libjxl's dependencies from installing.
-        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+        vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
         vcpkgArguments: spdlog
 
     # ---------- MACOS DEPENDENCIES ----------

@@ -295,7 +295,8 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
             *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
             srcFile, baseName);
     } else if ((boost::iequals(extension, ".mov") ||
-                boost::iequals(extension, ".mp4")) &&
+                boost::iequals(extension, ".mp4") ||
+                boost::iequals(extension, ".mkv")) &&
                boost::icontains(filename, "NATIVE")) {
         filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
             *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
