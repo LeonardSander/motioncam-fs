@@ -25,6 +25,7 @@ jobs:
       with:
         path: |
           ~/.cache/vcpkg
+          .vcpkg-binary-cache
           vcpkg/downloads
           build-linux/vcpkg_installed
         key: Linux-vcpkg-${{ hashFiles('vcpkg.json', '.github/workflows/**') }}
@@ -56,6 +57,7 @@ jobs:
     - name: Configure with LLVM
       shell: bash
       run: |
+        export VCPKG_BINARY_SOURCES="clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
         for attempt in 1 2 3; do
           if cmake -S . -B build-linux -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -130,6 +132,7 @@ jobs:
         path: |
           ~/.cache/vcpkg
           ~/Library/Caches/Homebrew
+          .vcpkg-binary-cache
           vcpkg/downloads
           build/
         key: ${{ runner.os }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', '.github/workflows/**') }}
@@ -234,9 +237,8 @@ jobs:
       if: matrix.os == 'windows-latest'
       shell: pwsh
       run: |
-        # Keep run-vcpkg's x-gha binary cache enabled. Retry because a cold
-        # manifest install downloads many GitHub-hosted source archives and
-        # can be throttled temporarily.
+        # Use a persistent file cache because x-gha was removed from vcpkg.
+        $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
         for ($attempt = 1; $attempt -le 3; $attempt++) {
           cmake -S . -B build `
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
@@ -253,6 +255,7 @@ jobs:
       if: matrix.os == 'macos-latest'
       shell: bash
       run: |
+        export VCPKG_BINARY_SOURCES="clear;files,${{ github.workspace }}/.vcpkg-binary-cache,readwrite"
         BREW_PREFIX="$(brew --prefix)"
         for attempt in 1 2 3; do
           if cmake -S . -B build \
