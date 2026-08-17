@@ -24,6 +24,11 @@ struct CameraConfiguration;
 
 namespace utils {
 
+// Parse WIDTHxHEIGHT or WIDTHxHEIGHT_STRIDE. Returns zero values for invalid
+// components; STRIDE is a pixel count, not a byte count.
+void parseCropTarget(const std::string& target, uint32_t& width,
+                     uint32_t& height, uint32_t& stride);
+
 // ============================================================================
 // Stream Utilities
 // ============================================================================

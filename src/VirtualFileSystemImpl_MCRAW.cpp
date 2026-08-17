@@ -243,7 +243,10 @@ void VirtualFileSystemImpl_MCRAW::init() {
     std::vector<uint8_t> data;
     nlohmann::json metadata;
 
-    decoder.loadFrame(frames[0], data, metadata);
+    uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
+    if (mSettings.options & RENDER_OPT_CROPPING)
+        utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
+    decoder.loadFrame(frames[0], data, metadata, static_cast<int>(strideOverride));
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
@@ -399,8 +402,10 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo.totalFrames = static_cast<int>(frames.size());
     mFileInfo.droppedFrames = droppedFrames;
     mFileInfo.duplicatedFrames = duplicatedFrames;
-    mFileInfo.width = cameraFrameMetadata.width;
-    mFileInfo.height = cameraFrameMetadata.height;
+    mFileInfo.width = cropWidth > 0 && cropWidth <= static_cast<uint32_t>(cameraFrameMetadata.width)
+        ? static_cast<int>(cropWidth) : cameraFrameMetadata.width;
+    mFileInfo.height = cropHeight > 0 && cropHeight <= static_cast<uint32_t>(cameraFrameMetadata.height)
+        ? static_cast<int>(cropHeight) : cameraFrameMetadata.height;
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
@@ -490,7 +495,10 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
 
         std::vector<uint8_t> frameData;
         nlohmann::json metadata;
-        decoder->loadFrame(timestamp, frameData, metadata);
+        uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
+        if (mSettings.options & RENDER_OPT_CROPPING)
+            utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
+        decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
         const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
         const int outputFrameNumber = std::stoi(frameDigits);
         std::optional<float> exposureOverride;

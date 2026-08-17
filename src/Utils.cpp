@@ -18,6 +18,30 @@
 namespace motioncam {
 namespace utils {
 
+void parseCropTarget(const std::string& target, uint32_t& width,
+                     uint32_t& height, uint32_t& stride) {
+    width = height = stride = 0;
+    const size_t separatorPos = target.find('x');
+    if (separatorPos == std::string::npos)
+        return;
+    try {
+        size_t heightEnd = 0;
+        width = std::stoul(target.substr(0, separatorPos));
+        height = std::stoul(target.substr(separatorPos + 1), &heightEnd);
+        const size_t suffixPos = separatorPos + 1 + heightEnd;
+        if (suffixPos < target.size()) {
+            if (target[suffixPos] != '_' || suffixPos + 1 >= target.size())
+                throw std::invalid_argument("invalid crop suffix");
+            size_t strideEnd = 0;
+            stride = std::stoul(target.substr(suffixPos + 1), &strideEnd);
+            if (suffixPos + 1 + strideEnd != target.size())
+                throw std::invalid_argument("invalid stride");
+        }
+    } catch (const std::exception&) {
+        width = height = stride = 0;
+    }
+}
+
 // ============================================================================
 // vectorbuf and vector_ostream implementations
 // ============================================================================
@@ -828,17 +852,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     uint32_t newWidth, newHeight;
     uint32_t cropWidth = 0, cropHeight = 0;
 
-    if (!cropTarget.empty()) {
-        const size_t separatorPos = cropTarget.find('x');
-        if (separatorPos != std::string::npos) {
-            try {
-                cropWidth = std::stoul(cropTarget.substr(0, separatorPos));
-                cropHeight = std::stoul(cropTarget.substr(separatorPos + 1));
-            } catch (const std::exception&) {
-                // Ignore invalid crop target
-                cropWidth = 0;
-                cropHeight = 0;
-    }}}
+    uint32_t ignoredStride = 0;
+    parseCropTarget(cropTarget, cropWidth, cropHeight, ignoredStride);
 
     if (cropWidth > 0 && cropHeight > 0 && cropWidth <= inOutWidth && cropHeight <= inOutHeight) {
         newWidth = cropWidth / sourceScale;

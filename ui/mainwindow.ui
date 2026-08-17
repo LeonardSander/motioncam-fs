@@ -964,6 +964,9 @@
            </item>
            <item>
             <widget class="QComboBox" name="cropTargetComboBox">
+             <property name="toolTip">
+              <string>Crop as WIDTHxHEIGHT. Append _STRIDE to override the decoded row width in pixels, for example 4000x3000_4096.</string>
+             </property>
              <property name="minimumSize">
               <size>
                <width>120</width>
