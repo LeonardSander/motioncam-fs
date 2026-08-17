@@ -329,16 +329,16 @@ if(Boost_FOUND)
   include_directories(${Boost_INCLUDE_DIRS})
 endif()
 
-if(UNIX AND NOT APPLE)
-  include(FetchContent)
-  FetchContent_Declare(bs_thread_pool
-      GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
-      GIT_TAG v4.1.0
-      GIT_SHALLOW TRUE)
-  FetchContent_MakeAvailable(bs_thread_pool)
-  target_include_directories(${PROJECT_NAME} PRIVATE
-      ${bs_thread_pool_SOURCE_DIR}/include)
-endif()
+# Use the same pinned thread-pool API on every platform. In particular, do not
+# pick up the newer templated BS::thread_pool API from vcpkg on Windows/macOS.
+include(FetchContent)
+FetchContent_Declare(bs_thread_pool
+    GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
+    GIT_TAG v4.1.0
+    GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(bs_thread_pool)
+target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+    ${bs_thread_pool_SOURCE_DIR}/include)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
   Qt${QT_VERSION_MAJOR}::Widgets
