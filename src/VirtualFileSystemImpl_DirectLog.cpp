@@ -321,8 +321,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     
     try {
         const auto& videoInfo = mDecoder->getVideoInfo();
-        const int width = videoInfo.width;
-        const int height = videoInfo.height;
+        int width = videoInfo.width;
+        int height = videoInfo.height;
         
         // Determine if we should apply log curve and bit reduction
         const bool applyLogCurve =
@@ -346,9 +346,27 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
         
         // Process RGB data: apply log curve to reduce to 12-bit, then apply additional bit reduction
-        std::vector<uint16_t> processedRgbData;
+        std::vector<uint16_t> processedRgbData = rgbData;
         float dstWhiteLevel = 65535.0f;
         int encodeBits = 16;
+
+        // Spatial reduction must happen while the decoded RGB values are
+        // still linear. Averaging LOG60 values would darken mixed blocks.
+        const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
+        if (proxyScale > 1) {
+            std::vector<uint16_t> reduced;
+            uint32_t reducedWidth = 0, reducedHeight = 0;
+            utils::reduceRGB(processedRgbData, reduced,
+                             static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                             static_cast<uint32_t>(proxyScale),
+                             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ,
+                             reducedWidth, reducedHeight);
+            if (reduced.empty())
+                throw std::runtime_error("Proxy scale is too large for the DirectLog image");
+            processedRgbData = std::move(reduced);
+            width = static_cast<int>(reducedWidth);
+            height = static_cast<int>(reducedHeight);
+        }
         
         if (applyLogCurve) {
             // First reduce to 12-bit using log curve
@@ -362,13 +380,14 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             }
             
             encodeBits = useBits;
-            processedRgbData.resize(rgbData.size());
+            const auto linearRgbData = std::move(processedRgbData);
+            processedRgbData.resize(linearRgbData.size());
             
             // Apply log curve to each pixel
-            for (size_t i = 0; i < rgbData.size(); i += 3) {
+            for (size_t i = 0; i < linearRgbData.size(); i += 3) {
                 for (int c = 0; c < 3; ++c) {
                     // Normalize input to [0, 1]
-                    float normalized = rgbData[i + c] / 65535.0f;
+                    float normalized = linearRgbData[i + c] / 65535.0f;
                     
                     // Apply log2 transform: log2(1 + k*x) / log2(1 + k)
                     // Using k=60 to match MCRAW implementation
@@ -383,9 +402,6 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                     );
                 }
             }
-        } else {
-            // No log curve - use original data
-            processedRgbData = rgbData;
         }
         
         // Check if remosaicing is requested (from render options)

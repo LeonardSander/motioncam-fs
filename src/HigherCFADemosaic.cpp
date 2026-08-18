@@ -173,6 +173,99 @@ void demosaicHigherCFA(
     }
 }
 
+void reduceRGB(const std::vector<uint16_t>& input, std::vector<uint16_t>& output,
+               uint32_t width, uint32_t height, uint32_t scale, bool highQuality,
+               uint32_t& outputWidth, uint32_t& outputHeight,
+               uint16_t logWhiteLevel) {
+    scale = std::max(1u, scale);
+    outputWidth = width / scale;
+    outputHeight = height / scale;
+    if (!outputWidth || !outputHeight ||
+        input.size() < static_cast<size_t>(width) * height * 3) {
+        output.clear();
+        return;
+    }
+    output.resize(static_cast<size_t>(outputWidth) * outputHeight * 3);
+    const uint32_t sample = (scale - 1) / 2;
+    for (uint32_t y = 0; y < outputHeight; ++y) {
+        for (uint32_t x = 0; x < outputWidth; ++x) {
+            for (uint32_t channel = 0; channel < 3; ++channel) {
+                uint64_t value = 0;
+                if (highQuality) {
+                    if (logWhiteLevel) {
+                        double linearSum = 0.0;
+                        for (uint32_t sy = 0; sy < scale; ++sy)
+                            for (uint32_t sx = 0; sx < scale; ++sx) {
+                                const uint16_t encoded = input[
+                                    ((static_cast<size_t>(y) * scale + sy) * width +
+                                     x * scale + sx) * 3 + channel];
+                                const double logValue = static_cast<double>(encoded) / logWhiteLevel;
+                                linearSum += (std::pow(61.0, logValue) - 1.0) / 60.0;
+                            }
+                        const double linearAverage = linearSum /
+                            (static_cast<double>(scale) * scale);
+                        value = static_cast<uint64_t>(std::llround(
+                            std::log2(1.0 + 60.0 * linearAverage) /
+                            std::log2(61.0) * logWhiteLevel));
+                    } else {
+                        for (uint32_t sy = 0; sy < scale; ++sy)
+                            for (uint32_t sx = 0; sx < scale; ++sx)
+                                value += input[((static_cast<size_t>(y) * scale + sy) * width +
+                                                x * scale + sx) * 3 + channel];
+                        value = (value + static_cast<uint64_t>(scale) * scale / 2) /
+                                (static_cast<uint64_t>(scale) * scale);
+                    }
+                } else {
+                    value = input[((static_cast<size_t>(y) * scale + sample) * width +
+                                   x * scale + sample) * 3 + channel];
+                }
+                output[(static_cast<size_t>(y) * outputWidth + x) * 3 + channel] =
+                    static_cast<uint16_t>(value);
+            }
+        }
+    }
+}
+
+void binQuadBayer(const std::vector<uint16_t>& input, std::vector<uint16_t>& output,
+                  uint32_t width, uint32_t height,
+                  uint32_t& outputWidth, uint32_t& outputHeight,
+                  uint16_t logWhiteLevel) {
+    outputWidth = width / 2;
+    outputHeight = height / 2;
+    if (!outputWidth || !outputHeight ||
+        input.size() < static_cast<size_t>(width) * height) {
+        output.clear();
+        return;
+    }
+    output.resize(static_cast<size_t>(outputWidth) * outputHeight);
+    for (uint32_t y = 0; y < outputHeight; ++y) {
+        for (uint32_t x = 0; x < outputWidth; ++x) {
+            const uint32_t sourceX = x * 2;
+            const uint32_t sourceY = y * 2;
+            const std::array<uint16_t, 4> values = {
+                input[static_cast<size_t>(sourceY) * width + sourceX],
+                input[static_cast<size_t>(sourceY) * width + sourceX + 1],
+                input[static_cast<size_t>(sourceY + 1) * width + sourceX],
+                input[static_cast<size_t>(sourceY + 1) * width + sourceX + 1]};
+            uint16_t average = 0;
+            if (logWhiteLevel) {
+                double linearSum = 0.0;
+                for (uint16_t encoded : values) {
+                    const double logValue = static_cast<double>(encoded) / logWhiteLevel;
+                    linearSum += (std::pow(61.0, logValue) - 1.0) / 60.0;
+                }
+                average = static_cast<uint16_t>(std::llround(
+                    std::log2(1.0 + 60.0 * linearSum / 4.0) /
+                    std::log2(61.0) * logWhiteLevel));
+            } else {
+                const uint64_t sum = values[0] + values[1] + values[2] + values[3];
+                average = static_cast<uint16_t>((sum + 2) / 4);
+            }
+            output[static_cast<size_t>(y) * outputWidth + x] = average;
+        }
+    }
+}
+
 
 } // namespace utils
 } // namespace motioncam

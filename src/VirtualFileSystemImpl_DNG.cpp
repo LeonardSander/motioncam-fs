@@ -209,6 +209,7 @@ void VirtualFileSystemImpl_DNG::init() {
         const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
                                  mDecoder->getGainMap(static_cast<int>(i), sizeGainMap);
         const bool processHigher = mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
+            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
         {
             std::vector<uint8_t> sizedData;
@@ -405,6 +406,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
 
     if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
+         vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
          (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
         !DNGDecoder::processHigherCFA(
             bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,

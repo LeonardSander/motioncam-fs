@@ -85,6 +85,33 @@ static uint32_t tiffTagValue(const std::vector<uint8_t>& dng, uint16_t wantedTag
     return 0;
 }
 
+static std::array<uint32_t, 4> tiffLong4Tag(const std::vector<uint8_t>& dng,
+                                            uint16_t wantedTag) {
+    auto u16 = [&](size_t offset) {
+        assert(offset + 2 <= dng.size());
+        return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8);
+    };
+    auto u32 = [&](size_t offset) {
+        assert(offset + 4 <= dng.size());
+        return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+            dng[offset + 2] << 16 | dng[offset + 3] << 24);
+    };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t count = u16(ifd);
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) == wantedTag) {
+                assert(u16(entry + 2) == 4 && u32(entry + 4) == 4);
+                const size_t offset = u32(entry + 8);
+                return {u32(offset), u32(offset + 4), u32(offset + 8), u32(offset + 12)};
+            }
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + count * 12);
+    }
+    assert(false && "TIFF LONG[4] tag not found");
+    return {};
+}
+
 static std::array<uint8_t, 4> tiffByteTag(const std::vector<uint8_t>& dng,
                                          uint16_t wantedTag) {
     auto u16 = [&](size_t offset) {
@@ -204,6 +231,8 @@ int main() {
         assert(image.SetBlackLevelRepeatDim(2, 2));
         assert(image.SetBlackLevel(4, black));
         assert(image.SetWhiteLevel(0x3fff));
+        const unsigned int activeArea[4] = {0, 0, higherHeight, higherWidth};
+        assert(image.SetActiveArea(activeArea));
         assert(image.SetExposureTime(0.003009814f));
         assert(image.SetIso(100));
         assert(image.SetDNGVersion(1, 7, 0, 0));
@@ -283,6 +312,32 @@ int main() {
     }
     std::filesystem::remove_all(sequencePath);
     const std::array<uint8_t, 4> phase = {0, 1, 1, 2};
+    auto hqProxy = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        hqProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+        false, 2, true));
+    assert(tiffTagValue(hqProxy, 256) == higherWidth / 2);
+    assert(tiffTagValue(hqProxy, 257) == higherHeight / 2);
+    assert(tiffTagValue(hqProxy, 262) == 32803);
+    assert(tiffTagValue(hqProxy, 277) == 1);
+    assert((tiffLong4Tag(hqProxy, 50829) ==
+            std::array<uint32_t, 4>{0, 0, higherHeight / 2, higherWidth / 2}));
+    auto hqRemosaic = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        hqRemosaic, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+        true, 2, true));
+    assert(tiffTagValue(hqRemosaic, 256) == higherWidth / 2);
+    assert(tiffTagValue(hqRemosaic, 257) == higherHeight / 2);
+    assert(tiffTagValue(hqRemosaic, 262) == 32803);
+    assert(tiffTagValue(hqRemosaic, 277) == 1);
+    auto hqFourProxy = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        hqFourProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+        false, 4, true));
+    assert(tiffTagValue(hqFourProxy, 256) == higherWidth / 4);
+    assert(tiffTagValue(hqFourProxy, 257) == higherHeight / 4);
+    assert(tiffTagValue(hqFourProxy, 262) == 34892);
+    assert(tiffTagValue(hqFourProxy, 277) == 3);
     assert(motioncam::DNGDecoder::processHigherCFA(
         processBytes, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
         false, 1, true));
@@ -348,6 +403,8 @@ int main() {
     assert(rgbDng.SetPhotometric(tinydngwriter::PHOTOMETRIC_LINEARRAW));
     assert(rgbDng.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
     assert(rgbDng.SetWhiteLevel(1023));
+    const unsigned int rgbActiveArea[4] = {4, 6, 28, 42};
+    assert(rgbDng.SetActiveArea(rgbActiveArea));
     assert(rgbDng.SetDNGVersion(1, 7, 0, 0));
     assert(rgbDng.SetDNGBackwardVersion(1, 7, 0, 0));
     assert(rgbDng.SetImageData(reinterpret_cast<const unsigned char*>(rgb.data()),
@@ -357,6 +414,16 @@ int main() {
     assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));
+    auto proxyRgb = mountedRgb;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        proxyRgb, 2, phase, motioncam::QuadBayerMode::Demosaic,
+        false, 2, true));
+    assert(tiffTagValue(proxyRgb, 256) == rgbWidth / 2);
+    assert(tiffTagValue(proxyRgb, 257) == rgbHeight / 2);
+    assert(tiffTagValue(proxyRgb, 279) ==
+           (rgbWidth / 2) * (rgbHeight / 2) * channels * sizeof(uint16_t));
+    assert((tiffLong4Tag(proxyRgb, 50829) ==
+            std::array<uint32_t, 4>{2, 3, 14, 21}));
     auto syntheticRgb = mountedRgb;
     assert(motioncam::DNGDecoder::setTimingMetadata(syntheticRgb, 24.0, 0));
     std::vector<uint8_t> replacement(static_cast<size_t>(rgbWidth) * rgbHeight * channels * 2);

@@ -64,7 +64,7 @@ Camera Native finalization can encode 10-bit LOG60 as HEVC/MOV or AV1/MP4. MP4 i
 
 - **Proxy / Binning Mode**
   
-  This mode reduces the resolution of the raw image by discarding pixel values. Performance is prioritised and heavy aliasing is introduced to the image. Only use while editing and turn off for delivery. However if MCRAWs contain image data with a quad bayer cfa, the 2x binning option will sum 2by2 pixels to return a binned bayer image. This operation also results in an increase of precision per summed pixel (10b to 12b).
+  This mode reduces image resolution for editing. HQ demosaics ordinary Bayer footage first and box-averages the resulting RGB pixels. Quad Bayer has a dedicated path: 2x averages each same-color 2x2 block directly into ordinary Bayer, while 4x/8x demosaic that binned Bayer and apply the remaining RGB reduction. DirectLog and RGB DNG inputs use RGB averaging. With HQ disabled, RGB inputs retain a representative pixel per reduction block and Bayer proxy processing uses its fast sample-selection path. Remosaic may be enabled after RGB reduction to convert the result back to ordinary Bayer.
 
 - **Off Center Cropping**
   
@@ -74,9 +74,9 @@ Camera Native finalization can encode 10-bit LOG60 as HEVC/MOV or AV1/MP4. MP4 i
   
   Fuse detects the CFA repeat size from MCRAW metadata (`cfaSize`, with the legacy remosaic flag mapping to 4x4), DNG CFA tags, or the per-clip JSON sidecar. The Higher CFA Processing control can demosaic 4x4 footage to RGB, use an OCL/4PD-oriented anti-aliasing variant, retain correct 4x4/6x6/8x8 CFA metadata, or deliberately label it as ordinary 2x2 Bayer for compatibility. Enabling Remosaic converts a demosaiced result back to ordinary Bayer for applications that do not accept RGB DNGs.
 
-  Proxy reduction converts each higher-CFA color block to one ordinary Bayer sample. With **HQ** enabled all values in the block are summed and the black/white levels are scaled by the block area. With HQ disabled Fuse selects the upper-left central sample (indices 0, 4, and 5 for 2x2, 3x3, and 4x4 blocks).
+  With **HQ** enabled, ordinary Bayer and RGB inputs are reduced by averaging RGB blocks without changing black or white levels. Quad Bayer is first averaged into half-resolution ordinary Bayer; at 2x that Bayer image is the output, while 4x/8x demosaic it before the remaining reduction. With HQ disabled, Fuse uses the faster sample-selection reduction.
 
-  At the 2x proxy setting, 6x6 CFA is reduced directly from each 3x3 color block to ordinary Bayer. For 8x8 CFA in either demosaic mode, 2x proxy first reduces 2x2 sub-blocks to a half-resolution 4x4 CFA and then runs the selected quad-Bayer demosaic. Selecting 4x proxy on 8x8 CFA reduces each complete 4x4 color block and produces quarter-resolution ordinary Bayer. Other proxy factors are rounded up to a CFA-aligned block multiple.
+  In LQ mode, higher-CFA proxy sampling remains aligned to complete same-color blocks: 6x6 CFA uses its 3x3 color blocks, while 8x8 CFA can use staged 2x reduction for demosaic modes or complete 4x4 blocks at 4x proxy. HQ treatment of non-quad higher-CFA footage demosaics the full image before applying the requested RGB reduction factor.
 
 ---
 

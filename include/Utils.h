@@ -175,6 +175,30 @@ void remosaicRGBToBayer(
     int height,
     const std::string& cfaPhase = "bggr");
 
+// Reduces interleaved RGB by an integer factor. HQ box-averages every source
+// pixel; LQ retains one representative pixel per block.
+void reduceRGB(
+    const std::vector<uint16_t>& input,
+    std::vector<uint16_t>& output,
+    uint32_t width,
+    uint32_t height,
+    uint32_t scale,
+    bool highQuality,
+    uint32_t& outputWidth,
+    uint32_t& outputHeight,
+    uint16_t logWhiteLevel = 0);
+
+// Averages each 2x2 same-colour block of a 4x4 quad-Bayer image into one
+// sample, producing an ordinary 2x2 Bayer mosaic at half resolution.
+void binQuadBayer(
+    const std::vector<uint16_t>& input,
+    std::vector<uint16_t>& output,
+    uint32_t width,
+    uint32_t height,
+    uint32_t& outputWidth,
+    uint32_t& outputHeight,
+    uint16_t logWhiteLevel = 0);
+
 // Edge- and luma-guided Bayer/higher-CFA demosaic. The OCL variant compensates
 // the radial response difference between pixels sharing an on-sensor lens.
 void demosaicHigherCFA(

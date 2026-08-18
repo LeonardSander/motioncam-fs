@@ -1303,10 +1303,16 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0)
         cfaRepeatSize = metadata.needRemosaic ? 4 : 2;
     const bool higherCFA = cfaRepeatSize > 2;
-    const bool staged8x8Demosaic = cfaRepeatSize == 8 && draftScale == 2;
-    const bool demosaic = (higherCFA || settings.cameraNativeStaging) &&
-        (draftScale == 1 || staged8x8Demosaic) &&
-        (settings.quadBayerOption == QuadBayerMode::Demosaic ||
+    const bool hqProxy = draftScale > 1 &&
+        (settings.options & RENDER_OPT_HIGHER_CFA_HQ);
+    const bool quadBayerHqProxy = hqProxy && cfaRepeatSize == 4;
+    const bool hqRgbProxy = hqProxy && !quadBayerHqProxy;
+    const int preprocessScale = hqProxy ? 1 : draftScale;
+    const bool staged8x8Demosaic = !hqProxy && cfaRepeatSize == 8 && draftScale == 2;
+    const bool demosaic = (higherCFA || settings.cameraNativeStaging || hqProxy) &&
+        (hqRgbProxy || (quadBayerHqProxy && draftScale > 2) ||
+         draftScale == 1 || staged8x8Demosaic) &&
+        (hqProxy || settings.quadBayerOption == QuadBayerMode::Demosaic ||
          settings.quadBayerOption == QuadBayerMode::DemosaicOCL);
     const bool remosaic = demosaic && (settings.options & RENDER_OPT_REMOSAIC_TO_BAYER);
 
@@ -1320,7 +1326,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         metadata,
         cameraConfiguration,
         cfa,
-        draftScale,
+        preprocessScale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap,
         cfaRepeatSize, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
         cfaRepeatSize == 4,
@@ -1331,10 +1337,29 @@ std::shared_ptr<std::vector<char>> generateDng(
         true  // includeOpcode = true to generate lens shading opcode when not applied to image
     );
 
+    if (quadBayerHqProxy) {
+        std::vector<uint16_t> quadSamples(static_cast<size_t>(width) * height);
+        std::memcpy(quadSamples.data(), processedData.data(),
+                    quadSamples.size() * sizeof(uint16_t));
+        std::vector<uint16_t> binnedBayer;
+        uint32_t binnedWidth = 0, binnedHeight = 0;
+        binQuadBayer(quadSamples, binnedBayer, width, height,
+                     binnedWidth, binnedHeight,
+                     effectiveLogTransform != LogTransformMode::Disabled && !debugShadingMap
+                         ? dstWhiteLevel : 0);
+        if (binnedBayer.empty())
+            throw std::runtime_error("Could not bin quad-Bayer proxy image");
+        processedData.resize(binnedBayer.size() * sizeof(uint16_t));
+        std::memcpy(processedData.data(), binnedBayer.data(), processedData.size());
+        width = binnedWidth;
+        height = binnedHeight;
+    }
+
     if (demosaic) {
         std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
         std::memcpy(cfaSamples.data(), processedData.data(), cfaSamples.size() * sizeof(uint16_t));
-        const int processedRepeatSize = staged8x8Demosaic ? 4 : cfaRepeatSize;
+        const int processedRepeatSize = quadBayerHqProxy ? 2 :
+            (staged8x8Demosaic ? 4 : cfaRepeatSize);
         std::array<uint32_t, 3> blackSums = {0, 0, 0};
         std::array<uint32_t, 3> blackCounts = {0, 0, 0};
         for (int phaseIndex = 0; phaseIndex < 4; ++phaseIndex) {
@@ -1358,6 +1383,23 @@ std::shared_ptr<std::vector<char>> generateDng(
         const uint16_t outputWhite = dstWhiteLevel;
         for (uint16_t& sample : rgbSamples)
             sample = std::min(sample, outputWhite);
+        if (hqRgbProxy || quadBayerHqProxy) {
+            std::vector<uint16_t> reduced;
+            uint32_t reducedWidth = 0, reducedHeight = 0;
+            const uint32_t rgbScale = quadBayerHqProxy
+                ? static_cast<uint32_t>(draftScale / 2)
+                : static_cast<uint32_t>(draftScale);
+            reduceRGB(rgbSamples, reduced, width, height,
+                      rgbScale, true,
+                      reducedWidth, reducedHeight,
+                      effectiveLogTransform != LogTransformMode::Disabled && !debugShadingMap
+                          ? dstWhiteLevel : 0);
+            if (reduced.empty())
+                throw std::runtime_error("Proxy scale is too large for the image");
+            rgbSamples = std::move(reduced);
+            width = reducedWidth;
+            height = reducedHeight;
+        }
         if (remosaic) {
             std::vector<uint16_t> bayerSamples;
             std::string phase;
@@ -1918,7 +1960,7 @@ float getShadingMapValue(
     return valTop * (1.0f - wy) + valBottom * wy;
 }
 
-void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData, 
+void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData,
                         int width, int height, const std::string& cfaPhase) {
     // Determine CFA pattern (default to BGGR if not specified or invalid)
     std::string pattern = cfaPhase.empty() ? "bggr" : cfaPhase;

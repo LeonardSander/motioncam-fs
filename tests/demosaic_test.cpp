@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -34,5 +35,44 @@ int main() {
     // in the native red plane as colour-difference demosaic would do.
     assert(rgb[detailPixel * 3 + 1] > flatColor[1] * 3);
     assert(rgb[detailPixel * 3 + 2] > flatColor[2] * 3);
+
+    std::vector<uint16_t> gradient(8 * 8 * 3);
+    for (size_t i = 0; i < gradient.size(); ++i) gradient[i] = static_cast<uint16_t>(i);
+    std::vector<uint16_t> reduced;
+    uint32_t reducedWidth = 0, reducedHeight = 0;
+    motioncam::utils::reduceRGB(gradient, reduced, 8, 8, 2, true,
+                                reducedWidth, reducedHeight);
+    assert(reducedWidth == 4 && reducedHeight == 4 && reduced.size() == 4 * 4 * 3);
+    assert(reduced[0] == (gradient[0] + gradient[3] + gradient[24] + gradient[27] + 2) / 4);
+    motioncam::utils::reduceRGB(gradient, reduced, 8, 8, 2, false,
+                                reducedWidth, reducedHeight);
+    assert(reduced[0] == gradient[0]);
+
+    std::vector<uint16_t> rectangular(16 * 12 * 3, 100);
+    motioncam::utils::reduceRGB(rectangular, reduced, 16, 12, 2, true,
+                                reducedWidth, reducedHeight);
+    assert(reducedWidth == 8 && reducedHeight == 6);
+
+    // Log-aware HQ reduction must average in linear light and only then
+    // encode the averaged result again.
+    std::vector<uint16_t> encoded(8 * 8 * 3, 0);
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        for (int c = 0; c < 3; ++c)
+            encoded[(y * 8 + x) * 3 + c] = (x & 1) ? 4095 : 0;
+    motioncam::utils::reduceRGB(encoded, reduced, 8, 8, 2, true,
+                                reducedWidth, reducedHeight, 4095);
+    const auto expectedLogMidpoint = static_cast<uint16_t>(std::lround(
+        std::log2(31.0) / std::log2(61.0) * 4095.0));
+    assert(reduced[0] == expectedLogMidpoint);
+
+    std::vector<uint16_t> quad(8 * 8);
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        quad[y * 8 + x] = static_cast<uint16_t>((y / 2) * 100 + (x / 2) * 10 +
+                                                (y & 1) * 2 + (x & 1));
+    std::vector<uint16_t> binned;
+    motioncam::utils::binQuadBayer(quad, binned, 8, 8,
+                                   reducedWidth, reducedHeight);
+    assert(reducedWidth == 4 && reducedHeight == 4);
+    assert(binned[0] == 2); // Rounded average of 0, 1, 2, and 3.
     return 0;
 }
