@@ -136,6 +136,8 @@ preprocessData(
     bool vignetteOnlyColor,
     bool normaliseShadingMap,
     bool debugShadingMap,
+    bool optimizeGainMaps,
+    float& gainMapExposureOffset,
     uint32_t cfaRepeatSize,
     bool higherCfaHq,
     bool interpretAsQuadBayer,

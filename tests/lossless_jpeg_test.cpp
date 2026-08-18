@@ -177,5 +177,27 @@ int main() {
     assert(std::search(colorBaked.begin(), colorBaked.end(),
                        opcodeList3Tag.begin(), opcodeList3Tag.end()) != colorBaked.end());
 
+    // Android-style DNGs commonly store the four CFA phases as four separate
+    // one-channel GainMap opcodes. All of them must be transformed in place.
+    tinydngwriter::OpcodeList fourGainOpcodes;
+    for (unsigned int phase = 0; phase < 4; ++phase) {
+        tinydngwriter::GainMapParams phaseMap = gainMap;
+        phaseMap.top = phase / 2;
+        phaseMap.left = phase % 2;
+        phaseMap.row_pitch = 2;
+        phaseMap.col_pitch = 2;
+        phaseMap.map_planes = 1;
+        phaseMap.gain_data.resize(4);
+        for (size_t point = 0; point < phaseMap.gain_data.size(); ++point)
+            phaseMap.gain_data[point] = 1.0f + 0.1f * phase + 0.05f * point;
+        fourGainOpcodes.AddGainMap(phaseMap);
+    }
+    assert(image.SetOpcodeList2(fourGainOpcodes));
+    std::ostringstream fourGainOutput(std::ios::binary);
+    assert(writer.WriteToFile(fourGainOutput, &error));
+    const std::string fourGainDng = fourGainOutput.str();
+    std::vector<uint8_t> fourGainBytes(fourGainDng.begin(), fourGainDng.end());
+    assert(motioncam::DNGDecoder::transformGainMaps(fourGainBytes, false, true, false));
+
     return 0;
 }

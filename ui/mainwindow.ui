@@ -750,6 +750,8 @@
           <number>8</number>
          </property>
          <item>
+          <layout class="QHBoxLayout" name="gainMapTransformLayout">
+           <item>
           <widget class="QCheckBox" name="vignetteOnlyColorCheckBox">
            <property name="text">
             <string>Reduce to Color Correction</string>
@@ -758,6 +760,14 @@
             <bool>true</bool>
            </property>
           </widget>
+           </item>
+           <item>
+            <widget class="QCheckBox" name="optimizeGainMapsCheckBox">
+             <property name="text"><string>Optimize Gainmaps</string></property>
+             <property name="toolTip"><string>Move each color channel's minimum gain to BaselineExposure and AsShotNeutral, leaving only spatial gain variation in the map.</string></property>
+            </widget>
+           </item>
+          </layout>
          </item>
          <item>
           <widget class="QLabel" name="vignetteOnlyColorLabel">

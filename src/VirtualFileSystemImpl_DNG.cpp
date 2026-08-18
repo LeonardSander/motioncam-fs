@@ -206,8 +206,9 @@ void VirtualFileSystemImpl_DNG::init() {
         const bool addNeutral = (mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE) &&
                                 !mHasAsShotNeutral[frames[i].timestamp];
         GainMap sizeGainMap;
+        const bool hasGainMap = mDecoder->getGainMap(static_cast<int>(i), sizeGainMap);
         const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-                                 mDecoder->getGainMap(static_cast<int>(i), sizeGainMap);
+                                 hasGainMap;
         const bool processHigher = mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
@@ -219,10 +220,22 @@ void VirtualFileSystemImpl_DNG::init() {
             if (!DNGDecoder::overrideDataLevels(sizedData, mConfig.levels))
                 throw std::runtime_error("Could not override source DNG data levels");
             DNGDecoder::repairExposureTime(sizedData, mExposureTimes.at(frames[i].timestamp));
+            double baseline = mNormalizedExposureOffsets.at(frames[i].timestamp);
+            const auto& neutral = mSmoothedAsShotNeutrals.at(frames[i].timestamp);
+            if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
+                                            addNeutral ? &neutral : nullptr))
+                throw std::runtime_error("Could not size transformed DNG metadata");
+            if (hasGainMap && !bakeGainMap &&
+                (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
+                !DNGDecoder::transformGainMaps(sizedData, false, true, false))
+                throw std::runtime_error("Unsupported DNG gain-map color transform: " + frames[i].filePath);
+            if (hasGainMap && (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
+                !DNGDecoder::transformGainMaps(sizedData, false, false, true))
+                throw std::runtime_error("Unsupported DNG gain-map optimization: " + frames[i].filePath);
             if (bakeGainMap && !DNGDecoder::bakeGainMaps(
-                    sizedData,
-                    mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-                    mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
+                    sizedData, mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+                    mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
+                    mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
                 throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frames[i].filePath);
             if (processHigher && !DNGDecoder::processHigherCFA(
                     sizedData, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
@@ -233,11 +246,6 @@ void VirtualFileSystemImpl_DNG::init() {
             if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
                 !DNGDecoder::bakeIsoOverlay(sizedData, mIsoValues.at(frames[i].timestamp)))
                 throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + frames[i].filePath);
-            double baseline = mNormalizedExposureOffsets.at(frames[i].timestamp);
-            const auto& neutral = mSmoothedAsShotNeutrals.at(frames[i].timestamp);
-            if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
-                                            addNeutral ? &neutral : nullptr))
-                throw std::runtime_error("Could not size transformed DNG metadata");
             if (!DNGDecoder::setTimingMetadata(sizedData, mFps, 0))
                 throw std::runtime_error("Could not size DNG timing metadata");
             if (!DNGDecoder::packUncompressedToWhiteLevel(sizedData))
@@ -395,30 +403,6 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     if (!DNGDecoder::setTimingMetadata(bytes, mFps, outputTimestamp))
         throw std::runtime_error("Could not update DNG timing metadata");
 
-    const int frameIndex = static_cast<int>(std::distance(frames.begin(), it));
-    GainMap gainMap;
-    if ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-        mDecoder->getGainMap(frameIndex, gainMap) &&
-        !DNGDecoder::bakeGainMaps(
-            bytes,
-            mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-            mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
-        throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
-
-    if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
-         vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
-         (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
-        !DNGDecoder::processHigherCFA(
-            bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
-            mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
-            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
-            mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
-        throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + it->filePath);
-
-    if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
-        !DNGDecoder::bakeIsoOverlay(bytes, mIsoValues.at(timestamp)))
-        throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + it->filePath);
-
     const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
     const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
@@ -437,6 +421,38 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
             throw std::runtime_error("Could not update DNG exposure/white-balance tags");
     }
+
+    const int frameIndex = static_cast<int>(std::distance(frames.begin(), it));
+    GainMap gainMap;
+    const bool hasGainMap = mDecoder->getGainMap(frameIndex, gainMap);
+    const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+                             hasGainMap;
+    if (hasGainMap && !bakeGainMap &&
+        (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
+        !DNGDecoder::transformGainMaps(bytes, false, true, false))
+        throw std::runtime_error("Unsupported DNG gain-map color transform: " + it->filePath);
+    if (hasGainMap && (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
+        !DNGDecoder::transformGainMaps(bytes, false, false, true))
+        throw std::runtime_error("Unsupported DNG gain-map optimization: " + it->filePath);
+    if (bakeGainMap && !DNGDecoder::bakeGainMaps(
+            bytes, mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+            mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
+            mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
+        throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
+
+    if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
+         vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
+         (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
+        !DNGDecoder::processHigherCFA(
+            bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
+            mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
+            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
+            mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
+        throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + it->filePath);
+
+    if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
+        !DNGDecoder::bakeIsoOverlay(bytes, mIsoValues.at(timestamp)))
+        throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + it->filePath);
     if (!mConfig.cameraNativeStaging && !DNGDecoder::packUncompressedToWhiteLevel(bytes))
         throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
     if (jpegCompression) {

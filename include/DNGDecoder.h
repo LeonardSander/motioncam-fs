@@ -106,7 +106,12 @@ public:
     static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,
                              bool normalizeGainMaps,
-                             bool colorOnly);
+                             bool colorOnly,
+                             bool optimizeGainMaps = false);
+    static bool transformGainMaps(std::vector<uint8_t>& dngData,
+                                  bool normalizeGainMaps,
+                                  bool colorOnly,
+                                  bool optimizeGainMaps);
     static bool processHigherCFA(std::vector<uint8_t>& dngData,
                                  int repeatSize,
                                  const std::array<uint8_t, 4>& phase,

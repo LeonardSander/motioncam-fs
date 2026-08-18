@@ -822,6 +822,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     bool vignetteOnlyColor,
     bool normaliseShadingMap,
     bool debugShadingMap,
+    bool optimizeGainMaps,
+    float& gainMapExposureOffset,
     uint32_t cfaRepeatSize,
     bool higherCfaHq,
     bool interpretAsQuadBayer,
@@ -930,9 +932,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
 
     tinydngwriter::OpcodeList opcodeList3;
 
-    // When applying shading map, increase precision
-    if(applyShadingMap) {
-        if(vignetteOnlyColor) {
+    if (vignetteOnlyColor) {
+        if (applyShadingMap) {
             CameraFrameMetadata luminanceMetadata = metadata;
             const size_t points = static_cast<size_t>(metadata.lensShadingMapWidth) *
                                   metadata.lensShadingMapHeight;
@@ -944,12 +945,33 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                 if (std::isfinite(minimum) && minimum > 0.0f)
                     luminanceMetadata.lensShadingMap[0][point] = minimum;
             }
+            float luminanceMinimum = std::numeric_limits<float>::max();
+            for (float gain : luminanceMetadata.lensShadingMap[0])
+                if (std::isfinite(gain) && gain > 0.0f)
+                    luminanceMinimum = std::min(luminanceMinimum, gain);
+            if (optimizeGainMaps && std::isfinite(luminanceMinimum) && luminanceMinimum > 0.0f) {
+                gainMapExposureOffset += std::log2(luminanceMinimum);
+                for (float& gain : luminanceMetadata.lensShadingMap[0])
+                    if (std::isfinite(gain) && gain > 0.0f) gain /= luminanceMinimum;
+            }
             opcodeList3 = createLensShadingOpcodeList(
                 luminanceMetadata, inOutWidth, inOutHeight, left, top);
-            utils::colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight, cfa);
         }
-        if(normaliseShadingMap) {
+        // Without baking, intentionally discard luminance and retain only the
+        // local color ratios in OpcodeList2.
+        if (lensShadingMap.size() >= 4) {
+            utils::colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth,
+                                       metadata.lensShadingMapHeight, cfa);
+        } else {
+            for (auto& plane : lensShadingMap)
+                std::fill(plane.begin(), plane.end(), 1.0f);
+        }
+    }
+    // When applying shading map, increase precision
+    if(applyShadingMap) {
+        if (normaliseShadingMap)
             utils::normalizeShadingMap(lensShadingMap);
+        if(normaliseShadingMap) {
             useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
         } else {
             if (debugShadingMap) 
@@ -998,7 +1020,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     tinydngwriter::OpcodeList opcodeList2;
     if(includeOpcode && !applyShadingMap) {
         // Create lens shading map as opcode list 2 gain map
-        opcodeList2 = createLensShadingOpcodeList(metadata, inOutWidth, inOutHeight, left, top);
+        CameraFrameMetadata opcodeMetadata = metadata;
+        opcodeMetadata.lensShadingMap = lensShadingMap;
+        opcodeList2 = createLensShadingOpcodeList(opcodeMetadata, inOutWidth, inOutHeight, left, top);
     }
 
     //
@@ -1279,6 +1303,59 @@ std::shared_ptr<std::vector<char>> generateDng(
     else
         throw std::runtime_error("Invalid sensor arrangement");
 
+    CameraFrameMetadata gainMetadata = metadata;
+    float gainMapExposureOffset = 0.0f;
+    std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
+    const bool willBakeGainMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    if (!willBakeGainMap && (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
+        if (gainMetadata.lensShadingMap.size() >= 4) {
+            utils::colorOnlyShadingMap(gainMetadata.lensShadingMap,
+                                       gainMetadata.lensShadingMapWidth,
+                                       gainMetadata.lensShadingMapHeight, cfa);
+        } else {
+            for (auto& plane : gainMetadata.lensShadingMap)
+                std::fill(plane.begin(), plane.end(), 1.0f);
+        }
+    }
+    if ((settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
+        !gainMetadata.lensShadingMap.empty()) {
+        std::array<float, 3> channelMin{
+            std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max()};
+        for (size_t plane = 0; plane < gainMetadata.lensShadingMap.size(); ++plane) {
+            const size_t color = plane < cfa.size() ? std::min<size_t>(2, cfa[plane])
+                                                   : std::min<size_t>(2, plane);
+            for (float gain : gainMetadata.lensShadingMap[plane])
+                if (std::isfinite(gain) && gain > 0.0f)
+                    channelMin[color] = std::min(channelMin[color], gain);
+        }
+        if (gainMetadata.lensShadingMap.size() == 1) {
+            float minimum = std::numeric_limits<float>::max();
+            for (float gain : gainMetadata.lensShadingMap[0])
+                if (std::isfinite(gain) && gain > 0.0f)
+                    minimum = std::min(minimum, gain);
+            if (std::isfinite(minimum) && minimum > 0.0f)
+                channelMin.fill(minimum);
+        }
+        float commonMin = std::numeric_limits<float>::max();
+        for (float& value : channelMin) {
+            if (!std::isfinite(value) || value <= 0.0f) value = 1.0f;
+            commonMin = std::min(commonMin, value);
+        }
+        if (std::isfinite(commonMin) && commonMin > 0.0f) {
+            gainMapExposureOffset = std::log2(commonMin);
+            for (size_t color = 0; color < 3; ++color)
+                gainMapNeutralScale[color] = commonMin / channelMin[color];
+            for (size_t plane = 0; plane < gainMetadata.lensShadingMap.size(); ++plane) {
+                const size_t color = plane < cfa.size() ? std::min<size_t>(2, cfa[plane])
+                                                       : std::min<size_t>(2, plane);
+                for (float& gain : gainMetadata.lensShadingMap[plane])
+                    if (std::isfinite(gain) && gain > 0.0f) gain /= channelMin[color];
+            }
+
+        }
+    }
+
     // The quality combo retains its selected scale while proxy mode is disabled.
     const int draftScale =
         settings.options & RENDER_OPT_DRAFT ? settings.draftScale : 1;
@@ -1323,11 +1400,13 @@ std::shared_ptr<std::vector<char>> generateDng(
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
         width, height,
-        metadata,
+        gainMetadata,
         cameraConfiguration,
         cfa,
         preprocessScale,
         applyShadingMap, vignetteOnlyColor, normalizeShadingMap, debugShadingMap,
+        settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
+        gainMapExposureOffset,
         cfaRepeatSize, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
         cfaRepeatSize == 4,
         cropTarget,
@@ -1549,7 +1628,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     } else if (normalizeExposure) {
         normalizedExposureOffset = std::log2(baselineExpValue / (metadata.iso * metadata.exposureTime));
     }
-    dng.SetBaselineExposure(normalizedExposureOffset + exposureOffset);
+    dng.SetBaselineExposure(normalizedExposureOffset + exposureOffset + gainMapExposureOffset);
 
     if (higherCFA && !demosaic && draftScale == 1 &&
         settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {
@@ -1653,13 +1732,14 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetCameraCalibration2(3, IDENTITY_MATRIX);
 
     // Apply asShotNeutral from calibration if available, otherwise from metadata
-    if (calibration.has_value() && calibration->hasAsShotNeutral) {
-        dng.SetAsShotNeutral(3, calibration->asShotNeutral.data());
-    } else if (asShotNeutralOverride.has_value()) {
-        dng.SetAsShotNeutral(3, asShotNeutralOverride->data());
-    } else {
-        dng.SetAsShotNeutral(3, metadata.asShotNeutral.data());
-    }
+    std::array<float, 3> outputNeutral = metadata.asShotNeutral;
+    if (calibration.has_value() && calibration->hasAsShotNeutral)
+        outputNeutral = calibration->asShotNeutral;
+    else if (asShotNeutralOverride.has_value())
+        outputNeutral = *asShotNeutralOverride;
+    for (size_t color = 0; color < 3; ++color)
+        outputNeutral[color] *= gainMapNeutralScale[color];
+    dng.SetAsShotNeutral(3, outputNeutral.data());
 
     dng.SetCalibrationIlluminant1(getColorIlluminant(cameraConfiguration.colorIlluminant1));
     dng.SetCalibrationIlluminant2(getColorIlluminant(cameraConfiguration.colorIlluminant2));

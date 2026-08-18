@@ -230,6 +230,9 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     
     if(ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+
+    if(ui->optimizeGainMapsCheckBox->checkState() == Qt::CheckState::Checked)
+        settings.options |= motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
     
     if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
@@ -341,6 +344,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->optimizeGainMapsCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->smoothExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->smoothWhiteBalanceCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -453,6 +457,7 @@ void MainWindow::saveSettings() {
     settings.setValue("applyVignetteCorrection", ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("optimizeGainMaps", ui->optimizeGainMapsCheckBox->isChecked());
     settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("smoothExposure", ui->smoothExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("smoothWhiteBalance", ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked);
@@ -505,6 +510,8 @@ void MainWindow::restoreSettings() {
     ui->vignetteOnlyColorCheckBox->setCheckState(
         !settings.contains("vignetteOnlyColor") ? Qt::CheckState::Checked :
         (settings.value("vignetteOnlyColor").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
+
+    ui->optimizeGainMapsCheckBox->setChecked(settings.value("optimizeGainMaps", false).toBool());
 
     ui->normalizeExposureCheckBox->setCheckState(
         !settings.contains("normalizeExposure") ? Qt::CheckState::Checked :
@@ -1903,7 +1910,8 @@ void MainWindow::updateUi() {
         ui->logTransformComboBox->setEnabled(false);
     }   
 
-    // Scale raw only enabled when vignette correction is on
+    // Pixel normalization is bake-only; reduce-to-color can also transform a
+    // deferred OpcodeList2 gain map.
     if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->scaleRawCheckBox->setEnabled(true);
         if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) {
@@ -1912,15 +1920,13 @@ void MainWindow::updateUi() {
         } else {
             ui->debugVignetteCheckBox->setEnabled(true);            
         }
-        ui->vignetteOnlyColorCheckBox->setEnabled(true);
     } else {
         ui->scaleRawCheckBox->setEnabled(false);
         ui->scaleRawCheckBox->setChecked(false);
         ui->debugVignetteCheckBox->setEnabled(false);
         ui->debugVignetteCheckBox->setChecked(false);
-        ui->vignetteOnlyColorCheckBox->setEnabled(false);
-        ui->vignetteOnlyColorCheckBox->setChecked(false);
     }
+    ui->vignetteOnlyColorCheckBox->setEnabled(true);
 
     if (mCacheRootFolder.isEmpty()) {
         ui->cacheFolderLabel->setText("<i>Same as source file</i>");
@@ -2172,6 +2178,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->scaleRawCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->optimizeGainMapsCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->normalizeExposureCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->smoothExposureCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->smoothWhiteBalanceCheckBox->setCheckState(Qt::CheckState::Unchecked);

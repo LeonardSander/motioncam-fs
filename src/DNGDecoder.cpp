@@ -217,12 +217,12 @@ namespace {
         appendBE32(payload, static_cast<uint32_t>(76 + map.data.size() * 4));
         appendBE32(payload, map.top); appendBE32(payload, map.left);
         appendBE32(payload, map.bottom); appendBE32(payload, map.right);
-        appendBE32(payload, 0); appendBE32(payload, 1);
+        appendBE32(payload, map.plane); appendBE32(payload, map.planes);
         appendBE32(payload, map.rowPitch); appendBE32(payload, map.colPitch);
         appendBE32(payload, map.height); appendBE32(payload, map.width);
         appendBEDouble(payload, map.spacingV); appendBEDouble(payload, map.spacingH);
         appendBEDouble(payload, map.originV); appendBEDouble(payload, map.originH);
-        appendBE32(payload, 1);
+        appendBE32(payload, map.channels);
         for (float gain : map.data) appendBEFloat(payload, gain);
         return payload;
     }
@@ -2250,7 +2250,8 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
 
 bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool normalizeGainMaps,
-                              bool colorOnly) {
+                              bool colorOnly,
+                              bool optimizeGainMaps) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -2290,6 +2291,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         return false;
     std::vector<uint8_t> luminanceOpcode;
     bool gridColorSeparated = false;
+    std::optional<double> luminanceBaseline;
     if (colorOnly && !maps.empty()) {
         GainMap luminance = maps.front();
         luminance.plane = 0; luminance.planes = 1; luminance.channels = 1;
@@ -2310,6 +2312,17 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 for (uint32_t channel = 0; channel < map.channels; ++channel)
                     map.data[point * map.channels + channel] /= minimum;
             }
+        }
+        float luminanceMinimum = std::numeric_limits<float>::max();
+        for (float gain : luminance.data)
+            if (std::isfinite(gain) && gain > 0.0f)
+                luminanceMinimum = std::min(luminanceMinimum, gain);
+        if (optimizeGainMaps && std::isfinite(luminanceMinimum) && luminanceMinimum > 0.0f) {
+            for (float& gain : luminance.data)
+                if (std::isfinite(gain) && gain > 0.0f) gain /= luminanceMinimum;
+            DNGFrameMetadata metadata;
+            if (!getColorMetadata(data, metadata)) return false;
+            luminanceBaseline = metadata.baselineExposure + std::log2(luminanceMinimum);
         }
         luminanceOpcode = serializeGainMap(luminance);
         if (luminanceOpcode.size() > opcodeE->count) return false;
@@ -2426,6 +2439,132 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         // Keep a valid OpcodeList2 tag, but make its list empty to prevent double application.
         write32(data.data() + opcodeE->valueOffset, 0, false);
         write32(data.data() + opcodeE->entryOffset + 4, 4, little);
+    }
+    if (luminanceBaseline.has_value() &&
+        !updateMetadata(data, &*luminanceBaseline, nullptr))
+        return false;
+    return true;
+}
+
+bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGainMaps,
+                                   bool colorOnly, bool optimizeGainMaps) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* opcode = nullptr;
+    for (const auto& entry : entries)
+        if (entry.tag == TIFF_TAG_OPCODE_LIST_2) { opcode = &entry; break; }
+    if (!opcode || !opcode->count) return false;
+    std::vector<GainMap> maps;
+    if (!parseOpcodeGainMaps(data.data() + opcode->valueOffset, opcode->count, maps))
+        return false;
+    for (const auto& map : maps)
+        if (map.channels != 1 && map.channels != 4) return false;
+
+    // Keep the complete opcode list intact. parseOpcodeGainMaps deliberately
+    // returns only GainMap opcodes, so remember the payload offsets separately
+    // and overwrite only those payloads after transforming them.
+    std::vector<std::pair<size_t, size_t>> payloads;
+    const uint8_t* opcodeData = data.data() + opcode->valueOffset;
+    const uint32_t opcodeCount = readBE32(opcodeData);
+    size_t offset = 4;
+    for (uint32_t i = 0; i < opcodeCount; ++i) {
+        if (offset + 16 > opcode->count) return false;
+        const uint32_t id = readBE32(opcodeData + offset);
+        const uint32_t bytes = readBE32(opcodeData + offset + 12);
+        offset += 16;
+        if (bytes > opcode->count - offset) return false;
+        if (id == OPCODE_GAIN_MAP) payloads.emplace_back(offset, bytes);
+        offset += bytes;
+    }
+    if (payloads.size() != maps.size()) return false;
+
+    std::array<uint8_t, 4> cfa{0, 1, 1, 2};
+    int repeat = 2;
+    getCFAMetadata(data, repeat, cfa);
+    auto sampleColor = [&](const GainMap& map, size_t sample) {
+        if (map.channels == 4)
+            return static_cast<size_t>(std::min<uint8_t>(2, cfa[sample % 4]));
+        // Four-map DNGs normally select their CFA phase through the opcode's
+        // top/left origin and row/column pitch.
+        const size_t phase = ((map.top & 1u) << 1u) | (map.left & 1u);
+        return static_cast<size_t>(std::min<uint8_t>(2, cfa[phase]));
+    };
+    std::array<float, 3> minima{std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::max()};
+    if (optimizeGainMaps) {
+        for (const auto& map : maps)
+            for (size_t i = 0; i < map.data.size(); ++i) {
+                const float gain = map.data[i];
+                if (std::isfinite(gain) && gain > 0.0f) {
+                    const size_t color = sampleColor(map, i);
+                    minima[color] = std::min(minima[color], gain);
+                }
+            }
+        if (maps.size() == 1 && maps.front().channels == 1)
+            minima[0] = minima[2] = minima[1];
+        for (float& value : minima)
+            if (!std::isfinite(value) || value <= 0.0f) value = 1.0f;
+        const float common = std::min({minima[0], minima[1], minima[2]});
+        for (auto& map : maps)
+            for (size_t i = 0; i < map.data.size(); ++i) {
+                const size_t color = sampleColor(map, i);
+                if (std::isfinite(map.data[i]) && map.data[i] > 0.0f)
+                    map.data[i] /= minima[color];
+            }
+        DNGFrameMetadata metadata;
+        if (!getColorMetadata(data, metadata)) return false;
+        double baseline = metadata.baselineExposure + std::log2(common);
+        auto neutral = metadata.asShotNeutral;
+        for (size_t color = 0; color < 3; ++color)
+            neutral[color] *= common / minima[color];
+        if (!updateMetadata(data, &baseline, &neutral)) return false;
+    }
+    if (colorOnly) {
+        for (auto& map : maps) {
+            if (map.channels != 4) continue;
+            const size_t points = static_cast<size_t>(map.width) * map.height;
+            for (size_t point = 0; point < points; ++point) {
+                float minimum = std::numeric_limits<float>::max();
+                for (size_t channel = 0; channel < 4; ++channel)
+                    minimum = std::min(minimum, map.data[point * 4 + channel]);
+                if (std::isfinite(minimum) && minimum > 0.0f)
+                    for (size_t channel = 0; channel < 4; ++channel)
+                        map.data[point * 4 + channel] /= minimum;
+            }
+        }
+        std::vector<GainMap*> scalarMaps;
+        for (auto& map : maps)
+            if (map.channels == 1) scalarMaps.push_back(&map);
+        if (scalarMaps.size() == 1) {
+            std::fill(scalarMaps.front()->data.begin(), scalarMaps.front()->data.end(), 1.0f);
+        } else if (!scalarMaps.empty()) {
+            const size_t samples = scalarMaps.front()->data.size();
+            for (const auto* map : scalarMaps)
+                if (map->data.size() != samples) return false;
+            for (size_t sample = 0; sample < samples; ++sample) {
+                float minimum = std::numeric_limits<float>::max();
+                for (const auto* map : scalarMaps)
+                    minimum = std::min(minimum, map->data[sample]);
+                if (std::isfinite(minimum) && minimum > 0.0f)
+                    for (auto* map : scalarMaps) map->data[sample] /= minimum;
+            }
+        }
+    }
+    if (normalizeGainMaps) {
+        float maximum = 0.0f;
+        for (const auto& map : maps)
+            for (float gain : map.data)
+                if (std::isfinite(gain)) maximum = std::max(maximum, gain);
+        if (maximum > 0.0f)
+            for (auto& map : maps)
+                for (float& gain : map.data) gain /= maximum;
+    }
+    for (size_t i = 0; i < maps.size(); ++i) {
+        const auto encoded = serializeGainMap(maps[i]);
+        if (encoded.size() < 20 || encoded.size() - 20 != payloads[i].second) return false;
+        std::copy(encoded.begin() + 20, encoded.end(),
+                  data.begin() + opcode->valueOffset + payloads[i].first);
     }
     return true;
 }

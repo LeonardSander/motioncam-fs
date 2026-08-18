@@ -87,7 +87,8 @@ enum FileRenderOptions : unsigned int {
     RENDER_OPT_SMOOTH_EXPOSURE              = 1 << 13,
     RENDER_OPT_SMOOTH_WHITE_BALANCE         = 1 << 14,
     RENDER_OPT_HIGHER_CFA_HQ                = 1 << 15,
-    RENDER_OPT_BAKE_ISO                     = 1 << 16
+    RENDER_OPT_BAKE_ISO                     = 1 << 16,
+    RENDER_OPT_OPTIMIZE_GAIN_MAPS            = 1 << 17
 };
 
 // Overload bitwise OR operator
@@ -151,6 +152,9 @@ static std::string optionsToString(FileRenderOptions options) {
     }
     if (options & RENDER_OPT_BAKE_ISO) {
         flags.push_back("BAKE_ISO");
+    }
+    if (options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) {
+        flags.push_back("OPTIMIZE_GAIN_MAPS");
     }
     if (options & RENDER_OPT_FRAMERATE_CONVERSION) {
         flags.push_back("FRAMERATE_CONVERSION");
