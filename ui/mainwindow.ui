@@ -408,6 +408,16 @@
            </property>
           </widget>
          </item>
+         <item>
+          <widget class="QCheckBox" name="bakeIsoCheckBox">
+           <property name="text">
+            <string>Bake per-frame ISO into image</string>
+           </property>
+           <property name="toolTip">
+            <string>Render each frame's ISO value as centered text near the bottom of the image.</string>
+           </property>
+          </widget>
+         </item>
         </layout>
        </item>       
        <item>

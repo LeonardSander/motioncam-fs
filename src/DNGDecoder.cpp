@@ -1720,6 +1720,52 @@ bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
     return replaceTiffStrip(data, oldOffset, oldBytes, packed, little);
 }
 
+bool DNGDecoder::bakeIsoOverlay(std::vector<uint8_t>& data, double iso) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    auto scalar = [&](const TiffEntry& entry, uint32_t index = 0) -> uint32_t {
+        index = std::min(index, entry.count - 1);
+        const size_t position = entry.valueOffset + static_cast<size_t>(index) *
+            (entry.type == TIFF_TYPE_SHORT ? 2 : 4);
+        return entry.type == TIFF_TYPE_SHORT ? read16(data.data() + position, little)
+                                             : read32(data.data() + position, little);
+    };
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries)
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            (scalar(entry) == TIFF_PHOTOMETRIC_CFA || scalar(entry) == 34892)) {
+            photo = &entry; break;
+        }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag && entry.count) return &entry;
+        return nullptr;
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL), blackE = find(TIFF_TAG_BLACK_LEVEL);
+    const auto whiteE = find(TIFF_TAG_WHITE_LEVEL);
+    if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE ||
+        !sppE || !whiteE || offsetsE->count != 1 || countsE->count != 1 ||
+        scalar(*bitsE) != 16 || scalar(*compressionE) != TIFF_COMPRESSION_NONE) return false;
+    const uint32_t width = scalar(*widthE), height = scalar(*heightE), channels = scalar(*sppE);
+    const uint32_t offset = scalar(*offsetsE), bytes = scalar(*countsE);
+    const size_t required = static_cast<size_t>(width) * height * channels * 2;
+    if (!width || !height || !channels || channels > 4 || offset > data.size() ||
+        bytes < required || required > data.size() - offset) return false;
+    std::vector<uint16_t> samples(static_cast<size_t>(width) * height * channels);
+    for (size_t i = 0; i < samples.size(); ++i)
+        samples[i] = read16(data.data() + offset + i * 2, little);
+    utils::bakeIsoOverlay(samples.data(), width, height, channels, iso,
+                          static_cast<uint16_t>(blackE ? scalar(*blackE) : 0),
+                          static_cast<uint16_t>(std::min<uint32_t>(scalar(*whiteE), 65535)));
+    for (size_t i = 0; i < samples.size(); ++i)
+        write16(data.data() + offset + i * 2, samples[i], little);
+    return true;
+}
+
 bool DNGDecoder::extractUncompressedRGB16(const std::vector<uint8_t>& data,
                                           std::vector<uint8_t>& rgbData,
                                           uint32_t& width,

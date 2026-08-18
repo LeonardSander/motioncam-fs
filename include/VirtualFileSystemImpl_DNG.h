@@ -86,6 +86,7 @@ private:
     std::map<Timestamp, bool> mHasBaselineExposure;
     std::map<Timestamp, bool> mHasAsShotNeutral;
     std::map<Timestamp, double> mExposureTimes;
+    std::map<Timestamp, double> mIsoValues;
     mutable std::mutex mMutex;
 };
 

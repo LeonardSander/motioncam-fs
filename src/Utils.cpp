@@ -18,6 +18,7 @@
 namespace motioncam {
 namespace utils {
 
+
 void parseCropTarget(const std::string& target, uint32_t& width,
                      uint32_t& height, uint32_t& stride) {
     width = height = stride = 0;
@@ -1386,6 +1387,14 @@ std::shared_ptr<std::vector<char>> generateDng(
                 dstWhiteLevel = 65535;
             }
         }
+    }
+
+    if (settings.options & RENDER_OPT_BAKE_ISO) {
+        const int overlayChannels = demosaic && !remosaic ? 3 : 1;
+        bakeIsoOverlay(reinterpret_cast<uint16_t*>(processedData.data()), width, height,
+                       overlayChannels, metadata.iso,
+                       *std::min_element(dstBlackLevel.begin(), dstBlackLevel.end()),
+                       dstWhiteLevel);
     }
 
     spdlog::debug("New black level {},{},{},{} and white level {}",

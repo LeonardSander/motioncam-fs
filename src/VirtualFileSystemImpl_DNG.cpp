@@ -133,6 +133,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             mHasBaselineExposure[frames[i].timestamp] = metadata[i].hasBaselineExposure;
             mHasAsShotNeutral[frames[i].timestamp] = metadata[i].hasAsShotNeutral;
             mExposureTimes[frames[i].timestamp] = metadata[i].exposureTime;
+            mIsoValues[frames[i].timestamp] = metadata[i].iso;
             for (size_t c = 0; c < 3; ++c)
                 logNeutrals[c].push_back(std::log(std::max(1e-6f, metadata[i].asShotNeutral[c])));
         }
@@ -228,6 +229,9 @@ void VirtualFileSystemImpl_DNG::init() {
                     vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
                     mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
                 throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + frames[i].filePath);
+            if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
+                !DNGDecoder::bakeIsoOverlay(sizedData, mIsoValues.at(frames[i].timestamp)))
+                throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + frames[i].filePath);
             double baseline = mNormalizedExposureOffsets.at(frames[i].timestamp);
             const auto& neutral = mSmoothedAsShotNeutrals.at(frames[i].timestamp);
             if (!DNGDecoder::updateMetadata(sizedData, addBaseline ? &baseline : nullptr,
@@ -408,6 +412,10 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
         throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + it->filePath);
+
+    if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
+        !DNGDecoder::bakeIsoOverlay(bytes, mIsoValues.at(timestamp)))
+        throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + it->filePath);
 
     const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;

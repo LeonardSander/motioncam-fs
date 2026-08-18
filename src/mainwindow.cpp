@@ -245,6 +245,9 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
 
     if(ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE;
+
+    if(ui->bakeIsoCheckBox->checkState() == Qt::CheckState::Checked)
+        settings.options |= motioncam::RENDER_OPT_BAKE_ISO;
     
     if(ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
@@ -341,6 +344,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->normalizeExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->smoothExposureCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->smoothWhiteBalanceCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->bakeIsoCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->rifeInterpolationCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) { saveSettings(); });
     connect(ui->rifeRemoveButton, &QPushButton::clicked, this, [this] {
@@ -452,6 +456,7 @@ void MainWindow::saveSettings() {
     settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("smoothExposure", ui->smoothExposureCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("smoothWhiteBalance", ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("bakeIso", ui->bakeIsoCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("rifeInterpolation", ui->rifeInterpolationCheckBox->isChecked());
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
@@ -509,6 +514,8 @@ void MainWindow::restoreSettings() {
         settings.value("smoothExposure").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
     ui->smoothWhiteBalanceCheckBox->setCheckState(
         settings.value("smoothWhiteBalance").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    ui->bakeIsoCheckBox->setCheckState(
+        settings.value("bakeIso").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
     ui->cfrConversionCheckBox->setCheckState(
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
@@ -2168,6 +2175,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->normalizeExposureCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->smoothExposureCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->smoothWhiteBalanceCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->bakeIsoCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);

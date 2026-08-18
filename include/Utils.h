@@ -158,6 +158,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     const std::optional<float>& baselineExposureOverride = std::nullopt,
     const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt);
 
+// Draws a centered, outlined ISO label into unpacked 16-bit image samples.
+void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
+                    uint32_t channels, double iso, uint16_t black, uint16_t white);
+
 // ============================================================================
 // Utility Functions
 // ============================================================================

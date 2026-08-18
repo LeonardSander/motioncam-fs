@@ -87,6 +87,7 @@ public:
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,
                                    const std::string& levels);
     static bool packUncompressedToWhiteLevel(std::vector<uint8_t>& dngData);
+    static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
     static bool extractUncompressedRGB16(const std::vector<uint8_t>& dngData,
                                          std::vector<uint8_t>& rgbData,
                                          uint32_t& width,

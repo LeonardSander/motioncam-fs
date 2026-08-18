@@ -45,6 +45,7 @@ set(PROJECT_SOURCES
         src/CalibrationData.cpp
         src/AudioWriter.cpp
         src/Utils.cpp
+        src/IsoOverlay.cpp
         src/HigherCFADemosaic.cpp
 
         include/mainwindow.h
@@ -406,6 +407,7 @@ if(BUILD_TESTING)
 
     add_executable(motioncam-lossless-jpeg-test
         tests/lossless_jpeg_test.cpp
+        src/IsoOverlay.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -420,6 +422,7 @@ if(BUILD_TESTING)
 
     add_executable(motioncam-jpeg-xl-test
         tests/jpeg_xl_test.cpp
+        src/IsoOverlay.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -434,6 +437,7 @@ if(BUILD_TESTING)
     add_executable(motioncam-rife-fake tests/rife_fake.cpp)
     add_executable(motioncam-finalize-interpolation-test
         tests/finalize_interpolation_test.cpp
+        src/IsoOverlay.cpp
         src/VirtualFileSystemImpl.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
