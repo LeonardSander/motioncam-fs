@@ -36,6 +36,10 @@ struct DNGFrameMetadata {
     double iso = 0.0;
     double baselineExposure = 0.0;
     std::array<float, 3> asShotNeutral = {1.0f, 1.0f, 1.0f};
+    std::array<float, 4> blackLevel{};
+    std::array<float, 4> whiteLevel{};
+    uint32_t blackLevelCount = 0;
+    uint32_t whiteLevelCount = 0;
     std::array<float, 9> colorMatrix1{};
     std::array<float, 9> colorMatrix2{};
     std::array<float, 9> forwardMatrix1{};
@@ -51,6 +55,7 @@ struct DNGFrameMetadata {
 
 struct GainMap {
     uint32_t top, left, bottom, right;
+    uint32_t coordinateWidth = 0, coordinateHeight = 0;
     uint32_t plane, planes;
     uint32_t rowPitch, colPitch;
     uint32_t width, height, channels;
@@ -73,6 +78,8 @@ public:
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
     static bool getColorMetadata(const std::vector<uint8_t>& dngData,
                                  DNGFrameMetadata& metadata);
+    static bool getGainMaps(const std::vector<uint8_t>& dngData,
+                            int opcodeList, std::vector<GainMap>& gainMaps);
     bool getCFAMetadata(int frameNumber, int& repeatSize, std::array<uint8_t, 4>& phase);
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,

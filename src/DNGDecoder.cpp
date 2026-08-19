@@ -900,9 +900,16 @@ bool DNGDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
 bool DNGDecoder::getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps) {
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
+    return getGainMaps(data, 2, gainMaps);
+}
+
+bool DNGDecoder::getGainMaps(const std::vector<uint8_t>& data, int opcodeList,
+                             std::vector<GainMap>& gainMaps) {
+    gainMaps.clear();
+    const uint16_t wanted = opcodeList == 3 ? TIFF_TAG_OPCODE_LIST_3 : TIFF_TAG_OPCODE_LIST_2;
     bool little = true;
     for (const auto& entry : findTiffEntries(data, little)) {
-        if (entry.tag == TIFF_TAG_OPCODE_LIST_2 && entry.count &&
+        if (entry.tag == wanted && entry.count &&
             parseOpcodeGainMaps(data.data() + entry.valueOffset, entry.count, gainMaps))
             return true;
     }
@@ -945,6 +952,22 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             for (uint32_t c = 0; c < 3; ++c)
                 metadata.asShotNeutral[c] = static_cast<float>(readRational(data, entry, c, little));
             metadata.hasAsShotNeutral = true;
+        } else if (entry.tag == TIFF_TAG_BLACK_LEVEL && entry.count) {
+            metadata.blackLevelCount = std::min<uint32_t>(4, entry.count);
+            for (uint32_t c = 0; c < metadata.blackLevelCount; ++c)
+                metadata.blackLevel[c] = entry.type == TIFF_TYPE_RATIONAL
+                    ? static_cast<float>(readRational(data, entry, c, little))
+                    : static_cast<float>(entry.type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + entry.valueOffset + c * 2, little)
+                        : read32(data.data() + entry.valueOffset + c * 4, little));
+        } else if (entry.tag == TIFF_TAG_WHITE_LEVEL && entry.count) {
+            metadata.whiteLevelCount = std::min<uint32_t>(4, entry.count);
+            for (uint32_t c = 0; c < metadata.whiteLevelCount; ++c)
+                metadata.whiteLevel[c] = entry.type == TIFF_TYPE_RATIONAL
+                    ? static_cast<float>(readRational(data, entry, c, little))
+                    : static_cast<float>(entry.type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + entry.valueOffset + c * 2, little)
+                        : read32(data.data() + entry.valueOffset + c * 4, little));
         } else if (entry.tag == TIFF_TAG_COLOR_MATRIX_1)
             readMatrix(entry, metadata.colorMatrix1, metadata.hasColorMatrix1);
         else if (entry.tag == TIFF_TAG_COLOR_MATRIX_2)

@@ -1413,7 +1413,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         settings.levels,
         effectiveLogTransform,
         settings.quadBayerOption,
-        true  // includeOpcode = true to generate lens shading opcode when not applied to image
+        true // includeOpcode
     );
 
     if (quadBayerHqProxy) {

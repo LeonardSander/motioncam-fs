@@ -18,6 +18,8 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <fstream>
+#include <QByteArray>
 
 using motioncam::Timestamp;
 
@@ -84,6 +86,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     boost::filesystem::path srcPath(mSrcPath);
     boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
     if (boost::filesystem::exists(calibPath)) {
+        loadSidecarMetadata(calibPath);
         mCalibration = CalibrationData::loadFromFile(calibPath.string());
         if (mCalibration.has_value()) {
             spdlog::info("Loaded calibration for DirectLog: {}", calibPath.string());
@@ -156,8 +159,50 @@ void VirtualFileSystemImpl_DirectLog::init() {
     if (!frames.empty()) {
         std::vector<uint16_t> sampleRgbData;
         if (mDecoder->extractFrame(0, sampleRgbData)) {
+            auto sampleGainMaps = loadSidecarGainMaps(0, "gainMaps");
+            auto sampleDeferredGainMaps = loadSidecarGainMaps(0, "deferredGainMaps");
+            std::vector<GainMap> sampleOpcodeList2, sampleOpcodeList3;
+            auto classifySampleMaps = [&](const std::vector<GainMap>& maps) {
+                if (maps.empty()) return;
+                if (maps.size() == 4 || (maps.size() == 1 && maps.front().channels == 4))
+                    sampleOpcodeList2.insert(sampleOpcodeList2.end(), maps.begin(), maps.end());
+                else if (maps.size() == 1 && maps.front().channels == 1)
+                    sampleOpcodeList3.push_back(maps.front());
+                else
+                    throw std::runtime_error("Unsupported DirectLog gain-map layout");
+            };
+            if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
+                classifySampleMaps(sampleGainMaps);
+                classifySampleMaps(sampleDeferredGainMaps);
+            } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
+                if (sampleDeferredGainMaps.size() == 1 &&
+                    sampleDeferredGainMaps.front().channels == 1)
+                    sampleOpcodeList3 = sampleDeferredGainMaps;
+                if (sampleGainMaps.size() == 1 && sampleGainMaps.front().channels == 1)
+                    sampleOpcodeList3 = sampleGainMaps;
+            }
+            double sampleIso = 0.0, sampleShutter = 0.0, sampleBaseline = 0.0;
+            std::optional<std::array<float, 3>> sampleNeutral;
+            if (mSidecarMetadata.contains("dynamic") &&
+                mSidecarMetadata["dynamic"].contains("frames") &&
+                !mSidecarMetadata["dynamic"]["frames"].empty()) {
+                const auto& metadata = mSidecarMetadata["dynamic"]["frames"][0];
+                sampleIso = metadata.value("iso", 0.0);
+                sampleShutter = metadata.value("shutterSpeedSeconds", 0.0);
+                sampleBaseline = metadata.value("baselineExposure", 0.0);
+                if (metadata.contains("asShotNeutral") &&
+                    metadata["asShotNeutral"].is_array() &&
+                    metadata["asShotNeutral"].size() >= 3)
+                    sampleNeutral = std::array<float, 3>{
+                        metadata["asShotNeutral"][0].get<float>(),
+                        metadata["asShotNeutral"][1].get<float>(),
+                        metadata["asShotNeutral"][2].get<float>()};
+            }
             std::vector<uint8_t> sampleDngData;
-            if (convertRGBToDNG(sampleRgbData, sampleDngData, 0, frames[0].timestamp)) {
+            if (convertRGBToDNG(sampleRgbData, sampleDngData, 0, frames[0].timestamp,
+                                false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleIso,
+                                sampleShutter, sampleBaseline, sampleNeutral,
+                                sampleOpcodeList2, sampleOpcodeList3)) {
                 if (!DNGDecoder::setTimingMetadata(sampleDngData, mFps, 0))
                     throw std::runtime_error("Could not size DirectLog DNG timing metadata");
                 mTypicalDngSize = sampleDngData.size();
@@ -312,12 +357,326 @@ size_t VirtualFileSystemImpl_DirectLog::generateFrame(
     return async ? 0 : renderFuture.get();
 }
 
+void VirtualFileSystemImpl_DirectLog::loadSidecarMetadata(
+        const boost::filesystem::path& path) {
+    mSidecarMetadata = nlohmann::json();
+    try {
+        std::ifstream input(path.string());
+        if (input) input >> mSidecarMetadata;
+    } catch (const std::exception& e) {
+        spdlog::warn("Could not parse DirectLog dynamic metadata from {}: {}",
+                     path.string(), e.what());
+        mSidecarMetadata = nlohmann::json();
+    }
+}
+
+std::vector<GainMap> VirtualFileSystemImpl_DirectLog::loadSidecarGainMaps(
+        int frameNumber, const char* field) const {
+    std::vector<GainMap> maps;
+    if (!mSidecarMetadata.contains("dynamic")) return maps;
+    const auto& dynamic = mSidecarMetadata["dynamic"];
+    if (!dynamic.contains("frames") || !dynamic.contains("gainMapFormats") ||
+        !dynamic.contains("gainMapPayloads") || frameNumber < 0 ||
+        static_cast<size_t>(frameNumber) >= dynamic["frames"].size()) return maps;
+    const auto& frame = dynamic["frames"][frameNumber];
+    if (!frame.contains(field) || !frame[field].is_array()) return maps;
+
+    for (const auto& reference : frame[field]) {
+        const size_t formatIndex = reference.at("format").get<size_t>();
+        const size_t payloadIndex = reference.at("payload").get<size_t>();
+        if (formatIndex >= dynamic["gainMapFormats"].size() ||
+            payloadIndex >= dynamic["gainMapPayloads"].size())
+            throw std::runtime_error("Invalid DirectLog gain-map reference");
+        const auto& format = dynamic["gainMapFormats"][formatIndex];
+        const auto& payload = dynamic["gainMapPayloads"][payloadIndex];
+        const size_t count = payload.at("valueCount").get<size_t>();
+        if (count > std::numeric_limits<uint32_t>::max() / sizeof(float))
+            throw std::runtime_error("DirectLog gain-map payload is too large");
+        const QByteArray compressed = QByteArray::fromBase64(
+            QByteArray::fromStdString(payload.at("values").get<std::string>()));
+        QByteArray wrapped;
+        const uint32_t byteCount = static_cast<uint32_t>(count * sizeof(float));
+        wrapped.reserve(compressed.size() + 4);
+        wrapped.append(static_cast<char>(byteCount >> 24));
+        wrapped.append(static_cast<char>(byteCount >> 16));
+        wrapped.append(static_cast<char>(byteCount >> 8));
+        wrapped.append(static_cast<char>(byteCount));
+        wrapped.append(compressed);
+        const QByteArray raw = qUncompress(wrapped);
+        if (raw.size() != static_cast<qsizetype>(byteCount))
+            throw std::runtime_error("Could not decompress DirectLog gain-map values");
+
+        GainMap map{};
+        map.top = format.at("top").get<uint32_t>();
+        map.left = format.at("left").get<uint32_t>();
+        map.bottom = format.at("bottom").get<uint32_t>();
+        map.right = format.at("right").get<uint32_t>();
+        map.coordinateWidth = format.at("coordinateWidth").get<uint32_t>();
+        map.coordinateHeight = format.at("coordinateHeight").get<uint32_t>();
+        map.plane = format.at("plane").get<uint32_t>();
+        map.planes = format.at("planes").get<uint32_t>();
+        map.rowPitch = format.at("rowPitch").get<uint32_t>();
+        map.colPitch = format.at("colPitch").get<uint32_t>();
+        map.width = format.at("width").get<uint32_t>();
+        map.height = format.at("height").get<uint32_t>();
+        map.channels = format.at("channels").get<uint32_t>();
+        map.spacingV = format.at("spacingV").get<double>();
+        map.spacingH = format.at("spacingH").get<double>();
+        map.originV = format.at("originV").get<double>();
+        map.originH = format.at("originH").get<double>();
+        if (!map.width || !map.height || !map.channels ||
+            count != static_cast<size_t>(map.width) * map.height * map.channels)
+            throw std::runtime_error("Invalid DirectLog gain-map dimensions");
+        map.data.resize(count);
+        const auto* source = reinterpret_cast<const unsigned char*>(raw.constData());
+        for (size_t index = 0; index < count; ++index) {
+            const uint32_t bits = static_cast<uint32_t>(source[index * 4]) |
+                (static_cast<uint32_t>(source[index * 4 + 1]) << 8) |
+                (static_cast<uint32_t>(source[index * 4 + 2]) << 16) |
+                (static_cast<uint32_t>(source[index * 4 + 3]) << 24);
+            std::memcpy(&map.data[index], &bits, sizeof(bits));
+        }
+        maps.push_back(std::move(map));
+    }
+    return maps;
+}
+
+void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
+        std::vector<uint16_t>& rgbData, int frameNumber, float& exposureOffset,
+        std::array<float, 3>& neutralScale) const {
+    if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
+        !mSidecarMetadata.contains("dynamic")) return;
+    const auto& dynamic = mSidecarMetadata["dynamic"];
+    if (!dynamic.contains("frames") || !dynamic.contains("gainMapFormats") ||
+        !dynamic.contains("gainMapPayloads") || frameNumber < 0 ||
+        static_cast<size_t>(frameNumber) >= dynamic["frames"].size()) return;
+
+    const auto& frame = dynamic["frames"][frameNumber];
+    std::string cfaPhase = "bggr";
+    if (mCalibration && !mCalibration->cfaPhase.empty())
+        cfaPhase = mCalibration->cfaPhase;
+    else if (!mConfig.cfaPhase.empty() && mConfig.cfaPhase != "Don't override CFA")
+        cfaPhase = mConfig.cfaPhase;
+    std::transform(cfaPhase.begin(), cfaPhase.end(), cfaPhase.begin(), ::tolower);
+    std::array<uint8_t, 4> cfa{2, 1, 1, 0};
+    if (cfaPhase == "rggb") cfa = {0, 1, 1, 2};
+    else if (cfaPhase == "grbg") cfa = {1, 0, 2, 1};
+    else if (cfaPhase == "gbrg") cfa = {1, 2, 0, 1};
+    if (mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP)
+        std::fill(rgbData.begin(), rgbData.end(), std::numeric_limits<uint16_t>::max());
+    auto apply = [&](const char* field) {
+        if (!frame.contains(field) || !frame[field].is_array()) return;
+        std::array<float, 3> optimizedMinima{1.0f, 1.0f, 1.0f};
+        if (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) {
+            optimizedMinima.fill(std::numeric_limits<float>::max());
+            for (const auto& map : loadSidecarGainMaps(frameNumber, field)) {
+                std::array<bool, 3> mapColors{};
+                if (map.channels == 1) {
+                    for (uint32_t phaseY = 0; phaseY < 2; ++phaseY)
+                        for (uint32_t phaseX = 0; phaseX < 2; ++phaseX)
+                            if (phaseY % map.rowPitch == 0 && phaseX % map.colPitch == 0)
+                                mapColors[std::min<size_t>(2, cfa[
+                                    (((map.top + phaseY) & 1u) << 1u) |
+                                    ((map.left + phaseX) & 1u)])] = true;
+                }
+                if ((mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
+                    map.channels == 1 && mapColors[0] && mapColors[1] && mapColors[2])
+                    continue;
+                for (size_t point = 0;
+                     point < static_cast<size_t>(map.width) * map.height; ++point) {
+                    for (uint32_t channel = 0; channel < map.channels; ++channel) {
+                        const float value = map.data[point * map.channels + channel];
+                        if (!std::isfinite(value) || value <= 0.0f) continue;
+                        if (map.channels == 1) {
+                            for (size_t color = 0; color < mapColors.size(); ++color)
+                                if (mapColors[color])
+                                    optimizedMinima[color] = std::min(optimizedMinima[color], value);
+                        } else {
+                            const size_t color = map.channels >= 4
+                                ? std::min<size_t>(2, cfa[channel % 4])
+                                : std::min<size_t>(2, channel);
+                            optimizedMinima[color] = std::min(optimizedMinima[color], value);
+                        }
+                    }
+                }
+            }
+            for (float& minimum : optimizedMinima)
+                if (!std::isfinite(minimum) || minimum <= 0.0f) minimum = 1.0f;
+            const float commonMinimum = *std::min_element(
+                optimizedMinima.begin(), optimizedMinima.end());
+            exposureOffset += std::log2(commonMinimum);
+            for (size_t color = 0; color < optimizedMinima.size(); ++color)
+                neutralScale[color] *= commonMinimum / optimizedMinima[color];
+        }
+        for (const auto& reference : frame[field]) {
+            const size_t formatIndex = reference.at("format").get<size_t>();
+            const size_t payloadIndex = reference.at("payload").get<size_t>();
+            if (formatIndex >= dynamic["gainMapFormats"].size() ||
+                payloadIndex >= dynamic["gainMapPayloads"].size())
+                throw std::runtime_error("Invalid DirectLog gain-map reference");
+            const auto& format = dynamic["gainMapFormats"][formatIndex];
+            const auto& payload = dynamic["gainMapPayloads"][payloadIndex];
+            const size_t count = payload.at("valueCount").get<size_t>();
+            const QByteArray compressed = QByteArray::fromBase64(
+                QByteArray::fromStdString(payload.at("values").get<std::string>()));
+            QByteArray wrapped;
+            wrapped.reserve(compressed.size() + 4);
+            const uint32_t byteCount = static_cast<uint32_t>(count * sizeof(float));
+            wrapped.append(static_cast<char>(byteCount >> 24));
+            wrapped.append(static_cast<char>(byteCount >> 16));
+            wrapped.append(static_cast<char>(byteCount >> 8));
+            wrapped.append(static_cast<char>(byteCount));
+            wrapped.append(compressed);
+            const QByteArray raw = qUncompress(wrapped);
+            if (raw.size() != static_cast<qsizetype>(byteCount))
+                throw std::runtime_error("Could not decompress DirectLog gain-map values");
+            std::vector<float> values(count);
+            const auto* source = reinterpret_cast<const unsigned char*>(raw.constData());
+            for (size_t index = 0; index < count; ++index) {
+                const uint32_t bits = static_cast<uint32_t>(source[index * 4]) |
+                    (static_cast<uint32_t>(source[index * 4 + 1]) << 8) |
+                    (static_cast<uint32_t>(source[index * 4 + 2]) << 16) |
+                    (static_cast<uint32_t>(source[index * 4 + 3]) << 24);
+                std::memcpy(&values[index], &bits, sizeof(bits));
+            }
+            const uint32_t mapWidth = format.at("width").get<uint32_t>();
+            const uint32_t mapHeight = format.at("height").get<uint32_t>();
+            const uint32_t channels = format.at("channels").get<uint32_t>();
+            if (!mapWidth || !mapHeight || !channels ||
+                values.size() != static_cast<size_t>(mapWidth) * mapHeight * channels)
+                throw std::runtime_error("Invalid DirectLog gain-map dimensions");
+            const uint32_t top = format.at("top").get<uint32_t>();
+            const uint32_t left = format.at("left").get<uint32_t>();
+            const uint32_t bottom = format.at("bottom").get<uint32_t>();
+            const uint32_t right = format.at("right").get<uint32_t>();
+            const uint32_t rowPitch = format.at("rowPitch").get<uint32_t>();
+            const uint32_t colPitch = format.at("colPitch").get<uint32_t>();
+            const double spacingV = format.at("spacingV").get<double>();
+            const double spacingH = format.at("spacingH").get<double>();
+            const double originV = format.at("originV").get<double>();
+            const double originH = format.at("originH").get<double>();
+            if (!format.contains("coordinateWidth") || !format.contains("coordinateHeight"))
+                throw std::runtime_error(
+                    "DirectLog gain-map sidecar lacks sensor coordinate dimensions");
+            const uint32_t coordinateWidth = format.at("coordinateWidth").get<uint32_t>();
+            const uint32_t coordinateHeight = format.at("coordinateHeight").get<uint32_t>();
+            if (!rowPitch || !colPitch || top >= bottom || left >= right)
+                throw std::runtime_error("Invalid DirectLog gain-map geometry");
+            if (!coordinateWidth || !coordinateHeight)
+                throw std::runtime_error("Invalid DirectLog gain-map coordinate extent");
+            // Match the CFA opcode's row/column selection. Pitch-one maps apply
+            // to every CFA color (for example deferred luminance); pitch-two
+            // maps normally select one or two phases through top/left.
+            std::array<bool, 3> affectedColors{};
+            for (uint32_t phaseY = 0; phaseY < 2; ++phaseY)
+                for (uint32_t phaseX = 0; phaseX < 2; ++phaseX) {
+                    const uint32_t sampleY = top + phaseY;
+                    const uint32_t sampleX = left + phaseX;
+                    if ((sampleY - top) % rowPitch == 0 &&
+                        (sampleX - left) % colPitch == 0)
+                        affectedColors[std::min<size_t>(2, cfa[
+                            ((sampleY & 1u) << 1u) | (sampleX & 1u)])] = true;
+                }
+            // A single-channel map is the deferred luminance remainder from
+            // an earlier color-only bake. Reduce-to-color must leave it
+            // deferred; it contains no channel-relative correction to apply.
+            if ((mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) && channels == 1 &&
+                affectedColors[0] && affectedColors[1] && affectedColors[2])
+                continue;
+
+            if ((mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) && !values.empty()) {
+                for (size_t point = 0; point < static_cast<size_t>(mapWidth) * mapHeight; ++point)
+                    for (uint32_t channel = 0; channel < channels; ++channel) {
+                        size_t color = std::min<size_t>(2, channel);
+                        if (channels >= 4) color = std::min<size_t>(2, cfa[channel % 4]);
+                        else if (channels == 1) {
+                            color = 0;
+                            while (color + 1 < affectedColors.size() && !affectedColors[color])
+                                ++color;
+                        }
+                        values[point * channels + channel] /= optimizedMinima[color];
+                    }
+            }
+            if ((mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) && channels > 1) {
+                for (size_t point = 0; point < static_cast<size_t>(mapWidth) * mapHeight; ++point) {
+                    float minimum = std::numeric_limits<float>::max();
+                    for (uint32_t channel = 0; channel < channels; ++channel)
+                        minimum = std::min(minimum, values[point * channels + channel]);
+                    if (std::isfinite(minimum) && minimum > 0.0f)
+                        for (uint32_t channel = 0; channel < channels; ++channel)
+                            values[point * channels + channel] /= minimum;
+                }
+            }
+            if (mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP) {
+                const float maximum = *std::max_element(values.begin(), values.end());
+                if (std::isfinite(maximum) && maximum > 0.0f)
+                    for (float& value : values) value /= maximum;
+            } else if (mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) {
+                for (float& value : values)
+                    if (std::isfinite(value) && value > 0.0f) value = 1.0f / value;
+            }
+            auto gainAt = [&](uint32_t x, uint32_t y, uint32_t channel) {
+                channel = std::min(channel, channels - 1);
+                return values[(static_cast<size_t>(y) * mapWidth + x) * channels + channel];
+            };
+            auto colorGainAt = [&](uint32_t x, uint32_t y, uint32_t color) {
+                if (channels == 1) return gainAt(x, y, 0);
+                float sum = 0.0f;
+                uint32_t countForColor = 0;
+                for (uint32_t channel = 0; channel < std::min<uint32_t>(4, channels); ++channel) {
+                    if (cfa[channel] == color) {
+                        sum += gainAt(x, y, channel);
+                        ++countForColor;
+                    }
+                }
+                return countForColor ? sum / countForColor : 1.0f;
+            };
+            for (int y = 0; y < mHeight; ++y) for (int x = 0; x < mWidth; ++x) {
+                const uint32_t sensorX = left + static_cast<uint32_t>(x);
+                const uint32_t sensorY = top + static_cast<uint32_t>(y);
+                const double nx = static_cast<double>(sensorX) / coordinateWidth;
+                const double ny = static_cast<double>(sensorY) / coordinateHeight;
+                const double gridX = spacingH > 0.0 ? (nx - originH) / spacingH : 0.0;
+                const double gridY = spacingV > 0.0 ? (ny - originV) / spacingV : 0.0;
+                const double floorX = std::floor(gridX), floorY = std::floor(gridY);
+                const uint32_t x0 = static_cast<uint32_t>(std::min<double>(
+                    mapWidth - 1, std::max(0.0, floorX)));
+                const uint32_t y0 = static_cast<uint32_t>(std::min<double>(
+                    mapHeight - 1, std::max(0.0, floorY)));
+                const uint32_t x1 = std::min(x0 + 1, mapWidth - 1);
+                const uint32_t y1 = std::min(y0 + 1, mapHeight - 1);
+                const float fx = static_cast<float>(std::clamp(gridX - floorX, 0.0, 1.0));
+                const float fy = static_cast<float>(std::clamp(gridY - floorY, 0.0, 1.0));
+                const size_t pixel = (static_cast<size_t>(y) * mWidth + x) * 3;
+                for (uint32_t color = 0; color < 3; ++color) {
+                    if (channels == 1 && !affectedColors[color]) continue;
+                    const float top = colorGainAt(x0, y0, color) * (1.0f - fx) +
+                                      colorGainAt(x1, y0, color) * fx;
+                    const float bottom = colorGainAt(x0, y1, color) * (1.0f - fx) +
+                                         colorGainAt(x1, y1, color) * fx;
+                    const float gain = top * (1.0f - fy) + bottom * fy;
+                    rgbData[pixel + color] = static_cast<uint16_t>(std::clamp(
+                        std::lround(rgbData[pixel + color] * gain), 0l, 65535l));
+                }
+            }
+        }
+    };
+    apply("gainMaps");
+    if (!(mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
+        apply("deferredGainMaps");
+}
+
 bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     const std::vector<uint16_t>& rgbData, 
     std::vector<uint8_t>& dngData, 
     int frameNumber, 
     Timestamp timestamp,
-    bool jpegCompression) {
+    bool jpegCompression, float gainMapExposureOffset,
+    const std::array<float, 3>& gainMapNeutralScale, double iso,
+    double shutterSpeed, double baselineExposure,
+    const std::optional<std::array<float, 3>>& asShotNeutral,
+    const std::vector<GainMap>& opcodeList2Maps,
+    const std::vector<GainMap>& opcodeList3Maps) {
     
     try {
         const auto& videoInfo = mDecoder->getVideoInfo();
@@ -531,6 +890,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             dng.SetUniqueCameraModel("DirectLog Video");
         }
         dng.SetSoftware("MotionCam DirectLog Decoder");
+        if (iso > 0.0) dng.SetIso(static_cast<unsigned int>(std::lround(iso)));
+        if (shutterSpeed > 0.0) dng.SetExposureTime(shutterSpeed);
         
         // Set image description with frame info
         std::ostringstream desc;
@@ -563,7 +924,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 // If parsing fails, keep the original exposureOffset value
             }
         }
-        dng.SetBaselineExposure(exposureOffset);
+        dng.SetBaselineExposure(static_cast<float>(baselineExposure) +
+                                exposureOffset + gainMapExposureOffset);
         
         // Set white/black levels and linearization table
         if (applyLogCurve) {
@@ -630,10 +992,57 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             if (mCalibration->hasForwardMatrix2) {
                 dng.SetForwardMatrix2(3, mCalibration->forwardMatrix2.data());
             }
-            if (mCalibration->hasAsShotNeutral) {
-                dng.SetAsShotNeutral(3, mCalibration->asShotNeutral.data());
-            }
         }
+        auto outputNeutral = asShotNeutral;
+        if (!outputNeutral && mCalibration && mCalibration->hasAsShotNeutral)
+            outputNeutral = mCalibration->asShotNeutral;
+        if (outputNeutral) {
+            for (size_t color = 0; color < outputNeutral->size(); ++color)
+                (*outputNeutral)[color] *= gainMapNeutralScale[color];
+            dng.SetAsShotNeutral(3, outputNeutral->data());
+        }
+        auto makeOpcodeList = [&](const std::vector<GainMap>& maps) {
+            tinydngwriter::OpcodeList result;
+            if (maps.empty()) return result;
+            const uint32_t cropLeft = std::min_element(maps.begin(), maps.end(),
+                [](const GainMap& a, const GainMap& b) { return a.left < b.left; })->left;
+            const uint32_t cropTop = std::min_element(maps.begin(), maps.end(),
+                [](const GainMap& a, const GainMap& b) { return a.top < b.top; })->top;
+            for (const auto& map : maps) {
+                if (!map.coordinateWidth || !map.coordinateHeight ||
+                    map.left < cropLeft || map.top < cropTop ||
+                    map.right <= cropLeft || map.bottom <= cropTop)
+                    throw std::runtime_error("Invalid DirectLog opcode coordinate geometry");
+                tinydngwriter::GainMapParams params{};
+                params.top = map.top - cropTop; params.left = map.left - cropLeft;
+                params.bottom = std::min<uint32_t>(mHeight, map.bottom - cropTop);
+                params.right = std::min<uint32_t>(mWidth, map.right - cropLeft);
+                params.plane = map.plane; params.planes = map.planes;
+                params.row_pitch = map.rowPitch; params.col_pitch = map.colPitch;
+                params.map_points_v = map.height; params.map_points_h = map.width;
+                params.map_spacing_v = map.spacingV * map.coordinateHeight / mHeight;
+                params.map_spacing_h = map.spacingH * map.coordinateWidth / mWidth;
+                params.map_origin_v =
+                    (map.originV * map.coordinateHeight - cropTop) / mHeight;
+                params.map_origin_h =
+                    (map.originH * map.coordinateWidth - cropLeft) / mWidth;
+                params.map_planes = map.channels;
+                // The sidecar and DNG payload are point-major/interleaved;
+                // tiny_dng_writer accepts plane-major input.
+                const size_t planeSize = static_cast<size_t>(map.width) * map.height;
+                params.gain_data.resize(map.data.size());
+                for (size_t point = 0; point < planeSize; ++point)
+                    for (uint32_t channel = 0; channel < map.channels; ++channel)
+                        params.gain_data[static_cast<size_t>(channel) * planeSize + point] =
+                            map.data[point * map.channels + channel];
+                result.AddGainMap(params);
+            }
+            return result;
+        };
+        const auto opcodeList2 = makeOpcodeList(opcodeList2Maps);
+        const auto opcodeList3 = makeOpcodeList(opcodeList3Maps);
+        if (!opcodeList2.IsEmpty()) dng.SetOpcodeList2(opcodeList2);
+        if (!opcodeList3.IsEmpty()) dng.SetOpcodeList3(opcodeList3);
         // Write DNG to memory stream
         std::ostringstream oss;
         tinydngwriter::DNGWriter writer(false); // little-endian
@@ -679,10 +1088,63 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
         std::vector<uint16_t> rgbData;
         if (!mDecoder->extractFrame(frameNumber, rgbData))
             throw std::runtime_error("Could not decode DirectLog frame");
+        const auto sidecarGainMaps = loadSidecarGainMaps(frameNumber, "gainMaps");
+        const auto sidecarDeferredGainMaps = loadSidecarGainMaps(frameNumber, "deferredGainMaps");
+        float gainMapExposureOffset = 0.0f;
+        std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
+        applySidecarGainMaps(rgbData, frameNumber, gainMapExposureOffset, gainMapNeutralScale);
+        double iso = 0.0, shutterSpeed = 0.0, baselineExposure = 0.0;
+        std::optional<std::array<float, 3>> asShotNeutral;
+        if (mSidecarMetadata.contains("dynamic") &&
+            mSidecarMetadata["dynamic"].contains("frames") &&
+            static_cast<size_t>(frameNumber) < mSidecarMetadata["dynamic"]["frames"].size()) {
+            const auto& metadata = mSidecarMetadata["dynamic"]["frames"][frameNumber];
+            iso = metadata.value("iso", 0.0);
+            shutterSpeed = metadata.value("shutterSpeedSeconds", 0.0);
+            baselineExposure = metadata.value("baselineExposure", 0.0);
+            if (metadata.contains("asShotNeutral") &&
+                metadata["asShotNeutral"].is_array() &&
+                metadata["asShotNeutral"].size() >= 3) {
+                asShotNeutral = std::array<float, 3>{
+                    metadata["asShotNeutral"][0].get<float>(),
+                    metadata["asShotNeutral"][1].get<float>(),
+                    metadata["asShotNeutral"][2].get<float>()};
+            }
+        }
         const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
         const int outputFrameNumber = std::stoi(frameDigits);
+        std::vector<GainMap> opcodeList2Maps;
+        std::vector<GainMap> opcodeList3Maps;
+        auto classifyGainMaps = [&](const std::vector<GainMap>& maps) {
+            if (maps.empty()) return;
+            const bool cfaLensSet = maps.size() == 4 ||
+                (maps.size() == 1 && maps.front().channels == 4);
+            const bool deferredLuminance = maps.size() == 1 &&
+                maps.front().channels == 1;
+            if (cfaLensSet)
+                opcodeList2Maps.insert(opcodeList2Maps.end(), maps.begin(), maps.end());
+            else if (deferredLuminance)
+                opcodeList3Maps.push_back(maps.front());
+            else
+                throw std::runtime_error("Unsupported DirectLog gain-map layout");
+        };
+        if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
+            classifyGainMaps(sidecarGainMaps);
+            classifyGainMaps(sidecarDeferredGainMaps);
+        } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
+            if (sidecarDeferredGainMaps.size() == 1 &&
+                sidecarDeferredGainMaps.front().channels == 1)
+                opcodeList3Maps = sidecarDeferredGainMaps;
+            else if (!sidecarDeferredGainMaps.empty())
+                throw std::runtime_error("Unsupported DirectLog deferred gain-map layout");
+            if (sidecarGainMaps.size() == 1 && sidecarGainMaps.front().channels == 1)
+                opcodeList3Maps = sidecarGainMaps;
+        }
         std::vector<uint8_t> dngData;
-        if (!convertRGBToDNG(rgbData, dngData, outputFrameNumber, timestamp, jpegCompression))
+        if (!convertRGBToDNG(rgbData, dngData, outputFrameNumber, timestamp, jpegCompression,
+                             gainMapExposureOffset, gainMapNeutralScale, iso, shutterSpeed,
+                             baselineExposure, asShotNeutral,
+                             opcodeList2Maps, opcodeList3Maps))
             throw std::runtime_error("Could not generate DirectLog DNG");
         const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
         const Timestamp outputTimestamp = converted
@@ -712,7 +1174,9 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     boost::filesystem::path srcPath(mSrcPath);
     boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
     mCalibration.reset();
+    mSidecarMetadata = nlohmann::json();
     if (boost::filesystem::exists(calibPath)) {
+        loadSidecarMetadata(calibPath);
         mCalibration = CalibrationData::loadFromFile(calibPath.string());
         if (mCalibration.has_value()) {
             spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());

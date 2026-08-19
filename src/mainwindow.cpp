@@ -45,9 +45,11 @@ using namespace motioncam;
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <QTimer>
 #include <QtConcurrent>
 #include <fstream>
@@ -1388,6 +1390,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
             std::vector<uint8_t> rgb;
             Timestamp timestamp = 0;
             DNGFrameMetadata colorMetadata;
+            std::vector<GainMap> gainMaps;
+            std::vector<GainMap> deferredGainMaps;
         };
         std::mutex queueMutex;
         std::condition_variable queueChanged;
@@ -1421,6 +1425,13 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
                             height != static_cast<uint32_t>(info->height) ||
                             !DNGDecoder::getColorMetadata(dng, frame.colorMetadata))
                             throw std::runtime_error("Could not extract RGB16 from rendered frame");
+                        DNGDecoder::getGainMaps(dng, 2, frame.gainMaps);
+                        DNGDecoder::getGainMaps(dng, 3, frame.deferredGainMaps);
+                        if (stagingSettings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
+                            frame.gainMaps.clear();
+                            if (!(stagingSettings.options & motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR))
+                                frame.deferredGainMaps.clear();
+                        }
                         std::unique_lock lock(queueMutex);
                         queueChanged.wait(lock, [&] {
                             return frameQueue.size() < 3 || cancelled.load();
@@ -1500,8 +1511,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
             QString svtParams = "lp=4:keyint=10s:tune=0:enable-overlays=1:scd=1:scm=0";
             if (hdrNoise)
                 svtParams = "lp=4:keyint=10s:tune=5:noise=8:enable-overlays=1:scd=1:scm=0";
-            args << "-c:v" << "libsvtav1" << "-crf" << (hdrNoise ? "18" : "12")
-                 << "-preset" << (hdrNoise ? "2" : "4")
+            args << "-c:v" << "libsvtav1" << "-crf" << (hdrNoise ? "12" : "7")
+                 << "-preset" << (hdrNoise ? "2" : "3")
                  << "-svtav1-params" << svtParams;
         } else {
             args << "-c:v" << "libx265" << "-preset" << "slow" << "-crf" << "14"
@@ -1541,6 +1552,95 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
             ? info->fps : info->frameRateInfo.medianFrameRate;
         NutVideoPipe videoPipe(encoder, diagnostic, info->width, info->height, encoderNominalFps);
         DNGFrameMetadata colorMetadata;
+        nlohmann::json dynamicFrames = nlohmann::json::array();
+        nlohmann::json gainMapFormats = nlohmann::json::array();
+        nlohmann::json gainMapPayloads = nlohmann::json::array();
+        std::unordered_map<std::string, size_t> gainMapFormatIds;
+        std::unordered_map<std::string, size_t> gainMapPayloadIds;
+        auto appendDynamicMetadata = [&](const NativeFrame& frame) {
+            const auto& metadata = frame.colorMetadata;
+            nlohmann::json item;
+            item["timestampNs"] = frame.timestamp;
+            item["iso"] = metadata.iso;
+            item["shutterSpeedSeconds"] = metadata.exposureTime;
+            item["baselineExposure"] = metadata.baselineExposure;
+            item["asShotNeutral"] = metadata.asShotNeutral;
+
+            const uint32_t channels = std::max<uint32_t>(1, metadata.blackLevelCount);
+            item["blackLevel"] = nlohmann::json::array();
+            item["whiteLevel"] = nlohmann::json::array();
+            for (uint32_t channel = 0; channel < channels; ++channel) {
+                const uint32_t black = metadata.blackLevelCount
+                    ? std::min(channel, metadata.blackLevelCount - 1) : 0;
+                item["blackLevel"].push_back(static_cast<double>(metadata.blackLevel[black]));
+                const uint32_t white = metadata.whiteLevelCount
+                    ? std::min(channel, metadata.whiteLevelCount - 1) : 0;
+                item["whiteLevel"].push_back(static_cast<double>(metadata.whiteLevel[white]));
+            }
+            auto serializeGainMaps = [&](const std::vector<GainMap>& maps) {
+                nlohmann::json result = nlohmann::json::array();
+                for (const auto& map : maps) {
+                    QByteArray rawValues;
+                    rawValues.resize(static_cast<qsizetype>(map.data.size() * sizeof(float)));
+                    auto* destination = reinterpret_cast<unsigned char*>(rawValues.data());
+                    for (size_t index = 0; index < map.data.size(); ++index) {
+                        uint32_t bits = 0;
+                        std::memcpy(&bits, &map.data[index], sizeof(bits));
+                        destination[index * 4] = static_cast<unsigned char>(bits);
+                        destination[index * 4 + 1] = static_cast<unsigned char>(bits >> 8);
+                        destination[index * 4 + 2] = static_cast<unsigned char>(bits >> 16);
+                        destination[index * 4 + 3] = static_cast<unsigned char>(bits >> 24);
+                    }
+                    // qCompress prepends the uncompressed size. Strip that
+                    // prefix so the payload is an ordinary zlib stream that
+                    // can be decoded outside Qt.
+                    QByteArray compressed = qCompress(rawValues, 9);
+                    compressed.remove(0, 4);
+                    nlohmann::json format = {
+                        {"top", map.top}, {"left", map.left},
+                        {"bottom", map.bottom}, {"right", map.right},
+                        {"plane", map.plane}, {"planes", map.planes},
+                        {"rowPitch", map.rowPitch}, {"colPitch", map.colPitch},
+                        {"width", map.width}, {"height", map.height},
+                        {"channels", map.channels},
+                        // Gain-map bounds remain in the uncropped sensor
+                        // coordinate system. Camera-native RGB starts at the
+                        // rectangle's top/left, so retain that coordinate
+                        // extent for reconstruction during ingest.
+                        {"coordinateWidth", map.right - map.left == static_cast<uint32_t>(info->width)
+                            ? map.left + map.right : std::max(map.right, static_cast<uint32_t>(info->width))},
+                        {"coordinateHeight", map.bottom - map.top == static_cast<uint32_t>(info->height)
+                            ? map.top + map.bottom : std::max(map.bottom, static_cast<uint32_t>(info->height))},
+                        {"spacingV", map.spacingV}, {"spacingH", map.spacingH},
+                        {"originV", map.originV}, {"originH", map.originH}
+                    };
+                    const std::string formatKey = format.dump();
+                    auto [formatIt, newFormat] = gainMapFormatIds.emplace(
+                        formatKey, gainMapFormats.size());
+                    if (newFormat) gainMapFormats.push_back(std::move(format));
+
+                    const std::string encoded = compressed.toBase64(
+                        QByteArray::Base64Encoding | QByteArray::OmitTrailingEquals).toStdString();
+                    const std::string payloadKey = std::to_string(map.data.size()) + ":" + encoded;
+                    auto [payloadIt, newPayload] = gainMapPayloadIds.emplace(
+                        payloadKey, gainMapPayloads.size());
+                    if (newPayload) gainMapPayloads.push_back({
+                        {"valueCount", map.data.size()},
+                        {"valuesEncoding", "float32-le+zlib+base64"},
+                        {"values", encoded}
+                    });
+                    result.push_back({
+                        {"format", formatIt->second},
+                        {"payload", payloadIt->second}
+                    });
+                }
+                return result;
+            };
+            item["gainMaps"] = serializeGainMaps(frame.gainMaps);
+            if (!frame.deferredGainMaps.empty())
+                item["deferredGainMaps"] = serializeGainMaps(frame.deferredGainMaps);
+            dynamicFrames.push_back(std::move(item));
+        };
         std::optional<NativeFrame> pendingFrame;
         int frameIndex = 0;
         while (true) {
@@ -1579,6 +1679,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
                     const int64_t duration = frame.timestamp - pendingFrame->timestamp;
                     videoPipe.writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
                         std::max<int64_t>(1, duration));
+                    appendDynamicMetadata(*pendingFrame);
                     ++frameIndex;
                     progress.setValue(frameIndex);
                 }
@@ -1599,6 +1700,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
         if (!pendingFrame) throw std::runtime_error("The rendered sequence contains no video frames");
         videoPipe.writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
             std::max<int64_t>(1, static_cast<int64_t>(std::llround(1e9 / info->fps))));
+        appendDynamicMetadata(*pendingFrame);
         ++frameIndex;
         if (frameIndex != frameCount)
             throw std::runtime_error("Rendered frame count did not match the clip metadata");
@@ -1634,6 +1736,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
         if (colorMetadata.hasForwardMatrix1) sidecar["forwardMatrix1"] = colorMetadata.forwardMatrix1;
         if (colorMetadata.hasForwardMatrix2) sidecar["forwardMatrix2"] = colorMetadata.forwardMatrix2;
         if (colorMetadata.hasAsShotNeutral) sidecar["asShotNeutral"] = colorMetadata.asShotNeutral;
+        sidecar["dynamic"] = {
+            {"gainMapFormats", std::move(gainMapFormats)},
+            {"gainMapPayloads", std::move(gainMapPayloads)},
+            {"frames", std::move(dynamicFrames)}
+        };
         std::ofstream jsonFile(partialJsonPath.toStdString(), std::ios::trunc);
         if (!jsonFile)
             throw std::runtime_error("Could not create Camera Native JSON sidecar");
