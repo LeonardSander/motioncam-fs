@@ -119,6 +119,7 @@ public:
                                   bool normalizeGainMaps,
                                   bool colorOnly,
                                   bool optimizeGainMaps);
+    static bool canonicalizeGainMapOpcodes(std::vector<uint8_t>& dngData);
     static bool processHigherCFA(std::vector<uint8_t>& dngData,
                                  int repeatSize,
                                  const std::array<uint8_t, 4>& phase,

@@ -719,12 +719,45 @@ void encodeRGBTo4Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& heig
 }
 
 
+void addSinglePlaneGainMaps(tinydngwriter::OpcodeList& opcodeList,
+                            const tinydngwriter::GainMapParams& params,
+                            bool cfaPhases)
+{
+    if (params.map_planes <= 1) {
+        opcodeList.AddGainMap(params);
+        return;
+    }
+    const size_t planeSize =
+        static_cast<size_t>(params.map_points_v) * params.map_points_h;
+    if (params.gain_data.size() != planeSize * params.map_planes ||
+        (cfaPhases && params.map_planes != 4)) {
+        return;
+    }
+    for (unsigned int channel = 0; channel < params.map_planes; ++channel) {
+        auto single = params;
+        single.map_planes = 1;
+        single.gain_data.assign(params.gain_data.begin() + channel * planeSize,
+                                params.gain_data.begin() + (channel + 1) * planeSize);
+        if (cfaPhases) {
+            single.top = channel / 2;
+            single.left = channel % 2;
+            single.row_pitch = 2;
+            single.col_pitch = 2;
+        } else {
+            single.plane = params.plane + channel;
+            single.planes = 1;
+        }
+        opcodeList.AddGainMap(single);
+    }
+}
+
 tinydngwriter::OpcodeList createLensShadingOpcodeList(
     const CameraFrameMetadata& metadata,
     uint32_t imageWidth,
     uint32_t imageHeight,
     int left,
-    int top)
+    int top,
+    unsigned int targetPlanes)
 {
     tinydngwriter::OpcodeList opcodeList;
     
@@ -734,15 +767,16 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
         return opcodeList; // Return empty list if no shading map
     }
     
-    // Build a gain map opcode compatible with DNG OpcodeList2 GainMap
-    tinydngwriter::GainMapParams gainParams;
+    // Build GainMap opcodes compatible with DNG readers which represent a
+    // Bayer shading map as one opcode per CFA phase (not as four MapPlanes in
+    // a single-plane raw image).
+    tinydngwriter::GainMapParams gainParams{};
     
-    // Set the area to apply the gain map (active image area)
-    // Use provided left/top offsets if the active area is a sub-rectangle
-    gainParams.top = static_cast<unsigned int>(std::max(0, top));
-    gainParams.left = static_cast<unsigned int>(std::max(0, left));
-    gainParams.bottom = static_cast<unsigned int>(std::max<int>(0, top) + imageHeight);
-    gainParams.right = static_cast<unsigned int>(std::max<int>(0, left) + imageWidth);
+    // The emitted DNG's raw IFD and ActiveArea both start at (0, 0).
+    gainParams.top = 0;
+    gainParams.left = 0;
+    gainParams.bottom = imageHeight;
+    gainParams.right = imageWidth;
     
     // Apply starting from plane 0
     gainParams.plane = 0;
@@ -750,7 +784,7 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     // Bayer-phase gain planes.
     unsigned int availablePlanes = static_cast<unsigned int>(metadata.lensShadingMap.size());
     if (availablePlanes == 0) availablePlanes = 1;
-    gainParams.planes = 1;
+    gainParams.planes = targetPlanes;
     
     // Grid size in the gain map
     const unsigned int mapPointsV = static_cast<unsigned int>(metadata.lensShadingMapHeight);
@@ -758,29 +792,30 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     gainParams.map_points_v = mapPointsV;
     gainParams.map_points_h = mapPointsH;
     
-    // Compute pixel pitch between adjacent map points in rows/cols (in pixels)
-    // If only a single point along a dimension, pitch covers the full extent
-    const unsigned int imageRows = imageHeight;
-    const unsigned int imageCols = imageWidth;
+    // A multi-channel CFA map addresses one of the four 2x2 phases per opcode.
     gainParams.row_pitch = 1;
     gainParams.col_pitch = 1;
     
-    // Map spacing and origin in relative coordinates
-    // Spacing is relative pitch to image size; origin is relative to active area
-    gainParams.map_spacing_v = mapPointsV > 1 ? 1.0 / (mapPointsV - 1) : 1.0;
-    gainParams.map_spacing_h = mapPointsH > 1 ? 1.0 / (mapPointsH - 1) : 1.0;
-    gainParams.map_origin_v = 0.0;
-    gainParams.map_origin_h = 0.0;
+    // The shading grid is defined over the original sensor image. Express its
+    // grid locations in the coordinate system of the cropped output image so
+    // deferred opcode correction samples the same values as the baked path.
+    const double coordinateHeight = metadata.originalHeight > 0
+        ? metadata.originalHeight : imageHeight;
+    const double coordinateWidth = metadata.originalWidth > 0
+        ? metadata.originalWidth : imageWidth;
+    gainParams.map_spacing_v = mapPointsV > 1
+        ? coordinateHeight / imageHeight / (mapPointsV - 1) : 1.0;
+    gainParams.map_spacing_h = mapPointsH > 1
+        ? coordinateWidth / imageWidth / (mapPointsH - 1) : 1.0;
+    gainParams.map_origin_v = -static_cast<double>(std::max(0, top)) / imageHeight;
+    gainParams.map_origin_h = -static_cast<double>(std::max(0, left)) / imageWidth;
     
-    // Number of planes in the gain map payload (match planes when available)
     gainParams.map_planes = std::min(4u, availablePlanes);
     
     // Fill gain data in plane-major, row-major order
     if (!metadata.lensShadingMap.empty() && !metadata.lensShadingMap[0].empty()) {
         const size_t perPlaneSize = static_cast<size_t>(mapPointsV) * static_cast<size_t>(mapPointsH);
-        const size_t expectedSize = perPlaneSize * static_cast<size_t>(gainParams.map_planes);
-        gainParams.gain_data.reserve(expectedSize);
-
+        gainParams.gain_data.reserve(perPlaneSize * gainParams.map_planes);
         for (unsigned int p = 0; p < gainParams.map_planes; ++p) {
             const unsigned int srcPlane = (p < metadata.lensShadingMap.size()) ? p : 0;
             for (unsigned int v = 0; v < mapPointsV; ++v) {
@@ -799,11 +834,7 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
                 }
             }
         }
-
-        // Only add the gain map if we have valid data size
-        if (gainParams.gain_data.size() == expectedSize) {
-            opcodeList.AddGainMap(gainParams);
-        }
+        addSinglePlaneGainMaps(opcodeList, gainParams, gainParams.map_planes > 1);
     }
     
     return opcodeList;
@@ -930,6 +961,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
 
     int useBits = 0;
 
+    tinydngwriter::OpcodeList opcodeList2;
     tinydngwriter::OpcodeList opcodeList3;
 
     if (vignetteOnlyColor) {
@@ -937,25 +969,28 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
             CameraFrameMetadata luminanceMetadata = metadata;
             const size_t points = static_cast<size_t>(metadata.lensShadingMapWidth) *
                                   metadata.lensShadingMapHeight;
-            luminanceMetadata.lensShadingMap.assign(1, std::vector<float>(points, 1.0f));
+            std::vector<float> luminance(points, 1.0f);
             for (size_t point = 0; point < points; ++point) {
                 float minimum = std::numeric_limits<float>::max();
                 for (const auto& channel : lensShadingMap)
                     if (point < channel.size()) minimum = std::min(minimum, channel[point]);
                 if (std::isfinite(minimum) && minimum > 0.0f)
-                    luminanceMetadata.lensShadingMap[0][point] = minimum;
+                    luminance[point] = minimum;
             }
             float luminanceMinimum = std::numeric_limits<float>::max();
-            for (float gain : luminanceMetadata.lensShadingMap[0])
+            for (float gain : luminance)
                 if (std::isfinite(gain) && gain > 0.0f)
                     luminanceMinimum = std::min(luminanceMinimum, gain);
             if (optimizeGainMaps && std::isfinite(luminanceMinimum) && luminanceMinimum > 0.0f) {
                 gainMapExposureOffset += std::log2(luminanceMinimum);
-                for (float& gain : luminanceMetadata.lensShadingMap[0])
+                for (float& gain : luminance)
                     if (std::isfinite(gain) && gain > 0.0f) gain /= luminanceMinimum;
             }
+            luminanceMetadata.lensShadingMap.assign(1, luminance);
+            // OpcodeList3 runs on demosaiced RGB. Its single map plane is
+            // reused for all three target image planes.
             opcodeList3 = createLensShadingOpcodeList(
-                luminanceMetadata, inOutWidth, inOutHeight, left, top);
+                luminanceMetadata, inOutWidth, inOutHeight, left, top, 3);
         }
         // Without baking, intentionally discard luminance and retain only the
         // local color ratios in OpcodeList2.
@@ -1017,7 +1052,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     }
 
     // Create opcode list if requested and shading map is not applied to image data
-    tinydngwriter::OpcodeList opcodeList2;
     if(includeOpcode && !applyShadingMap) {
         // Create lens shading map as opcode list 2 gain map
         CameraFrameMetadata opcodeMetadata = metadata;
@@ -1306,17 +1340,6 @@ std::shared_ptr<std::vector<char>> generateDng(
     CameraFrameMetadata gainMetadata = metadata;
     float gainMapExposureOffset = 0.0f;
     std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
-    const bool willBakeGainMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    if (!willBakeGainMap && (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
-        if (gainMetadata.lensShadingMap.size() >= 4) {
-            utils::colorOnlyShadingMap(gainMetadata.lensShadingMap,
-                                       gainMetadata.lensShadingMapWidth,
-                                       gainMetadata.lensShadingMapHeight, cfa);
-        } else {
-            for (auto& plane : gainMetadata.lensShadingMap)
-                std::fill(plane.begin(), plane.end(), 1.0f);
-        }
-    }
     if ((settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
         !gainMetadata.lensShadingMap.empty()) {
         std::array<float, 3> channelMin{
@@ -1576,7 +1599,9 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetBigEndian(false);
     dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
-    dng.SetDNGBackwardVersion(1, jpegXlCompression ? 7 : 1, 0, 0);
+    const bool hasStageOpcodes = !opcodeList2.IsEmpty() || !opcodeList3.IsEmpty();
+    dng.SetDNGBackwardVersion(
+        1, jpegXlCompression ? 7 : (hasStageOpcodes ? 3 : 1), 0, 0);
     
     // Set image dimensions and format FIRST (before image data)
     dng.SetImageWidth(width);
@@ -1709,7 +1734,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     } else if (!isZeroMatrix(cameraConfiguration.colorMatrix1)) {
         dng.SetColorMatrix1(3, cameraConfiguration.colorMatrix1.data());
     }
-    
+
     if (calibration.has_value() && calibration->hasColorMatrix2) {
         dng.SetColorMatrix2(3, calibration->colorMatrix2.data());
     } else if (!isZeroMatrix(cameraConfiguration.colorMatrix2)) {

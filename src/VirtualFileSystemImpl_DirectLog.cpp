@@ -178,7 +178,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
                 if (sampleDeferredGainMaps.size() == 1 &&
                     sampleDeferredGainMaps.front().channels == 1)
                     sampleOpcodeList3 = sampleDeferredGainMaps;
-                if (sampleGainMaps.size() == 1 && sampleGainMaps.front().channels == 1)
+                else if (sampleGainMaps.size() == 1 &&
+                         sampleGainMaps.front().channels == 1)
                     sampleOpcodeList3 = sampleGainMaps;
             }
             double sampleIso = 0.0, sampleShutter = 0.0, sampleBaseline = 0.0;
@@ -866,10 +867,11 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // Set DNG version
         dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
+        const bool hasStageOpcodes = !opcodeList2Maps.empty() || !opcodeList3Maps.empty();
         if (jpegXlCompression) {
             dng.SetDNGBackwardVersion(1, 7, 0, 0);
         } else if (shouldRemosaic) {
-            dng.SetDNGBackwardVersion(1, 1, 0, 0);
+            dng.SetDNGBackwardVersion(1, hasStageOpcodes ? 3 : 1, 0, 0);
         } else {
             dng.SetDNGBackwardVersion(1, 4, 0, 0);
         }
@@ -1001,7 +1003,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 (*outputNeutral)[color] *= gainMapNeutralScale[color];
             dng.SetAsShotNeutral(3, outputNeutral->data());
         }
-        auto makeOpcodeList = [&](const std::vector<GainMap>& maps) {
+        auto makeOpcodeList = [&](const std::vector<GainMap>& maps, bool cfaPhases) {
             tinydngwriter::OpcodeList result;
             if (maps.empty()) return result;
             const uint32_t cropLeft = std::min_element(maps.begin(), maps.end(),
@@ -1027,20 +1029,35 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 params.map_origin_h =
                     (map.originH * map.coordinateWidth - cropLeft) / mWidth;
                 params.map_planes = map.channels;
-                // The sidecar and DNG payload are point-major/interleaved;
-                // tiny_dng_writer accepts plane-major input.
+                if (!cfaPhases && map.channels == 1) {
+                    params.top = 0;
+                    params.left = 0;
+                    params.bottom = mHeight;
+                    params.right = mWidth;
+                    params.plane = 0;
+                    params.planes = 3;
+                    params.row_pitch = 1;
+                    params.col_pitch = 1;
+                }
                 const size_t planeSize = static_cast<size_t>(map.width) * map.height;
+                if (!map.channels || map.data.size() != planeSize * map.channels)
+                    throw std::runtime_error("Invalid DirectLog opcode gain-map payload");
+                if (cfaPhases && map.channels > 1 && map.channels != 4)
+                    throw std::runtime_error("Unsupported DirectLog CFA gain-map channel count");
+                // Sidecars are point-major; the shared opcode helper accepts
+                // plane-major input and emits one opcode per channel.
                 params.gain_data.resize(map.data.size());
                 for (size_t point = 0; point < planeSize; ++point)
                     for (uint32_t channel = 0; channel < map.channels; ++channel)
                         params.gain_data[static_cast<size_t>(channel) * planeSize + point] =
                             map.data[point * map.channels + channel];
-                result.AddGainMap(params);
+                utils::addSinglePlaneGainMaps(
+                    result, params, cfaPhases && map.channels > 1);
             }
             return result;
         };
-        const auto opcodeList2 = makeOpcodeList(opcodeList2Maps);
-        const auto opcodeList3 = makeOpcodeList(opcodeList3Maps);
+        const auto opcodeList2 = makeOpcodeList(opcodeList2Maps, true);
+        const auto opcodeList3 = makeOpcodeList(opcodeList3Maps, false);
         if (!opcodeList2.IsEmpty()) dng.SetOpcodeList2(opcodeList2);
         if (!opcodeList3.IsEmpty()) dng.SetOpcodeList3(opcodeList3);
         // Write DNG to memory stream
@@ -1137,7 +1154,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
                 opcodeList3Maps = sidecarDeferredGainMaps;
             else if (!sidecarDeferredGainMaps.empty())
                 throw std::runtime_error("Unsupported DirectLog deferred gain-map layout");
-            if (sidecarGainMaps.size() == 1 && sidecarGainMaps.front().channels == 1)
+            else if (sidecarGainMaps.size() == 1 && sidecarGainMaps.front().channels == 1)
                 opcodeList3Maps = sidecarGainMaps;
         }
         std::vector<uint8_t> dngData;

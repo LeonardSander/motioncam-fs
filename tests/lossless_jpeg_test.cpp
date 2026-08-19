@@ -147,7 +147,7 @@ int main() {
     free(cfaEncoded);
 
     tinydngwriter::GainMapParams gainMap{};
-    gainMap.top = 0; gainMap.left = 0; gainMap.bottom = height; gainMap.right = width;
+    gainMap.top = 4; gainMap.left = 6; gainMap.bottom = height; gainMap.right = width;
     gainMap.plane = 0; gainMap.planes = 1;
     gainMap.row_pitch = 1; gainMap.col_pitch = 1;
     gainMap.map_points_v = 2; gainMap.map_points_h = 2;
@@ -164,6 +164,18 @@ int main() {
     std::ostringstream gainMapOutput(std::ios::binary);
     assert(writer.WriteToFile(gainMapOutput, &error));
     const std::string gainMapDng = gainMapOutput.str();
+    std::vector<uint8_t> canonical(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(canonical));
+    std::vector<motioncam::GainMap> canonicalMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(canonical, 2, canonicalMaps));
+    assert(canonicalMaps.size() == 4);
+    for (size_t phase = 0; phase < canonicalMaps.size(); ++phase) {
+        assert(canonicalMaps[phase].channels == 1);
+        assert(canonicalMaps[phase].rowPitch == 2);
+        assert(canonicalMaps[phase].colPitch == 2);
+        assert(canonicalMaps[phase].top == gainMap.top + phase / 2);
+        assert(canonicalMaps[phase].left == gainMap.left + phase % 2);
+    }
     std::vector<uint8_t> baked(gainMapDng.begin(), gainMapDng.end());
     const size_t originalSize = baked.size();
     assert(motioncam::DNGDecoder::bakeGainMaps(baked, false, false));
@@ -171,11 +183,18 @@ int main() {
 
     std::vector<uint8_t> colorBaked(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::bakeGainMaps(colorBaked, false, true));
-    // OpcodeList2 (51009 / 0xc741) is replaced by OpcodeList3
-    // (51022 / 0xc74e) in this little-endian test DNG.
-    const std::array<uint8_t, 2> opcodeList3Tag = {0x4e, 0xc7};
-    assert(std::search(colorBaked.begin(), colorBaked.end(),
-                       opcodeList3Tag.begin(), opcodeList3Tag.end()) != colorBaked.end());
+    // The unbaked luminance remainder is a single-map-plane OpcodeList3
+    // operation targeting all three post-demosaic image planes.
+    std::vector<motioncam::GainMap> luminanceMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(colorBaked, 3, luminanceMaps));
+    assert(luminanceMaps.size() == 1);
+    assert(luminanceMaps.front().plane == 0);
+    assert(luminanceMaps.front().planes == 3);
+    assert(luminanceMaps.front().top == 0 && luminanceMaps.front().left == 0);
+    assert(luminanceMaps.front().bottom == height && luminanceMaps.front().right == width);
+    assert(luminanceMaps.front().rowPitch == 1);
+    assert(luminanceMaps.front().colPitch == 1);
+    assert(luminanceMaps.front().channels == 1);
 
     // Android-style DNGs commonly store the four CFA phases as four separate
     // one-channel GainMap opcodes. All of them must be transformed in place.

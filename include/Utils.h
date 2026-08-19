@@ -15,6 +15,7 @@
 
 namespace tinydngwriter {
     class OpcodeList;
+    struct GainMapParams;
 }
 
 namespace motioncam {
@@ -69,6 +70,10 @@ public:
 
 unsigned short bitsNeeded(unsigned short value);
 
+void addSinglePlaneGainMaps(tinydngwriter::OpcodeList& opcodeList,
+                            const tinydngwriter::GainMapParams& params,
+                            bool cfaPhases);
+
 // ============================================================================
 // Bit Encoding Functions (RGB/Multi-Channel)
 // ============================================================================
@@ -120,7 +125,8 @@ tinydngwriter::OpcodeList createLensShadingOpcodeList(
     uint32_t imageWidth,
     uint32_t imageHeight,
     int left = 0,
-    int top = 0);
+    int top = 0,
+    unsigned int targetPlanes = 1);
 
 std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
            tinydngwriter::OpcodeList, tinydngwriter::OpcodeList>

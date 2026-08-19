@@ -2312,12 +2312,16 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     std::vector<GainMap> maps;
     if (!parseOpcodeGainMaps(data.data() + opcodeE->valueOffset, opcodeE->count, maps))
         return false;
-    std::vector<uint8_t> luminanceOpcode;
+    std::vector<uint8_t> luminanceOpcodes;
     bool gridColorSeparated = false;
     std::optional<double> luminanceBaseline;
     if (colorOnly && !maps.empty()) {
         GainMap luminance = maps.front();
-        luminance.plane = 0; luminance.planes = 1; luminance.channels = 1;
+        luminance.top = 0; luminance.left = 0;
+        luminance.bottom = height; luminance.right = width;
+        luminance.plane = 0; luminance.planes = 3;
+        luminance.rowPitch = 1; luminance.colPitch = 1;
+        luminance.channels = 1;
         luminance.data.assign(static_cast<size_t>(luminance.width) * luminance.height, 1.0f);
         for (size_t point = 0; point < luminance.data.size(); ++point) {
             float minimum = std::numeric_limits<float>::max();
@@ -2347,8 +2351,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             if (!getColorMetadata(data, metadata)) return false;
             luminanceBaseline = metadata.baselineExposure + std::log2(luminanceMinimum);
         }
-        luminanceOpcode = serializeGainMap(luminance);
-        if (luminanceOpcode.size() > opcodeE->count) return false;
+        luminanceOpcodes = serializeGainMap(luminance);
     }
     std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
     if (compression == TIFF_COMPRESSION_JPEG) {
@@ -2453,11 +2456,25 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         else for (uint32_t i = 0; i < blackE->count; ++i) writeScalar(*blackE, 0, i);
     }
     if (colorOnly) {
-        std::copy(luminanceOpcode.begin(), luminanceOpcode.end(),
-                  data.begin() + opcodeE->valueOffset);
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t opcodeOffset = static_cast<uint32_t>(data.size());
+        data.insert(data.end(), luminanceOpcodes.begin(), luminanceOpcodes.end());
         write16(data.data() + opcodeE->entryOffset, TIFF_TAG_OPCODE_LIST_3, little);
         write32(data.data() + opcodeE->entryOffset + 4,
-                static_cast<uint32_t>(luminanceOpcode.size()), little);
+                static_cast<uint32_t>(luminanceOpcodes.size()), little);
+        write32(data.data() + opcodeE->entryOffset + 8, opcodeOffset, little);
+        for (const auto& entry : entries) {
+            if (entry.tag != TIFF_TAG_DNG_BACKWARD_VERSION ||
+                entry.type != TIFF_TYPE_BYTE || entry.count < 4)
+                continue;
+            if (data[entry.valueOffset] < 1 ||
+                (data[entry.valueOffset] == 1 && data[entry.valueOffset + 1] < 3)) {
+                data[entry.valueOffset] = 1;
+                data[entry.valueOffset + 1] = 3;
+                data[entry.valueOffset + 2] = 0;
+                data[entry.valueOffset + 3] = 0;
+            }
+        }
     } else {
         // Keep a valid OpcodeList2 tag, but make its list empty to prevent double application.
         write32(data.data() + opcodeE->valueOffset, 0, false);
@@ -2590,6 +2607,89 @@ bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGai
                   data.begin() + opcode->valueOffset + payloads[i].first);
     }
     return true;
+}
+
+bool DNGDecoder::canonicalizeGainMapOpcodes(std::vector<uint8_t>& data) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    auto rewrite = [&](uint16_t tag, bool cfaPhases) -> bool {
+        const TiffEntry* entry = nullptr;
+        for (const auto& candidate : entries)
+            if (candidate.tag == tag) { entry = &candidate; break; }
+        if (!entry || !entry->count) return true;
+
+        const uint8_t* source = data.data() + entry->valueOffset;
+        if (entry->count < 4) return false;
+        const uint32_t count = readBE32(source);
+        size_t offset = 4;
+        uint32_t outputCount = 0;
+        bool changed = false;
+        std::vector<uint8_t> output(4, 0);
+        for (uint32_t i = 0; i < count; ++i) {
+            if (offset + 16 > entry->count) return false;
+            const uint32_t id = readBE32(source + offset);
+            const uint32_t bytes = readBE32(source + offset + 12);
+            if (bytes > entry->count - offset - 16) return false;
+            const size_t opcodeSize = 16 + bytes;
+            if (id != OPCODE_GAIN_MAP) {
+                output.insert(output.end(), source + offset, source + offset + opcodeSize);
+                ++outputCount;
+                offset += opcodeSize;
+                continue;
+            }
+
+            std::vector<uint8_t> one(4, 0);
+            one[3] = 1;
+            one.insert(one.end(), source + offset, source + offset + opcodeSize);
+            std::vector<GainMap> maps;
+            if (!parseOpcodeGainMaps(one.data(), one.size(), maps) || maps.size() != 1)
+                return false;
+            const GainMap& map = maps.front();
+            if (map.channels == 1) {
+                output.insert(output.end(), source + offset, source + offset + opcodeSize);
+                ++outputCount;
+            } else {
+                if (cfaPhases && map.channels != 4) return false;
+                changed = true;
+                const size_t points = static_cast<size_t>(map.width) * map.height;
+                for (uint32_t channel = 0; channel < map.channels; ++channel) {
+                    GainMap single = map;
+                    single.channels = 1;
+                    single.data.resize(points);
+                    for (size_t point = 0; point < points; ++point)
+                        single.data[point] = map.data[point * map.channels + channel];
+                    if (cfaPhases) {
+                        single.top = map.top + channel / 2;
+                        single.left = map.left + channel % 2;
+                        single.rowPitch = 2;
+                        single.colPitch = 2;
+                    } else {
+                        single.plane = map.plane + channel;
+                        single.planes = 1;
+                    }
+                    const auto encoded = serializeGainMap(single);
+                    output.insert(output.end(), encoded.begin() + 4, encoded.end());
+                    ++outputCount;
+                }
+            }
+            offset += opcodeSize;
+        }
+        if (offset != entry->count) return false;
+        if (!changed) return true;
+        output[0] = static_cast<uint8_t>(outputCount >> 24);
+        output[1] = static_cast<uint8_t>(outputCount >> 16);
+        output[2] = static_cast<uint8_t>(outputCount >> 8);
+        output[3] = static_cast<uint8_t>(outputCount);
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t newOffset = static_cast<uint32_t>(data.size());
+        data.insert(data.end(), output.begin(), output.end());
+        write32(data.data() + entry->entryOffset + 4,
+                static_cast<uint32_t>(output.size()), little);
+        write32(data.data() + entry->entryOffset + 8, newOffset, little);
+        return true;
+    };
+    return rewrite(TIFF_TAG_OPCODE_LIST_2, true) &&
+           rewrite(TIFF_TAG_OPCODE_LIST_3, false);
 }
 
 bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data) {

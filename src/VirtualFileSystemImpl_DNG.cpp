@@ -237,6 +237,8 @@ void VirtualFileSystemImpl_DNG::init() {
                     mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
                     mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
                 throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frames[i].filePath);
+            if (hasGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(sizedData))
+                throw std::runtime_error("Could not canonicalize DNG gain maps: " + frames[i].filePath);
             if (processHigher && !DNGDecoder::processHigherCFA(
                     sizedData, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
                     mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
@@ -439,6 +441,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
             mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
+    if (hasGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(bytes))
+        throw std::runtime_error("Could not canonicalize DNG gain maps: " + it->filePath);
 
     if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
          vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
