@@ -201,6 +201,8 @@ void VirtualFileSystemImpl_DNG::init() {
         dngEntry.pathParts = {};
         dngEntry.name = vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
         dngEntry.userData = frames[i].timestamp;
+        dngEntry.duplicateFrame = frames[i].duplicateFrame;
+        dngEntry.syntheticFrame = frames[i].syntheticFrame;
         const bool addBaseline = (mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE) &&
                                  !mHasBaselineExposure[frames[i].timestamp];
         const bool addNeutral = (mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE) &&
@@ -269,6 +271,7 @@ void VirtualFileSystemImpl_DNG::init() {
             }
             while (nextOutput < pts) {
                 Entry held = sourceEntries[previousSource];
+                held.duplicateFrame = true;
                 held.name = vfs::constructFrameFilename(mBaseName, nextOutput++, 6, "dng");
                 mFiles.push_back(std::move(held));
                 ++mDuplicatedFrames;
@@ -474,9 +477,45 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     }
 }
 
+bool VirtualFileSystemImpl_DNG::sourceImagePayloadsEqual(const Entry& left,
+                                                         const Entry& right) {
+    const auto leftTimestamp = std::get<Timestamp>(left.userData);
+    const auto rightTimestamp = std::get<Timestamp>(right.userData);
+    if (leftTimestamp == rightTimestamp) return true;
+    const auto& frames = mDecoder->getFrames();
+    auto findFrame = [&](Timestamp timestamp) {
+        return std::find_if(frames.begin(), frames.end(), [timestamp](const auto& frame) {
+            return frame.timestamp == timestamp;
+        });
+    };
+    const auto a = findFrame(leftTimestamp), b = findFrame(rightTimestamp);
+    if (a == frames.end() || b == frames.end()) return false;
+    auto fingerprint = [&](decltype(a) frame) -> std::optional<uint64_t> {
+        const size_t index = static_cast<size_t>(std::distance(frames.begin(), frame));
+        if (const auto cached = mPayloadHashes.find(index); cached != mPayloadHashes.end())
+            return cached->second;
+        std::vector<uint8_t> bytes;
+        if (!mDecoder->extractFrame(static_cast<int>(index), bytes))
+            return std::nullopt;
+        uint64_t hash = 0;
+        if (!DNGDecoder::imagePayloadHash(bytes, hash)) return std::nullopt;
+        mPayloadHashes.emplace(index, hash);
+        return hash;
+    };
+    const auto leftHash = fingerprint(a);
+    const auto rightHash = fingerprint(b);
+    if (!leftHash || !rightHash || *leftHash != *rightHash) return false;
+    std::vector<uint8_t> leftBytes, rightBytes;
+    if (!mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), a)), leftBytes) ||
+        !mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), b)), rightBytes))
+        return false;
+    return DNGDecoder::imagePayloadsEqual(leftBytes, rightBytes);
+}
+
 void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     std::lock_guard<std::mutex> lock(mMutex);
     mCache.clear();
+    mPayloadHashes.clear();
     mConfig = config;
     
     init();

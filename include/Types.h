@@ -27,6 +27,8 @@ struct Entry {
     std::string name;
     size_t size;
     std::variant<int64_t> userData;
+    bool duplicateFrame = false;
+    bool syntheticFrame = false;
 
     // Custom hash function for Entry
     struct Hash {
@@ -378,6 +380,9 @@ struct RenderSettings {
 
 struct FinalizeOptions {
     bool interpolateDuplicatedFrames = false;
+    // Compare adjacent source DNG image payloads when finding interpolation
+    // gaps. This is finalization-only and deliberately does not affect mounts.
+    bool detectDuplicateDngs = false;
     std::string rifeDirectory;
     // Optional interpreter override, also used by deterministic integration tests.
     std::string rifePythonExecutable;

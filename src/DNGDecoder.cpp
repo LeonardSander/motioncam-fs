@@ -66,6 +66,8 @@ namespace {
     constexpr uint16_t TIFF_TAG_STRIP_OFFSETS = 273;
     constexpr uint16_t TIFF_TAG_ROWS_PER_STRIP = 278;
     constexpr uint16_t TIFF_TAG_STRIP_BYTE_COUNTS = 279;
+    constexpr uint16_t TIFF_TAG_TILE_OFFSETS = 324;
+    constexpr uint16_t TIFF_TAG_TILE_BYTE_COUNTS = 325;
     constexpr uint16_t TIFF_TAG_BLACK_LEVEL_REPEAT_DIM = 50713;
     constexpr uint16_t TIFF_TAG_BLACK_LEVEL = 50714;
     constexpr uint16_t TIFF_TAG_WHITE_LEVEL = 50717;
@@ -762,6 +764,15 @@ void DNGDecoder::findDNGFiles() {
         const auto entries = findTiffEntries(bytes, little);
         double frameRate = 0.0;
         for (const auto& entry : entries) {
+            if (entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count &&
+                entry.valueOffset + entry.count <= bytes.size()) {
+                const std::string xmp(reinterpret_cast<const char*>(bytes.data() + entry.valueOffset),
+                                      entry.count);
+                frame.duplicateFrame = xmp.find("rpt:DuplicateFrame='true'") != std::string::npos ||
+                    xmp.find("rpt:DuplicateFrame=\"true\"") != std::string::npos;
+                frame.syntheticFrame = xmp.find("rpt:SyntheticFrame='true'") != std::string::npos ||
+                    xmp.find("rpt:SyntheticFrame=\"true\"") != std::string::npos;
+            }
             Timestamp embeddedTimestamp = 0;
             if (readRelativePresentationTimestamp(bytes, entry, embeddedTimestamp)) {
                 frame.timestamp = embeddedTimestamp;
@@ -822,6 +833,99 @@ void DNGDecoder::findDNGFiles() {
             if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) frame.height = static_cast<int>(value);
         }
     }
+}
+
+namespace {
+struct ImagePayloadSegment { size_t offset, size; };
+
+bool imagePayloadSegments(const std::vector<uint8_t>& data,
+                          std::vector<ImagePayloadSegment>& result) {
+        bool little = true;
+        const auto entries = findTiffEntries(data, little);
+        uint32_t imageIfd = 0;
+        for (const auto& entry : entries) {
+            if (entry.tag != TIFF_TAG_PHOTOMETRIC) continue;
+            const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                ? read16(data.data() + entry.valueOffset, little)
+                : entry.type == TIFF_TYPE_LONG
+                    ? read32(data.data() + entry.valueOffset, little) : 0;
+            if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+                imageIfd = entry.ifdOffset;
+                break;
+            }
+        }
+        if (!imageIfd) return false;
+        const TiffEntry* offsets = nullptr;
+        const TiffEntry* counts = nullptr;
+        for (const auto& entry : entries) {
+            if (entry.ifdOffset != imageIfd) continue;
+            if (entry.tag == TIFF_TAG_STRIP_OFFSETS || entry.tag == TIFF_TAG_TILE_OFFSETS)
+                offsets = &entry;
+            if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS || entry.tag == TIFF_TAG_TILE_BYTE_COUNTS)
+                counts = &entry;
+            if (offsets && counts) break;
+        }
+        if (!offsets || !counts || offsets->ifdOffset != counts->ifdOffset ||
+            offsets->count != counts->count || !offsets->count) return false;
+        auto value = [&](const TiffEntry& entry, uint32_t i, uint32_t& out) {
+            const size_t width = entry.type == TIFF_TYPE_SHORT ? 2 :
+                                 entry.type == TIFF_TYPE_LONG ? 4 : 0;
+            const size_t pos = entry.valueOffset + static_cast<size_t>(i) * width;
+            if (!width || pos + width > data.size()) return false;
+            out = width == 2 ? read16(data.data() + pos, little)
+                             : read32(data.data() + pos, little);
+            return true;
+        };
+        for (uint32_t i = 0; i < offsets->count; ++i) {
+            uint32_t offset = 0, count = 0;
+            if (!value(*offsets, i, offset) || !value(*counts, i, count) ||
+                static_cast<size_t>(offset) + count > data.size()) return false;
+            result.push_back({offset, count});
+        }
+        return true;
+}
+
+uint64_t hashImagePayload(const std::vector<uint8_t>& data,
+                          const std::vector<ImagePayloadSegment>& parts) {
+    uint64_t value = 1469598103934665603ULL;
+    for (const auto& part : parts)
+        for (size_t i = 0; i < part.size; ++i) {
+            value ^= data[part.offset + i];
+            value *= 1099511628211ULL;
+        }
+    return value;
+}
+}
+
+bool DNGDecoder::imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash) {
+    std::vector<ImagePayloadSegment> segments;
+    if (!imagePayloadSegments(data, segments)) return false;
+    hash = hashImagePayload(data, segments);
+    return true;
+}
+
+bool DNGDecoder::imagePayloadsEqual(const std::vector<uint8_t>& left,
+                                    const std::vector<uint8_t>& right) {
+    std::vector<ImagePayloadSegment> a, b;
+    if (!imagePayloadSegments(left, a) || !imagePayloadSegments(right, b)) return false;
+    size_t aTotal = 0, bTotal = 0;
+    for (const auto& segment : a) aTotal += segment.size;
+    for (const auto& segment : b) bTotal += segment.size;
+    if (aTotal != bTotal) return false;
+
+    // FNV-1a is used as a cheap rejection pass; equality is always confirmed
+    // byte-for-byte, so hash collisions cannot create false duplicates.
+    if (hashImagePayload(left, a) != hashImagePayload(right, b)) return false;
+    size_t ai = 0, bi = 0, ap = 0, bp = 0, remaining = aTotal;
+    while (remaining) {
+        const size_t count = std::min(a[ai].size - ap, b[bi].size - bp);
+        if (std::memcmp(left.data() + a[ai].offset + ap,
+                        right.data() + b[bi].offset + bp, count) != 0) return false;
+        remaining -= count; ap += count; bp += count;
+        if (ap == a[ai].size) { ++ai; ap = 0; }
+        if (bp == b[bi].size) { ++bi; bp = 0; }
+    }
+    return true;
 }
 
 void DNGDecoder::extractTimestampsFromFilenames() {
@@ -2070,15 +2174,29 @@ bool DNGDecoder::replaceUncompressedRGB16(std::vector<uint8_t>& data,
     return replaceTiffStrip(data, offset, bytes, encoded, little);
 }
 
-bool DNGDecoder::markSyntheticFrame(std::vector<uint8_t>& data) {
+namespace {
+bool setXmpBoolean(std::vector<uint8_t>& data, const char* property, bool enabled) {
     bool little = true;
     for (const auto& entry : findTiffEntries(data, little)) {
         if (entry.tag != TIFF_TAG_XMP || entry.type != TIFF_TYPE_BYTE || !entry.count) continue;
         std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
-        if (xmp.find("rpt:SyntheticFrame=") != std::string::npos) return true;
-        const auto position = xmp.find("/>");
-        if (position == std::string::npos) return false;
-        xmp.insert(position, " rpt:SyntheticFrame='true'");
+        const std::string prefix = std::string(property) + "=";
+        const auto propertyPosition = xmp.find(prefix);
+        if (propertyPosition != std::string::npos) {
+            const size_t quotePosition = propertyPosition + prefix.size();
+            if (quotePosition >= xmp.size() ||
+                (xmp[quotePosition] != '\'' && xmp[quotePosition] != '\"')) return false;
+            const char quote = xmp[quotePosition];
+            const auto valueEnd = xmp.find(quote, quotePosition + 1);
+            if (valueEnd == std::string::npos) return false;
+            xmp.replace(quotePosition + 1, valueEnd - quotePosition - 1,
+                        enabled ? "true" : "false");
+        } else {
+            const auto descriptionEnd = xmp.find("/>");
+            if (descriptionEnd == std::string::npos) return false;
+            xmp.insert(descriptionEnd, std::string(" ") + property +
+                (enabled ? "='true'" : "='false'"));
+        }
         while (data.size() % 4) data.push_back(0);
         const uint32_t offset = static_cast<uint32_t>(data.size());
         data.insert(data.end(), xmp.begin(), xmp.end());
@@ -2087,6 +2205,41 @@ bool DNGDecoder::markSyntheticFrame(std::vector<uint8_t>& data) {
         return true;
     }
     return false;
+}
+}
+
+bool DNGDecoder::markSyntheticFrame(std::vector<uint8_t>& data) {
+    return setXmpBoolean(data, "rpt:DuplicateFrame", false) &&
+           setXmpBoolean(data, "rpt:SyntheticFrame", true);
+}
+
+bool DNGDecoder::markDuplicateFrame(std::vector<uint8_t>& data) {
+    return setXmpBoolean(data, "rpt:DuplicateFrame", true);
+}
+
+namespace {
+bool hasXmpBoolean(const std::vector<uint8_t>& data, const char* property) {
+    bool little = true;
+    for (const auto& entry : findTiffEntries(data, little)) {
+        if (entry.tag != TIFF_TAG_XMP || entry.type != TIFF_TYPE_BYTE || !entry.count) continue;
+        std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
+        const std::string prefix = std::string(property) + "=";
+        const auto position = xmp.find(prefix);
+        if (position == std::string::npos) continue;
+        const auto value = position + prefix.size();
+        return xmp.compare(value, 6, "'true'") == 0 ||
+               xmp.compare(value, 6, "\"true\"") == 0;
+    }
+    return false;
+}
+}
+
+bool DNGDecoder::isSyntheticFrame(const std::vector<uint8_t>& data) {
+    return hasXmpBoolean(data, "rpt:SyntheticFrame");
+}
+
+bool DNGDecoder::isDuplicateFrame(const std::vector<uint8_t>& data) {
+    return hasXmpBoolean(data, "rpt:DuplicateFrame");
 }
 
 bool DNGDecoder::interpolateFrameMetadata(std::vector<uint8_t>& data,

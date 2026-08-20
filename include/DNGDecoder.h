@@ -21,6 +21,8 @@ struct DNGFrameInfo {
     bool hasGainMap;
     bool hasExactPresentationTimestamp = false;
     bool hasTimeCodeTimestamp = false;
+    bool duplicateFrame = false;
+    bool syntheticFrame = false;
 };
 
 struct DNGSequenceInfo {
@@ -103,6 +105,9 @@ public:
                                          const std::vector<uint8_t>& rgbData,
                                          uint32_t width, uint32_t height);
     static bool markSyntheticFrame(std::vector<uint8_t>& dngData);
+    static bool markDuplicateFrame(std::vector<uint8_t>& dngData);
+    static bool isSyntheticFrame(const std::vector<uint8_t>& dngData);
+    static bool isDuplicateFrame(const std::vector<uint8_t>& dngData);
     static bool interpolateFrameMetadata(std::vector<uint8_t>& dngData,
                                          const std::vector<uint8_t>& leftDng,
                                          const std::vector<uint8_t>& rightDng,
@@ -129,6 +134,9 @@ public:
                                  bool higherCfaHq = true);
     
     static bool isDNGSequence(const std::string& path);
+    static bool imagePayloadsEqual(const std::vector<uint8_t>& left,
+                                   const std::vector<uint8_t>& right);
+    static bool imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash);
 
 private:
     void analyzeSequence();

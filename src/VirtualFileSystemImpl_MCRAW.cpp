@@ -369,6 +369,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
                 entry.size = mTypicalDngSize;
                 entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");
                 entry.userData = previousTimestamp;
+                entry.duplicateFrame = true;
                 mFiles.emplace_back(entry);
                 ++lastPts;
                 ++duplicatedFrames;

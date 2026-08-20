@@ -222,10 +222,19 @@ void VirtualFileSystemImpl_DirectLog::init() {
     int lastPts = 0;
     mDroppedFrames = 0;
     mDuplicatedFrames = 0;
+    auto restoreFrameFlags = [&](Entry& entry, size_t sourceIndex) {
+        if (!mSidecarMetadata.contains("dynamic") ||
+            !mSidecarMetadata["dynamic"].contains("frames") ||
+            sourceIndex >= mSidecarMetadata["dynamic"]["frames"].size()) return;
+        const auto& metadata = mSidecarMetadata["dynamic"]["frames"][sourceIndex];
+        entry.duplicateFrame = metadata.value("duplicateFrame", false);
+        entry.syntheticFrame = metadata.value("syntheticFrame", false);
+    };
     
     if (applyCFRConversion) {
         // CFR conversion: duplicate/drop frames to match target framerate
         Timestamp previousTimestamp = frames.front().timestamp;
+        size_t previousSourceIndex = 0;
         for (size_t i = 0; i < frames.size(); ++i) {
             int pts = vfs::getFrameNumberFromTimestamp(frames[i].timestamp, frames[0].timestamp, mFps);
             
@@ -243,6 +252,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
                 dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
                 dngEntry.size = mTypicalDngSize;
                 dngEntry.userData = previousTimestamp;
+                restoreFrameFlags(dngEntry, previousSourceIndex);
+                dngEntry.duplicateFrame = true;
                 mFiles.push_back(dngEntry);
                 ++lastPts;
                 ++mDuplicatedFrames;
@@ -253,9 +264,11 @@ void VirtualFileSystemImpl_DirectLog::init() {
             dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
             dngEntry.size = mTypicalDngSize;
             dngEntry.userData = frames[i].timestamp;
+            restoreFrameFlags(dngEntry, i);
             mFiles.push_back(dngEntry);
             ++lastPts;
             previousTimestamp = frames[i].timestamp;
+            previousSourceIndex = i;
         }
     } else {
         // No CFR conversion: use frames as-is
@@ -266,6 +279,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
             dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
             dngEntry.size = mTypicalDngSize;
             dngEntry.userData = frames[i].timestamp;
+            restoreFrameFlags(dngEntry, i);
             mFiles.push_back(dngEntry);
             ++lastPts;
         }
@@ -1169,7 +1183,6 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
             : timestamp - frames.front().timestamp;
         if (!DNGDecoder::setTimingMetadata(dngData, mFps, outputTimestamp))
             throw std::runtime_error("Could not write DirectLog DNG timing metadata");
-
         auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
         if (!jpegCompression)
             mCache.put(entry, output);

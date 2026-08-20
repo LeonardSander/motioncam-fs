@@ -444,7 +444,16 @@ int main() {
         const int wanted = replacement[i] | replacement[i + 1] << 8;
         assert(std::abs(actual - wanted) <= 33);
     }
+    assert(motioncam::DNGDecoder::markDuplicateFrame(syntheticRgb));
+    assert(motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(!motioncam::DNGDecoder::isSyntheticFrame(syntheticRgb));
     assert(motioncam::DNGDecoder::markSyntheticFrame(syntheticRgb));
+    assert(!motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(motioncam::DNGDecoder::isSyntheticFrame(syntheticRgb));
+    assert(motioncam::DNGDecoder::markDuplicateFrame(syntheticRgb));
+    assert(motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(motioncam::DNGDecoder::markSyntheticFrame(syntheticRgb));
+    assert(!motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
     const std::string syntheticMarker = "rpt:SyntheticFrame='true'";
     assert(std::search(syntheticRgb.begin(), syntheticRgb.end(),
         syntheticMarker.begin(), syntheticMarker.end()) != syntheticRgb.end());

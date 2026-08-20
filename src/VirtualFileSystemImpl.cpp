@@ -59,16 +59,22 @@ void finalize(
     struct Gap { size_t left, right; std::vector<size_t> frames; };
     std::vector<Gap> gaps;
     if (options.interpolateDuplicatedFrames) {
+        auto duplicated = [&](size_t current, size_t previous) {
+            if (entries[current].duplicateFrame) return true;
+            if (std::get<int64_t>(entries[current].userData) ==
+                std::get<int64_t>(entries[previous].userData)) return true;
+            return options.detectDuplicateDngs &&
+                filesystem.sourceImagePayloadsEqual(entries[current], entries[previous]);
+        };
         for (size_t i = 1; i + 1 < entries.size();) {
             if (entries[i].name == "audio.wav" || entries[i - 1].name == "audio.wav" ||
-                std::get<int64_t>(entries[i].userData) != std::get<int64_t>(entries[i - 1].userData)) {
+                !duplicated(i, i - 1)) {
                 ++i;
                 continue;
             }
             Gap gap{i - 1, i + 1, {}};
             while (gap.right < entries.size() && entries[gap.right].name != "audio.wav" &&
-                   std::get<int64_t>(entries[gap.right].userData) ==
-                       std::get<int64_t>(entries[gap.left].userData))
+                   duplicated(gap.right, gap.right - 1))
                 ++gap.right;
             if (gap.right == entries.size() || entries[gap.right].name == "audio.wav") break;
             for (size_t frame = i; frame < gap.right; ++frame) gap.frames.push_back(frame);
@@ -228,6 +234,12 @@ for line in sys.stdin:
             delayCompression ? false : jpegCompression);
         if (!data) throw std::runtime_error("Failed to render " + entries[index].name);
         std::vector<uint8_t> rendered(data->begin(), data->end());
+        if (isDng(entries[index])) {
+            if (entries[index].duplicateFrame && !DNGDecoder::markDuplicateFrame(rendered))
+                throw std::runtime_error("Could not mark duplicated frame " + entries[index].name);
+            if (entries[index].syntheticFrame && !DNGDecoder::markSyntheticFrame(rendered))
+                throw std::runtime_error("Could not preserve synthetic frame " + entries[index].name);
+        }
         if (writeFiles || !isDng(entries[index]))
             writeBytes(outputPath(entries[index]), rendered);
         if (fileReady && isDng(entries[index]))

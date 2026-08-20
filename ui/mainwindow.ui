@@ -621,6 +621,12 @@
            </item>
           </layout>
          </item>
+         <item>
+          <widget class="QCheckBox" name="detectDuplicateDngsCheckBox">
+           <property name="text"><string>Detect Duplicate DNGs</string></property>
+           <property name="toolTip"><string>During finalization, detect holds from DNG duplicate metadata or identical DNG image payloads. Camera Native inputs use duplicate flags from their JSON sidecar; lossy video pixels are not compared. Only holds remaining after frame-rate conversion are interpolated. Mounted sequences are unaffected.</string></property>
+          </widget>
+         </item>
         </layout>
        </item>
        <item>

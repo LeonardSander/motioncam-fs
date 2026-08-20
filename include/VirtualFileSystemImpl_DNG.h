@@ -6,6 +6,7 @@
 #include <memory>
 #include <array>
 #include <map>
+#include <unordered_map>
 
 namespace BS {
 class thread_pool;
@@ -42,6 +43,7 @@ public:
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
+    bool sourceImagePayloadsEqual(const Entry& left, const Entry& right) override;
     std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
 
@@ -88,6 +90,7 @@ private:
     std::map<Timestamp, double> mExposureTimes;
     std::map<Timestamp, double> mIsoValues;
     mutable std::mutex mMutex;
+    std::unordered_map<size_t, uint64_t> mPayloadHashes;
 };
 
 } // namespace motioncam

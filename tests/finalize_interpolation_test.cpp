@@ -114,6 +114,7 @@ public:
             entry.size = i == duplicatedFrames + 1 ? mRight.size() : mLeft.size();
             entry.userData = static_cast<int64_t>(i == duplicatedFrames + 1
                 ? duplicatedFrames + 1 : 0);
+            entry.duplicateFrame = i > 0 && i <= duplicatedFrames;
             mEntries.push_back(entry);
         }
     }
@@ -140,6 +141,20 @@ private:
 
 int main() {
     namespace fs = std::filesystem;
+    const auto uncompressedA = makeDng(
+        1234, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
+    const auto uncompressedB = makeDng(
+        1234, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 1000000000);
+    const auto uncompressedDifferent = makeDng(
+        1235, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 1000000000);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(uncompressedA, uncompressedB));
+    assert(!motioncam::DNGDecoder::imagePayloadsEqual(
+        uncompressedA, uncompressedDifferent));
+    auto compressedA = uncompressedA, compressedB = uncompressedB;
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedA));
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedB));
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(compressedA, compressedB));
+
     const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
     fs::remove_all(root);
     fs::create_directories(root / "rife");
@@ -189,6 +204,8 @@ int main() {
     for (const auto neutral : metadata.asShotNeutral) assert(std::abs(neutral - 2.0f) < 1e-4f);
     const std::string marker = "rpt:SyntheticFrame='true'";
     assert(std::search(dng.begin(), dng.end(), marker.begin(), marker.end()) != dng.end());
+    assert(motioncam::DNGDecoder::isSyntheticFrame(dng));
+    assert(!motioncam::DNGDecoder::isDuplicateFrame(dng));
 
     FakeFileSystem cfaFilesystem(makeLogCfaDng(0, 0), makeLogCfaDng(1023, 2));
     motioncam::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});

@@ -353,6 +353,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->bakeIsoCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->rifeInterpolationCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) { saveSettings(); });
+    connect(ui->detectDuplicateDngsCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) { saveSettings(); });
     connect(ui->rifeRemoveButton, &QPushButton::clicked, this, [this] {
         const QString runtimeRoot = rifeRuntimeRoot();
         const QString archivePath = QDir(QStandardPaths::writableLocation(
@@ -466,6 +467,7 @@ void MainWindow::saveSettings() {
     settings.setValue("bakeIso", ui->bakeIsoCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("rifeInterpolation", ui->rifeInterpolationCheckBox->isChecked());
+    settings.setValue("detectDuplicateDngs", ui->detectDuplicateDngsCheckBox->isChecked());
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
@@ -530,6 +532,7 @@ void MainWindow::restoreSettings() {
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
         (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
     ui->rifeInterpolationCheckBox->setChecked(settings.value("rifeInterpolation", false).toBool());
+    ui->detectDuplicateDngsCheckBox->setChecked(settings.value("detectDuplicateDngs", false).toBool());
 
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
@@ -1340,8 +1343,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
         return;
     }
 
-    const bool interpolateFrames =
-        ui->rifeInterpolationCheckBox->isChecked() && info->duplicatedFrames > 0;
+    const bool detectDuplicateDngs = ui->detectDuplicateDngsCheckBox->isChecked();
+    const bool interpolateFrames = ui->rifeInterpolationCheckBox->isChecked() &&
+        (info->duplicatedFrames > 0 || detectDuplicateDngs);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) {
         mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
@@ -1358,6 +1362,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
     try {
         motioncam::FinalizeOptions finalizeOptions;
         finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
+        finalizeOptions.detectDuplicateDngs = detectDuplicateDngs;
         finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
         QDir stageDir(staging.path());
 
@@ -1392,6 +1397,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
             DNGFrameMetadata colorMetadata;
             std::vector<GainMap> gainMaps;
             std::vector<GainMap> deferredGainMaps;
+            bool duplicateFrame = false;
+            bool syntheticFrame = false;
         };
         std::mutex queueMutex;
         std::condition_variable queueChanged;
@@ -1427,6 +1434,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
                             throw std::runtime_error("Could not extract RGB16 from rendered frame");
                         DNGDecoder::getGainMaps(dng, 2, frame.gainMaps);
                         DNGDecoder::getGainMaps(dng, 3, frame.deferredGainMaps);
+                        frame.duplicateFrame = DNGDecoder::isDuplicateFrame(dng);
+                        frame.syntheticFrame = DNGDecoder::isSyntheticFrame(dng);
                         if (stagingSettings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
                             frame.gainMaps.clear();
                             if (!(stagingSettings.options & motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR))
@@ -1565,6 +1574,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
             item["shutterSpeedSeconds"] = metadata.exposureTime;
             item["baselineExposure"] = metadata.baselineExposure;
             item["asShotNeutral"] = metadata.asShotNeutral;
+            item["duplicateFrame"] = frame.duplicateFrame;
+            item["syntheticFrame"] = frame.syntheticFrame;
 
             const uint32_t channels = std::max<uint32_t>(1, metadata.blackLevelCount);
             item["blackLevel"] = nlohmann::json::array();
@@ -1836,8 +1847,9 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     
     spdlog::info("Using temp directory: {}", tempPath.toStdString());
     
-    const bool interpolateFrames =
-        ui->rifeInterpolationCheckBox->isChecked() && fileInfo->duplicatedFrames > 0;
+    const bool detectDuplicateDngs = ui->detectDuplicateDngsCheckBox->isChecked();
+    const bool interpolateFrames = ui->rifeInterpolationCheckBox->isChecked() &&
+        (fileInfo->duplicatedFrames > 0 || detectDuplicateDngs);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) return;
 
@@ -1854,6 +1866,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     bool enableCompression = settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION;
     motioncam::FinalizeOptions finalizeOptions;
     finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
+    finalizeOptions.detectDuplicateDngs = detectDuplicateDngs;
     finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
     finalizeOptions.jxlDistance = settings.jxlDistance;
 

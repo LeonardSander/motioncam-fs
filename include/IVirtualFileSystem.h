@@ -39,6 +39,11 @@ public:
     virtual void updateOptions(const RenderSettings& settings) = 0;
     virtual FileInfo getFileInfo() const = 0;
 
+    // Finalizers may ask whether two output entries refer to source frames with
+    // identical encoded image data. Non-DNG implementations have no such
+    // source payloads.
+    virtual bool sourceImagePayloadsEqual(const Entry&, const Entry&) { return false; }
+
 protected:
     IVirtualFileSystem() = default;
 };
