@@ -178,11 +178,30 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
                 spdlog::warn("Ignoring invalid cfaSize {}; expected an even integer >= 2", size);
             }
         }
-        
+
+        if (j.contains("needGainMapOrderFixed")) {
+            if (!j["needGainMapOrderFixed"].is_boolean())
+                throw std::invalid_argument("needGainMapOrderFixed must be a boolean");
+            data.needGainMapOrderFixed = j["needGainMapOrderFixed"].get<bool>();
+            data.hasNeedGainMapOrderFixed = true;
+        }
+
+        if (j.contains("fullSensorResolution")) {
+            data.fullSensorResolution = parseArray<int, 2>(j["fullSensorResolution"]);
+            if (data.fullSensorResolution[0] > 0 && data.fullSensorResolution[1] > 0) {
+                data.hasFullSensorResolution = true;
+            } else {
+                throw std::invalid_argument(
+                    "fullSensorResolution must contain positive width and height");
+            }
+        }
+
         // Return data only if at least one field was parsed
-        if (data.hasColorMatrix1 || data.hasColorMatrix2 || 
-            data.hasForwardMatrix1 || data.hasForwardMatrix2 || 
-            data.hasAsShotNeutral || data.hasDataLevels || data.hasCfaSize || !data.cfaPhase.empty()) {
+        if (data.hasColorMatrix1 || data.hasColorMatrix2 ||
+            data.hasForwardMatrix1 || data.hasForwardMatrix2 ||
+            data.hasAsShotNeutral || data.hasDataLevels || data.hasCfaSize ||
+            data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution ||
+            !data.cfaPhase.empty()) {
             return data;
         }
         
@@ -208,9 +227,13 @@ std::string CalibrationData::createExampleJson() {
   "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
   "_cfaPhase": "bggr",
   "_comment5": "DirectLog input levels: Auto uses video metadata; Full or Limited overrides it per clip",
-  "dataLevels": "Auto",
-  "_comment6": "Per-clip CFA repeat size: 2 for Bayer, 4/6/8 for higher CFA sensors",
-  "cfaSize": 2
+  "_dataLevels": "Full",
+  "_comment6": "CFA repeat size: 2 for Bayer, 4/6/8 for quad bayer and higher CFA sensors",
+  "_cfaSize": 2,
+  "_comment7": "Fix gainmap cfa bayer phase mismatches",
+  "_needGainMapOrderFixed": true,
+  "_comment8": "Specify uncropped resolution to prevent gainmaps to be scaled to fit.",
+  "_fullSensorResolution": [4096, 3072]
 })";
 }
 

@@ -220,28 +220,28 @@ namespace {
 
 motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     motioncam::RenderSettings settings;
-    
+
     // Build options bitfield
     settings.options = motioncam::RENDER_OPT_NONE;
-    
+
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_DRAFT;
-    
+
     if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    
+
     if(ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
 
     if(ui->optimizeGainMapsCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
-    
+
     if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
-    
+
     if(ui->debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
-    
+
     if(ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
 
@@ -253,19 +253,19 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
 
     if(ui->bakeIsoCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_BAKE_ISO;
-    
+
     if(ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
-    
+
     if(ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_CROPPING;
-    
+
     if(ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
-    
+
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
-    
+
     if(ui->remosaicCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
 
@@ -274,7 +274,7 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
 
     if(ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_JPEG_COMPRESSION;
-    
+
     // Copy all other settings from member variable
     settings.draftScale =
         ui->draftModeCheckBox->isChecked() ? mRenderSettings.draftScale : 1;
@@ -415,7 +415,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
-    
+
     // Load global calibration.json if it exists
     QString appDir = QCoreApplication::applicationDirPath();
     QString globalCalibPath = QDir(appDir).absoluteFilePath("calibration.json");
@@ -437,7 +437,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow() {
     saveSettings();
-    
+
     // Wait for any ongoing processing
     if (mProcessingWatcher && mProcessingWatcher->isRunning()) {
         mProcessingWatcher->waitForFinished();
@@ -564,7 +564,7 @@ void MainWindow::restoreSettings() {
     ui->higherCfaHqCheckBox->setChecked(
         !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
 
-    mCacheRootFolder = settings.value("cachePath").toString();    
+    mCacheRootFolder = settings.value("cachePath").toString();
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
@@ -581,17 +581,17 @@ void MainWindow::restoreSettings() {
         ui->draftQuality->setCurrentIndex(1);
     else if(mRenderSettings.draftScale == 8)
         ui->draftQuality->setCurrentIndex(2);
-    
+
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
     ui->exposureCompensationLineEdit->setText(QString::fromStdString(mRenderSettings.exposureCompensation));
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(
         quadBayerModeToString(mRenderSettings.quadBayerOption)));
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
-    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels));  
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));  
-  
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels));
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
+
     // Restore mounted files
     auto size = settings.beginReadArray("mountedFiles");
     for (int i = 0; i < size; ++i) {
@@ -620,7 +620,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 
                     // Accept MCRAW files, MOV/MP4 files with NATIVE suffix, or DNG files/directories
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
-                        (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
+                        (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mkv", Qt::CaseInsensitive))) ||
@@ -643,7 +643,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                 for (const auto& url : urls) {
                     auto filePath = url.toLocalFile();
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
-                        (filePath.contains("NATIVE", Qt::CaseInsensitive) && 
+                        (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mkv", Qt::CaseInsensitive))) ||
@@ -716,7 +716,7 @@ void MainWindow::mountFile(const QString& filePath) {
         int minutes = static_cast<int>(info.runtimeSeconds) / 60;
         int seconds = static_cast<int>(info.runtimeSeconds) % 60;
         QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
-        
+
         // Extract RAW bits and log indicator from levelsInfo for styling
         QString levelsStr = QString::fromStdString(info.levelsInfo);
         QString rawPart;
@@ -724,7 +724,7 @@ void MainWindow::mountFile(const QString& filePath) {
         if (rawIdx != -1) {
             rawPart = levelsStr.mid(rawIdx);
         }
-        
+
         // First row: Runtime, Resolution, Data Type, Levels
         auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
                                  "<span style='color: #888888;'> | Resolution: %2x%3 | Data Type: %4 | Levels: %5</span>")
@@ -733,7 +733,7 @@ void MainWindow::mountFile(const QString& filePath) {
                                 .arg(info.height)
                                 .arg(QString::fromStdString(info.dataType))
                                 .arg(levelsStr.left(rawIdx));
-        
+
         // Add styled RAW part if it exists
         if (!rawPart.isEmpty()) {
             infoText1 += QString("<span style='color: white;'>%1</span>").arg(rawPart);
@@ -744,7 +744,7 @@ void MainWindow::mountFile(const QString& filePath) {
         infoLabel1->setProperty("infoLabel1", true);
         infoLabel1->setProperty("mountId", QVariant(mountId));
         fileLayout->addWidget(infoLabel1);
-        
+
         // Second row: FPS info and frame counts
         auto infoText2 = QString("<span style='color: #888888;'>Median / Average / Target FPS: %1 / %2 -> </span>"
                                  "<span style='color: white;'>%3</span>"
@@ -755,7 +755,7 @@ void MainWindow::mountFile(const QString& filePath) {
                                 .arg(info.totalFrames)
                                 .arg(info.droppedFrames)
                                 .arg(info.duplicatedFrames);
-        
+
         auto* infoLabel2 = new QLabel(infoText2, fileWidget);
         infoLabel2->setStyleSheet("font-size: 9pt;");
         infoLabel2->setProperty("infoLabel2", true);
@@ -774,7 +774,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create horizontal layout for buttons
     auto* buttonLayout = new QHBoxLayout();
     buttonLayout->setSpacing(8);
-    
+
     // Define consistent button size
     const int buttonWidth = 100;
     const int buttonHeight = 30;
@@ -796,7 +796,7 @@ void MainWindow::mountFile(const QString& filePath) {
     removeButton->setFixedSize(buttonWidth, buttonHeight);
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
     buttonLayout->addWidget(removeButton);
-    
+
 #ifdef _WIN32
     // ProjFS leaves hydrated files on disk after unmounting, so Windows needs
     // an explicit way to remove them.
@@ -805,7 +805,7 @@ void MainWindow::mountFile(const QString& filePath) {
     discardButton->setToolTip("Unmount and delete all written DNG files");
     buttonLayout->addWidget(discardButton);
 #endif
-    
+
     // Create and add the finalize button
     auto* finalizeButton = new QPushButton("Finalize", fileWidget);
     finalizeButton->setFixedSize(buttonWidth, buttonHeight);
@@ -815,25 +815,25 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Add stretch to push buttons to the left
     buttonLayout->addStretch();
-    
+
     // Create calibration button (right-aligned)
     auto* calibButton = new QPushButton("Create JSON", fileWidget);
     calibButton->setFixedSize(buttonWidth, buttonHeight);
     calibButton->setProperty("calibButton", true);
     buttonLayout->addWidget(calibButton);
-    
+
     // Create a container widget for status label and refresh button overlay
     auto* statusContainer = new QWidget(fileWidget);
     statusContainer->setProperty("statusContainer", true);
     statusContainer->setFixedHeight(buttonHeight);
-    
+
     // Create calibration status label (initially hidden)
     auto* calibStatusLabel = new QLabel("", statusContainer);
     calibStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold;");
     calibStatusLabel->setProperty("calibStatusLabel", true);
     calibStatusLabel->setVisible(false);
     calibStatusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    
+
     // Create invisible refresh button on top of the status label
     auto* refreshButton = new QPushButton("", statusContainer);
     refreshButton->setStyleSheet("background: transparent; border: none;");
@@ -841,9 +841,9 @@ void MainWindow::mountFile(const QString& filePath) {
     refreshButton->setProperty("refreshButton", true);
     refreshButton->setVisible(false);
     refreshButton->setToolTip("Refresh Calibration");
-    
+
     buttonLayout->addWidget(statusContainer);
-    
+
     // Connect refresh button to update calibration
     connect(refreshButton, &QPushButton::clicked, this, [this] {
         updateFpsLabels();
@@ -881,24 +881,24 @@ void MainWindow::mountFile(const QString& filePath) {
     connect(removeButton, &QPushButton::clicked, this, [this, fileWidget] {
         removeFile(fileWidget);
     });
-    
+
 #ifdef _WIN32
     connect(discardButton, &QPushButton::clicked, this, [this, fileWidget] {
         discardFile(fileWidget);
     });
 #endif
-    
+
     connect(finalizeButton, &QPushButton::clicked, this, [this, fileWidget] {
         finalizeFile(fileWidget);
     });
-    
+
     connect(calibButton, &QPushButton::clicked, this, [this, fileWidget] {
         createCalibrationJson(fileWidget);
     });
 
     mMountedFiles.append(
         motioncam::MountedFile(mountId, filePath));
-    
+
     // Update calibration button state
     updateCalibrationButtonStates();
 }
@@ -999,30 +999,30 @@ void MainWindow::discardFile(QWidget* fileWidget) {
     if (answer != QMessageBox::Discard) {
         return;
     }
-    
+
     // First unmount
     bool ok = false;
     auto mountId = fileWidget->property("mountId").toInt(&ok);
     if(ok) {
         mFuseFilesystem->unmount(mountId);
     }
-    
+
     // Give Windows a moment to release file handles after unmounting
     QThread::msleep(100);
-    
+
     // Delete the entire mount directory recursively
     QDir mountDir(mountPath);
     if (mountDir.exists()) {
         // Try to remove directory (includes all files)
         bool removed = mountDir.removeRecursively();
-        
+
         if (!removed) {
             // If first attempt failed, wait a bit longer and try again
             // (files might still be in use)
             QThread::msleep(500);
             removed = mountDir.removeRecursively();
         }
-        
+
         if (removed) {
             spdlog::info("Discarded clip: removed directory and all files: {}", mountPath.toStdString());
         } else {
@@ -1030,29 +1030,29 @@ void MainWindow::discardFile(QWidget* fileWidget) {
             // Try to delete individual files
             QStringList allFiles = mountDir.entryList(QDir::Files | QDir::NoDotAndDotDot);
             int deletedCount = 0;
-            
+
             for (const QString& fileName : allFiles) {
                 QString filePath = mountDir.absoluteFilePath(fileName);
                 if (QFile::remove(filePath)) {
                     deletedCount++;
                 }
             }
-            
+
             // Try one more time to remove the directory
             if (mountDir.rmdir(".")) {
-                spdlog::info("Discarded clip: deleted {} files and removed directory: {}", 
+                spdlog::info("Discarded clip: deleted {} files and removed directory: {}",
                             deletedCount, mountPath.toStdString());
             } else {
-                spdlog::warn("Discarded clip: deleted {} files but directory remains (files may be in use): {}", 
+                spdlog::warn("Discarded clip: deleted {} files but directory remains (files may be in use): {}",
                             deletedCount, mountPath.toStdString());
             }
         }
     }
-    
+
     // Remove from UI (same as removeFile)
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
-    
+
     int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
     if (fileWidgetIndex > 0) {
         auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
@@ -1065,10 +1065,10 @@ void MainWindow::discardFile(QWidget* fileWidget) {
             }
         }
     }
-    
+
     scrollLayout->removeWidget(fileWidget);
     fileWidget->deleteLater();
-    
+
     // Remove from mounted files list
     if(ok) {
         auto it = std::find_if(
@@ -1077,7 +1077,7 @@ void MainWindow::discardFile(QWidget* fileWidget) {
         if(it != mMountedFiles.end())
             mMountedFiles.erase(it);
     }
-    
+
     if (mMountedFiles.empty()) {
         ui->dragAndDropLabel->show();
     }
@@ -1805,13 +1805,13 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     }
     auto mountPath = fileWidget->property("mountPath").toString();
     auto srcFile = fileWidget->property("filePath").toString();
-    
+
     if (mountPath.isEmpty() || srcFile.isEmpty()) {
-        spdlog::error("Finalize failed: mount information not found (mountPath: {}, srcFile: {})", 
+        spdlog::error("Finalize failed: mount information not found (mountPath: {}, srcFile: {})",
                      mountPath.toStdString(), srcFile.toStdString());
         return;
     }
-    
+
     // Get mount ID and file info
     bool ok = false;
     auto mountId = fileWidget->property("mountId").toInt(&ok);
@@ -1819,34 +1819,34 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         spdlog::error("Finalize failed: invalid mount ID");
         return;
     }
-    
+
     auto fileInfo = mFuseFilesystem->getFileInfo(mountId);
     if (!fileInfo.has_value()) {
         spdlog::error("Finalize failed: could not get file information");
         return;
     }
-    
+
     int totalFrames = fileInfo->totalFrames - fileInfo->droppedFrames + fileInfo->duplicatedFrames;
     if (totalFrames <= 0) {
         QMessageBox::warning(this, "Finalize failed", "The clip contains no renderable frames.");
         return;
     }
-    
+
     // Use a temporary directory to avoid ProjectedFS locks
     // We'll write to temp, then move files to the final location
     QString tempPath = mountPath + ".finalizing-" +
         QUuid::createUuid().toString(QUuid::WithoutBraces);
     QDir tempDir(tempPath);
-    
+
     // Create temp directory
     if (!tempDir.mkpath(".")) {
         spdlog::error("Failed to create temp directory: {}", tempPath.toStdString());
         QMessageBox::critical(this, "Finalize failed", "Could not create the temporary render directory.");
         return;
     }
-    
+
     spdlog::info("Using temp directory: {}", tempPath.toStdString());
-    
+
     const bool detectDuplicateDngs = ui->detectDuplicateDngsCheckBox->isChecked();
     const bool interpolateFrames = ui->rifeInterpolationCheckBox->isChecked() &&
         (fileInfo->duplicatedFrames > 0 || detectDuplicateDngs);
@@ -1860,7 +1860,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     progress.setAutoClose(false);
     progress.setAutoReset(false);
     progress.setValue(0);
-    
+
     // Get current render config
     auto settings = buildRenderSettings();
     bool enableCompression = settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION;
@@ -1873,8 +1873,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     spdlog::info("Starting finalize for {} ({} frames from fileInfo, compression: {})",
                  srcFile.toStdString(), totalFrames, enableCompression ? "enabled" : "disabled");
     spdlog::info("Compression checkbox state: {}", enableCompression);
-    
-    
+
+
     // Render all frames directly to disk (bypassing ProjectedFS)
     // This allows compression to work correctly with variable file sizes
     bool mountReleased = false;
@@ -1899,11 +1899,11 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 
         if (!progress.wasCanceled()) {
             spdlog::info("Rendered {} frames to temp directory", totalFrames);
-            
+
             // Now move files from temp to final location
             progress.setLabelText("Moving files to final location...");
             QApplication::processEvents();
-            
+
             // Keep the active mount intact until rendering has fully succeeded.
             mFuseFilesystem->unmount(mountId);
             mountReleased = true;
@@ -1928,7 +1928,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             tempDir.removeRecursively();
             return;
         }
-        
+
     } catch (const std::exception& e) {
         spdlog::error("Finalize failed: {}", e.what());
         if (!mountReleased) {
@@ -1949,11 +1949,11 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             message);
         return;
     }
-    
+
     // Remove from UI
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
-    
+
     int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
     if (fileWidgetIndex > 0) {
         auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
@@ -1966,17 +1966,17 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             }
         }
     }
-    
+
     scrollLayout->removeWidget(fileWidget);
     fileWidget->deleteLater();
-    
+
     // Remove from mounted files list
     auto it = std::find_if(
         mMountedFiles.begin(), mMountedFiles.end(),
         [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
     if(it != mMountedFiles.end())
         mMountedFiles.erase(it);
-    
+
     if (mMountedFiles.empty()) {
         ui->dragAndDropLabel->show();
     }
@@ -2017,7 +2017,7 @@ void MainWindow::updateUi() {
             ui->camModelOverrideComboBox->setCurrentText("Panasonic");
     } else {
         ui->camModelOverrideComboBox->setCurrentText("");
-        ui->camModelOverrideComboBox->setEnabled(false);             
+        ui->camModelOverrideComboBox->setEnabled(false);
     }
 
     // Bit depth reduction combobox only enabled when checkbox is checked
@@ -2028,7 +2028,7 @@ void MainWindow::updateUi() {
     } else {
         ui->logTransformComboBox->setCurrentText("");
         ui->logTransformComboBox->setEnabled(false);
-    }   
+    }
 
     // Pixel normalization is bake-only; reduce-to-color can also transform a
     // deferred OpcodeList2 gain map.
@@ -2038,7 +2038,7 @@ void MainWindow::updateUi() {
             ui->debugVignetteCheckBox->setEnabled(false);
             ui->debugVignetteCheckBox->setChecked(false);
         } else {
-            ui->debugVignetteCheckBox->setEnabled(true);            
+            ui->debugVignetteCheckBox->setEnabled(true);
         }
     } else {
         ui->scaleRawCheckBox->setEnabled(false);
@@ -2056,7 +2056,7 @@ void MainWindow::updateUi() {
         ui->cacheFolderLabel->setText(mCacheRootFolder);
         ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
     }
-    
+
     // Update calibration button states
     updateCalibrationButtonStates();
 }
@@ -2070,30 +2070,30 @@ void MainWindow::updateFpsLabels() {
 
     // Find all info labels in the scroll area
     auto allLabels = scrollContent->findChildren<QLabel*>();
-    
+
     for (auto* label : allLabels) {
         bool ok = false;
         auto mountId = label->property("mountId").toInt(&ok);
-        
+
         if (!ok || mountId < 0) {
             continue;
         }
-        
+
         // Get the updated info
         auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
         if (!fileInfoOpt.has_value()) {
             continue;
         }
-        
+
         auto info = fileInfoOpt.value();
-        
+
         // Update first info label (runtime, resolution, data type, levels)
         if (label->property("infoLabel1").toBool()) {
             // Format runtime as MM:SS
             int minutes = static_cast<int>(info.runtimeSeconds) / 60;
             int seconds = static_cast<int>(info.runtimeSeconds) % 60;
             QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
-            
+
             // Extract RAW bits and log indicator from levelsInfo for styling
             QString levelsStr = QString::fromStdString(info.levelsInfo);
             QString rawPart;
@@ -2101,7 +2101,7 @@ void MainWindow::updateFpsLabels() {
             if (rawIdx != -1) {
                 rawPart = levelsStr.mid(rawIdx);
             }
-            
+
             auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
                                      "<span style='color: #888888;'> | Resolution: %2x%3 | Data Type: %4 | Levels: %5</span>")
                                     .arg(runtimeStr)
@@ -2109,11 +2109,11 @@ void MainWindow::updateFpsLabels() {
                                     .arg(info.height)
                                     .arg(QString::fromStdString(info.dataType))
                                     .arg(levelsStr.left(rawIdx));
-            
+
             if (!rawPart.isEmpty()) {
                 infoText1 += QString("<span style='color: white;'>%1</span>").arg(rawPart);
             }
-            
+
             label->setText(infoText1);
         }
         // Update second info label (FPS and frame counts)
@@ -2127,7 +2127,7 @@ void MainWindow::updateFpsLabels() {
                                     .arg(info.totalFrames)
                                     .arg(info.droppedFrames)
                                     .arg(info.duplicatedFrames);
-            
+
             label->setText(infoText2);
         }
     }
@@ -2146,38 +2146,38 @@ void MainWindow::scheduleOptionsUpdate() {
         mOptionsUpdatePending = true;
         return;
     }
-    
+
     // If no files mounted, nothing to do
     if (mMountedFiles.isEmpty()) {
         return;
     }
-    
+
     mProcessingInProgress = true;
     mOptionsUpdatePending = false;
-    
+
     // Capture current settings
     auto settings = buildRenderSettings();
     auto mountedFiles = mMountedFiles;
     auto filesystem = mFuseFilesystem.get();
-    
+
     // Show progress
     onProcessingStarted();
-    
+
     // Run processing in background thread using QtConcurrent
     QFuture<void> future = QtConcurrent::run([this, filesystem, settings, mountedFiles]() {
         int current = 0;
         int total = mountedFiles.size();
-        
+
         for (const auto& file : mountedFiles) {
             filesystem->updateOptions(file.mountId, settings);
             current++;
-            
+
             // Update progress on main thread
             QMetaObject::invokeMethod(this, "onProcessingProgress", Qt::QueuedConnection,
                                      Q_ARG(int, current), Q_ARG(int, total));
         }
     });
-    
+
     mProcessingWatcher->setFuture(future);
 }
 
@@ -2320,12 +2320,12 @@ void MainWindow::onSetDefaultSettings(bool checked) {
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
     ui->exposureCompensationLineEdit->setText(QString::fromStdString(mRenderSettings.exposureCompensation));
-    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));    
-    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels)); 
-    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));    
-    ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));  
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels));
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));
+    ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
-    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));   
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
 
     updateUi();
 }
@@ -2336,27 +2336,27 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         QMessageBox::warning(this, "Error", "File path not found");
         return;
     }
-    
+
     QFileInfo fileInfo(filePath);
     QString jsonPath = fileInfo.isDir()
         ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
         : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
-    
+
     // Check if JSON already exists
     if (QFile::exists(jsonPath)) {
-        auto reply = QMessageBox::question(this, "File Exists", 
+        auto reply = QMessageBox::question(this, "File Exists",
             QString("Calibration file already exists:\n%1\n\nOverwrite?").arg(jsonPath),
             QMessageBox::Yes | QMessageBox::No);
         if (reply != QMessageBox::Yes) {
             return;
         }
     }
-    
+
     // Read the global calibration.json file directly to preserve all fields (including disabled ones)
     std::string jsonContent;
     QString appDir = QCoreApplication::applicationDirPath();
     QString globalCalibPath = QDir(appDir).absoluteFilePath("calibration.json");
-    
+
     if (QFile::exists(globalCalibPath)) {
         // Read the global calibration.json file
         std::ifstream inFile(globalCalibPath.toStdString());
@@ -2373,39 +2373,55 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         // Use example template if global calibration doesn't exist
         jsonContent = motioncam::CalibrationData::createExampleJson();
     }
-    
+
+    // The global calibration may predate fields added to the generated
+    // template. Preserve its values and ordering, but add any missing example
+    // fields so newly-created per-clip sidecars are current.
+    try {
+        auto calibration = nlohmann::ordered_json::parse(jsonContent);
+        const auto example = nlohmann::ordered_json::parse(
+            motioncam::CalibrationData::createExampleJson());
+        for (const auto& [key, value] : example.items())
+            if (!calibration.contains(key)) calibration[key] = value;
+        jsonContent = calibration.dump(2);
+    } catch (const std::exception& e) {
+        spdlog::warn("Could not merge new calibration template fields: {}", e.what());
+    }
+
     // Write JSON file
     std::ofstream outFile(jsonPath.toStdString());
     if (!outFile.is_open()) {
         QMessageBox::critical(this, "Error", QString("Failed to create calibration file:\n%1").arg(jsonPath));
         return;
     }
-    
+
     outFile << jsonContent;
     outFile.close();
-    
+
     // Update button states
     updateCalibrationButtonStates();
+    // Reload the newly-created sidecar for any already-mounted clip.
+    scheduleOptionsUpdate();
 }
 
 void MainWindow::updateCalibrationButtonStates() {
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     if (!scrollContent) return;
-    
+
     auto fileWidgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
-    
+
     for (auto* fileWidget : fileWidgets) {
         // Skip if not a file widget (e.g., separators)
         if (!fileWidget->property("filePath").isValid()) {
             continue;
         }
-        
+
         auto filePath = fileWidget->property("filePath").toString();
         QFileInfo fileInfo(filePath);
         QString jsonPath = fileInfo.isDir()
             ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
             : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
-        
+
         // Find the calibration button, status container, label, and refresh button
         QPushButton* actualCalibButton = nullptr;
         QPushButton* actualRefreshButton = nullptr;
@@ -2418,14 +2434,14 @@ void MainWindow::updateCalibrationButtonStates() {
                 actualRefreshButton = btn;
             }
         }
-        
+
         for (auto* widget : fileWidget->findChildren<QWidget*>()) {
             if (widget->property("statusContainer").toBool()) {
                 statusContainer = widget;
                 break;
             }
         }
-        
+
         QLabel* actualStatusLabel = nullptr;
         for (auto* lbl : fileWidget->findChildren<QLabel*>()) {
             if (lbl->property("calibStatusLabel").toBool()) {
@@ -2433,32 +2449,32 @@ void MainWindow::updateCalibrationButtonStates() {
                 break;
             }
         }
-        
+
         if (!actualCalibButton || !actualStatusLabel || !actualRefreshButton || !statusContainer) {
             continue;
         }
-        
+
         // Check if JSON exists and is valid
         if (QFile::exists(jsonPath)) {
             auto calibData = motioncam::CalibrationData::loadFromFile(jsonPath.toStdString());
-            
+
             if (calibData.has_value()) {
                 // Valid calibration found
                 actualCalibButton->setVisible(false);
                 actualStatusLabel->setText("Calibration Loaded");
                 actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #00AA00;");
                 actualStatusLabel->setVisible(true);
-                
+
                 // Adjust label size and position
                 actualStatusLabel->adjustSize();
                 actualStatusLabel->move(0, (statusContainer->height() - actualStatusLabel->height()) / 2);
-                
+
                 // Show refresh button and position it to overlay the label
                 int labelWidth = actualStatusLabel->fontMetrics().horizontalAdvance(actualStatusLabel->text());
                 actualRefreshButton->setGeometry(0, 0, labelWidth + 20, statusContainer->height());
                 actualRefreshButton->setVisible(true);
                 actualRefreshButton->raise();
-                
+
                 statusContainer->setFixedWidth(labelWidth + 20);
                 statusContainer->setVisible(true);
             } else {
@@ -2467,17 +2483,17 @@ void MainWindow::updateCalibrationButtonStates() {
                 actualStatusLabel->setText("Calibration Ignored");
                 actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #AA0000;");
                 actualStatusLabel->setVisible(true);
-                
+
                 // Adjust label size and position
                 actualStatusLabel->adjustSize();
                 actualStatusLabel->move(0, (statusContainer->height() - actualStatusLabel->height()) / 2);
-                
+
                 // Show refresh button and position it to overlay the label
                 int labelWidth = actualStatusLabel->fontMetrics().horizontalAdvance(actualStatusLabel->text());
                 actualRefreshButton->setGeometry(0, 0, labelWidth + 20, statusContainer->height());
                 actualRefreshButton->setVisible(true);
                 actualRefreshButton->raise();
-                
+
                 statusContainer->setFixedWidth(labelWidth + 20);
                 statusContainer->setVisible(true);
             }

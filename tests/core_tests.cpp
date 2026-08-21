@@ -21,12 +21,24 @@ int main() {
     assert(levelsCalibration->hasDataLevels);
     assert(levelsCalibration->dataLevels == "Full");
 
-    const auto exampleCalibration = CalibrationData::parse(CalibrationData::createExampleJson());
-    assert(exampleCalibration.has_value());
-    assert(exampleCalibration->hasDataLevels);
-    assert(exampleCalibration->dataLevels == "Auto");
-    assert(exampleCalibration->hasCfaSize);
-    assert(exampleCalibration->cfaSize == 2);
+    const auto exampleCalibration = nlohmann::json::parse(
+        CalibrationData::createExampleJson());
+    assert(exampleCalibration.contains("_dataLevels"));
+    assert(exampleCalibration.contains("_cfaSize"));
+    assert(exampleCalibration.contains("_needGainMapOrderFixed"));
+    assert(exampleCalibration.contains("_fullSensorResolution"));
+
+    const auto gainMapCalibration = CalibrationData::parse(
+        std::string(R"({"needGainMapOrderFixed":true})"));
+    assert(gainMapCalibration.has_value());
+    assert(gainMapCalibration->hasNeedGainMapOrderFixed);
+    assert(gainMapCalibration->needGainMapOrderFixed);
+
+    const auto sensorCalibration = CalibrationData::parse(
+        std::string(R"({"fullSensorResolution":[4000,3008]})"));
+    assert(sensorCalibration.has_value());
+    assert(sensorCalibration->hasFullSensorResolution);
+    assert((sensorCalibration->fullSensorResolution == std::array<int, 2>{4000, 3008}));
 
     const auto higherCfaCalibration = CalibrationData::parse(std::string(R"({"cfaSize":8})"));
     assert(higherCfaCalibration.has_value());

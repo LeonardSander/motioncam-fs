@@ -219,6 +219,17 @@ void VirtualFileSystemImpl_DNG::init() {
             if (!mDecoder->extractFrame(static_cast<int>(i), sizedData) ||
                 !DNGDecoder::ensureUncompressed(sizedData))
                 throw std::runtime_error("Could not size uncompressed DNG");
+            const std::optional<bool> gainMapOrderOverride =
+                mCalibration && mCalibration->hasNeedGainMapOrderFixed
+                    ? std::optional<bool>(mCalibration->needGainMapOrderFixed)
+                    : std::nullopt;
+            if (!DNGDecoder::repairGainMapCfaPhase(sizedData, gainMapOrderOverride))
+                throw std::runtime_error("Could not reconcile DNG gain maps with its CFA phase");
+            if (mCalibration && mCalibration->hasFullSensorResolution &&
+                !DNGDecoder::cropGainMapsToFullSensor(
+                    sizedData, mCalibration->fullSensorResolution[0],
+                    mCalibration->fullSensorResolution[1]))
+                throw std::runtime_error("Could not crop full-sensor DNG gain maps");
             if (!DNGDecoder::overrideDataLevels(sizedData, mConfig.levels))
                 throw std::runtime_error("Could not override source DNG data levels");
             DNGDecoder::repairExposureTime(sizedData, mExposureTimes.at(frames[i].timestamp));
@@ -237,9 +248,11 @@ void VirtualFileSystemImpl_DNG::init() {
             if (bakeGainMap && !DNGDecoder::bakeGainMaps(
                     sizedData, mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
                     mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
-                    mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
+                    mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
+                    mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP))
                 throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frames[i].filePath);
-            if (hasGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(sizedData))
+            if (hasGainMap && !bakeGainMap &&
+                !DNGDecoder::canonicalizeGainMapOpcodes(sizedData))
                 throw std::runtime_error("Could not canonicalize DNG gain maps: " + frames[i].filePath);
             if (processHigher && !DNGDecoder::processHigherCFA(
                     sizedData, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
@@ -250,9 +263,15 @@ void VirtualFileSystemImpl_DNG::init() {
             if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
                 !DNGDecoder::bakeIsoOverlay(sizedData, mIsoValues.at(frames[i].timestamp)))
                 throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + frames[i].filePath);
+            if ((mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+                !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+                (mConfig.logTransform != LogTransformMode::KeepInput || bakeGainMap) &&
+                !DNGDecoder::applyLogTransform(sizedData, mConfig.logTransform))
+                throw std::runtime_error("Could not apply DNG log transform: " + frames[i].filePath);
             if (!DNGDecoder::setTimingMetadata(sizedData, mFps, 0))
                 throw std::runtime_error("Could not size DNG timing metadata");
-            if (!DNGDecoder::packUncompressedToWhiteLevel(sizedData))
+            if (!mConfig.cameraNativeStaging &&
+                !DNGDecoder::packUncompressedToWhiteLevel(sizedData))
                 throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
             dngEntry.size = sizedData.size();
         }
@@ -395,6 +414,17 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         throw std::runtime_error("Could not read source DNG");
     if (!DNGDecoder::ensureUncompressed(bytes))
         throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
+    const std::optional<bool> gainMapOrderOverride =
+        mCalibration && mCalibration->hasNeedGainMapOrderFixed
+            ? std::optional<bool>(mCalibration->needGainMapOrderFixed)
+            : std::nullopt;
+    if (!DNGDecoder::repairGainMapCfaPhase(bytes, gainMapOrderOverride))
+        throw std::runtime_error("Could not reconcile DNG gain maps with its CFA phase");
+    if (mCalibration && mCalibration->hasFullSensorResolution &&
+        !DNGDecoder::cropGainMapsToFullSensor(
+            bytes, mCalibration->fullSensorResolution[0],
+            mCalibration->fullSensorResolution[1]))
+        throw std::runtime_error("Could not crop full-sensor DNG gain maps");
     if (!DNGDecoder::overrideDataLevels(bytes, mConfig.levels))
         throw std::runtime_error("Could not override source DNG data levels");
     DNGDecoder::repairExposureTime(bytes, mExposureTimes.at(timestamp));
@@ -405,9 +435,6 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     const Timestamp outputTimestamp = converted
         ? static_cast<Timestamp>(std::llround(outputFrameNumber * 1e9 / mFps))
         : timestamp - frames.front().timestamp;
-    if (!DNGDecoder::setTimingMetadata(bytes, mFps, outputTimestamp))
-        throw std::runtime_error("Could not update DNG timing metadata");
-
     const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
     const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
@@ -442,9 +469,10 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     if (bakeGainMap && !DNGDecoder::bakeGainMaps(
             bytes, mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
-            mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
+            mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
+            mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + it->filePath);
-    if (hasGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(bytes))
+    if (hasGainMap && !bakeGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(bytes))
         throw std::runtime_error("Could not canonicalize DNG gain maps: " + it->filePath);
 
     if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
@@ -460,6 +488,13 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
         !DNGDecoder::bakeIsoOverlay(bytes, mIsoValues.at(timestamp)))
         throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + it->filePath);
+    if ((mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+        !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+        (mConfig.logTransform != LogTransformMode::KeepInput || bakeGainMap) &&
+        !DNGDecoder::applyLogTransform(bytes, mConfig.logTransform))
+        throw std::runtime_error("Could not apply DNG log transform: " + it->filePath);
+    if (!DNGDecoder::setTimingMetadata(bytes, mFps, outputTimestamp))
+        throw std::runtime_error("Could not update DNG timing metadata");
     if (!mConfig.cameraNativeStaging && !DNGDecoder::packUncompressedToWhiteLevel(bytes))
         throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
     if (jpegCompression) {
@@ -517,7 +552,23 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     mCache.clear();
     mPayloadHashes.clear();
     mConfig = config;
-    
+
+    const boost::filesystem::path srcPath(mSrcPath);
+    const boost::filesystem::path calibPath = boost::filesystem::is_directory(srcPath)
+        ? srcPath / (srcPath.filename().string() + ".json")
+        : srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    mCalibration.reset();
+    if (boost::filesystem::exists(calibPath)) {
+        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        if (mCalibration)
+            spdlog::info("Reloaded calibration for DNG sequence: {}", calibPath.string());
+    }
+    mHasCfa = mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
+    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
+        mCfaSize = mCalibration->cfaSize;
+        mHasCfa = mCfaSize >= 2;
+    }
+
     init();
 }
 

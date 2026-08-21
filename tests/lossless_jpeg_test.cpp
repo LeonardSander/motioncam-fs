@@ -11,7 +11,119 @@
 #include <string>
 #include <vector>
 
+static std::vector<uint8_t> tiledLosslessJpegDng(
+        const std::vector<uint16_t>& pixels, uint32_t width, uint32_t height,
+        uint32_t tileWidth, uint32_t tileHeight, uint16_t bits,
+        int jpegComponents = 1, bool padEdgeTiles = false) {
+    auto put16 = [](std::vector<uint8_t>& out, size_t at, uint16_t value) {
+        out[at] = value & 0xff; out[at + 1] = value >> 8;
+    };
+    auto put32 = [](std::vector<uint8_t>& out, size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i) out[at + i] = static_cast<uint8_t>(value >> (i * 8));
+    };
+    constexpr uint16_t entryCount = 11;
+    std::vector<uint8_t> dng(8 + 2 + entryCount * 12 + 4, 0);
+    dng[0] = 'I'; dng[1] = 'I'; put16(dng, 2, 42); put32(dng, 4, 8);
+    put16(dng, 8, entryCount);
+    size_t entry = 10;
+    auto scalar = [&](uint16_t tag, uint16_t type, uint32_t value) {
+        put16(dng, entry, tag); put16(dng, entry + 2, type); put32(dng, entry + 4, 1);
+        if (type == 3) put16(dng, entry + 8, static_cast<uint16_t>(value));
+        else put32(dng, entry + 8, value);
+        entry += 12;
+    };
+    scalar(256, 4, width); scalar(257, 4, height); scalar(258, 3, bits);
+    scalar(259, 3, 7); scalar(262, 3, 32803); scalar(277, 3, 1);
+    scalar(322, 4, tileWidth); scalar(323, 4, tileHeight);
+    const uint32_t tilesAcross = (width + tileWidth - 1) / tileWidth;
+    const uint32_t tilesDown = (height + tileHeight - 1) / tileHeight;
+    const uint32_t tileCount = tilesAcross * tilesDown;
+    const uint32_t offsetsArray = static_cast<uint32_t>(dng.size());
+    dng.resize(dng.size() + tileCount * 8);
+    put16(dng, entry, 324); put16(dng, entry + 2, 4); put32(dng, entry + 4, tileCount);
+    put32(dng, entry + 8, offsetsArray); entry += 12;
+    put16(dng, entry, 325); put16(dng, entry + 2, 4); put32(dng, entry + 4, tileCount);
+    put32(dng, entry + 8, offsetsArray + tileCount * 4); entry += 12;
+    scalar(50717, 4, (1u << bits) - 1);
+    for (uint32_t ty = 0, index = 0; ty < tilesDown; ++ty) {
+        for (uint32_t tx = 0; tx < tilesAcross; ++tx, ++index) {
+            const uint32_t imageW = std::min(tileWidth, width - tx * tileWidth);
+            const uint32_t imageH = std::min(tileHeight, height - ty * tileHeight);
+            const uint32_t w = padEdgeTiles ? tileWidth : imageW;
+            const uint32_t h = padEdgeTiles ? tileHeight : imageH;
+            std::vector<uint16_t> tile(static_cast<size_t>(w) * h);
+            for (uint32_t y = 0; y < imageH; ++y)
+                std::copy_n(pixels.data() + static_cast<size_t>(ty * tileHeight + y) * width +
+                                tx * tileWidth,
+                            imageW, tile.data() + static_cast<size_t>(y) * w);
+            uint8_t* encoded = nullptr; int encodedSize = 0;
+            assert(w % jpegComponents == 0);
+            assert(lj92_encode(tile.data(), w / jpegComponents, h, bits,
+                               jpegComponents, w, 0, nullptr, 0,
+                               &encoded, &encodedSize) == LJ92_ERROR_NONE);
+            put32(dng, offsetsArray + index * 4, static_cast<uint32_t>(dng.size()));
+            put32(dng, offsetsArray + (tileCount + index) * 4, encodedSize);
+            dng.insert(dng.end(), encoded, encoded + encodedSize);
+            free(encoded);
+        }
+    }
+    return dng;
+}
+
 int main() {
+    // Two-component Android DNG tiles may assign a different DC Huffman table
+    // to each component. Verify that the selectors in SOS are honored.
+    {
+        const std::vector<uint8_t> jpeg = {
+            0xff,0xd8,
+            0xff,0xc3, 0x00,0x0e, 0x08, 0x00,0x01, 0x00,0x01, 0x02,
+                0x00,0x11,0x00, 0x01,0x11,0x00,
+            // Both DC tables deliberately share one DHT marker.
+            0xff,0xc4, 0x00,0x27, 0x00,
+                0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+                0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, 0x07,
+            0x01,
+                0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+                0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, 0x00,0x07,
+            0xff,0xda, 0x00,0x0a, 0x02, 0x00,0x00, 0x01,0x10, 0x01,0x00,0x00,
+            0x09,0x93,0x00,0x00, 0xff,0xd9
+        };
+        lj92 twoTableDecoder = nullptr;
+        int w=0,h=0,b=0,c=0;
+        assert(lj92_open(&twoTableDecoder, const_cast<uint8_t*>(jpeg.data()), jpeg.size(),
+                         &w,&h,&b,&c) == LJ92_ERROR_NONE);
+        std::array<uint16_t,2> result{};
+        assert(lj92_decode(twoTableDecoder, result.data(), 2, 0, nullptr, 0) == LJ92_ERROR_NONE);
+        lj92_close(twoTableDecoder);
+        assert(w == 1 && h == 1 && b == 8 && c == 2);
+        assert(result[0] == 10 && result[1] == 20);
+
+        // Component selectors, rather than their position in SOS, define the
+        // destination channel. Exercise a valid scan whose order differs from SOF.
+        auto reordered = jpeg;
+        const std::array<uint8_t, 2> sosMarker = {0xff, 0xda};
+        const auto reorderedSos = std::search(
+            reordered.begin(), reordered.end(), sosMarker.begin(), sosMarker.end());
+        assert(reorderedSos != reordered.end());
+        reorderedSos[5] = 1;
+        reorderedSos[7] = 0;
+        twoTableDecoder = nullptr;
+        assert(lj92_open(&twoTableDecoder, reordered.data(), reordered.size(),
+                         &w,&h,&b,&c) == LJ92_ERROR_NONE);
+        result = {};
+        assert(lj92_decode(twoTableDecoder, result.data(), 2, 0, nullptr, 0) == LJ92_ERROR_NONE);
+        lj92_close(twoTableDecoder);
+        assert(result[0] == 20 && result[1] == 10);
+
+        // Reject a frame component count that exceeds liblj92's fixed storage.
+        auto excessiveComponents = jpeg;
+        excessiveComponents[11] = 5;
+        twoTableDecoder = nullptr;
+        assert(lj92_open(&twoTableDecoder, excessiveComponents.data(), excessiveComponents.size(),
+                         &w,&h,&b,&c) == LJ92_ERROR_CORRUPT);
+        assert(twoTableDecoder == nullptr);
+    }
+
     constexpr unsigned int width = 32;
     constexpr unsigned int height = 24;
     constexpr unsigned short bits = 12;
@@ -83,6 +195,66 @@ int main() {
     lj92_close(decoder);
     assert(decoded == pixels);
 
+    // Camera DNGs commonly store lossless JPEG as independently coded tiles.
+    // Include partial right/bottom tiles and verify canonical row placement.
+    {
+        constexpr uint32_t tiledWidth = 8, tiledHeight = 5;
+        std::vector<uint16_t> tiledPixels(tiledWidth * tiledHeight);
+        for (uint32_t y = 0; y < tiledHeight; ++y)
+            for (uint32_t x = 0; x < tiledWidth; ++x)
+                tiledPixels[y * tiledWidth + x] = static_cast<uint16_t>(y * 100 + x);
+        auto tiled = tiledLosslessJpegDng(
+            tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2);
+        assert(motioncam::DNGDecoder::ensureUncompressed(tiled));
+        auto read16 = [&](size_t at) { return static_cast<uint16_t>(tiled[at] | tiled[at + 1] << 8); };
+        auto read32 = [&](size_t at) { return static_cast<uint32_t>(tiled[at] | tiled[at + 1] << 8 |
+            tiled[at + 2] << 16 | tiled[at + 3] << 24); };
+        uint32_t stripOffset = 0, stripBytes = 0;
+        const uint16_t count = read16(8);
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t at = 10 + i * 12;
+            if (read16(at) == 259) assert(read16(at + 8) == 1);
+            if (read16(at) == 273) stripOffset = read32(at + 8);
+            if (read16(at) == 279) stripBytes = read32(at + 8);
+        }
+        assert(stripOffset && stripBytes == tiledPixels.size() * sizeof(uint16_t));
+        for (size_t i = 0; i < tiledPixels.size(); ++i)
+            assert(read16(stripOffset + i * 2) == tiledPixels[i]);
+
+        // TIFF tiles keep their declared dimensions at image boundaries and
+        // pad samples outside the image. Those padding samples must be ignored.
+        auto padded = tiledLosslessJpegDng(
+            tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2, true);
+        assert(motioncam::DNGDecoder::ensureUncompressed(padded));
+        auto padded16 = [&](size_t at) {
+            return static_cast<uint16_t>(padded[at] | padded[at + 1] << 8);
+        };
+        auto padded32 = [&](size_t at) {
+            return static_cast<uint32_t>(padded[at] | padded[at + 1] << 8 |
+                padded[at + 2] << 16 | padded[at + 3] << 24);
+        };
+        uint32_t paddedStripOffset = 0;
+        for (uint16_t i = 0; i < padded16(8); ++i) {
+            const size_t at = 10 + i * 12;
+            if (padded16(at) == 273) paddedStripOffset = padded32(at + 8);
+        }
+        assert(paddedStripOffset);
+        for (size_t i = 0; i < tiledPixels.size(); ++i)
+            assert(padded16(paddedStripOffset + i * 2) == tiledPixels[i]);
+
+        // A short interior tile must not be accepted and padded with black data.
+        auto shortTile = tiledLosslessJpegDng(
+            tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2);
+        const std::array<uint8_t, 2> sofMarker = {0xff, 0xc3};
+        const auto sof = std::search(shortTile.begin(), shortTile.end(),
+                                     sofMarker.begin(), sofMarker.end());
+        assert(sof != shortTile.end());
+        // JPEG width is two pixels with two components; make it one pixel.
+        sof[7] = 0;
+        sof[8] = 1;
+        assert(!motioncam::DNGDecoder::ensureUncompressed(shortTile));
+    }
+
     constexpr unsigned int rgbWidth = 19;
     constexpr unsigned int rgbHeight = 13;
     constexpr int rgbComponents = 3;
@@ -151,7 +323,9 @@ int main() {
     gainMap.plane = 0; gainMap.planes = 1;
     gainMap.row_pitch = 1; gainMap.col_pitch = 1;
     gainMap.map_points_v = 2; gainMap.map_points_h = 2;
-    gainMap.map_spacing_v = 1.0; gainMap.map_spacing_h = 1.0;
+    // Deliberately use the legacy 1/pointCount spacing. Full-sensor remapping
+    // must expand the final control point to the sensor edge.
+    gainMap.map_spacing_v = 0.5; gainMap.map_spacing_h = 0.5;
     gainMap.map_origin_v = 0.0; gainMap.map_origin_h = 0.0;
     gainMap.map_planes = 4;
     gainMap.gain_data.resize(16);
@@ -164,6 +338,20 @@ int main() {
     std::ostringstream gainMapOutput(std::ios::binary);
     assert(writer.WriteToFile(gainMapOutput, &error));
     const std::string gainMapDng = gainMapOutput.str();
+    std::vector<uint8_t> croppedGainMapDng(gainMapDng.begin(), gainMapDng.end());
+    std::vector<motioncam::GainMap> originalMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(croppedGainMapDng, 2, originalMaps));
+    assert(!originalMaps.empty());
+    assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
+        croppedGainMapDng, width * 2, height * 2));
+    std::vector<motioncam::GainMap> croppedMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(croppedGainMapDng, 2, croppedMaps));
+    assert(croppedMaps.size() == originalMaps.size());
+    assert(std::abs(croppedMaps.front().spacingH - 1.0) < 1e-9);
+    assert(std::abs(croppedMaps.front().spacingV - 1.0) < 1e-9);
+    assert(std::abs(croppedMaps.front().originH) < 1e-9);
+    assert(std::abs(croppedMaps.front().originV) < 1e-9);
+    assert(croppedMaps.front().data != originalMaps.front().data);
     std::vector<uint8_t> canonical(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(canonical));
     std::vector<motioncam::GainMap> canonicalMaps;
@@ -180,6 +368,62 @@ int main() {
     const size_t originalSize = baked.size();
     assert(motioncam::DNGDecoder::bakeGainMaps(baked, false, false));
     assert(baked.size() > originalSize);
+    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(baked));
+
+    std::vector<uint8_t> debugBaked(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        debugBaked, false, false, false, true));
+    assert(debugBaked != baked);
+
+    std::vector<uint8_t> croppedDebug(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
+        croppedDebug, width * 2, height * 2));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        croppedDebug, false, false, false, true));
+    assert(croppedDebug != debugBaked);
+
+    // Existing linearization must be consumed before gain-map baking rather
+    // than making the vignette path reject the DNG.
+    std::vector<uint8_t> linearizedThenBaked(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::ensureUncompressed(linearizedThenBaked));
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        linearizedThenBaked, motioncam::LogTransformMode::KeepInput));
+    assert(motioncam::DNGDecoder::bakeGainMaps(linearizedThenBaked, false, false));
+
+    // A raw IFD may be reached through the ordinary TIFF next-IFD chain rather
+    // than IFD0 or SubIFDs. Rebuilding it for the log table must preserve that chain.
+    std::vector<uint8_t> nextIfdLog(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::ensureUncompressed(nextIfdLog));
+    auto put16le = [](std::vector<uint8_t>& bytes, size_t at, uint16_t value) {
+        bytes[at] = static_cast<uint8_t>(value);
+        bytes[at + 1] = static_cast<uint8_t>(value >> 8);
+    };
+    auto put32le = [](std::vector<uint8_t>& bytes, size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i)
+            bytes[at + i] = static_cast<uint8_t>(value >> (8 * i));
+    };
+    const uint32_t rawIfd = static_cast<uint32_t>(nextIfdLog[4] |
+        nextIfdLog[5] << 8 | nextIfdLog[6] << 16 | nextIfdLog[7] << 24);
+    const uint32_t emptyRoot = static_cast<uint32_t>(nextIfdLog.size());
+    nextIfdLog.resize(nextIfdLog.size() + 6);
+    put16le(nextIfdLog, emptyRoot, 0);
+    put32le(nextIfdLog, emptyRoot + 2, rawIfd);
+    put32le(nextIfdLog, 4, emptyRoot);
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        nextIfdLog, motioncam::LogTransformMode::KeepInput));
+    const uint32_t rebuiltRawIfd = static_cast<uint32_t>(nextIfdLog[emptyRoot + 2] |
+        nextIfdLog[emptyRoot + 3] << 8 | nextIfdLog[emptyRoot + 4] << 16 |
+        nextIfdLog[emptyRoot + 5] << 24);
+    assert(rebuiltRawIfd != 0 && rebuiltRawIfd != rawIfd);
+
+    std::vector<uint8_t> ordinaryBayer(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::ensureUncompressed(ordinaryBayer));
+    const std::vector<uint8_t> beforeNoopRemosaic = ordinaryBayer;
+    const std::array<uint8_t, 4> ordinaryPhase = {0, 1, 1, 2};
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        ordinaryBayer, 2, ordinaryPhase, motioncam::QuadBayerMode::Demosaic,
+        true, 1, true));
+    assert(ordinaryBayer == beforeNoopRemosaic);
 
     std::vector<uint8_t> colorBaked(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::bakeGainMaps(colorBaked, false, true));
@@ -196,7 +440,7 @@ int main() {
     assert(luminanceMaps.front().colPitch == 1);
     assert(luminanceMaps.front().channels == 1);
 
-    // Android-style DNGs commonly store the four CFA phases as four separate
+    // Legacy MotionCam DNGs store the four CFA phases as four separate
     // one-channel GainMap opcodes. All of them must be transformed in place.
     tinydngwriter::OpcodeList fourGainOpcodes;
     for (unsigned int phase = 0; phase < 4; ++phase) {
@@ -212,11 +456,38 @@ int main() {
         fourGainOpcodes.AddGainMap(phaseMap);
     }
     assert(image.SetOpcodeList2(fourGainOpcodes));
+    const std::array<unsigned char, 4> bggr = {2, 1, 1, 0};
+    assert(image.SetCFARepeatPatternDim(2, 2));
+    assert(image.SetCFAPattern(bggr.size(), bggr.data()));
     std::ostringstream fourGainOutput(std::ios::binary);
     assert(writer.WriteToFile(fourGainOutput, &error));
     const std::string fourGainDng = fourGainOutput.str();
     std::vector<uint8_t> fourGainBytes(fourGainDng.begin(), fourGainDng.end());
+    assert(motioncam::DNGDecoder::repairGainMapCfaPhase(fourGainBytes, true));
     assert(motioncam::DNGDecoder::transformGainMaps(fourGainBytes, false, true, false));
+
+    const std::string softwarePlaceholder(32, 'X');
+    assert(image.SetSoftware(softwarePlaceholder));
+    std::ostringstream producerOutput(std::ios::binary);
+    assert(writer.WriteToFile(producerOutput, &error));
+    const std::string producerTemplate = producerOutput.str();
+    auto producerIsRepaired = [&](const std::string& software) {
+        std::vector<uint8_t> bytes(producerTemplate.begin(), producerTemplate.end());
+        const auto placeholder = std::search(bytes.begin(), bytes.end(),
+            softwarePlaceholder.begin(), softwarePlaceholder.end());
+        assert(placeholder != bytes.end() && software.size() < softwarePlaceholder.size());
+        std::fill_n(placeholder, softwarePlaceholder.size(), 0);
+        std::copy(software.begin(), software.end(), placeholder);
+        const std::vector<uint8_t> original = bytes;
+        assert(motioncam::DNGDecoder::repairGainMapCfaPhase(bytes));
+        return bytes != original;
+    };
+    assert(producerIsRepaired("MotionCam 4.0.4"));
+    assert(!producerIsRepaired("MotionCam 4.0.5"));
+    assert(producerIsRepaired("MotionCam Tools 1.0.0.0"));
+    assert(!producerIsRepaired("MotionCam Tools 1.0.0.1"));
+    assert(producerIsRepaired("MotionCam Tools"));
+    assert(!producerIsRepaired("MotionCamera 3.0"));
 
     return 0;
 }

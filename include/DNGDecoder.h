@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <optional>
 #include <cstdint>
 #include <unordered_map>
 #include <array>
@@ -96,6 +97,7 @@ public:
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,
                                    const std::string& levels);
     static bool packUncompressedToWhiteLevel(std::vector<uint8_t>& dngData);
+    static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
     static bool extractUncompressedRGB16(const std::vector<uint8_t>& dngData,
                                          std::vector<uint8_t>& rgbData,
@@ -119,12 +121,18 @@ public:
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,
                              bool normalizeGainMaps,
                              bool colorOnly,
-                             bool optimizeGainMaps = false);
+                             bool optimizeGainMaps = false,
+                             bool debugGainMap = false);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,
                                   bool optimizeGainMaps);
     static bool canonicalizeGainMapOpcodes(std::vector<uint8_t>& dngData);
+    static bool repairGainMapCfaPhase(
+        std::vector<uint8_t>& dngData,
+        std::optional<bool> sidecarOverride = std::nullopt);
+    static bool cropGainMapsToFullSensor(
+        std::vector<uint8_t>& dngData, uint32_t fullWidth, uint32_t fullHeight);
     static bool processHigherCFA(std::vector<uint8_t>& dngData,
                                  int repeatSize,
                                  const std::array<uint8_t, 4>& phase,
