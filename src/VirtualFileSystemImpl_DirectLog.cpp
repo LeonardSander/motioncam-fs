@@ -1264,7 +1264,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     int dstWhiteLevel = (1 << dstBits) - 1;
     
     info.levelsInfo = std::to_string(srcWhiteLevel) + "/0 -> " + 
-                      std::to_string(dstWhiteLevel) + "/0 RAW" + std::to_string(dstBits) +
+                      std::to_string(dstWhiteLevel) + "/0 " + std::to_string(dstBits) + "b" +
                       (applyLogCurve ? " log" : "");
     
     // Calculate runtime from video duration

@@ -717,11 +717,13 @@ void MainWindow::mountFile(const QString& filePath) {
         int seconds = static_cast<int>(info.runtimeSeconds) % 60;
         QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
 
-        // Extract RAW bits and log indicator from levelsInfo for styling
+        // Extract bit depth and log indicator from levelsInfo for styling
         QString levelsStr = QString::fromStdString(info.levelsInfo);
         QString rawPart;
-        int rawIdx = levelsStr.indexOf("RAW");
-        if (rawIdx != -1) {
+        int rawIdx = levelsStr.lastIndexOf('b');
+        while (rawIdx > 0 && levelsStr.at(rawIdx - 1).isDigit())
+            --rawIdx;
+        if (rawIdx >= 0) {
             rawPart = levelsStr.mid(rawIdx);
         }
 
@@ -2094,11 +2096,13 @@ void MainWindow::updateFpsLabels() {
             int seconds = static_cast<int>(info.runtimeSeconds) % 60;
             QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
 
-            // Extract RAW bits and log indicator from levelsInfo for styling
+            // Extract bit depth and log indicator from levelsInfo for styling
             QString levelsStr = QString::fromStdString(info.levelsInfo);
             QString rawPart;
-            int rawIdx = levelsStr.indexOf("RAW");
-            if (rawIdx != -1) {
+            int rawIdx = levelsStr.lastIndexOf('b');
+            while (rawIdx > 0 && levelsStr.at(rawIdx - 1).isDigit())
+                --rawIdx;
+            if (rawIdx >= 0) {
                 rawPart = levelsStr.mid(rawIdx);
             }
 

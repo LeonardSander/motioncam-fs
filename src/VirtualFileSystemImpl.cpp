@@ -671,12 +671,12 @@ std::string getDisplayDataLevels(
     std::string result = std::to_string(static_cast<int>(srcWhiteLevel)) + "/" + 
                          std::to_string(static_cast<int>(srcBlackLevel[0]));    // Build levels info string
     
-    if (srcBlackLevel[0] != dstBlackLevel[0]) {
+    if (srcWhiteLevel != dstWhiteLevel || srcBlackLevel[0] != dstBlackLevel[0]) {
         result += " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" + 
                            std::to_string(static_cast<int>(dstBlackLevel[0]));
     }       // Show transformation if levels changed
     
-    result += " RAW" + std::to_string(std::min(16, useBits));
+    result += " " + std::to_string(std::min(16, useBits)) + "b";
     if (!logTransform.empty()) 
         result += " log";    
 

@@ -77,6 +77,9 @@ private:
     int mDuplicatedFrames;
     int mWidth;
     int mHeight;
+    float mSourceWhiteLevel = 65535.0f;
+    std::array<float, 4> mSourceBlackLevel{};
+    bool mSourceHasGainMap = false;
     bool mHasCfa = false;
     int mCfaSize = 2;
     std::array<uint8_t, 4> mCfaPhase = {0, 1, 1, 2};

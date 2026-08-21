@@ -137,6 +137,16 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             for (size_t c = 0; c < 3; ++c)
                 logNeutrals[c].push_back(std::log(std::max(1e-6f, metadata[i].asShotNeutral[c])));
         }
+        if (!metadata.empty()) {
+            if (metadata[0].whiteLevelCount > 0)
+                mSourceWhiteLevel = metadata[0].whiteLevel[0];
+            if (metadata[0].blackLevelCount > 0)
+                mSourceBlackLevel = metadata[0].blackLevel;
+        }
+        if (!frames.empty()) {
+            GainMap sourceGainMap;
+            mSourceHasGainMap = mDecoder->getGainMap(0, sourceGainMap);
+        }
         const int radius = std::max(1, static_cast<int>(std::lround(2.0 * std::max(1.0f, mMedFps))));
         const auto smoothedExposure = temporalSmooth(effectiveExposures, radius);
         std::array<std::vector<double>, 3> smoothedNeutral;
@@ -585,11 +595,16 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     
     // DNG sequences are pass-through, so we show source format
     info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";
-    const bool sourceLevels = mConfig.levels.empty() || mConfig.levels == "Dynamic" ||
-        mConfig.levels == "Static" || mConfig.levels == "Dynamic/Dynamic" ||
-        mConfig.levels == "Dynamic/Static" || mConfig.levels == "Static/Dynamic" ||
-        mConfig.levels == "Static/Static";
-    info.levelsInfo = sourceLevels ? "Source DNG" : mConfig.levels + " (DNG override)";
+    const bool applyLogCurve = (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+        mConfig.logTransform != LogTransformMode::Disabled &&
+        !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
+    info.levelsInfo = vfs::getDisplayDataLevels(
+        mSourceWhiteLevel, mSourceBlackLevel,
+        mSourceWhiteLevel, mSourceBlackLevel,
+        mConfig.levels,
+        applyLogCurve ? logTransformModeToString(mConfig.logTransform) : std::string(),
+        mSourceHasGainMap && (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION),
+        mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
     
     // Calculate runtime from frame count and fps
     const int outputFrames = mTotalFrames - mDroppedFrames + mDuplicatedFrames;
