@@ -105,6 +105,7 @@ namespace {
     constexpr uint16_t TIFF_TYPE_SHORT = 3;
     constexpr uint16_t TIFF_TYPE_LONG = 4;
     constexpr uint16_t TIFF_TYPE_RATIONAL = 5;
+    constexpr uint16_t TIFF_TYPE_UNDEFINED = 7;
     constexpr uint16_t TIFF_TYPE_SRATIONAL = 10;
     constexpr uint16_t TIFF_TAG_IMAGE_WIDTH = 256;
     constexpr uint16_t TIFF_TAG_IMAGE_HEIGHT = 257;
@@ -1076,6 +1077,102 @@ bool DNGDecoder::getGainMaps(const std::vector<uint8_t>& data, int opcodeList,
             return true;
     }
     return false;
+}
+
+bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
+                                 const std::vector<GainMap>& gainMaps) {
+    const uint16_t wanted = opcodeList == 3 ? TIFF_TAG_OPCODE_LIST_3 : TIFF_TAG_OPCODE_LIST_2;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* entry = nullptr;
+    for (const auto& candidate : entries)
+        if (candidate.tag == wanted) { entry = &candidate; break; }
+    std::vector<uint8_t> output(4, 0);
+    uint32_t outputCount = 0;
+    if (entry && entry->count) {
+        const uint8_t* source = data.data() + entry->valueOffset;
+        if (entry->count < 4) return false;
+        const uint32_t count = readBE32(source);
+        size_t offset = 4;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (offset + 16 > entry->count) return false;
+            const uint32_t id = readBE32(source + offset);
+            const uint32_t bytes = readBE32(source + offset + 12);
+            if (bytes > entry->count - offset - 16) return false;
+            const size_t opcodeBytes = 16 + bytes;
+            if (id != OPCODE_GAIN_MAP) {
+                output.insert(output.end(), source + offset, source + offset + opcodeBytes);
+                ++outputCount;
+            }
+            offset += opcodeBytes;
+        }
+        if (offset != entry->count) return false;
+    }
+    for (const auto& map : gainMaps) {
+        const auto encoded = serializeGainMap(map);
+        if (encoded.size() < 4 || readBE32(encoded.data()) != 1) return false;
+        output.insert(output.end(), encoded.begin() + 4, encoded.end());
+        ++outputCount;
+    }
+    output[0] = static_cast<uint8_t>(outputCount >> 24);
+    output[1] = static_cast<uint8_t>(outputCount >> 16);
+    output[2] = static_cast<uint8_t>(outputCount >> 8);
+    output[3] = static_cast<uint8_t>(outputCount);
+    if (!entry) {
+        if (gainMaps.empty()) return true;
+        const uint32_t oldIfd = read32(data.data() + 4, little);
+        if (oldIfd + 2 > data.size()) return false;
+        const uint16_t oldCount = read16(data.data() + oldIfd, little);
+        const size_t oldEnd = static_cast<size_t>(oldIfd) + 2 + static_cast<size_t>(oldCount) * 12;
+        if (oldEnd + 4 > data.size() || oldCount == std::numeric_limits<uint16_t>::max())
+            return false;
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t newIfd = static_cast<uint32_t>(data.size());
+        const uint16_t newCount = static_cast<uint16_t>(oldCount + 1);
+        const size_t tableBytes = 2 + static_cast<size_t>(newCount) * 12 + 4;
+        data.resize(data.size() + tableBytes, 0);
+        std::vector<std::array<uint8_t, 12>> rebuilt;
+        rebuilt.reserve(newCount);
+        for (uint16_t i = 0; i < oldCount; ++i) {
+            std::array<uint8_t, 12> existing{};
+            std::memcpy(existing.data(), data.data() + oldIfd + 2 + static_cast<size_t>(i) * 12, 12);
+            rebuilt.push_back(existing);
+        }
+        std::array<uint8_t, 12> added{};
+        write16(added.data(), wanted, little);
+        write16(added.data() + 2, TIFF_TYPE_UNDEFINED, little);
+        write32(added.data() + 4, static_cast<uint32_t>(output.size()), little);
+        const uint32_t payloadOffset = static_cast<uint32_t>(data.size());
+        write32(added.data() + 8, payloadOffset, little);
+        rebuilt.push_back(added);
+        std::sort(rebuilt.begin(), rebuilt.end(), [little](const auto& a, const auto& b) {
+            return read16(a.data(), little) < read16(b.data(), little);
+        });
+        write16(data.data() + newIfd, newCount, little);
+        size_t destination = static_cast<size_t>(newIfd) + 2;
+        for (const auto& rebuiltEntry : rebuilt) {
+            std::memcpy(data.data() + destination, rebuiltEntry.data(), rebuiltEntry.size());
+            destination += rebuiltEntry.size();
+        }
+        std::memcpy(data.data() + destination, data.data() + oldEnd, 4);
+        write32(data.data() + 4, newIfd, little);
+        data.insert(data.end(), output.begin(), output.end());
+        return true;
+    }
+    if (output.size() <= 4) {
+        write32(data.data() + entry->entryOffset + 4,
+                static_cast<uint32_t>(output.size()), little);
+        std::fill(data.begin() + entry->entryOffset + 8,
+                  data.begin() + entry->entryOffset + 12, 0);
+        std::copy(output.begin(), output.end(), data.begin() + entry->entryOffset + 8);
+        return true;
+    }
+    if (data.size() & 1u) data.push_back(0);
+    const uint32_t offset = static_cast<uint32_t>(data.size());
+    data.insert(data.end(), output.begin(), output.end());
+    write32(data.data() + entry->entryOffset + 4, static_cast<uint32_t>(output.size()), little);
+    write32(data.data() + entry->entryOffset + 8, offset, little);
+    return true;
 }
 
 bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {

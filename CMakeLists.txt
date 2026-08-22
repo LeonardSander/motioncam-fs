@@ -439,10 +439,12 @@ if(BUILD_TESTING)
         tests/finalize_interpolation_test.cpp
         src/IsoOverlay.cpp
         src/VirtualFileSystemImpl.cpp
+        src/CalibrationData.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
     target_include_directories(motioncam-finalize-interpolation-test PRIVATE
+        ${bs_thread_pool_SOURCE_DIR}/include
         include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
     target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex

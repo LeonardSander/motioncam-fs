@@ -3,10 +3,13 @@
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
 #include <CalibrationData.h>
+#include <VirtualFileSystemImpl.h>
 #include <memory>
 #include <array>
 #include <map>
+#include <shared_mutex>
 #include <unordered_map>
+#include <nlohmann/json.hpp>
 
 namespace BS {
 class thread_pool;
@@ -50,15 +53,9 @@ public:
 private:
     void init();
     
-    size_t generateFrame(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async);
-
     void calculateFrameRateStats();
+    std::vector<uint8_t> transformFrame(
+        size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression);
 
 private:
     LRUCache& mCache;
@@ -70,8 +67,7 @@ private:
     std::vector<Entry> mFiles;
     RenderSettings mConfig;
     float mFps;
-    float mMedFps;
-    float mAvgFps;
+    FrameRateInfo mFrameRateInfo{};
     int mTotalFrames;
     int mDroppedFrames;
     int mDuplicatedFrames;
@@ -85,6 +81,7 @@ private:
     std::array<uint8_t, 4> mCfaPhase = {0, 1, 1, 2};
     std::unique_ptr<DNGDecoder> mDecoder;
     std::optional<CalibrationData> mCalibration;
+    nlohmann::json mSidecarMetadata;
     std::map<Timestamp, float> mNormalizedExposureOffsets;
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
@@ -93,7 +90,10 @@ private:
     std::map<Timestamp, double> mExposureTimes;
     std::map<Timestamp, double> mIsoValues;
     mutable std::mutex mMutex;
+    mutable std::mutex mPayloadHashMutex;
+    mutable std::shared_mutex mRenderMutex;
     std::unordered_map<size_t, uint64_t> mPayloadHashes;
+    std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
 };
 
 } // namespace motioncam

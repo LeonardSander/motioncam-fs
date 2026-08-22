@@ -6,6 +6,9 @@
 #include <VirtualFileSystemImpl.h>
 #include <array>
 #include <map>
+#include <nlohmann/json.hpp>
+#include <shared_mutex>
+#include <unordered_map>
 
 namespace BS {
 class thread_pool;
@@ -48,21 +51,7 @@ public:
 private:
     void init();
 
-    size_t generateFrame(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async);
-
-    size_t generateAudio(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async);
+    void applySidecarGainMapOpcodes(std::vector<uint8_t>& dng, size_t frameIndex) const;
 
 private:
     LRUCache& mCache;
@@ -72,17 +61,9 @@ private:
     const std::string mBaseName;
     size_t mTypicalDngSize;
     std::vector<Entry> mFiles;
+    std::vector<Timestamp> mSourceFrames;
+    std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::vector<uint8_t> mAudioFile;
-    /*RenderConfig mConfig;*/
-    /*int mDraftScale;
-    CFRTarget mCFRTarget;
-    std::string mCropTarget;
-    std::string mCameraModel;
-    std::string mLevels;
-    LogTransformMode mLogTransform;
-    std::string mExposureCompensation;
-    QuadBayerMode mQuadBayerOption;
-    FileRenderOptions mOptions;*/
     RenderSettings mSettings;
     float mFps;
     FrameRateInfo mFrameRateInfo;
@@ -91,7 +72,9 @@ private:
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     std::optional<CalibrationData> mCalibration;
-    std::mutex mMutex;
+    nlohmann::json mSidecarMetadata;
+    mutable std::mutex mMutex;
+    mutable std::shared_mutex mRenderMutex;
 };
 
 } // namespace motioncam

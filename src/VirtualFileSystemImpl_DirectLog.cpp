@@ -83,11 +83,9 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mIsHLG(false) {
     
     // Load calibration JSON if it exists
-    boost::filesystem::path srcPath(mSrcPath);
-    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    const auto calibPath = vfs::sidecarPath(mSrcPath);
     if (boost::filesystem::exists(calibPath)) {
-        loadSidecarMetadata(calibPath);
-        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
             spdlog::info("Loaded calibration for DirectLog: {}", calibPath.string());
         }
@@ -111,9 +109,13 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mIsHLG = videoInfo.isHLG;
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
+        const auto& frames = mDecoder->getFrames();
+        for (size_t i = 0; i < frames.size(); ++i)
+            mFrameIndexByTimestamp[frames[i].timestamp] = i;
         
         // Calculate frame rate statistics from actual frame timestamps
         calculateFrameRateStats();
+        analyzeSidecarExposure();
         
         spdlog::info("DirectLog video loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames, format: {}, HLG: {}", 
                      mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate, mTotalFrames, mPixelFormat, mIsHLG);
@@ -135,14 +137,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
     
     mFiles.clear();
 
-#ifdef _WIN32
-    Entry desktopIni;
-    desktopIni.type = EntryType::FILE_ENTRY;
-    desktopIni.pathParts = {};
-    desktopIni.name = "desktop.ini";
-    desktopIni.size = vfs::DESKTOP_INI.size();
-    mFiles.push_back(desktopIni);
-#endif
+    vfs::appendDesktopIni(mFiles);
 
     const auto& frames = mDecoder->getFrames();
     if (frames.empty()) {
@@ -159,50 +154,14 @@ void VirtualFileSystemImpl_DirectLog::init() {
     if (!frames.empty()) {
         std::vector<uint16_t> sampleRgbData;
         if (mDecoder->extractFrame(0, sampleRgbData)) {
-            auto sampleGainMaps = loadSidecarGainMaps(0, "gainMaps");
-            auto sampleDeferredGainMaps = loadSidecarGainMaps(0, "deferredGainMaps");
             std::vector<GainMap> sampleOpcodeList2, sampleOpcodeList3;
-            auto classifySampleMaps = [&](const std::vector<GainMap>& maps) {
-                if (maps.empty()) return;
-                if (maps.size() == 4 || (maps.size() == 1 && maps.front().channels == 4))
-                    sampleOpcodeList2.insert(sampleOpcodeList2.end(), maps.begin(), maps.end());
-                else if (maps.size() == 1 && maps.front().channels == 1)
-                    sampleOpcodeList3.push_back(maps.front());
-                else
-                    throw std::runtime_error("Unsupported DirectLog gain-map layout");
-            };
-            if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
-                classifySampleMaps(sampleGainMaps);
-                classifySampleMaps(sampleDeferredGainMaps);
-            } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
-                if (sampleDeferredGainMaps.size() == 1 &&
-                    sampleDeferredGainMaps.front().channels == 1)
-                    sampleOpcodeList3 = sampleDeferredGainMaps;
-                else if (sampleGainMaps.size() == 1 &&
-                         sampleGainMaps.front().channels == 1)
-                    sampleOpcodeList3 = sampleGainMaps;
-            }
-            double sampleIso = 0.0, sampleShutter = 0.0, sampleBaseline = 0.0;
-            std::optional<std::array<float, 3>> sampleNeutral;
-            if (mSidecarMetadata.contains("dynamic") &&
-                mSidecarMetadata["dynamic"].contains("frames") &&
-                !mSidecarMetadata["dynamic"]["frames"].empty()) {
-                const auto& metadata = mSidecarMetadata["dynamic"]["frames"][0];
-                sampleIso = metadata.value("iso", 0.0);
-                sampleShutter = metadata.value("shutterSpeedSeconds", 0.0);
-                sampleBaseline = metadata.value("baselineExposure", 0.0);
-                if (metadata.contains("asShotNeutral") &&
-                    metadata["asShotNeutral"].is_array() &&
-                    metadata["asShotNeutral"].size() >= 3)
-                    sampleNeutral = std::array<float, 3>{
-                        metadata["asShotNeutral"][0].get<float>(),
-                        metadata["asShotNeutral"][1].get<float>(),
-                        metadata["asShotNeutral"][2].get<float>()};
-            }
+            prepareSidecarGainMapOpcodes(0, sampleOpcodeList2, sampleOpcodeList3);
+            const auto sampleMetadata = frameMetadata(0);
             std::vector<uint8_t> sampleDngData;
             if (convertRGBToDNG(sampleRgbData, sampleDngData, 0, frames[0].timestamp,
-                                false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleIso,
-                                sampleShutter, sampleBaseline, sampleNeutral,
+                                false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleMetadata.iso,
+                                sampleMetadata.shutterSpeed, sampleMetadata.baselineExposure,
+                                sampleMetadata.asShotNeutral,
                                 sampleOpcodeList2, sampleOpcodeList3)) {
                 if (!DNGDecoder::setTimingMetadata(sampleDngData, mFps, 0))
                     throw std::runtime_error("Could not size DirectLog DNG timing metadata");
@@ -218,10 +177,10 @@ void VirtualFileSystemImpl_DirectLog::init() {
         }
     }
     
-    // Generate file entries with CFR conversion if enabled
-    int lastPts = 0;
-    mDroppedFrames = 0;
-    mDuplicatedFrames = 0;
+    std::vector<Entry> sourceEntries;
+    std::vector<Timestamp> timestamps;
+    sourceEntries.reserve(frames.size());
+    timestamps.reserve(frames.size());
     auto restoreFrameFlags = [&](Entry& entry, size_t sourceIndex) {
         if (!mSidecarMetadata.contains("dynamic") ||
             !mSidecarMetadata["dynamic"].contains("frames") ||
@@ -231,59 +190,19 @@ void VirtualFileSystemImpl_DirectLog::init() {
         entry.syntheticFrame = metadata.value("syntheticFrame", false);
     };
     
-    if (applyCFRConversion) {
-        // CFR conversion: duplicate/drop frames to match target framerate
-        Timestamp previousTimestamp = frames.front().timestamp;
-        size_t previousSourceIndex = 0;
-        for (size_t i = 0; i < frames.size(); ++i) {
-            int pts = vfs::getFrameNumberFromTimestamp(frames[i].timestamp, frames[0].timestamp, mFps);
-            
-            if (pts < lastPts) {
-                mDroppedFrames += 1;
-                continue;
-            }
-
-            // Hold the preceding frame through gaps, then switch to the
-            // current frame at its mapped output position.
-            while (lastPts < pts) {
-                Entry dngEntry;
-                dngEntry.type = EntryType::FILE_ENTRY;
-                dngEntry.pathParts = {};
-                dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
-                dngEntry.size = mTypicalDngSize;
-                dngEntry.userData = previousTimestamp;
-                restoreFrameFlags(dngEntry, previousSourceIndex);
-                dngEntry.duplicateFrame = true;
-                mFiles.push_back(dngEntry);
-                ++lastPts;
-                ++mDuplicatedFrames;
-            }
-            Entry dngEntry;
-            dngEntry.type = EntryType::FILE_ENTRY;
-            dngEntry.pathParts = {};
-            dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
-            dngEntry.size = mTypicalDngSize;
-            dngEntry.userData = frames[i].timestamp;
-            restoreFrameFlags(dngEntry, i);
-            mFiles.push_back(dngEntry);
-            ++lastPts;
-            previousTimestamp = frames[i].timestamp;
-            previousSourceIndex = i;
-        }
-    } else {
-        // No CFR conversion: use frames as-is
-        for (size_t i = 0; i < frames.size(); ++i) {
-            Entry dngEntry;
-            dngEntry.type = EntryType::FILE_ENTRY;
-            dngEntry.pathParts = {};
-            dngEntry.name = vfs::constructFrameFilename(mBaseName + "-", lastPts, 6, "dng");
-            dngEntry.size = mTypicalDngSize;
-            dngEntry.userData = frames[i].timestamp;
-            restoreFrameFlags(dngEntry, i);
-            mFiles.push_back(dngEntry);
-            ++lastPts;
-        }
+    for (size_t i = 0; i < frames.size(); ++i) {
+        Entry entry;
+        entry.type = EntryType::FILE_ENTRY;
+        entry.size = mTypicalDngSize;
+        entry.userData = frames[i].timestamp;
+        restoreFrameFlags(entry, i);
+        sourceEntries.push_back(entry);
+        timestamps.push_back(frames[i].timestamp);
     }
+    auto mapped = vfs::mapFramesToCfr(sourceEntries, timestamps, mBaseName + "-", mFps,
+        applyCFRConversion, mDroppedFrames, mDuplicatedFrames);
+    mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
+                  std::make_move_iterator(mapped.end()));
     
     spdlog::info("DirectLog generated {} DNG entries (dropped: {}, duplicated: {})", 
                  mFiles.size(), mDroppedFrames, mDuplicatedFrames);
@@ -292,30 +211,13 @@ void VirtualFileSystemImpl_DirectLog::init() {
 std::vector<Entry> VirtualFileSystemImpl_DirectLog::listFiles(const std::string& filter) const {
     std::lock_guard<std::mutex> lock(mMutex);
     
-    if (filter.empty()) {
-        return mFiles;
-    }
-    
-    std::vector<Entry> filteredFiles;
-    for (const auto& file : mFiles) {
-        if (file.name.find(filter) != std::string::npos) {
-            filteredFiles.push_back(file);
-        }
-    }
-    
-    return filteredFiles;
+    return vfs::filterEntries(mFiles, filter);
 }
 
 std::optional<Entry> VirtualFileSystemImpl_DirectLog::findEntry(const std::string& fullPath) const {
     std::lock_guard<std::mutex> lock(mMutex);
     
-    for (const auto& entry : mFiles) {
-        if (entry.getFullPath() == boost::filesystem::path(fullPath).relative_path()) {
-            return entry;
-        }
-    }
-    
-    return std::nullopt;
+    return vfs::findEntry(mFiles, fullPath);
 }
 
 int VirtualFileSystemImpl_DirectLog::readFile(
@@ -326,134 +228,95 @@ int VirtualFileSystemImpl_DirectLog::readFile(
     std::function<void(size_t, int)> result,
     bool async) {
     
-    if (entry.name == "desktop.ini") {
-#ifdef _WIN32
-        size_t copyLen = std::min(len, vfs::DESKTOP_INI.size() - pos);
-        if (copyLen > 0) {
-            memcpy(dst, vfs::DESKTOP_INI.data() + pos, copyLen);
-        }
-        result(copyLen, 0);
-        return 0;
-#endif
-    }
-    
-    if (boost::ends_with(entry.name, ".dng")) {
-        return generateFrame(entry, pos, len, dst, result, async);
-    }
-    
-    result(0, -1);
-    return -1;
+    return vfs::readMountedEntry(entry, pos, len, dst, result, async,
+        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); });
 }
 
-size_t VirtualFileSystemImpl_DirectLog::generateFrame(
-    const Entry& entry,
-    const size_t pos,
-    const size_t len,
-    void* dst,
-    std::function<void(size_t, int)> result,
-    bool async) {
-
-    auto renderTask = [this, entry, pos, len, dst, result]() -> size_t {
-        try {
-            auto data = materializeFile(entry, false);
-            const size_t count = data && pos < data->size()
-                ? std::min(len, data->size() - pos) : 0;
-            if (count)
-                std::memcpy(dst, data->data() + pos, count);
-            result(count, 0);
-            return count;
-        } catch (const std::exception& e) {
-            spdlog::error("Error generating DirectLog frame: {}", e.what());
-            result(0, -1);
-            return 0;
+void VirtualFileSystemImpl_DirectLog::analyzeSidecarExposure() {
+    mNormalizedExposureOffsets.clear();
+    mSmoothedExposureOffsets.clear();
+    mSmoothedAsShotNeutrals.clear();
+    if (!mSidecarMetadata.contains("dynamic") ||
+        !mSidecarMetadata["dynamic"].contains("frames")) return;
+    const auto& metadataFrames = mSidecarMetadata["dynamic"]["frames"];
+    const auto& sourceFrames = mDecoder->getFrames();
+    std::vector<vfs::ExposureSample> samples;
+    samples.reserve(std::min(metadataFrames.size(), sourceFrames.size()));
+    for (size_t i = 0; i < metadataFrames.size() && i < sourceFrames.size(); ++i) {
+        const auto& metadata = metadataFrames[i];
+        vfs::ExposureSample sample;
+        sample.timestamp = sourceFrames[i].timestamp;
+        sample.iso = metadata.value("iso", 0.0);
+        sample.exposureSeconds = metadata.value("shutterSpeedSeconds", 0.0);
+        sample.baselineExposure = metadata.value("baselineExposure", 0.0);
+        if (metadata.contains("asShotNeutral") && metadata["asShotNeutral"].is_array() &&
+            metadata["asShotNeutral"].size() >= 3) {
+            for (size_t c = 0; c < 3; ++c)
+                sample.asShotNeutral[c] = metadata["asShotNeutral"][c].get<float>();
         }
-    };
-    auto renderFuture = mProcessingThreadPool.submit_task(renderTask);
-    return async ? 0 : renderFuture.get();
+        samples.push_back(sample);
+    }
+    const auto analysis = vfs::analyzeExposureMetadata(
+        samples, mFrameRateInfo.medianFrameRate);
+    mNormalizedExposureOffsets = analysis.normalizedBaseline;
+    mSmoothedExposureOffsets = analysis.smoothedBaseline;
+    mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
 }
 
-void VirtualFileSystemImpl_DirectLog::loadSidecarMetadata(
-        const boost::filesystem::path& path) {
-    mSidecarMetadata = nlohmann::json();
-    try {
-        std::ifstream input(path.string());
-        if (input) input >> mSidecarMetadata;
-    } catch (const std::exception& e) {
-        spdlog::warn("Could not parse DirectLog dynamic metadata from {}: {}",
-                     path.string(), e.what());
-        mSidecarMetadata = nlohmann::json();
+VirtualFileSystemImpl_DirectLog::FrameMetadata
+VirtualFileSystemImpl_DirectLog::frameMetadata(int frameNumber) const {
+    FrameMetadata result;
+    if (frameNumber < 0 || !mSidecarMetadata.contains("dynamic") ||
+        !mSidecarMetadata["dynamic"].contains("frames") ||
+        static_cast<size_t>(frameNumber) >= mSidecarMetadata["dynamic"]["frames"].size())
+        return result;
+    const auto& metadata = mSidecarMetadata["dynamic"]["frames"][frameNumber];
+    result.iso = metadata.value("iso", 0.0);
+    result.shutterSpeed = metadata.value("shutterSpeedSeconds", 0.0);
+    result.baselineExposure = metadata.value("baselineExposure", 0.0);
+    if (metadata.contains("asShotNeutral") && metadata["asShotNeutral"].is_array() &&
+        metadata["asShotNeutral"].size() >= 3) {
+        result.asShotNeutral = std::array<float, 3>{
+            metadata["asShotNeutral"][0].get<float>(),
+            metadata["asShotNeutral"][1].get<float>(),
+            metadata["asShotNeutral"][2].get<float>()};
     }
+    return result;
 }
 
 std::vector<GainMap> VirtualFileSystemImpl_DirectLog::loadSidecarGainMaps(
         int frameNumber, const char* field) const {
-    std::vector<GainMap> maps;
-    if (!mSidecarMetadata.contains("dynamic")) return maps;
-    const auto& dynamic = mSidecarMetadata["dynamic"];
-    if (!dynamic.contains("frames") || !dynamic.contains("gainMapFormats") ||
-        !dynamic.contains("gainMapPayloads") || frameNumber < 0 ||
-        static_cast<size_t>(frameNumber) >= dynamic["frames"].size()) return maps;
-    const auto& frame = dynamic["frames"][frameNumber];
-    if (!frame.contains(field) || !frame[field].is_array()) return maps;
+    return frameNumber < 0 ? std::vector<GainMap>{} :
+        vfs::loadSidecarGainMaps(mSidecarMetadata, static_cast<size_t>(frameNumber), field);
+}
 
-    for (const auto& reference : frame[field]) {
-        const size_t formatIndex = reference.at("format").get<size_t>();
-        const size_t payloadIndex = reference.at("payload").get<size_t>();
-        if (formatIndex >= dynamic["gainMapFormats"].size() ||
-            payloadIndex >= dynamic["gainMapPayloads"].size())
-            throw std::runtime_error("Invalid DirectLog gain-map reference");
-        const auto& format = dynamic["gainMapFormats"][formatIndex];
-        const auto& payload = dynamic["gainMapPayloads"][payloadIndex];
-        const size_t count = payload.at("valueCount").get<size_t>();
-        if (count > std::numeric_limits<uint32_t>::max() / sizeof(float))
-            throw std::runtime_error("DirectLog gain-map payload is too large");
-        const QByteArray compressed = QByteArray::fromBase64(
-            QByteArray::fromStdString(payload.at("values").get<std::string>()));
-        QByteArray wrapped;
-        const uint32_t byteCount = static_cast<uint32_t>(count * sizeof(float));
-        wrapped.reserve(compressed.size() + 4);
-        wrapped.append(static_cast<char>(byteCount >> 24));
-        wrapped.append(static_cast<char>(byteCount >> 16));
-        wrapped.append(static_cast<char>(byteCount >> 8));
-        wrapped.append(static_cast<char>(byteCount));
-        wrapped.append(compressed);
-        const QByteArray raw = qUncompress(wrapped);
-        if (raw.size() != static_cast<qsizetype>(byteCount))
-            throw std::runtime_error("Could not decompress DirectLog gain-map values");
-
-        GainMap map{};
-        map.top = format.at("top").get<uint32_t>();
-        map.left = format.at("left").get<uint32_t>();
-        map.bottom = format.at("bottom").get<uint32_t>();
-        map.right = format.at("right").get<uint32_t>();
-        map.coordinateWidth = format.at("coordinateWidth").get<uint32_t>();
-        map.coordinateHeight = format.at("coordinateHeight").get<uint32_t>();
-        map.plane = format.at("plane").get<uint32_t>();
-        map.planes = format.at("planes").get<uint32_t>();
-        map.rowPitch = format.at("rowPitch").get<uint32_t>();
-        map.colPitch = format.at("colPitch").get<uint32_t>();
-        map.width = format.at("width").get<uint32_t>();
-        map.height = format.at("height").get<uint32_t>();
-        map.channels = format.at("channels").get<uint32_t>();
-        map.spacingV = format.at("spacingV").get<double>();
-        map.spacingH = format.at("spacingH").get<double>();
-        map.originV = format.at("originV").get<double>();
-        map.originH = format.at("originH").get<double>();
-        if (!map.width || !map.height || !map.channels ||
-            count != static_cast<size_t>(map.width) * map.height * map.channels)
-            throw std::runtime_error("Invalid DirectLog gain-map dimensions");
-        map.data.resize(count);
-        const auto* source = reinterpret_cast<const unsigned char*>(raw.constData());
-        for (size_t index = 0; index < count; ++index) {
-            const uint32_t bits = static_cast<uint32_t>(source[index * 4]) |
-                (static_cast<uint32_t>(source[index * 4 + 1]) << 8) |
-                (static_cast<uint32_t>(source[index * 4 + 2]) << 16) |
-                (static_cast<uint32_t>(source[index * 4 + 3]) << 24);
-            std::memcpy(&map.data[index], &bits, sizeof(bits));
-        }
-        maps.push_back(std::move(map));
+void VirtualFileSystemImpl_DirectLog::prepareSidecarGainMapOpcodes(
+        int frameNumber, std::vector<GainMap>& opcodeList2,
+        std::vector<GainMap>& opcodeList3) const {
+    opcodeList2.clear();
+    opcodeList3.clear();
+    const auto gainMaps = loadSidecarGainMaps(frameNumber, "gainMaps");
+    const auto deferredGainMaps = loadSidecarGainMaps(frameNumber, "deferredGainMaps");
+    auto classify = [&](const std::vector<GainMap>& maps) {
+        if (maps.empty()) return;
+        if (maps.size() == 4 || (maps.size() == 1 && maps.front().channels == 4))
+            opcodeList2.insert(opcodeList2.end(), maps.begin(), maps.end());
+        else if (maps.size() == 1 && maps.front().channels == 1)
+            opcodeList3.push_back(maps.front());
+        else
+            throw std::runtime_error("Unsupported DirectLog gain-map layout");
+    };
+    if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
+        classify(gainMaps);
+        classify(deferredGainMaps);
+    } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
+        if (deferredGainMaps.size() == 1 && deferredGainMaps.front().channels == 1)
+            opcodeList3 = deferredGainMaps;
+        else if (!deferredGainMaps.empty())
+            throw std::runtime_error("Unsupported DirectLog deferred gain-map layout");
+        else if (gainMaps.size() == 1 && gainMaps.front().channels == 1)
+            opcodeList3 = gainMaps;
     }
-    return maps;
 }
 
 void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
@@ -891,20 +754,11 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
         
         // Set camera/software metadata
-        if (mConfig.cameraModel == "Blackmagic") {
-            dng.SetUniqueCameraModel("Blackmagic Pocket Cinema Camera 4K");
-        } else if (mConfig.cameraModel == "Panasonic") {
-            dng.SetUniqueCameraModel("Panasonic Varicam RAW");
-        } else if (mConfig.cameraModel == "Fujifilm" ||
-                   mConfig.cameraModel == "Fujifilm X-T5") {
-            dng.SetUniqueCameraModel("Fujifilm X-T5");
-            dng.SetMake("Fujifilm");
-            dng.SetCameraModelName("X-T5");
-        } else if (!mConfig.cameraModel.empty()) {
-            dng.SetUniqueCameraModel(mConfig.cameraModel);
-        } else {
-            dng.SetUniqueCameraModel("DirectLog Video");
-        }
+        const auto identity = vfs::resolveCameraIdentity(
+            mConfig.cameraModel, "DirectLog Video");
+        dng.SetUniqueCameraModel(identity.uniqueModel);
+        if (!identity.make.empty()) dng.SetMake(identity.make);
+        if (!identity.model.empty()) dng.SetCameraModelName(identity.model);
         dng.SetSoftware("MotionCam DirectLog Decoder");
         if (iso > 0.0) dng.SetIso(static_cast<unsigned int>(std::lround(iso)));
         if (shutterSpeed > 0.0) dng.SetExposureTime(shutterSpeed);
@@ -932,43 +786,18 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         }
 
         // Set baseline exposure with the optional gain offset
-        float exposureOffset = (mConfig.cameraModel == "Panasonic" ? -2.0f : 0.0f);
-        if (!mConfig.exposureCompensation.empty()) {
-            try {
-                exposureOffset += std::stof(mConfig.exposureCompensation);
-            } catch (const std::exception&) {
-                // If parsing fails, keep the original exposureOffset value
-            }
-        }
+        const float exposureOffset = vfs::configuredExposureOffset(mConfig);
         dng.SetBaselineExposure(static_cast<float>(baselineExposure) +
                                 exposureOffset + gainMapExposureOffset);
         
         // Set white/black levels and linearization table
         if (applyLogCurve) {
-            // Create linearization table to reverse the log curve
-            const int tableSize = static_cast<int>(dstWhiteLevel) + 1;
-            std::vector<unsigned short> linearizationTable(tableSize);
-            
-            for (int i = 0; i < tableSize; i++) {
-                float normalizedLogValue = static_cast<float>(i) / dstWhiteLevel;
-                
-                float linearValue;
-                if (i == 0) {
-                    linearValue = 0.0f;  // Exact identity: stored 0 → linear 0
-                } else if (i == tableSize - 1) {
-                    linearValue = 1.0f;  // Force maximum table entry → linear 1
-                } else {
-                    // Inverse of: logValue = log2(1 + k*x) / log2(1 + k)
-                    // x = (2^(logValue * log2(1 + k)) - 1) / k
-                    linearValue = (std::pow(2.0f, normalizedLogValue * std::log2(61.0f)) - 1.0f) / 60.0f;
-                    linearValue = std::clamp(linearValue, 0.0f, 1.0f);
-                }
-                
-                // Scale to 16-bit range
-                linearizationTable[i] = static_cast<unsigned short>(linearValue * 65535.0f);
-            }
-            
-            dng.SetLinearizationTable(tableSize, linearizationTable.data());
+            const auto linearizationTable = utils::makeLogLinearizationTable(
+                static_cast<unsigned int>(dstWhiteLevel));
+            if (linearizationTable.empty())
+                throw std::runtime_error("Invalid DirectLog log white level");
+            dng.SetLinearizationTable(static_cast<unsigned int>(linearizationTable.size()),
+                                      linearizationTable.data());
             
             // Set black level to 0 and white level to 65534 (as per MCRAW implementation)
             unsigned short blackLevel[4] = {0, 0, 0, 0};
@@ -1099,119 +928,75 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeFile(
     const Entry& entry, bool jpegCompression) {
-    if (!jpegCompression) {
-        if (auto cached = mCache.get(entry)) {
-            mCache.put(entry, cached);
-            return cached;
-        }
-    }
-
-    try {
+    std::shared_lock renderLock(mRenderMutex);
+    return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         const auto timestamp = std::get<Timestamp>(entry.userData);
         const auto& frames = mDecoder->getFrames();
-        const auto it = std::find_if(frames.begin(), frames.end(), [timestamp](const auto& frame) {
-            return frame.timestamp == timestamp;
-        });
-        if (it == frames.end())
+        const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
+        if (frameIt == mFrameIndexByTimestamp.end())
             throw std::runtime_error("DirectLog source frame not found");
-        const int frameNumber = static_cast<int>(std::distance(frames.begin(), it));
+        const int frameNumber = static_cast<int>(frameIt->second);
 
         std::vector<uint16_t> rgbData;
         if (!mDecoder->extractFrame(frameNumber, rgbData))
             throw std::runtime_error("Could not decode DirectLog frame");
-        const auto sidecarGainMaps = loadSidecarGainMaps(frameNumber, "gainMaps");
-        const auto sidecarDeferredGainMaps = loadSidecarGainMaps(frameNumber, "deferredGainMaps");
         float gainMapExposureOffset = 0.0f;
         std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
         applySidecarGainMaps(rgbData, frameNumber, gainMapExposureOffset, gainMapNeutralScale);
-        double iso = 0.0, shutterSpeed = 0.0, baselineExposure = 0.0;
-        std::optional<std::array<float, 3>> asShotNeutral;
-        if (mSidecarMetadata.contains("dynamic") &&
-            mSidecarMetadata["dynamic"].contains("frames") &&
-            static_cast<size_t>(frameNumber) < mSidecarMetadata["dynamic"]["frames"].size()) {
-            const auto& metadata = mSidecarMetadata["dynamic"]["frames"][frameNumber];
-            iso = metadata.value("iso", 0.0);
-            shutterSpeed = metadata.value("shutterSpeedSeconds", 0.0);
-            baselineExposure = metadata.value("baselineExposure", 0.0);
-            if (metadata.contains("asShotNeutral") &&
-                metadata["asShotNeutral"].is_array() &&
-                metadata["asShotNeutral"].size() >= 3) {
-                asShotNeutral = std::array<float, 3>{
-                    metadata["asShotNeutral"][0].get<float>(),
-                    metadata["asShotNeutral"][1].get<float>(),
-                    metadata["asShotNeutral"][2].get<float>()};
-            }
+        auto metadata = frameMetadata(frameNumber);
+        const bool normalizeExposure = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
+        const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
+        const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
+        const bool optimizeGainMaps = mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
+        if (normalizeExposure || smoothExposure || optimizeGainMaps) {
+            const auto& offsets = smoothExposure
+                ? mSmoothedExposureOffsets : mNormalizedExposureOffsets;
+            if ((normalizeExposure || smoothExposure) && offsets.count(timestamp))
+                metadata.baselineExposure = offsets.at(timestamp);
+            // With optimization alone, assigning the parsed source value is
+            // intentional: convertRGBToDNG then adds the gain-map compensation.
         }
-        const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
-        const int outputFrameNumber = std::stoi(frameDigits);
+        if (smoothWhiteBalance && mSmoothedAsShotNeutrals.count(timestamp))
+            metadata.asShotNeutral = mSmoothedAsShotNeutrals.at(timestamp);
+        const int outputFrameNumber = vfs::outputFrameNumber(entry);
         std::vector<GainMap> opcodeList2Maps;
         std::vector<GainMap> opcodeList3Maps;
-        auto classifyGainMaps = [&](const std::vector<GainMap>& maps) {
-            if (maps.empty()) return;
-            const bool cfaLensSet = maps.size() == 4 ||
-                (maps.size() == 1 && maps.front().channels == 4);
-            const bool deferredLuminance = maps.size() == 1 &&
-                maps.front().channels == 1;
-            if (cfaLensSet)
-                opcodeList2Maps.insert(opcodeList2Maps.end(), maps.begin(), maps.end());
-            else if (deferredLuminance)
-                opcodeList3Maps.push_back(maps.front());
-            else
-                throw std::runtime_error("Unsupported DirectLog gain-map layout");
-        };
-        if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
-            classifyGainMaps(sidecarGainMaps);
-            classifyGainMaps(sidecarDeferredGainMaps);
-        } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
-            if (sidecarDeferredGainMaps.size() == 1 &&
-                sidecarDeferredGainMaps.front().channels == 1)
-                opcodeList3Maps = sidecarDeferredGainMaps;
-            else if (!sidecarDeferredGainMaps.empty())
-                throw std::runtime_error("Unsupported DirectLog deferred gain-map layout");
-            else if (sidecarGainMaps.size() == 1 && sidecarGainMaps.front().channels == 1)
-                opcodeList3Maps = sidecarGainMaps;
-        }
+        prepareSidecarGainMapOpcodes(frameNumber, opcodeList2Maps, opcodeList3Maps);
         std::vector<uint8_t> dngData;
         if (!convertRGBToDNG(rgbData, dngData, outputFrameNumber, timestamp, jpegCompression,
-                             gainMapExposureOffset, gainMapNeutralScale, iso, shutterSpeed,
-                             baselineExposure, asShotNeutral,
+                             gainMapExposureOffset, gainMapNeutralScale, metadata.iso,
+                             metadata.shutterSpeed, metadata.baselineExposure,
+                             metadata.asShotNeutral,
                              opcodeList2Maps, opcodeList3Maps))
             throw std::runtime_error("Could not generate DirectLog DNG");
         const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
-        const Timestamp outputTimestamp = converted
-            ? static_cast<Timestamp>(std::llround(outputFrameNumber * 1e9 / mFps))
-            : timestamp - frames.front().timestamp;
+        const Timestamp outputTimestamp = vfs::outputTimestamp(
+            entry, timestamp, frames.front().timestamp, mFps, converted);
         if (!DNGDecoder::setTimingMetadata(dngData, mFps, outputTimestamp))
             throw std::runtime_error("Could not write DirectLog DNG timing metadata");
         auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
-        if (!jpegCompression)
-            mCache.put(entry, output);
         return output;
-    } catch (...) {
-        if (!jpegCompression)
-            mCache.markLoadFailed(entry);
-        throw;
-    }
+    });
 }
 
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
+    std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);
 
     mCache.clear();
     mConfig = config;
     
     // Reload calibration JSON if it exists
-    boost::filesystem::path srcPath(mSrcPath);
-    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    const auto calibPath = vfs::sidecarPath(mSrcPath);
     mCalibration.reset();
     mSidecarMetadata = nlohmann::json();
     if (boost::filesystem::exists(calibPath)) {
-        loadSidecarMetadata(calibPath);
-        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
             spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
         }
     }
+    analyzeSidecarExposure();
     mDecoder->setFullRangeOverride(std::nullopt);
     if (mCalibration && mCalibration->hasDataLevels) {
         if (mCalibration->dataLevels == "Full")

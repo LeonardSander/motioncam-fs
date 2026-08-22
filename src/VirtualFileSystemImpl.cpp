@@ -1,6 +1,8 @@
 #include "VirtualFileSystemImpl.h"
 #include "DataLevels.h"
 #include "DNGDecoder.h"
+#include "LRUCache.h"
+#include "CalibrationData.h"
 #include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
@@ -12,10 +14,343 @@
 #include <QProcess>
 #include <QTemporaryDir>
 #include <boost/filesystem.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <spdlog/spdlog.h>
+#include <QByteArray>
+#include <nlohmann/json.hpp>
+#include <cstring>
+#include <BS_thread_pool.hpp>
 
 namespace motioncam {
 namespace vfs {
+
+namespace {
+std::vector<double> temporalSmooth(const std::vector<double>& values, int radius) {
+    std::vector<double> stable(values.size()), window;
+    window.reserve(static_cast<size_t>(radius * 2 + 1));
+    for (size_t i = 0; i < values.size(); ++i) {
+        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
+        const size_t end = std::min(values.size(), i + static_cast<size_t>(radius) + 1);
+        window.assign(values.begin() + begin, values.begin() + end);
+        const auto middle = window.begin() + window.size() / 2;
+        std::nth_element(window.begin(), middle, window.end());
+        stable[i] = *middle;
+    }
+    std::vector<double> result(values.size());
+    const double sigma = std::max(1.0, radius / 2.0);
+    for (size_t i = 0; i < stable.size(); ++i) {
+        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
+        const size_t end = std::min(stable.size(), i + static_cast<size_t>(radius) + 1);
+        double sum = 0.0, weightSum = 0.0;
+        for (size_t j = begin; j < end; ++j) {
+            const double distance = static_cast<double>(j) - static_cast<double>(i);
+            const double weight = std::exp(-0.5 * distance * distance / (sigma * sigma));
+            sum += stable[j] * weight;
+            weightSum += weight;
+        }
+        result[i] = sum / weightSum;
+    }
+    return result;
+}
+} // namespace
+
+ExposureAnalysis analyzeExposureMetadata(
+        const std::vector<ExposureSample>& samples, float frameRate) {
+    ExposureAnalysis result;
+    if (samples.empty()) return result;
+    std::vector<double> effective;
+    std::array<std::vector<double>, 3> logNeutrals;
+    effective.reserve(samples.size());
+    double minimum = std::numeric_limits<double>::max();
+    for (const auto& sample : samples) {
+        const double camera = std::max(1e-12, sample.iso * sample.exposureSeconds);
+        const double value = std::log2(camera) + sample.baselineExposure;
+        effective.push_back(value);
+        minimum = std::min(minimum, value);
+        for (size_t c = 0; c < 3; ++c)
+            logNeutrals[c].push_back(std::log(std::max(1e-6f, sample.asShotNeutral[c])));
+    }
+    const int radius = std::max(1, static_cast<int>(std::lround(
+        2.0 * std::max(1.0f, frameRate))));
+    const auto smoothExposure = temporalSmooth(effective, radius);
+    std::array<std::vector<double>, 3> smoothNeutral;
+    for (size_t c = 0; c < 3; ++c) smoothNeutral[c] = temporalSmooth(logNeutrals[c], radius);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        const double camera = std::log2(std::max(
+            1e-12, samples[i].iso * samples[i].exposureSeconds));
+        result.normalizedBaseline[samples[i].timestamp] = static_cast<float>(minimum - camera);
+        result.smoothedBaseline[samples[i].timestamp] = static_cast<float>(smoothExposure[i] - camera);
+        const double green = smoothNeutral[1][i];
+        auto& neutral = result.smoothedNeutral[samples[i].timestamp];
+        for (size_t c = 0; c < 3; ++c)
+            neutral[c] = static_cast<float>(std::exp(smoothNeutral[c][i] - green));
+    }
+    return result;
+}
+
+std::vector<Entry> mapFramesToCfr(
+        const std::vector<Entry>& sourceEntries, const std::vector<Timestamp>& timestamps,
+        const std::string& baseName, float frameRate, bool convert,
+        int& droppedFrames, int& duplicatedFrames) {
+    if (sourceEntries.size() != timestamps.size())
+        throw std::invalid_argument("CFR source entries and timestamps differ in size");
+    droppedFrames = duplicatedFrames = 0;
+    std::vector<Entry> output;
+    output.reserve(sourceEntries.size() * (convert ? 2 : 1));
+    int nextOutput = 0;
+    if (convert && !sourceEntries.empty()) {
+        size_t previousSource = 0;
+        for (size_t i = 0; i < sourceEntries.size(); ++i) {
+            const int pts = getFrameNumberFromTimestamp(timestamps[i], timestamps.front(), frameRate);
+            if (pts < nextOutput) { ++droppedFrames; continue; }
+            while (nextOutput < pts) {
+                Entry held = sourceEntries[previousSource];
+                held.duplicateFrame = true;
+                held.name = constructFrameFilename(baseName, nextOutput++, 6, "dng");
+                output.push_back(std::move(held));
+                ++duplicatedFrames;
+            }
+            Entry current = sourceEntries[i];
+            current.name = constructFrameFilename(baseName, nextOutput++, 6, "dng");
+            output.push_back(std::move(current));
+            previousSource = i;
+        }
+    } else {
+        for (const auto& source : sourceEntries) {
+            Entry entry = source;
+            entry.name = constructFrameFilename(baseName, nextOutput++, 6, "dng");
+            output.push_back(std::move(entry));
+        }
+    }
+    return output;
+}
+
+std::vector<Entry> filterEntries(const std::vector<Entry>& entries, const std::string& filter) {
+    if (filter.empty()) return entries;
+    std::vector<Entry> filtered;
+    std::copy_if(entries.begin(), entries.end(), std::back_inserter(filtered),
+        [&](const Entry& entry) { return entry.name.find(filter) != std::string::npos; });
+    return filtered;
+}
+
+std::optional<Entry> findEntry(const std::vector<Entry>& entries, const std::string& fullPath) {
+    const auto relative = boost::filesystem::path(fullPath).relative_path();
+    const auto found = std::find_if(entries.begin(), entries.end(),
+        [&](const Entry& entry) { return entry.getFullPath() == relative; });
+    return found == entries.end() ? std::nullopt : std::optional<Entry>(*found);
+}
+
+int outputFrameNumber(const Entry& entry) {
+    const auto extension = entry.name.rfind('.');
+    if (extension == std::string::npos || extension < 6)
+        throw std::invalid_argument("Frame entry has no six-digit sequence number: " + entry.name);
+    return std::stoi(entry.name.substr(extension - 6, 6));
+}
+
+Timestamp outputTimestamp(
+        const Entry& entry, Timestamp sourceTimestamp, Timestamp firstSourceTimestamp,
+        float frameRate, bool converted) {
+    return converted
+        ? static_cast<Timestamp>(std::llround(outputFrameNumber(entry) * 1e9 / frameRate))
+        : sourceTimestamp - firstSourceTimestamp;
+}
+
+float configuredExposureOffset(const RenderSettings& settings) {
+    float result = settings.cameraModel == "Panasonic" ? -2.0f : 0.0f;
+    if (!settings.exposureCompensation.empty()) {
+        try { result += std::stof(settings.exposureCompensation); }
+        catch (const std::exception&) {}
+    }
+    return result;
+}
+
+CameraIdentity resolveCameraIdentity(
+        const std::string& configuredModel, const std::string& fallbackModel) {
+    if (configuredModel == "Blackmagic")
+        return {"Blackmagic Pocket Cinema Camera 4K", {}, {}};
+    if (configuredModel == "Panasonic")
+        return {"Panasonic Varicam RAW", {}, {}};
+    if (configuredModel == "Fujifilm" || configuredModel == "Fujifilm X-T5")
+        return {"Fujifilm X-T5", "Fujifilm", "X-T5"};
+    return {configuredModel.empty() ? fallbackModel : configuredModel, {}, {}};
+}
+
+void appendDesktopIni(std::vector<Entry>& entries) {
+#ifdef _WIN32
+    Entry entry;
+    entry.type = EntryType::FILE_ENTRY;
+    entry.name = "desktop.ini";
+    entry.size = DESKTOP_INI.size();
+    entries.push_back(std::move(entry));
+#else
+    (void) entries;
+#endif
+}
+
+std::optional<int> readDesktopIni(
+        const Entry& entry, size_t pos, size_t len, void* dst,
+        const std::function<void(size_t, int)>& result) {
+    if (entry.name != "desktop.ini") return std::nullopt;
+#ifdef _WIN32
+    const size_t count = pos < DESKTOP_INI.size()
+        ? std::min(len, DESKTOP_INI.size() - pos) : 0;
+    if (count) std::memcpy(dst, DESKTOP_INI.data() + pos, count);
+    result(count, 0);
+    return 0;
+#else
+    result(0, -1);
+    return -1;
+#endif
+}
+
+std::vector<GainMap> loadSidecarGainMaps(
+        const nlohmann::json& sidecar, size_t frameNumber, const char* field) {
+    std::vector<GainMap> maps;
+    if (!sidecar.contains("dynamic")) return maps;
+    const auto& dynamic = sidecar["dynamic"];
+    if (!dynamic.contains("frames") || !dynamic.contains("gainMapFormats") ||
+        !dynamic.contains("gainMapPayloads") || frameNumber >= dynamic["frames"].size())
+        return maps;
+    const auto& frame = dynamic["frames"][frameNumber];
+    if (!frame.contains(field) || !frame[field].is_array()) return maps;
+    for (const auto& reference : frame[field]) {
+        const size_t formatIndex = reference.at("format").get<size_t>();
+        const size_t payloadIndex = reference.at("payload").get<size_t>();
+        if (formatIndex >= dynamic["gainMapFormats"].size() ||
+            payloadIndex >= dynamic["gainMapPayloads"].size())
+            throw std::runtime_error("Invalid gain-map sidecar reference");
+        const auto& format = dynamic["gainMapFormats"][formatIndex];
+        const auto& payload = dynamic["gainMapPayloads"][payloadIndex];
+        const size_t count = payload.at("valueCount").get<size_t>();
+        if (count > std::numeric_limits<uint32_t>::max() / sizeof(float))
+            throw std::runtime_error("Gain-map sidecar payload is too large");
+        const QByteArray compressed = QByteArray::fromBase64(
+            QByteArray::fromStdString(payload.at("values").get<std::string>()));
+        QByteArray wrapped;
+        const uint32_t byteCount = static_cast<uint32_t>(count * sizeof(float));
+        wrapped.reserve(compressed.size() + 4);
+        wrapped.append(static_cast<char>(byteCount >> 24));
+        wrapped.append(static_cast<char>(byteCount >> 16));
+        wrapped.append(static_cast<char>(byteCount >> 8));
+        wrapped.append(static_cast<char>(byteCount));
+        wrapped.append(compressed);
+        const QByteArray raw = qUncompress(wrapped);
+        if (raw.size() != static_cast<qsizetype>(byteCount))
+            throw std::runtime_error("Could not decompress gain-map sidecar values");
+        GainMap map{};
+        map.top = format.at("top").get<uint32_t>();
+        map.left = format.at("left").get<uint32_t>();
+        map.bottom = format.at("bottom").get<uint32_t>();
+        map.right = format.at("right").get<uint32_t>();
+        map.coordinateWidth = format.value("coordinateWidth", map.right);
+        map.coordinateHeight = format.value("coordinateHeight", map.bottom);
+        map.plane = format.at("plane").get<uint32_t>();
+        map.planes = format.at("planes").get<uint32_t>();
+        map.rowPitch = format.at("rowPitch").get<uint32_t>();
+        map.colPitch = format.at("colPitch").get<uint32_t>();
+        map.width = format.at("width").get<uint32_t>();
+        map.height = format.at("height").get<uint32_t>();
+        map.channels = format.at("channels").get<uint32_t>();
+        map.spacingV = format.at("spacingV").get<double>();
+        map.spacingH = format.at("spacingH").get<double>();
+        map.originV = format.at("originV").get<double>();
+        map.originH = format.at("originH").get<double>();
+        if (!map.width || !map.height || !map.channels || !map.rowPitch || !map.colPitch ||
+            map.top >= map.bottom || map.left >= map.right ||
+            count != static_cast<size_t>(map.width) * map.height * map.channels)
+            throw std::runtime_error("Invalid gain-map sidecar geometry");
+        map.data.resize(count);
+        const auto* source = reinterpret_cast<const unsigned char*>(raw.constData());
+        for (size_t index = 0; index < count; ++index) {
+            const uint32_t bits = static_cast<uint32_t>(source[index * 4]) |
+                (static_cast<uint32_t>(source[index * 4 + 1]) << 8) |
+                (static_cast<uint32_t>(source[index * 4 + 2]) << 16) |
+                (static_cast<uint32_t>(source[index * 4 + 3]) << 24);
+            std::memcpy(&map.data[index], &bits, sizeof(bits));
+        }
+        maps.push_back(std::move(map));
+    }
+    return maps;
+}
+
+nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
+    if (!boost::filesystem::exists(path)) return {};
+    try {
+        std::ifstream input(path.string());
+        if (!input) throw std::runtime_error("could not open file");
+        nlohmann::json result;
+        input >> result;
+        return result;
+    } catch (const std::exception& e) {
+        spdlog::warn("Could not parse sidecar metadata from {}: {}", path.string(), e.what());
+        return {};
+    }
+}
+
+boost::filesystem::path sidecarPath(const std::string& sourcePath) {
+    const boost::filesystem::path source(sourcePath);
+    return boost::filesystem::is_directory(source)
+        ? source / (source.filename().string() + ".json")
+        : source.parent_path() / (source.stem().string() + ".json");
+}
+
+void loadSidecar(
+        const boost::filesystem::path& path, nlohmann::json& metadata,
+        std::optional<CalibrationData>& calibration) {
+    metadata = loadSidecarMetadataFile(path);
+    calibration.reset();
+    if (boost::filesystem::exists(path))
+        calibration = CalibrationData::loadFromFile(path.string());
+}
+
+std::shared_ptr<std::vector<char>> materializeCached(
+        LRUCache& cache, const Entry& entry, bool bypassCache,
+        const std::function<std::shared_ptr<std::vector<char>>()>& renderer) {
+    if (bypassCache) return renderer();
+    if (auto cached = cache.get(entry)) {
+        cache.put(entry, cached);
+        return cached;
+    }
+    try {
+        auto output = renderer();
+        if (!output) throw std::runtime_error("Frame materializer returned no data");
+        cache.put(entry, output);
+        return output;
+    } catch (...) {
+        cache.markLoadFailed(entry);
+        throw;
+    }
+}
+
+int readMountedEntry(
+        const Entry& entry, size_t pos, size_t len, void* dst,
+        const std::function<void(size_t, int)>& result, bool async,
+        BS::thread_pool& processingThreadPool,
+        const std::function<std::shared_ptr<std::vector<char>>()>& materializer,
+        const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer) {
+    if (const auto desktop = readDesktopIni(entry, pos, len, dst, result)) return *desktop;
+    auto copyRange = [=]() -> size_t {
+        try {
+            const auto data = staticMaterializer ? staticMaterializer() : materializer();
+            const size_t count = data && pos < data->size()
+                ? std::min(len, data->size() - pos) : 0;
+            if (count) std::memcpy(dst, data->data() + pos, count);
+            result(count, 0);
+            return count;
+        } catch (const std::exception& e) {
+            spdlog::error("Mounted entry read failed for {}: {}", entry.name, e.what());
+            result(0, -1);
+            return 0;
+        }
+    };
+    if (staticMaterializer) return static_cast<int>(copyRange());
+    if (!boost::algorithm::ends_with(entry.name, ".dng")) {
+        result(0, -1);
+        return -1;
+    }
+    auto future = processingThreadPool.submit_task(copyRange);
+    return async ? 0 : static_cast<int>(future.get());
+}
 
 void finalize(
     IVirtualFileSystem& filesystem,

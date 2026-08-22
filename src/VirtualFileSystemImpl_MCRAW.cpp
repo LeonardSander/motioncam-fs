@@ -22,47 +22,6 @@
 #include <cmath>
 #include <tuple>
 
-namespace {
-
-// A wide centred median strongly rejects alternating auto-adjustments and
-// isolated manual jumps.  The centred window deliberately provides lookahead.
-std::vector<double> temporalMedian(const std::vector<double>& values, int radius) {
-    std::vector<double> result(values.size());
-    std::vector<double> window;
-    window.reserve(static_cast<size_t>(radius * 2 + 1));
-    for (size_t i = 0; i < values.size(); ++i) {
-        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
-        const size_t end = std::min(values.size(), i + static_cast<size_t>(radius) + 1);
-        window.assign(values.begin() + begin, values.begin() + end);
-        const auto middle = window.begin() + window.size() / 2;
-        std::nth_element(window.begin(), middle, window.end());
-        result[i] = *middle;
-    }
-    return result;
-}
-
-std::vector<double> temporalSmooth(const std::vector<double>& values, int radius) {
-    const auto stable = temporalMedian(values, radius);
-    std::vector<double> result(values.size());
-    const double sigma = std::max(1.0, radius / 2.0);
-    for (size_t i = 0; i < stable.size(); ++i) {
-        const size_t begin = i > static_cast<size_t>(radius) ? i - radius : 0;
-        const size_t end = std::min(stable.size(), i + static_cast<size_t>(radius) + 1);
-        double sum = 0.0;
-        double weightSum = 0.0;
-        for (size_t j = begin; j < end; ++j) {
-            const double distance = static_cast<double>(j) - static_cast<double>(i);
-            const double weight = std::exp(-0.5 * distance * distance / (sigma * sigma));
-            sum += stable[j] * weight;
-            weightSum += weight;
-        }
-        result[i] = sum / weightSum;
-    }
-    return result;
-}
-
-} // namespace
-
 namespace motioncam {
 
 VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
@@ -82,10 +41,9 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     
     // Load calibration JSON if it exists
-    boost::filesystem::path srcPath(mSrcPath);
-    boost::filesystem::path calibPath = srcPath.parent_path() / (srcPath.stem().string() + ".json");
+    const auto calibPath = vfs::sidecarPath(mSrcPath);
     if (boost::filesystem::exists(calibPath)) {
-        mCalibration = CalibrationData::loadFromFile(calibPath.string());
+        vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
             spdlog::info("Loaded calibration for MCRAW: {}", calibPath.string());
         }
@@ -96,24 +54,29 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     std::sort(frames.begin(), frames.end());
     if(frames.empty())
         return;
+    mSourceFrames = frames;
+    for (size_t i = 0; i < frames.size(); ++i) mFrameIndexByTimestamp[frames[i]] = i;
     mBaselineExpValue = std::numeric_limits<double>::max();    
     nlohmann::json metadata;
-    std::vector<double> logExposures;
-    std::array<std::vector<double>, 3> logNeutrals;
-    logExposures.reserve(frames.size());
+    std::vector<vfs::ExposureSample> exposureSamples;
+    exposureSamples.reserve(frames.size());
     for(const auto& frame : frames) {
         decoder.loadFrameMetadata(frame, metadata);
         const auto cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
         mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
-        logExposures.push_back(std::log2(std::max(1e-12, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime)));
+        vfs::ExposureSample sample;
+        sample.timestamp = frame;
+        sample.iso = cameraFrameMetadata.iso;
+        sample.exposureSeconds = cameraFrameMetadata.exposureTime;
         for (size_t channel = 0; channel < 3; ++channel) {
             const double neutral = metadata.contains("asShotNeutral") &&
                     metadata["asShotNeutral"].is_array() &&
                     metadata["asShotNeutral"].size() > channel
                 ? metadata["asShotNeutral"][channel].get<double>()
                 : 1.0;
-            logNeutrals[channel].push_back(std::log(std::max(1e-6, neutral)));
+            sample.asShotNeutral[channel] = static_cast<float>(neutral);
         }
+        exposureSamples.push_back(sample);
     }
 
     // Two seconds on either side is intentionally large enough to absorb
@@ -121,20 +84,10 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     const double frameRate = frames.size() > 1
         ? vfs::calculateFrameRate(frames).medianFrameRate
         : 30.0;
-    const int smoothingRadius = std::max(1, static_cast<int>(std::lround(2.0 * frameRate)));
-    const auto smoothExposure = temporalSmooth(logExposures, smoothingRadius);
-    std::array<std::vector<double>, 3> smoothNeutral;
-    for (size_t channel = 0; channel < 3; ++channel)
-        smoothNeutral[channel] = temporalSmooth(logNeutrals[channel], smoothingRadius);
-    for (size_t i = 0; i < frames.size(); ++i) {
-        mSmoothedExposureOffsets[frames[i]] = static_cast<float>(smoothExposure[i] - logExposures[i]);
-        std::array<float, 3> neutral;
-        const double green = smoothNeutral[1][i];
-        for (size_t channel = 0; channel < 3; ++channel)
-            neutral[channel] = static_cast<float>(std::exp(smoothNeutral[channel][i] - green));
-        mSmoothedAsShotNeutrals[frames[i]] = neutral;
-    }
-    this->init(/*mOptions*/);
+    const auto analysis = vfs::analyzeExposureMetadata(exposureSamples, frameRate);
+    mSmoothedExposureOffsets = analysis.smoothedBaseline;
+    mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
+    init();
 }
 
 VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
@@ -143,8 +96,7 @@ VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
 
 void VirtualFileSystemImpl_MCRAW::init() {
     Decoder decoder(mSrcPath);
-    auto frames = decoder.getFrames();
-    std::sort(frames.begin(), frames.end());
+    const auto& frames = mSourceFrames;
 
     if(frames.empty())
         return;
@@ -159,86 +111,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
     bool applyCFRConversion = mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION;
     mFps = vfs::determineCFRTarget(mFrameRateInfo, mSettings.cfrTarget, applyCFRConversion);
 
-    /*bool applyCFRConversion = options & RENDER_OPT_FRAMERATE_CONVERSION;
-
-    if (applyCFRConversion && mCFRTarget.mode != CFRMode::Disabled) {
-        if (mCFRTarget.mode == CFRMode::PreferInteger) {
-            if (mMedFps <=  23.0 || mMedFps >= 1000.0)
-                mFps = mMedFps;
-            else if (mMedFps < 24.5)
-                mFps = 24.0f;
-            else if (mMedFps < 26.0)
-                mFps = 25.0f;
-            else if (mMedFps < 33.0)
-                mFps = 30.0f;
-            else if (mMedFps < 49.0)
-                mFps = 48.0f;
-            else if (mMedFps < 52.0)
-                mFps = 50.0f;
-            else if (mMedFps > 56.0  && mMedFps < 63.0)
-                mFps = 60.0f;
-            else if (mMedFps > 112.0 && mMedFps < 125.0)
-                mFps = 120.0f;
-            else if (mMedFps > 224.0 && mMedFps < 250.0)
-                mFps = 240.0f;
-            else if (mMedFps > 448.0 && mMedFps < 500.0)
-                mFps = 480.0f;
-            else if (mMedFps > 896.0 && mMedFps < 1000.0)
-                mFps = 960.0f;
-            else if (mMedFps >= 63.0)
-                mFps = 120.0f;
-            else
-                mFps = 60.0f;
-        }
-        else if (mCFRTarget.mode == CFRMode::PreferDropFrame) {
-            if (mMedFps <=  23.0 || mMedFps >= 1000.0)
-                mFps = mMedFps;
-            else if (mMedFps < 24.5)
-                mFps = 23.976f;
-            else if (mMedFps < 26.0)
-                mFps = 25.0f;
-            else if (mMedFps < 33.0)
-                mFps = 29.97f;
-            else if (mMedFps < 49.0)
-                mFps = 47.952f;
-            else if (mMedFps < 52.0)
-                mFps = 50.0f;
-            else if (mMedFps > 56.0  && mMedFps < 63.0)
-                mFps = 59.94f;
-            else if (mMedFps > 112.0 && mMedFps < 125.0)
-                mFps = 119.88f;
-            else if (mMedFps > 224.0 && mMedFps < 250.0)
-                mFps = 240.0f;
-            else if (mMedFps > 448.0 && mMedFps < 500.0)
-                mFps = 480.0f;
-            else if (mMedFps > 896.0 && mMedFps < 1000.0)
-                mFps = 960.0f;
-            else if (mMedFps >= 63.0)
-                mFps = 119.88f;
-            else
-                mFps = 59.94f;
-        }
-        else if (mCFRTarget.mode == CFRMode::MedianSlowMotion) {
-            // Use median frame rate for non real time playback
-            mFps = mMedFps;
-        }
-        else if (mCFRTarget.mode == CFRMode::AverageTesting) {
-            // legacy framerate target determination
-            mFps = mAvgFps;
-        }
-        else if (mCFRTarget.mode == CFRMode::Custom) {
-            // Custom framerate
-            mFps = mCFRTarget.customValue;
-        }
-    } else {
-        // No CFR conversion - use custom value if provided, otherwise use average
-        if (mCFRTarget.mode == CFRMode::Custom) {
-            mFps = mCFRTarget.customValue;
-        } else {
-            mFps = mAvgFps;
-        }
-    }*/       
-
     // Calculate typical DNG size that we can use for all files
     std::vector<uint8_t> data;
     nlohmann::json metadata;
@@ -250,17 +122,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
+    utils::overrideLensShadingMap(cameraFrameMetadata,
+        vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"));
    
-        // Store frame information
-    /*mWidth = cameraFrameMetadata.width;
-    mHeight = cameraFrameMetadata.height;
-    mTotalFrames = static_cast<int>(frames.size());
-    mDroppedFrames = 0; // Will be calculated during frame processing
-    mDuplicatedFrames = 0;
-    mNeedRemosaic = cameraFrameMetadata.needRemosaic;
-    mSrcWhiteLevel = cameraFrameMetadata.dynamicWhiteLevel;
-    mSrcBlackLevel = cameraFrameMetadata.dynamicBlackLevel;	*/
-    
     auto dngData = utils::generateDng(
         data,
         cameraFrameMetadata,
@@ -275,6 +139,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
 
     {
         std::vector<uint8_t> timed(dngData->begin(), dngData->end());
+        applySidecarGainMapOpcodes(timed, 0);
         if (!DNGDecoder::setTimingMetadata(timed, mFps, 0))
             throw std::runtime_error("Could not size DNG timing metadata");
         dngData = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
@@ -283,20 +148,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mTypicalDngSize = dngData->size();
 
     // Generate file entries
-    int lastPts = 0;
-
     mFiles.reserve(frames.size()*2);
 
-// Disable icon previews in Windows/MacOS
-#ifdef _WIN32
-    Entry desktopIni;
-
-    desktopIni.type = FILE_ENTRY;
-    desktopIni.size = vfs::DESKTOP_INI.size();
-    desktopIni.name = "desktop.ini";
-
-    mFiles.emplace_back(desktopIni);
-#endif
+    vfs::appendDesktopIni(mFiles);
 
     // Generate and add audio (TODO: We're loading all the audio into memory)
     Entry audioEntry;
@@ -350,52 +204,20 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mFiles.emplace_back(audioEntry);
     }
 
-    int duplicatedFrames = 0;
-    int droppedFrames = 0;
-
-    // Add video frames. When filling a timestamp gap, hold the most recently
-    // displayed frame until the newly arrived frame's mapped position.
-    Timestamp previousTimestamp = frames.front();
-    for(auto& x : frames) {
-        if(applyCFRConversion) {
-            int pts = vfs::getFrameNumberFromTimestamp(x, frames[0], mFps);
-            if (pts < lastPts) {
-                ++droppedFrames;
-                continue;
-            }
-            while(lastPts < pts) {
-                Entry entry;
-                entry.type = EntryType::FILE_ENTRY;
-                entry.size = mTypicalDngSize;
-                entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");
-                entry.userData = previousTimestamp;
-                entry.duplicateFrame = true;
-                mFiles.emplace_back(entry);
-                ++lastPts;
-                ++duplicatedFrames;
-            }
-
-            Entry entry;
-            entry.type = EntryType::FILE_ENTRY;
-            entry.size = mTypicalDngSize;
-            entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");
-            entry.userData = x;
-            mFiles.emplace_back(entry);
-            ++lastPts;
-            previousTimestamp = x;
-        } else {
-            Entry entry;
-
-            // Add main entry
-            entry.type = EntryType::FILE_ENTRY;
-            entry.size = mTypicalDngSize;
-            entry.name = vfs::constructFrameFilename(mBaseName + std::string("-"), lastPts, 6, "dng");     
-            entry.userData = x;
-
-            mFiles.emplace_back(entry);
-            ++lastPts;
-        }
+    std::vector<Entry> sourceEntries;
+    sourceEntries.reserve(frames.size());
+    for (const auto timestamp : frames) {
+        Entry entry;
+        entry.type = EntryType::FILE_ENTRY;
+        entry.size = mTypicalDngSize;
+        entry.userData = timestamp;
+        sourceEntries.push_back(entry);
     }
+    int duplicatedFrames = 0, droppedFrames = 0;
+    auto mapped = vfs::mapFramesToCfr(sourceEntries, frames, mBaseName + "-", mFps,
+        applyCFRConversion, droppedFrames, duplicatedFrames);
+    mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
+                  std::make_move_iterator(mapped.end()));
 
     // Store frame information
     mFileInfo.frameRateInfo = mFrameRateInfo;
@@ -421,77 +243,28 @@ void VirtualFileSystemImpl_MCRAW::init() {
 }
 
 std::vector<Entry> VirtualFileSystemImpl_MCRAW::listFiles(const std::string& filter) const {
-    if (filter.empty()) {
-        return mFiles;
-    }
-
-    std::vector<Entry> filteredFiles;
-    for (const auto& entry : mFiles) {
-        if (entry.name.find(filter) != std::string::npos) {
-            filteredFiles.push_back(entry);
-        }
-    }
-    return filteredFiles;
+    std::lock_guard<std::mutex> lock(mMutex);
+    return vfs::filterEntries(mFiles, filter);
 }
 
 std::optional<Entry> VirtualFileSystemImpl_MCRAW::findEntry(const std::string& fullPath) const {
-    for(const auto& e : mFiles) {
-        if(boost::filesystem::path(fullPath).relative_path() == e.getFullPath())
-            return e;
-    }
-
-    return {};
+    std::lock_guard<std::mutex> lock(mMutex);
+    return vfs::findEntry(mFiles, fullPath);
 }
-
-size_t VirtualFileSystemImpl_MCRAW::generateFrame(
-    const Entry& entry,
-    const size_t pos,
-    const size_t len,
-    void* dst,
-    std::function<void(size_t, int)> result,
-    bool async)
-{
-    auto task = [this, entry, pos, len, dst, result]() -> size_t {
-        try {
-            auto data = materializeFile(entry, false);
-            const size_t count = data && pos < data->size()
-                ? std::min(len, data->size() - pos) : 0;
-            if (count)
-                std::memcpy(dst, data->data() + pos, count);
-            result(count, 0);
-            return count;
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to generate DNG (error: {})", e.what());
-            result(0, -1);
-            return 0;
-        }
-    };
-    auto future = mProcessingThreadPool.submit_task(task);
-    return async ? 0 : future.get();
-}
-
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
     const Entry& entry, bool jpegCompression) {
+    std::shared_lock renderLock(mRenderMutex);
     if (boost::ends_with(entry.name, "wav"))
         return std::make_shared<std::vector<char>>(mAudioFile.begin(), mAudioFile.end());
 
-    if (!jpegCompression) {
-        if (auto cached = mCache.get(entry)) {
-            mCache.put(entry, cached);
-            return cached;
-        }
-    }
-
-    try {
+    return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
             decoder = std::make_unique<Decoder>(mSrcPath);
         const auto timestamp = std::get<Timestamp>(entry.userData);
-        auto frames = decoder->getFrames();
-        std::sort(frames.begin(), frames.end());
-        const auto it = std::find(frames.begin(), frames.end(), timestamp);
-        if (it == frames.end())
+        const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
+        if (frameIt == mFrameIndexByTimestamp.end())
             throw std::runtime_error("MCRAW source frame not found");
 
         std::vector<uint8_t> frameData;
@@ -500,18 +273,20 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
-        const auto frameDigits = entry.name.substr(entry.name.size() - 10, 6);
-        const int outputFrameNumber = std::stoi(frameDigits);
+        const int outputFrameNumber = vfs::outputFrameNumber(entry);
         std::optional<float> exposureOverride;
-        if ((mSettings.options & RENDER_OPT_NORMALIZE_EXPOSURE) &&
-            (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE))
+        if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
             exposureOverride = mSmoothedExposureOffsets.at(timestamp);
         std::optional<std::array<float, 3>> neutralOverride;
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        utils::overrideLensShadingMap(frameMetadata,
+            vfs::loadSidecarGainMaps(mSidecarMetadata,
+                frameIt->second, "gainMaps"));
         auto output = utils::generateDng(
             frameData,
-            CameraFrameMetadata::parse(metadata),
+            frameMetadata,
             CameraConfiguration::parse(decoder->getContainerMetadata()),
             mFps,
             outputFrameNumber,
@@ -524,44 +299,43 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
         const bool converted = mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION;
-        const Timestamp outputTimestamp = converted
-            ? static_cast<Timestamp>(std::llround(outputFrameNumber * 1e9 / mFps))
-            : timestamp - frames.front();
+        const Timestamp outputTimestamp = vfs::outputTimestamp(
+            entry, timestamp, mSourceFrames.front(), mFps, converted);
         std::vector<uint8_t> timed(output->begin(), output->end());
+        applySidecarGainMapOpcodes(
+            timed, frameIt->second);
         if (!DNGDecoder::setTimingMetadata(timed, mFps, outputTimestamp))
             throw std::runtime_error("Could not write DNG timing metadata");
         output = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
-        if (!jpegCompression)
-            mCache.put(entry, output);
         return output;
-    } catch (...) {
-        if (!jpegCompression)
-            mCache.markLoadFailed(entry);
-        throw;
-    }
+    });
 }
 
-size_t VirtualFileSystemImpl_MCRAW::generateAudio(
-    const Entry& entry,
-    const size_t pos,
-    const size_t len,
-    void* dst,
-    std::function<void(size_t, int)> result,
-    bool async)
-{
-    size_t readBytes = 0;
-
-    if(pos < mAudioFile.size()) {
-        // Calculate length to copy
-        const size_t actualLen = (std::min)(len, mAudioFile.size() - pos);
-
-        std::memcpy(dst, mAudioFile.data() + pos, actualLen);
-
-        readBytes = actualLen;
+void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
+        std::vector<uint8_t>& dng, size_t frameIndex) const {
+    if (!mSidecarMetadata.contains("dynamic") ||
+        !mSidecarMetadata["dynamic"].contains("frames") ||
+        frameIndex >= mSidecarMetadata["dynamic"]["frames"].size()) return;
+    const auto& frame = mSidecarMetadata["dynamic"]["frames"][frameIndex];
+    const bool bake = mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    if (!bake && frame.contains("gainMaps") &&
+        !DNGDecoder::replaceGainMaps(dng, 2,
+            vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, "gainMaps")))
+        throw std::runtime_error("Could not apply MCRAW OpcodeList2 gain-map override");
+    if (!bake && frame.contains("deferredGainMaps") &&
+        !DNGDecoder::replaceGainMaps(dng, 3,
+            vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, "deferredGainMaps")))
+        throw std::runtime_error("Could not apply MCRAW OpcodeList3 gain-map override");
+    if (bake && (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
+        const char* field = frame.contains("deferredGainMaps")
+            ? "deferredGainMaps" : "gainMaps";
+        if (frame.contains(field)) {
+            const auto maps = vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, field);
+            if (maps.size() == 1 && maps.front().channels == 1 &&
+                !DNGDecoder::replaceGainMaps(dng, 3, maps))
+                throw std::runtime_error("Could not apply MCRAW deferred gain-map override");
+        }
     }
-
-    // Always read synchronously for now
-    return readBytes;
 }
 
 int VirtualFileSystemImpl_MCRAW::readFile(
@@ -572,31 +346,22 @@ int VirtualFileSystemImpl_MCRAW::readFile(
     std::function<void(size_t, int)> result,
     bool async) {
 
-    #ifdef _WIN32
-        if(entry.name == "desktop.ini") {
-            const size_t actualLen = (std::min)(len, vfs::DESKTOP_INI.size() - pos);
-            std::memcpy(dst, vfs::DESKTOP_INI.data() + pos, actualLen);
-
-            return actualLen;
-        }
-    #endif
-
-    // Requestion audio?
-    if(boost::ends_with(entry.name, "wav")) {
-        return generateAudio(entry, pos, len, dst, result, async);
-    }
-    else if(boost::ends_with(entry.name, "dng")) {
-        return generateFrame(entry, pos, len, dst, result, async);
-    }
-
-    return -1;
+    std::function<std::shared_ptr<std::vector<char>>()> staticMaterializer;
+    if (boost::ends_with(entry.name, ".wav"))
+        staticMaterializer = [this, entry] { return materializeFile(entry, false); };
+    return vfs::readMountedEntry(entry, pos, len, dst, result, async,
+        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); },
+        staticMaterializer);
 }
 
 void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {
+    std::unique_lock renderLock(mRenderMutex);
+    std::lock_guard<std::mutex> lock(mMutex);
     mSettings = settings;
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     mCache.clear();
+    vfs::loadSidecar(vfs::sidecarPath(mSrcPath), mSidecarMetadata, mCalibration);
     init();
 }
 

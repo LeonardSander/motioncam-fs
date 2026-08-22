@@ -8,6 +8,8 @@
 #include <Types.h>
 #include <nlohmann/json.hpp>
 #include <memory>
+#include <shared_mutex>
+#include <unordered_map>
 
 namespace BS {
 class thread_pool;
@@ -48,16 +50,15 @@ public:
         const Entry& entry, bool jpegCompression = false) override;
 
 private:
+    struct FrameMetadata {
+        double iso = 0.0;
+        double shutterSpeed = 0.0;
+        double baselineExposure = 0.0;
+        std::optional<std::array<float, 3>> asShotNeutral;
+    };
+
     void init();
     
-    size_t generateFrame(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async);
-
     bool isHLGVideo() const;
     void calculateFrameRateStats();
     bool convertRGBToDNG(const std::vector<uint16_t>& rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp, bool jpegCompression = false,
@@ -69,10 +70,14 @@ private:
                          const std::vector<GainMap>& opcodeList2 = {},
                          const std::vector<GainMap>& opcodeList3 = {});
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
+    void prepareSidecarGainMapOpcodes(
+        int frameNumber, std::vector<GainMap>& opcodeList2,
+        std::vector<GainMap>& opcodeList3) const;
     void applySidecarGainMaps(std::vector<uint16_t>& rgbData, int frameNumber,
                               float& exposureOffset,
                               std::array<float, 3>& neutralScale) const;
-    void loadSidecarMetadata(const boost::filesystem::path& path);
+    void analyzeSidecarExposure();
+    FrameMetadata frameMetadata(int frameNumber) const;
 
 
 private:
@@ -96,7 +101,12 @@ private:
     std::unique_ptr<DirectLogDecoder> mDecoder;
     std::optional<CalibrationData> mCalibration;
     nlohmann::json mSidecarMetadata;
+    std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
+    std::map<Timestamp, float> mNormalizedExposureOffsets;
+    std::map<Timestamp, float> mSmoothedExposureOffsets;
+    std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     mutable std::mutex mMutex;
+    mutable std::shared_mutex mRenderMutex;
 };
 
 } // namespace motioncam

@@ -4,6 +4,8 @@
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
 #include "DataLevels.h"
+#include "VirtualFileSystemImpl.h"
+#include "DNGDecoder.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +19,55 @@
 
 namespace motioncam {
 namespace utils {
+
+void overrideLensShadingMap(
+        CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps) {
+    if (gainMaps.empty()) return;
+    const uint32_t width = gainMaps.front().width;
+    const uint32_t height = gainMaps.front().height;
+    if (!width || !height) throw std::invalid_argument("Invalid gain-map override dimensions");
+    std::vector<std::vector<float>> planes;
+    if (gainMaps.size() == 1) {
+        const auto& map = gainMaps.front();
+        if (map.channels != 1 && map.channels != 4)
+            throw std::invalid_argument("MCRAW gain-map override requires one or four channels");
+        planes.resize(map.channels);
+        const size_t points = static_cast<size_t>(width) * height;
+        for (auto& plane : planes) plane.resize(points);
+        for (size_t point = 0; point < points; ++point)
+            for (uint32_t channel = 0; channel < map.channels; ++channel)
+                planes[channel][point] = map.data[point * map.channels + channel];
+    } else if (gainMaps.size() == 4) {
+        planes.reserve(4);
+        for (const auto& map : gainMaps) {
+            if (map.width != width || map.height != height || map.channels != 1)
+                throw std::invalid_argument("MCRAW gain-map override planes must share dimensions");
+            planes.push_back(map.data);
+        }
+    } else {
+        throw std::invalid_argument("MCRAW gain-map override requires one map or four planes");
+    }
+    metadata.lensShadingMap = std::move(planes);
+    metadata.lensShadingMapWidth = static_cast<int>(width);
+    metadata.lensShadingMapHeight = static_cast<int>(height);
+}
+
+std::vector<unsigned short> makeLogLinearizationTable(unsigned int storedWhiteLevel) {
+    if (storedWhiteLevel == 0 || storedWhiteLevel >= 65536) return {};
+    std::vector<unsigned short> table(storedWhiteLevel + 1);
+    for (unsigned int i = 0; i <= storedWhiteLevel; ++i) {
+        float linear = 0.0f;
+        if (i == storedWhiteLevel) {
+            linear = 1.0f;
+        } else if (i != 0) {
+            const float encoded = static_cast<float>(i) / storedWhiteLevel;
+            linear = (std::pow(2.0f, encoded * std::log2(61.0f)) - 1.0f) / 60.0f;
+            linear = std::clamp(linear, 0.0f, 1.0f);
+        }
+        table[i] = static_cast<unsigned short>(linear * 65535.0f);
+    }
+    return table;
+}
 
 
 void parseCropTarget(const std::string& target, uint32_t& width,
@@ -1636,16 +1687,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetIso(metadata.iso);
     dng.SetExposureTime(metadata.exposureTime / 1e9);
 
-    float exposureOffset = (settings.cameraModel == "Panasonic" ? -2.0f : 0.0f);
-
-    // Parse float from exposureCompensation string and add to exposureOffset
-    if (!settings.exposureCompensation.empty()) {
-        try {
-            exposureOffset += std::stof(settings.exposureCompensation);
-        } catch (const std::exception&) {
-            // If parsing fails, keep the original exposureOffset value
-        }
-    }
+    const float exposureOffset = vfs::configuredExposureOffset(settings);
 
     float normalizedExposureOffset = 0.0f;
     if (baselineExposureOverride.has_value()) {
@@ -1775,22 +1817,11 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetSoftware(software);
 
 
-    if(settings.cameraModel != ""){
-        if (settings.cameraModel == "Blackmagic") {
-            dng.SetUniqueCameraModel("Blackmagic Pocket Cinema Camera 4K");
-        } else if (settings.cameraModel == "Panasonic") {
-            dng.SetUniqueCameraModel("Panasonic Varicam RAW");
-        } else if (settings.cameraModel == "Fujifilm" || settings.cameraModel == "Fujifilm X-T5") {
-            dng.SetUniqueCameraModel("Fujifilm X-T5");
-            dng.SetMake("Fujifilm");
-            dng.SetCameraModelName("X-T5");
-        } else {
-            // Generic camera model
-            dng.SetUniqueCameraModel(settings.cameraModel);
-        }
-    } else {
-        dng.SetUniqueCameraModel(cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
-    }
+    const auto identity = vfs::resolveCameraIdentity(settings.cameraModel,
+        cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
+    dng.SetUniqueCameraModel(identity.uniqueModel);
+    if (!identity.make.empty()) dng.SetMake(identity.make);
+    if (!identity.model.empty()) dng.SetCameraModelName(identity.model);
 
     // Add lens shading map as opcode list 2 if not applied to image data
     if (!opcodeList2.IsEmpty()) {
@@ -1818,40 +1849,14 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (needsLinearization && dstWhiteLevel > 0) {
         spdlog::debug("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}", 
                      logTransformModeToString(effectiveLogTransform), applyShadingMap, dstWhiteLevel);
-        // Create linearization table sized for the actual stored range
-        // The stored values range from 0 to dstWhiteLevel, so we need dstWhiteLevel+1 entries
-        const int tableSize = static_cast<int>(dstWhiteLevel) + 1;
-        
-        if (tableSize <= 0 || tableSize > 65536) {
-            spdlog::error("Invalid linearization table size: {}", tableSize);
+        auto linearizationTable = makeLogLinearizationTable(dstWhiteLevel);
+        if (linearizationTable.empty()) {
+            spdlog::error("Invalid linearization table white level: {}", dstWhiteLevel);
         } else {
-            std::vector<unsigned short> linearizationTable(tableSize);
-        
-        for (int i = 0; i < tableSize; i++) {
-            // Convert stored log value back to linear
-            // Must match the aggressive log curve: logValue = log2(1 + k*clampedValue) / log2(1 + k)
-            // Inverse: clampedValue = (2^(logValue * log2(1 + k)) - 1) / k
-            
-            float logValue = static_cast<float>(i);
-            float normalizedLogValue = logValue / dstWhiteLevel;  // Normalize by dstWhiteLevel to match forward transform
-            
-            // Reverse the k=60 curve with guaranteed identity preservation
-            float linearValue;
-            
-            if (i == 0) {
-                linearValue = 0.0f;  // Exact identity: stored 0 → linear 0
-            } else if (i == tableSize - 1) {
-                linearValue = 1.0f;  // Force maximum table entry → linear 1 → 65535
-            } else {                               
-                // Inverse of: logValue = log2(1 + k*clampedValue) / log2(1 + k)
-                linearValue = (std::pow(2.0f, normalizedLogValue * std::log2(1.0f + 60.0f)) - 1.0f) / 60.0f;
-                linearValue = std::clamp(linearValue, 0.0f, 1.0f);
-            }            
-            // Scale to 16-bit range            
-            linearizationTable[i] = static_cast<unsigned short>(linearValue * 65535.0f);                  
-            }        
-            dng.SetLinearizationTable(tableSize, linearizationTable.data());
-            spdlog::debug("Added linearization table with {} entries for log transform", tableSize);
+            dng.SetLinearizationTable(static_cast<unsigned int>(linearizationTable.size()),
+                                      linearizationTable.data());
+            spdlog::debug("Added linearization table with {} entries for log transform",
+                          linearizationTable.size());
             std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
             dng.SetBlackLevel(samplesPerPixel == 3 ? 3 : 4, linearBlackLevel.data());
             dng.SetWhiteLevel(static_cast<unsigned short>(65534));

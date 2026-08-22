@@ -1,7 +1,9 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "LRUCache.h"
 #include "VirtualFileSystemImpl.h"
+#include <BS_thread_pool.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -275,5 +277,74 @@ int main() {
         rejectedMissingCallback = true;
     }
     assert(rejectedMissingCallback);
+
+    // Exposure analysis operates on effective exposure, so source baseline
+    // metadata participates in normalization and smoothing instead of being
+    // blindly copied to the output.
+    const std::vector<motioncam::vfs::ExposureSample> exposureSamples{
+        {0, 100.0, 0.01, 2.0, {1.0f, 1.0f, 1.0f}},
+        {1, 200.0, 0.01, 0.0, {2.0f, 1.0f, 0.5f}}};
+    const auto exposureAnalysis = motioncam::vfs::analyzeExposureMetadata(
+        exposureSamples, 24.0f);
+    // The second frame defines the minimum effective exposure. The first
+    // therefore needs a replacement baseline of one stop.
+    assert(std::abs(exposureAnalysis.normalizedBaseline.at(0) - 1.0f) < 1e-5f);
+    assert(std::abs(exposureAnalysis.normalizedBaseline.at(1) - 0.0f) < 1e-5f);
+
+    std::vector<motioncam::Entry> cadenceSources(2);
+    cadenceSources[0].type = cadenceSources[1].type = motioncam::EntryType::FILE_ENTRY;
+    cadenceSources[0].userData = 0;
+    cadenceSources[1].userData = 2000000000LL;
+    int cadenceDrops = 0, cadenceDuplicates = 0;
+    const auto cadence = motioncam::vfs::mapFramesToCfr(cadenceSources,
+        {0, 2000000000LL}, "frame-", 1.0f, true,
+        cadenceDrops, cadenceDuplicates);
+    assert(cadence.size() == 3 && cadenceDuplicates == 1 && cadenceDrops == 0);
+    assert(cadence[1].duplicateFrame && std::get<int64_t>(cadence[1].userData) == 0);
+    assert(motioncam::vfs::outputFrameNumber(cadence[2]) == 2);
+    assert(motioncam::vfs::outputTimestamp(
+        cadence[2], 2000000000LL, 0, 1.0f, true) == 2000000000LL);
+
+    motioncam::Entry mountedEntry;
+    mountedEntry.type = motioncam::EntryType::FILE_ENTRY;
+    mountedEntry.name = "frame-000001.dng";
+    mountedEntry.userData = 1LL;
+    motioncam::LRUCache cache(1024);
+    int renders = 0;
+    const auto render = [&] {
+        ++renders;
+        return std::make_shared<std::vector<char>>(
+            std::initializer_list<char>{'a', 'b', 'c', 'd'});
+    };
+    assert(*motioncam::vfs::materializeCached(cache, mountedEntry, false, render) ==
+        std::vector<char>({'a', 'b', 'c', 'd'}));
+    assert(*motioncam::vfs::materializeCached(cache, mountedEntry, false, render) ==
+        std::vector<char>({'a', 'b', 'c', 'd'}));
+    assert(renders == 1);
+
+    BS::thread_pool pool(1);
+    char range[2]{};
+    size_t callbackBytes = 0;
+    int callbackError = -1;
+    assert(motioncam::vfs::readMountedEntry(
+        mountedEntry, 1, sizeof(range), range,
+        [&](size_t bytes, int error) { callbackBytes = bytes; callbackError = error; },
+        false, pool, render) == 2);
+    assert(range[0] == 'b' && range[1] == 'c');
+    assert(callbackBytes == 2 && callbackError == 0);
+
+    std::vector<motioncam::Entry> desktopEntries;
+    motioncam::vfs::appendDesktopIni(desktopEntries);
+#ifdef _WIN32
+    char desktopRange[8]{};
+    assert(desktopEntries.size() == 1);
+    assert(motioncam::vfs::readDesktopIni(
+        desktopEntries.front(), 0, sizeof(desktopRange), desktopRange,
+        [&](size_t bytes, int error) { callbackBytes = bytes; callbackError = error; }) == 0);
+    assert(callbackBytes == 8 && callbackError == 0);
+#else
+    assert(desktopEntries.empty());
+#endif
+
     fs::remove_all(root);
 }

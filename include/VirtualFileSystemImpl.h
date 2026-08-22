@@ -5,12 +5,20 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <array>
+#include <map>
+#include <nlohmann/json_fwd.hpp>
+
+namespace BS { class thread_pool; }
 #include "Types.h"
 #include "IVirtualFileSystem.h"
 
 namespace motioncam {
 
 struct AudioChunk;
+struct GainMap;
+struct CalibrationData;
+class LRUCache;
 
 struct FrameRateInfo {
     float minFrameRate;
@@ -35,6 +43,87 @@ struct FileInfo {
 };
 
 namespace vfs {
+
+struct ExposureSample {
+    Timestamp timestamp = 0;
+    double iso = 0.0;
+    double exposureSeconds = 0.0;
+    double baselineExposure = 0.0;
+    std::array<float, 3> asShotNeutral{1.0f, 1.0f, 1.0f};
+};
+
+struct ExposureAnalysis {
+    std::map<Timestamp, float> normalizedBaseline;
+    std::map<Timestamp, float> smoothedBaseline;
+    std::map<Timestamp, std::array<float, 3>> smoothedNeutral;
+};
+
+ExposureAnalysis analyzeExposureMetadata(
+    const std::vector<ExposureSample>& samples, float frameRate);
+
+std::vector<Entry> mapFramesToCfr(
+    const std::vector<Entry>& sourceEntries,
+    const std::vector<Timestamp>& timestamps,
+    const std::string& baseName,
+    float frameRate,
+    bool convert,
+    int& droppedFrames,
+    int& duplicatedFrames);
+
+std::vector<Entry> filterEntries(
+    const std::vector<Entry>& entries, const std::string& filter);
+
+std::optional<Entry> findEntry(
+    const std::vector<Entry>& entries, const std::string& fullPath);
+
+int outputFrameNumber(const Entry& entry);
+
+Timestamp outputTimestamp(
+    const Entry& entry,
+    Timestamp sourceTimestamp,
+    Timestamp firstSourceTimestamp,
+    float frameRate,
+    bool converted);
+
+float configuredExposureOffset(const RenderSettings& settings);
+
+struct CameraIdentity {
+    std::string uniqueModel;
+    std::string make;
+    std::string model;
+};
+
+CameraIdentity resolveCameraIdentity(
+    const std::string& configuredModel, const std::string& fallbackModel);
+
+void appendDesktopIni(std::vector<Entry>& entries);
+
+std::optional<int> readDesktopIni(
+    const Entry& entry, size_t pos, size_t len, void* dst,
+    const std::function<void(size_t, int)>& result);
+
+std::vector<GainMap> loadSidecarGainMaps(
+    const nlohmann::json& sidecar, size_t frameNumber, const char* field);
+
+nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path);
+
+boost::filesystem::path sidecarPath(const std::string& sourcePath);
+
+void loadSidecar(
+    const boost::filesystem::path& path,
+    nlohmann::json& metadata,
+    std::optional<CalibrationData>& calibration);
+
+std::shared_ptr<std::vector<char>> materializeCached(
+    LRUCache& cache, const Entry& entry, bool bypassCache,
+    const std::function<std::shared_ptr<std::vector<char>>()>& renderer);
+
+int readMountedEntry(
+    const Entry& entry, size_t pos, size_t len, void* dst,
+    const std::function<void(size_t, int)>& result, bool async,
+    BS::thread_pool& processingThreadPool,
+    const std::function<std::shared_ptr<std::vector<char>>()>& materializer,
+    const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer = {});
 
 void finalize(
     IVirtualFileSystem& filesystem,

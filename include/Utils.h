@@ -22,8 +22,12 @@ namespace motioncam {
 
 struct CameraFrameMetadata;
 struct CameraConfiguration;
+struct GainMap;
 
 namespace utils {
+
+void overrideLensShadingMap(
+    CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps);
 
 // Parse WIDTHxHEIGHT or WIDTHxHEIGHT_STRIDE. Returns zero values for invalid
 // components; STRIDE is a pixel count, not a byte count.
@@ -175,6 +179,8 @@ void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
 // ============================================================================
 
 std::pair<int, int> toFraction(float frameRate, int base = 1000);
+
+std::vector<unsigned short> makeLogLinearizationTable(unsigned int storedWhiteLevel);
 
 void remosaicRGBToBayer(
     const std::vector<uint16_t>& rgbData,

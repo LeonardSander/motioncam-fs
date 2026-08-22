@@ -342,6 +342,63 @@ int main() {
     std::vector<motioncam::GainMap> originalMaps;
     assert(motioncam::DNGDecoder::getGainMaps(croppedGainMapDng, 2, originalMaps));
     assert(!originalMaps.empty());
+    auto replacementMaps = originalMaps;
+    std::fill(replacementMaps.front().data.begin(), replacementMaps.front().data.end(), 2.0f);
+    std::vector<uint8_t> replacedGainMapDng(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::replaceGainMaps(replacedGainMapDng, 2, replacementMaps));
+    std::vector<motioncam::GainMap> replacedMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(replacedGainMapDng, 2, replacedMaps));
+    assert(replacedMaps.size() == replacementMaps.size());
+    assert(replacedMaps.front().data == replacementMaps.front().data);
+    std::vector<uint8_t> clearedGainMapDng(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::replaceGainMaps(clearedGainMapDng, 2, {}));
+    std::vector<motioncam::GainMap> clearedMaps;
+    assert(!motioncam::DNGDecoder::getGainMaps(clearedGainMapDng, 2, clearedMaps));
+    assert(clearedMaps.empty());
+    auto cleared16 = [&](size_t offset) {
+        return static_cast<uint16_t>(clearedGainMapDng[offset] |
+                                     clearedGainMapDng[offset + 1] << 8);
+    };
+    auto cleared32 = [&](size_t offset) {
+        return static_cast<uint32_t>(clearedGainMapDng[offset] |
+            clearedGainMapDng[offset + 1] << 8 | clearedGainMapDng[offset + 2] << 16 |
+            clearedGainMapDng[offset + 3] << 24);
+    };
+    const uint32_t clearedIfd = cleared32(4);
+    bool foundClearedOpcodeList = false;
+    for (uint16_t i = 0; i < cleared16(clearedIfd); ++i) {
+        const size_t entry = static_cast<size_t>(clearedIfd) + 2 + i * 12;
+        if (cleared16(entry) != 51009) continue;
+        assert(cleared32(entry + 4) == 4);
+        assert(cleared32(entry + 8) == 0);
+        foundClearedOpcodeList = true;
+    }
+    assert(foundClearedOpcodeList);
+    std::vector<uint8_t> addedGainMapDng(gainMapDng.begin(), gainMapDng.end());
+    auto read16le = [&](size_t offset) {
+        return static_cast<uint16_t>(addedGainMapDng[offset] |
+                                     addedGainMapDng[offset + 1] << 8);
+    };
+    auto read32le = [&](size_t offset) {
+        return static_cast<uint32_t>(addedGainMapDng[offset] |
+            addedGainMapDng[offset + 1] << 8 | addedGainMapDng[offset + 2] << 16 |
+            addedGainMapDng[offset + 3] << 24);
+    };
+    const uint32_t rootIfd = read32le(4);
+    bool removedOpcodeTag = false;
+    for (uint16_t i = 0; i < read16le(rootIfd); ++i) {
+        const size_t entry = static_cast<size_t>(rootIfd) + 2 + i * 12;
+        if (read16le(entry) != 51009) continue;
+        addedGainMapDng[entry] = 0;
+        addedGainMapDng[entry + 1] = 0;
+        removedOpcodeTag = true;
+        break;
+    }
+    assert(removedOpcodeTag);
+    assert(motioncam::DNGDecoder::replaceGainMaps(addedGainMapDng, 2, replacementMaps));
+    std::vector<motioncam::GainMap> addedMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(addedGainMapDng, 2, addedMaps));
+    assert(addedMaps.front().data == replacementMaps.front().data);
     assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
         croppedGainMapDng, width * 2, height * 2));
     std::vector<motioncam::GainMap> croppedMaps;

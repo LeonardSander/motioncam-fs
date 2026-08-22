@@ -83,6 +83,8 @@ public:
                                  DNGFrameMetadata& metadata);
     static bool getGainMaps(const std::vector<uint8_t>& dngData,
                             int opcodeList, std::vector<GainMap>& gainMaps);
+    static bool replaceGainMaps(std::vector<uint8_t>& dngData,
+                                int opcodeList, const std::vector<GainMap>& gainMaps);
     bool getCFAMetadata(int frameNumber, int& repeatSize, std::array<uint8_t, 4>& phase);
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,
