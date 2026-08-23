@@ -123,7 +123,8 @@ int readMountedEntry(
     const std::function<void(size_t, int)>& result, bool async,
     BS::thread_pool& processingThreadPool,
     const std::function<std::shared_ptr<std::vector<char>>()>& materializer,
-    const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer = {});
+    const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer = {},
+    int priority = 0);
 
 void finalize(
     IVirtualFileSystem& filesystem,

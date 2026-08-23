@@ -137,9 +137,19 @@ void VirtualFileSystemImpl_DNG::init() {
 
     vfs::appendDesktopIni(mFiles);
 
-    // Size a source entry for each DNG, then map those entries to the output
-    // cadence in exactly the same way as MCRAW and DirectLog.
     const auto& frames = mDecoder->getFrames();
+    if (frames.empty()) {
+        mTypicalDngSize = 0;
+        return;
+    }
+    // Mounted output is uncompressed and has a fixed layout, so one frame is
+    // representative of every frame at the same resolution.
+    mTypicalDngSize = transformFrame(0, 0, false).size();
+    const bool draft = vfs::getScaleFromOptions(
+        mConfig.options, mConfig.draftScale) > 1;
+    const size_t firstDngSize = draft
+        ? transformFrame(0, 0, false, true).size() : mTypicalDngSize;
+
     std::vector<Entry> sourceEntries;
     sourceEntries.reserve(frames.size());
     for (size_t i = 0; i < frames.size(); ++i) {
@@ -150,7 +160,7 @@ void VirtualFileSystemImpl_DNG::init() {
         dngEntry.userData = frames[i].timestamp;
         dngEntry.duplicateFrame = frames[i].duplicateFrame;
         dngEntry.syntheticFrame = frames[i].syntheticFrame;
-        dngEntry.size = transformFrame(i, 0, false).size();
+        dngEntry.size = mTypicalDngSize;
         sourceEntries.push_back(dngEntry);
     }
 
@@ -159,10 +169,10 @@ void VirtualFileSystemImpl_DNG::init() {
     for (const auto& frame : frames) timestamps.push_back(frame.timestamp);
     auto mapped = vfs::mapFramesToCfr(sourceEntries, timestamps, mBaseName, mFps,
         applyCFRConversion, mDroppedFrames, mDuplicatedFrames);
+    if (!mapped.empty()) mapped.front().size = firstDngSize;
     mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
                   std::make_move_iterator(mapped.end()));
 
-    mTypicalDngSize = mFiles.empty() ? 0 : mFiles.back().size;
 }
 
 std::vector<Entry> VirtualFileSystemImpl_DNG::listFiles(const std::string& filter) const {
@@ -186,7 +196,8 @@ int VirtualFileSystemImpl_DNG::readFile(
     bool async) {
     
     return vfs::readMountedEntry(entry, pos, len, dst, result, async,
-        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); });
+        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); }, {},
+        vfs::outputFrameNumber(entry));
 }
 
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
@@ -201,15 +212,18 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
         const Timestamp outputTimestamp = vfs::outputTimestamp(
             entry, timestamp, frames.front().timestamp, mFps, converted);
+        const bool nativeResolution = vfs::outputFrameNumber(entry) == 0 &&
+            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1;
         auto bytes = transformFrame(
-            frameIt->second, outputTimestamp, jpegCompression);
+            frameIt->second, outputTimestamp, jpegCompression, nativeResolution);
         auto output = std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
         return output;
     });
 }
 
 std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
-        size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression) {
+        size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
+        bool nativeResolution) {
     const auto& frames = mDecoder->getFrames();
     if (frameIndex >= frames.size()) throw std::out_of_range("DNG source frame index");
     const auto& frame = frames[frameIndex];
@@ -284,13 +298,14 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if (hasGainMap && !bakeGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(bytes))
         throw std::runtime_error("Could not canonicalize DNG gain maps: " + frame.filePath);
 
-    if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) ||
-         vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1 ||
+    const int outputScale = nativeResolution ? 1 :
+        vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
+    if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) || outputScale > 1 ||
          (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
         !DNGDecoder::processHigherCFA(
             bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
             mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
-            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale),
+            outputScale,
             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
         throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + frame.filePath);
 

@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <shared_mutex>
+#include <condition_variable>
 #include <unordered_map>
 
 namespace BS {
@@ -61,21 +62,24 @@ private:
     
     bool isHLGVideo() const;
     void calculateFrameRateStats();
-    bool convertRGBToDNG(const std::vector<uint16_t>& rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp, bool jpegCompression = false,
+    bool convertRGBToDNG(std::vector<uint16_t> rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp, bool jpegCompression = false,
                          float gainMapExposureOffset = 0.0f,
                          const std::array<float, 3>& gainMapNeutralScale = {1.0f, 1.0f, 1.0f},
                          double iso = 0.0, double shutterSpeed = 0.0,
                          double baselineExposure = 0.0,
                          const std::optional<std::array<float, 3>>& asShotNeutral = std::nullopt,
                          const std::vector<GainMap>& opcodeList2 = {},
-                         const std::vector<GainMap>& opcodeList3 = {});
+                         const std::vector<GainMap>& opcodeList3 = {},
+                         int decodedWidth = 0, int decodedHeight = 0,
+                         bool inputLogEncoded = false);
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
     void prepareSidecarGainMapOpcodes(
         int frameNumber, std::vector<GainMap>& opcodeList2,
         std::vector<GainMap>& opcodeList3) const;
     void applySidecarGainMaps(std::vector<uint16_t>& rgbData, int frameNumber,
                               float& exposureOffset,
-                              std::array<float, 3>& neutralScale) const;
+                              std::array<float, 3>& neutralScale,
+                              int imageWidth = 0, int imageHeight = 0) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
 
@@ -107,6 +111,9 @@ private:
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     mutable std::mutex mMutex;
     mutable std::shared_mutex mRenderMutex;
+    mutable std::mutex mDngWriterMutex;
+    mutable std::condition_variable mDngWriterAvailable;
+    int mActiveDngWriters = 0;
 };
 
 } // namespace motioncam

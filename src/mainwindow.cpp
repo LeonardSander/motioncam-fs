@@ -471,6 +471,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("remosaicEnabled", ui->remosaicCheckBox->isChecked());
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jxlDistance", mRenderSettings.jxlDistance);
     const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
@@ -544,6 +545,8 @@ void MainWindow::restoreSettings() {
     ui->logTransformCheckBox->setCheckState(
         !settings.contains("logTransformEnabled") ? Qt::CheckState::Checked :
         (settings.value("logTransformEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
+
+    ui->remosaicCheckBox->setChecked(settings.value("remosaicEnabled", false).toBool());
 
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);

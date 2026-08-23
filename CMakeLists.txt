@@ -355,6 +355,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   ${FFMPEG_LIBRARIES}
   ${platform-specific})
 target_compile_definitions(${PROJECT_NAME} PRIVATE TINY_DNG_ENABLE_JPEG_XL)
+add_compile_definitions(BS_THREAD_POOL_ENABLE_PRIORITY)
 
 set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
 

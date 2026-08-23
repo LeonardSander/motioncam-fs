@@ -146,6 +146,20 @@ void VirtualFileSystemImpl_MCRAW::init() {
     }
 
     mTypicalDngSize = dngData->size();
+    size_t firstDngSize = mTypicalDngSize;
+    if (vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1) {
+        RenderSettings nativeSettings = mSettings;
+        nativeSettings.options = static_cast<FileRenderOptions>(
+            nativeSettings.options & ~RENDER_OPT_DRAFT);
+        auto nativeDng = utils::generateDng(
+            data, cameraFrameMetadata, cameraConfig, mFps, 0, mBaselineExpValue,
+            nativeSettings, mCalibration, false);
+        std::vector<uint8_t> timed(nativeDng->begin(), nativeDng->end());
+        applySidecarGainMapOpcodes(timed, 0);
+        if (!DNGDecoder::setTimingMetadata(timed, mFps, 0))
+            throw std::runtime_error("Could not size native MCRAW metadata frame");
+        firstDngSize = timed.size();
+    }
 
     // Generate file entries
     mFiles.reserve(frames.size()*2);
@@ -216,6 +230,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
     int duplicatedFrames = 0, droppedFrames = 0;
     auto mapped = vfs::mapFramesToCfr(sourceEntries, frames, mBaseName + "-", mFps,
         applyCFRConversion, droppedFrames, duplicatedFrames);
+    if (!mapped.empty()) mapped.front().size = firstDngSize;
     mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
                   std::make_move_iterator(mapped.end()));
 
@@ -274,6 +289,11 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
         const int outputFrameNumber = vfs::outputFrameNumber(entry);
+        RenderSettings frameSettings = mSettings;
+        if (outputFrameNumber == 0 &&
+            vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1)
+            frameSettings.options = static_cast<FileRenderOptions>(
+                frameSettings.options & ~RENDER_OPT_DRAFT);
         std::optional<float> exposureOverride;
         if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
             exposureOverride = mSmoothedExposureOffsets.at(timestamp);
@@ -291,7 +311,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             mFps,
             outputFrameNumber,
             mBaselineExpValue,
-            mSettings,
+            frameSettings,
             mCalibration,
             jpegCompression,
             exposureOverride,
@@ -351,7 +371,8 @@ int VirtualFileSystemImpl_MCRAW::readFile(
         staticMaterializer = [this, entry] { return materializeFile(entry, false); };
     return vfs::readMountedEntry(entry, pos, len, dst, result, async,
         mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); },
-        staticMaterializer);
+        staticMaterializer, boost::ends_with(entry.name, ".dng")
+            ? vfs::outputFrameNumber(entry) : 0);
 }
 
 void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {

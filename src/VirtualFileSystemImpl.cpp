@@ -327,7 +327,8 @@ int readMountedEntry(
         const std::function<void(size_t, int)>& result, bool async,
         BS::thread_pool& processingThreadPool,
         const std::function<std::shared_ptr<std::vector<char>>()>& materializer,
-        const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer) {
+        const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer,
+        int priority) {
     if (const auto desktop = readDesktopIni(entry, pos, len, dst, result)) return *desktop;
     auto copyRange = [=]() -> size_t {
         try {
@@ -348,7 +349,8 @@ int readMountedEntry(
         result(0, -1);
         return -1;
     }
-    auto future = processingThreadPool.submit_task(copyRange);
+    auto future = processingThreadPool.submit_task(
+        copyRange, static_cast<BS::priority_t>(std::clamp(priority, -32768, 32767)));
     return async ? 0 : static_cast<int>(future.get());
 }
 

@@ -14,6 +14,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
+#include <libswscale/swscale.h>
 }
 
 namespace motioncam {
@@ -27,7 +28,8 @@ struct DirectLogFrameInfo {
     int width;
     int height;
     std::string pixelFormat;
-    double timeBase;       
+    double timeBase;
+    bool keyFrame;
 };
 
 struct DirectLogVideoInfo {
@@ -49,7 +51,9 @@ public:
     const DirectLogVideoInfo& getVideoInfo() const { return mVideoInfo; }
     const std::vector<DirectLogFrameInfo>& getFrames() const { return mFrames; }
     
-    bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData);
+    bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
+                      int outputWidth = 0, int outputHeight = 0,
+                      bool preserveLogEncoded = false);
     bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint16_t>& rgbData);
     void setFullRangeOverride(std::optional<bool> fullRange);
     
@@ -58,11 +62,16 @@ public:
 
 private:
     void initFFmpeg();
+    bool initHardwareDecoder();
     void analyzeVideo();
     void cleanup();
-    bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData);
+    bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData,
+                         int outputWidth, int outputHeight, bool preserveLogEncoded);
     void applyHLGToLinear(std::vector<uint16_t>& rgbData);
     void applyLOG60ToLinear(std::vector<uint16_t>& rgbData);
+    AVFrame* transferableFrame(AVFrame* frame);
+    static AVPixelFormat selectPixelFormat(AVCodecContext* context,
+                                           const AVPixelFormat* formats);
 
 private:
     std::string mFilePath;
@@ -73,13 +82,18 @@ private:
     AVCodecContext* mCodecContext;
     const AVCodec* mCodec;
     AVFrame* mFrame;
+    AVFrame* mTransferFrame;
     AVPacket* mPacket;
+    SwsContext* mSwsContext;
+    AVBufferRef* mHardwareDeviceContext;
+    AVPixelFormat mHardwarePixelFormat;
     
     int mVideoStreamIndex;
     AVRational mTimeBase;
     std::optional<bool> mFullRange;
     std::optional<bool> mFullRangeOverride;
-
+    int mLastDecodedFrame;
+    std::vector<uint16_t> mLimitedRangeScratch;
     mutable std::mutex mMutex;
 };
 

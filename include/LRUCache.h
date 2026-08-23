@@ -30,9 +30,14 @@ public:
         });
 
         if (!success) {
-            // Timeout occurred - another thread is taking too long
-            spdlog::warn("Timeout waiting for key to be processed by another thread");
-            return nullptr;
+            // A slow renderer (notably a random AV1 seek) can legitimately take
+            // longer than the diagnostic timeout. Starting a second render for
+            // the same key only queues duplicate work and can snowball when an
+            // application issues several range reads for one large DNG.
+            spdlog::warn("Still waiting for key already being processed");
+            mCondition.wait(lock, [this, &key] {
+                return mInProgress.find(key) == mInProgress.end();
+            });
         }
 
         auto it = mCacheMap.find(key);

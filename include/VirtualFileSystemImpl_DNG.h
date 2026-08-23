@@ -55,7 +55,8 @@ private:
     
     void calculateFrameRateStats();
     std::vector<uint8_t> transformFrame(
-        size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression);
+        size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
+        bool nativeResolution = false);
 
 private:
     LRUCache& mCache;
