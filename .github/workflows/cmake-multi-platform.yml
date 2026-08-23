@@ -177,6 +177,10 @@ jobs:
         vcpkgTriplet: ${{ matrix.vcpkg_triplet }}
 
     # ---------- MACOS DEPENDENCIES ----------
+    - name: Install macOS build tools
+      if: matrix.platform == 'macos'
+      run: brew install nasm
+
     - name: Install macFUSE (macOS)
       if: matrix.platform == 'macos'
       run: brew install --cask macfuse

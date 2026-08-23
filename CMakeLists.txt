@@ -238,8 +238,11 @@ add_library(motioncam-decoder STATIC
 # including <cstring> directly. Keep clean C++ builds independent of
 # transitive includes without applying a C++ header to liblj92.c.
 if(MSVC)
-  target_compile_options(motioncam-decoder PRIVATE
-    "$<$<COMPILE_LANGUAGE:CXX>:/FIcstring>")
+  set_source_files_properties(
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Decoder.cpp
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData.cpp
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData_Legacy.cpp
+    PROPERTIES COMPILE_OPTIONS /FIcstring)
 else()
   target_compile_options(motioncam-decoder PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-include;cstring>")
