@@ -41,11 +41,17 @@ copy_framework() {
   fi
   local candidates=(
     "$QT_LIB_DIR/${name}.framework"
+    "/usr/local/opt/qt/lib/${name}.framework"
     "/usr/local/opt/qtbase/lib/${name}.framework"
+    "/usr/local/opt/qtpdf/lib/${name}.framework"
+    "/usr/local/opt/qtsvg/lib/${name}.framework"
     "/usr/local/opt/qtvirtualkeyboard/lib/${name}.framework"
     "/usr/local/opt/qtdeclarative/lib/${name}.framework"
+    "/opt/homebrew/opt/qt/lib/${name}.framework"
     "/opt/homebrew/opt/qt@6/lib/${name}.framework"
     "/opt/homebrew/opt/qtbase/lib/${name}.framework"
+    "/opt/homebrew/opt/qtpdf/lib/${name}.framework"
+    "/opt/homebrew/opt/qtsvg/lib/${name}.framework"
     "/opt/homebrew/opt/qtvirtualkeyboard/lib/${name}.framework"
     "/opt/homebrew/opt/qtdeclarative/lib/${name}.framework"
   )
@@ -129,10 +135,17 @@ copy_missing_rpath() {
 }
 
 copy_framework "QtDBus" || true
+copy_framework "QtPdf" || true
 copy_framework "QtSvg" || true
 copy_framework "QtVirtualKeyboard" || true
 copy_framework "QtVirtualKeyboardQml" || true
-copy_missing_rpath
+for _ in {1..5}; do
+  before="$(list_missing_rpath || true)"
+  [[ -z "$before" ]] && break
+  copy_missing_rpath
+  after="$(list_missing_rpath || true)"
+  [[ "$after" == "$before" ]] && break
+done
 
 BIN="$APP_PATH/Contents/MacOS/MotionCamFuse"
 if [[ -f "$BIN" ]]; then
