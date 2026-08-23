@@ -33,11 +33,11 @@ QT_LIB_DIR="${QT_PREFIX}/lib"
 copy_framework() {
   local name="$1"
   local target="$APP_PATH/Contents/Frameworks/${name}.framework"
-  if [[ -e "$target" ]]; then
-    rm -rf "$target"
-  fi
-  if [[ -d "$target" ]]; then
+  if [[ -d "$target" && ! -L "$target" ]]; then
     return 0
+  fi
+  if [[ -e "$target" || -L "$target" ]]; then
+    rm -rf "$target"
   fi
   local candidates=(
     "$QT_LIB_DIR/${name}.framework"
@@ -57,7 +57,12 @@ copy_framework() {
   )
   for candidate in "${candidates[@]}"; do
     if [[ -d "$candidate" ]]; then
-      rsync -a "$candidate" "$APP_PATH/Contents/Frameworks/"
+      # Homebrew's aggregate `qt` prefix exposes split formula frameworks as
+      # top-level symlinks. Resolve that symlink before copying, while keeping
+      # the framework's own Versions/Current links intact inside the bundle.
+      local source
+      source="$(cd "$candidate" && pwd -P)"
+      rsync -a "$source" "$APP_PATH/Contents/Frameworks/${name}.framework"
       return 0
     fi
   done
