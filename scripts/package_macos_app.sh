@@ -62,7 +62,7 @@ copy_framework() {
       # the framework's own Versions/Current links intact inside the bundle.
       local source
       source="$(cd "$candidate" && pwd -P)"
-      rsync -a "$source" "$APP_PATH/Contents/Frameworks/${name}.framework"
+      rsync -a "$source/" "$APP_PATH/Contents/Frameworks/${name}.framework/"
       return 0
     fi
   done
