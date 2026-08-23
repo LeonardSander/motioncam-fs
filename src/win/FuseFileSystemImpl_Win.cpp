@@ -773,7 +773,7 @@ void FuseFileSystemImpl_Win::cleanupCacheExpired() {
     for (const auto& candidate : candidates) {
         if (totalBytes <= mCacheQuotaBytes) break;
         const HRESULT result = candidate.session->dehydrate(candidate.relativePath);
-        if (SUCCEEDED(result)) totalBytes -= std::min(totalBytes, candidate.allocatedBytes);
+        if (SUCCEEDED(result)) totalBytes -= (std::min)(totalBytes, candidate.allocatedBytes);
         else spdlog::debug("Could not evict projected DNG {} (0x{:08x})",
                            candidate.relativePath.string(), static_cast<unsigned int>(result));
     }

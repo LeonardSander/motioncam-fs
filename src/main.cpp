@@ -11,6 +11,7 @@
 #include <QFont>
 #include <QGuiApplication>
 #include <QProcess>
+#include <QPushButton>
 #include <QUrl>
 #include <spdlog/spdlog.h>
 
