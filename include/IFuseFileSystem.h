@@ -3,6 +3,7 @@
 #include <string>
 #include <optional>
 #include <functional>
+#include <cstdint>
 
 #include "Types.h"
 
@@ -13,6 +14,11 @@ struct FileInfo;
 using MountId = int;
 
 constexpr auto InvalidMountId = -1;
+
+enum class CachePolicy {
+    Off,
+    Quota
+};
 
 class IFuseFileSystem {
 public:
@@ -25,6 +31,10 @@ public:
     virtual void unmount(MountId mountId) = 0;
     virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
+    virtual bool generateThumbnail(MountId, const std::string&, int = 320, int = 240) { return false; }
+    virtual void setCachePolicy(CachePolicy) {}
+    virtual void setCacheQuotaBytes(std::uint64_t) {}
+    virtual void cleanupCacheExpired() {}
     virtual void finalize(
         MountId mountId,
         const std::string& destination,

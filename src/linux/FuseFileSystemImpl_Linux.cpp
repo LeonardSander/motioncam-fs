@@ -2,7 +2,10 @@
 
 #include "linux/FuseFileSystemImpl_Linux.h"
 
+#include "CameraFrameMetadata.h"
+#include "CameraMetadata.h"
 #include "LRUCache.h"
+#include "Utils.h"
 #include "DNGDecoder.h"
 #include "IVirtualFileSystem.h"
 #include "VirtualFileSystemImpl_DNG.h"
@@ -13,6 +16,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 #include <fuse3/fuse.h>
+#include <motioncam/Decoder.hpp>
 #include <QDir>
 #include <QProcess>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -102,7 +106,7 @@ FuseContext* context() {
 struct LinuxFuseSession {
     LinuxFuseSession(const std::string& source, const std::string& destination,
                      std::unique_ptr<IVirtualFileSystem> filesystem)
-        : mDstPath(destination), mFs(std::move(filesystem)) { start(); }
+        : mSrcPath(source), mDstPath(destination), mFs(std::move(filesystem)) { start(); }
 
     ~LinuxFuseSession() {
         if (mFuse) {
@@ -132,6 +136,7 @@ struct LinuxFuseSession {
         fuse_invalidate_path(mFuse, "/");
     }
     FileInfo getFileInfo() const { return mFs->getFileInfo(); }
+    const std::string& sourcePath() const { return mSrcPath; }
     void finalize(const std::string& destination, bool jpegCompression,
                   const FinalizeOptions& options,
                   const std::function<bool(size_t, size_t, const std::string&)>& progress,
@@ -254,6 +259,7 @@ private:
         });
     }
 
+    std::string mSrcPath;
     std::string mDstPath;
     std::unique_ptr<IVirtualFileSystem> mFs;
     FuseContext* mState = nullptr;
@@ -311,13 +317,19 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     }
 
     const MountId mountId = mNextMountId++;
-    mMountedFiles.emplace(
-        mountId,
-        std::make_unique<LinuxFuseSession>(
-            srcFile, dstPath, std::move(filesystem)));
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        mMountedFiles.emplace(
+            mountId,
+            std::make_unique<LinuxFuseSession>(
+                srcFile, dstPath, std::move(filesystem)));
+    }
     return mountId;
 }
-void FuseFileSystemImpl_Linux::unmount(MountId mountId) { mMountedFiles.erase(mountId); }
+void FuseFileSystemImpl_Linux::unmount(MountId mountId) {
+    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+    mMountedFiles.erase(mountId);
+}
 void FuseFileSystemImpl_Linux::updateOptions(MountId mountId, const RenderSettings& settings) {
     if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
         it->second->updateOptions(settings);
@@ -326,6 +338,34 @@ std::optional<FileInfo> FuseFileSystemImpl_Linux::getFileInfo(MountId mountId) {
     if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
         return it->second->getFileInfo();
     return std::nullopt;
+}
+bool FuseFileSystemImpl_Linux::generateThumbnail(
+    MountId mountId, const std::string& outputPath, int width, int height) {
+    std::string sourcePath;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) return false;
+        sourcePath = it->second->sourcePath();
+    }
+    try {
+        const fs::path source(sourcePath);
+        if (!boost::iequals(source.extension().string(), ".mcraw")) return false;
+        Decoder decoder(source.string());
+        auto frames = decoder.getFrames();
+        if (frames.empty()) return false;
+        std::sort(frames.begin(), frames.end());
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(frames.front(), data, metadata);
+        return utils::generateJpegThumbnail(
+            data, CameraFrameMetadata::parse(metadata),
+            CameraConfiguration::parse(decoder.getContainerMetadata()),
+            outputPath, width, height);
+    } catch (const std::exception& error) {
+        spdlog::warn("Could not generate thumbnail: {}", error.what());
+        return false;
+    }
 }
 void FuseFileSystemImpl_Linux::finalize(
     MountId mountId, const std::string& destination, bool jpegCompression,

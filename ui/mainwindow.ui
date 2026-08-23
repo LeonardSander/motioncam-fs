@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1520</width>
-    <height>840</height>
+    <width>1820</width>
+    <height>880</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -157,7 +157,7 @@
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:18pt; font-weight:700;&quot;&gt;Settings&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
         </widget>
-       </item> 
+       </item>
        <item>
         <layout class="QVBoxLayout" name="cacheSection">
          <property name="spacing">
@@ -245,7 +245,7 @@
                 <property name="text">
                 <string>Prefer Integer</string>
                 </property>
-              </item>           
+              </item>
               <item>
                 <property name="text">
                 <string>Median (Slowmotion)</string>
@@ -326,7 +326,7 @@
           </widget>
          </item>
         </layout>
-       </item>      
+       </item>
        <item>
         <layout class="QVBoxLayout" name="normalizeExposureSection">
          <property name="spacing">
@@ -419,7 +419,7 @@
           </widget>
          </item>
         </layout>
-       </item>       
+       </item>
        <item>
         <layout class="QVBoxLayout" name="camModelSection">
          <property name="spacing">
@@ -460,12 +460,12 @@
                 <property name="text">
                 <string>Blackmagic</string>
                 </property>
-              </item>              
+              </item>
               <item>
                 <property name="text">
                 <string>Fujifilm</string>
                 </property>
-              </item>     
+              </item>
             </widget>
            </item>
           </layout>
@@ -498,7 +498,7 @@
             <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;White / Black Levels:&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
           </widget>
-         </item>           
+         </item>
            <item>
             <widget class="QComboBox" name="levelsComboBox">
              <property name="minimumSize">
@@ -534,7 +534,7 @@
             <property name="text">
              <string>16383/1024</string>
             </property>
-           </item>           
+           </item>
            <item>
             <property name="text">
              <string>65535/4096</string>
@@ -633,7 +633,7 @@
         <layout class="QVBoxLayout" name="defaultSection">
          <property name="spacing">
           <number>8</number>
-         </property>         
+         </property>
          <item>
           <widget class="QPushButton" name="defaultBtn">
            <property name="minimumSize">
@@ -722,7 +722,7 @@
           <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:18pt; font-weight:700;&quot;&gt;Preprocessing&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
          </property>
         </widget>
-       </item>       
+       </item>
        <item>
         <layout class="QVBoxLayout" name="vignetteSection">
          <property name="spacing">
@@ -824,12 +824,12 @@
           </widget>
          </item>
         </layout>
-       </item> 
+       </item>
        <item>
         <layout class="QVBoxLayout" name="logTransformSection">
          <property name="spacing">
           <number>8</number>
-         </property>         
+         </property>
          <item>
           <layout class="QHBoxLayout" name="logTransformLayout">
            <property name="spacing">
@@ -1118,7 +1118,7 @@
         <layout class="QVBoxLayout" name="remosaicSection">
          <property name="spacing">
           <number>8</number>
-         </property>         
+         </property>
          <item>
           <layout class="QHBoxLayout" name="remosaicLayout">
            <property name="spacing">
@@ -1179,7 +1179,7 @@
           </widget>
          </item>
         </layout>
-       </item>       
+       </item>
        <item>
         <spacer name="verticalSpacer3">
          <property name="orientation">

@@ -8,6 +8,10 @@
 #include "VirtualFileSystemImpl_DNG.h"
 #include "DNGDecoder.h"
 #include "LRUCache.h"
+#include "CameraFrameMetadata.h"
+#include "CameraMetadata.h"
+#include "Utils.h"
+#include <motioncam/Decoder.hpp>
 
 #include <iostream>
 #include <ntstatus.h>
@@ -91,12 +95,21 @@ namespace {
 
 class Session : public VirtualizationInstance {
 public:
-    Session(const std::string& dstPath, std::unique_ptr<IVirtualFileSystem> fs);
+    Session(const std::string& srcPath, const std::string& dstPath,
+            std::unique_ptr<IVirtualFileSystem> fs);
     ~Session();
 
 public:
     void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
+    const std::string& sourcePath() const { return mSrcPath; }
+    const std::string& destinationPath() const { return mDstPath; }
+    HRESULT dehydrate(const std::filesystem::path& relativePath) {
+        PRJ_UPDATE_FAILURE_CAUSES cause = PRJ_UPDATE_FAILURE_CAUSE_NONE;
+        return PrjDeleteFile(_instanceHandle, relativePath.wstring().c_str(),
+            PRJ_UPDATE_ALLOW_DIRTY_METADATA | PRJ_UPDATE_ALLOW_DIRTY_DATA |
+            PRJ_UPDATE_ALLOW_READ_ONLY, &cause);
+    }
     void finalize(const std::string&, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>&, bool);
@@ -124,6 +137,8 @@ protected:
         _Inout_ PRJ_NOTIFICATION_PARAMETERS* NotificationParameters) override;
 
 private:
+    std::string mSrcPath;
+    std::string mDstPath;
     RenderSettings mConfig;
     std::mutex mOpLock;
     std::atomic_uint64_t mContentVersion{0};
@@ -132,8 +147,10 @@ private:
 };
 
 Session::Session(
+    const std::string& srcPath,
     const std::string& dstPath,
-    std::unique_ptr<IVirtualFileSystem> fs) : mFs(std::move(fs))
+    std::unique_ptr<IVirtualFileSystem> fs)
+    : mSrcPath(srcPath), mDstPath(dstPath), mFs(std::move(fs))
 {
     SetOptionalMethods(OptionalMethods::Notify);
 
@@ -603,7 +620,9 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
+            auto session = std::make_unique<Session>(srcFile, dstPath, std::move(fs));
+            std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+            mMountedFiles[mountId] = std::move(session);
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
@@ -621,7 +640,9 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
+            auto session = std::make_unique<Session>(srcFile, dstPath, std::move(fs));
+            std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+            mMountedFiles[mountId] = std::move(session);
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
@@ -637,7 +658,9 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            mMountedFiles[mountId] = std::make_unique<Session>(dstPath, std::move(fs));
+            auto session = std::make_unique<Session>(srcFile, dstPath, std::move(fs));
+            std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+            mMountedFiles[mountId] = std::move(session);
         }
         catch(std::runtime_error& e) {
             spdlog::error("Failed to mount {} to {} (error: {})", srcFile, dstPath, e.what());
@@ -650,6 +673,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
 }
 
 void FuseFileSystemImpl_Win::unmount(MountId mountId) {
+    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
     mMountedFiles.erase(mountId);
 }
 
@@ -666,6 +690,93 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
         return dynamic_cast<Session*>(it->second.get())->getFileInfo();
     }
     return std::nullopt;
+}
+
+bool FuseFileSystemImpl_Win::generateThumbnail(
+    MountId mountId, const std::string& outputPath, int width, int height) {
+    std::string sourcePath;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) return false;
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        if (!session) return false;
+        sourcePath = session->sourcePath();
+    }
+    try {
+        const fs::path source(sourcePath);
+        if (!boost::iequals(source.extension().string(), ".mcraw")) return false;
+        Decoder decoder(source.string());
+        auto frames = decoder.getFrames();
+        if (frames.empty()) return false;
+        std::sort(frames.begin(), frames.end());
+        std::vector<uint8_t> data;
+        nlohmann::json metadata;
+        decoder.loadFrame(frames.front(), data, metadata);
+        return utils::generateJpegThumbnail(
+            data, CameraFrameMetadata::parse(metadata),
+            CameraConfiguration::parse(decoder.getContainerMetadata()),
+            outputPath, width, height);
+    } catch (const std::exception& error) {
+        spdlog::warn("Could not generate thumbnail: {}", error.what());
+        return false;
+    }
+}
+
+void FuseFileSystemImpl_Win::setCachePolicy(CachePolicy policy) {
+    mCachePolicy = policy;
+}
+
+void FuseFileSystemImpl_Win::setCacheQuotaBytes(std::uint64_t bytes) {
+    mCacheQuotaBytes = bytes;
+}
+
+void FuseFileSystemImpl_Win::cleanupCacheExpired() {
+    if (mCachePolicy != CachePolicy::Quota || mCacheQuotaBytes == 0) return;
+    std::lock_guard<std::mutex> mountedFilesLock(mMountedFilesMutex);
+    struct Candidate {
+        Session* session;
+        std::filesystem::path relativePath;
+        std::uint64_t allocatedBytes;
+        std::filesystem::file_time_type modified;
+    };
+    std::vector<Candidate> candidates;
+    std::uint64_t totalBytes = 0;
+    for (auto& mounted : mMountedFiles) {
+        auto* session = dynamic_cast<Session*>(mounted.second.get());
+        if (!session) continue;
+        const std::filesystem::path root(session->destinationPath());
+        std::error_code error;
+        if (!std::filesystem::exists(root, error)) continue;
+        for (std::filesystem::recursive_directory_iterator current(
+                 root, std::filesystem::directory_options::skip_permission_denied, error), end;
+             current != end; current.increment(error)) {
+            if (error) { error.clear(); continue; }
+            if (!current->is_regular_file(error) ||
+                !boost::iequals(current->path().extension().string(), ".dng"))
+                continue;
+            DWORD high = 0;
+            SetLastError(NO_ERROR);
+            const DWORD low = GetCompressedFileSizeW(current->path().c_str(), &high);
+            if (low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) continue;
+            const std::uint64_t bytes = (static_cast<std::uint64_t>(high) << 32) | low;
+            if (bytes == 0) continue;
+            totalBytes += bytes;
+            candidates.push_back({session, std::filesystem::relative(current->path(), root, error),
+                                  bytes, current->last_write_time(error)});
+        }
+    }
+    if (totalBytes <= mCacheQuotaBytes) return;
+    std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+        return left.modified < right.modified;
+    });
+    for (const auto& candidate : candidates) {
+        if (totalBytes <= mCacheQuotaBytes) break;
+        const HRESULT result = candidate.session->dehydrate(candidate.relativePath);
+        if (SUCCEEDED(result)) totalBytes -= std::min(totalBytes, candidate.allocatedBytes);
+        else spdlog::debug("Could not evict projected DNG {} (0x{:08x})",
+                           candidate.relativePath.string(), static_cast<unsigned int>(result));
+    }
 }
 
 void FuseFileSystemImpl_Win::finalize(

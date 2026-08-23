@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "settingsdialog.h"
 #include "CalibrationData.h"
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
@@ -18,15 +19,22 @@
 
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QKeyEvent>
 
 using namespace motioncam;
 #include <QMimeData>
 #include <QPushButton>
+#include <QAction>
+#include <QMenuBar>
 #include <QFileInfo>
 #include <QProcess>
+#include <QPointer>
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QSettings>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDir>
 #include <QSignalBlocker>
 #include <QLabel>
@@ -37,6 +45,7 @@ using namespace motioncam;
 #include <QTemporaryDir>
 #include <QStandardPaths>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QSaveFile>
@@ -68,8 +77,11 @@ extern "C" {
 #include "win/FuseFileSystemImpl_Win.h"
 #elif __APPLE__
 #include "macos/FuseFileSystemImpl_MacOS.h"
+#include <sys/mount.h>
 #elif __linux__
 #include "linux/FuseFileSystemImpl_Linux.h"
+#include <cerrno>
+#include <sys/stat.h>
 #endif
 
 namespace {
@@ -78,6 +90,66 @@ namespace {
     constexpr auto RIFE_REVISION = "b0542ef99f380f0fe17a1b44151ac6935e8b82d4";
     constexpr auto RIFE_ARCHIVE_SHA256 =
         "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
+
+#ifdef __APPLE__
+    QStringList listMotionCamFuseMounts() {
+        struct statfs* mounts = nullptr;
+        const int count = getmntinfo(&mounts, MNT_NOWAIT);
+        QStringList result;
+        for (int index = 0; index < count; ++index) {
+            const QString source = QString::fromLocal8Bit(mounts[index].f_mntfromname);
+            if (!source.startsWith("MotionCamFuse@") && !source.startsWith("MotionCam Fuse@"))
+                continue;
+            result.push_back(QString::fromLocal8Bit(mounts[index].f_mntonname));
+        }
+        return result;
+    }
+
+    void unmountMacFusePath(const QString& mountPoint) {
+        const QByteArray path = mountPoint.toUtf8();
+        if (::unmount(path.constData(), 0) != 0) ::unmount(path.constData(), MNT_FORCE);
+    }
+
+    bool waitForMacFuseUnmount(const QString& mountPoint, int timeoutMs) {
+        const QString expected = QFileInfo(mountPoint).absoluteFilePath();
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < timeoutMs) {
+            const auto mounts = listMotionCamFuseMounts();
+            const bool stillMounted = std::any_of(mounts.cbegin(), mounts.cend(),
+                [&expected](const QString& path) {
+                    return QFileInfo(path).absoluteFilePath() == expected;
+                });
+            if (!stillMounted) return true;
+            QApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+            QThread::msleep(20);
+        }
+        return false;
+    }
+#endif
+
+#ifdef __linux__
+    bool cleanupStaleLinuxFuseMount(const QString& mountPath, QString& errorMessage) {
+        const QByteArray nativePath = QFile::encodeName(QDir::cleanPath(mountPath));
+        struct stat pathStat {};
+        if (::lstat(nativePath.constData(), &pathStat) == 0 || errno != ENOTCONN) {
+            return true;
+        }
+
+        QProcess fusermount;
+        fusermount.start("fusermount3", {"-u", QDir::cleanPath(mountPath)});
+        if (!fusermount.waitForStarted() || !fusermount.waitForFinished(10000) ||
+            fusermount.exitStatus() != QProcess::NormalExit || fusermount.exitCode() != 0) {
+            const QString details =
+                QString::fromLocal8Bit(fusermount.readAllStandardError()).trimmed();
+            errorMessage = QString("A stale FUSE mount exists at %1 and could not be detached%2.")
+                               .arg(QDir::cleanPath(mountPath),
+                                    details.isEmpty() ? QString() : QString(": %1").arg(details));
+            return false;
+        }
+        return true;
+    }
+#endif
 
     QString rifeRuntimeRoot() {
         return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
@@ -320,6 +392,7 @@ MainWindow::MainWindow(QWidget *parent)
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Win>();
 #elif __APPLE__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_MacOs>();
+    QTimer::singleShot(0, this, &MainWindow::cleanupStaleMacFuseMounts);
 #elif __linux__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Linux>();
 #endif
@@ -329,6 +402,17 @@ MainWindow::MainWindow(QWidget *parent)
     ui->dragAndDropScrollArea->installEventFilter(this);
 
     restoreSettings();
+    mGlobalRenderSettings = mRenderSettings;
+#ifdef _WIN32
+    mFuseFilesystem->setCachePolicy(mCachePolicy);
+    mFuseFilesystem->setCacheQuotaBytes(mCacheQuotaBytes);
+    mCacheCleanupTimer = new QTimer(this);
+    connect(mCacheCleanupTimer, &QTimer::timeout, this, [this] {
+        mFuseFilesystem->cleanupCacheExpired();
+    });
+    if (mCachePolicy == motioncam::CachePolicy::Quota && mCacheCleanupIntervalSeconds > 0)
+        mCacheCleanupTimer->start(mCacheCleanupIntervalSeconds * 1000);
+#endif
 
     // Connect to widgets
     connect(ui->draftModeCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState state) {
@@ -416,6 +500,58 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
 
+    ui->defaultSection->removeWidget(ui->defaultBtn);
+    auto* applyButtons = new QHBoxLayout();
+    mApplySelectedButton = new QPushButton(tr("Apply to Selected"), this);
+    mApplyAllButton = new QPushButton(tr("Apply to All"), this);
+    mSelectedFilesLabel = new QLabel(tr("0 selected — editing GLOBAL settings"), this);
+    mSelectedFilesLabel->setStyleSheet("color:#7f93ad; font-weight:600;");
+    applyButtons->addWidget(mApplySelectedButton);
+    applyButtons->addWidget(mApplyAllButton);
+    applyButtons->addWidget(ui->defaultBtn);
+    ui->defaultSection->insertWidget(0, mSelectedFilesLabel);
+    ui->defaultSection->insertLayout(1, applyButtons);
+    connect(mApplySelectedButton, &QPushButton::clicked, this, &MainWindow::onApplySelected);
+    connect(mApplyAllButton, &QPushButton::clicked, this, &MainWindow::onApplyAll);
+    mApplySelectedButtonBaseStyle = mApplySelectedButton->styleSheet();
+    mApplyAllButtonBaseStyle = mApplyAllButton->styleSheet();
+    mAutoApplyTimer = new QTimer(this);
+    mAutoApplyTimer->setSingleShot(true);
+    connect(mAutoApplyTimer, &QTimer::timeout, this, [this] {
+        if (mSelectedMountIds.isEmpty() && !mMountedFiles.isEmpty()) onApplyAll();
+    });
+    mApplySelectedButton->setEnabled(false);
+    mApplyAllButton->setEnabled(false);
+
+    auto* fileMenu = menuBar()->addMenu(tr("File"));
+    auto* newSession = fileMenu->addAction(tr("New Session"));
+    auto* loadSession = fileMenu->addAction(tr("Load Session..."));
+    auto* saveSession = fileMenu->addAction(tr("Save Session"));
+    auto* saveSessionAs = fileMenu->addAction(tr("Save Session As..."));
+    newSession->setShortcut(QKeySequence::New);
+    loadSession->setShortcut(QKeySequence::Open);
+    saveSession->setShortcut(QKeySequence::Save);
+    saveSessionAs->setShortcut(QKeySequence::SaveAs);
+    connect(newSession, &QAction::triggered, this, &MainWindow::onNewSession);
+    connect(loadSession, &QAction::triggered, this, &MainWindow::onLoadSession);
+    connect(saveSession, &QAction::triggered, this, &MainWindow::onSaveSession);
+    connect(saveSessionAs, &QAction::triggered, this, &MainWindow::onSaveSessionAs);
+    mRecentSessionsMenu = fileMenu->addMenu(tr("Recent Sessions"));
+#ifdef __APPLE__
+    fileMenu->addSeparator();
+    auto* forceUnmount = fileMenu->addAction(tr("Force Unmount All"));
+    connect(forceUnmount, &QAction::triggered, this, &MainWindow::forceUnmountAllMacFuseMounts);
+#endif
+    QSettings appSettings(PACKAGE_NAME, APP_NAME);
+    mRecentSessions = appSettings.value("recentSessions").toStringList();
+    mRecentSessions.removeIf([](const QString& path) { return !QFileInfo::exists(path); });
+    updateRecentSessionsMenu();
+
+    auto* settingsMenu = menuBar()->addMenu(tr("Settings"));
+    auto* preferencesAction = settingsMenu->addAction(tr("Preferences..."));
+    preferencesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
+    connect(preferencesAction, &QAction::triggered, this, &MainWindow::onOpenPreferences);
+
     // Load global calibration.json if it exists
     QString appDir = QCoreApplication::applicationDirPath();
     QString globalCalibPath = QDir(appDir).absoluteFilePath("calibration.json");
@@ -436,7 +572,9 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
+    autoSaveSession();
     saveSettings();
+    mThumbnailTasks.waitForFinished();
 
     // Wait for any ongoing processing
     if (mProcessingWatcher && mProcessingWatcher->isRunning()) {
@@ -479,6 +617,11 @@ void MainWindow::saveSettings() {
     settings.setValue("cameraNativeMode", compressionMode);
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
+    settings.setValue("deleteOnUnmount", mDeleteOnUnmount);
+    settings.setValue("playerPath", mPlayerPath);
+    settings.setValue("cachePolicy", mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
+    settings.setValue("cacheQuotaBytes", static_cast<qulonglong>(mCacheQuotaBytes));
+    settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
     settings.setValue("cfrTarget", QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
     settings.setValue("cropTarget", QString::fromStdString(mRenderSettings.cropTarget));
@@ -488,15 +631,6 @@ void MainWindow::saveSettings() {
     settings.setValue("logTransform", QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
     settings.setValue("quadBayerOption", QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
     settings.setValue("cfaPhase", QString::fromStdString(mRenderSettings.cfaPhase));
-    // Save mounted files
-    settings.beginWriteArray("mountedFiles");
-
-    for (auto i = 0; i < mMountedFiles.size(); ++i) {
-        settings.setArrayIndex(i);
-        settings.setValue("srcFile", mMountedFiles[i].srcFile);
-    }
-
-    settings.endArray();
 }
 
 void MainWindow::restoreSettings() {
@@ -568,6 +702,13 @@ void MainWindow::restoreSettings() {
         !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
 
     mCacheRootFolder = settings.value("cachePath").toString();
+    mDeleteOnUnmount = settings.value("deleteOnUnmount", false).toBool();
+    mPlayerPath = settings.value("playerPath").toString();
+    mCachePolicy = settings.value("cachePolicy", "quota").toString() == "off"
+        ? motioncam::CachePolicy::Off : motioncam::CachePolicy::Quota;
+    mCacheQuotaBytes = settings.value("cacheQuotaBytes",
+        QVariant::fromValue<qulonglong>(30ULL * 1024 * 1024 * 1024)).toULongLong();
+    mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
@@ -595,21 +736,17 @@ void MainWindow::restoreSettings() {
     ui->levelsComboBox->setCurrentText(QString::fromStdString(mRenderSettings.levels));
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
 
-    // Restore mounted files
-    auto size = settings.beginReadArray("mountedFiles");
-    for (int i = 0; i < size; ++i) {
-        settings.setArrayIndex(i);
-
-        auto srcFile = settings.value("srcFile").toString();
-        if(QFile::exists(srcFile)) // Mount files that exist
-            mountFile(srcFile);
-    }
-    settings.endArray();
-
     updateUi();
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (auto* card = qobject_cast<QWidget*>(watched);
+        card && card->property("clipCard").toBool() &&
+        event->type() == QEvent::MouseButtonRelease) {
+        if (auto* check = card->findChild<QCheckBox*>("clipSelection"))
+            check->toggle();
+        return true;
+    }
     if (watched == ui->dragAndDropScrollArea) {
         if (event->type() == QEvent::DragEnter) {
             auto* dragEvent = static_cast<QDragEnterEvent*>(event);
@@ -667,10 +804,28 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void MainWindow::mountFile(const QString& filePath) {
+    const QString normalizedPath = QFileInfo(filePath).absoluteFilePath();
+    for (const auto& mounted : mMountedFiles)
+        if (QFileInfo(mounted.srcFile).absoluteFilePath() == normalizedPath)
+            return;
+    if (mMountInProgress) {
+        QTimer::singleShot(200, this, [this, filePath] { mountFile(filePath); });
+        return;
+    }
+    mMountInProgress = true;
     // Extract just the filename from the path
     QFileInfo fileInfo(filePath);
     auto fileName = fileInfo.fileName();
-    const QString destinationRoot = mCacheRootFolder.isEmpty() ? fileInfo.path() : mCacheRootFolder;
+    QString destinationRoot = mCacheRootFolder;
+#ifdef __APPLE__
+    if (destinationRoot.isEmpty()) {
+        destinationRoot = QDir(QDir::homePath()).filePath("Mounts/MotionCamFuse");
+    }
+#else
+    if (destinationRoot.isEmpty()) {
+        destinationRoot = fileInfo.path();
+    }
+#endif
     // A sequence directory cannot be mounted onto itself: doing so hides the
     // source DNGs and makes every projected read recursively enter FUSE.
     const QString mountName = fileInfo.isDir()
@@ -679,12 +834,43 @@ void MainWindow::mountFile(const QString& filePath) {
     auto dstPath = destinationRoot + "/" + mountName;
     motioncam::MountId mountId;
 
-    try {
-        auto settings = buildRenderSettings();
-        mountId = mFuseFilesystem->mount(settings, filePath.toStdString(), dstPath.toStdString());
+    QProgressDialog mountProgress(
+        tr("Reading and mounting %1...").arg(fileInfo.fileName()), QString(), 0, 0, this);
+    mountProgress.setWindowModality(Qt::WindowModal);
+    mountProgress.setCancelButton(nullptr);
+    mountProgress.setMinimumDuration(0);
+    mountProgress.show();
+    QApplication::processEvents();
+    QString mountError;
+    const auto settings = buildRenderSettings();
+#ifdef __APPLE__
+    cleanupStaleMacFuseMounts();
+#elif __linux__
+    if (!cleanupStaleLinuxFuseMount(dstPath, mountError)) {
+        mountProgress.close();
+        mMountInProgress = false;
+        QMessageBox::critical(this, tr("Error"), mountError);
+        return;
     }
-    catch(std::runtime_error& e) {
-        QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(e.what()));
+#endif
+    auto future = QtConcurrent::run([this, settings, filePath, dstPath, &mountError] {
+        try {
+            return mFuseFilesystem->mount(
+                settings, filePath.toStdString(), dstPath.toStdString());
+        } catch (const std::exception& error) {
+            mountError = QString::fromUtf8(error.what());
+            return motioncam::InvalidMountId;
+        }
+    });
+    while (!future.isFinished()) {
+        QApplication::processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(10);
+    }
+    mountProgress.close();
+    mountId = future.result();
+    mMountInProgress = false;
+    if (mountId == motioncam::InvalidMountId) {
+        QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(mountError));
         return;
     }
 
@@ -695,20 +881,54 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(168);        // Increased height for 2 lines of metrics
+    fileWidget->setFixedHeight(148);
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
+    fileWidget->setObjectName(QStringLiteral("clipCard"));
+    fileWidget->setProperty("clipCard", true);
+    fileWidget->setCursor(Qt::PointingHandCursor);
+    fileWidget->installEventFilter(this);
 
-    auto* fileLayout = new QVBoxLayout(fileWidget);
-    fileLayout->setContentsMargins(16, 12, 16, 20);
+    auto* cardLayout = new QHBoxLayout(fileWidget);
+    cardLayout->setContentsMargins(8, 8, 8, 8);
+    cardLayout->setSpacing(10);
+
+    auto* thumbnailLabel = new QLabel(tr("Loading..."), fileWidget);
+    thumbnailLabel->setObjectName(QStringLiteral("thumbnailLabel"));
+    thumbnailLabel->setFixedSize(176, 112);
+    thumbnailLabel->setAlignment(Qt::AlignCenter);
+    thumbnailLabel->setStyleSheet("background:#1a1a1a; border:1px solid #333;");
+    cardLayout->addWidget(thumbnailLabel, 0, Qt::AlignVCenter);
+
+    auto* fileLayout = new QVBoxLayout();
+    fileLayout->setContentsMargins(0, 2, 0, 2);
     fileLayout->setSpacing(4);
+    cardLayout->addLayout(fileLayout, 1);
 
     // Create and add the filename label
     auto* fileLabel = new QLabel(fileInfo.baseName(), fileWidget);
     fileLabel->setToolTip(filePath); // Show full path on hover
     fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
-    fileLayout->addWidget(fileLabel);
+    auto* titleLayout = new QHBoxLayout();
+    titleLayout->setContentsMargins(0, 0, 0, 0);
+    titleLayout->addWidget(fileLabel, 1);
+    auto* localBadge = new QLabel(tr("LOCAL"), fileWidget);
+    localBadge->setObjectName(QStringLiteral("localBadge"));
+    localBadge->setStyleSheet("color:#f1c65a; border:1px solid #f1c65a; border-radius:3px; padding:1px 5px; font-weight:700;");
+    localBadge->hide();
+    auto* globalBadge = new QLabel(tr("GLOBAL"), fileWidget);
+    globalBadge->setObjectName(QStringLiteral("globalBadge"));
+    globalBadge->setStyleSheet("color:#a4b1c2; border:1px solid #46566b; border-radius:3px; padding:1px 5px; font-weight:600;");
+    auto* localReset = new QPushButton(tr("×"), fileWidget);
+    localReset->setObjectName(QStringLiteral("localReset"));
+    localReset->setToolTip(tr("Reset local settings to global"));
+    localReset->setFixedSize(20, 20);
+    localReset->hide();
+    titleLayout->addWidget(localBadge);
+    titleLayout->addWidget(localReset);
+    titleLayout->addWidget(globalBadge);
+    fileLayout->addLayout(titleLayout);
 
     // Get file information from the FUSE filesystem
     auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
@@ -774,10 +994,11 @@ void MainWindow::mountFile(const QString& filePath) {
     fileLayout->addWidget(sourceLabel);
 
     // Add spacer to maintain button position
-    fileLayout->addSpacing(12);
+    fileLayout->addSpacing(8);
 
     // Create horizontal layout for buttons
     auto* buttonLayout = new QHBoxLayout();
+    buttonLayout->setContentsMargins(0, 0, 0, 0);
     buttonLayout->setSpacing(8);
 
     // Define consistent button size
@@ -802,15 +1023,6 @@ void MainWindow::mountFile(const QString& filePath) {
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
     buttonLayout->addWidget(removeButton);
 
-#ifdef _WIN32
-    // ProjFS leaves hydrated files on disk after unmounting, so Windows needs
-    // an explicit way to remove them.
-    auto* discardButton = new QPushButton("Discard", fileWidget);
-    discardButton->setFixedSize(buttonWidth, buttonHeight);
-    discardButton->setToolTip("Unmount and delete all written DNG files");
-    buttonLayout->addWidget(discardButton);
-#endif
-
     // Create and add the finalize button
     auto* finalizeButton = new QPushButton("Finalize", fileWidget);
     finalizeButton->setFixedSize(buttonWidth, buttonHeight);
@@ -829,8 +1041,10 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Create a container widget for status label and refresh button overlay
     auto* statusContainer = new QWidget(fileWidget);
+    statusContainer->setObjectName(QStringLiteral("statusContainer"));
     statusContainer->setProperty("statusContainer", true);
     statusContainer->setFixedHeight(buttonHeight);
+    statusContainer->setStyleSheet(QStringLiteral("background:transparent;"));
 
     // Create calibration status label (initially hidden)
     auto* calibStatusLabel = new QLabel("", statusContainer);
@@ -848,6 +1062,7 @@ void MainWindow::mountFile(const QString& filePath) {
     refreshButton->setToolTip("Refresh Calibration");
 
     buttonLayout->addWidget(statusContainer);
+    buttonLayout->addSpacing(16);
 
     // Connect refresh button to update calibration
     connect(refreshButton, &QPushButton::clicked, this, [this] {
@@ -856,6 +1071,43 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Add button layout to main layout
     fileLayout->addLayout(buttonLayout);
+    fileLayout->addSpacing(6);
+
+    auto* clipControls = new QVBoxLayout();
+    clipControls->setContentsMargins(0, 0, 0, 6);
+    clipControls->addStretch();
+    auto* clipCheckBox = new QCheckBox(fileWidget);
+    clipCheckBox->setObjectName(QStringLiteral("clipSelection"));
+    clipCheckBox->setToolTip(tr("Select this clip for per-clip settings"));
+    clipCheckBox->setStyleSheet(QStringLiteral("background:transparent;"));
+    clipControls->addWidget(clipCheckBox, 0, Qt::AlignRight);
+    auto* clipNumber = new QLabel(QString::number(mMountedFiles.size() + 1), fileWidget);
+    clipNumber->setObjectName(QStringLiteral("indexLabel"));
+    clipNumber->setStyleSheet("color:#7f93ad; font-size:9pt;");
+    clipControls->addWidget(clipNumber, 0, Qt::AlignRight);
+    cardLayout->addLayout(clipControls);
+
+    connect(clipCheckBox, &QCheckBox::toggled, this, [this, fileWidget, mountId](bool selected) {
+        if (selected) mSelectedMountIds.insert(mountId);
+        else mSelectedMountIds.remove(mountId);
+        fileWidget->setProperty("selected", selected);
+        fileWidget->setStyleSheet(selected
+            ? "QWidget#clipCard { background:#223246; border:1px solid #3a5878; border-radius:6px; }"
+              "QWidget#clipCard QLabel { background:transparent; }"
+              "QWidget#clipCard QWidget#statusContainer, QWidget#clipCard QCheckBox#clipSelection { background:transparent; }"
+            : "QWidget#clipCard { background:transparent; border:1px solid transparent; border-radius:6px; }"
+              "QWidget#clipCard QLabel { background:transparent; }"
+              "QWidget#clipCard QWidget#statusContainer, QWidget#clipCard QCheckBox#clipSelection { background:transparent; }");
+        updateSelectionUi();
+    });
+    connect(localReset, &QPushButton::clicked, this, [this, mountId] {
+        mLocalSettings.remove(mountId);
+        mFuseFilesystem->updateOptions(mountId, mGlobalRenderSettings);
+        updateLocalBadge(mountId);
+        updateThumbnail(mountId);
+        updateSelectionUi();
+        autoSaveSession();
+    });
 
     // Add separator if there are already mounted files
     if (!mMountedFiles.empty()) {
@@ -870,6 +1122,11 @@ void MainWindow::mountFile(const QString& filePath) {
 
     // Add the file widget to the scroll area
     scrollLayout->insertWidget(0, fileWidget);
+    updateClipIndices();
+    QTimer::singleShot(250, this, [this, mountId] { updateThumbnail(mountId); });
+
+    for (auto* label : fileWidget->findChildren<QLabel*>())
+        label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
     // Hide the drag-drop label since we now have content
     ui->dragAndDropLabel->hide();
@@ -887,12 +1144,6 @@ void MainWindow::mountFile(const QString& filePath) {
         removeFile(fileWidget);
     });
 
-#ifdef _WIN32
-    connect(discardButton, &QPushButton::clicked, this, [this, fileWidget] {
-        discardFile(fileWidget);
-    });
-#endif
-
     connect(finalizeButton, &QPushButton::clicked, this, [this, fileWidget] {
         finalizeFile(fileWidget);
     });
@@ -903,6 +1154,7 @@ void MainWindow::mountFile(const QString& filePath) {
 
     mMountedFiles.append(
         motioncam::MountedFile(mountId, filePath));
+    autoSaveSession();
 
     // Update calibration button state
     updateCalibrationButtonStates();
@@ -912,12 +1164,16 @@ void MainWindow::playFile(const QString& path) {
     bool success = false;
 
 #ifdef _WIN32
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString playerPath = QDir(appDir).absoluteFilePath("../Player/MotionCamPlayer.exe");
-
+    const QString playerPath = mPlayerPath.isEmpty()
+        ? QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../Player/MotionCamPlayer.exe")
+        : mPlayerPath;
     success = QProcess::startDetached(QDir::cleanPath(playerPath), QStringList() << path);
 #elif __APPLE__
-    success = QProcess::startDetached("/usr/bin/open", QStringList() << "-a" << "MotionCam Player" << path);
+    success = mPlayerPath.isEmpty()
+        ? QProcess::startDetached("/usr/bin/open", QStringList() << "-a" << "MotionCam Player" << path)
+        : QProcess::startDetached("/usr/bin/open", QStringList() << "-a" << mPlayerPath << path);
+#elif __linux__
+    if (!mPlayerPath.isEmpty()) success = QProcess::startDetached(mPlayerPath, QStringList() << path);
 #endif
 
     if (!success)
@@ -948,6 +1204,7 @@ void MainWindow::openMountedDirectory(QWidget* fileWidget) {
 void MainWindow::removeFile(QWidget* fileWidget) {
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
+    const QString mountPath = fileWidget->property("mountPath").toString();
 
     // Find and remove the separator above this file widget if it exists
     int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
@@ -972,6 +1229,18 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     auto mountId = fileWidget->property("mountId").toInt(&ok);
     if(ok) {
         mFuseFilesystem->unmount(mountId);
+        mSelectedMountIds.remove(mountId);
+        mLocalSettings.remove(mountId);
+
+#ifdef _WIN32
+        if (mDeleteOnUnmount && !mountPath.isEmpty()) {
+            QThread::msleep(100);
+            QDir mountDirectory(mountPath);
+            if (mountDirectory.exists() && !mountDirectory.removeRecursively())
+                spdlog::warn("Could not delete local DNG output after unmount: {}",
+                             mountPath.toStdString());
+        }
+#endif
 
         auto it = std::find_if(
             mMountedFiles.begin(), mMountedFiles.end(),
@@ -985,6 +1254,22 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     if (mMountedFiles.empty()) {
         ui->dragAndDropLabel->show();
     }
+    updateClipIndices();
+    updateSelectionUi();
+    autoSaveSession();
+}
+
+void MainWindow::keyPressEvent(QKeyEvent* event) {
+    if (event->matches(QKeySequence::SelectAll)) {
+        for (const auto& file : mMountedFiles) {
+            if (auto* card = fileWidgetForMount(file.mountId))
+                if (auto* check = card->findChild<QCheckBox*>("clipSelection"))
+                    check->setChecked(true);
+        }
+        event->accept();
+        return;
+    }
+    QMainWindow::keyPressEvent(event);
 }
 
 #ifdef _WIN32
@@ -1914,6 +2199,10 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             mountReleased = true;
 #ifdef _WIN32
             QThread::msleep(150);
+#elif __APPLE__
+            if (!waitForMacFuseUnmount(mountPath, 10000)) {
+                throw std::runtime_error("Timed out waiting for the macOS FUSE mount to close");
+            }
 #endif
 
             QDir mountDir(mountPath);
@@ -2147,45 +2436,297 @@ void MainWindow::onRenderSettingsChanged(Qt::CheckState checkState) {
 }
 
 void MainWindow::scheduleOptionsUpdate() {
-    // Coalesce edits made while a rebuild is active, then apply the newest
-    // settings immediately after it completes instead of silently dropping it.
-    if (mProcessingInProgress || (mProcessingWatcher && mProcessingWatcher->isRunning())) {
-        mOptionsUpdatePending = true;
-        return;
+    if (auto* changedWidget = qobject_cast<QWidget*>(sender())) {
+        changedWidget->setProperty("localOverride", false);
+        changedWidget->style()->unpolish(changedWidget);
+        changedWidget->style()->polish(changedWidget);
     }
+    if (mMountedFiles.isEmpty()) return;
+    if (mSelectedMountIds.isEmpty()) mGlobalRenderSettings = buildRenderSettings();
+    markSettingsDirty();
+}
 
-    // If no files mounted, nothing to do
-    if (mMountedFiles.isEmpty()) {
-        return;
+void MainWindow::markSettingsDirty() {
+    if (mMountedFiles.isEmpty()) return;
+    mSettingsDirty = true;
+    mApplySelectedButton->setEnabled(!mSelectedMountIds.isEmpty());
+    mApplyAllButton->setEnabled(true);
+    mApplySelectedButton->setText(tr("Apply to Selected *"));
+    mApplyAllButton->setText(tr("Apply to All *"));
+    const QString pending = QStringLiteral(
+        "QPushButton { background:#d1a53a; color:#111; border:1px solid #e4bd5d; border-radius:4px; }"
+        "QPushButton:hover { background:#e1b64a; }");
+    mApplySelectedButton->setStyleSheet(pending);
+    mApplyAllButton->setStyleSheet(pending);
+    if (mSelectedMountIds.isEmpty()) mAutoApplyTimer->start(150);
+    else mAutoApplyTimer->stop();
+}
+
+void MainWindow::clearApplyFeedback() {
+    mSettingsDirty = false;
+    mAutoApplyTimer->stop();
+    mApplySelectedButton->setText(tr("Apply to Selected"));
+    mApplyAllButton->setText(tr("Apply to All"));
+    mApplySelectedButton->setStyleSheet(mApplySelectedButtonBaseStyle);
+    mApplyAllButton->setStyleSheet(mApplyAllButtonBaseStyle);
+}
+
+QWidget* MainWindow::fileWidgetForMount(motioncam::MountId mountId) const {
+    auto* content = ui->dragAndDropScrollArea->widget();
+    if (!content) return nullptr;
+    for (auto* widget : content->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+        bool ok = false;
+        if (widget->property("mountId").toInt(&ok) == mountId && ok) return widget;
     }
+    return nullptr;
+}
 
-    mProcessingInProgress = true;
-    mOptionsUpdatePending = false;
+void MainWindow::updateLocalBadge(motioncam::MountId mountId) {
+    auto* card = fileWidgetForMount(mountId);
+    if (!card) return;
+    const bool local = mLocalSettings.contains(mountId);
+    if (auto* badge = card->findChild<QLabel*>("localBadge")) badge->setVisible(local);
+    if (auto* badge = card->findChild<QLabel*>("globalBadge")) badge->setVisible(!local);
+    if (auto* reset = card->findChild<QPushButton*>("localReset")) reset->setVisible(local);
+}
 
-    // Capture current settings
-    auto settings = buildRenderSettings();
-    auto mountedFiles = mMountedFiles;
-    auto filesystem = mFuseFilesystem.get();
+void MainWindow::updateClipIndices() {
+    auto* content = ui->dragAndDropScrollArea->widget();
+    auto* layout = content ? qobject_cast<QVBoxLayout*>(content->layout()) : nullptr;
+    if (!layout) return;
+    int number = 1;
+    for (int i = layout->count() - 1; i >= 0; --i) {
+        auto* card = layout->itemAt(i)->widget();
+        if (!card || !card->property("mountId").isValid()) continue;
+        if (auto* label = card->findChild<QLabel*>("indexLabel"))
+            label->setText(QStringLiteral("%1.").arg(number++, 2, 10, QChar('0')));
+    }
+}
 
-    // Show progress
-    onProcessingStarted();
+void MainWindow::updateSelectionUi() {
+    const int count = mSelectedMountIds.size();
+    mSelectedFilesLabel->setText(count == 0
+        ? tr("0 selected — editing GLOBAL settings")
+        : tr("%1 selected — editing LOCAL settings").arg(count));
+    mApplySelectedButton->setEnabled(count > 0);
+    mApplyAllButton->setEnabled(!mMountedFiles.isEmpty());
+    const auto settings = count == 0
+        ? mGlobalRenderSettings
+        : mLocalSettings.value(*mSelectedMountIds.constBegin(), mGlobalRenderSettings);
+    mRenderSettings = settings;
+    const QSignalBlocker b1(ui->draftModeCheckBox), b2(ui->vignetteCorrectionCheckBox),
+        b3(ui->vignetteOnlyColorCheckBox), b4(ui->optimizeGainMapsCheckBox),
+        b5(ui->scaleRawCheckBox), b6(ui->debugVignetteCheckBox),
+        b7(ui->normalizeExposureCheckBox), b8(ui->smoothExposureCheckBox),
+        b9(ui->smoothWhiteBalanceCheckBox), b10(ui->bakeIsoCheckBox),
+        b11(ui->cfrConversionCheckBox), b12(ui->cropEnableCheckBox),
+        b13(ui->camModelOverrideCheckBox), b14(ui->logTransformCheckBox);
+    const QSignalBlocker b15(ui->cfrTarget), b16(ui->cropTargetComboBox),
+        b17(ui->camModelOverrideComboBox), b18(ui->levelsComboBox),
+        b19(ui->exposureCompensationLineEdit), b20(ui->logTransformComboBox),
+        b21(ui->quadBayerComboBox), b22(ui->cfaPhaseComboBox),
+        b23(ui->draftQuality), b24(ui->remosaicCheckBox),
+        b25(ui->higherCfaHqCheckBox), b26(ui->dngCompressionCheckBox),
+        b27(ui->dngCompressionModeComboBox);
+    for (auto* box : {ui->draftModeCheckBox, ui->vignetteCorrectionCheckBox,
+                      ui->vignetteOnlyColorCheckBox, ui->optimizeGainMapsCheckBox,
+                      ui->scaleRawCheckBox, ui->debugVignetteCheckBox,
+                      ui->normalizeExposureCheckBox, ui->smoothExposureCheckBox,
+                      ui->smoothWhiteBalanceCheckBox, ui->bakeIsoCheckBox,
+                      ui->cfrConversionCheckBox, ui->cropEnableCheckBox,
+                      ui->camModelOverrideCheckBox, ui->logTransformCheckBox,
+                      ui->remosaicCheckBox, ui->higherCfaHqCheckBox,
+                      ui->dngCompressionCheckBox})
+        box->setTristate(false);
+    for (auto* widget : {static_cast<QWidget*>(ui->cfrTarget),
+                         static_cast<QWidget*>(ui->cropTargetComboBox),
+                         static_cast<QWidget*>(ui->camModelOverrideComboBox),
+                         static_cast<QWidget*>(ui->levelsComboBox),
+                         static_cast<QWidget*>(ui->exposureCompensationLineEdit),
+                         static_cast<QWidget*>(ui->logTransformComboBox),
+                         static_cast<QWidget*>(ui->quadBayerComboBox),
+                         static_cast<QWidget*>(ui->cfaPhaseComboBox),
+                         static_cast<QWidget*>(ui->draftQuality)}) {
+        widget->setProperty("localOverride", false);
+        widget->style()->unpolish(widget);
+        widget->style()->polish(widget);
+    }
+    auto checked = [&settings](motioncam::FileRenderOptions option) {
+        return static_cast<bool>(settings.options & option);
+    };
+    ui->draftModeCheckBox->setChecked(checked(motioncam::RENDER_OPT_DRAFT));
+    ui->vignetteCorrectionCheckBox->setChecked(checked(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION));
+    ui->vignetteOnlyColorCheckBox->setChecked(checked(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
+    ui->optimizeGainMapsCheckBox->setChecked(checked(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
+    ui->scaleRawCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
+    ui->debugVignetteCheckBox->setChecked(checked(motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
+    ui->normalizeExposureCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_EXPOSURE));
+    ui->smoothExposureCheckBox->setChecked(checked(motioncam::RENDER_OPT_SMOOTH_EXPOSURE));
+    ui->smoothWhiteBalanceCheckBox->setChecked(checked(motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE));
+    ui->bakeIsoCheckBox->setChecked(checked(motioncam::RENDER_OPT_BAKE_ISO));
+    ui->cfrConversionCheckBox->setChecked(checked(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+    ui->cropEnableCheckBox->setChecked(checked(motioncam::RENDER_OPT_CROPPING));
+    ui->camModelOverrideCheckBox->setChecked(checked(motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
+    ui->logTransformCheckBox->setChecked(checked(motioncam::RENDER_OPT_LOG_TRANSFORM));
+    ui->remosaicCheckBox->setChecked(checked(motioncam::RENDER_OPT_REMOSAIC_TO_BAYER));
+    ui->higherCfaHqCheckBox->setChecked(checked(motioncam::RENDER_OPT_HIGHER_CFA_HQ));
+    ui->dngCompressionCheckBox->setChecked(checked(motioncam::RENDER_OPT_JPEG_COMPRESSION));
+    ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(settings.cfrTarget)));
+    ui->cropTargetComboBox->setCurrentText(QString::fromStdString(settings.cropTarget));
+    ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(settings.cameraModel));
+    ui->levelsComboBox->setCurrentText(QString::fromStdString(settings.levels));
+    ui->exposureCompensationLineEdit->setText(QString::fromStdString(settings.exposureCompensation));
+    ui->logTransformComboBox->setCurrentText(
+        QString::fromStdString(logTransformModeToString(settings.logTransform)));
+    ui->quadBayerComboBox->setCurrentText(
+        QString::fromStdString(quadBayerModeToString(settings.quadBayerOption)));
+    ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(settings.cfaPhase));
+    ui->draftQuality->setCurrentIndex(settings.draftScale == 2 ? 0
+        : settings.draftScale == 4 ? 1 : settings.draftScale == 8 ? 2 : -1);
+    const std::array<float, 6> jxlDistances{-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
+    const auto nearestJxl = std::min_element(jxlDistances.begin(), jxlDistances.end(),
+        [&settings](float left, float right) {
+            return std::abs(left - settings.jxlDistance) <
+                   std::abs(right - settings.jxlDistance);
+        });
+    ui->dngCompressionModeComboBox->setCurrentIndex(
+        static_cast<int>(nearestJxl - jxlDistances.begin()));
 
-    // Run processing in background thread using QtConcurrent
-    QFuture<void> future = QtConcurrent::run([this, filesystem, settings, mountedFiles]() {
-        int current = 0;
-        int total = mountedFiles.size();
+    if (count > 1) {
+        auto mixedFlag = [this, &settings](motioncam::FileRenderOptions option) {
+            const bool first = static_cast<bool>(settings.options & option);
+            for (auto selectedId : mSelectedMountIds) {
+                const auto current = mLocalSettings.value(selectedId, mGlobalRenderSettings);
+                if (static_cast<bool>(current.options & option) != first) return true;
+            }
+            return false;
+        };
+        auto markCheck = [](QCheckBox* box, bool mixed) {
+            box->setTristate(mixed);
+            if (mixed) box->setCheckState(Qt::PartiallyChecked);
+        };
+        markCheck(ui->draftModeCheckBox, mixedFlag(motioncam::RENDER_OPT_DRAFT));
+        markCheck(ui->vignetteCorrectionCheckBox, mixedFlag(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION));
+        markCheck(ui->vignetteOnlyColorCheckBox, mixedFlag(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
+        markCheck(ui->optimizeGainMapsCheckBox, mixedFlag(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
+        markCheck(ui->scaleRawCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
+        markCheck(ui->debugVignetteCheckBox, mixedFlag(motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
+        markCheck(ui->normalizeExposureCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_EXPOSURE));
+        markCheck(ui->smoothExposureCheckBox, mixedFlag(motioncam::RENDER_OPT_SMOOTH_EXPOSURE));
+        markCheck(ui->smoothWhiteBalanceCheckBox, mixedFlag(motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE));
+        markCheck(ui->bakeIsoCheckBox, mixedFlag(motioncam::RENDER_OPT_BAKE_ISO));
+        markCheck(ui->cfrConversionCheckBox, mixedFlag(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+        markCheck(ui->cropEnableCheckBox, mixedFlag(motioncam::RENDER_OPT_CROPPING));
+        markCheck(ui->camModelOverrideCheckBox, mixedFlag(motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
+        markCheck(ui->logTransformCheckBox, mixedFlag(motioncam::RENDER_OPT_LOG_TRANSFORM));
+        markCheck(ui->remosaicCheckBox, mixedFlag(motioncam::RENDER_OPT_REMOSAIC_TO_BAYER));
+        markCheck(ui->higherCfaHqCheckBox, mixedFlag(motioncam::RENDER_OPT_HIGHER_CFA_HQ));
+        markCheck(ui->dngCompressionCheckBox, mixedFlag(motioncam::RENDER_OPT_JPEG_COMPRESSION));
+        auto markValue = [this, &settings](QWidget* widget, auto getter) {
+            const auto first = getter(settings);
+            bool mixed = false;
+            for (auto selectedId : mSelectedMountIds)
+                mixed |= getter(mLocalSettings.value(selectedId, mGlobalRenderSettings)) != first;
+            widget->setProperty("localOverride", mixed);
+            widget->style()->unpolish(widget);
+            widget->style()->polish(widget);
+        };
+        markValue(ui->cfrTarget, [](const auto& s) { return cfrTargetToString(s.cfrTarget); });
+        markValue(ui->draftQuality, [](const auto& s) { return s.draftScale; });
+        markValue(ui->cropTargetComboBox, [](const auto& s) { return s.cropTarget; });
+        markValue(ui->camModelOverrideComboBox, [](const auto& s) { return s.cameraModel; });
+        markValue(ui->levelsComboBox, [](const auto& s) { return s.levels; });
+        markValue(ui->exposureCompensationLineEdit, [](const auto& s) { return s.exposureCompensation; });
+        markValue(ui->logTransformComboBox, [](const auto& s) { return s.logTransform; });
+        markValue(ui->quadBayerComboBox, [](const auto& s) { return s.quadBayerOption; });
+        markValue(ui->cfaPhaseComboBox, [](const auto& s) { return s.cfaPhase; });
+    }
+    updateUi();
+}
 
-        for (const auto& file : mountedFiles) {
-            filesystem->updateOptions(file.mountId, settings);
-            current++;
+void MainWindow::onApplySelected() {
+    if (mSelectedMountIds.isEmpty()) return;
+    const auto edited = buildRenderSettings();
+    for (auto id : mSelectedMountIds) {
+        auto settings = edited;
+        const auto previous = mLocalSettings.value(id, mGlobalRenderSettings);
+        auto preserveMixedFlag = [&](QCheckBox* box, motioncam::FileRenderOptions option) {
+            if (box->checkState() != Qt::PartiallyChecked) return;
+            if (previous.options & option) settings.options |= option;
+            else settings.options = static_cast<motioncam::FileRenderOptions>(settings.options & ~option);
+        };
+        preserveMixedFlag(ui->draftModeCheckBox, motioncam::RENDER_OPT_DRAFT);
+        preserveMixedFlag(ui->vignetteCorrectionCheckBox, motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+        preserveMixedFlag(ui->vignetteOnlyColorCheckBox, motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR);
+        preserveMixedFlag(ui->optimizeGainMapsCheckBox, motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS);
+        preserveMixedFlag(ui->scaleRawCheckBox, motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP);
+        preserveMixedFlag(ui->debugVignetteCheckBox, motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
+        preserveMixedFlag(ui->normalizeExposureCheckBox, motioncam::RENDER_OPT_NORMALIZE_EXPOSURE);
+        preserveMixedFlag(ui->smoothExposureCheckBox, motioncam::RENDER_OPT_SMOOTH_EXPOSURE);
+        preserveMixedFlag(ui->smoothWhiteBalanceCheckBox, motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE);
+        preserveMixedFlag(ui->bakeIsoCheckBox, motioncam::RENDER_OPT_BAKE_ISO);
+        preserveMixedFlag(ui->cfrConversionCheckBox, motioncam::RENDER_OPT_FRAMERATE_CONVERSION);
+        preserveMixedFlag(ui->cropEnableCheckBox, motioncam::RENDER_OPT_CROPPING);
+        preserveMixedFlag(ui->camModelOverrideCheckBox, motioncam::RENDER_OPT_CAMMODEL_OVERRIDE);
+        preserveMixedFlag(ui->logTransformCheckBox, motioncam::RENDER_OPT_LOG_TRANSFORM);
+        preserveMixedFlag(ui->remosaicCheckBox, motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
+        preserveMixedFlag(ui->higherCfaHqCheckBox, motioncam::RENDER_OPT_HIGHER_CFA_HQ);
+        preserveMixedFlag(ui->dngCompressionCheckBox, motioncam::RENDER_OPT_JPEG_COMPRESSION);
+        if (ui->cfrTarget->property("localOverride").toBool()) settings.cfrTarget = previous.cfrTarget;
+        if (ui->draftQuality->property("localOverride").toBool()) settings.draftScale = previous.draftScale;
+        if (ui->cropTargetComboBox->property("localOverride").toBool()) settings.cropTarget = previous.cropTarget;
+        if (ui->camModelOverrideComboBox->property("localOverride").toBool()) settings.cameraModel = previous.cameraModel;
+        if (ui->levelsComboBox->property("localOverride").toBool()) settings.levels = previous.levels;
+        if (ui->exposureCompensationLineEdit->property("localOverride").toBool())
+            settings.exposureCompensation = previous.exposureCompensation;
+        if (ui->logTransformComboBox->property("localOverride").toBool()) settings.logTransform = previous.logTransform;
+        if (ui->quadBayerComboBox->property("localOverride").toBool()) settings.quadBayerOption = previous.quadBayerOption;
+        if (ui->cfaPhaseComboBox->property("localOverride").toBool()) settings.cfaPhase = previous.cfaPhase;
+        mLocalSettings.insert(id, settings);
+        mFuseFilesystem->updateOptions(id, settings);
+        updateLocalBadge(id);
+        updateThumbnail(id);
+    }
+    clearApplyFeedback();
+    autoSaveSession();
+}
 
-            // Update progress on main thread
-            QMetaObject::invokeMethod(this, "onProcessingProgress", Qt::QueuedConnection,
-                                     Q_ARG(int, current), Q_ARG(int, total));
-        }
-    });
+void MainWindow::onApplyAll() {
+    if (mMountedFiles.isEmpty()) return;
+    mGlobalRenderSettings = buildRenderSettings();
+    mRenderSettings = mGlobalRenderSettings;
+    mLocalSettings.clear();
+    for (const auto& file : mMountedFiles) {
+        mFuseFilesystem->updateOptions(file.mountId, mGlobalRenderSettings);
+        updateLocalBadge(file.mountId);
+        updateThumbnail(file.mountId);
+    }
+    clearApplyFeedback();
+    autoSaveSession();
+}
 
-    mProcessingWatcher->setFuture(future);
+void MainWindow::updateThumbnail(motioncam::MountId mountId) {
+    auto* card = fileWidgetForMount(mountId);
+    auto* label = card ? card->findChild<QLabel*>("thumbnailLabel") : nullptr;
+    if (!label) return;
+    const QString path = QDir::temp().filePath(QStringLiteral("motioncam-fuse-%1.jpg").arg(mountId));
+    label->setText(tr("Generating..."));
+    QPointer<QLabel> guardedLabel(label);
+    auto render = [this, mountId, path, guardedLabel] {
+        const bool generated = mFuseFilesystem->generateThumbnail(
+            mountId, path.toStdString(), 352, 224);
+        QMetaObject::invokeMethod(this, [path, guardedLabel, generated] {
+            if (!guardedLabel) return;
+            const QPixmap image(path);
+            if (generated && !image.isNull()) {
+                guardedLabel->setPixmap(image.scaled(guardedLabel->size(),
+                    Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+            } else {
+                guardedLabel->setText(QObject::tr("No preview"));
+            }
+        }, Qt::QueuedConnection);
+    };
+    mThumbnailTasks.addFuture(QtConcurrent::run(std::move(render)));
 }
 
 void MainWindow::onProcessingStarted() {
@@ -2296,6 +2837,284 @@ void MainWindow::onSetCacheFolder(bool checked) {
     else {
         ui->cacheFolderLabel->setText(mCacheRootFolder);
         ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
+    }
+}
+
+void MainWindow::onOpenPreferences() {
+    SettingsDialog dialog(this);
+    dialog.setCacheFolder(mCacheRootFolder);
+    dialog.setPlayerPath(mPlayerPath);
+#ifdef _WIN32
+    dialog.setDeleteOnUnmount(mDeleteOnUnmount);
+    dialog.setCachePolicyMode(mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
+    dialog.setCacheQuotaGb(static_cast<double>(mCacheQuotaBytes) / (1024.0 * 1024.0 * 1024.0));
+    dialog.setCacheCleanupIntervalSeconds(mCacheCleanupIntervalSeconds);
+#endif
+
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    mCacheRootFolder = dialog.getCacheFolder();
+    mPlayerPath = dialog.getPlayerPath();
+#ifdef _WIN32
+    mDeleteOnUnmount = dialog.getDeleteOnUnmount();
+    mCachePolicy = dialog.getCachePolicyMode() == "off"
+        ? motioncam::CachePolicy::Off : motioncam::CachePolicy::Quota;
+    mCacheQuotaBytes = static_cast<std::uint64_t>(
+        dialog.getCacheQuotaGb() * 1024.0 * 1024.0 * 1024.0);
+    mCacheCleanupIntervalSeconds = dialog.getCacheCleanupIntervalSeconds();
+    mFuseFilesystem->setCachePolicy(mCachePolicy);
+    mFuseFilesystem->setCacheQuotaBytes(mCacheQuotaBytes);
+    mFuseFilesystem->cleanupCacheExpired();
+    if (mCacheCleanupTimer) {
+        if (mCachePolicy == motioncam::CachePolicy::Quota && mCacheCleanupIntervalSeconds > 0)
+            mCacheCleanupTimer->start(mCacheCleanupIntervalSeconds * 1000);
+        else
+            mCacheCleanupTimer->stop();
+    }
+#endif
+    ui->cacheFolderLabel->setText(mCacheRootFolder.isEmpty()
+        ? tr("<i>Same as source file</i>") : mCacheRootFolder);
+    saveSettings();
+    scheduleOptionsUpdate();
+}
+
+void MainWindow::saveSessionToFile(const QString& path) {
+    auto encode = [](const motioncam::RenderSettings& settings) {
+        QJsonObject object;
+        object["options"] = static_cast<int>(settings.options);
+        object["draftScale"] = settings.draftScale;
+        object["cfrTarget"] = QString::fromStdString(cfrTargetToString(settings.cfrTarget));
+        object["cropTarget"] = QString::fromStdString(settings.cropTarget);
+        object["cameraModel"] = QString::fromStdString(settings.cameraModel);
+        object["levels"] = QString::fromStdString(settings.levels);
+        object["logTransform"] = QString::fromStdString(logTransformModeToString(settings.logTransform));
+        object["exposureCompensation"] = QString::fromStdString(settings.exposureCompensation);
+        object["quadBayerOption"] = QString::fromStdString(quadBayerModeToString(settings.quadBayerOption));
+        object["cfaPhase"] = QString::fromStdString(settings.cfaPhase);
+        object["jxlDistance"] = settings.jxlDistance;
+        return object;
+    };
+    QJsonObject root;
+    root["version"] = 2;
+    root["globalSettings"] = encode(mGlobalRenderSettings);
+    root["cacheFolder"] = mCacheRootFolder;
+    QJsonArray clips;
+    for (const auto& file : mMountedFiles) {
+        QJsonObject clip;
+        clip["path"] = file.srcFile;
+        if (mLocalSettings.contains(file.mountId))
+            clip["localSettings"] = encode(mLocalSettings.value(file.mountId));
+        clips.append(clip);
+    }
+    root["clips"] = clips;
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) ||
+        file.write(QJsonDocument(root).toJson()) < 0 || !file.commit()) {
+        QMessageBox::warning(this, tr("Save Session"), tr("Could not save %1").arg(path));
+        return;
+    }
+    if (QFileInfo(path).absoluteFilePath() != QFileInfo(autoSessionPath()).absoluteFilePath()) {
+        mCurrentSessionFile = path;
+        addRecentSession(path);
+    }
+}
+
+void MainWindow::clearSession() {
+    while (!mMountedFiles.isEmpty()) {
+        auto* card = fileWidgetForMount(mMountedFiles.front().mountId);
+        if (card) removeFile(card);
+        else {
+            mFuseFilesystem->unmount(mMountedFiles.front().mountId);
+            mMountedFiles.removeFirst();
+        }
+    }
+    mLocalSettings.clear();
+    mSelectedMountIds.clear();
+    updateSelectionUi();
+}
+
+void MainWindow::loadSessionFromFile(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Load Session"), tr("Could not open %1").arg(path));
+        return;
+    }
+    const auto document = QJsonDocument::fromJson(file.readAll());
+    if (!document.isObject()) {
+        QMessageBox::warning(this, tr("Load Session"), tr("Invalid session file"));
+        return;
+    }
+    auto decode = [](const QJsonObject& object) {
+        motioncam::RenderSettings settings;
+        settings.options = static_cast<motioncam::FileRenderOptions>(object["options"].toInt());
+        settings.draftScale = object["draftScale"].toInt(1);
+        settings.cfrTarget = stringToCFRTarget(object["cfrTarget"].toString("Prefer Drop Frame").toStdString());
+        settings.cropTarget = object["cropTarget"].toString().toStdString();
+        settings.cameraModel = object["cameraModel"].toString("Panasonic").toStdString();
+        settings.levels = object["levels"].toString("Dynamic").toStdString();
+        settings.logTransform = stringToLogTransformMode(object["logTransform"].toString("Keep Input").toStdString());
+        settings.exposureCompensation = object["exposureCompensation"].toString().toStdString();
+        settings.quadBayerOption = stringToQuadBayerMode(object["quadBayerOption"].toString("Demosaic").toStdString());
+        settings.cfaPhase = object["cfaPhase"].toString("Don't override CFA").toStdString();
+        settings.jxlDistance = static_cast<float>(object["jxlDistance"].toDouble(-1.0));
+        return settings;
+    };
+    const auto root = document.object();
+    const auto clips = root["clips"].toArray();
+    clearSession();
+    mCacheRootFolder = root["cacheFolder"].toString();
+    mGlobalRenderSettings = decode(root["globalSettings"].toObject());
+    mRenderSettings = mGlobalRenderSettings;
+    updateSelectionUi();
+    for (const auto& value : clips) {
+        const auto clip = value.toObject();
+        const QString clipPath = clip["path"].toString();
+        if (!QFileInfo::exists(clipPath)) continue;
+        mountFile(clipPath);
+        if (clip.contains("localSettings") && !mMountedFiles.isEmpty()) {
+            const auto id = mMountedFiles.back().mountId;
+            const auto local = decode(clip["localSettings"].toObject());
+            mLocalSettings.insert(id, local);
+            mFuseFilesystem->updateOptions(id, local);
+            updateLocalBadge(id);
+            updateThumbnail(id);
+        }
+    }
+    if (QFileInfo(path).absoluteFilePath() == QFileInfo(autoSessionPath()).absoluteFilePath())
+        mCurrentSessionFile.clear();
+    else {
+        mCurrentSessionFile = path;
+        addRecentSession(path);
+    }
+    autoSaveSession();
+}
+
+QString MainWindow::sessionDirectory() const {
+    const QString path = QDir(QStandardPaths::writableLocation(
+        QStandardPaths::AppLocalDataLocation)).filePath("sessions");
+    QDir().mkpath(path);
+    return path;
+}
+
+QString MainWindow::autoSessionPath() const {
+    return QDir(sessionDirectory()).filePath("last_session.json");
+}
+
+void MainWindow::autoSaveSession() {
+    if (mMountedFiles.isEmpty()) {
+        QFile::remove(autoSessionPath());
+        return;
+    }
+    const QString current = mCurrentSessionFile;
+    saveSessionToFile(autoSessionPath());
+    mCurrentSessionFile = current;
+}
+
+void MainWindow::promptToResumeSession() {
+    const QString path = autoSessionPath();
+    if (!QFileInfo::exists(path)) return;
+    QMessageBox prompt(this);
+    prompt.setIcon(QMessageBox::Question);
+    prompt.setWindowTitle(tr("Resume Session"));
+    prompt.setText(tr("Resume the last session or start a new one?"));
+    auto* resume = prompt.addButton(tr("Resume"), QMessageBox::AcceptRole);
+    prompt.addButton(tr("New Session"), QMessageBox::RejectRole);
+    prompt.setDefaultButton(resume);
+    prompt.exec();
+    if (prompt.clickedButton() == resume) loadSessionFromFile(path);
+    else clearSession();
+}
+
+#ifdef __APPLE__
+void MainWindow::cleanupStaleMacFuseMounts() {
+    QSet<QString> activePaths;
+    for (const auto& mounted : mMountedFiles) {
+        if (auto* card = fileWidgetForMount(mounted.mountId))
+            activePaths.insert(QFileInfo(card->property("mountPath").toString()).absoluteFilePath());
+    }
+    for (const auto& mountPoint : listMotionCamFuseMounts()) {
+        if (activePaths.contains(QFileInfo(mountPoint).absoluteFilePath())) continue;
+        unmountMacFusePath(mountPoint);
+        QDir().rmdir(mountPoint);
+    }
+}
+
+void MainWindow::forceUnmountAllMacFuseMounts() {
+    if (QMessageBox::question(this, tr("Force Unmount All"),
+            tr("Force unmount all MotionCamFuse volumes and clear the session?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+    auto mounts = listMotionCamFuseMounts();
+    std::sort(mounts.begin(), mounts.end(), [](const QString& a, const QString& b) {
+        return a.size() > b.size();
+    });
+    for (const auto& mountPoint : mounts) {
+        unmountMacFusePath(mountPoint);
+        QDir().rmdir(mountPoint);
+    }
+    clearSession();
+}
+#endif
+
+void MainWindow::addRecentSession(const QString& path) {
+    const QString normalized = QFileInfo(path).absoluteFilePath();
+    if (normalized == QFileInfo(autoSessionPath()).absoluteFilePath()) return;
+    mRecentSessions.removeAll(normalized);
+    mRecentSessions.prepend(normalized);
+    while (mRecentSessions.size() > 10) mRecentSessions.removeLast();
+    QSettings(PACKAGE_NAME, APP_NAME).setValue("recentSessions", mRecentSessions);
+    updateRecentSessionsMenu();
+}
+
+void MainWindow::updateRecentSessionsMenu() {
+    if (!mRecentSessionsMenu) return;
+    mRecentSessionsMenu->clear();
+    if (mRecentSessions.isEmpty()) {
+        auto* empty = mRecentSessionsMenu->addAction(tr("No recent sessions"));
+        empty->setEnabled(false);
+    }
+    for (const QString& path : mRecentSessions) {
+        auto* action = mRecentSessionsMenu->addAction(QFileInfo(path).completeBaseName());
+        action->setToolTip(path);
+        connect(action, &QAction::triggered, this, [this, path] {
+            if (QFileInfo::exists(path)) loadSessionFromFile(path);
+            else {
+                mRecentSessions.removeAll(path);
+                QSettings(PACKAGE_NAME, APP_NAME).setValue("recentSessions", mRecentSessions);
+                updateRecentSessionsMenu();
+            }
+        });
+    }
+    mRecentSessionsMenu->addSeparator();
+    mRecentSessionsMenu->addAction(tr("Clear Recent Sessions"), this,
+                                   &MainWindow::onClearRecentSessions);
+}
+
+void MainWindow::onClearRecentSessions() {
+    mRecentSessions.clear();
+    QSettings(PACKAGE_NAME, APP_NAME).setValue("recentSessions", mRecentSessions);
+    updateRecentSessionsMenu();
+}
+
+void MainWindow::onNewSession() {
+    clearSession();
+    mCurrentSessionFile.clear();
+    QFile::remove(autoSessionPath());
+}
+void MainWindow::onLoadSession() {
+    const QString path = QFileDialog::getOpenFileName(this, tr("Load Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
+    if (!path.isEmpty()) loadSessionFromFile(path);
+}
+void MainWindow::onSaveSession() {
+    if (mCurrentSessionFile.isEmpty()) onSaveSessionAs();
+    else saveSessionToFile(mCurrentSessionFile);
+}
+void MainWindow::onSaveSessionAs() {
+    QString path = QFileDialog::getSaveFileName(this, tr("Save Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
+    if (!path.isEmpty()) {
+        if (!path.endsWith(".json", Qt::CaseInsensitive)) path += ".json";
+        saveSessionToFile(path);
     }
 }
 

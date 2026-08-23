@@ -224,5 +224,13 @@ void demosaicHigherCFA(
     const std::array<uint8_t, 4>& bayerPhase,
     bool ocl);
 
+bool generateJpegThumbnail(
+    std::vector<uint8_t>& data,
+    const CameraFrameMetadata& metadata,
+    const CameraConfiguration& cameraConfiguration,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight);
+
 } // namespace utils
 } // namespace motioncam

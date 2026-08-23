@@ -1,0 +1,6 @@
+Windows Registry Editor Version 5.00
+
+; Delete MotionCam Fuse registry settings
+; This removes all saved settings including checkboxes, paths, etc.
+
+[-HKEY_CURRENT_USER\Software\com.motioncam]

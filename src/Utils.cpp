@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/back_inserter.hpp>
@@ -2227,6 +2228,71 @@ void burnInText(
         
         xOffset += charWidth + charSpacing;
     }
+}
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
+bool generateJpegThumbnail(
+    std::vector<uint8_t>& data,
+    const CameraFrameMetadata& metadata,
+    const CameraConfiguration& cameraConfiguration,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight) {
+    const int width = static_cast<int>(metadata.width);
+    const int height = static_cast<int>(metadata.height);
+    if (width < 2 || height < 2 || thumbWidth < 1 || thumbHeight < 1 ||
+        data.size() < static_cast<size_t>(width) * height * sizeof(uint16_t))
+        return false;
+
+    std::array<uint8_t, 4> cfa{0, 1, 1, 2};
+    if (cameraConfiguration.sensorArrangement == "bggr") cfa = {2, 1, 1, 0};
+    else if (cameraConfiguration.sensorArrangement == "grbg") cfa = {1, 0, 2, 1};
+    else if (cameraConfiguration.sensorArrangement == "gbrg") cfa = {1, 2, 0, 1};
+
+    const float black = std::accumulate(metadata.dynamicBlackLevel.begin(),
+        metadata.dynamicBlackLevel.end(), 0.0f) / 4.0f;
+    const float range = std::max(1.0f, metadata.dynamicWhiteLevel - black);
+    const std::array<float, 3> gains{
+        1.0f / std::max(metadata.asShotNeutral[0], 0.001f),
+        1.0f / std::max(metadata.asShotNeutral[1], 0.001f),
+        1.0f / std::max(metadata.asShotNeutral[2], 0.001f)};
+    const float scale = std::max(static_cast<float>(thumbWidth) / width,
+                                 static_cast<float>(thumbHeight) / height);
+    const float visibleWidth = thumbWidth / scale;
+    const float visibleHeight = thumbHeight / scale;
+    const float offsetX = (width - visibleWidth) * 0.5f;
+    const float offsetY = (height - visibleHeight) * 0.5f;
+    const auto* raw = reinterpret_cast<const uint16_t*>(data.data());
+    std::vector<uint8_t> rgb(static_cast<size_t>(thumbWidth) * thumbHeight * 3);
+    auto srgb = [](float value) {
+        value = std::clamp(value, 0.0f, 1.0f);
+        return value <= 0.0031308f ? value * 12.92f
+                                  : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
+    };
+    for (int y = 0; y < thumbHeight; ++y) {
+        for (int x = 0; x < thumbWidth; ++x) {
+            int sx = std::clamp(static_cast<int>(offsetX + x / scale), 0, width - 2) & ~1;
+            int sy = std::clamp(static_cast<int>(offsetY + y / scale), 0, height - 2) & ~1;
+            const int base = sy * width + sx;
+            const uint16_t px[4]{raw[base], raw[base + 1], raw[base + width], raw[base + width + 1]};
+            float channels[3]{};
+            int counts[3]{};
+            for (int i = 0; i < 4; ++i) {
+                channels[cfa[i]] += px[i];
+                ++counts[cfa[i]];
+            }
+            const size_t out = (static_cast<size_t>(y) * thumbWidth + x) * 3;
+            for (int channel = 0; channel < 3; ++channel) {
+                const float sample = counts[channel] ? channels[channel] / counts[channel] : black;
+                const float value = ((sample - black) / range) * gains[channel];
+                rgb[out + channel] = static_cast<uint8_t>(std::lround(srgb(value) * 255.0f));
+            }
+        }
+    }
+    return stbi_write_jpg(outputPath.c_str(), thumbWidth, thumbHeight, 3,
+                          rgb.data(), 88) != 0;
 }
 
 } // namespace utils

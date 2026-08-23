@@ -7,16 +7,142 @@
 #include <QTimer>
 #include <QFileInfo>
 #include <QDirIterator>
+#include <QDesktopServices>
+#include <QFont>
+#include <QGuiApplication>
+#include <QProcess>
+#include <QUrl>
+#include <spdlog/spdlog.h>
+
+#ifdef __APPLE__
+#include "CrashDebug.h"
+#include <execinfo.h>
+#include <signal.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstdio>
+#include <cstring>
+#include <exception>
+#endif
+
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
+namespace {
+void messageHandler(QtMsgType type, const QMessageLogContext&, const QString& message) {
+    const auto text = message.toLocal8Bit();
+    switch (type) {
+    case QtDebugMsg: spdlog::debug("Qt: {}", text.constData()); break;
+    case QtInfoMsg: spdlog::info("Qt: {}", text.constData()); break;
+    case QtWarningMsg: spdlog::warn("Qt: {}", text.constData()); break;
+    case QtCriticalMsg: spdlog::error("Qt: {}", text.constData()); break;
+    case QtFatalMsg: spdlog::critical("Qt: {}", text.constData()); std::abort();
+    }
+}
+
+#ifdef __APPLE__
+int crashLogFd = -1;
+void crashHandler(int signal) {
+    const char header[] = "\n==== MotionCamFuse crash ====\n";
+    if (crashLogFd >= 0) ::write(crashLogFd, header, sizeof(header) - 1);
+    motioncam::debug::dumpCrashContext(crashLogFd >= 0 ? crashLogFd : STDERR_FILENO);
+    void* stack[64];
+    const int count = ::backtrace(stack, 64);
+    ::backtrace_symbols_fd(stack, count, crashLogFd >= 0 ? crashLogFd : STDERR_FILENO);
+    if (crashLogFd >= 0) ::fsync(crashLogFd);
+    _Exit(128 + signal);
+}
+void installCrashHandler() {
+    const QString directory = QDir::home().filePath("Library/Logs/MotionCam Tools");
+    QDir().mkpath(directory);
+    crashLogFd = ::open(QDir(directory).filePath("crash.txt").toUtf8().constData(),
+                        O_CREAT | O_WRONLY | O_APPEND, 0644);
+    struct sigaction action {};
+    action.sa_handler = crashHandler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART | SA_RESETHAND;
+    for (int signal : {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE})
+        sigaction(signal, &action, nullptr);
+    std::set_terminate([] { crashHandler(SIGABRT); });
+}
+
+bool platformReady() {
+    const QStringList candidates{"/Library/Filesystems/macfuse.fs",
+        "/Library/Frameworks/macfuse.framework", "/Library/Extensions/macfuse.kext",
+        "/Library/Frameworks/fuse_t.framework"};
+    for (const auto& path : candidates) if (QFileInfo::exists(path)) return true;
+    QMessageBox prompt(QMessageBox::Warning, "macFUSE Required",
+        "MotionCam Fuse needs macFUSE to mount clips. Install and approve macFUSE in "
+        "System Settings > Privacy & Security, then reopen the application.",
+        QMessageBox::NoButton);
+    auto* download = prompt.addButton("Open macFUSE Download", QMessageBox::AcceptRole);
+    auto* privacy = prompt.addButton("Open Privacy & Security", QMessageBox::ActionRole);
+    prompt.addButton(QMessageBox::Cancel);
+    prompt.setDefaultButton(download);
+    prompt.exec();
+    if (prompt.clickedButton() == download)
+        QDesktopServices::openUrl(QUrl("https://macfuse.github.io/"));
+    else if (prompt.clickedButton() == privacy)
+        QDesktopServices::openUrl(QUrl(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Security"));
+    return false;
+}
+#elif defined(_WIN32)
+bool platformReady() {
+    HMODULE library = LoadLibraryW(L"projectedfslib.dll");
+    if (library) { FreeLibrary(library); return true; }
+    const QString script = QDir(QCoreApplication::applicationDirPath()).filePath("Enable_ProjFS.bat");
+    QMessageBox prompt(QMessageBox::Warning, "ProjectedFS Required",
+        "MotionCam Fuse needs Windows Projected File System. Enable it as administrator, "
+        "then restart Windows.", QMessageBox::NoButton);
+    auto* enable = prompt.addButton("Enable ProjectedFS (Admin)", QMessageBox::AcceptRole);
+    auto* openFolder = prompt.addButton("Open Setup Folder", QMessageBox::ActionRole);
+    prompt.addButton(QMessageBox::Cancel);
+    prompt.setDefaultButton(enable);
+    prompt.exec();
+    if (prompt.clickedButton() == openFolder) {
+        QProcess::startDetached("explorer.exe",
+            {QDir::toNativeSeparators(QFileInfo(script).absolutePath())});
+        return false;
+    }
+    if (prompt.clickedButton() == enable) {
+        if (!QFileInfo::exists(script)) {
+            QMessageBox::critical(nullptr, "ProjectedFS Setup", "Enable_ProjFS.bat was not found.");
+        } else {
+            const QString command = QString("Start-Process -FilePath '%1' -Verb RunAs")
+                                        .arg(QDir::toNativeSeparators(script));
+            QProcess::startDetached("powershell.exe",
+                {"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command});
+        }
+    }
+    return false;
+}
+#endif
+} // namespace
 
 int main(int argc, char *argv[])
 {
     SingleApplication app(argc, argv);
 
+#ifdef __APPLE__
+    installCrashHandler();
+#endif
+
     // Set application properties
     app.setApplicationName("MotionCam Fuse");
     app.setApplicationVersion("1.0");
     app.setOrganizationName("MotionCam");
+#ifdef __APPLE__
+    app.setWindowIcon(QIcon(":/assets/app_icon_mac.png"));
+    QFont appFont = app.font();
+    if (appFont.pointSizeF() > 0) {
+        appFont.setPointSizeF(appFont.pointSizeF() + 2.0);
+        app.setFont(appFont);
+    }
+#else
     app.setWindowIcon(QIcon(":/assets/app_icon.png"));
+#endif
 
     // Load theme
     QFile themeFile(":qdarkstyle/dark/darkstyle.qss");
@@ -63,8 +189,13 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+#if defined(_WIN32) || defined(__APPLE__)
+    if (!platformReady()) return 1;
+#endif
+
     // Create main window
     MainWindow window;
+    qInstallMessageHandler(messageHandler);
 
     // Handle messages from other instances
     QObject::connect(&app, &SingleApplication::messageReceived, &window,
@@ -87,5 +218,18 @@ int main(int argc, char *argv[])
     }
 
     window.show();
+#ifdef __APPLE__
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window,
+        [&window](Qt::ApplicationState state) {
+            if (state != Qt::ApplicationActive) return;
+            if (window.isVisible() && !window.isMinimized()) return;
+            window.show();
+            if (window.isMinimized()) window.showNormal();
+            window.raise();
+            window.activateWindow();
+        });
+#endif
+    if (fileToMount.isEmpty())
+        QTimer::singleShot(0, &window, [&window] { window.promptToResumeSession(); });
     return app.exec();
 }
