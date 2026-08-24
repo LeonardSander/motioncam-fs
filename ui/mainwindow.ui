@@ -544,6 +544,11 @@
              <item><property name="text"><string>Camera Native (HEVC)</string></property></item>
              <item><property name="text"><string>Camera Native (AV1)</string></property></item>
              <item><property name="text"><string>Camera Native (AV1 HDR + Noise)</string></property></item>
+             <item><property name="text"><string>Camera Native (ProRes LT)</string></property></item>
+             <item><property name="text"><string>Camera Native (ProRes Standard)</string></property></item>
+             <item><property name="text"><string>Camera Native (ProRes HQ)</string></property></item>
+             <item><property name="text"><string>Camera Native (CineForm 422)</string></property></item>
+             <item><property name="text"><string>Camera Native (CineForm RGB)</string></property></item>
             </widget>
            </item>
           </layout>
@@ -551,7 +556,7 @@
          <item>
           <widget class="QLabel" name="compressionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Uses JPEG/JPEG XL for DNG finalization, or Camera Native to encode an RGB sequence as 10-bit LOG60 HEVC/AV1. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Uses JPEG/JPEG XL for DNG finalization, or Camera Native to encode LOG60 as HEVC, AV1, ProRes, or CineForm. CineForm RGB retains RGB at 12-bit; ProRes and CineForm 422 use 10-bit YUV 4:2:2. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

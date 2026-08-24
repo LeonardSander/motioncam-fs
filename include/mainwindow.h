@@ -120,7 +120,7 @@ private slots:
     void discardFile(QWidget* fileWidget);
 #endif
     void finalizeFile(QWidget* fileWidget);
-    void finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoise);
+    void finalizeCameraNative(QWidget* fileWidget, const QString& mode);
     void createCalibrationJson(QWidget* fileWidget);
     void updateCalibrationButtonStates();
 

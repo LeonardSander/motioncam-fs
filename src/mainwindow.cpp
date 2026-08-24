@@ -1590,7 +1590,12 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
     return runtimeRoot;
 }
 
-void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoise) {
+void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) {
+    const bool av1 = mode.contains("AV1");
+    const bool hdrNoise = mode.contains("HDR");
+    const bool proRes = mode.contains("ProRes");
+    const bool cineForm = mode.contains("CineForm");
+    const bool cineFormRgb = mode.contains("CineForm RGB");
     const QString srcFile = fileWidget->property("filePath").toString();
     const QString mountPath = fileWidget->property("mountPath").toString();
     bool mountOk = false;
@@ -1666,7 +1671,13 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
     }
 
     const QFileInfo sourceInfo(srcFile);
-    const QString codecSuffix = av1 ? (hdrNoise ? "_AV1_HDR_NOISE" : "_AV1") : "";
+    QString codecSuffix;
+    if (av1) codecSuffix = hdrNoise ? "_AV1_HDR_NOISE" : "_AV1";
+    else if (mode.contains("ProRes LT")) codecSuffix = "_PRORES_LT";
+    else if (mode.contains("ProRes Standard")) codecSuffix = "_PRORES_STANDARD";
+    else if (mode.contains("ProRes HQ")) codecSuffix = "_PRORES_HQ";
+    else if (cineFormRgb) codecSuffix = "_CINEFORM_RGB";
+    else if (cineForm) codecSuffix = "_CINEFORM_422";
     const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
     const QString containerExtension = av1 ? ".mp4" : ".mov";
     const QDir outputDir(QFileInfo(mountPath).absolutePath());
@@ -1721,17 +1732,20 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
         if (ffmpeg.isEmpty())
             throw std::runtime_error(
                 "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
-        if (av1) {
+        const QString requiredEncoder = av1 ? "libsvtav1"
+            : proRes ? "prores_ks" : cineForm ? "cfhd" : QString{};
+        if (!requiredEncoder.isEmpty()) {
             QProcess probe;
             probe.setProcessChannelMode(QProcess::MergedChannels);
-            probe.start(ffmpeg, {"-hide_banner", "-h", "encoder=libsvtav1"});
+            probe.start(ffmpeg, {"-hide_banner", "-h", "encoder=" + requiredEncoder});
             if (!probe.waitForStarted() || !probe.waitForFinished(10000) || probe.exitCode() != 0 ||
-                !probe.readAll().contains("Encoder libsvtav1")) {
+                !probe.readAll().contains(("Encoder " + requiredEncoder).toUtf8())) {
                 probe.kill();
                 probe.waitForFinished();
                 throw std::runtime_error(
-                    "This FFmpeg executable does not provide the libsvtav1 encoder. "
-                    "Install an FFmpeg build with SVT-AV1 support or place it beside MotionCam Fuse.");
+                    ("This FFmpeg executable does not provide the " + requiredEncoder +
+                     " encoder. Install a compatible FFmpeg build or place it beside MotionCam Fuse.")
+                        .toStdString());
             }
         }
 
@@ -1846,16 +1860,21 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
         const QString audioPath = stageDir.absoluteFilePath("audio.wav");
         if (QFile::exists(audioPath))
             args << "-i" << audioPath;
-        const QString log60 =
+        const QString log60Lut =
             "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:"
             "g=log(1+60*val/maxval)/log(61)*maxval:"
-            "b=log(1+60*val/maxval)/log(61)*maxval,"
-            "zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=none,"
-            "format=yuv420p10le";
+            "b=log(1+60*val/maxval)/log(61)*maxval";
+        const QString pixelFormat = cineFormRgb ? "gbrp12le"
+            : (proRes || cineForm) ? "yuv422p10le" : "yuv420p10le";
+        const QString videoFilter = cineFormRgb
+            ? log60Lut + ",format=gbrp12le"
+            : log60Lut +
+                ",zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=none,format=" +
+                pixelFormat;
         args << "-map" << "0:v:0";
         if (QFile::exists(audioPath))
             args << "-map" << "1:a:0" << "-c:a" << "copy";
-        args << "-vf" << log60;
+        args << "-vf" << videoFilter;
         if (av1) {
             // SVT 4 defaults to parallelism level 6 (305 PPCS at 4K), which
             // can exhaust a desktop process's memory during encoder startup.
@@ -1867,13 +1886,23 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
             args << "-c:v" << "libsvtav1" << "-crf" << (hdrNoise ? "12" : "7")
                  << "-preset" << (hdrNoise ? "2" : "3")
                  << "-svtav1-params" << svtParams;
+        } else if (proRes) {
+            const QString profile = mode.contains("ProRes LT") ? "1"
+                : mode.contains("ProRes Standard") ? "2" : "3";
+            args << "-c:v" << "prores_ks" << "-profile:v" << profile;
+        } else if (cineForm) {
+            args << "-c:v" << "cfhd" << "-quality" << "film3+";
         } else {
             args << "-c:v" << "libx265" << "-preset" << "slow" << "-crf" << "14"
                  << "-x265-params" << "range=full:colorprim=bt2020:colormatrix=bt2020nc";
         }
-        args << "-pix_fmt" << "yuv420p10le"
-             << "-color_range" << "pc" << "-colorspace" << "bt2020nc"
-             << "-color_primaries" << "bt2020"
+        args << "-pix_fmt" << pixelFormat
+             << "-color_range" << "pc";
+        if (cineFormRgb)
+            args << "-colorspace" << "rgb" << "-color_primaries" << "bt2020";
+        else
+            args << "-colorspace" << "bt2020nc" << "-color_primaries" << "bt2020";
+        args
              << "-fps_mode" << (convertToCfr ? "cfr" : "passthrough");
         if (convertToCfr)
             args << "-r" << QString::number(info->fps, 'g', 9);
@@ -2083,8 +2112,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
         nlohmann::json sidecar;
         sidecar["transferFunction"] = "LOG60";
         sidecar["dataLevels"] = "Full";
-        sidecar["videoCodec"] = av1 ? "AV1" : "HEVC";
-        sidecar["encoder"] = av1 ? "libsvtav1" : "libx265";
+        sidecar["videoCodec"] = av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
+        sidecar["encoder"] = av1 ? "libsvtav1" : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
+        sidecar["pixelFormat"] = pixelFormat.toStdString();
         if (hdrNoise) sidecar["noiseSynthesis"] = 8;
         if (colorMetadata.hasColorMatrix1) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
         if (colorMetadata.hasColorMatrix2) sidecar["colorMatrix2"] = colorMetadata.colorMatrix2;
@@ -2143,8 +2173,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, bool av1, bool hdrNoi
 void MainWindow::finalizeFile(QWidget* fileWidget) {
     const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
     if (ui->dngCompressionCheckBox->isChecked() && compressionMode.startsWith("Camera Native")) {
-        const bool av1 = compressionMode.contains("AV1");
-        finalizeCameraNative(fileWidget, av1, compressionMode.contains("HDR"));
+        finalizeCameraNative(fileWidget, compressionMode);
         return;
     }
     auto mountPath = fileWidget->property("mountPath").toString();
@@ -2689,8 +2718,13 @@ void MainWindow::updateSelectionUi() {
             return std::abs(left - settings.jxlDistance) <
                    std::abs(right - settings.jxlDistance);
         });
-    ui->dngCompressionModeComboBox->setCurrentIndex(
-        static_cast<int>(nearestJxl - jxlDistances.begin()));
+    // Camera Native modes are global finalization choices rather than fields
+    // in RenderSettings. Preserve them while clip selection changes; only the
+    // six DNG compression modes are derived from per-clip jxlDistance.
+    if (ui->dngCompressionModeComboBox->currentIndex() < 6) {
+        ui->dngCompressionModeComboBox->setCurrentIndex(
+            static_cast<int>(nearestJxl - jxlDistances.begin()));
+    }
 
     if (count > 1) {
         auto mixedFlag = [this, &settings](motioncam::FileRenderOptions option) {
