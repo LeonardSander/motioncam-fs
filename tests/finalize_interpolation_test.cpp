@@ -105,7 +105,7 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
 class FakeFileSystem final : public motioncam::IVirtualFileSystem {
 public:
     FakeFileSystem(std::vector<uint8_t> left, std::vector<uint8_t> right,
-                   size_t duplicatedFrames = 1)
+                   size_t duplicatedFrames = 1, bool markDuplicates = true)
         : mLeft(std::move(left)), mRight(std::move(right)) {
         for (size_t i = 0; i < duplicatedFrames + 2; ++i) {
             motioncam::Entry entry;
@@ -116,7 +116,7 @@ public:
             entry.size = i == duplicatedFrames + 1 ? mRight.size() : mLeft.size();
             entry.userData = static_cast<int64_t>(i == duplicatedFrames + 1
                 ? duplicatedFrames + 1 : 0);
-            entry.duplicateFrame = i > 0 && i <= duplicatedFrames;
+            entry.duplicateFrame = markDuplicates && i > 0 && i <= duplicatedFrames;
             mEntries.push_back(entry);
         }
     }
@@ -132,6 +132,14 @@ public:
                 [&](const auto& candidate) { return candidate.name == entry.name; })));
         assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
         return std::make_shared<std::vector<char>>(timed.begin(), timed.end());
+    }
+    bool sourceImagePayloadsEqual(const motioncam::Entry& left,
+                                  const motioncam::Entry& right) override {
+        const auto leftDng = materializeFile(left, false);
+        const auto rightDng = materializeFile(right, false);
+        return motioncam::DNGDecoder::imagePayloadsEqual(
+            std::vector<uint8_t>(leftDng->begin(), leftDng->end()),
+            std::vector<uint8_t>(rightDng->begin(), rightDng->end()));
     }
     void updateOptions(const motioncam::RenderSettings&) override {}
     motioncam::FileInfo getFileInfo() const override { return {}; }
@@ -208,6 +216,24 @@ int main() {
     assert(std::search(dng.begin(), dng.end(), marker.begin(), marker.end()) != dng.end());
     assert(motioncam::DNGDecoder::isSyntheticFrame(dng));
     assert(!motioncam::DNGDecoder::isDuplicateFrame(dng));
+
+    // Pixel duplicate detection must persist its result even when interpolation
+    // is disabled. This also covers Camera Native, which consumes the same
+    // finalized DNG stream and copies this marker into duplicateFrame JSON.
+    FakeFileSystem detectedFilesystem(
+        makeDng(42, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0),
+        makeDng(84, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 2), 1, false);
+    motioncam::FinalizeOptions detectionOptions;
+    detectionOptions.detectDuplicateDngs = true;
+    size_t detectedFrames = 0;
+    motioncam::vfs::finalize(detectedFilesystem, (root / "detected-out").string(),
+        false, detectionOptions, {},
+        [&](const std::vector<uint8_t>& detectedDng, motioncam::Timestamp timestamp) {
+            assert(motioncam::DNGDecoder::isDuplicateFrame(detectedDng) == (timestamp == 1));
+            ++detectedFrames;
+        }, false);
+    assert(detectedFrames == 3);
+    assert(fs::is_empty(root / "detected-out"));
 
     FakeFileSystem cfaFilesystem(makeLogCfaDng(0, 0), makeLogCfaDng(1023, 2));
     motioncam::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});

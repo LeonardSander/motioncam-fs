@@ -395,13 +395,31 @@ void finalize(
     constexpr size_t maxInterpolatedGapFrames = 31;
     struct Gap { size_t left, right; std::vector<size_t> frames; };
     std::vector<Gap> gaps;
+
+    // Duplicate detection is useful independently of interpolation: finalized
+    // DNGs carry the result in XMP, and Camera Native forwards it to its JSON
+    // sidecar. Perform the comparison before rendering so both output paths see
+    // the detected flag even when RIFE is disabled.
+    if (options.detectDuplicateDngs) {
+        size_t detectedCount = 0;
+        for (size_t i = 1; i < entries.size(); ++i) {
+            if (!isDng(entries[i]) || !isDng(entries[i - 1]) ||
+                entries[i].duplicateFrame)
+                continue;
+            if (filesystem.sourceImagePayloadsEqual(entries[i], entries[i - 1])) {
+                entries[i].duplicateFrame = true;
+                ++detectedCount;
+            }
+        }
+        spdlog::info("Detected {} duplicated DNG frame(s) by image payload", detectedCount);
+    }
+
     if (options.interpolateDuplicatedFrames) {
         auto duplicated = [&](size_t current, size_t previous) {
             if (entries[current].duplicateFrame) return true;
             if (std::get<int64_t>(entries[current].userData) ==
                 std::get<int64_t>(entries[previous].userData)) return true;
-            return options.detectDuplicateDngs &&
-                filesystem.sourceImagePayloadsEqual(entries[current], entries[previous]);
+            return false;
         };
         for (size_t i = 1; i + 1 < entries.size();) {
             if (entries[i].name == "audio.wav" || entries[i - 1].name == "audio.wav" ||

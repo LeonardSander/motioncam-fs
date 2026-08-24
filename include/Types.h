@@ -386,8 +386,8 @@ struct RenderSettings {
 
 struct FinalizeOptions {
     bool interpolateDuplicatedFrames = false;
-    // Compare adjacent source DNG image payloads when finding interpolation
-    // gaps. This is finalization-only and deliberately does not affect mounts.
+    // Compare adjacent source DNG image payloads and mark matching finalized
+    // frames as duplicates. This is finalization-only and does not affect mounts.
     bool detectDuplicateDngs = false;
     std::string rifeDirectory;
     // Optional interpreter override, also used by deterministic integration tests.
