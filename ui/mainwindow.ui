@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1820</width>
-    <height>820</height>
+    <width>1780</width>
+    <height>780</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -191,12 +191,12 @@
               </property>
               <item>
                 <property name="text">
-                <string>Prefer Drop Frame</string>
+                <string>Prefer Integer</string>
                 </property>
               </item>
               <item>
                 <property name="text">
-                <string>Prefer Integer</string>
+                <string>Prefer Drop Frame</string>
                 </property>
               </item>
               <item>
@@ -539,7 +539,7 @@
          </item>
          <item>
           <widget class="QLabel" name="cropLabel">
-           <property name="text"><string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop to top-left to fix image resolution mismatch only on full sensor captures. Enter WxH for custom size.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string></property>
+           <property name="text"><string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Crop to top-left to fix image resolution mismatch only on full sensor captures. Enter WxH_S for custom size and row stride.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string></property>
            <property name="wordWrap"><bool>true</bool></property>
           </widget>
          </item>
@@ -561,27 +561,27 @@
            <property name="spacing"><number>8</number></property>
            <item>
             <widget class="QCheckBox" name="dngCompressionCheckBox">
-             <property name="text"><string>Compress Finalized DNGs</string></property>
+             <property name="text"><string>Finalize Format</string></property>
              <property name="checked"><bool>false</bool></property>
             </widget>
            </item>
            <item>
             <widget class="QComboBox" name="dngCompressionModeComboBox">
              <property name="minimumSize"><size><width>100</width><height>30</height></size></property>
+             <property name="editable"><bool>true</bool></property>
              <item><property name="text"><string>JPEG 92 Lossless</string></property></item>
              <item><property name="text"><string>JPEG XL Lossless</string></property></item>
-             <item><property name="text"><string>JPEG XL Lossy 0.1</string></property></item>
-             <item><property name="text"><string>JPEG XL Lossy 0.3</string></property></item>
-             <item><property name="text"><string>JPEG XL Lossy 0.5</string></property></item>
-             <item><property name="text"><string>JPEG XL Lossy 1.0</string></property></item>
-             <item><property name="text"><string>Camera Native (HEVC)</string></property></item>
-             <item><property name="text"><string>Camera Native (AV1)</string></property></item>
-             <item><property name="text"><string>Camera Native (AV1 HDR + Noise)</string></property></item>
-             <item><property name="text"><string>Camera Native (ProRes LT)</string></property></item>
-             <item><property name="text"><string>Camera Native (ProRes Standard)</string></property></item>
-             <item><property name="text"><string>Camera Native (ProRes HQ)</string></property></item>
-             <item><property name="text"><string>Camera Native (CineForm 422)</string></property></item>
-             <item><property name="text"><string>Camera Native (CineForm RGB)</string></property></item>
+             <item><property name="text"><string>JPEG XL DCT 0.3</string></property></item>
+             <item><property name="text"><string>HEVC 420 slow 14</string></property></item>
+             <item><property name="text"><string>AV1 420 3 7</string></property></item>
+             <item><property name="text"><string>AV1 420 2 12 synth noise</string></property></item>
+             <item><property name="text"><string>CineForm 422</string></property></item>
+             <item><property name="text"><string>CineForm RGB</string></property></item>
+             <item><property name="text"><string>ProRes LT</string></property></item>
+             <item><property name="text"><string>ProRes Std</string></property></item>
+             <item><property name="text"><string>ProRes HQ</string></property></item>
+             <item><property name="text"><string>ProRes 444</string></property></item>
+             <item><property name="text"><string>ProRes XQ</string></property></item>
             </widget>
            </item>
           </layout>
@@ -599,6 +599,7 @@
         <item>
           <widget class="QCheckBox" name="detectDuplicateDngsCheckBox">
            <property name="text"><string>Detect Duplicate DNGs</string></property>
+           <property name="checked"><bool>true</bool></property>
            <property name="toolTip"><string>During finalization, detect holds from DNG duplicate metadata or identical DNG image payloads and save the duplicate flag to DNG or Camera Native output. Camera Native inputs use duplicate flags from their JSON sidecar; lossy video pixels are not compared. If interpolation is enabled, holds remaining after frame-rate conversion are interpolated. Mounted sequences are unaffected.</string></property>
           </widget>
          </item>
@@ -940,7 +941,7 @@
               <string>HQ</string>
              </property>
              <property name="checked">
-              <bool>true</bool>
+              <bool>false</bool>
              </property>
             </widget>
              </item>

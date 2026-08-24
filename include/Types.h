@@ -281,7 +281,7 @@ inline CFRTarget stringToCFRTarget(const std::string& str) {
             throw std::invalid_argument("trailing characters in frame rate");
         return CFRTarget(CFRMode::Custom, value);
     } catch (...) {
-        return CFRTarget(CFRMode::PreferDropFrame);
+        return CFRTarget(CFRMode::PreferInteger);
     }
 }
 
@@ -293,7 +293,7 @@ inline std::string cfrTargetToString(const CFRTarget& target) {
         case CFRMode::MedianSlowMotion: return "Median (Slowmotion)";
         case CFRMode::AverageTesting: return "Average (Testing)";
         case CFRMode::Custom: return std::to_string(target.customValue);
-        default: return "Prefer Drop Frame";
+        default: return "Prefer Integer";
     }
 }
 
@@ -319,7 +319,7 @@ struct RenderSettings {
     RenderSettings()
         : options(RENDER_OPT_NONE)
         , draftScale(1)
-        , cfrTarget(CFRMode::PreferDropFrame)
+        , cfrTarget(CFRMode::PreferInteger)
         , cropTarget("")
         , cameraModel("Panasonic")
         , levels("Dynamic")

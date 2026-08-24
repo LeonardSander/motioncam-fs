@@ -56,6 +56,7 @@ using namespace motioncam;
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -92,6 +93,28 @@ namespace {
     constexpr auto RIFE_REVISION = "b0542ef99f380f0fe17a1b44151ac6935e8b82d4";
     constexpr auto RIFE_ARCHIVE_SHA256 =
         "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
+
+    bool isCameraNativeFormat(const QString& mode) {
+        const QString trimmed = mode.trimmed();
+        return trimmed.startsWith("HEVC ", Qt::CaseInsensitive) ||
+               trimmed.startsWith("AV1 ", Qt::CaseInsensitive) ||
+               trimmed.startsWith("ProRes ", Qt::CaseInsensitive) ||
+               trimmed.startsWith("CineForm ", Qt::CaseInsensitive);
+    }
+
+    bool parseJxlDctDistance(const QString& mode, float& distance) {
+        QString value = mode.trimmed();
+        if (!value.startsWith("JPEG XL DCT", Qt::CaseInsensitive))
+            return false;
+        value = value.mid(11).trimmed();
+        value.replace(',', '.');
+        bool valid = false;
+        const float parsed = value.toFloat(&valid);
+        if (!valid || !std::isfinite(parsed) || parsed < 0.0f)
+            return false;
+        distance = parsed;
+        return true;
+    }
 
 #ifdef __APPLE__
     QStringList listMotionCamFuseMounts() {
@@ -466,10 +489,18 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->higherCfaHqCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
-    connect(ui->dngCompressionModeComboBox, &QComboBox::currentIndexChanged, this, [this](int index) {
-        static constexpr float modes[] = {-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
-        if (index < 6)
-            mRenderSettings.jxlDistance = modes[std::clamp(index, 0, 5)];
+    connect(ui->dngCompressionModeComboBox, &QComboBox::currentTextChanged, this,
+            [this](const QString& text) {
+        const QString mode = text.trimmed();
+        if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
+            mRenderSettings.jxlDistance = -1.0f;
+        } else if (mode.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
+            mRenderSettings.jxlDistance = 0.0f;
+        } else {
+            float distance = 0.0f;
+            if (parseJxlDctDistance(mode, distance))
+                mRenderSettings.jxlDistance = distance;
+        }
         onRenderSettingsChanged(Qt::CheckState::Unchecked);
     });
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
@@ -516,7 +547,12 @@ MainWindow::MainWindow(QWidget *parent)
     applyButtons->addWidget(mApplySelectedButton);
     applyButtons->addWidget(mApplyAllButton);
     applyButtons->addWidget(ui->defaultBtn);
-    ui->defaultSection->insertLayout(0, applyButtons);
+    const int applyButtonHeight = qMax(ui->defaultBtn->minimumHeight(),
+                                       ui->defaultBtn->sizeHint().height());
+    mApplySelectedButton->setFixedHeight(applyButtonHeight);
+    mApplyAllButton->setFixedHeight(applyButtonHeight);
+    ui->defaultBtn->setFixedHeight(applyButtonHeight);
+    ui->preprocessingLayout->addLayout(applyButtons);
     connect(mApplySelectedButton, &QPushButton::clicked, this, &MainWindow::onApplySelected);
     connect(mApplyAllButton, &QPushButton::clicked, this, &MainWindow::onApplyAll);
     mApplySelectedButtonBaseStyle = mApplySelectedButton->styleSheet();
@@ -615,7 +651,7 @@ void MainWindow::saveSettings() {
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jxlDistance", mRenderSettings.jxlDistance);
     const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
-    settings.setValue("cameraNativeFinalization", compressionMode.startsWith("Camera Native"));
+    settings.setValue("cameraNativeFinalization", isCameraNativeFormat(compressionMode));
     settings.setValue("cameraNativeMode", compressionMode);
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
@@ -671,7 +707,7 @@ void MainWindow::restoreSettings() {
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
         (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
     ui->rifeInterpolationCheckBox->setChecked(settings.value("rifeInterpolation", false).toBool());
-    ui->detectDuplicateDngsCheckBox->setChecked(settings.value("detectDuplicateDngs", false).toBool());
+    ui->detectDuplicateDngsCheckBox->setChecked(settings.value("detectDuplicateDngs", true).toBool());
 
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
@@ -689,21 +725,42 @@ void MainWindow::restoreSettings() {
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
     mRenderSettings.jxlDistance = settings.value("jxlDistance", -1.0).toFloat();
-    const std::array<float, 6> jxlDistances = {-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
-    auto nearestJxl = std::min_element(jxlDistances.begin(), jxlDistances.end(), [this](float a, float b) {
-        return std::abs(a - mRenderSettings.jxlDistance) < std::abs(b - mRenderSettings.jxlDistance);
-    });
-    int compressionIndex = static_cast<int>(nearestJxl - jxlDistances.begin());
+    int compressionIndex = mRenderSettings.jxlDistance < 0.0f ? 0
+        : mRenderSettings.jxlDistance == 0.0f ? 1 : 2;
+    bool restoredNativeMode = false;
+    QString restoredNativeText;
     if (settings.contains("cameraNativeMode")) {
-        const int savedIndex = ui->dngCompressionModeComboBox->findText(
-            settings.value("cameraNativeMode").toString());
-        if (savedIndex >= 0) compressionIndex = savedIndex;
+        QString savedMode = settings.value("cameraNativeMode").toString();
+        if (savedMode.startsWith("Camera Native (") && savedMode.endsWith(')'))
+            savedMode = savedMode.mid(15, savedMode.size() - 16);
+        if (savedMode == "HEVC") savedMode = "HEVC 420 slow 14";
+        if (savedMode == "AV1") savedMode = "AV1 420 3 7";
+        if (savedMode == "AV1 HDR + Noise" || savedMode == "AV1 Synth Noise")
+            savedMode = "AV1 420 2 12 synth noise";
+        if (savedMode == "ProRes Standard") savedMode = "ProRes Std";
+        const int savedIndex = ui->dngCompressionModeComboBox->findText(savedMode);
+        if (savedIndex >= 3) {
+            compressionIndex = savedIndex;
+            restoredNativeMode = true;
+        } else if (isCameraNativeFormat(savedMode)) {
+            restoredNativeText = savedMode;
+            restoredNativeMode = true;
+        }
     } else if (settings.value("cameraNativeFinalization", false).toBool()) {
-        compressionIndex = 6;
+        compressionIndex = 3;
+        restoredNativeMode = true;
     }
-    ui->dngCompressionModeComboBox->setCurrentIndex(compressionIndex);
+    if (restoredNativeText.isEmpty())
+        ui->dngCompressionModeComboBox->setCurrentIndex(compressionIndex);
+    else
+        ui->dngCompressionModeComboBox->setCurrentText(restoredNativeText);
+    if (!restoredNativeMode && mRenderSettings.jxlDistance > 0.0f &&
+        std::abs(mRenderSettings.jxlDistance - 0.3f) > 0.0001f) {
+        ui->dngCompressionModeComboBox->setCurrentText(
+            QString("JPEG XL DCT %1").arg(mRenderSettings.jxlDistance));
+    }
     ui->higherCfaHqCheckBox->setChecked(
-        !settings.contains("higherCfaHq") || settings.value("higherCfaHq").toBool());
+        settings.value("higherCfaHq", false).toBool());
 
     mCacheRootFolder = settings.value("cachePath").toString();
     mDeleteOnUnmount = settings.value("deleteOnUnmount", false).toBool();
@@ -716,7 +773,7 @@ void MainWindow::restoreSettings() {
     mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
     mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
-    mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
+    mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Integer" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
     mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Demosaic" : settings.value("quadBayerOption").toString().toStdString());
     mRenderSettings.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
@@ -887,7 +944,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    fileWidget->setFixedHeight(148);
+    fileWidget->setFixedHeight(156);
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
@@ -901,6 +958,7 @@ void MainWindow::mountFile(const QString& filePath) {
     cardLayout->setSpacing(10);
 
     auto* thumbnailContainer = new QWidget(fileWidget);
+    thumbnailContainer->setObjectName(QStringLiteral("thumbnailContainer"));
     thumbnailContainer->setFixedSize(176, 112);
     thumbnailContainer->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     auto* thumbnailLayout = new QHBoxLayout(thumbnailContainer);
@@ -939,10 +997,21 @@ void MainWindow::mountFile(const QString& filePath) {
     localReset->setToolTip(tr("Reset local settings to global"));
     localReset->setFixedSize(20, 20);
     localReset->hide();
-    titleLayout->addWidget(localBadge);
     titleLayout->addWidget(localReset);
+    titleLayout->addWidget(localBadge);
     titleLayout->addWidget(globalBadge);
     fileLayout->addLayout(titleLayout);
+
+    // The selection controls share only the metadata rows, leaving the title
+    // and action rows free to reach the card's true right edge.
+    auto* metadataLayout = new QHBoxLayout();
+    metadataLayout->setContentsMargins(0, 0, 0, 0);
+    metadataLayout->setSpacing(4);
+    auto* metadataTextLayout = new QVBoxLayout();
+    metadataTextLayout->setContentsMargins(0, 0, 0, 0);
+    metadataTextLayout->setSpacing(4);
+    metadataLayout->addLayout(metadataTextLayout, 1);
+    fileLayout->addLayout(metadataLayout);
 
     // Get file information from the FUSE filesystem
     auto fileInfoOpt = mFuseFilesystem->getFileInfo(mountId);
@@ -980,9 +1049,11 @@ void MainWindow::mountFile(const QString& filePath) {
 
         auto* infoLabel1 = new QLabel(infoText1, fileWidget);
         infoLabel1->setStyleSheet("font-size: 9pt;");
+        infoLabel1->setMinimumHeight(infoLabel1->fontMetrics().height() + 4);
+        infoLabel1->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         infoLabel1->setProperty("infoLabel1", true);
         infoLabel1->setProperty("mountId", QVariant(mountId));
-        fileLayout->addWidget(infoLabel1);
+        metadataTextLayout->addWidget(infoLabel1);
 
         // Second row: FPS info and frame counts
         auto infoText2 = QString("<span style='color: #888888;'>Median / Average / Target FPS: %1 / %2 -> </span>"
@@ -997,15 +1068,17 @@ void MainWindow::mountFile(const QString& filePath) {
 
         auto* infoLabel2 = new QLabel(infoText2, fileWidget);
         infoLabel2->setStyleSheet("font-size: 9pt;");
+        infoLabel2->setMinimumHeight(infoLabel2->fontMetrics().height() + 4);
+        infoLabel2->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         infoLabel2->setProperty("infoLabel2", true);
         infoLabel2->setProperty("mountId", QVariant(mountId));
-        fileLayout->addWidget(infoLabel2);
+        metadataTextLayout->addWidget(infoLabel2);
     }
 
     // Create and add the source folder label
     auto* sourceLabel = new QLabel(QString("Source: %1").arg(fileInfo.path()), fileWidget);
     sourceLabel->setStyleSheet("font-size: 9pt; color: #666666;");
-    fileLayout->addWidget(sourceLabel);
+    metadataTextLayout->addWidget(sourceLabel);
 
     // Add spacer to maintain button position
     fileLayout->addSpacing(8);
@@ -1044,10 +1117,26 @@ void MainWindow::mountFile(const QString& filePath) {
     finalizeButton->setEnabled(true);
     buttonLayout->addWidget(finalizeButton);
 
-    // Add stretch to push buttons to the left
-    buttonLayout->addStretch();
+    auto* timingButton = new QPushButton(fileWidget);
+    timingButton->setObjectName(QStringLiteral("frameTimingButton"));
+    timingButton->setFixedSize(buttonHeight, buttonHeight);
+    timingButton->setToolTip(tr("Show frame timing graph"));
+    timingButton->setFlat(true);
+    QPixmap timingPixmap(22, 22);
+    timingPixmap.fill(Qt::transparent);
+    {
+        QPainter iconPainter(&timingPixmap);
+        iconPainter.setRenderHint(QPainter::Antialiasing);
+        iconPainter.setPen(QPen(QColor("#8fb7e8"), 1.7));
+        iconPainter.drawPolyline(QPolygonF({{1, 16}, {5, 10}, {9, 14}, {14, 4}, {18, 9}, {21, 2}}));
+        iconPainter.setPen(QPen(QColor("#64788f"), 1));
+        iconPainter.drawLine(1, 20, 21, 20);
+    }
+    timingButton->setIcon(QIcon(timingPixmap));
+    buttonLayout->addWidget(timingButton, 0, Qt::AlignVCenter);
 
-    // Create calibration button (right-aligned)
+    // Keep calibration controls flush against the right side of the action row.
+    buttonLayout->addStretch();
     auto* calibButton = new QPushButton("Create JSON", fileWidget);
     calibButton->setFixedSize(buttonWidth, buttonHeight);
     calibButton->setProperty("calibButton", true);
@@ -1076,7 +1165,6 @@ void MainWindow::mountFile(const QString& filePath) {
     refreshButton->setToolTip("Refresh Calibration");
 
     buttonLayout->addWidget(statusContainer);
-    buttonLayout->addSpacing(16);
 
     // Connect refresh button to update calibration
     connect(refreshButton, &QPushButton::clicked, this, [this] {
@@ -1088,35 +1176,21 @@ void MainWindow::mountFile(const QString& filePath) {
     fileLayout->addSpacing(6);
 
     auto* clipControls = new QVBoxLayout();
-    clipControls->setContentsMargins(0, 0, 0, 6);
+    clipControls->setContentsMargins(0, 0, 0, 0);
+    clipControls->setSpacing(4);
     clipControls->addStretch();
-    auto* timingButton = new QPushButton(fileWidget);
-    timingButton->setObjectName(QStringLiteral("frameTimingButton"));
-    timingButton->setFixedSize(24, 24);
-    timingButton->setToolTip(tr("Show frame timing graph"));
-    timingButton->setFlat(true);
-    QPixmap timingPixmap(18, 18);
-    timingPixmap.fill(Qt::transparent);
-    {
-        QPainter iconPainter(&timingPixmap);
-        iconPainter.setRenderHint(QPainter::Antialiasing);
-        iconPainter.setPen(QPen(QColor("#8fb7e8"), 1.7));
-        iconPainter.drawPolyline(QPolygonF({{1, 13}, {4, 8}, {7, 11}, {11, 3}, {14, 7}, {17, 2}}));
-        iconPainter.setPen(QPen(QColor("#64788f"), 1));
-        iconPainter.drawLine(1, 16, 17, 16);
-    }
-    timingButton->setIcon(QIcon(timingPixmap));
-    clipControls->addWidget(timingButton, 0, Qt::AlignRight);
     auto* clipCheckBox = new QCheckBox(fileWidget);
     clipCheckBox->setObjectName(QStringLiteral("clipSelection"));
     clipCheckBox->setToolTip(tr("Select this clip for per-clip settings"));
     clipCheckBox->setStyleSheet(QStringLiteral("background:transparent;"));
-    clipControls->addWidget(clipCheckBox, 0, Qt::AlignRight);
+    clipControls->addWidget(clipCheckBox, 0, Qt::AlignHCenter);
     auto* clipNumber = new QLabel(QString::number(mMountedFiles.size() + 1), fileWidget);
     clipNumber->setObjectName(QStringLiteral("indexLabel"));
     clipNumber->setStyleSheet("color:#7f93ad; font-size:9pt;");
-    clipControls->addWidget(clipNumber, 0, Qt::AlignRight);
-    cardLayout->addLayout(clipControls);
+    clipNumber->setAlignment(Qt::AlignCenter);
+    clipControls->addWidget(clipNumber, 0, Qt::AlignHCenter);
+    clipControls->addStretch();
+    metadataLayout->addLayout(clipControls);
 
     connect(timingButton, &QPushButton::clicked, this, [this, mountId, fileInfo] {
         const auto info = mFuseFilesystem->getFileInfo(mountId);
@@ -1154,9 +1228,11 @@ void MainWindow::mountFile(const QString& filePath) {
         fileWidget->setStyleSheet(selected
             ? "QWidget#clipCard { background:#223246; border:1px solid #3a5878; border-radius:6px; }"
               "QWidget#clipCard QLabel { background:transparent; }"
+              "QWidget#clipCard QWidget#thumbnailContainer { background:#223246; }"
               "QWidget#clipCard QWidget#statusContainer, QWidget#clipCard QCheckBox#clipSelection { background:transparent; }"
             : "QWidget#clipCard { background:transparent; border:1px solid transparent; border-radius:6px; }"
               "QWidget#clipCard QLabel { background:transparent; }"
+              "QWidget#clipCard QWidget#thumbnailContainer { background:transparent; }"
               "QWidget#clipCard QWidget#statusContainer, QWidget#clipCard QCheckBox#clipSelection { background:transparent; }");
         updateSelectionUi();
     });
@@ -1597,11 +1673,52 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
 }
 
 void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) {
-    const bool av1 = mode.contains("AV1");
-    const bool hdrNoise = mode.contains("HDR");
-    const bool proRes = mode.contains("ProRes");
-    const bool cineForm = mode.contains("CineForm");
-    const bool cineFormRgb = mode.contains("CineForm RGB");
+    const QStringList modeParts = mode.simplified().split(' ', Qt::SkipEmptyParts);
+    const bool hevc = !modeParts.isEmpty() &&
+        modeParts.front().compare("HEVC", Qt::CaseInsensitive) == 0;
+    const bool av1 = !modeParts.isEmpty() &&
+        modeParts.front().compare("AV1", Qt::CaseInsensitive) == 0;
+    const bool hdrNoise = av1 && mode.endsWith("synth noise", Qt::CaseInsensitive);
+    const bool proRes = mode.startsWith("ProRes ", Qt::CaseInsensitive);
+    const bool cineForm = mode.startsWith("CineForm ", Qt::CaseInsensitive);
+    const bool cineFormRgb = mode.compare("CineForm RGB", Qt::CaseInsensitive) == 0;
+    QString chroma = "420";
+    QString encoderPreset;
+    QString encoderCrf;
+    int av1Preset = 0;
+    int av1Crf = 0;
+    if (hevc || av1) {
+        bool validPreset = true;
+        bool validCrf = true;
+        if (modeParts.size() == (hdrNoise ? 6 : 4)) {
+            chroma = modeParts[1];
+            encoderPreset = modeParts[2];
+            encoderCrf = modeParts[3];
+            if (av1) {
+                av1Preset = encoderPreset.toInt(&validPreset);
+                av1Crf = encoderCrf.toInt(&validCrf);
+                validPreset = validPreset && av1Preset >= -2 && av1Preset <= 13;
+                validCrf = validCrf && av1Crf >= 0 && av1Crf <= 63;
+            } else {
+                encoderCrf.toFloat(&validCrf);
+            }
+        } else {
+            validPreset = validCrf = false;
+        }
+        const bool validChroma = chroma == "420" || chroma == "422" || chroma == "444";
+        if (!validChroma || !validPreset || !validCrf || (hdrNoise && chroma != "420")) {
+            QMessageBox::warning(this, tr("Invalid finalize format"),
+                tr("Use ‘HEVC 420|422|444 preset CRF’ or ‘AV1 420|422|444 preset CRF’. "
+                   "AV1 synth noise is available only with 420."));
+            return;
+        }
+    } else if ((proRes && mode != "ProRes LT" && mode != "ProRes Std" &&
+                mode != "ProRes HQ" && mode != "ProRes 444" && mode != "ProRes XQ") ||
+               (cineForm && mode != "CineForm 422" && mode != "CineForm RGB")) {
+        QMessageBox::warning(this, tr("Invalid finalize format"),
+                             tr("Select one of the listed ProRes or CineForm formats."));
+        return;
+    }
     const QString srcFile = fileWidget->property("filePath").toString();
     const QString mountPath = fileWidget->property("mountPath").toString();
     bool mountOk = false;
@@ -1678,10 +1795,13 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
 
     const QFileInfo sourceInfo(srcFile);
     QString codecSuffix;
-    if (av1) codecSuffix = hdrNoise ? "_AV1_HDR_NOISE" : "_AV1";
+    if (hevc) codecSuffix = "_HEVC";
+    else if (av1) codecSuffix = hdrNoise ? "_AV1_HDR_NOISE" : "_AV1";
     else if (mode.contains("ProRes LT")) codecSuffix = "_PRORES_LT";
-    else if (mode.contains("ProRes Standard")) codecSuffix = "_PRORES_STANDARD";
+    else if (mode.contains("ProRes Std")) codecSuffix = "_PRORES_STANDARD";
     else if (mode.contains("ProRes HQ")) codecSuffix = "_PRORES_HQ";
+    else if (mode.contains("ProRes 444")) codecSuffix = "_PRORES_444";
+    else if (mode.contains("ProRes XQ")) codecSuffix = "_PRORES_XQ";
     else if (cineFormRgb) codecSuffix = "_CINEFORM_RGB";
     else if (cineForm) codecSuffix = "_CINEFORM_422";
     const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
@@ -1738,21 +1858,46 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         if (ffmpeg.isEmpty())
             throw std::runtime_error(
                 "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
-        const QString requiredEncoder = av1 ? "libsvtav1"
-            : proRes ? "prores_ks" : cineForm ? "cfhd" : QString{};
-        if (!requiredEncoder.isEmpty()) {
+        auto probeEncoder = [&ffmpeg](const QString& name, QByteArray* help = nullptr) {
             QProcess probe;
             probe.setProcessChannelMode(QProcess::MergedChannels);
-            probe.start(ffmpeg, {"-hide_banner", "-h", "encoder=" + requiredEncoder});
-            if (!probe.waitForStarted() || !probe.waitForFinished(10000) || probe.exitCode() != 0 ||
-                !probe.readAll().contains(("Encoder " + requiredEncoder).toUtf8())) {
+            probe.start(ffmpeg, {"-hide_banner", "-h", "encoder=" + name});
+            if (!probe.waitForStarted() || !probe.waitForFinished(10000)) {
                 probe.kill();
                 probe.waitForFinished();
+                return false;
+            }
+            const QByteArray output = probe.readAll();
+            if (help) *help = output;
+            return probe.exitCode() == 0 && output.contains(("Encoder " + name).toUtf8());
+        };
+        QString av1Encoder;
+        QString requiredEncoder = proRes ? "prores_ks" : cineForm ? "cfhd" : QString{};
+        if (av1) {
+            QByteArray svtHelp;
+            const bool hasSvt = probeEncoder("libsvtav1", &svtHelp);
+            const QByteArray requiredPixelFormat =
+                (chroma == "422" ? QByteArray("yuv422p10le")
+                                 : chroma == "444" ? QByteArray("yuv444p10le")
+                                                    : QByteArray("yuv420p10le"));
+            if (hasSvt && svtHelp.contains(requiredPixelFormat)) {
+                av1Encoder = "libsvtav1";
+            } else if (chroma != "420" && probeEncoder("libaom-av1")) {
+                if (av1Preset < 0 || av1Preset > 8)
+                    throw std::runtime_error(
+                        "The libaom AV1 fallback requires a preset from 0 through 8.");
+                av1Encoder = "libaom-av1";
+            } else {
                 throw std::runtime_error(
-                    ("This FFmpeg executable does not provide the " + requiredEncoder +
-                     " encoder. Install a compatible FFmpeg build or place it beside MotionCam Fuse.")
+                    ("This FFmpeg executable cannot encode AV1 " + chroma +
+                     " at 10-bit. Install an FFmpeg build with a compatible libsvtav1 or libaom-av1.")
                         .toStdString());
             }
+        } else if (!requiredEncoder.isEmpty() && !probeEncoder(requiredEncoder)) {
+            throw std::runtime_error(
+                ("This FFmpeg executable does not provide the " + requiredEncoder +
+                 " encoder. Install a compatible FFmpeg build or place it beside MotionCam Fuse.")
+                    .toStdString());
         }
 
         struct NativeFrame {
@@ -1870,8 +2015,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:"
             "g=log(1+60*val/maxval)/log(61)*maxval:"
             "b=log(1+60*val/maxval)/log(61)*maxval";
+        const bool proRes444 = mode.contains("ProRes 444") || mode.contains("ProRes XQ");
         const QString pixelFormat = cineFormRgb ? "gbrp12le"
-            : (proRes || cineForm) ? "yuv422p10le" : "yuv420p10le";
+            : proRes444 ? "yuv444p10le"
+            : (proRes || cineForm || chroma == "422") ? "yuv422p10le"
+            : chroma == "444" ? "yuv444p10le" : "yuv420p10le";
         const QString videoFilter = cineFormRgb
             ? log60Lut + ",format=gbrp12le"
             : log60Lut +
@@ -1886,20 +2034,33 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             // can exhaust a desktop process's memory during encoder startup.
             // Level 4 keeps preset/quality unchanged while bounding its frame
             // pipeline (148 PPCS in SVT-AV1 4.1).
-            QString svtParams = "lp=4:keyint=10s:tune=0:enable-overlays=1:scd=1:scm=0";
-            if (hdrNoise)
-                svtParams = "lp=4:keyint=10s:tune=5:noise=8:enable-overlays=1:scd=1:scm=0";
-            args << "-c:v" << "libsvtav1" << "-crf" << (hdrNoise ? "12" : "7")
-                 << "-preset" << (hdrNoise ? "2" : "3")
-                 << "-svtav1-params" << svtParams;
+            if (av1Encoder == "libsvtav1") {
+                QString svtParams = "lp=4:keyint=10s:tune=0:enable-overlays=1:scd=1:scm=0";
+                if (hdrNoise)
+                    svtParams = "lp=4:keyint=10s:tune=5:noise=8:enable-overlays=1:scd=1:scm=0";
+                args << "-c:v" << av1Encoder << "-crf" << QString::number(av1Crf)
+                     << "-preset" << QString::number(av1Preset)
+                     << "-svtav1-params" << svtParams;
+            } else {
+                const QString av1Profile = chroma == "422" ? "2" : "1";
+                args << "-c:v" << "libaom-av1" << "-crf" << QString::number(av1Crf)
+                     << "-b:v" << "0" << "-cpu-used" << QString::number(av1Preset)
+                     << "-profile:v" << av1Profile << "-row-mt" << "1";
+            }
         } else if (proRes) {
             const QString profile = mode.contains("ProRes LT") ? "1"
-                : mode.contains("ProRes Standard") ? "2" : "3";
-            args << "-c:v" << "prores_ks" << "-profile:v" << profile;
+                : mode.contains("ProRes Std") ? "2"
+                : mode.contains("ProRes HQ") ? "3"
+                : mode.contains("ProRes 444") ? "4" : "5";
+            args << "-c:v" << "prores_ks" << "-profile:v" << profile
+                 << "-alpha_bits" << "0";
         } else if (cineForm) {
             args << "-c:v" << "cfhd" << "-quality" << "film3+";
         } else {
-            args << "-c:v" << "libx265" << "-preset" << "slow" << "-crf" << "14"
+            const QString hevcProfile = chroma == "422" ? "main422-10"
+                : chroma == "444" ? "main444-10" : "main10";
+            args << "-c:v" << "libx265" << "-preset" << encoderPreset
+                 << "-crf" << encoderCrf << "-profile:v" << hevcProfile
                  << "-x265-params" << "range=full:colorprim=bt2020:colormatrix=bt2020nc";
         }
         args << "-pix_fmt" << pixelFormat
@@ -2119,7 +2280,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         sidecar["transferFunction"] = "LOG60";
         sidecar["dataLevels"] = "Full";
         sidecar["videoCodec"] = av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
-        sidecar["encoder"] = av1 ? "libsvtav1" : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
+        sidecar["encoder"] = av1 ? av1Encoder.toStdString()
+            : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
         sidecar["pixelFormat"] = pixelFormat.toStdString();
         if (hdrNoise) sidecar["noiseSynthesis"] = 8;
         if (colorMetadata.hasColorMatrix1) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
@@ -2178,9 +2340,25 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
 
 void MainWindow::finalizeFile(QWidget* fileWidget) {
     const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
-    if (ui->dngCompressionCheckBox->isChecked() && compressionMode.startsWith("Camera Native")) {
-        finalizeCameraNative(fileWidget, compressionMode);
-        return;
+    if (ui->dngCompressionCheckBox->isChecked()) {
+        if (isCameraNativeFormat(compressionMode)) {
+            finalizeCameraNative(fileWidget, compressionMode);
+            return;
+        }
+        const QString mode = compressionMode.trimmed();
+        if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
+            mRenderSettings.jxlDistance = -1.0f;
+        } else if (mode.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
+            mRenderSettings.jxlDistance = 0.0f;
+        } else {
+            float distance = 0.0f;
+            if (!parseJxlDctDistance(mode, distance)) {
+                QMessageBox::warning(this, tr("Invalid finalize format"),
+                    tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.3’."));
+                return;
+            }
+            mRenderSettings.jxlDistance = distance;
+        }
     }
     auto mountPath = fileWidget->property("mountPath").toString();
     auto srcFile = fileWidget->property("filePath").toString();
@@ -2718,18 +2896,18 @@ void MainWindow::updateSelectionUi() {
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(settings.cfaPhase));
     ui->draftQuality->setCurrentIndex(settings.draftScale == 2 ? 0
         : settings.draftScale == 4 ? 1 : settings.draftScale == 8 ? 2 : -1);
-    const std::array<float, 6> jxlDistances{-1.0f, 0.0f, 0.1f, 0.3f, 0.5f, 1.0f};
-    const auto nearestJxl = std::min_element(jxlDistances.begin(), jxlDistances.end(),
-        [&settings](float left, float right) {
-            return std::abs(left - settings.jxlDistance) <
-                   std::abs(right - settings.jxlDistance);
-        });
     // Camera Native modes are global finalization choices rather than fields
-    // in RenderSettings. Preserve them while clip selection changes; only the
-    // six DNG compression modes are derived from per-clip jxlDistance.
-    if (ui->dngCompressionModeComboBox->currentIndex() < 6) {
-        ui->dngCompressionModeComboBox->setCurrentIndex(
-            static_cast<int>(nearestJxl - jxlDistances.begin()));
+    // in RenderSettings. Preserve them while clip selection changes.
+    if (!isCameraNativeFormat(ui->dngCompressionModeComboBox->currentText())) {
+        if (settings.jxlDistance < 0.0f)
+            ui->dngCompressionModeComboBox->setCurrentIndex(0);
+        else if (settings.jxlDistance == 0.0f)
+            ui->dngCompressionModeComboBox->setCurrentIndex(1);
+        else if (std::abs(settings.jxlDistance - 0.3f) <= 0.0001f)
+            ui->dngCompressionModeComboBox->setCurrentIndex(2);
+        else
+            ui->dngCompressionModeComboBox->setCurrentText(
+                QString("JPEG XL DCT %1").arg(settings.jxlDistance));
     }
 
     if (count > 1) {
@@ -3077,7 +3255,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         motioncam::RenderSettings settings;
         settings.options = static_cast<motioncam::FileRenderOptions>(object["options"].toInt());
         settings.draftScale = object["draftScale"].toInt(1);
-        settings.cfrTarget = stringToCFRTarget(object["cfrTarget"].toString("Prefer Drop Frame").toStdString());
+        settings.cfrTarget = stringToCFRTarget(object["cfrTarget"].toString("Prefer Integer").toStdString());
         settings.cropTarget = object["cropTarget"].toString().toStdString();
         settings.cameraModel = object["cameraModel"].toString("Panasonic").toStdString();
         settings.levels = object["levels"].toString("Dynamic").toStdString();
@@ -3257,13 +3435,17 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->smoothWhiteBalanceCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->bakeIsoCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->detectDuplicateDngsCheckBox->setChecked(true);
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
-    ui->higherCfaHqCheckBox->setChecked(true);
+    ui->higherCfaHqCheckBox->setChecked(false);
+    ui->dngCompressionModeComboBox->setCurrentIndex(0);
+    ui->dngCompressionCheckBox->setChecked(true);
 
     mRenderSettings.draftScale = 1;
-    mRenderSettings.cfrTarget = stringToCFRTarget("Prefer Drop Frame");
+    mRenderSettings.jxlDistance = -1.0f;
+    mRenderSettings.cfrTarget = stringToCFRTarget("Prefer Integer");
     mRenderSettings.exposureCompensation.clear();
     mRenderSettings.cameraModel = "Panasonic";
     mRenderSettings.levels = "Dynamic";
