@@ -1286,6 +1286,32 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
     });
 }
 
+bool VirtualFileSystemImpl_DirectLog::generateThumbnail(
+        const std::string& outputPath, int width, int height) {
+    try {
+        std::array<float, 3> neutral{1.0f, 1.0f, 1.0f};
+        {
+            std::shared_lock renderLock(mRenderMutex);
+            std::lock_guard<std::mutex> lock(mMutex);
+            const auto metadata = frameMetadata(0);
+            neutral = metadata.asShotNeutral.value_or(
+                mCalibration && mCalibration->hasAsShotNeutral
+                    ? mCalibration->asShotNeutral
+                    : neutral);
+        }
+        DirectLogDecoder decoder(mSrcPath);
+        const auto& info = decoder.getVideoInfo();
+        std::vector<uint16_t> rgb;
+        if (!decoder.extractFrame(0, rgb)) return false;
+        return utils::generateJpegThumbnailFromRgb16(
+            rgb, info.width, info.height, neutral,
+            outputPath, width, height);
+    } catch (const std::exception& error) {
+        spdlog::warn("Could not generate DirectLog thumbnail: {}", error.what());
+        return false;
+    }
+}
+
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
     std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);

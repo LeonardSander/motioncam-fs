@@ -889,12 +889,20 @@ void MainWindow::mountFile(const QString& filePath) {
     cardLayout->setContentsMargins(8, 8, 8, 8);
     cardLayout->setSpacing(10);
 
-    auto* thumbnailLabel = new QLabel(tr("Loading..."), fileWidget);
+    auto* thumbnailContainer = new QWidget(fileWidget);
+    thumbnailContainer->setFixedSize(176, 112);
+    thumbnailContainer->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    auto* thumbnailLayout = new QHBoxLayout(thumbnailContainer);
+    thumbnailLayout->setContentsMargins(0, 0, 0, 0);
+    thumbnailLayout->setAlignment(Qt::AlignCenter);
+
+    auto* thumbnailLabel = new QLabel(tr("Loading..."), thumbnailContainer);
     thumbnailLabel->setObjectName(QStringLiteral("thumbnailLabel"));
     thumbnailLabel->setFixedSize(176, 112);
     thumbnailLabel->setAlignment(Qt::AlignCenter);
     thumbnailLabel->setStyleSheet("background:#1a1a1a; border:1px solid #333;");
-    cardLayout->addWidget(thumbnailLabel, 0, Qt::AlignVCenter);
+    thumbnailLayout->addWidget(thumbnailLabel);
+    cardLayout->addWidget(thumbnailContainer, 0, Qt::AlignVCenter);
 
     auto* fileLayout = new QVBoxLayout();
     fileLayout->setContentsMargins(0, 2, 0, 2);
@@ -1145,7 +1153,6 @@ void MainWindow::mountFile(const QString& filePath) {
         mLocalSettings.remove(mountId);
         mFuseFilesystem->updateOptions(mountId, mGlobalRenderSettings);
         updateLocalBadge(mountId);
-        updateThumbnail(mountId);
         updateSelectionUi();
         autoSaveSession();
     });
@@ -2724,7 +2731,6 @@ void MainWindow::onApplySelected() {
         mLocalSettings.insert(id, settings);
         mFuseFilesystem->updateOptions(id, settings);
         updateLocalBadge(id);
-        updateThumbnail(id);
     }
     updateFpsLabels();
     clearApplyFeedback();
@@ -2739,7 +2745,6 @@ void MainWindow::onApplyAll() {
     for (const auto& file : mMountedFiles) {
         mFuseFilesystem->updateOptions(file.mountId, mGlobalRenderSettings);
         updateLocalBadge(file.mountId);
-        updateThumbnail(file.mountId);
     }
     updateFpsLabels();
     clearApplyFeedback();
@@ -2760,8 +2765,10 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
             if (!guardedLabel) return;
             const QPixmap image(path);
             if (generated && !image.isNull()) {
-                guardedLabel->setPixmap(image.scaled(guardedLabel->size(),
-                    Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
+                const QPixmap preview = image.scaled(
+                    QSize(176, 112), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                guardedLabel->setFixedSize(preview.size());
+                guardedLabel->setPixmap(preview);
             } else {
                 guardedLabel->setText(QObject::tr("No preview"));
             }
@@ -2996,7 +3003,6 @@ void MainWindow::loadSessionFromFile(const QString& path) {
             mLocalSettings.insert(id, local);
             mFuseFilesystem->updateOptions(id, local);
             updateLocalBadge(id);
-            updateThumbnail(id);
         }
     }
     if (QFileInfo(path).absoluteFilePath() == QFileInfo(autoSessionPath()).absoluteFilePath())

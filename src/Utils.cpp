@@ -2258,23 +2258,21 @@ bool generateJpegThumbnail(
         1.0f / std::max(metadata.asShotNeutral[0], 0.001f),
         1.0f / std::max(metadata.asShotNeutral[1], 0.001f),
         1.0f / std::max(metadata.asShotNeutral[2], 0.001f)};
-    const float scale = std::max(static_cast<float>(thumbWidth) / width,
+    const float scale = std::min(static_cast<float>(thumbWidth) / width,
                                  static_cast<float>(thumbHeight) / height);
-    const float visibleWidth = thumbWidth / scale;
-    const float visibleHeight = thumbHeight / scale;
-    const float offsetX = (width - visibleWidth) * 0.5f;
-    const float offsetY = (height - visibleHeight) * 0.5f;
+    const int renderedWidth = std::max(1, static_cast<int>(std::lround(width * scale)));
+    const int renderedHeight = std::max(1, static_cast<int>(std::lround(height * scale)));
     const auto* raw = reinterpret_cast<const uint16_t*>(data.data());
-    std::vector<uint8_t> rgb(static_cast<size_t>(thumbWidth) * thumbHeight * 3);
+    std::vector<uint8_t> rgb(static_cast<size_t>(renderedWidth) * renderedHeight * 3);
     auto srgb = [](float value) {
         value = std::clamp(value, 0.0f, 1.0f);
         return value <= 0.0031308f ? value * 12.92f
                                   : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
     };
-    for (int y = 0; y < thumbHeight; ++y) {
-        for (int x = 0; x < thumbWidth; ++x) {
-            int sx = std::clamp(static_cast<int>(offsetX + x / scale), 0, width - 2) & ~1;
-            int sy = std::clamp(static_cast<int>(offsetY + y / scale), 0, height - 2) & ~1;
+    for (int y = 0; y < renderedHeight; ++y) {
+        for (int x = 0; x < renderedWidth; ++x) {
+            int sx = std::clamp(static_cast<int>(x / scale), 0, width - 2) & ~1;
+            int sy = std::clamp(static_cast<int>(y / scale), 0, height - 2) & ~1;
             const int base = sy * width + sx;
             const uint16_t px[4]{raw[base], raw[base + 1], raw[base + width], raw[base + width + 1]};
             float channels[3]{};
@@ -2283,7 +2281,7 @@ bool generateJpegThumbnail(
                 channels[cfa[i]] += px[i];
                 ++counts[cfa[i]];
             }
-            const size_t out = (static_cast<size_t>(y) * thumbWidth + x) * 3;
+            const size_t out = (static_cast<size_t>(y) * renderedWidth + x) * 3;
             for (int channel = 0; channel < 3; ++channel) {
                 const float sample = counts[channel] ? channels[channel] / counts[channel] : black;
                 const float value = ((sample - black) / range) * gains[channel];
@@ -2291,7 +2289,83 @@ bool generateJpegThumbnail(
             }
         }
     }
-    return stbi_write_jpg(outputPath.c_str(), thumbWidth, thumbHeight, 3,
+    return stbi_write_jpg(outputPath.c_str(), renderedWidth, renderedHeight, 3,
+                          rgb.data(), 88) != 0;
+}
+
+bool generateJpegThumbnailFromDng(
+    const std::vector<char>& source,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight) {
+    if (source.empty() || thumbWidth < 1 || thumbHeight < 1) return false;
+    std::vector<uint8_t> data(source.begin(), source.end());
+    int repeatSize = 2;
+    std::array<uint8_t, 4> phase{0, 1, 1, 2};
+    const bool hasCfa = DNGDecoder::getCFAMetadata(data, repeatSize, phase);
+    if (!DNGDecoder::ensureUncompressed(data)) return false;
+    if (hasCfa && !DNGDecoder::processHigherCFA(
+            data, repeatSize, phase, QuadBayerMode::Demosaic, false))
+        return false;
+
+    std::vector<uint8_t> rgb16;
+    uint32_t width = 0, height = 0;
+    if (!DNGDecoder::extractUncompressedRGB16(data, rgb16, width, height) ||
+        width < 1 || height < 1) return false;
+
+    DNGFrameMetadata metadata;
+    if (!DNGDecoder::getColorMetadata(data, metadata)) return false;
+    std::vector<uint16_t> samples(rgb16.size() / sizeof(uint16_t));
+    for (size_t i = 0; i < samples.size(); ++i)
+        samples[i] = static_cast<uint16_t>(
+            rgb16[i * 2] | static_cast<uint16_t>(rgb16[i * 2 + 1]) << 8);
+    return generateJpegThumbnailFromRgb16(
+        samples, width, height, metadata.asShotNeutral,
+        outputPath, thumbWidth, thumbHeight);
+}
+
+bool generateJpegThumbnailFromRgb16(
+    const std::vector<uint16_t>& data,
+    uint32_t width,
+    uint32_t height,
+    const std::array<float, 3>& asShotNeutral,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight) {
+    if (width < 1 || height < 1 || thumbWidth < 1 || thumbHeight < 1 ||
+        data.size() < static_cast<size_t>(width) * height * 3) return false;
+    const std::array<float, 3> gains{
+        1.0f / std::max(asShotNeutral[0], 0.001f),
+        1.0f / std::max(asShotNeutral[1], 0.001f),
+        1.0f / std::max(asShotNeutral[2], 0.001f)};
+    const float scale = std::min(static_cast<float>(thumbWidth) / width,
+                                 static_cast<float>(thumbHeight) / height);
+    const int renderedWidth = std::max(1, static_cast<int>(std::lround(width * scale)));
+    const int renderedHeight = std::max(1, static_cast<int>(std::lround(height * scale)));
+    std::vector<uint8_t> rgb(static_cast<size_t>(renderedWidth) * renderedHeight * 3);
+    auto srgb = [](float value) {
+        value = std::clamp(value, 0.0f, 1.0f);
+        return value <= 0.0031308f ? value * 12.92f
+            : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
+    };
+    for (int y = 0; y < renderedHeight; ++y) {
+        for (int x = 0; x < renderedWidth; ++x) {
+            const uint32_t sx = std::min(width - 1,
+                static_cast<uint32_t>(x / scale));
+            const uint32_t sy = std::min(height - 1,
+                static_cast<uint32_t>(y / scale));
+            const size_t input = (static_cast<size_t>(sy) * width + sx) * 3;
+            const size_t output = (static_cast<size_t>(y) * renderedWidth + x) * 3;
+            std::array<float, 3> linear{};
+            for (int channel = 0; channel < 3; ++channel)
+                linear[channel] = (data[input + channel] / 65535.0f) * gains[channel];
+            for (int channel = 0; channel < 3; ++channel) {
+                const float value = linear[channel];
+                rgb[output + channel] = static_cast<uint8_t>(std::lround(srgb(value) * 255.0f));
+            }
+        }
+    }
+    return stbi_write_jpg(outputPath.c_str(), renderedWidth, renderedHeight, 3,
                           rgb.data(), 88) != 0;
 }
 

@@ -103,6 +103,9 @@ public:
     void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
     const std::string& sourcePath() const { return mSrcPath; }
+    bool generateThumbnail(const std::string& path, int width, int height) {
+        return mFs->generateThumbnail(path, width, height);
+    }
     const std::string& destinationPath() const { return mDstPath; }
     HRESULT dehydrate(const std::filesystem::path& relativePath) {
         PRJ_UPDATE_FAILURE_CAUSES cause = PRJ_UPDATE_FAILURE_CAUSE_NONE;
@@ -702,10 +705,11 @@ bool FuseFileSystemImpl_Win::generateThumbnail(
         auto* session = dynamic_cast<Session*>(it->second.get());
         if (!session) return false;
         sourcePath = session->sourcePath();
+        if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
+            return session->generateThumbnail(outputPath, width, height);
     }
     try {
         const fs::path source(sourcePath);
-        if (!boost::iequals(source.extension().string(), ".mcraw")) return false;
         Decoder decoder(source.string());
         auto frames = decoder.getFrames();
         if (frames.empty()) return false;

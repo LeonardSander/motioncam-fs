@@ -113,6 +113,9 @@ public:
 
     FileInfo getFileInfo() const;
     const std::string& sourcePath() const { return mSrcFile; }
+    bool generateThumbnail(const std::string& path, int width, int height) {
+        return mFs->generateThumbnail(path, width, height);
+    }
     void finalize(const std::string&, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>&, bool);
@@ -578,10 +581,11 @@ bool FuseFileSystemImpl_MacOs::generateThumbnail(
         const auto it = mMountedFiles.find(mountId);
         if (it == mMountedFiles.end()) return false;
         sourcePath = it->second->sourcePath();
+        if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
+            return it->second->generateThumbnail(outputPath, width, height);
     }
     try {
         const fs::path source(sourcePath);
-        if (!boost::iequals(source.extension().string(), ".mcraw")) return false;
         Decoder decoder(source.string());
         auto frames = decoder.getFrames();
         if (frames.empty()) return false;

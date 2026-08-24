@@ -221,6 +221,21 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     });
 }
 
+bool VirtualFileSystemImpl_DNG::generateThumbnail(
+        const std::string& outputPath, int width, int height) {
+    try {
+        DNGDecoder decoder(mSrcPath);
+        std::vector<uint8_t> source;
+        if (!decoder.extractFrame(0, source)) return false;
+        const std::vector<char> bytes(source.begin(), source.end());
+        return utils::generateJpegThumbnailFromDng(
+            bytes, outputPath, width, height);
+    } catch (const std::exception& error) {
+        spdlog::warn("Could not generate DNG thumbnail: {}", error.what());
+        return false;
+    }
+}
+
 std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
         bool nativeResolution) {

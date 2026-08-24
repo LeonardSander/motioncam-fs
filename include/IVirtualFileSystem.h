@@ -38,6 +38,7 @@ public:
 
     virtual void updateOptions(const RenderSettings& settings) = 0;
     virtual FileInfo getFileInfo() const = 0;
+    virtual bool generateThumbnail(const std::string&, int, int) { return false; }
 
     // Finalizers may ask whether two output entries refer to source frames with
     // identical encoded image data. Non-DNG implementations have no such

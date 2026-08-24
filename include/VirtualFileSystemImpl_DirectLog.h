@@ -47,6 +47,7 @@ public:
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
+    bool generateThumbnail(const std::string& outputPath, int width, int height) override;
     std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
 

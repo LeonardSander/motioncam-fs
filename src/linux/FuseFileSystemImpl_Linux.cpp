@@ -136,6 +136,9 @@ struct LinuxFuseSession {
         fuse_invalidate_path(mFuse, "/");
     }
     FileInfo getFileInfo() const { return mFs->getFileInfo(); }
+    bool generateThumbnail(const std::string& path, int width, int height) {
+        return mFs->generateThumbnail(path, width, height);
+    }
     const std::string& sourcePath() const { return mSrcPath; }
     void finalize(const std::string& destination, bool jpegCompression,
                   const FinalizeOptions& options,
@@ -347,10 +350,11 @@ bool FuseFileSystemImpl_Linux::generateThumbnail(
         const auto it = mMountedFiles.find(mountId);
         if (it == mMountedFiles.end()) return false;
         sourcePath = it->second->sourcePath();
+        if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
+            return it->second->generateThumbnail(outputPath, width, height);
     }
     try {
         const fs::path source(sourcePath);
-        if (!boost::iequals(source.extension().string(), ".mcraw")) return false;
         Decoder decoder(source.string());
         auto frames = decoder.getFrames();
         if (frames.empty()) return false;

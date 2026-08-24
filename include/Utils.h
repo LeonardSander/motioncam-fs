@@ -232,5 +232,20 @@ bool generateJpegThumbnail(
     int thumbWidth,
     int thumbHeight);
 
+bool generateJpegThumbnailFromDng(
+    const std::vector<char>& data,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight);
+
+bool generateJpegThumbnailFromRgb16(
+    const std::vector<uint16_t>& data,
+    uint32_t width,
+    uint32_t height,
+    const std::array<float, 3>& asShotNeutral,
+    const std::string& outputPath,
+    int thumbWidth,
+    int thumbHeight);
+
 } // namespace utils
 } // namespace motioncam
