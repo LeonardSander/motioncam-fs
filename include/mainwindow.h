@@ -92,7 +92,6 @@ private slots:
 private slots:
     void onRenderSettingsChanged(Qt::CheckState state);
     void onDraftModeQualityChanged(int index);
-    void onSetCacheFolder(bool checked);
     void onCFRTargetChanged(std::string input);
     void onCamModelOverrideChanged(std::string input);
     void onLevelsChanged(std::string input);
@@ -180,7 +179,6 @@ private:
     QStringList mRecentSessions;
     QMenu* mRecentSessionsMenu = nullptr;
     QFutureSynchronizer<void> mThumbnailTasks;
-    QTimer* mAutoApplyTimer = nullptr;
     bool mSettingsDirty = false;
     QString mApplySelectedButtonBaseStyle;
     QString mApplyAllButtonBaseStyle;

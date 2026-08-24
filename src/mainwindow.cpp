@@ -473,7 +473,6 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
     connect(ui->cfrTarget, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCFRTargetChanged(text.toStdString());
-        QTimer::singleShot(100, this, &MainWindow::updateFpsLabels);
     });
     connect(ui->exposureCompensationLineEdit, &QLineEdit::textChanged, this, [this](const QString& text) {
         onExposureCompensationChanged(text.toStdString());
@@ -497,7 +496,6 @@ MainWindow::MainWindow(QWidget *parent)
         onCfaPhaseChanged(text.toStdString());
     });
 
-    connect(ui->changeCacheBtn, &QPushButton::clicked, this, &MainWindow::onSetCacheFolder);
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
 
     ui->defaultSection->removeWidget(ui->defaultBtn);
@@ -515,11 +513,6 @@ MainWindow::MainWindow(QWidget *parent)
     connect(mApplyAllButton, &QPushButton::clicked, this, &MainWindow::onApplyAll);
     mApplySelectedButtonBaseStyle = mApplySelectedButton->styleSheet();
     mApplyAllButtonBaseStyle = mApplyAllButton->styleSheet();
-    mAutoApplyTimer = new QTimer(this);
-    mAutoApplyTimer->setSingleShot(true);
-    connect(mAutoApplyTimer, &QTimer::timeout, this, [this] {
-        if (mSelectedMountIds.isEmpty() && !mMountedFiles.isEmpty()) onApplyAll();
-    });
     mApplySelectedButton->setEnabled(false);
     mApplyAllButton->setEnabled(false);
 
@@ -2342,15 +2335,6 @@ void MainWindow::updateUi() {
     }
     ui->vignetteOnlyColorCheckBox->setEnabled(true);
 
-    if (mCacheRootFolder.isEmpty()) {
-        ui->cacheFolderLabel->setText("<i>Same as source file</i>");
-        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-style: italic;");
-    }
-    else {
-        ui->cacheFolderLabel->setText(mCacheRootFolder);
-        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
-    }
-
     // Update calibration button states
     updateCalibrationButtonStates();
 }
@@ -2458,13 +2442,10 @@ void MainWindow::markSettingsDirty() {
         "QPushButton:hover { background:#e1b64a; }");
     mApplySelectedButton->setStyleSheet(pending);
     mApplyAllButton->setStyleSheet(pending);
-    if (mSelectedMountIds.isEmpty()) mAutoApplyTimer->start(150);
-    else mAutoApplyTimer->stop();
 }
 
 void MainWindow::clearApplyFeedback() {
     mSettingsDirty = false;
-    mAutoApplyTimer->stop();
     mApplySelectedButton->setText(tr("Apply to Selected"));
     mApplyAllButton->setText(tr("Apply to All"));
     mApplySelectedButton->setStyleSheet(mApplySelectedButtonBaseStyle);
@@ -2687,6 +2668,7 @@ void MainWindow::onApplySelected() {
         updateLocalBadge(id);
         updateThumbnail(id);
     }
+    updateFpsLabels();
     clearApplyFeedback();
     autoSaveSession();
 }
@@ -2701,6 +2683,7 @@ void MainWindow::onApplyAll() {
         updateLocalBadge(file.mountId);
         updateThumbnail(file.mountId);
     }
+    updateFpsLabels();
     clearApplyFeedback();
     autoSaveSession();
 }
@@ -2819,27 +2802,6 @@ void MainWindow::onCfaPhaseChanged(std::string input) {
     scheduleOptionsUpdate();
 }
 
-void MainWindow::onSetCacheFolder(bool checked) {
-    Q_UNUSED(checked);  // Parameter not needed for folder selection
-
-    auto folderPath = QFileDialog::getExistingDirectory(
-        this,
-        tr("Select Cache Root Folder"),
-        QString(),  // Start from default location
-        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks
-    );
-
-    mCacheRootFolder = folderPath;
-    if (mCacheRootFolder.isEmpty()) {
-        ui->cacheFolderLabel->setText("<i>Same as source file</i>");
-        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-style: italic;");
-    }
-    else {
-        ui->cacheFolderLabel->setText(mCacheRootFolder);
-        ui->cacheFolderLabel->setStyleSheet("color: white; font-weight: bold; font-family: monospace;");
-    }
-}
-
 void MainWindow::onOpenPreferences() {
     SettingsDialog dialog(this);
     dialog.setCacheFolder(mCacheRootFolder);
@@ -2873,8 +2835,6 @@ void MainWindow::onOpenPreferences() {
             mCacheCleanupTimer->stop();
     }
 #endif
-    ui->cacheFolderLabel->setText(mCacheRootFolder.isEmpty()
-        ? tr("<i>Same as source file</i>") : mCacheRootFolder);
     saveSettings();
     scheduleOptionsUpdate();
 }
