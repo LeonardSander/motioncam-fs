@@ -202,9 +202,15 @@ namespace {
             JxlEncoderSetColorEncoding(encoder, &color) != JXL_ENC_SUCCESS) return finish(false);
         auto* frame = JxlEncoderFrameSettingsCreate(encoder, nullptr);
         if (!frame || JxlEncoderFrameSettingsSetOption(
-                frame, JXL_ENC_FRAME_SETTING_EFFORT, 7) != JXL_ENC_SUCCESS ||
-            JxlEncoderFrameSettingsSetOption(
-                frame, JXL_ENC_FRAME_SETTING_MODULAR, 1) != JXL_ENC_SUCCESS) return finish(false);
+                frame, JXL_ENC_FRAME_SETTING_EFFORT, 7) != JXL_ENC_SUCCESS) return finish(false);
+        // Modular is the appropriate bit-exact path for lossless raw samples.
+        // Do not force it for lossy output: libjxl's distance setting is tuned
+        // for its normal lossy mode and forcing modular can collapse smooth,
+        // low-range raw/log data into implausibly small, poorly interoperable
+        // codestreams. This also matches the Adobe DNG SDK's mode selection.
+        if (distance == 0.0f && JxlEncoderFrameSettingsSetOption(
+                frame, JXL_ENC_FRAME_SETTING_MODULAR, 1) != JXL_ENC_SUCCESS)
+            return finish(false);
         if ((distance == 0.0f && JxlEncoderSetFrameLossless(frame, JXL_TRUE) != JXL_ENC_SUCCESS) ||
             (distance > 0.0f && JxlEncoderSetFrameDistance(frame, distance) != JXL_ENC_SUCCESS))
             return finish(false);

@@ -77,18 +77,21 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         std::vector<vfs::ExposureSample> exposureSamples;
         std::vector<DNGFrameMetadata> metadata(frames.size());
         exposureSamples.reserve(frames.size());
+        size_t missingExposureFrames = 0;
         for (size_t i = 0; i < frames.size(); ++i) {
-            if (!mDecoder->getFrameMetadata(static_cast<int>(i), metadata[i]) ||
-                !metadata[i].hasExposure) {
-                throw std::runtime_error("DNG frame is missing ISO or ExposureTime: " + frames[i].filePath);
+            if (!mDecoder->getFrameMetadata(static_cast<int>(i), metadata[i]))
+                throw std::runtime_error("Could not read DNG frame metadata: " + frames[i].filePath);
+            if (metadata[i].hasExposure) {
+                exposureSamples.push_back({frames[i].timestamp, metadata[i].iso,
+                    metadata[i].exposureTime, metadata[i].baselineExposure,
+                    metadata[i].asShotNeutral});
+                mExposureTimes[frames[i].timestamp] = metadata[i].exposureTime;
+                mIsoValues[frames[i].timestamp] = metadata[i].iso;
+            } else {
+                ++missingExposureFrames;
             }
-            exposureSamples.push_back({frames[i].timestamp, metadata[i].iso,
-                metadata[i].exposureTime, metadata[i].baselineExposure,
-                metadata[i].asShotNeutral});
             mHasBaselineExposure[frames[i].timestamp] = metadata[i].hasBaselineExposure;
             mHasAsShotNeutral[frames[i].timestamp] = metadata[i].hasAsShotNeutral;
-            mExposureTimes[frames[i].timestamp] = metadata[i].exposureTime;
-            mIsoValues[frames[i].timestamp] = metadata[i].iso;
         }
         if (!metadata.empty()) {
             if (metadata[0].whiteLevelCount > 0)
@@ -103,11 +106,20 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 mSidecarMetadata, 0, "gainMaps");
             if (!sidecarMaps.empty()) mSourceHasGainMap = true;
         }
-        const auto analysis = vfs::analyzeExposureMetadata(
-            exposureSamples, mFrameRateInfo.medianFrameRate);
-        mNormalizedExposureOffsets = analysis.normalizedBaseline;
-        mSmoothedExposureOffsets = analysis.smoothedBaseline;
-        mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
+        // Exposure normalization/smoothing is meaningful only when every
+        // frame has both ISO and ExposureTime. Missing optional exposure tags
+        // must not prevent an otherwise valid DNG sequence from mounting.
+        if (missingExposureFrames == 0) {
+            const auto analysis = vfs::analyzeExposureMetadata(
+                exposureSamples, mFrameRateInfo.medianFrameRate);
+            mNormalizedExposureOffsets = analysis.normalizedBaseline;
+            mSmoothedExposureOffsets = analysis.smoothedBaseline;
+            mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
+        } else {
+            spdlog::warn("DNG sequence has {} frame(s) without ISO or ExposureTime; "
+                         "exposure normalization and smoothing are disabled",
+                         missingExposureFrames);
+        }
         
         spdlog::info("DNG sequence loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames",
                      mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate,
@@ -274,19 +286,27 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         throw std::runtime_error("Could not crop full-sensor DNG gain maps");
     if (!DNGDecoder::overrideDataLevels(bytes, mConfig.levels))
         throw std::runtime_error("Could not override source DNG data levels");
-    DNGDecoder::repairExposureTime(bytes, mExposureTimes.at(timestamp));
+    if (const auto exposure = mExposureTimes.find(timestamp);
+        exposure != mExposureTimes.end())
+        DNGDecoder::repairExposureTime(bytes, exposure->second);
 
     const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
     const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
-    if (normalize || smoothExposure || smoothWhiteBalance) {
-        double baseline = smoothExposure
-            ? mSmoothedExposureOffsets.at(timestamp)
-            : mNormalizedExposureOffsets.at(timestamp);
-        baseline += vfs::configuredExposureOffset(mConfig);
-        const auto neutralIt = mSmoothedAsShotNeutrals.find(timestamp);
-        const double* baselinePtr = (normalize || smoothExposure) ? &baseline : nullptr;
-        const std::array<float, 3>* neutralPtr = smoothWhiteBalance
+    const auto baselineIt = smoothExposure
+        ? mSmoothedExposureOffsets.find(timestamp)
+        : mNormalizedExposureOffsets.find(timestamp);
+    const auto neutralIt = mSmoothedAsShotNeutrals.find(timestamp);
+    const bool updateExposure = (normalize || smoothExposure) &&
+        baselineIt != (smoothExposure ? mSmoothedExposureOffsets.end()
+                                     : mNormalizedExposureOffsets.end());
+    const bool updateWhiteBalance = smoothWhiteBalance &&
+        neutralIt != mSmoothedAsShotNeutrals.end();
+    if (updateExposure || updateWhiteBalance) {
+        double baseline = updateExposure
+            ? baselineIt->second + vfs::configuredExposureOffset(mConfig) : 0.0;
+        const double* baselinePtr = updateExposure ? &baseline : nullptr;
+        const std::array<float, 3>* neutralPtr = updateWhiteBalance
             ? &neutralIt->second : nullptr;
         if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
             throw std::runtime_error("Could not update DNG exposure/white-balance tags");
@@ -324,9 +344,11 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
         throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + frame.filePath);
 
-    if ((mConfig.options & RENDER_OPT_BAKE_ISO) &&
-        !DNGDecoder::bakeIsoOverlay(bytes, mIsoValues.at(timestamp)))
-        throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + frame.filePath);
+    if (mConfig.options & RENDER_OPT_BAKE_ISO) {
+        const auto iso = mIsoValues.find(timestamp);
+        if (iso != mIsoValues.end() && !DNGDecoder::bakeIsoOverlay(bytes, iso->second))
+            throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + frame.filePath);
+    }
     if ((mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
         (mConfig.logTransform != LogTransformMode::KeepInput || bakeGainMap) &&

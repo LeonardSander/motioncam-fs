@@ -205,6 +205,36 @@ int main() {
         assert(image.SetImageData(reinterpret_cast<const unsigned char*>(cfa.data()),
                                   cfa.size() * sizeof(uint16_t)));
         assert(image.GetStripBytes() > 0);
+        auto losslessDng = writeDng(image);
+        assert(tiffTagValue(losslessDng, 259) == 52546);
+        assert(motioncam::DNGDecoder::ensureUncompressed(losslessDng));
+        assert(tiffTagValue(losslessDng, 259) == 1);
+        assert(tiffTagValue(losslessDng, 279) == cfa.size() * sizeof(uint16_t));
+
+        // Exercise the complete lossy CFA DNG, not only the bare codestream.
+        // Low-range uint16 samples model DirectLog RGB16 after a reduced-bit
+        // log transform and remosaic.
+        tinydngwriter::DNGImage lossyImage;
+        lossyImage.SetBigEndian(false);
+        assert(lossyImage.SetImageWidth(width) && lossyImage.SetImageLength(height));
+        assert(lossyImage.SetRowsPerStrip(height) && lossyImage.SetSamplesPerPixel(1));
+        assert(lossyImage.SetBitsPerSample(1, &bits));
+        assert(lossyImage.SetCompression(tinydngwriter::COMPRESSION_JPEG_XL));
+        assert(lossyImage.SetJXLDistance(0.5f));
+        assert(lossyImage.SetPhotometric(tinydngwriter::PHOTOMETRIC_CFA));
+        assert(lossyImage.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+        assert(lossyImage.SetCFARepeatPatternDim(repeat, repeat));
+        assert(lossyImage.SetCFAPattern(static_cast<unsigned int>(pattern.size()), pattern.data()));
+        assert(lossyImage.SetWhiteLevel(16383));
+        assert(lossyImage.SetDNGVersion(1, 7, 0, 0));
+        assert(lossyImage.SetDNGBackwardVersion(1, 7, 0, 0));
+        assert(lossyImage.SetImageData(reinterpret_cast<const unsigned char*>(cfa.data()),
+                                       cfa.size() * sizeof(uint16_t)));
+        auto lossyDng = writeDng(lossyImage);
+        assert(tiffTagValue(lossyDng, 259) == 52546);
+        assert(motioncam::DNGDecoder::ensureUncompressed(lossyDng));
+        assert(tiffTagValue(lossyDng, 259) == 1);
+        assert(tiffTagValue(lossyDng, 277) == 1);
     }
 
     constexpr unsigned int higherWidth = 64, higherHeight = 48, higherRepeat = 4;
@@ -486,6 +516,14 @@ int main() {
     setTiffByteTag(remosaicedRgb, 50707, {1, 4, 0, 0});
     assert(tiffByteTag(remosaicedRgb, 50706) ==
            (std::array<uint8_t, 4>{1, 4, 0, 0}));
+    auto lossyFinalized = remosaicedRgb;
+    assert(motioncam::DNGDecoder::compressJPEGXL(lossyFinalized, 0.5f));
+    assert(tiffTagValue(lossyFinalized, 259) == 52546);
+    assert(tiffTagValue(lossyFinalized, 258) == 16);
+    assert(motioncam::DNGDecoder::ensureUncompressed(lossyFinalized));
+    assert(tiffTagValue(lossyFinalized, 259) == 1);
+    assert(tiffTagValue(lossyFinalized, 277) == 1);
+
     assert(motioncam::DNGDecoder::compressJPEGXL(remosaicedRgb, 0.0f));
     assert(tiffTagValue(remosaicedRgb, 259) == 52546);
     assert(tiffByteTag(remosaicedRgb, 50706) ==
