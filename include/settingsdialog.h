@@ -40,6 +40,11 @@ public:
     void setDeleteOnUnmount(bool enabled);
     bool getDeleteOnUnmount() const;
 
+    void setAutoApplyClipSettings(bool enabled);
+    bool getAutoApplyClipSettings() const;
+    void setUnmountOnFinalize(bool enabled);
+    bool getUnmountOnFinalize() const;
+
     void setMatrixOverrideEnabled(bool enabled);
     bool getMatrixOverrideEnabled() const;
     void setMatrixProfile(const QString& profile);
@@ -67,6 +72,8 @@ private:
     QLabel* mCacheFolderWarningLabel;
     QDialogButtonBox* mButtonBox;
     QCheckBox* mDeleteOnUnmountCheckBox;
+    QCheckBox* mAutoApplyClipSettingsCheckBox;
+    QCheckBox* mUnmountOnFinalizeCheckBox;
     QCheckBox* mMatrixOverrideCheckBox;
     QComboBox* mMatrixProfileComboBox;
 

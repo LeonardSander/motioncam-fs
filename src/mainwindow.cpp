@@ -517,6 +517,7 @@ MainWindow::MainWindow(QWidget *parent)
     mApplyAllButtonBaseStyle = mApplyAllButton->styleSheet();
     mApplySelectedButton->setEnabled(false);
     mApplyAllButton->setEnabled(false);
+    updateApplyButtonsVisibility();
 
     auto* fileMenu = menuBar()->addMenu(tr("File"));
     auto* newSession = fileMenu->addAction(tr("New Session"));
@@ -617,6 +618,8 @@ void MainWindow::saveSettings() {
     settings.setValue("cachePolicy", mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
     settings.setValue("cacheQuotaBytes", static_cast<qulonglong>(mCacheQuotaBytes));
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
+    settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
+    settings.setValue("unmountOnFinalize", mUnmountOnFinalize);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
     settings.setValue("cfrTarget", QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
     settings.setValue("cropTarget", QString::fromStdString(mRenderSettings.cropTarget));
@@ -704,6 +707,8 @@ void MainWindow::restoreSettings() {
     mCacheQuotaBytes = settings.value("cacheQuotaBytes",
         QVariant::fromValue<qulonglong>(30ULL * 1024 * 1024 * 1024)).toULongLong();
     mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
+    mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
+    mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Drop Frame" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
@@ -1029,7 +1034,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Create and add the finalize button
     auto* finalizeButton = new QPushButton("Finalize", fileWidget);
     finalizeButton->setFixedSize(buttonWidth, buttonHeight);
-    finalizeButton->setToolTip("Render all frames to disk with compression (if enabled), then unmount");
+    finalizeButton->setToolTip("Render all frames to disk with compression (if enabled)");
     finalizeButton->setEnabled(true);
     buttonLayout->addWidget(finalizeButton);
 
@@ -2175,6 +2180,13 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     // We'll write to temp, then move files to the final location
     QString tempPath = mountPath + ".finalizing-" +
         QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString retainedOutputPath = mountPath + "-finalized";
+    if (!mUnmountOnFinalize && QFileInfo::exists(retainedOutputPath) &&
+        QMessageBox::question(this, "Replace finalized output?",
+            QString("Replace the existing finalized output at:\n%1").arg(retainedOutputPath),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
     QDir tempDir(tempPath);
 
     // Create temp directory
@@ -2242,6 +2254,25 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             // Now move files from temp to final location
             progress.setLabelText("Moving files to final location...");
             QApplication::processEvents();
+
+            if (!mUnmountOnFinalize) {
+                const QFileInfo retainedInfo(retainedOutputPath);
+                const bool removedExisting = !retainedInfo.exists() ||
+                    (retainedInfo.isDir() ? QDir(retainedOutputPath).removeRecursively()
+                                          : QFile::remove(retainedOutputPath));
+                if (!removedExisting)
+                    throw std::runtime_error("Could not replace the existing finalized output directory");
+                QDir parentDir(QFileInfo(retainedOutputPath).absolutePath());
+                if (!parentDir.rename(tempPath, retainedOutputPath))
+                    throw std::runtime_error("Could not move the completed render into the finalized output directory");
+                progress.close();
+                QMessageBox::information(this, "Finalize complete",
+                    QString("The clip remains mounted. Finalized output was created at:\n%1")
+                        .arg(retainedOutputPath));
+                spdlog::info("Finalize complete: {} frames rendered to {} without unmounting",
+                             totalFrames, retainedOutputPath.toStdString());
+                return;
+            }
 
             // Keep the active mount intact until rendering has fully succeeded.
             mFuseFilesystem->unmount(mountId);
@@ -2490,9 +2521,32 @@ void MainWindow::scheduleOptionsUpdate() {
         changedWidget->style()->unpolish(changedWidget);
         changedWidget->style()->polish(changedWidget);
     }
-    if (mMountedFiles.isEmpty()) return;
     if (mSelectedMountIds.isEmpty()) mGlobalRenderSettings = buildRenderSettings();
-    markSettingsDirty();
+    if (mMountedFiles.isEmpty()) return;
+    if (mAutoApplyClipSettings) applyAutoSettings();
+    else markSettingsDirty();
+}
+
+void MainWindow::applyAutoSettings() {
+    if (mSelectedMountIds.isEmpty()) {
+        mRenderSettings = mGlobalRenderSettings;
+        for (const auto& file : mMountedFiles) {
+            if (mLocalSettings.contains(file.mountId)) continue;
+            mFuseFilesystem->updateOptions(file.mountId, mGlobalRenderSettings);
+        }
+        updateFpsLabels();
+        clearApplyFeedback();
+        autoSaveSession();
+        return;
+    }
+
+    onApplySelected();
+}
+
+void MainWindow::updateApplyButtonsVisibility() {
+    const bool visible = !mAutoApplyClipSettings;
+    mApplySelectedButton->setVisible(visible);
+    mApplyAllButton->setVisible(visible);
 }
 
 void MainWindow::markSettingsDirty() {
@@ -2871,6 +2925,8 @@ void MainWindow::onOpenPreferences() {
     SettingsDialog dialog(this);
     dialog.setCacheFolder(mCacheRootFolder);
     dialog.setPlayerPath(mPlayerPath);
+    dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
+    dialog.setUnmountOnFinalize(mUnmountOnFinalize);
 #ifdef _WIN32
     dialog.setDeleteOnUnmount(mDeleteOnUnmount);
     dialog.setCachePolicyMode(mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
@@ -2881,8 +2937,12 @@ void MainWindow::onOpenPreferences() {
     if (dialog.exec() != QDialog::Accepted)
         return;
 
+    const bool wasAutoApply = mAutoApplyClipSettings;
     mCacheRootFolder = dialog.getCacheFolder();
     mPlayerPath = dialog.getPlayerPath();
+    mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
+    mUnmountOnFinalize = dialog.getUnmountOnFinalize();
+    updateApplyButtonsVisibility();
 #ifdef _WIN32
     mDeleteOnUnmount = dialog.getDeleteOnUnmount();
     mCachePolicy = dialog.getCachePolicyMode() == "off"
@@ -2901,7 +2961,10 @@ void MainWindow::onOpenPreferences() {
     }
 #endif
     saveSettings();
-    scheduleOptionsUpdate();
+    if (mAutoApplyClipSettings && !wasAutoApply)
+        applyAutoSettings();
+    else if (!mAutoApplyClipSettings && wasAutoApply)
+        clearApplyFeedback();
 }
 
 void MainWindow::saveSessionToFile(const QString& path) {

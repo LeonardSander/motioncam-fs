@@ -214,6 +214,29 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     mainLayout->addWidget(playerGroup);
 
+    // Clip settings group
+    auto* clipSettingsGroup = new QGroupBox("Clip Settings", this);
+    auto* clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
+    mAutoApplyClipSettingsCheckBox = new QCheckBox("Auto apply", this);
+    mAutoApplyClipSettingsCheckBox->setChecked(true);
+    clipSettingsLayout->addWidget(mAutoApplyClipSettingsCheckBox);
+    auto* autoApplyHelpLabel = new QLabel(
+        helpSpan("Immediately applies global edits to clips using global settings, and local edits "
+                 "to all selected clips. Disable to use the Apply buttons."),
+        this);
+    autoApplyHelpLabel->setWordWrap(true);
+    clipSettingsLayout->addWidget(autoApplyHelpLabel);
+    mUnmountOnFinalizeCheckBox = new QCheckBox("Unmount on finalize", this);
+    mUnmountOnFinalizeCheckBox->setChecked(true);
+    clipSettingsLayout->addWidget(mUnmountOnFinalizeCheckBox);
+    auto* unmountOnFinalizeHelpLabel = new QLabel(
+        helpSpan("Unmounts a clip after successful DNG finalization. When disabled, the mounted "
+                 "clip stays active and output is written to a sibling -finalized folder."),
+        this);
+    unmountOnFinalizeHelpLabel->setWordWrap(true);
+    clipSettingsLayout->addWidget(unmountOnFinalizeHelpLabel);
+    mainLayout->addWidget(clipSettingsGroup);
+
     // Matrix override group (disabled for Fuse-AllV2)
     auto* matrixGroup = new QGroupBox("Color Matrix Override", this);
     matrixGroup->setVisible(false);
@@ -397,6 +420,26 @@ void SettingsDialog::setDeleteOnUnmount(bool enabled)
 bool SettingsDialog::getDeleteOnUnmount() const
 {
     return mDeleteOnUnmountCheckBox->isChecked();
+}
+
+void SettingsDialog::setAutoApplyClipSettings(bool enabled)
+{
+    mAutoApplyClipSettingsCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getAutoApplyClipSettings() const
+{
+    return mAutoApplyClipSettingsCheckBox->isChecked();
+}
+
+void SettingsDialog::setUnmountOnFinalize(bool enabled)
+{
+    mUnmountOnFinalizeCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getUnmountOnFinalize() const
+{
+    return mUnmountOnFinalizeCheckBox->isChecked();
 }
 
 void SettingsDialog::setMatrixOverrideEnabled(bool enabled)

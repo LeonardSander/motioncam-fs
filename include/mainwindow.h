@@ -145,6 +145,8 @@ private:
     void autoSaveSession();
     void markSettingsDirty();
     void clearApplyFeedback();
+    void applyAutoSettings();
+    void updateApplyButtonsVisibility();
 #ifdef __APPLE__
     void cleanupStaleMacFuseMounts();
     void forceUnmountAllMacFuseMounts();
@@ -184,6 +186,8 @@ private:
     QFutureSynchronizer<void> mThumbnailTasks;
     QHash<motioncam::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
     bool mSettingsDirty = false;
+    bool mAutoApplyClipSettings = true;
+    bool mUnmountOnFinalize = true;
     QString mApplySelectedButtonBaseStyle;
     QString mApplyAllButtonBaseStyle;
     
