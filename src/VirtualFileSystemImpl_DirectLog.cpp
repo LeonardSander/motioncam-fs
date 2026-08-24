@@ -1365,7 +1365,20 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     
     // Calculate runtime from video duration
     info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(mTotalFrames) / mFps) : 0.0f;
-    
+
+    const auto& frames = mDecoder->getFrames();
+    auto presentationTimestamps = std::make_shared<std::vector<std::int64_t>>();
+    presentationTimestamps->reserve(frames.size());
+    for (const auto& frame : frames)
+        presentationTimestamps->push_back(frame.pts);
+    info.presentationTimestamps = std::move(presentationTimestamps);
+    if (!frames.empty() && frames.front().timeBase > 0.0) {
+        const AVRational timeBase = av_d2q(frames.front().timeBase, INT_MAX);
+        info.timingTimeBaseNum = timeBase.num;
+        info.timingTimeBaseDen = timeBase.den;
+    }
+    info.timingUsesCfrMapping = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+
     return info;
 }
 

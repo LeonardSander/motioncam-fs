@@ -255,6 +255,11 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
         mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
     mFileInfo.runtimeSeconds = audioDurationSec;
+    mFileInfo.presentationTimestamps =
+        std::make_shared<const std::vector<std::int64_t>>(frames.begin(), frames.end());
+    mFileInfo.timingTimeBaseNum = 1;
+    mFileInfo.timingTimeBaseDen = 1000000000;
+    mFileInfo.timingUsesCfrMapping = applyCFRConversion;
 }
 
 std::vector<Entry> VirtualFileSystemImpl_MCRAW::listFiles(const std::string& filter) const {

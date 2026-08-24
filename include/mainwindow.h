@@ -12,6 +12,7 @@
 #include <QStringList>
 #include <QFutureWatcher>
 #include <QFutureSynchronizer>
+#include <QPointer>
 #include <optional>
 
 #ifdef _WIN32
@@ -68,6 +69,8 @@ namespace Ui {
 class MainWindow;
 }
 QT_END_NAMESPACE
+
+class FrameTimingDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -179,6 +182,7 @@ private:
     QStringList mRecentSessions;
     QMenu* mRecentSessionsMenu = nullptr;
     QFutureSynchronizer<void> mThumbnailTasks;
+    QHash<motioncam::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
     bool mSettingsDirty = false;
     QString mApplySelectedButtonBaseStyle;
     QString mApplyAllButtonBaseStyle;

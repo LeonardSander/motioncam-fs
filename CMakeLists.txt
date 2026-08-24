@@ -43,6 +43,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/FrameTimingDialog.cpp
         src/settingsdialog.cpp
         src/VirtualFileSystemImpl.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
@@ -59,6 +60,7 @@ set(PROJECT_SOURCES
         src/HigherCFADemosaic.cpp
 
         include/mainwindow.h
+        include/FrameTimingDialog.h
         include/settingsdialog.h
         include/Types.h
         include/DataLevels.h

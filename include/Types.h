@@ -272,7 +272,13 @@ inline CFRTarget stringToCFRTarget(const std::string& str) {
 
     // Try to parse as custom float
     try {
-        float value = std::stof(str);
+        std::string normalized = str;
+        if (normalized.find('.') == std::string::npos)
+            std::replace(normalized.begin(), normalized.end(), ',', '.');
+        std::size_t parsed = 0;
+        float value = std::stof(normalized, &parsed);
+        if (normalized.find_first_not_of(" \t\r\n", parsed) != std::string::npos)
+            throw std::invalid_argument("trailing characters in frame rate");
         return CFRTarget(CFRMode::Custom, value);
     } catch (...) {
         return CFRTarget(CFRMode::PreferDropFrame);

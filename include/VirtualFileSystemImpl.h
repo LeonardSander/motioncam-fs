@@ -7,6 +7,7 @@
 #include <memory>
 #include <array>
 #include <map>
+#include <memory>
 #include <nlohmann/json_fwd.hpp>
 
 namespace BS { class thread_pool; }
@@ -40,6 +41,12 @@ struct FileInfo {
     std::string dataType;        // "Bayer CFA", "Quad Bayer CFA", or "RGB"
     std::string levelsInfo;      // e.g., "1023/64 -> 1023/0 10b"
     float runtimeSeconds;        // Runtime in seconds based on audio track
+    // Native presentation timestamps for frame-timing visualization. The
+    // timestamp unit is timingTimeBaseNum / timingTimeBaseDen seconds.
+    std::shared_ptr<const std::vector<std::int64_t>> presentationTimestamps;
+    int timingTimeBaseNum = 0;
+    int timingTimeBaseDen = 0;
+    bool timingUsesCfrMapping = false;
 };
 
 namespace vfs {

@@ -418,7 +418,16 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     // Calculate runtime from frame count and fps
     const int outputFrames = mTotalFrames - mDroppedFrames + mDuplicatedFrames;
     info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(outputFrames) / mFps) : 0.0f;
-    
+    const auto& frames = mDecoder->getFrames();
+    auto presentationTimestamps = std::make_shared<std::vector<std::int64_t>>();
+    presentationTimestamps->reserve(frames.size());
+    for (const auto& frame : frames)
+        presentationTimestamps->push_back(frame.timestamp);
+    info.presentationTimestamps = std::move(presentationTimestamps);
+    info.timingTimeBaseNum = 1;
+    info.timingTimeBaseDen = 1000000000;
+    info.timingUsesCfrMapping = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+
     return info;
 }
 

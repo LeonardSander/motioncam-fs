@@ -83,6 +83,13 @@ int main() {
     auto customRate = stringToCFRTarget("48");
     assert(customRate.mode == CFRMode::Custom);
     assert(nearlyEqual(customRate.customValue, 48.0f));
+    customRate = stringToCFRTarget("23.976");
+    assert(customRate.mode == CFRMode::Custom);
+    assert(nearlyEqual(customRate.customValue, 23.976f));
+    customRate = stringToCFRTarget("23,976");
+    assert(customRate.mode == CFRMode::Custom);
+    assert(nearlyEqual(customRate.customValue, 23.976f));
+    assert(stringToCFRTarget("23.976junk").mode == CFRMode::PreferDropFrame);
 
     const auto whitespaceCalibration = CalibrationData::parse(std::string(R"({
         "colorMatrix1": [1.1 -0.2 0.1 0.0 1.0 0.0 0.2 -0.1 0.9],

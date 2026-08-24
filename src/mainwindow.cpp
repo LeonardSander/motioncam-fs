@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "FrameTimingDialog.h"
 #include "ui_mainwindow.h"
 #include "settingsdialog.h"
 #include "CalibrationData.h"
@@ -38,6 +39,7 @@ using namespace motioncam;
 #include <QDir>
 #include <QSignalBlocker>
 #include <QLabel>
+#include <QPainter>
 #include <QFrame>
 #include <QProgressDialog>
 #include <QThread>
@@ -1069,6 +1071,23 @@ void MainWindow::mountFile(const QString& filePath) {
     auto* clipControls = new QVBoxLayout();
     clipControls->setContentsMargins(0, 0, 0, 6);
     clipControls->addStretch();
+    auto* timingButton = new QPushButton(fileWidget);
+    timingButton->setObjectName(QStringLiteral("frameTimingButton"));
+    timingButton->setFixedSize(24, 24);
+    timingButton->setToolTip(tr("Show frame timing graph"));
+    timingButton->setFlat(true);
+    QPixmap timingPixmap(18, 18);
+    timingPixmap.fill(Qt::transparent);
+    {
+        QPainter iconPainter(&timingPixmap);
+        iconPainter.setRenderHint(QPainter::Antialiasing);
+        iconPainter.setPen(QPen(QColor("#8fb7e8"), 1.7));
+        iconPainter.drawPolyline(QPolygonF({{1, 13}, {4, 8}, {7, 11}, {11, 3}, {14, 7}, {17, 2}}));
+        iconPainter.setPen(QPen(QColor("#64788f"), 1));
+        iconPainter.drawLine(1, 16, 17, 16);
+    }
+    timingButton->setIcon(QIcon(timingPixmap));
+    clipControls->addWidget(timingButton, 0, Qt::AlignRight);
     auto* clipCheckBox = new QCheckBox(fileWidget);
     clipCheckBox->setObjectName(QStringLiteral("clipSelection"));
     clipCheckBox->setToolTip(tr("Select this clip for per-clip settings"));
@@ -1079,6 +1098,35 @@ void MainWindow::mountFile(const QString& filePath) {
     clipNumber->setStyleSheet("color:#7f93ad; font-size:9pt;");
     clipControls->addWidget(clipNumber, 0, Qt::AlignRight);
     cardLayout->addLayout(clipControls);
+
+    connect(timingButton, &QPushButton::clicked, this, [this, mountId, fileInfo] {
+        const auto info = mFuseFilesystem->getFileInfo(mountId);
+        if (!info || !info->presentationTimestamps ||
+            info->presentationTimestamps->size() < 2 ||
+            info->timingTimeBaseNum <= 0 || info->timingTimeBaseDen <= 0) {
+            QMessageBox::information(this, tr("Frame timing"),
+                                     tr("This clip has no usable presentation timestamps."));
+            return;
+        }
+        auto* dialog = mTimingDialogs.value(mountId).data();
+        if (!dialog) {
+            dialog = new FrameTimingDialog(
+                fileInfo.baseName(), *info->presentationTimestamps,
+                info->timingTimeBaseNum, info->timingTimeBaseDen, info->fps,
+                info->timingUsesCfrMapping, this);
+            mTimingDialogs.insert(mountId, dialog);
+            connect(dialog, &QObject::destroyed, this, [this, mountId] {
+                mTimingDialogs.remove(mountId);
+            });
+        } else {
+            dialog->updateTiming(*info->presentationTimestamps,
+                                 info->timingTimeBaseNum, info->timingTimeBaseDen,
+                                 info->fps, info->timingUsesCfrMapping);
+        }
+        dialog->show();
+        dialog->raise();
+        dialog->activateWindow();
+    });
 
     connect(clipCheckBox, &QCheckBox::toggled, this, [this, fileWidget, mountId](bool selected) {
         if (selected) mSelectedMountIds.insert(mountId);
@@ -1221,6 +1269,7 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     bool ok = false;
     auto mountId = fileWidget->property("mountId").toInt(&ok);
     if(ok) {
+        if (auto* dialog = mTimingDialogs.value(mountId).data()) dialog->close();
         mFuseFilesystem->unmount(mountId);
         mSelectedMountIds.remove(mountId);
         mLocalSettings.remove(mountId);
@@ -2363,7 +2412,7 @@ void MainWindow::updateFpsLabels() {
             continue;
         }
 
-        auto info = fileInfoOpt.value();
+        const auto& info = fileInfoOpt.value();
 
         // Update first info label (runtime, resolution, data type, levels)
         if (label->property("infoLabel1").toBool()) {
@@ -2410,6 +2459,15 @@ void MainWindow::updateFpsLabels() {
 
             label->setText(infoText2);
         }
+    }
+
+    for (auto it = mTimingDialogs.begin(); it != mTimingDialogs.end(); ++it) {
+        if (!it.value()) continue;
+        const auto info = mFuseFilesystem->getFileInfo(it.key());
+        if (!info || !info->presentationTimestamps) continue;
+        it.value()->updateTiming(*info->presentationTimestamps,
+                                 info->timingTimeBaseNum, info->timingTimeBaseDen,
+                                 info->fps, info->timingUsesCfrMapping);
     }
 }
 
