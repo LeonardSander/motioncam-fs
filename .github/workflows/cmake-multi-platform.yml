@@ -31,6 +31,17 @@ jobs:
           libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
           libswscale-dev
 
+    # Ubuntu 24.04 ships libjpeg-turbo 2.x, while 12-bit CinemaDNG support
+    # uses the unified 8/12-bit API provided by libjpeg-turbo 3.x. Install the
+    # same pinned vcpkg port used by the other platform builds, but keep
+    # manifest mode disabled so the remaining Linux dependencies stay native.
+    - name: Install libjpeg-turbo via vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+        vcpkgArguments: libjpeg-turbo
+        vcpkgTriplet: x64-linux
+
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
       with:
@@ -44,7 +55,10 @@ jobs:
         cmake -S . -B build-linux -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
-          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          -DVCPKG_TARGET_TRIPLET=x64-linux \
+          -DVCPKG_MANIFEST_MODE=OFF
 
     - name: Build
       run: cmake --build build-linux --parallel
