@@ -291,6 +291,7 @@ endif()
 # JPEG XL is the DNG 1.7 compression backend. Prefer pkg-config (used by
 # distro packages and vcpkg), with a conventional library fallback.
 find_package(PkgConfig QUIET)
+find_package(JPEG REQUIRED)
 if(PkgConfig_FOUND)
     pkg_check_modules(JXL QUIET IMPORTED_TARGET libjxl)
 endif()
@@ -421,6 +422,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   ${MOTIONCAM_SPDLOG_TARGET}
   ${MOTIONCAM_FMT_TARGET}
   motioncam-decoder
+  JPEG::JPEG
   ${JXL_TARGET}
   ${FFMPEG_LIBRARIES}
   ${platform-specific})
@@ -500,7 +502,7 @@ if(BUILD_TESTING)
         deps/motioncam-decoder/thirdparty/liblj92)
     target_include_directories(motioncam-lossless-jpeg-test PRIVATE include)
     target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
-        Boost::filesystem Boost::regex spdlog::spdlog ${JXL_TARGET})
+        Boost::filesystem Boost::regex spdlog::spdlog JPEG::JPEG ${JXL_TARGET})
     add_test(NAME motioncam-lossless-jpeg-test
         COMMAND motioncam-lossless-jpeg-test)
 
@@ -514,7 +516,7 @@ if(BUILD_TESTING)
         deps/motioncam-decoder/thirdparty)
     target_include_directories(motioncam-jpeg-xl-test PRIVATE include)
     target_link_libraries(motioncam-jpeg-xl-test PRIVATE
-        ${JXL_TARGET} Boost::filesystem Boost::regex spdlog::spdlog)
+        ${JXL_TARGET} JPEG::JPEG Boost::filesystem Boost::regex spdlog::spdlog)
     target_compile_definitions(motioncam-jpeg-xl-test PRIVATE TINY_DNG_ENABLE_JPEG_XL)
     add_test(NAME motioncam-jpeg-xl-test COMMAND motioncam-jpeg-xl-test)
 
@@ -532,7 +534,7 @@ if(BUILD_TESTING)
         include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
     target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex
-        spdlog::spdlog motioncam-decoder)
+        spdlog::spdlog motioncam-decoder JPEG::JPEG)
     target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
         TINY_DNG_ENABLE_JPEG_XL
         RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:motioncam-rife-fake>")

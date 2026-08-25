@@ -1455,6 +1455,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0)
         cfaRepeatSize = metadata.needRemosaic ? 4 : 2;
     const bool higherCFA = cfaRepeatSize > 2;
+    const bool lossyJpegDct = compressionEnabled && isLossyJpegDct(settings.jxlDistance);
     const bool hqProxy = draftScale > 1 &&
         (settings.options & RENDER_OPT_HIGHER_CFA_HQ);
     const bool quadBayerHqProxy = hqProxy && cfaRepeatSize == 4;
@@ -1599,11 +1600,12 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Encode to reduce size in container
     auto actualBits = utils::bitsNeeded(dstWhiteLevel);
     auto encodeBits = actualBits;
-    const bool jpegXlCompression = compressionEnabled && settings.jxlDistance >= 0.0f;
+    const bool writerCompression = compressionEnabled && !lossyJpegDct;
+    const bool jpegXlCompression = writerCompression && settings.jxlDistance >= 0.0f;
 
     // Compressed codecs consume unpacked uint16 samples.
     // The compression will handle the redundancy
-    if (!compressionEnabled && !settings.cameraNativeStaging) {
+    if (!writerCompression && !settings.cameraNativeStaging && !lossyJpegDct) {
         if (demosaic && !remosaic) {
             if (encodeBits <= 4) encodeRGBTo4Bit(processedData, width, height), encodeBits = 4;
             else if (encodeBits <= 6) encodeRGBTo6Bit(processedData, width, height), encodeBits = 6;
@@ -1674,7 +1676,7 @@ std::shared_ptr<std::vector<char>> generateDng(
                                samplesPerPixel == 3 ? 1 : 2);
         
     // Set compression based on user preference (BEFORE SetImageData)
-    if (compressionEnabled) {
+    if (writerCompression) {
         if (settings.jxlDistance < 0.0f) {
             if (!dng.SetCompression(tinydngwriter::COMPRESSION_JPEG))
                 throw std::runtime_error("Failed to enable JPEG 92 compression");
@@ -1766,7 +1768,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     // DNG 1.7 JPEG XL is decoded through a uint16 pixel buffer. Keep sensor
     // values unchanged and describe their meaningful range with WhiteLevel.
     // For uncompressed: use encodeBits (the packed bit depth)
-    const uint16_t storedBits = jpegXlCompression ? 16 : actualBits;
+    const uint16_t storedBits = (jpegXlCompression || lossyJpegDct) ? 16 : actualBits;
     const uint16_t bps[3] = { storedBits, storedBits, storedBits };
     dng.SetBitsPerSample(samplesPerPixel, bps);
 
@@ -1868,7 +1870,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     }    
 
     // Set image data AFTER all metadata is configured (including BitsPerSample and Compression)
-    spdlog::debug("Calling SetImageData with {} bytes, compression={}", processedData.size(), compressionEnabled);
+    spdlog::debug("Calling SetImageData with {} bytes, compression={}", processedData.size(), writerCompression);
     if (!dng.SetImageData(reinterpret_cast<const unsigned char*>(processedData.data()), processedData.size())) {
         spdlog::error("SetImageData failed: {}", dng.Error());
         throw std::runtime_error("Failed to set image data: " + dng.Error());
@@ -1890,6 +1892,13 @@ std::shared_ptr<std::vector<char>> generateDng(
     utils::vector_ostream stream(*output);
 
     writer.WriteToFile(stream, &err);
+
+    if (lossyJpegDct) {
+        std::vector<uint8_t> bytes(output->begin(), output->end());
+        if (!DNGDecoder::compressLossyJPEG(bytes))
+            throw std::runtime_error("Failed to enable lossy JPEG DCT compression");
+        output->assign(bytes.begin(), bytes.end());
+    }
 
     return output;
 }

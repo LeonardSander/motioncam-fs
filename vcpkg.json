@@ -7,6 +7,7 @@
         "boost-regex",
         "fmt",
         "spdlog",
+        "libjpeg-turbo",
         "libjxl",
         {
             "name": "ffmpeg",

@@ -13,6 +13,13 @@
 
 namespace motioncam {
 
+constexpr float DNG_COMPRESSION_JPEG_DCT = -2.0f;
+constexpr float DNG_COMPRESSION_JPEG_LOSSLESS = -1.0f;
+
+inline bool isLossyJpegDct(float value) {
+    return value <= DNG_COMPRESSION_JPEG_DCT + 0.01f;
+}
+
 typedef int64_t Timestamp;
 
 enum EntryType : int {
@@ -308,8 +315,8 @@ struct RenderSettings {
     std::string exposureCompensation;
     QuadBayerMode quadBayerOption;
     std::string cfaPhase;
-    // JPEG XL distance used when finalizing compressed DNGs. Zero is
-    // mathematically lossless; positive values enable experimental lossy JXL.
+    // Compression selector: -2 is 12-bit CinemaDNG JPEG DCT, -1 is JPEG 92 lossless,
+    // zero is lossless JXL, and positive values are lossy JXL.
     float jxlDistance;
     // Internal export mode: write normalized, unpacked 16-bit RGB staging DNGs
     // for the Camera Native encoder. This is never persisted as a UI option.

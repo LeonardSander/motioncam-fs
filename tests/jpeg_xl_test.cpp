@@ -193,6 +193,7 @@ int main() {
         std::vector<unsigned char> pattern(repeat * repeat, 1);
         assert(image.SetImageWidth(width) && image.SetImageLength(height));
         assert(image.SetRowsPerStrip(height) && image.SetSamplesPerPixel(1));
+        assert(image.SetYResolution(300));
         assert(image.SetBitsPerSample(1, &bits));
         assert(image.SetCompression(tinydngwriter::COMPRESSION_JPEG_XL));
         assert(image.SetJXLDistance(0.0f));
@@ -210,6 +211,29 @@ int main() {
         assert(motioncam::DNGDecoder::ensureUncompressed(losslessDng));
         assert(tiffTagValue(losslessDng, 259) == 1);
         assert(tiffTagValue(losslessDng, 279) == cfa.size() * sizeof(uint16_t));
+
+        auto jpeg92Dng = losslessDng;
+        assert(motioncam::DNGDecoder::compressLosslessJPEG(jpeg92Dng));
+        assert(tiffTagValue(jpeg92Dng, 259) == 7);
+        assert(motioncam::DNGDecoder::ensureUncompressed(jpeg92Dng));
+        assert(tiffTagValue(jpeg92Dng, 277) == 1);
+
+        // CinemaDNG keeps every CFA geometry as one raw plane in a 12-bit
+        // lossy DCT JPEG stream under Compression=7.
+        auto dctDng = losslessDng;
+        assert(motioncam::DNGDecoder::compressLossyJPEG(dctDng, 90));
+        assert(tiffTagValue(dctDng, 259) == 7);
+        assert(tiffTagValue(dctDng, 262) == 32803);
+        assert(tiffTagValue(dctDng, 258) == 12);
+        assert(tiffTagValue(dctDng, 277) == 1);
+        assert(tiffTagValue(dctDng, 322) == width);
+        assert(tiffTagValue(dctDng, 323) == height);
+        assert(tiffTagValue(dctDng, 324) > 0);
+        // Adding TileLength must not consume the existing resolution metadata.
+        assert(tiffTagValue(dctDng, 283) > 0);
+        assert(motioncam::DNGDecoder::ensureUncompressed(dctDng));
+        assert(tiffTagValue(dctDng, 259) == 1);
+        assert(tiffTagValue(dctDng, 277) == 1);
 
         // Exercise the complete lossy CFA DNG, not only the bare codestream.
         // Low-range uint16 samples model DirectLog RGB16 after a reduced-bit
@@ -444,6 +468,51 @@ int main() {
     assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));
+    auto jpeg92Rgb = mountedRgb;
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(jpeg92Rgb));
+    assert(motioncam::DNGDecoder::ensureUncompressed(jpeg92Rgb));
+    assert(tiffTagValue(jpeg92Rgb, 277) == 3);
+    auto dctRgb = mountedRgb;
+    assert(motioncam::DNGDecoder::compressLossyJPEG(dctRgb));
+    assert(tiffTagValue(dctRgb, 259) == 7);
+    assert(tiffTagValue(dctRgb, 258) == 12);
+    assert(motioncam::DNGDecoder::ensureUncompressed(dctRgb));
+    assert(tiffTagValue(dctRgb, 277) == 3);
+    auto tenBitDctRgb = mountedRgb;
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(tenBitDctRgb));
+    assert(tiffTagValue(tenBitDctRgb, 258) == 10);
+    assert(motioncam::DNGDecoder::compressLossyJPEG(tenBitDctRgb));
+    assert(tiffTagValue(tenBitDctRgb, 258) == 12);
+    assert(motioncam::DNGDecoder::ensureUncompressed(tenBitDctRgb));
+
+    tinydngwriter::DNGImage logRgb;
+    logRgb.SetBigEndian(false);
+    assert(logRgb.SetImageWidth(rgbWidth) && logRgb.SetImageLength(rgbHeight));
+    assert(logRgb.SetRowsPerStrip(rgbHeight) && logRgb.SetSamplesPerPixel(3));
+    assert(logRgb.SetBitsPerSample(3, rgbBits));
+    assert(logRgb.SetCompression(tinydngwriter::COMPRESSION_NONE));
+    assert(logRgb.SetPhotometric(tinydngwriter::PHOTOMETRIC_LINEARRAW));
+    assert(logRgb.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+    assert(logRgb.SetWhiteLevel(65534));
+    const unsigned short logBlack[3] = {1024, 2048, 3072};
+    assert(logRgb.SetBlackLevel(3, logBlack));
+    std::vector<uint16_t> logTable(1024);
+    for (size_t i = 0; i < logTable.size(); ++i)
+        logTable[i] = static_cast<uint16_t>(i * 65535u / (logTable.size() - 1));
+    assert(logRgb.SetLinearizationTable(logTable.size(), logTable.data()));
+    assert(logRgb.SetDNGVersion(1, 4, 0, 0));
+    assert(logRgb.SetDNGBackwardVersion(1, 1, 0, 0));
+    std::vector<uint16_t> logSamples(rgb.size());
+    for (size_t i = 0; i < logSamples.size(); ++i) logSamples[i] = rgb[i] & 1023u;
+    assert(logRgb.SetImageData(reinterpret_cast<const unsigned char*>(logSamples.data()),
+                               logSamples.size() * sizeof(uint16_t)));
+    auto logDctRgb = writeDng(logRgb);
+    assert(motioncam::DNGDecoder::compressLossyJPEG(logDctRgb));
+    assert(tiffTagValue(logDctRgb, 50717) == 65534);
+    assert(tiffTagValue(logDctRgb, 50714) == logBlack[0]);
+    assert(motioncam::DNGDecoder::ensureUncompressed(logDctRgb));
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(logDctRgb));
+    assert(tiffTagValue(logDctRgb, 258) == 12);
     auto proxyRgb = mountedRgb;
     assert(motioncam::DNGDecoder::processHigherCFA(
         proxyRgb, 2, phase, motioncam::QuadBayerMode::Demosaic,

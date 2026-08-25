@@ -750,6 +750,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         std::vector<uint16_t> processedRgbData = std::move(rgbData);
         float dstWhiteLevel = 65535.0f;
         int encodeBits = 16;
+        const bool lossyJpegDct = jpegCompression && isLossyJpegDct(mConfig.jxlDistance);
         const bool shouldRemosaic =
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
         std::string cfaPhase = "bggr";
@@ -868,7 +869,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             diagnosticStage = std::chrono::steady_clock::now();
         }
 
-        const bool jpegXlCompression = jpegCompression && mConfig.jxlDistance >= 0.0f;
+        const bool writerCompression = jpegCompression && !lossyJpegDct;
+        const bool jpegXlCompression = writerCompression && mConfig.jxlDistance >= 0.0f;
         std::vector<uint8_t> imageBytes;
         const uint8_t* imageData = nullptr;
         size_t imageDataSize = 0;
@@ -876,7 +878,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             imageBytes = std::move(directlyPackedSamples);
             imageData = imageBytes.data();
             imageDataSize = imageBytes.size();
-        } else if (jpegCompression || encodeBits == 16) {
+        } else if (writerCompression || lossyJpegDct || encodeBits == 16) {
             // SetImageData consumes the input synchronously. Use the owned
             // sample storage directly instead of duplicating a 16-bit frame.
             imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
@@ -905,20 +907,20 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetRowsPerStrip(height);
         
         unsigned short bitsPerSample[3] = {
-            static_cast<unsigned short>(jpegXlCompression ? 16 : encodeBits),
-            static_cast<unsigned short>(jpegXlCompression ? 16 : encodeBits),
-            static_cast<unsigned short>(jpegXlCompression ? 16 : encodeBits)
+            static_cast<unsigned short>((jpegXlCompression || lossyJpegDct) ? 16 : encodeBits),
+            static_cast<unsigned short>((jpegXlCompression || lossyJpegDct) ? 16 : encodeBits),
+            static_cast<unsigned short>((jpegXlCompression || lossyJpegDct) ? 16 : encodeBits)
         };
         dng.SetBitsPerSample(samplesPerPixel, bitsPerSample);
         
         // Photometric interpretation
         dng.SetPhotometric(photometric);
         dng.SetPlanarConfig(1); // Chunky
-        dng.SetCompression(jpegCompression
+        dng.SetCompression(writerCompression
             ? (mConfig.jxlDistance < 0.0f ? tinydngwriter::COMPRESSION_JPEG
                                          : tinydngwriter::COMPRESSION_JPEG_XL)
             : tinydngwriter::COMPRESSION_NONE);
-        if (jpegCompression && mConfig.jxlDistance >= 0.0f)
+        if (writerCompression && mConfig.jxlDistance >= 0.0f)
             dng.SetJXLDistance(mConfig.jxlDistance);
         
         unsigned short sampleFormat[3] = {1, 1, 1}; // Unsigned integer
@@ -1131,6 +1133,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         diagnosticStage = std::chrono::steady_clock::now();
         std::string dngStr = std::move(oss).str();
         dngData.assign(dngStr.begin(), dngStr.end());
+        if (lossyJpegDct && !DNGDecoder::compressLossyJPEG(dngData))
+            throw std::runtime_error("Failed to enable lossy JPEG DCT compression");
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} output_copy_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));

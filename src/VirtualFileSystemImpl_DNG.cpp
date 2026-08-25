@@ -359,9 +359,11 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if (!mConfig.cameraNativeStaging && !DNGDecoder::packUncompressedToWhiteLevel(bytes))
         throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
     if (jpegCompression) {
-        const bool compressed = mConfig.jxlDistance < 0.0f
-            ? DNGDecoder::compressLosslessJPEG(bytes)
-            : DNGDecoder::compressJPEGXL(bytes, mConfig.jxlDistance);
+        const bool compressed = isLossyJpegDct(mConfig.jxlDistance)
+            ? DNGDecoder::compressLossyJPEG(bytes)
+            : mConfig.jxlDistance < 0.0f
+                ? DNGDecoder::compressLosslessJPEG(bytes)
+                : DNGDecoder::compressJPEGXL(bytes, mConfig.jxlDistance);
         if (!compressed) throw std::runtime_error("Could not compress finalized DNG");
     }
     return bytes;

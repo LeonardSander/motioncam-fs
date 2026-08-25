@@ -503,9 +503,11 @@ void finalize(
     auto compressDng = [&](size_t index) {
         auto dng = writeFiles
             ? readBytes(outputPath(entries[index])) : finalizedDngs[index];
-        const bool ok = options.jxlDistance >= 0.0f
-            ? DNGDecoder::compressJPEGXL(dng, options.jxlDistance)
-            : DNGDecoder::compressLosslessJPEG(dng);
+        const bool ok = isLossyJpegDct(options.jxlDistance)
+            ? DNGDecoder::compressLossyJPEG(dng)
+            : options.jxlDistance >= 0.0f
+                ? DNGDecoder::compressJPEGXL(dng, options.jxlDistance)
+                : DNGDecoder::compressLosslessJPEG(dng);
         if (!ok) throw std::runtime_error("Could not compress " + entries[index].name);
         if (writeFiles) writeBytes(outputPath(entries[index]), dng);
         if (fileReady) finalizedDngs[index] = std::move(dng);

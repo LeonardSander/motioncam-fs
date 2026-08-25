@@ -494,6 +494,10 @@ MainWindow::MainWindow(QWidget *parent)
         const QString mode = text.trimmed();
         if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
             mRenderSettings.jxlDistance = -1.0f;
+        } else if (mode.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
+                   mode.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
+                   mode.compare("JPEG DCT Lossy", Qt::CaseInsensitive) == 0) {
+            mRenderSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_DCT;
         } else if (mode.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
             mRenderSettings.jxlDistance = 0.0f;
         } else {
@@ -725,8 +729,9 @@ void MainWindow::restoreSettings() {
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
     mRenderSettings.jxlDistance = settings.value("jxlDistance", -1.0).toFloat();
-    int compressionIndex = mRenderSettings.jxlDistance < 0.0f ? 0
-        : mRenderSettings.jxlDistance == 0.0f ? 1 : 2;
+    int compressionIndex = motioncam::isLossyJpegDct(mRenderSettings.jxlDistance) ? 1
+        : mRenderSettings.jxlDistance < 0.0f ? 0
+        : mRenderSettings.jxlDistance == 0.0f ? 2 : 3;
     bool restoredNativeMode = false;
     QString restoredNativeText;
     if (settings.contains("cameraNativeMode")) {
@@ -739,7 +744,7 @@ void MainWindow::restoreSettings() {
             savedMode = "AV1 420 2 12 synth noise";
         if (savedMode == "ProRes Standard") savedMode = "ProRes Std";
         const int savedIndex = ui->dngCompressionModeComboBox->findText(savedMode);
-        if (savedIndex >= 3) {
+        if (savedIndex >= 4) {
             compressionIndex = savedIndex;
             restoredNativeMode = true;
         } else if (isCameraNativeFormat(savedMode)) {
@@ -747,7 +752,7 @@ void MainWindow::restoreSettings() {
             restoredNativeMode = true;
         }
     } else if (settings.value("cameraNativeFinalization", false).toBool()) {
-        compressionIndex = 3;
+        compressionIndex = 4;
         restoredNativeMode = true;
     }
     if (restoredNativeText.isEmpty())
@@ -2348,6 +2353,10 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         const QString mode = compressionMode.trimmed();
         if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
             mRenderSettings.jxlDistance = -1.0f;
+        } else if (mode.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
+                   mode.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
+                   mode.compare("JPEG DCT Lossy", Qt::CaseInsensitive) == 0) {
+            mRenderSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_DCT;
         } else if (mode.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
             mRenderSettings.jxlDistance = 0.0f;
         } else {
@@ -2899,12 +2908,14 @@ void MainWindow::updateSelectionUi() {
     // Camera Native modes are global finalization choices rather than fields
     // in RenderSettings. Preserve them while clip selection changes.
     if (!isCameraNativeFormat(ui->dngCompressionModeComboBox->currentText())) {
-        if (settings.jxlDistance < 0.0f)
+        if (motioncam::isLossyJpegDct(settings.jxlDistance))
+            ui->dngCompressionModeComboBox->setCurrentIndex(1);
+        else if (settings.jxlDistance < 0.0f)
             ui->dngCompressionModeComboBox->setCurrentIndex(0);
         else if (settings.jxlDistance == 0.0f)
-            ui->dngCompressionModeComboBox->setCurrentIndex(1);
-        else if (std::abs(settings.jxlDistance - 0.3f) <= 0.0001f)
             ui->dngCompressionModeComboBox->setCurrentIndex(2);
+        else if (std::abs(settings.jxlDistance - 0.3f) <= 0.0001f)
+            ui->dngCompressionModeComboBox->setCurrentIndex(3);
         else
             ui->dngCompressionModeComboBox->setCurrentText(
                 QString("JPEG XL DCT %1").arg(settings.jxlDistance));
