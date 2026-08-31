@@ -1473,6 +1473,79 @@ std::shared_ptr<std::vector<char>> generateDng(
     if(!(settings.options & RENDER_OPT_CROPPING))
         cropTarget = "0x0";
 
+    struct ActiveBadPixel { uint32_t row; uint32_t column; };
+    std::vector<ActiveBadPixel> activeBadPixels;
+    if (calibration && calibration->hasBadPixels &&
+        settings.badPixelTreatment != BadPixelTreatment::Disabled) {
+        if (settings.badPixelTreatment == BadPixelTreatment::OpcodeOnly &&
+            std::any_of(calibration->badPixels.begin(), calibration->badPixels.end(), [](const auto& pixel) {
+                return pixel.action != CalibrationData::BadPixelAction::Interpolate;
+            }))
+            spdlog::warn("DNG bad-pixel opcodes can only represent interpolation; brighten/dampen entries are skipped unless the image is demosaiced");
+        const auto levelsForDefects = resolveDataLevels(
+            settings.levels, metadata.dynamicWhiteLevel, metadata.dynamicBlackLevel,
+            cameraConfiguration.whiteLevel, cameraConfiguration.blackLevel);
+        auto* samples = reinterpret_cast<uint16_t*>(data.data());
+        const std::vector<uint16_t> source(samples, samples + static_cast<size_t>(width) * height);
+        const int group = std::max(1, cfaRepeatSize / 2);
+        const int sensorLeft = std::max(0, (metadata.originalWidth - static_cast<int>(width)) / 2);
+        const int sensorTop = std::max(0, (metadata.originalHeight - static_cast<int>(height)) / 2);
+        auto phaseAt = [&](int x, int y) {
+            return ((y / group) & 1) * 2 + ((x / group) & 1);
+        };
+        auto interpolateBad = [&](int x, int y) {
+            std::vector<uint16_t> neighbours;
+            const int phase = phaseAt(x + sensorLeft, y + sensorTop);
+            for (int radius = 1; radius <= std::max(4, group * 2) && neighbours.size() < 4; ++radius)
+                for (int dy = -radius; dy <= radius; ++dy)
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        if (std::max(std::abs(dx), std::abs(dy)) != radius) continue;
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= static_cast<int>(width) || ny >= static_cast<int>(height)) continue;
+                        if (phaseAt(nx + sensorLeft, ny + sensorTop) == phase)
+                            neighbours.push_back(source[static_cast<size_t>(ny) * width + nx]);
+                    }
+            if (neighbours.empty()) return source[static_cast<size_t>(y) * width + x];
+            const auto middle = neighbours.begin() + neighbours.size() / 2;
+            std::nth_element(neighbours.begin(), middle, neighbours.end());
+            return *middle;
+        };
+        const double exposureSeconds = metadata.exposureTime / 1.0e9;
+        for (const auto& defect : calibration->badPixels) {
+            const int firstX = defect.repeatX ? defect.x : defect.x - sensorLeft;
+            const int firstY = defect.repeatY ? defect.y : defect.y - sensorTop;
+            const int stepX = defect.repeatX ? defect.repeatX : static_cast<int>(width) + 1;
+            const int stepY = defect.repeatY ? defect.repeatY : static_cast<int>(height) + 1;
+            int localStartX = defect.repeatX ? firstX - sensorLeft : firstX;
+            int localStartY = defect.repeatY ? firstY - sensorTop : firstY;
+            if (defect.repeatX) while (localStartX < 0) localStartX += stepX;
+            if (defect.repeatY) while (localStartY < 0) localStartY += stepY;
+            for (int y = localStartY; y < static_cast<int>(height); y += stepY)
+                for (int x = localStartX; x < static_cast<int>(width); x += stepX) {
+                    if (x < 0 || y < 0 || metadata.iso < defect.minIso || exposureSeconds < defect.minExposureSeconds) continue;
+                    const int phase = phaseAt(x + sensorLeft, y + sensorTop);
+                    const float black = levelsForDefects.black[phase];
+                    const float range = std::max(1.0f, levelsForDefects.white - black);
+                    const float normalized = std::clamp((source[static_cast<size_t>(y) * width + x] - black) / range, 0.0f, 1.0f);
+                    if ((defect.thresholdAbove && normalized < *defect.thresholdAbove) ||
+                        (defect.thresholdBelow && normalized > *defect.thresholdBelow)) continue;
+                    if (defect.action == CalibrationData::BadPixelAction::Interpolate)
+                        activeBadPixels.push_back({static_cast<uint32_t>(y), static_cast<uint32_t>(x)});
+                    const bool bake = settings.badPixelTreatment == BadPixelTreatment::Bake || demosaic;
+                    if (!bake) continue;
+                    const size_t index = static_cast<size_t>(y) * width + x;
+                    if (defect.action == CalibrationData::BadPixelAction::Interpolate) {
+                        samples[index] = interpolateBad(x, y);
+                    } else {
+                        const float factor = defect.action == CalibrationData::BadPixelAction::Brighten
+                            ? 1.0f + defect.amount : 1.0f - defect.amount;
+                        samples[index] = static_cast<uint16_t>(std::clamp(
+                            std::lround(black + std::max(0.0f, source[index] - black) * factor), 0l, 65535l));
+                    }
+                }
+        }
+    }
+
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
         width, height,
@@ -1653,7 +1726,24 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetBigEndian(false);
     dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
-    const bool hasStageOpcodes = !opcodeList2.IsEmpty() || !opcodeList3.IsEmpty();
+    tinydngwriter::OpcodeList opcodeList1;
+    if (settings.badPixelTreatment == BadPixelTreatment::OpcodeOnly && !demosaic &&
+        preprocessScale == 1 && cropTarget == "0x0" && !activeBadPixels.empty()) {
+        if (cfaRepeatSize != 2)
+            spdlog::warn("FixBadPixelsList is Bayer-specific; compatibility depends on the DNG reader for {}x{} CFA data",
+                         cfaRepeatSize, cfaRepeatSize);
+        tinydngwriter::FixBadPixelsParams params;
+        for (const auto& pixel : activeBadPixels)
+            params.bad_pixels.push_back({pixel.row, pixel.column});
+        const auto phaseName = [&]() {
+            std::string value;
+            for (uint8_t color : cfa) value += color == 0 ? 'r' : color == 2 ? 'b' : 'g';
+            return value;
+        }();
+        params.bayer_phase = phaseName == "rggb" ? 0 : phaseName == "grbg" ? 1 : phaseName == "gbrg" ? 2 : 3;
+        opcodeList1.AddFixBadPixelsList(params);
+    }
+    const bool hasStageOpcodes = !opcodeList1.IsEmpty() || !opcodeList2.IsEmpty() || !opcodeList3.IsEmpty();
     dng.SetDNGBackwardVersion(
         1, jpegXlCompression ? 7 : (hasStageOpcodes ? 3 : 1), 0, 0);
     
@@ -1826,6 +1916,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (!identity.make.empty()) dng.SetMake(identity.make);
     if (!identity.model.empty()) dng.SetCameraModelName(identity.model);
 
+    if (!opcodeList1.IsEmpty()) {
+        dng.SetOpcodeList1(opcodeList1);
+        spdlog::debug("Added OpcodeList1 (bad pixels)");
+    }
     // Add lens shading map as opcode list 2 if not applied to image data
     if (!opcodeList2.IsEmpty()) {
         dng.SetOpcodeList2(opcodeList2);

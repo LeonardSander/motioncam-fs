@@ -4,10 +4,23 @@
 #include <array>
 #include <string>
 #include <optional>
+#include <vector>
 
 namespace motioncam {
 
 struct CalibrationData {
+    enum class BadPixelAction { Brighten, Dampen, Interpolate };
+    struct BadPixel {
+        int x = 0, y = 0;
+        int repeatX = 0, repeatY = 0;
+        BadPixelAction action = BadPixelAction::Interpolate;
+        float amount = 0.0f;
+        std::optional<float> thresholdAbove;
+        std::optional<float> thresholdBelow;
+        int minIso = 0;
+        double minExposureSeconds = 0.0;
+    };
+    std::vector<BadPixel> badPixels;
     std::array<float, 9> colorMatrix1;
     std::array<float, 9> colorMatrix2;
     std::array<float, 9> forwardMatrix1;
@@ -28,6 +41,7 @@ struct CalibrationData {
     bool hasCfaSize = false;
     bool hasNeedGainMapOrderFixed = false;
     bool hasFullSensorResolution = false;
+    bool hasBadPixels = false;
     
     // Parse from JSON file
     static std::optional<CalibrationData> loadFromFile(const std::string& filePath);

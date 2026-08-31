@@ -1087,6 +1087,26 @@
            </property>
           </widget>
          </item>
+       </layout>
+       </item>
+       <item>
+        <layout class="QVBoxLayout" name="badPixelSection">
+         <property name="spacing"><number>8</number></property>
+         <item>
+          <layout class="QHBoxLayout" name="badPixelLayout">
+           <item><widget class="QLabel" name="badPixelLabel"><property name="text"><string>Bad Pixel Treatment</string></property></widget></item>
+           <item><widget class="QComboBox" name="badPixelTreatmentComboBox">
+            <property name="minimumSize"><size><width>120</width><height>30</height></size></property>
+            <item><property name="text"><string>Bake</string></property></item>
+            <item><property name="text"><string>Opcode Only</string></property></item>
+            <item><property name="text"><string>Disabled</string></property></item>
+           </widget></item>
+          </layout>
+         </item>
+         <item><widget class="QLabel" name="badPixelInfoLabel">
+          <property name="text"><string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Bake calibrated bad/PDAF pixel corrections, preserve raw samples with a DNG opcode, or disable treatment.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string></property>
+          <property name="wordWrap"><bool>true</bool></property>
+         </widget></item>
         </layout>
        </item>
        <item>

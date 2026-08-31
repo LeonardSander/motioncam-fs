@@ -10,6 +10,30 @@ using json = nlohmann::json;
 namespace motioncam {
 
 namespace {
+    float parseFraction(const json& value, const char* name) {
+        if (value.is_number()) return value.get<float>();
+        if (!value.is_string())
+            throw std::invalid_argument(std::string(name) + " must be a normalized number or percentage");
+        std::string text = value.get<std::string>();
+        const bool percent = !text.empty() && text.back() == '%';
+        if (percent) text.pop_back();
+        const float result = std::stof(text) / (percent ? 100.0f : 1.0f);
+        return result;
+    }
+
+    double parseExposureSeconds(const json& value) {
+        if (value.is_number()) return value.get<double>();
+        std::string text = value.get<std::string>();
+        if (text.size() > 2 && text.substr(text.size() - 2) == "ms")
+            return std::stod(text.substr(0, text.size() - 2)) / 1000.0;
+        if (!text.empty() && text.back() == 's')
+            return std::stod(text.substr(0, text.size() - 1));
+        const auto slash = text.find('/');
+        if (slash != std::string::npos)
+            return std::stod(text.substr(0, slash)) / std::stod(text.substr(slash + 1));
+        return std::stod(text);
+    }
+
     std::string normalizeWhitespaceSeparatedArrays(std::string jsonText) {
         static const std::array<const char*, 12> keys = {
             "colorMatrix1", "colorMatrix2", "forwardMatrix1", "forwardMatrix2",
@@ -207,11 +231,56 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             }
         }
 
+        if (j.contains("badPixels")) {
+            if (!j["badPixels"].is_array())
+                throw std::invalid_argument("badPixels must be an array");
+            for (const auto& item : j["badPixels"]) {
+                CalibrationData::BadPixel pixel;
+                pixel.x = item.at("x").get<int>();
+                pixel.y = item.at("y").get<int>();
+                if (item.contains("repeat")) {
+                    const auto repeat = parseArray<int, 2>(item["repeat"]);
+                    if (repeat[0] <= 0 || repeat[1] <= 0)
+                        throw std::invalid_argument("badPixels repeat values must be positive");
+                    pixel.repeatX = repeat[0];
+                    pixel.repeatY = repeat[1];
+                    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= pixel.repeatX || pixel.y >= pixel.repeatY)
+                        throw std::invalid_argument("repeating badPixels x/y must lie inside the repeat tile");
+                } else if (pixel.x < 0 || pixel.y < 0) {
+                    throw std::invalid_argument("badPixels x/y must not be negative");
+                }
+                const std::string treatment = item.value("treatment", "interpolate");
+                if (treatment == "brighten") pixel.action = CalibrationData::BadPixelAction::Brighten;
+                else if (treatment == "dampen") pixel.action = CalibrationData::BadPixelAction::Dampen;
+                else if (treatment != "interpolate")
+                    throw std::invalid_argument("badPixels treatment must be brighten, dampen, or interpolate");
+                if (item.contains("amount")) pixel.amount = parseFraction(item["amount"], "amount");
+                if (pixel.action != CalibrationData::BadPixelAction::Interpolate && !item.contains("amount"))
+                    throw std::invalid_argument("brighten and dampen badPixels require amount");
+                if (item.contains("thresholdAbove")) pixel.thresholdAbove = parseFraction(item["thresholdAbove"], "thresholdAbove");
+                if (item.contains("thresholdBelow")) pixel.thresholdBelow = parseFraction(item["thresholdBelow"], "thresholdBelow");
+                if (item.contains("threshold")) {
+                    const auto& threshold = item["threshold"];
+                    if (threshold.contains("above")) pixel.thresholdAbove = parseFraction(threshold["above"], "threshold above");
+                    if (threshold.contains("below")) pixel.thresholdBelow = parseFraction(threshold["below"], "threshold below");
+                }
+                pixel.minIso = item.value("minIso", 0);
+                if (item.contains("minExposure"))
+                    pixel.minExposureSeconds = parseExposureSeconds(item["minExposure"]);
+                const auto valid = [](float value) { return value >= 0.0f && value <= 1.0f; };
+                if (!valid(pixel.amount) || (pixel.thresholdAbove && !valid(*pixel.thresholdAbove)) ||
+                    (pixel.thresholdBelow && !valid(*pixel.thresholdBelow)))
+                    throw std::invalid_argument("badPixels amount and thresholds must be between 0 and 1");
+                data.badPixels.push_back(pixel);
+            }
+            data.hasBadPixels = !data.badPixels.empty();
+        }
+
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 ||
             data.hasForwardMatrix1 || data.hasForwardMatrix2 ||
             data.hasAsShotNeutral || data.hasDataLevels || data.hasCfaSize ||
-            data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution ||
+            data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution || data.hasBadPixels ||
             !data.cfaPhase.empty()) {
             return data;
         }
@@ -244,7 +313,12 @@ std::string CalibrationData::createExampleJson() {
   "_comment7": "Fix gainmap cfa bayer phase mismatches",
   "_needGainMapOrderFixed": true,
   "_comment8": "Specify uncropped resolution to prevent gainmaps to be scaled to fit.",
-  "_fullSensorResolution": [4096, 3072]
+  "_fullSensorResolution": [4096, 3072],
+  "_comment9": "Bad/PDAF pixels use normalized thresholds (0=black, 1=white); repeat defines a periodic tile",
+  "_badPixels": [
+    {"x": 123, "y": 456, "treatment": "interpolate", "threshold": {"above": "50%"}},
+    {"x": 3, "y": 5, "repeat": [16, 16], "treatment": "brighten", "amount": "12%", "threshold": {"below": "75%"}}
+  ]
 })";
 }
 

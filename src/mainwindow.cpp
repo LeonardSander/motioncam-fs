@@ -382,6 +382,7 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     settings.logTransform = mRenderSettings.logTransform;
     settings.exposureCompensation = mRenderSettings.exposureCompensation;
     settings.quadBayerOption = mRenderSettings.quadBayerOption;
+    settings.badPixelTreatment = mRenderSettings.badPixelTreatment;
     settings.cfaPhase = mRenderSettings.cfaPhase;
     settings.jxlDistance = mRenderSettings.jxlDistance;
 
@@ -529,6 +530,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->quadBayerComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onQuadBayerChanged(text.toStdString());
     });
+    connect(ui->badPixelTreatmentComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
+        mRenderSettings.badPixelTreatment = stringToBadPixelTreatment(text.toStdString());
+        scheduleOptionsUpdate();
+    });
     connect(ui->cfaPhaseComboBox, &QComboBox::currentTextChanged, this, [this](const QString& text) {
         onCfaPhaseChanged(text.toStdString());
     });
@@ -674,6 +679,7 @@ void MainWindow::saveSettings() {
     settings.setValue("levels", QString::fromStdString(mRenderSettings.levels));
     settings.setValue("logTransform", QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
     settings.setValue("quadBayerOption", QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    settings.setValue("badPixelTreatment", QString::fromStdString(badPixelTreatmentToString(mRenderSettings.badPixelTreatment)));
     settings.setValue("cfaPhase", QString::fromStdString(mRenderSettings.cfaPhase));
 }
 
@@ -781,6 +787,8 @@ void MainWindow::restoreSettings() {
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Integer" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
     mRenderSettings.quadBayerOption = stringToQuadBayerMode(!settings.contains("quadBayerOption") ? "Demosaic" : settings.value("quadBayerOption").toString().toStdString());
+    mRenderSettings.badPixelTreatment = stringToBadPixelTreatment(
+        settings.value("badPixelTreatment", "Bake").toString().toStdString());
     mRenderSettings.cfaPhase = (!settings.contains("cfaPhase") ? "Don't override CFA" : settings.value("cfaPhase").toString().toStdString());
     mRenderSettings.cropTarget = settings.value("cropTarget").toString().toStdString();
     mRenderSettings.cameraModel = (!settings.contains("camModelOverride") ? "Panasonic" : settings.value("camModelOverride").toString().toStdString());
@@ -798,6 +806,8 @@ void MainWindow::restoreSettings() {
     ui->exposureCompensationLineEdit->setText(QString::fromStdString(mRenderSettings.exposureCompensation));
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(
         quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    ui->badPixelTreatmentComboBox->setCurrentText(QString::fromStdString(
+        badPixelTreatmentToString(mRenderSettings.badPixelTreatment)));
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cameraModel));
@@ -2850,7 +2860,7 @@ void MainWindow::updateSelectionUi() {
         b21(ui->quadBayerComboBox), b22(ui->cfaPhaseComboBox),
         b23(ui->draftQuality), b24(ui->remosaicCheckBox),
         b25(ui->higherCfaHqCheckBox), b26(ui->dngCompressionCheckBox),
-        b27(ui->dngCompressionModeComboBox);
+        b27(ui->dngCompressionModeComboBox), b28(ui->badPixelTreatmentComboBox);
     for (auto* box : {ui->draftModeCheckBox, ui->vignetteCorrectionCheckBox,
                       ui->vignetteOnlyColorCheckBox, ui->optimizeGainMapsCheckBox,
                       ui->scaleRawCheckBox, ui->debugVignetteCheckBox,
@@ -2868,6 +2878,7 @@ void MainWindow::updateSelectionUi() {
                          static_cast<QWidget*>(ui->exposureCompensationLineEdit),
                          static_cast<QWidget*>(ui->logTransformComboBox),
                          static_cast<QWidget*>(ui->quadBayerComboBox),
+                         static_cast<QWidget*>(ui->badPixelTreatmentComboBox),
                          static_cast<QWidget*>(ui->cfaPhaseComboBox),
                          static_cast<QWidget*>(ui->draftQuality)}) {
         widget->setProperty("localOverride", false);
@@ -2903,6 +2914,8 @@ void MainWindow::updateSelectionUi() {
         QString::fromStdString(logTransformModeToString(settings.logTransform)));
     ui->quadBayerComboBox->setCurrentText(
         QString::fromStdString(quadBayerModeToString(settings.quadBayerOption)));
+    ui->badPixelTreatmentComboBox->setCurrentText(
+        QString::fromStdString(badPixelTreatmentToString(settings.badPixelTreatment)));
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(settings.cfaPhase));
     ui->draftQuality->setCurrentIndex(settings.draftScale == 2 ? 0
         : settings.draftScale == 4 ? 1 : settings.draftScale == 8 ? 2 : -1);
@@ -2969,6 +2982,7 @@ void MainWindow::updateSelectionUi() {
         markValue(ui->exposureCompensationLineEdit, [](const auto& s) { return s.exposureCompensation; });
         markValue(ui->logTransformComboBox, [](const auto& s) { return s.logTransform; });
         markValue(ui->quadBayerComboBox, [](const auto& s) { return s.quadBayerOption; });
+        markValue(ui->badPixelTreatmentComboBox, [](const auto& s) { return s.badPixelTreatment; });
         markValue(ui->cfaPhaseComboBox, [](const auto& s) { return s.cfaPhase; });
     }
     updateUi();
@@ -3011,6 +3025,7 @@ void MainWindow::onApplySelected() {
             settings.exposureCompensation = previous.exposureCompensation;
         if (ui->logTransformComboBox->property("localOverride").toBool()) settings.logTransform = previous.logTransform;
         if (ui->quadBayerComboBox->property("localOverride").toBool()) settings.quadBayerOption = previous.quadBayerOption;
+        if (ui->badPixelTreatmentComboBox->property("localOverride").toBool()) settings.badPixelTreatment = previous.badPixelTreatment;
         if (ui->cfaPhaseComboBox->property("localOverride").toBool()) settings.cfaPhase = previous.cfaPhase;
         mLocalSettings.insert(id, settings);
         mFuseFilesystem->updateOptions(id, settings);
@@ -3209,6 +3224,7 @@ void MainWindow::saveSessionToFile(const QString& path) {
         object["logTransform"] = QString::fromStdString(logTransformModeToString(settings.logTransform));
         object["exposureCompensation"] = QString::fromStdString(settings.exposureCompensation);
         object["quadBayerOption"] = QString::fromStdString(quadBayerModeToString(settings.quadBayerOption));
+        object["badPixelTreatment"] = QString::fromStdString(badPixelTreatmentToString(settings.badPixelTreatment));
         object["cfaPhase"] = QString::fromStdString(settings.cfaPhase);
         object["jxlDistance"] = settings.jxlDistance;
         return object;
@@ -3274,6 +3290,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         settings.logTransform = stringToLogTransformMode(object["logTransform"].toString("Keep Input").toStdString());
         settings.exposureCompensation = object["exposureCompensation"].toString().toStdString();
         settings.quadBayerOption = stringToQuadBayerMode(object["quadBayerOption"].toString("Demosaic").toStdString());
+        settings.badPixelTreatment = stringToBadPixelTreatment(object["badPixelTreatment"].toString("Bake").toStdString());
         settings.cfaPhase = object["cfaPhase"].toString("Don't override CFA").toStdString();
         settings.jxlDistance = static_cast<float>(object["jxlDistance"].toDouble(-1.0));
         return settings;
@@ -3467,6 +3484,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     mRenderSettings.levels = "Dynamic";
     mRenderSettings.logTransform = stringToLogTransformMode("Keep Input");
     mRenderSettings.quadBayerOption = stringToQuadBayerMode("Demosaic");
+    mRenderSettings.badPixelTreatment = BadPixelTreatment::Bake;
     mRenderSettings.cfaPhase = "Don't override CFA";
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
@@ -3476,6 +3494,8 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cropTarget));
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
     ui->quadBayerComboBox->setCurrentText(QString::fromStdString(quadBayerModeToString(mRenderSettings.quadBayerOption)));
+    ui->badPixelTreatmentComboBox->setCurrentText(QString::fromStdString(
+        badPixelTreatmentToString(mRenderSettings.badPixelTreatment)));
     ui->cfaPhaseComboBox->setCurrentText(QString::fromStdString(mRenderSettings.cfaPhase));
 
     updateUi();

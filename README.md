@@ -76,6 +76,10 @@ Camera Native finalization can encode LOG60 as HEVC/MOV, AV1/MP4, ProRes LT/Stan
 
   With **HQ** enabled, ordinary Bayer and RGB inputs are reduced by averaging RGB blocks without changing black or white levels. Quad Bayer is first averaged into half-resolution ordinary Bayer; at 2x that Bayer image is the output, while 4x/8x demosaic it before the remaining reduction. With HQ disabled, Fuse uses the faster sample-selection reduction.
 
+- **Bad and PDAF Pixels**
+
+  Calibration sidecars may contain a `badPixels` array. An entry names one full-sensor position, or a position inside a repeating PDAF tile with `repeat`. `treatment` is `brighten`, `dampen`, or `interpolate`; adjustment `amount` and `threshold.above`/`threshold.below` accept normalized values or percentages. Thresholds are evaluated against that pixel's own black-subtracted value, normalized so black is 0 and white is 1. Optional `minIso` and `minExposure` gates accept values such as `800`, `"1/30"`, or `"20ms"`. The Bad Pixel Treatment selector can bake corrections, emit eligible interpolation positions in DNG OpcodeList1 while retaining stored raw samples, or disable treatment. Repeating entries use `{ "x": 3, "y": 5, "repeat": [16, 16], "treatment": "brighten", "amount": "12%", "threshold": { "below": "75%" } }`.
+
   In LQ mode, higher-CFA proxy sampling remains aligned to complete same-color blocks: 6x6 CFA uses its 3x3 color blocks, while 8x8 CFA can use staged 2x reduction for demosaic modes or complete 4x4 blocks at 4x proxy. HQ treatment of non-quad higher-CFA footage demosaics the full image before applying the requested RGB reduction factor.
 
 ---

@@ -50,6 +50,18 @@ int main() {
     assert(stringCfaCalibration->hasCfaSize);
     assert(stringCfaCalibration->cfaSize == 4);
 
+    const auto badPixelCalibration = CalibrationData::parse(std::string(R"({
+        "badPixels":[
+            {"x":12,"y":34,"treatment":"dampen","amount":"20%","threshold":{"above":"50%"},"minIso":800,"minExposure":"1/30"},
+            {"x":3,"y":5,"repeat":[16,16],"treatment":"interpolate","thresholdBelow":0.1}
+        ]})"));
+    assert(badPixelCalibration.has_value() && badPixelCalibration->hasBadPixels);
+    assert(badPixelCalibration->badPixels.size() == 2);
+    assert(nearlyEqual(badPixelCalibration->badPixels[0].amount, 0.2f));
+    assert(nearlyEqual(*badPixelCalibration->badPixels[0].thresholdAbove, 0.5f));
+    assert(std::abs(badPixelCalibration->badPixels[0].minExposureSeconds - 1.0 / 30.0) < 0.0001);
+    assert(badPixelCalibration->badPixels[1].repeatX == 16);
+
     const auto invalidLevelsCalibration = CalibrationData::parse(std::string(R"({"dataLevels":"Video"})"));
     assert(!invalidLevelsCalibration.has_value());
 
@@ -57,6 +69,7 @@ int main() {
     assert(defaults.cfaPhase == "Don't override CFA");
     assert(defaults.cfrTarget.mode == CFRMode::PreferInteger);
     assert(defaults.quadBayerOption == QuadBayerMode::Demosaic);
+    assert(defaults.badPixelTreatment == BadPixelTreatment::Bake);
     assert(stringToQuadBayerMode("Correct QBCFA Metadata") == QuadBayerMode::CorrectQBCFAMetadata);
 
     const std::array<float, 4> dynamicBlack{60, 61, 62, 63};

@@ -203,6 +203,20 @@ enum class QuadBayerMode {
     WrongCFAMetadata
 };
 
+enum class BadPixelTreatment { Bake, OpcodeOnly, Disabled };
+
+inline std::string badPixelTreatmentToString(BadPixelTreatment value) {
+    if (value == BadPixelTreatment::OpcodeOnly) return "Opcode Only";
+    if (value == BadPixelTreatment::Disabled) return "Disabled";
+    return "Bake";
+}
+
+inline BadPixelTreatment stringToBadPixelTreatment(const std::string& value) {
+    if (value == "Opcode Only") return BadPixelTreatment::OpcodeOnly;
+    if (value == "Disabled" || value == "Disable Fully") return BadPixelTreatment::Disabled;
+    return BadPixelTreatment::Bake;
+}
+
 enum class LogTransformMode {
     Disabled,
     KeepInput,
@@ -313,6 +327,7 @@ struct RenderSettings {
     std::string levels;
     LogTransformMode logTransform;
     std::string exposureCompensation;
+    BadPixelTreatment badPixelTreatment;
     QuadBayerMode quadBayerOption;
     std::string cfaPhase;
     // Compression selector: -2 is 12-bit CinemaDNG JPEG DCT, -1 is JPEG 92 lossless,
@@ -332,6 +347,7 @@ struct RenderSettings {
         , levels("Dynamic")
         , logTransform(LogTransformMode::KeepInput)
         , exposureCompensation("")
+        , badPixelTreatment(BadPixelTreatment::Bake)
         , quadBayerOption(QuadBayerMode::Demosaic)
         , cfaPhase("Don't override CFA")
         , jxlDistance(-1.0f)
@@ -358,6 +374,7 @@ struct RenderSettings {
         , levels(lvl)
         , logTransform(stringToLogTransformMode(log))
         , exposureCompensation(exp)
+        , badPixelTreatment(BadPixelTreatment::Bake)
         , quadBayerOption(stringToQuadBayerMode(qb))
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
@@ -384,6 +401,7 @@ struct RenderSettings {
         , levels(lvls)
         , logTransform(logTrans)
         , exposureCompensation(expComp)
+        , badPixelTreatment(BadPixelTreatment::Bake)
         , quadBayerOption(quadBayer)
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
