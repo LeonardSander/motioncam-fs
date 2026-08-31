@@ -278,9 +278,9 @@ nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
     try {
         std::ifstream input(path.string());
         if (!input) throw std::runtime_error("could not open file");
-        nlohmann::json result;
-        input >> result;
-        return result;
+        std::ostringstream contents;
+        contents << input.rdbuf();
+        return CalibrationData::parseSidecarJson(contents.str());
     } catch (const std::exception& e) {
         spdlog::warn("Could not parse sidecar metadata from {}: {}", path.string(), e.what());
         return {};

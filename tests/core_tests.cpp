@@ -101,5 +101,28 @@ int main() {
     assert(nearlyEqual(whitespaceCalibration->colorMatrix1[1], -0.2f));
     assert(nearlyEqual(whitespaceCalibration->forwardMatrix1[8], 0.7f));
 
+    // A comment may mention a field before its actual key, as generated calibration
+    // files do. Multiline whitespace-separated arrays must still be normalized.
+    const auto generatedWhitespaceCalibration = CalibrationData::parse(std::string(R"({
+        "_comment": "Remove _ in _colorMatrix1 to enable override.",
+        "colorMatrix1": [
+            0.9847999811 -0.3684000075 -0.1010999978
+            -0.2682000101 1.129500031 0.115199998
+            0.0588000007 0.04030000046 0.534799993
+        ],
+        "_forwardMatrix1": [
+            0.4375 0.3828125 0.140625 0.21875 0.71875
+            0.0625 0.015625 0.09375 0.7109375
+        ],
+        "_asShotNeutral": [0.4609375 1 0.61328125],
+        "fullSensorResolution": [4096 3072]
+    })"));
+    assert(generatedWhitespaceCalibration.has_value());
+    assert(generatedWhitespaceCalibration->hasColorMatrix1);
+    assert(nearlyEqual(generatedWhitespaceCalibration->colorMatrix1[1], -0.3684000075f));
+    assert(generatedWhitespaceCalibration->hasFullSensorResolution);
+    assert((generatedWhitespaceCalibration->fullSensorResolution ==
+        std::array<int, 2>{4096, 3072}));
+
     return 0;
 }

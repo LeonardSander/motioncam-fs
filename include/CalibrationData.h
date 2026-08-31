@@ -34,6 +34,10 @@ struct CalibrationData {
     
     // Parse from JSON string
     static std::optional<CalibrationData> parse(const std::string& jsonString);
+
+    // Parse a calibration sidecar, accepting legacy whitespace-separated arrays.
+    // Throws nlohmann::json exceptions when the remaining JSON is invalid.
+    static nlohmann::json parseSidecarJson(const std::string& jsonString);
     
     // Parse from nlohmann::json object
     static std::optional<CalibrationData> parse(const nlohmann::json& j);

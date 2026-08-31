@@ -11,14 +11,23 @@ namespace motioncam {
 
 namespace {
     std::string normalizeWhitespaceSeparatedArrays(std::string jsonText) {
-        static const std::array<const char*, 5> keys = {
-            "colorMatrix1", "colorMatrix2", "forwardMatrix1",
-            "forwardMatrix2", "asShotNeutral"
+        static const std::array<const char*, 12> keys = {
+            "colorMatrix1", "colorMatrix2", "forwardMatrix1", "forwardMatrix2",
+            "asShotNeutral", "fullSensorResolution", "_colorMatrix1", "_colorMatrix2",
+            "_forwardMatrix1", "_forwardMatrix2", "_asShotNeutral", "_fullSensorResolution"
         };
 
         for (const char* key : keys) {
             const std::string quotedKey = std::string("\"") + key + "\"";
-            const auto keyPos = jsonText.find(quotedKey);
+            auto keyPos = jsonText.find(quotedKey);
+            while (keyPos != std::string::npos) {
+                const auto colonPos = jsonText.find_first_not_of(
+                    " \t\r\n", keyPos + quotedKey.size());
+                if (colonPos != std::string::npos && jsonText[colonPos] == ':') {
+                    break;
+                }
+                keyPos = jsonText.find(quotedKey, keyPos + quotedKey.size());
+            }
             if (keyPos == std::string::npos) {
                 continue;
             }
@@ -34,9 +43,7 @@ namespace {
 
             std::string values =
                 jsonText.substr(openBracket + 1, closeBracket - openBracket - 1);
-            if (values.find(',') != std::string::npos) {
-                continue;
-            }
+            std::replace(values.begin(), values.end(), ',', ' ');
 
             std::istringstream input(values);
             std::ostringstream normalized;
@@ -91,7 +98,7 @@ std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& 
         
         std::stringstream buffer;
         buffer << file.rdbuf();
-        json j = json::parse(normalizeWhitespaceSeparatedArrays(buffer.str()));
+        json j = parseSidecarJson(buffer.str());
         return parse(j);
     } catch (const std::exception& e) {
         spdlog::error("Error loading calibration file {}: {}", filePath, e.what());
@@ -101,12 +108,16 @@ std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& 
 
 std::optional<CalibrationData> CalibrationData::parse(const std::string& jsonString) {
     try {
-        json j = json::parse(normalizeWhitespaceSeparatedArrays(jsonString));
+        json j = parseSidecarJson(jsonString);
         return parse(j);
     } catch (const std::exception& e) {
         spdlog::error("Error parsing calibration JSON: {}", e.what());
         return std::nullopt;
     }
+}
+
+nlohmann::json CalibrationData::parseSidecarJson(const std::string& jsonString) {
+    return json::parse(normalizeWhitespaceSeparatedArrays(jsonString));
 }
 
 std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
