@@ -1,7 +1,6 @@
 #pragma once
 
 #include <vector>
-#include <chrono>
 #include <condition_variable>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,24 +20,15 @@ public:
 
     // Get value from cache, returns nullptr if not found
     // If another thread is already processing the same key, this thread will wait
-    std::shared_ptr<std::vector<char>> get(const Entry& key, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+    std::shared_ptr<std::vector<char>> get(const Entry& key) {
         std::unique_lock<std::mutex> lock(mMutex);
 
-        // Wait if another thread is currently processing this key, with timeout
-        bool success = mCondition.wait_for(lock, timeout, [this, &key] {
+        // Concurrent range reads for a large mounted file are expected. Let the
+        // first reader finish materializing it instead of treating a slow frame
+        // as a warning or starting duplicate work.
+        mCondition.wait(lock, [this, &key] {
             return mInProgress.find(key) == mInProgress.end();
         });
-
-        if (!success) {
-            // A slow renderer (notably a random AV1 seek) can legitimately take
-            // longer than the diagnostic timeout. Starting a second render for
-            // the same key only queues duplicate work and can snowball when an
-            // application issues several range reads for one large DNG.
-            spdlog::warn("Still waiting for key already being processed");
-            mCondition.wait(lock, [this, &key] {
-                return mInProgress.find(key) == mInProgress.end();
-            });
-        }
 
         auto it = mCacheMap.find(key);
         if (it == mCacheMap.end()) {
@@ -90,15 +80,9 @@ public:
                 mCacheList.pop_back();
             }
 
-            // If the single item is too large for the cache, don't add it
-            if (valueSize > mMaxSize) {
-                // Remove from in-progress set and notify waiting threads
-                mInProgress.erase(key);
-                mCondition.notify_all();
-                return;
-            }
-
-            // Add new entry
+            // Keep one oversized item. Mounted files are served through many
+            // range reads, so rejecting it would regenerate the complete frame
+            // for every range and serialize all waiting readers behind that work.
             mCacheList.emplace_front(key, value);
             mCacheMap[key] = mCacheList.begin();
             mCurrentSize += valueSize;

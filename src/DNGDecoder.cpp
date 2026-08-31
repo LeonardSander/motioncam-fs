@@ -1125,7 +1125,7 @@ void DNGDecoder::analyzeSequence() {
             mSequenceInfo.fps = totalDuration > 0.0
                 ? (mFrames.size() - 1) / totalDuration : 30.0;
         } else if (!(mSequenceInfo.fps > 0.0)) {
-            mSequenceInfo.fps = 30.0; // Default
+            mSequenceInfo.fps = 24.0;
         }
     }
     
@@ -1169,7 +1169,7 @@ void DNGDecoder::findDNGFiles() {
         frameInfo.width = 0;
         frameInfo.height = 0;
         frameInfo.hasGainMap = false;
-        frameInfo.timestamp = static_cast<Timestamp>(i * 1000000000.0 / 30.0); // Default timing
+        frameInfo.timestamp = static_cast<Timestamp>(i * 1000000000.0 / 24.0);
         
         mFrames.push_back(frameInfo);
     }
@@ -1351,7 +1351,7 @@ bool DNGDecoder::imagePayloadsEqual(const std::vector<uint8_t>& left,
 
 void DNGDecoder::extractTimestampsFromFilenames() {
     // Try to extract frame numbers from filenames for better timing
-    boost::regex frameNumberRegex(R"((?:^|[-_])(\d{6,})$)");
+    boost::regex frameNumberRegex(R"((?:^|[-_])(\d+)$)");
     boost::smatch match;
 
     std::vector<std::optional<int>> extracted(mFrames.size());
@@ -1359,8 +1359,7 @@ void DNGDecoder::extractTimestampsFromFilenames() {
         const auto& frame = mFrames[i];
         boost::filesystem::path p(frame.filePath);
         std::string filename = p.stem().string();
-        if (!frame.hasExactPresentationTimestamp && !frame.hasTimeCodeTimestamp &&
-            boost::regex_search(filename, match, frameNumberRegex)) {
+        if (boost::regex_search(filename, match, frameNumberRegex)) {
             extracted[i] = std::stoi(match[1].str());
         }
     }
@@ -1369,7 +1368,7 @@ void DNGDecoder::extractTimestampsFromFilenames() {
     // Treat the suffix as a frame counter only when the whole sequence looks
     // like a plausible monotonically increasing counter. Otherwise retain the
     // default 30 fps timestamps assigned while discovering the files.
-    bool plausibleCounter = !extracted.empty();
+    bool plausibleCounter = extracted.size() >= 3;
     for (size_t i = 0; i < extracted.size(); ++i) {
         plausibleCounter &= extracted[i].has_value();
         if (i && plausibleCounter) {
@@ -1378,11 +1377,23 @@ void DNGDecoder::extractTimestampsFromFilenames() {
         }
     }
     if (plausibleCounter) {
-        const double fallbackFps = mSequenceInfo.fps > 0.0 ? mSequenceInfo.fps : 30.0;
+        const double fallbackFps = mSequenceInfo.fps > 0.0 ? mSequenceInfo.fps : 24.0;
         for (size_t i = 0; i < mFrames.size(); ++i) {
             mFrames[i].frameNumber = *extracted[i];
-            mFrames[i].timestamp = static_cast<Timestamp>(
-                *extracted[i] * 1000000000.0 / fallbackFps);
+            if (!mFrames[i].hasExactPresentationTimestamp &&
+                !mFrames[i].hasTimeCodeTimestamp)
+                mFrames[i].timestamp = static_cast<Timestamp>(
+                    *extracted[i] * 1000000000.0 / fallbackFps);
+        }
+        mSequenceInfo.hasFrameNumberSequence = true;
+    } else {
+        // A folder of independently named stills is not a VFR sequence. Keep
+        // discovery order and expose it as a cinema-rate CFR clip. Do not
+        // replace timing read from the DNGs; frames without timing already have
+        // the discovery-order fallback assigned by findDNGFiles().
+        mSequenceInfo.fps = 24.0;
+        for (size_t i = 0; i < mFrames.size(); ++i) {
+            mFrames[i].frameNumber = static_cast<int>(i);
         }
     }
     

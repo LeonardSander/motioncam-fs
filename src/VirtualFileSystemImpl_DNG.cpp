@@ -59,6 +59,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mWidth = sequenceInfo.width;
         mHeight = sequenceInfo.height;
         mFps = static_cast<float>(sequenceInfo.fps);
+        mHasFrameNumberSequence = sequenceInfo.hasFrameNumberSequence;
         mTotalFrames = static_cast<int>(sequenceInfo.totalFrames);
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
@@ -151,9 +152,17 @@ void VirtualFileSystemImpl_DNG::init() {
     mFiles.clear();
     mDroppedFrames = 0;
     mDuplicatedFrames = 0;
-    const bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
-    mFps = vfs::determineCFRTarget(
-        mFrameRateInfo, mConfig.cfrTarget, applyCFRConversion);
+    const bool applyCFRConversion = mHasFrameNumberSequence &&
+        (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
+    if (mHasFrameNumberSequence) {
+        mFps = vfs::determineCFRTarget(
+            mFrameRateInfo, mConfig.cfrTarget, applyCFRConversion);
+    } else {
+        // Independent stills form a 24 fps CFR clip by default, but an explicit
+        // custom rate remains available to the user.
+        mFps = mConfig.cfrTarget.mode == CFRMode::Custom
+            ? mConfig.cfrTarget.customValue : 24.0f;
+    }
 
     vfs::appendDesktopIni(mFiles);
 
@@ -162,9 +171,21 @@ void VirtualFileSystemImpl_DNG::init() {
         mTypicalDngSize = 0;
         return;
     }
-    // Mounted output is uncompressed and has a fixed layout, so one frame is
-    // representative of every frame at the same resolution.
-    mTypicalDngSize = transformFrame(0, 0, false).size();
+    if (mHasFrameNumberSequence) {
+        // Proper sequences are expected to have a stable DNG layout. Avoid
+        // rendering the entire clip during mount initialization.
+        mTypicalDngSize = transformFrame(0, 0, false).size();
+    } else {
+        // Independent DNGs can have heterogeneous metadata. Compression ratio
+        // is not a proxy for retained metadata size, so measure every output.
+        mTypicalDngSize = 0;
+        for (size_t i = 0; i < frames.size(); ++i) {
+            const Timestamp outputTimestamp =
+                frames[i].timestamp - frames.front().timestamp;
+            mTypicalDngSize = std::max(
+                mTypicalDngSize, transformFrame(i, outputTimestamp, false).size());
+        }
+    }
     const bool draft = vfs::getScaleFromOptions(
         mConfig.options, mConfig.draftScale) > 1;
     const size_t firstDngSize = draft
@@ -176,7 +197,9 @@ void VirtualFileSystemImpl_DNG::init() {
         Entry dngEntry;
         dngEntry.type = EntryType::FILE_ENTRY;
         dngEntry.pathParts = {};
-        dngEntry.name = vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng");
+        dngEntry.name = mHasFrameNumberSequence
+            ? vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng")
+            : boost::filesystem::path(frames[i].filePath).filename().string();
         dngEntry.userData = frames[i].timestamp;
         dngEntry.duplicateFrame = frames[i].duplicateFrame;
         dngEntry.syntheticFrame = frames[i].syntheticFrame;
@@ -187,8 +210,10 @@ void VirtualFileSystemImpl_DNG::init() {
     std::vector<Timestamp> timestamps;
     timestamps.reserve(frames.size());
     for (const auto& frame : frames) timestamps.push_back(frame.timestamp);
-    auto mapped = vfs::mapFramesToCfr(sourceEntries, timestamps, mBaseName, mFps,
-        applyCFRConversion, mDroppedFrames, mDuplicatedFrames);
+    auto mapped = mHasFrameNumberSequence
+        ? vfs::mapFramesToCfr(sourceEntries, timestamps, mBaseName, mFps,
+              applyCFRConversion, mDroppedFrames, mDuplicatedFrames)
+        : sourceEntries;
     if (!mapped.empty()) mapped.front().size = firstDngSize;
     mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
                   std::make_move_iterator(mapped.end()));
@@ -217,7 +242,7 @@ int VirtualFileSystemImpl_DNG::readFile(
     
     return vfs::readMountedEntry(entry, pos, len, dst, result, async,
         mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); }, {},
-        vfs::outputFrameNumber(entry));
+        mHasFrameNumberSequence ? vfs::outputFrameNumber(entry) : 0);
 }
 
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
@@ -229,13 +254,22 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
         if (frameIt == mFrameIndexByTimestamp.end())
             throw std::runtime_error("DNG source frame not found");
-        const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
-        const Timestamp outputTimestamp = vfs::outputTimestamp(
-            entry, timestamp, frames.front().timestamp, mFps, converted);
-        const bool nativeResolution = vfs::outputFrameNumber(entry) == 0 &&
+        const bool converted = mHasFrameNumberSequence &&
+            (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
+        const Timestamp outputTimestamp = converted
+            ? vfs::outputTimestamp(entry, timestamp, frames.front().timestamp, mFps, true)
+            : timestamp - frames.front().timestamp;
+        const bool firstFrame = frameIt->second == 0;
+        const bool nativeResolution = firstFrame &&
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1;
         auto bytes = transformFrame(
             frameIt->second, outputTimestamp, jpegCompression, nativeResolution);
+        const size_t advertisedSize = nativeResolution ? bytes.size() : mTypicalDngSize;
+        if (!jpegCompression) {
+            if (bytes.size() > advertisedSize)
+                throw std::runtime_error("Transformed DNG exceeds advertised mounted size");
+            bytes.resize(advertisedSize, 0);
+        }
         auto output = std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
         return output;
     });
@@ -473,7 +507,8 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     info.presentationTimestamps = std::move(presentationTimestamps);
     info.timingTimeBaseNum = 1;
     info.timingTimeBaseDen = 1000000000;
-    info.timingUsesCfrMapping = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
+    info.timingUsesCfrMapping = mHasFrameNumberSequence &&
+        (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
 
     return info;
 }

@@ -416,9 +416,9 @@ int main() {
         ("motioncam-jxl-sequence-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(sequencePath);
-    for (int frame = 0; frame < 2; ++frame) {
+    for (int frame = 0; frame < 3; ++frame) {
         auto timedBytes = legacyBytes;
-        const motioncam::Timestamp timestamp = frame == 0 ? 0 : 40000000;
+        const motioncam::Timestamp timestamp = frame * 40000000LL;
         assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
         assert(tiffTagType(timedBytes, 51044) == 10); // SRATIONAL
         const size_t timedSize = timedBytes.size();
@@ -435,16 +435,60 @@ int main() {
         motioncam::DNGDecoder sequence(sequencePath.string());
         const auto& info = sequence.getSequenceInfo();
         assert(info.width == higherWidth && info.height == higherHeight);
-        assert(info.totalFrames == 2 && std::abs(info.fps - 25.0) < 0.001);
+        assert(info.totalFrames == 3 && std::abs(info.fps - 25.0) < 0.001);
+        assert(info.hasFrameNumberSequence);
         const auto& frames = sequence.getFrames();
         assert(frames[0].hasExactPresentationTimestamp && frames[0].timestamp == 0);
         assert(frames[1].hasExactPresentationTimestamp && frames[1].timestamp == 40000000);
+        assert(frames[2].hasExactPresentationTimestamp && frames[2].timestamp == 80000000);
         motioncam::DNGFrameMetadata metadata;
         assert(sequence.getFrameMetadata(0, metadata));
         assert(metadata.hasExposure && metadata.iso == 100);
         assert(metadata.exposureTime > 0.0 && std::isfinite(metadata.exposureTime));
     }
     std::filesystem::remove_all(sequencePath);
+    const auto shortSequencePath = std::filesystem::temp_directory_path() /
+        ("motioncam-jxl-short-sequence-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(shortSequencePath);
+    for (int frame = 0; frame < 2; ++frame) {
+        const auto filename = shortSequencePath /
+            ("still-00000" + std::to_string(frame) + ".dng");
+        std::ofstream output(filename, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(legacyBytes.data()),
+                     static_cast<std::streamsize>(legacyBytes.size()));
+        assert(output.good());
+    }
+    {
+        motioncam::DNGDecoder sequence(shortSequencePath.string());
+        assert(sequence.getSequenceInfo().totalFrames == 2);
+        assert(std::abs(sequence.getSequenceInfo().fps - 24.0) < 0.001);
+        assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
+    }
+    std::filesystem::remove_all(shortSequencePath);
+    const auto timedStillPath = std::filesystem::temp_directory_path() /
+        ("motioncam-jxl-timed-stills-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(timedStillPath);
+    for (int frame = 0; frame < 2; ++frame) {
+        auto timedBytes = legacyBytes;
+        assert(motioncam::DNGDecoder::setTimingMetadata(
+            timedBytes, 25.0, 100000000LL + frame * 40000000LL));
+        std::ofstream output(timedStillPath / (std::string("still-") +
+            static_cast<char>('a' + frame) + ".dng"), std::ios::binary);
+        output.write(reinterpret_cast<const char*>(timedBytes.data()),
+                     static_cast<std::streamsize>(timedBytes.size()));
+        assert(output.good());
+    }
+    {
+        motioncam::DNGDecoder sequence(timedStillPath.string());
+        assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
+        const auto& frames = sequence.getFrames();
+        assert(frames.size() == 2);
+        assert(frames[0].timestamp == 100000000LL);
+        assert(frames[1].timestamp == 140000000LL);
+    }
+    std::filesystem::remove_all(timedStillPath);
     const auto datedSequencePath = std::filesystem::temp_directory_path() /
         ("motioncam-jxl-dated-sequence-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -460,7 +504,8 @@ int main() {
     }
     {
         motioncam::DNGDecoder sequence(datedSequencePath.string());
-        assert(std::abs(sequence.getSequenceInfo().fps - 30.0) < 0.001);
+        assert(std::abs(sequence.getSequenceInfo().fps - 24.0) < 0.001);
+        assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
         const auto& frames = sequence.getFrames();
         assert(frames.size() == 4 && frames[0].timestamp == 0);
         assert(frames[1].timestamp > frames[0].timestamp);

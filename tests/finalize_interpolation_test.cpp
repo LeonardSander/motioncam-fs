@@ -348,6 +348,20 @@ int main() {
         std::vector<char>({'a', 'b', 'c', 'd'}));
     assert(renders == 1);
 
+    motioncam::LRUCache undersizedCache(2);
+    int oversizedRenders = 0;
+    const auto oversizedRender = [&] {
+        ++oversizedRenders;
+        return std::make_shared<std::vector<char>>(
+            std::initializer_list<char>{'a', 'b', 'c', 'd'});
+    };
+    assert(motioncam::vfs::materializeCached(
+        undersizedCache, mountedEntry, false, oversizedRender)->size() == 4);
+    assert(motioncam::vfs::materializeCached(
+        undersizedCache, mountedEntry, false, oversizedRender)->size() == 4);
+    assert(oversizedRenders == 1);
+    assert(undersizedCache.size() == 4);
+
     BS::thread_pool pool(1);
     char range[2]{};
     size_t callbackBytes = 0;

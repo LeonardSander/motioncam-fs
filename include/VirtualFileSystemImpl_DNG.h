@@ -69,6 +69,7 @@ private:
     std::vector<Entry> mFiles;
     RenderSettings mConfig;
     float mFps;
+    bool mHasFrameNumberSequence = false;
     FrameRateInfo mFrameRateInfo{};
     int mTotalFrames;
     int mDroppedFrames;
