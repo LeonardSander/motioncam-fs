@@ -67,6 +67,14 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             mCfaSize = mCalibration->cfaSize;
             mHasCfa = mCfaSize >= 2;
         }
+        if (mCalibration && !mCalibration->cfaPhase.empty()) {
+            std::string phase = boost::algorithm::to_lower_copy(mCalibration->cfaPhase);
+            if (phase == "rggb") mCfaPhase = {0, 1, 1, 2};
+            else if (phase == "grbg") mCfaPhase = {1, 0, 2, 1};
+            else if (phase == "gbrg") mCfaPhase = {1, 2, 0, 1};
+            else if (phase == "bggr") mCfaPhase = {2, 1, 1, 0};
+            else spdlog::warn("Ignoring invalid sidecar CFA phase '{}'", mCalibration->cfaPhase);
+        }
         
         // Calculate frame rate statistics
         calculateFrameRateStats();

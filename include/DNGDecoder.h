@@ -28,10 +28,10 @@ struct DNGFrameInfo {
 
 struct DNGSequenceInfo {
     std::string basePath;
-    int width;
-    int height;
-    double fps;
-    int64_t totalFrames;
+    int width = 0;
+    int height = 0;
+    double fps = 0.0;
+    int64_t totalFrames = 0;
 };
 
 struct DNGFrameMetadata {

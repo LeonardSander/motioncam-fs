@@ -106,6 +106,31 @@ static uint16_t tiffTagType(const std::vector<uint8_t>& dng, uint16_t wantedTag)
     return 0;
 }
 
+static std::vector<uint8_t> tiffByteTagValues(const std::vector<uint8_t>& dng,
+                                              uint16_t wantedTag) {
+    auto u16 = [&](size_t offset) {
+        return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8);
+    };
+    auto u32 = [&](size_t offset) {
+        return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+            dng[offset + 2] << 16 | dng[offset + 3] << 24);
+    };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t count = u16(ifd);
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) != wantedTag || u16(entry + 2) != 1) continue;
+            const uint32_t values = u32(entry + 4);
+            const size_t offset = values > 4 ? u32(entry + 8) : entry + 8;
+            assert(offset <= dng.size() && values <= dng.size() - offset);
+            return {dng.begin() + offset, dng.begin() + offset + values};
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + count * 12);
+    }
+    assert(false && "TIFF BYTE tag not found");
+    return {};
+}
+
 static void rewriteTiffTag(std::vector<uint8_t>& dng, uint16_t oldTag,
                            uint16_t newTag, uint16_t newType = 0,
                            uint32_t newValue = 0) {
@@ -420,7 +445,40 @@ int main() {
         assert(metadata.exposureTime > 0.0 && std::isfinite(metadata.exposureTime));
     }
     std::filesystem::remove_all(sequencePath);
+    const auto datedSequencePath = std::filesystem::temp_directory_path() /
+        ("motioncam-jxl-dated-sequence-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(datedSequencePath);
+    const std::array<const char*, 4> datedNames = {
+        "IMG_20201217_145306.dng", "IMG_20201217_145756.dng",
+        "IMG_20201217_145827.dng", "IMG_20201217_145902.dng"};
+    for (const char* name : datedNames) {
+        std::ofstream output(datedSequencePath / name, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(legacyBytes.data()),
+                     static_cast<std::streamsize>(legacyBytes.size()));
+        assert(output.good());
+    }
+    {
+        motioncam::DNGDecoder sequence(datedSequencePath.string());
+        assert(std::abs(sequence.getSequenceInfo().fps - 30.0) < 0.001);
+        const auto& frames = sequence.getFrames();
+        assert(frames.size() == 4 && frames[0].timestamp == 0);
+        assert(frames[1].timestamp > frames[0].timestamp);
+        assert(frames[2].timestamp > frames[1].timestamp);
+        assert(frames[3].timestamp > frames[2].timestamp);
+    }
+    std::filesystem::remove_all(datedSequencePath);
     const std::array<uint8_t, 4> phase = {0, 1, 1, 2};
+    auto metadataOverride = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        metadataOverride, 6, phase, motioncam::QuadBayerMode::CorrectQBCFAMetadata,
+        false, 1, true));
+    assert(tiffTagValue(metadataOverride, 33421) == 6);
+    const std::vector<uint8_t> expected6x6 = {
+        0,0,0,1,1,1, 0,0,0,1,1,1, 0,0,0,1,1,1,
+        1,1,1,2,2,2, 1,1,1,2,2,2, 1,1,1,2,2,2};
+    assert(tiffByteTagValues(metadataOverride, 33422) == expected6x6);
+    assert(motioncam::DNGDecoder::setTimingMetadata(metadataOverride, 25.0, 0));
     auto hqProxy = processBytes;
     assert(motioncam::DNGDecoder::processHigherCFA(
         hqProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,

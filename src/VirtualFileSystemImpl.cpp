@@ -288,7 +288,13 @@ nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
 }
 
 boost::filesystem::path sidecarPath(const std::string& sourcePath) {
-    const boost::filesystem::path source(sourcePath);
+    // A directory selected by a file picker and the same directory supplied
+    // with a trailing separator must resolve to the same sidecar. Boost treats
+    // the latter as having an empty filename ("clip/" -> "clip/.json").
+    boost::filesystem::path source(sourcePath);
+    while (source.filename().empty() && source.has_parent_path() &&
+           source.parent_path() != source)
+        source = source.parent_path();
     return boost::filesystem::is_directory(source)
         ? source / (source.filename().string() + ".json")
         : source.parent_path() / (source.stem().string() + ".json");

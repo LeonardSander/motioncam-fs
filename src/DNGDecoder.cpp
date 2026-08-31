@@ -1353,19 +1353,36 @@ void DNGDecoder::extractTimestampsFromFilenames() {
     // Try to extract frame numbers from filenames for better timing
     boost::regex frameNumberRegex(R"((?:^|[-_])(\d{6,})$)");
     boost::smatch match;
-    
-    for (auto& frame : mFrames) {
+
+    std::vector<std::optional<int>> extracted(mFrames.size());
+    for (size_t i = 0; i < mFrames.size(); ++i) {
+        const auto& frame = mFrames[i];
         boost::filesystem::path p(frame.filePath);
         std::string filename = p.stem().string();
-        
         if (!frame.hasExactPresentationTimestamp && !frame.hasTimeCodeTimestamp &&
             boost::regex_search(filename, match, frameNumberRegex)) {
-            int extractedFrameNumber = std::stoi(match[1].str());
-            frame.frameNumber = extractedFrameNumber;
-            
-            // Update timestamp based on extracted frame number
-            const double fallbackFps = mSequenceInfo.fps > 0.0 ? mSequenceInfo.fps : 30.0;
-            frame.timestamp = static_cast<Timestamp>(extractedFrameNumber * 1000000000.0 / fallbackFps);
+            extracted[i] = std::stoi(match[1].str());
+        }
+    }
+
+    // Camera filenames commonly end in HHMMSS (for example IMG_..._145306).
+    // Treat the suffix as a frame counter only when the whole sequence looks
+    // like a plausible monotonically increasing counter. Otherwise retain the
+    // default 30 fps timestamps assigned while discovering the files.
+    bool plausibleCounter = !extracted.empty();
+    for (size_t i = 0; i < extracted.size(); ++i) {
+        plausibleCounter &= extracted[i].has_value();
+        if (i && plausibleCounter) {
+            const int delta = *extracted[i] - *extracted[i - 1];
+            plausibleCounter &= delta > 0 && delta <= 100;
+        }
+    }
+    if (plausibleCounter) {
+        const double fallbackFps = mSequenceInfo.fps > 0.0 ? mSequenceInfo.fps : 30.0;
+        for (size_t i = 0; i < mFrames.size(); ++i) {
+            mFrames[i].frameNumber = *extracted[i];
+            mFrames[i].timestamp = static_cast<Timestamp>(
+                *extracted[i] * 1000000000.0 / fallbackFps);
         }
     }
     
@@ -1672,7 +1689,10 @@ bool DNGDecoder::updateMetadata(std::vector<uint8_t>& data,
 bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
                                    double frameRate,
                                    Timestamp timestampNs) {
-    if (!(frameRate > 0.0) || !std::isfinite(frameRate) || timestampNs < 0) return false;
+    if (!(frameRate > 0.0) || !std::isfinite(frameRate) || timestampNs < 0) {
+        spdlog::error("Invalid DNG timing values: fps={}, timestamp={}", frameRate, timestampNs);
+        return false;
+    }
     bool little = true;
     auto entries = findTiffEntries(data, little);
     bool hasFrameRate = false, hasTimeCode = false, hasXmp = false;
@@ -1685,8 +1705,11 @@ bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
     }
     const auto newXmp = relativePresentationTimestampXmp(timestampNs);
     if (!addMissingTimingEntries(data, !hasFrameRate, !hasTimeCode, !hasXmp,
-                                 static_cast<uint32_t>(newXmp.size()), little))
+                                 static_cast<uint32_t>(newXmp.size()), little)) {
+        spdlog::error("Could not append DNG timing tags (bytes={}, rate={}, timecode={}, xmp={})",
+                      data.size(), hasFrameRate, hasTimeCode, hasXmp);
         return false;
+    }
     entries = findTiffEntries(data, little);
     const bool pairedRate = frameRate >= 47.0 && frameRate <= 61.0;
     const int nominalFps = pairedRate
@@ -1735,6 +1758,9 @@ bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
             }
         }
     }
+    if (!frameRateWritten || !timeCodeWritten || !timestampWritten)
+        spdlog::error("Incomplete DNG timing write (rate={}, timecode={}, timestamp={}, entries={})",
+                      frameRateWritten, timeCodeWritten, timestampWritten, entries.size());
     return frameRateWritten && timeCodeWritten && timestampWritten;
 }
 
@@ -1860,6 +1886,36 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     };
     const TiffEntry* dimE = find(sourceIsRgb ? 65000 : TIFF_TAG_CFA_REPEAT_PATTERN_DIM);
     const TiffEntry* patternE = find(sourceIsRgb ? 65001 : TIFF_TAG_CFA_PATTERN);
+    auto writeHigherCfaMetadata = [&]() {
+        if (!dimE || !patternE || repeatSize < 2 || (repeatSize & 1) ||
+            dimE->type != TIFF_TYPE_SHORT || dimE->count < 2 ||
+            patternE->type != TIFF_TYPE_BYTE) return false;
+        const uint64_t patternBytes64 = static_cast<uint64_t>(repeatSize) * repeatSize;
+        if (patternBytes64 > std::numeric_limits<uint32_t>::max()) return false;
+        const uint32_t patternBytes = static_cast<uint32_t>(patternBytes64);
+        std::vector<uint8_t> pattern(patternBytes);
+        const int block = repeatSize / 2;
+        for (int y = 0; y < repeatSize; ++y)
+            for (int x = 0; x < repeatSize; ++x)
+                pattern[static_cast<size_t>(y) * repeatSize + x] =
+                    phase[static_cast<size_t>(y / block) * 2 + x / block];
+
+        write16(data.data() + dimE->valueOffset, static_cast<uint16_t>(repeatSize), little);
+        write16(data.data() + dimE->valueOffset + 2, static_cast<uint16_t>(repeatSize), little);
+        const size_t patternEntry = patternE->entryOffset;
+        write32(data.data() + patternEntry + 4, patternBytes, little);
+        if (patternBytes <= 4) {
+            std::fill_n(data.data() + patternEntry + 8, 4, 0);
+            std::copy(pattern.begin(), pattern.end(), data.data() + patternEntry + 8);
+        } else {
+            if (data.size() & 1u) data.push_back(0);
+            if (data.size() > std::numeric_limits<uint32_t>::max() - patternBytes) return false;
+            const uint32_t patternOffset = static_cast<uint32_t>(data.size());
+            data.insert(data.end(), pattern.begin(), pattern.end());
+            write32(data.data() + patternEntry + 8, patternOffset, little);
+        }
+        return true;
+    };
     if (sourceIsRgb) {
         if (!dimE) dimE = find(TIFF_TAG_CFA_REPEAT_PATTERN_DIM);
         if (!patternE) patternE = find(TIFF_TAG_CFA_PATTERN);
@@ -1981,7 +2037,8 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     // both lossy and unnecessary, and previously routed this no-op option
     // through the higher-CFA interpolation path.
     if (repeatSize == 2 && remosaic && !proxy) return true;
-    if (!proxy && mode == QuadBayerMode::CorrectQBCFAMetadata) return true;
+    if (!proxy && mode == QuadBayerMode::CorrectQBCFAMetadata)
+        return writeHigherCfaMetadata();
     if (!proxy && mode == QuadBayerMode::WrongCFAMetadata) {
         if (!dimE || !patternE) return false;
         write32(data.data() + dimE->entryOffset + 4, 2, little);
