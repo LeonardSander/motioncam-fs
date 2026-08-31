@@ -2832,6 +2832,7 @@ void MainWindow::updateSelectionUi() {
         : tr("%1 selected — editing LOCAL settings").arg(count));
     mApplySelectedButton->setEnabled(count > 0);
     mApplyAllButton->setEnabled(!mMountedFiles.isEmpty());
+    updateCalibrationButtonStates();
     const auto settings = count == 0
         ? mGlobalRenderSettings
         : mLocalSettings.value(*mSelectedMountIds.constBegin(), mGlobalRenderSettings);
@@ -3492,6 +3493,26 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
         : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
 
+    // When exactly one clip with a valid sidecar is selected, the calibration
+    // buttons on the other clips copy that sidecar instead of creating a new
+    // one from the global template.
+    for (auto* candidate : fileWidget->findChildren<QPushButton*>()) {
+        if (!candidate->property("calibButton").toBool()) continue;
+        const QString sourcePath = candidate->property("copyJsonSourcePath").toString();
+        if (!sourcePath.isEmpty()) {
+            if (!QFile::copy(sourcePath, jsonPath)) {
+                QMessageBox::critical(this, tr("Error"),
+                    tr("Failed to copy calibration file:\n%1\n\nto:\n%2")
+                        .arg(sourcePath, jsonPath));
+                return;
+            }
+            updateCalibrationButtonStates();
+            reloadCalibration(fileWidget);
+            return;
+        }
+        break;
+    }
+
     // Check if JSON already exists
     if (QFile::exists(jsonPath)) {
         auto reply = QMessageBox::question(this, "File Exists",
@@ -3551,7 +3572,20 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     // Update button states
     updateCalibrationButtonStates();
     // Reload the newly-created sidecar for any already-mounted clip.
-    scheduleOptionsUpdate();
+    reloadCalibration(fileWidget);
+}
+
+void MainWindow::reloadCalibration(QWidget* fileWidget) {
+    bool ok = false;
+    const auto mountId = fileWidget->property("mountId").toInt(&ok);
+    if (!ok) return;
+
+    // updateOptions also reloads the sidecar. Preserve whether this clip uses
+    // global or local render settings; calibration file operations must not
+    // create a local settings override for the currently selected clip.
+    mFuseFilesystem->updateOptions(
+        mountId, mLocalSettings.value(mountId, mGlobalRenderSettings));
+    updateFpsLabels();
 }
 
 void MainWindow::updateCalibrationButtonStates() {
@@ -3559,6 +3593,21 @@ void MainWindow::updateCalibrationButtonStates() {
     if (!scrollContent) return;
 
     auto fileWidgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+
+    QString selectedJsonPath;
+    QWidget* selectedFileWidget = nullptr;
+    if (mSelectedMountIds.size() == 1) {
+        selectedFileWidget = fileWidgetForMount(*mSelectedMountIds.constBegin());
+        if (selectedFileWidget) {
+            const QFileInfo selectedInfo(selectedFileWidget->property("filePath").toString());
+            const QString candidate = selectedInfo.isDir()
+                ? selectedInfo.absoluteFilePath() + "/" + selectedInfo.fileName() + ".json"
+                : selectedInfo.absolutePath() + "/" + selectedInfo.completeBaseName() + ".json";
+            if (QFile::exists(candidate) &&
+                motioncam::CalibrationData::loadFromFile(candidate.toStdString()).has_value())
+                selectedJsonPath = candidate;
+        }
+    }
 
     for (auto* fileWidget : fileWidgets) {
         // Skip if not a file widget (e.g., separators)
@@ -3603,6 +3652,15 @@ void MainWindow::updateCalibrationButtonStates() {
         if (!actualCalibButton || !actualStatusLabel || !actualRefreshButton || !statusContainer) {
             continue;
         }
+
+        const bool canCopySelectedJson = !selectedJsonPath.isEmpty() &&
+                                         fileWidget != selectedFileWidget;
+        actualCalibButton->setText(canCopySelectedJson ? tr("Copy JSON") : tr("Create JSON"));
+        actualCalibButton->setToolTip(canCopySelectedJson
+            ? tr("Copy the selected clip's calibration JSON to this clip")
+            : QString());
+        actualCalibButton->setProperty("copyJsonSourcePath",
+            canCopySelectedJson ? selectedJsonPath : QString());
 
         // Check if JSON exists and is valid
         if (QFile::exists(jsonPath)) {
