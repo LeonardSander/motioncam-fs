@@ -55,7 +55,7 @@ int main() {
 
     RenderSettings defaults;
     assert(defaults.cfaPhase == "Don't override CFA");
-    assert(defaults.cfrTarget.mode == CFRMode::PreferDropFrame);
+    assert(defaults.cfrTarget.mode == CFRMode::PreferInteger);
     assert(defaults.quadBayerOption == QuadBayerMode::Demosaic);
     assert(stringToQuadBayerMode("Correct QBCFA Metadata") == QuadBayerMode::CorrectQBCFAMetadata);
 
@@ -89,7 +89,7 @@ int main() {
     customRate = stringToCFRTarget("23,976");
     assert(customRate.mode == CFRMode::Custom);
     assert(nearlyEqual(customRate.customValue, 23.976f));
-    assert(stringToCFRTarget("23.976junk").mode == CFRMode::PreferDropFrame);
+    assert(stringToCFRTarget("23.976junk").mode == CFRMode::PreferInteger);
 
     const auto whitespaceCalibration = CalibrationData::parse(std::string(R"({
         "colorMatrix1": [1.1 -0.2 0.1 0.0 1.0 0.0 0.2 -0.1 0.9],

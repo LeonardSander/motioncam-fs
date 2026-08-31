@@ -2,6 +2,7 @@
 #include "tinydng/tiny_dng_writer.h"
 #include "liblj92/lj92.h"
 #include "DNGDecoder.h"
+#include <jpeglib.h>
 
 #include <algorithm>
 #include <cassert>
@@ -70,7 +71,305 @@ static std::vector<uint8_t> tiledLosslessJpegDng(
     return dng;
 }
 
+static std::vector<uint8_t> multiStripUncompressedDng(
+        const std::vector<uint16_t>& pixels, uint32_t width, uint32_t height,
+        uint32_t rowsPerStrip) {
+    auto put16 = [](std::vector<uint8_t>& out, size_t at, uint16_t value) {
+        out[at] = value & 0xff; out[at + 1] = value >> 8;
+    };
+    auto put32 = [](std::vector<uint8_t>& out, size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i) out[at + i] = static_cast<uint8_t>(value >> (i * 8));
+    };
+    constexpr uint16_t entryCount = 10;
+    std::vector<uint8_t> dng(8 + 2 + entryCount * 12 + 4, 0);
+    dng[0] = 'I'; dng[1] = 'I'; put16(dng, 2, 42); put32(dng, 4, 8);
+    put16(dng, 8, entryCount);
+    size_t entry = 10;
+    auto scalar = [&](uint16_t tag, uint16_t type, uint32_t value) {
+        put16(dng, entry, tag); put16(dng, entry + 2, type); put32(dng, entry + 4, 1);
+        if (type == 3) put16(dng, entry + 8, static_cast<uint16_t>(value));
+        else put32(dng, entry + 8, value);
+        entry += 12;
+    };
+    scalar(256, 4, width); scalar(257, 4, height); scalar(258, 3, 16);
+    scalar(259, 3, 1); scalar(262, 3, 32803);
+    const uint32_t stripCount = (height + rowsPerStrip - 1) / rowsPerStrip;
+    const uint32_t arrays = static_cast<uint32_t>(dng.size());
+    dng.resize(dng.size() + stripCount * 8);
+    put16(dng, entry, 273); put16(dng, entry + 2, 4); put32(dng, entry + 4, stripCount);
+    put32(dng, entry + 8, arrays); entry += 12;
+    scalar(278, 4, rowsPerStrip);
+    put16(dng, entry, 279); put16(dng, entry + 2, 4); put32(dng, entry + 4, stripCount);
+    put32(dng, entry + 8, arrays + stripCount * 4); entry += 12;
+    scalar(277, 3, 1); scalar(50717, 4, 65535);
+    for (uint32_t index = 0; index < stripCount; ++index) {
+        const uint32_t firstRow = index * rowsPerStrip;
+        const uint32_t rows = std::min(rowsPerStrip, height - firstRow);
+        const uint32_t bytes = rows * width * 2;
+        put32(dng, arrays + index * 4, static_cast<uint32_t>(dng.size()));
+        // Include harmless per-strip padding to ensure it is not copied into
+        // the canonical image payload.
+        put32(dng, arrays + (stripCount + index) * 4, bytes + 2);
+        for (uint32_t i = 0; i < rows * width; ++i) {
+            const uint16_t value = pixels[static_cast<size_t>(firstRow) * width + i];
+            dng.push_back(value & 0xff); dng.push_back(value >> 8);
+        }
+        dng.push_back(0xaa); dng.push_back(0x55);
+    }
+    return dng;
+}
+
+static std::vector<uint8_t> chunkedDng(
+        uint32_t width, uint32_t height, uint16_t bits, uint16_t channels,
+        uint16_t compression, uint32_t chunkWidth, uint32_t chunkHeight,
+        bool tiled, bool planar, const std::vector<std::vector<uint8_t>>& chunks,
+        bool omitDefaults = false) {
+    auto put16 = [](std::vector<uint8_t>& out, size_t at, uint16_t value) {
+        out[at] = value & 0xff; out[at + 1] = value >> 8;
+    };
+    auto put32 = [](std::vector<uint8_t>& out, size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i) out[at + i] = static_cast<uint8_t>(value >> (i * 8));
+    };
+    const uint16_t entryCount = static_cast<uint16_t>(
+        7 + (tiled ? 1 : 0) + (omitDefaults ? 0 : 2) + (planar ? 1 : 0));
+    std::vector<uint8_t> dng(8 + 2 + entryCount * 12 + 4, 0);
+    dng[0] = 'I'; dng[1] = 'I'; put16(dng, 2, 42); put32(dng, 4, 8);
+    put16(dng, 8, entryCount);
+    size_t entry = 10;
+    auto scalar = [&](uint16_t tag, uint16_t type, uint32_t value) {
+        put16(dng, entry, tag); put16(dng, entry + 2, type); put32(dng, entry + 4, 1);
+        if (type == 3) put16(dng, entry + 8, static_cast<uint16_t>(value));
+        else put32(dng, entry + 8, value);
+        entry += 12;
+    };
+    scalar(256, 4, width); scalar(257, 4, height); scalar(258, 3, bits);
+    if (!omitDefaults) scalar(259, 3, compression);
+    scalar(262, 3, channels == 1 ? 32803 : 34892);
+    const uint32_t arrays = static_cast<uint32_t>(dng.size());
+    dng.resize(dng.size() + chunks.size() * 8);
+    put16(dng, entry, tiled ? 324 : 273); put16(dng, entry + 2, 4);
+    put32(dng, entry + 4, chunks.size()); put32(dng, entry + 8, arrays); entry += 12;
+    scalar(tiled ? 322 : 278, 4, tiled ? chunkWidth : chunkHeight);
+    if (tiled) scalar(323, 4, chunkHeight);
+    put16(dng, entry, tiled ? 325 : 279); put16(dng, entry + 2, 4);
+    put32(dng, entry + 4, chunks.size());
+    put32(dng, entry + 8, arrays + chunks.size() * 4); entry += 12;
+    if (!omitDefaults) scalar(277, 3, channels);
+    if (planar) scalar(284, 3, 2);
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        put32(dng, arrays + i * 4, static_cast<uint32_t>(dng.size()));
+        put32(dng, arrays + (chunks.size() + i) * 4, chunks[i].size());
+        dng.insert(dng.end(), chunks[i].begin(), chunks[i].end());
+    }
+    return dng;
+}
+
+static std::vector<uint8_t> jpeg8(const std::vector<uint8_t>& pixels,
+                                  uint32_t width, uint32_t height) {
+    jpeg_compress_struct codec{};
+    jpeg_error_mgr error{};
+    codec.err = jpeg_std_error(&error);
+    jpeg_create_compress(&codec);
+    unsigned char* encoded = nullptr;
+    unsigned long encodedSize = 0;
+    jpeg_mem_dest(&codec, &encoded, &encodedSize);
+    codec.image_width = width; codec.image_height = height;
+    codec.input_components = 1; codec.in_color_space = JCS_GRAYSCALE;
+    jpeg_set_defaults(&codec); jpeg_set_quality(&codec, 90, TRUE);
+    jpeg_start_compress(&codec, TRUE);
+    while (codec.next_scanline < codec.image_height) {
+        JSAMPROW row = const_cast<JSAMPROW>(pixels.data() +
+            static_cast<size_t>(codec.next_scanline) * width);
+        assert(jpeg_write_scanlines(&codec, &row, 1) == 1);
+    }
+    jpeg_finish_compress(&codec);
+    std::vector<uint8_t> result(encoded, encoded + encodedSize);
+    jpeg_destroy_compress(&codec); free(encoded);
+    return result;
+}
+
+static uint32_t tagScalar(const std::vector<uint8_t>& dng, uint16_t wanted) {
+    auto u16 = [&](size_t at) { return static_cast<uint16_t>(dng[at] | dng[at + 1] << 8); };
+    auto u32 = [&](size_t at) { return static_cast<uint32_t>(dng[at] | dng[at + 1] << 8 |
+        dng[at + 2] << 16 | dng[at + 3] << 24); };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t count = u16(ifd);
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t at = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(at) == wanted) return u16(at + 2) == 3 ? u16(at + 8) : u32(at + 8);
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + count * 12);
+    }
+    assert(false && "tag not found"); return 0;
+}
+
+static bool ifdsAreTagSorted(const std::vector<uint8_t>& dng) {
+    auto u16 = [&](size_t at) { return static_cast<uint16_t>(dng[at] | dng[at + 1] << 8); };
+    auto u32 = [&](size_t at) { return static_cast<uint32_t>(dng[at] | dng[at + 1] << 8 |
+        dng[at + 2] << 16 | dng[at + 3] << 24); };
+    for (uint32_t ifd = u32(4); ifd;) {
+        if (ifd > dng.size() || dng.size() - ifd < 2) return false;
+        const uint16_t count = u16(ifd);
+        if (count > (dng.size() - ifd - 2) / 12) return false;
+        uint16_t previous = 0;
+        for (uint16_t i = 0; i < count; ++i) {
+            const uint16_t tag = u16(static_cast<size_t>(ifd) + 2 + i * 12);
+            if (i && tag < previous) return false;
+            previous = tag;
+        }
+        const size_t next = static_cast<size_t>(ifd) + 2 + count * 12;
+        if (next + 4 > dng.size()) return false;
+        ifd = u32(next);
+    }
+    return true;
+}
+
 int main() {
+    // Uncompressed tiles, compressed strips, planar LinearRaw, and omitted
+    // TIFF defaults all normalize to one chunky, uncompressed strip.
+    {
+        constexpr uint32_t w = 5, h = 3, tw = 3, th = 2;
+        std::vector<std::vector<uint8_t>> chunks;
+        for (uint32_t ty = 0; ty < 2; ++ty) for (uint32_t tx = 0; tx < 2; ++tx) {
+            std::vector<uint8_t> tile(tw * th * 2, 0);
+            for (uint32_t y = 0; y < th && ty * th + y < h; ++y)
+                for (uint32_t x = 0; x < tw && tx * tw + x < w; ++x) {
+                    const uint16_t value = static_cast<uint16_t>((ty * th + y) * 100 + tx * tw + x);
+                    const size_t at = (static_cast<size_t>(y) * tw + x) * 2;
+                    tile[at] = value & 0xff; tile[at + 1] = value >> 8;
+                }
+            chunks.push_back(std::move(tile));
+        }
+        auto tiled = chunkedDng(w, h, 16, 1, 1, tw, th, true, false, chunks);
+        assert(motioncam::DNGDecoder::ensureUncompressed(tiled));
+        assert(tagScalar(tiled, 259) == 1 && tagScalar(tiled, 273) > 0);
+        assert(tagScalar(tiled, 278) == h && tagScalar(tiled, 279) == w * h * 2);
+        assert(ifdsAreTagSorted(tiled));
+
+        // Absurd declared tile dimensions must be rejected without overflowing
+        // byte or allocation-size arithmetic.
+        auto hostile = chunkedDng(w, h, 16, 1, 1, UINT32_MAX, UINT32_MAX,
+                                  true, false, {{0, 0}});
+        assert(!motioncam::DNGDecoder::ensureUncompressed(hostile));
+    }
+    {
+        constexpr uint32_t w = 6, h = 5, rows = 2;
+        std::vector<uint16_t> source(w * h);
+        for (size_t i = 0; i < source.size(); ++i) source[i] = static_cast<uint16_t>(i * 17);
+        std::vector<std::vector<uint8_t>> chunks;
+        for (uint32_t y = 0; y < h; y += rows) {
+            const uint32_t count = std::min(rows, h - y);
+            uint8_t* encoded = nullptr; int bytes = 0;
+            assert(lj92_encode(source.data() + static_cast<size_t>(y) * w,
+                w, count, 12, 1, w, 0, nullptr, 0, &encoded, &bytes) == LJ92_ERROR_NONE);
+            chunks.emplace_back(encoded, encoded + bytes); free(encoded);
+        }
+        auto strips = chunkedDng(w, h, 12, 1, 7, w, rows, false, false, chunks);
+        assert(motioncam::DNGDecoder::ensureUncompressed(strips));
+        assert(tagScalar(strips, 259) == 1 && tagScalar(strips, 258) == 16);
+    }
+    {
+        constexpr uint32_t w = 8, h = 6, rows = 2;
+        std::vector<std::vector<uint8_t>> chunks;
+        for (uint32_t y = 0; y < h; y += rows) {
+            std::vector<uint8_t> pixels(w * rows);
+            for (size_t i = 0; i < pixels.size(); ++i)
+                pixels[i] = static_cast<uint8_t>(20 + y * w + i);
+            chunks.push_back(jpeg8(pixels, w, rows));
+        }
+        auto strips = chunkedDng(w, h, 8, 1, 34892, w, rows, false, false, chunks);
+        assert(motioncam::DNGDecoder::ensureUncompressed(strips));
+        assert(tagScalar(strips, 259) == 1 && tagScalar(strips, 258) == 16);
+    }
+    {
+        constexpr uint32_t w = 4, h = 3;
+        std::vector<uint16_t> expected(w * h * 3);
+        std::vector<std::vector<uint8_t>> planes(3);
+        for (uint32_t c = 0; c < 3; ++c) {
+            planes[c].resize(w * h * 2);
+            for (uint32_t i = 0; i < w * h; ++i) {
+                const uint16_t value = static_cast<uint16_t>(c * 1000 + i);
+                expected[i * 3 + c] = value;
+                planes[c][i * 2] = value & 0xff; planes[c][i * 2 + 1] = value >> 8;
+            }
+        }
+        auto planar = chunkedDng(w, h, 16, 3, 1, w, h, false, true, planes);
+        assert(motioncam::DNGDecoder::ensureUncompressed(planar));
+        assert(tagScalar(planar, 284) == 1);
+        std::vector<uint8_t> rgb; uint32_t outW = 0, outH = 0;
+        assert(motioncam::DNGDecoder::extractUncompressedRGB16(planar, rgb, outW, outH));
+        assert(outW == w && outH == h && rgb.size() == expected.size() * 2);
+        for (size_t i = 0; i < expected.size(); ++i)
+            assert(static_cast<uint16_t>(rgb[i * 2] | rgb[i * 2 + 1] << 8) == expected[i]);
+    }
+    {
+        constexpr uint32_t w = 5, h = 4;
+        std::vector<uint16_t> expected(w * h * 3);
+        std::vector<std::vector<uint8_t>> encodedPlanes;
+        for (uint32_t c = 0; c < 3; ++c) {
+            std::vector<uint16_t> plane(w * h);
+            for (uint32_t i = 0; i < w * h; ++i) {
+                plane[i] = static_cast<uint16_t>(c * 900 + i * 3);
+                expected[i * 3 + c] = plane[i];
+            }
+            uint8_t* encoded = nullptr; int bytes = 0;
+            assert(lj92_encode(plane.data(), w, h, 12, 1, w, 0, nullptr, 0,
+                               &encoded, &bytes) == LJ92_ERROR_NONE);
+            encodedPlanes.emplace_back(encoded, encoded + bytes);
+            free(encoded);
+        }
+        auto planar = chunkedDng(w, h, 12, 3, 7, w, h, false, true, encodedPlanes);
+        assert(motioncam::DNGDecoder::ensureUncompressed(planar));
+        assert(tagScalar(planar, 284) == 1 && ifdsAreTagSorted(planar));
+        std::vector<uint8_t> rgb; uint32_t outW = 0, outH = 0;
+        assert(motioncam::DNGDecoder::extractUncompressedRGB16(planar, rgb, outW, outH));
+        assert(outW == w && outH == h && rgb.size() == expected.size() * 2);
+        for (size_t i = 0; i < expected.size(); ++i)
+            assert(static_cast<uint16_t>(rgb[i * 2] | rgb[i * 2 + 1] << 8) == expected[i]);
+    }
+    {
+        constexpr uint32_t w = 4, h = 2;
+        std::vector<uint8_t> pixels(w * h * 2);
+        auto defaults = chunkedDng(w, h, 16, 1, 1, w, h, false, false, {pixels}, true);
+        assert(motioncam::DNGDecoder::ensureUncompressed(defaults));
+        assert(tagScalar(defaults, 259) == 1 && tagScalar(defaults, 277) == 1);
+        assert(ifdsAreTagSorted(defaults));
+    }
+
+    // Valid uncompressed TIFF/DNG data may be split across many strips.  The
+    // decoder must canonicalize it for processing rather than rejecting it.
+    {
+        constexpr uint32_t stripWidth = 5, stripHeight = 7, rowsPerStrip = 2;
+        std::vector<uint16_t> stripPixels(stripWidth * stripHeight);
+        for (size_t i = 0; i < stripPixels.size(); ++i)
+            stripPixels[i] = static_cast<uint16_t>(1000 + i);
+        auto multiStrip = multiStripUncompressedDng(
+            stripPixels, stripWidth, stripHeight, rowsPerStrip);
+        assert(motioncam::DNGDecoder::ensureUncompressed(multiStrip));
+        auto read16 = [&](size_t at) {
+            return static_cast<uint16_t>(multiStrip[at] | multiStrip[at + 1] << 8);
+        };
+        auto read32 = [&](size_t at) {
+            return static_cast<uint32_t>(multiStrip[at] | multiStrip[at + 1] << 8 |
+                multiStrip[at + 2] << 16 | multiStrip[at + 3] << 24);
+        };
+        uint32_t stripOffset = 0, stripBytes = 0, outputRowsPerStrip = 0;
+        for (uint16_t i = 0; i < read16(8); ++i) {
+            const size_t at = 10 + i * 12;
+            if (read16(at) == 273) {
+                assert(read32(at + 4) == 1); stripOffset = read32(at + 8);
+            }
+            if (read16(at) == 279) {
+                assert(read32(at + 4) == 1); stripBytes = read32(at + 8);
+            }
+            if (read16(at) == 278) outputRowsPerStrip = read32(at + 8);
+        }
+        assert(stripOffset && stripBytes == stripPixels.size() * sizeof(uint16_t));
+        assert(outputRowsPerStrip == stripHeight);
+        for (size_t i = 0; i < stripPixels.size(); ++i)
+            assert(read16(stripOffset + i * 2) == stripPixels[i]);
+    }
+
     // Two-component Android DNG tiles may assign a different DC Huffman table
     // to each component. Verify that the selectors in SOS are honored.
     {

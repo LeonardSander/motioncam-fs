@@ -3339,7 +3339,7 @@ void MainWindow::promptToResumeSession() {
     prompt.setDefaultButton(resume);
     prompt.exec();
     if (prompt.clickedButton() == resume) loadSessionFromFile(path);
-    else clearSession();
+    else onNewSession();
 }
 
 #ifdef __APPLE__
@@ -3417,6 +3417,10 @@ void MainWindow::onNewSession() {
     clearSession();
     mCurrentSessionFile.clear();
     QFile::remove(autoSessionPath());
+    onSetDefaultSettings(false);
+    mGlobalRenderSettings = buildRenderSettings();
+    mRenderSettings = mGlobalRenderSettings;
+    clearApplyFeedback();
 }
 void MainWindow::onLoadSession() {
     const QString path = QFileDialog::getOpenFileName(this, tr("Load Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));

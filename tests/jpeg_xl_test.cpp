@@ -85,6 +85,52 @@ static uint32_t tiffTagValue(const std::vector<uint8_t>& dng, uint16_t wantedTag
     return 0;
 }
 
+static uint16_t tiffTagType(const std::vector<uint8_t>& dng, uint16_t wantedTag) {
+    assert(dng.size() >= 8 && dng[0] == 'I' && dng[1] == 'I');
+    auto u16 = [&](size_t offset) {
+        return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8);
+    };
+    auto u32 = [&](size_t offset) {
+        return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+            dng[offset + 2] << 16 | dng[offset + 3] << 24);
+    };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t count = u16(ifd);
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) == wantedTag) return u16(entry + 2);
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + count * 12);
+    }
+    assert(false && "TIFF tag not found");
+    return 0;
+}
+
+static void rewriteTiffTag(std::vector<uint8_t>& dng, uint16_t oldTag,
+                           uint16_t newTag, uint16_t newType = 0,
+                           uint32_t newValue = 0) {
+    auto u16 = [&](size_t at) { return static_cast<uint16_t>(dng[at] | dng[at + 1] << 8); };
+    auto u32 = [&](size_t at) { return static_cast<uint32_t>(dng[at] | dng[at + 1] << 8 |
+        dng[at + 2] << 16 | dng[at + 3] << 24); };
+    auto put16 = [&](size_t at, uint16_t value) {
+        dng[at] = value & 0xff; dng[at + 1] = value >> 8;
+    };
+    auto put32 = [&](size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i) dng[at + i] = static_cast<uint8_t>(value >> (i * 8));
+    };
+    const uint32_t ifd = u32(4);
+    for (uint16_t i = 0; i < u16(ifd); ++i) {
+        const size_t at = static_cast<size_t>(ifd) + 2 + i * 12;
+        if (u16(at) != oldTag) continue;
+        put16(at, newTag);
+        if (newType) {
+            put16(at + 2, newType); put32(at + 4, 1); put32(at + 8, newValue);
+        }
+        return;
+    }
+    assert(false && "TIFF tag to rewrite not found");
+}
+
 static std::array<uint32_t, 4> tiffLong4Tag(const std::vector<uint8_t>& dng,
                                             uint16_t wantedTag) {
     auto u16 = [&](size_t offset) {
@@ -208,6 +254,14 @@ int main() {
         assert(image.GetStripBytes() > 0);
         auto losslessDng = writeDng(image);
         assert(tiffTagValue(losslessDng, 259) == 52546);
+        auto tiledJxl = losslessDng;
+        rewriteTiffTag(tiledJxl, 273, 324);
+        rewriteTiffTag(tiledJxl, 278, 322, 4, width);
+        rewriteTiffTag(tiledJxl, 279, 325);
+        rewriteTiffTag(tiledJxl, 283, 323, 4, height);
+        assert(motioncam::DNGDecoder::ensureUncompressed(tiledJxl));
+        assert(tiffTagValue(tiledJxl, 259) == 1);
+        assert(tiffTagValue(tiledJxl, 279) == cfa.size() * sizeof(uint16_t));
         assert(motioncam::DNGDecoder::ensureUncompressed(losslessDng));
         assert(tiffTagValue(losslessDng, 259) == 1);
         assert(tiffTagValue(losslessDng, 279) == cfa.size() * sizeof(uint16_t));
@@ -341,6 +395,7 @@ int main() {
         auto timedBytes = legacyBytes;
         const motioncam::Timestamp timestamp = frame == 0 ? 0 : 40000000;
         assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
+        assert(tiffTagType(timedBytes, 51044) == 10); // SRATIONAL
         const size_t timedSize = timedBytes.size();
         assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
         assert(timedBytes.size() == timedSize);

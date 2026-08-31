@@ -145,6 +145,7 @@ namespace {
     constexpr uint16_t TIFF_TAG_STRIP_OFFSETS = 273;
     constexpr uint16_t TIFF_TAG_ROWS_PER_STRIP = 278;
     constexpr uint16_t TIFF_TAG_STRIP_BYTE_COUNTS = 279;
+    constexpr uint16_t TIFF_TAG_PLANAR_CONFIGURATION = 284;
     constexpr uint16_t TIFF_TAG_TILE_OFFSETS = 324;
     constexpr uint16_t TIFF_TAG_TILE_BYTE_COUNTS = 325;
     constexpr uint16_t TIFF_TAG_TILE_WIDTH = 322;
@@ -547,6 +548,25 @@ namespace {
         return result;
     }
 
+    bool sortTiffIfdEntries(std::vector<uint8_t>& data, uint32_t ifd, bool little) {
+        if (ifd > data.size() || data.size() - ifd < 2) return false;
+        const uint16_t count = read16(data.data() + ifd, little);
+        const size_t first = static_cast<size_t>(ifd) + 2;
+        if (count > (data.size() - first) / 12 ||
+            data.size() - first - static_cast<size_t>(count) * 12 < 4) return false;
+        std::vector<std::array<uint8_t, 12>> records(count);
+        for (uint16_t i = 0; i < count; ++i)
+            std::copy_n(data.data() + first + static_cast<size_t>(i) * 12, 12,
+                        records[i].data());
+        std::stable_sort(records.begin(), records.end(), [&](const auto& a, const auto& b) {
+            return read16(a.data(), little) < read16(b.data(), little);
+        });
+        for (uint16_t i = 0; i < count; ++i)
+            std::copy_n(records[i].data(), 12,
+                        data.data() + first + static_cast<size_t>(i) * 12);
+        return true;
+    }
+
     bool replaceTiffStrip(std::vector<uint8_t>& data, uint32_t stripOffset,
                           uint32_t stripBytes, const std::vector<uint8_t>& replacement,
                           bool little) {
@@ -623,8 +643,9 @@ namespace {
         return true;
     }
 
-    bool insertTiffLongEntry(std::vector<uint8_t>& data, uint32_t targetIfd,
-                             uint16_t tag, uint32_t value, bool little) {
+    bool insertTiffScalarEntry(std::vector<uint8_t>& data, uint32_t targetIfd,
+                               uint16_t tag, uint16_t type, uint32_t value, bool little) {
+        if (type != TIFF_TYPE_SHORT && type != TIFF_TYPE_LONG) return false;
         if (data.size() > std::numeric_limits<uint32_t>::max() - 12u ||
             targetIfd > data.size() || data.size() - targetIfd < 2) return false;
         const uint16_t targetCount = read16(data.data() + targetIfd, little);
@@ -643,9 +664,13 @@ namespace {
 
         const auto entries = findTiffEntries(data, little);
         struct EntryPointer { uint32_t entry; uint32_t target; };
-        struct SubIfdArray { uint32_t entry; std::vector<uint32_t> targets; };
-        std::vector<EntryPointer> externalPointers, inlineIfdPointers;
-        std::vector<SubIfdArray> subIfdArrays;
+        struct SubIfdArray {
+            uint32_t entry;
+            std::vector<uint32_t> targets;
+            bool inlineValues = false;
+        };
+        std::vector<EntryPointer> externalPointers, inlineIfdPointers, imagePointers;
+        std::vector<SubIfdArray> subIfdArrays, imageOffsetArrays;
         std::map<uint32_t, uint32_t> nextIfds;
         for (const auto& entry : entries) {
             const size_t typeSize = tiffTypeSize(entry.type);
@@ -658,11 +683,30 @@ namespace {
                 if (entry.count == 1) {
                     inlineIfdPointers.push_back({static_cast<uint32_t>(entry.entryOffset), raw});
                 } else {
-                    SubIfdArray array{static_cast<uint32_t>(entry.entryOffset), {}};
+                    SubIfdArray array{static_cast<uint32_t>(entry.entryOffset), {}, false};
                     array.targets.reserve(entry.count);
                     for (uint32_t i = 0; i < entry.count; ++i)
                         array.targets.push_back(read32(data.data() + entry.valueOffset + i * 4u, little));
                     subIfdArrays.push_back(std::move(array));
+                }
+            }
+            if ((entry.tag == TIFF_TAG_STRIP_OFFSETS || entry.tag == TIFF_TAG_TILE_OFFSETS) &&
+                (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+                if (entry.count == 1) {
+                    const uint32_t target = entry.type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + entry.valueOffset, little)
+                        : read32(data.data() + entry.valueOffset, little);
+                    imagePointers.push_back({static_cast<uint32_t>(entry.entryOffset), target});
+                } else {
+                    SubIfdArray array{static_cast<uint32_t>(entry.entryOffset), {},
+                                      entry.type == TIFF_TYPE_SHORT && entry.count <= 2};
+                    array.targets.reserve(entry.count);
+                    const size_t step = entry.type == TIFF_TYPE_SHORT ? 2u : 4u;
+                    for (uint32_t i = 0; i < entry.count; ++i)
+                        array.targets.push_back(entry.type == TIFF_TYPE_SHORT
+                            ? read16(data.data() + entry.valueOffset + i * step, little)
+                            : read32(data.data() + entry.valueOffset + i * step, little));
+                    imageOffsetArrays.push_back(std::move(array));
                 }
             }
             if (!nextIfds.count(entry.ifdOffset)) {
@@ -686,11 +730,55 @@ namespace {
         for (const auto& pointer : inlineIfdPointers)
             write32(data.data() + relocated(pointer.entry) + 8,
                     relocated(pointer.target), little);
+        for (const auto& pointer : imagePointers) {
+            const uint32_t entryAt = relocated(pointer.entry);
+            const uint16_t type = read16(data.data() + entryAt + 2, little);
+            if (type == TIFF_TYPE_SHORT &&
+                relocated(pointer.target) > std::numeric_limits<uint16_t>::max()) {
+                write16(data.data() + entryAt + 2, TIFF_TYPE_LONG, little);
+                write32(data.data() + entryAt + 8, relocated(pointer.target), little);
+            } else if (type == TIFF_TYPE_SHORT) {
+                write16(data.data() + entryAt + 8, relocated(pointer.target), little);
+            } else {
+                write32(data.data() + entryAt + 8, relocated(pointer.target), little);
+            }
+        }
         for (const auto& array : subIfdArrays) {
             const uint32_t entryAt = relocated(array.entry);
-            const uint32_t arrayAt = read32(data.data() + entryAt + 8, little);
+            const uint32_t arrayAt = array.inlineValues
+                ? entryAt + 8 : read32(data.data() + entryAt + 8, little);
             for (size_t i = 0; i < array.targets.size(); ++i)
                 write32(data.data() + arrayAt + i * 4u, relocated(array.targets[i]), little);
+        }
+        for (const auto& array : imageOffsetArrays) {
+            const uint32_t entryAt = relocated(array.entry);
+            uint16_t type = read16(data.data() + entryAt + 2, little);
+            const bool promote = type == TIFF_TYPE_SHORT &&
+                std::any_of(array.targets.begin(), array.targets.end(), [&](uint32_t target) {
+                    return relocated(target) > std::numeric_limits<uint16_t>::max();
+                });
+            if (promote) {
+                const uint64_t bytes = static_cast<uint64_t>(array.targets.size()) * 4u;
+                if (bytes > std::numeric_limits<uint32_t>::max() ||
+                    data.size() > std::numeric_limits<uint32_t>::max() - bytes)
+                    return false;
+                const uint32_t longArray = static_cast<uint32_t>(data.size());
+                data.resize(data.size() + static_cast<size_t>(bytes));
+                write16(data.data() + entryAt + 2, TIFF_TYPE_LONG, little);
+                write32(data.data() + entryAt + 8, longArray, little);
+                type = TIFF_TYPE_LONG;
+            }
+            const uint32_t arrayAt = array.inlineValues
+                && !promote ? entryAt + 8 : read32(data.data() + entryAt + 8, little);
+            const size_t step = type == TIFF_TYPE_SHORT ? 2u : 4u;
+            for (size_t i = 0; i < array.targets.size(); ++i) {
+                if (type == TIFF_TYPE_SHORT)
+                    write16(data.data() + arrayAt + i * step,
+                            static_cast<uint16_t>(relocated(array.targets[i])), little);
+                else
+                    write32(data.data() + arrayAt + i * step,
+                            relocated(array.targets[i]), little);
+            }
         }
         for (const auto& [oldIfd, oldNext] : nextIfds) {
             const uint32_t newIfd = relocated(oldIfd);
@@ -701,10 +789,13 @@ namespace {
         }
         write16(data.data() + relocated(targetIfd), targetCount + 1u, little);
         write16(data.data() + insertion, tag, little);
-        write16(data.data() + insertion + 2u, TIFF_TYPE_LONG, little);
+        write16(data.data() + insertion + 2u, type, little);
         write32(data.data() + insertion + 4u, 1, little);
-        write32(data.data() + insertion + 8u, value, little);
-        return true;
+        if (type == TIFF_TYPE_SHORT)
+            write16(data.data() + insertion + 8u, static_cast<uint16_t>(value), little);
+        else
+            write32(data.data() + insertion + 8u, value, little);
+        return sortTiffIfdEntries(data, relocated(targetIfd), little);
     }
 
     double readRational(const std::vector<uint8_t>& data, const TiffEntry& entry,
@@ -818,7 +909,7 @@ namespace {
             entries.push_back(entry);
             valuePos += bytes;
         };
-        if (addFrameRate) add(TIFF_TAG_FRAME_RATE, TIFF_TYPE_RATIONAL, 1, 8);
+        if (addFrameRate) add(TIFF_TAG_FRAME_RATE, TIFF_TYPE_SRATIONAL, 1, 8);
         if (addTimeCode) add(TIFF_TAG_TIME_CODES, TIFF_TYPE_BYTE, 8, 8);
         if (addXmp) add(TIFF_TAG_XMP, TIFF_TYPE_BYTE, xmpBytes, xmpBytes);
         std::sort(entries.begin(), entries.end(), [little](const auto& a, const auto& b) {
@@ -1106,7 +1197,9 @@ void DNGDecoder::findDNGFiles() {
                 frame.timestamp = embeddedTimestamp;
                 frame.hasExactPresentationTimestamp = true;
             }
-            if (entry.tag == TIFF_TAG_FRAME_RATE && entry.type == TIFF_TYPE_RATIONAL && entry.count) {
+            if (entry.tag == TIFF_TAG_FRAME_RATE &&
+                (entry.type == TIFF_TYPE_RATIONAL || entry.type == TIFF_TYPE_SRATIONAL) &&
+                entry.count) {
                 frameRate = readRational(bytes, entry, 0, little);
                 if (!(mSequenceInfo.fps > 0.0)) mSequenceInfo.fps = frameRate;
             }
@@ -1584,7 +1677,9 @@ bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
     auto entries = findTiffEntries(data, little);
     bool hasFrameRate = false, hasTimeCode = false, hasXmp = false;
     for (const auto& entry : entries) {
-        hasFrameRate |= entry.tag == TIFF_TAG_FRAME_RATE && entry.type == TIFF_TYPE_RATIONAL && entry.count;
+        hasFrameRate |= entry.tag == TIFF_TAG_FRAME_RATE &&
+                        (entry.type == TIFF_TYPE_RATIONAL ||
+                         entry.type == TIFF_TYPE_SRATIONAL) && entry.count;
         hasTimeCode |= entry.tag == TIFF_TAG_TIME_CODES && entry.type == TIFF_TYPE_BYTE && entry.count >= 8;
         hasXmp |= entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count;
     }
@@ -1619,8 +1714,14 @@ bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,
     }
     bool frameRateWritten = false, timeCodeWritten = false, timestampWritten = false;
     for (const auto& entry : entries) {
-        if (entry.tag == TIFF_TAG_FRAME_RATE && entry.type == TIFF_TYPE_RATIONAL && entry.count) {
+        if (entry.tag == TIFF_TAG_FRAME_RATE &&
+            (entry.type == TIFF_TYPE_RATIONAL || entry.type == TIFF_TYPE_SRATIONAL) &&
+            entry.count) {
             writeRational(data, entry, 0, frameRate, little);
+            // DNG defines FrameRate as SRATIONAL. Normalize files produced by
+            // older builds, which incorrectly emitted the same 8-byte value as
+            // unsigned RATIONAL.
+            write16(data.data() + entry.entryOffset + 2, TIFF_TYPE_SRATIONAL, little);
             frameRateWritten = true;
         } else if (entry.tag == TIFF_TAG_TIME_CODES && entry.type == TIFF_TYPE_BYTE && entry.count >= 8) {
             std::memcpy(data.data() + entry.valueOffset, timeCode, sizeof(timeCode));
@@ -2214,6 +2315,21 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
             if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag) return &entry;
         return nullptr;
     };
+    // Compression and SamplesPerPixel have TIFF defaults of 1. Some valid DNG
+    // writers omit them; materialize the defaults because later processing
+    // stages intentionally operate on an explicit canonical IFD.
+    if (!find(TIFF_TAG_COMPRESSION)) {
+        if (!insertTiffScalarEntry(data, photo->ifdOffset, TIFF_TAG_COMPRESSION,
+                                   TIFF_TYPE_SHORT, TIFF_COMPRESSION_NONE, little))
+            return false;
+        return ensureUncompressed(data);
+    }
+    if (!find(TIFF_TAG_SAMPLES_PER_PIXEL)) {
+        if (!insertTiffScalarEntry(data, photo->ifdOffset, TIFF_TAG_SAMPLES_PER_PIXEL,
+                                   TIFF_TYPE_SHORT, 1, little))
+            return false;
+        return ensureUncompressed(data);
+    }
     const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
     const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
     const auto stripOffsetsE = find(TIFF_TAG_STRIP_OFFSETS);
@@ -2222,12 +2338,21 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
     const auto tileCountsE = find(TIFF_TAG_TILE_BYTE_COUNTS);
     const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
     if (!widthE || !heightE || !bitsE || !compressionE || !sppE) return false;
+    if ((stripOffsetsE || stripCountsE) && !find(TIFF_TAG_ROWS_PER_STRIP)) {
+        if (!insertTiffScalarEntry(data, photo->ifdOffset, TIFF_TAG_ROWS_PER_STRIP,
+                                   TIFF_TYPE_LONG, scalar(*heightE), little))
+            return false;
+        return ensureUncompressed(data);
+    }
 
     const uint32_t compression = scalar(*compressionE);
     const uint32_t width = scalar(*widthE), height = scalar(*heightE);
     const uint32_t bits = scalar(*bitsE), channels = scalar(*sppE);
+    const auto planarE = find(TIFF_TAG_PLANAR_CONFIGURATION);
+    const uint32_t planar = planarE ? scalar(*planarE) : 1;
     if (!width || !height || !channels || channels > 4 || bits < 8 || bits > 16)
         return false;
+    if (planar != 1 && planar != 2) return false;
     size_t imageSamples = 0;
     if (!checkedImageSamples(width, height, channels, imageSamples) ||
         imageSamples > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) ||
@@ -2240,170 +2365,235 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
             write32(data.data() + entry.valueOffset, value, little);
     };
 
-    // Tiled DNG is common for camera-generated lossless-JPEG raws. Decode every
-    // tile into one contiguous 16-bit image and turn the tile IFD into the
-    // single-strip layout used by the rest of the processing pipeline.
-    if (tileOffsetsE || tileCountsE) {
-        const auto tileWidthE = find(TIFF_TAG_TILE_WIDTH);
-        const auto tileHeightE = find(TIFF_TAG_TILE_LENGTH);
-        if (!tileOffsetsE || !tileCountsE || !tileWidthE || !tileHeightE ||
-            tileOffsetsE->count != tileCountsE->count || !tileOffsetsE->count ||
-            (compression != TIFF_COMPRESSION_JPEG &&
-             compression != TIFF_COMPRESSION_LOSSY_JPEG)) return false;
-        const uint32_t tileWidth = scalar(*tileWidthE), tileHeight = scalar(*tileHeightE);
-        if (!tileWidth || !tileHeight) return false;
-        const uint64_t across = (static_cast<uint64_t>(width) + tileWidth - 1) / tileWidth;
-        const uint64_t down = (static_cast<uint64_t>(height) + tileHeight - 1) / tileHeight;
-        if (across * down != tileOffsetsE->count) return false;
-        auto arrayValue = [&](const TiffEntry& entry, uint32_t index) -> uint32_t {
-            const size_t step = entry.type == TIFF_TYPE_SHORT ? 2 : 4;
-            const size_t offset = entry.valueOffset + static_cast<size_t>(index) * step;
-            return entry.type == TIFF_TYPE_SHORT
-                ? read16(data.data() + offset, little) : read32(data.data() + offset, little);
-        };
-        std::vector<uint16_t> pixels(imageSamples);
-        for (uint32_t index = 0; index < tileOffsetsE->count; ++index) {
-            const uint32_t offset = arrayValue(*tileOffsetsE, index);
-            const uint32_t byteCount = arrayValue(*tileCountsE, index);
-            if (offset > data.size() || byteCount > data.size() - offset) return false;
-            const uint32_t originX = (index % static_cast<uint32_t>(across)) * tileWidth;
-            const uint32_t originY = (index / static_cast<uint32_t>(across)) * tileHeight;
-            const uint32_t expectedWidth = std::min(tileWidth, width - originX);
-            const uint32_t expectedHeight = std::min(tileHeight, height - originY);
-            if (compression == TIFF_COMPRESSION_LOSSY_JPEG) {
-                std::vector<uint16_t> tile;
-                if (bits != 8 || !decodeDctJPEG(data.data() + offset, byteCount,
-                        expectedWidth, expectedHeight, channels, tile)) return false;
-                for (uint32_t y = 0; y < expectedHeight; ++y)
-                    std::copy_n(tile.data() + static_cast<size_t>(y) * expectedWidth * channels,
-                                static_cast<size_t>(expectedWidth) * channels,
-                                pixels.data() + (static_cast<size_t>(originY + y) * width + originX) * channels);
-                continue;
-            }
-            lj92 decoder = nullptr;
-            int decodedWidth = 0, decodedHeight = 0, decodedBits = 0, components = 0;
-            if (lj92_open(&decoder, data.data() + offset, byteCount, &decodedWidth,
-                          &decodedHeight, &decodedBits, &components) != LJ92_ERROR_NONE) {
-                std::vector<uint16_t> tile;
-                if ((bits != 8 && bits != 12) || !decodeDctJPEG(
-                        data.data() + offset, byteCount, expectedWidth,
-                        expectedHeight, channels, tile)) return false;
-                for (uint32_t y = 0; y < expectedHeight; ++y)
-                    std::copy_n(tile.data() + static_cast<size_t>(y) * expectedWidth * channels,
-                                static_cast<size_t>(expectedWidth) * channels,
-                                pixels.data() + (static_cast<size_t>(originY + y) * width + originX) * channels);
-                continue;
-            }
-            if (decodedWidth <= 0 || decodedHeight <= 0 || components <= 0 || components > 4 ||
-                static_cast<uint64_t>(decodedWidth) * decodedHeight * components >
-                    std::numeric_limits<size_t>::max() / sizeof(uint16_t)) {
-                lj92_close(decoder);
+    auto arrayValue = [&](const TiffEntry& entry, uint32_t index,
+                          uint32_t& value) -> bool {
+        if (index >= entry.count ||
+            (entry.type != TIFF_TYPE_SHORT && entry.type != TIFF_TYPE_LONG)) return false;
+        const size_t step = entry.type == TIFF_TYPE_SHORT ? 2 : 4;
+        const size_t at = entry.valueOffset + static_cast<size_t>(index) * step;
+        if (at > data.size() || step > data.size() - at) return false;
+        value = entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + at, little) : read32(data.data() + at, little);
+        return true;
+    };
+    auto decodeChunk = [&](uint32_t offset, uint32_t byteCount,
+                           uint32_t chunkWidth, uint32_t chunkHeight,
+                           uint32_t chunkChannels, std::vector<uint16_t>& output,
+                           uint32_t& decodedWidth, uint32_t& decodedHeight) -> bool {
+        if (!chunkWidth || !chunkHeight || !chunkChannels ||
+            offset > data.size() || byteCount > data.size() - offset) return false;
+        decodedWidth = chunkWidth; decodedHeight = chunkHeight;
+        if (compression == TIFF_COMPRESSION_NONE) {
+            const uint64_t rowBits = static_cast<uint64_t>(chunkWidth) * chunkChannels * bits;
+            const uint64_t rowBytes = (rowBits + 7) / 8;
+            if (rowBytes > byteCount / chunkHeight ||
+                chunkWidth > std::numeric_limits<size_t>::max() / chunkChannels)
                 return false;
+            const size_t rowSamples = static_cast<size_t>(chunkWidth) * chunkChannels;
+            if (rowSamples > std::numeric_limits<size_t>::max() / chunkHeight) return false;
+            output.assign(rowSamples * chunkHeight, 0);
+            for (uint32_t y = 0; y < chunkHeight; ++y) {
+                size_t bit = static_cast<size_t>(static_cast<uint64_t>(y) * rowBytes) * 8;
+                for (size_t x = 0; x < rowSamples; ++x) {
+                    uint16_t value = 0;
+                    if (bits == 16) {
+                        value = read16(data.data() + offset + bit / 8, little);
+                        bit += 16;
+                    } else {
+                        for (uint32_t b = 0; b < bits; ++b, ++bit)
+                            value = static_cast<uint16_t>((value << 1) |
+                                ((data[offset + bit / 8] >> (7 - bit % 8)) & 1));
+                    }
+                    output[static_cast<size_t>(y) * chunkWidth * chunkChannels + x] = value;
+                }
             }
-            std::vector<uint16_t> tile(
-                static_cast<size_t>(decodedWidth) * decodedHeight * components);
-            const uint64_t decodedRowSamples = static_cast<uint64_t>(decodedWidth) * components;
-            const bool validWidth = decodedRowSamples % channels == 0 &&
-                (decodedRowSamples / channels == expectedWidth ||
-                 decodedRowSamples / channels == tileWidth);
-            const bool validHeight = decodedHeight == static_cast<int>(expectedHeight) ||
-                decodedHeight == static_cast<int>(tileHeight);
-            const bool decoded = decodedWidth > 0 && decodedHeight > 0 &&
-                components > 0 && validWidth && validHeight &&
-                decodedBits == static_cast<int>(bits) &&
-                lj92_decode(decoder, tile.data(), decodedWidth * components,
-                            0, nullptr, 0) == LJ92_ERROR_NONE;
-            lj92_close(decoder);
-            if (!decoded) return false;
-            const uint32_t decodedPixelWidth = static_cast<uint32_t>(decodedRowSamples / channels);
-            const uint32_t copyWidth = std::min(decodedPixelWidth, width - originX);
-            const uint32_t copyHeight = std::min<uint32_t>(decodedHeight, height - originY);
-            for (uint32_t y = 0; y < copyHeight; ++y)
-                std::copy_n(tile.data() + static_cast<size_t>(y) * decodedRowSamples,
-                            static_cast<size_t>(copyWidth) * channels,
-                            pixels.data() + (static_cast<size_t>(originY + y) * width + originX) * channels);
+            return true;
         }
+        if (compression == TIFF_COMPRESSION_JPEG_XL) {
+            return bits == 16 && decodeJPEGXL(data.data() + offset, byteCount,
+                                               chunkWidth, chunkHeight,
+                                               chunkChannels, output);
+        }
+        if (compression == TIFF_COMPRESSION_LOSSY_JPEG) {
+            return bits == 8 && decodeDctJPEG(data.data() + offset, byteCount,
+                                              chunkWidth, chunkHeight,
+                                              chunkChannels, output);
+        }
+        if (compression != TIFF_COMPRESSION_JPEG) return false;
+        lj92 decoder = nullptr;
+        int dw = 0, dh = 0, db = 0, components = 0;
+        const int openResult = lj92_open(&decoder, data.data() + offset, byteCount,
+                                         &dw, &dh, &db, &components);
+        if (openResult != LJ92_ERROR_NONE) {
+            return (bits == 8 || bits == 12) &&
+                decodeDctJPEG(data.data() + offset, byteCount, chunkWidth,
+                              chunkHeight, chunkChannels, output);
+        }
+        const uint64_t rowSamples = static_cast<uint64_t>(std::max(0, dw)) *
+                                    static_cast<uint32_t>(std::max(0, components));
+        const uint64_t pixelWidth = chunkChannels && rowSamples % chunkChannels == 0
+            ? rowSamples / chunkChannels : 0;
+        if (dw <= 0 || dh <= 0 || components <= 0 || components > 4 ||
+            db != static_cast<int>(bits) || !pixelWidth ||
+            pixelWidth < chunkWidth || dh < static_cast<int>(chunkHeight) ||
+            static_cast<uint64_t>(dw) * dh * components >
+                std::numeric_limits<size_t>::max() / sizeof(uint16_t)) {
+            lj92_close(decoder); return false;
+        }
+        std::vector<uint16_t> encodedPixels(static_cast<size_t>(dw) * dh * components);
+        const bool ok = lj92_decode(decoder, encodedPixels.data(), dw * components,
+                                    0, nullptr, 0) == LJ92_ERROR_NONE;
+        lj92_close(decoder);
+        if (!ok) return false;
+        decodedWidth = static_cast<uint32_t>(pixelWidth);
+        decodedHeight = static_cast<uint32_t>(dh);
+        output = std::move(encodedPixels);
+        return true;
+    };
+    auto makeLongScalar = [&](const TiffEntry& entry, uint16_t tag, uint32_t value) {
+        write16(data.data() + entry.entryOffset, tag, little);
+        write16(data.data() + entry.entryOffset + 2, TIFF_TYPE_LONG, little);
+        write32(data.data() + entry.entryOffset + 4, 1, little);
+        write32(data.data() + entry.entryOffset + 8, value, little);
+    };
+    auto finishCanonical = [&](std::vector<uint16_t>& pixels,
+                               const TiffEntry& offsets, const TiffEntry& counts,
+                               const TiffEntry& rows) -> bool {
         const size_t byteCount = pixels.size() * sizeof(uint16_t);
         if (byteCount > std::numeric_limits<uint32_t>::max() ||
             data.size() > std::numeric_limits<uint32_t>::max() - byteCount) return false;
-        if ((data.size() & 1u) &&
-            data.size() == std::numeric_limits<uint32_t>::max() - byteCount) return false;
-        if (data.size() & 1u) data.push_back(0);
+        if (data.size() & 1u) {
+            if (data.size() == std::numeric_limits<uint32_t>::max() - byteCount)
+                return false;
+            data.push_back(0);
+        }
         const uint32_t offset = static_cast<uint32_t>(data.size());
         data.resize(data.size() + byteCount);
         for (size_t i = 0; i < pixels.size(); ++i) {
             data[offset + i * 2] = little ? pixels[i] & 0xff : pixels[i] >> 8;
             data[offset + i * 2 + 1] = little ? pixels[i] >> 8 : pixels[i] & 0xff;
         }
-        auto makeLongScalar = [&](const TiffEntry& entry, uint16_t tag, uint32_t value) {
-            write16(data.data() + entry.entryOffset, tag, little);
-            write16(data.data() + entry.entryOffset + 2, TIFF_TYPE_LONG, little);
-            write32(data.data() + entry.entryOffset + 4, 1, little);
-            write32(data.data() + entry.entryOffset + 8, value, little);
-        };
-        makeLongScalar(*tileOffsetsE, TIFF_TAG_STRIP_OFFSETS, offset);
-        makeLongScalar(*tileCountsE, TIFF_TAG_STRIP_BYTE_COUNTS, static_cast<uint32_t>(byteCount));
-        makeLongScalar(*tileWidthE, TIFF_TAG_ROWS_PER_STRIP, height);
-        // libtiff treats even a lone TileLength as evidence of a tiled image,
-        // then rejects the single-strip offset/count pair. Preserve the slot as
-        // an ignored private tag so no standard tile-layout tags survive.
-        write16(data.data() + tileHeightE->entryOffset, TIFF_TAG_UNUSED_TILE_LENGTH, little);
-        setScalar(*bitsE, 16);
+        makeLongScalar(offsets, TIFF_TAG_STRIP_OFFSETS, offset);
+        makeLongScalar(counts, TIFF_TAG_STRIP_BYTE_COUNTS,
+                       static_cast<uint32_t>(byteCount));
+        makeLongScalar(rows, TIFF_TAG_ROWS_PER_STRIP, height);
+        for (uint32_t i = 0; i < bitsE->count; ++i) {
+            const size_t at = bitsE->valueOffset + static_cast<size_t>(i) *
+                (bitsE->type == TIFF_TYPE_SHORT ? 2u : 4u);
+            if (bitsE->type == TIFF_TYPE_SHORT) write16(data.data() + at, 16, little);
+            else if (bitsE->type == TIFF_TYPE_LONG) write32(data.data() + at, 16, little);
+            else return false;
+        }
         setScalar(*compressionE, TIFF_COMPRESSION_NONE);
-        return true;
-    }
+        if (planarE) setScalar(*planarE, 1);
+        return sortTiffIfdEntries(data, photo->ifdOffset, little);
+    };
 
-    if (!stripOffsetsE || !stripCountsE || stripOffsetsE->count != 1 ||
-        stripCountsE->count != 1) return false;
-    if (compression == TIFF_COMPRESSION_NONE) return true;
-    const uint32_t stripOffset = scalar(*stripOffsetsE), stripBytes = scalar(*stripCountsE);
-    if (stripOffset > data.size() || stripBytes > data.size() - stripOffset) return false;
+    // A single chunky, uncompressed strip is already the canonical topology.
+    if (!tileOffsetsE && !tileCountsE && stripOffsetsE && stripCountsE &&
+        stripOffsetsE->count == 1 && stripCountsE->count == 1 &&
+        compression == TIFF_COMPRESSION_NONE && planar == 1) return true;
 
-    std::vector<uint16_t> pixels(imageSamples);
-    if (compression == TIFF_COMPRESSION_JPEG_XL) {
-        if (bits != 16 || !decodeJPEGXL(data.data() + stripOffset, stripBytes,
-                                        width, height, channels, pixels)) return false;
-    } else if (compression == TIFF_COMPRESSION_LOSSY_JPEG) {
-        if (bits != 8 || !decodeDctJPEG(data.data() + stripOffset, stripBytes,
-                                             width, height, channels, pixels)) return false;
-    } else if (compression == TIFF_COMPRESSION_JPEG) {
-        lj92 decoder = nullptr;
-        int decodedWidth = 0, decodedHeight = 0, decodedBits = 0, components = 0;
-        if (lj92_open(&decoder, data.data() + stripOffset, stripBytes, &decodedWidth,
-                      &decodedHeight, &decodedBits, &components) != LJ92_ERROR_NONE) {
-            if ((bits != 8 && bits != 12) || !decodeDctJPEG(
-                    data.data() + stripOffset, stripBytes, width, height, channels, pixels))
-                return false;
-            decoder = nullptr;
+    std::vector<uint16_t> pixels(imageSamples, 0);
+    if (tileOffsetsE || tileCountsE) {
+        const auto tileWidthE = find(TIFF_TAG_TILE_WIDTH);
+        const auto tileHeightE = find(TIFF_TAG_TILE_LENGTH);
+        if (!tileOffsetsE || !tileCountsE || !tileWidthE || !tileHeightE ||
+            tileOffsetsE->count != tileCountsE->count || !tileOffsetsE->count) return false;
+        const uint32_t tileWidth = scalar(*tileWidthE), tileHeight = scalar(*tileHeightE);
+        if (!tileWidth || !tileHeight) return false;
+        const uint64_t across64 = (static_cast<uint64_t>(width) + tileWidth - 1) / tileWidth;
+        const uint64_t down64 = (static_cast<uint64_t>(height) + tileHeight - 1) / tileHeight;
+        if (!across64 || !down64 || across64 > std::numeric_limits<uint32_t>::max() ||
+            across64 > std::numeric_limits<uint64_t>::max() / down64) return false;
+        const uint64_t tilesPerPlane64 = across64 * down64;
+        if (tilesPerPlane64 > std::numeric_limits<uint64_t>::max() /
+                (planar == 2 ? channels : 1)) return false;
+        const uint64_t expectedCount64 = tilesPerPlane64 * (planar == 2 ? channels : 1);
+        if (
+            tilesPerPlane64 > std::numeric_limits<uint32_t>::max() ||
+            expectedCount64 > std::numeric_limits<uint32_t>::max()) return false;
+        const uint32_t across = static_cast<uint32_t>(across64);
+        const uint32_t tilesPerPlane = static_cast<uint32_t>(tilesPerPlane64);
+        const uint32_t expectedCount = static_cast<uint32_t>(expectedCount64);
+        if (tileOffsetsE->count != expectedCount) return false;
+        for (uint32_t index = 0; index < expectedCount; ++index) {
+            uint32_t offset = 0, byteCount = 0;
+            if (!arrayValue(*tileOffsetsE, index, offset) ||
+                !arrayValue(*tileCountsE, index, byteCount)) return false;
+            const uint32_t plane = planar == 2 ? index / tilesPerPlane : 0;
+            const uint32_t spatial = planar == 2 ? index % tilesPerPlane : index;
+            const uint32_t originX = (spatial % across) * tileWidth;
+            const uint32_t originY = (spatial / across) * tileHeight;
+            const uint32_t copyWidth = std::min(tileWidth, width - originX);
+            const uint32_t copyHeight = std::min(tileHeight, height - originY);
+            const uint32_t chunkChannels = planar == 2 ? 1 : channels;
+            std::vector<uint16_t> tile;
+            uint32_t decodedWidth = 0, decodedHeight = 0;
+            const bool padded = compression == TIFF_COMPRESSION_NONE;
+            bool decoded = decodeChunk(offset, byteCount,
+                padded ? tileWidth : copyWidth, padded ? tileHeight : copyHeight,
+                chunkChannels, tile, decodedWidth, decodedHeight);
+            if (!decoded && compression != TIFF_COMPRESSION_NONE &&
+                (copyWidth != tileWidth || copyHeight != tileHeight))
+                decoded = decodeChunk(offset, byteCount, tileWidth, tileHeight,
+                                      chunkChannels, tile, decodedWidth, decodedHeight);
+            if (!decoded || decodedWidth < copyWidth || decodedHeight < copyHeight) return false;
+            for (uint32_t y = 0; y < copyHeight; ++y)
+                for (uint32_t x = 0; x < copyWidth; ++x)
+                    for (uint32_t c = 0; c < chunkChannels; ++c) {
+                        const uint32_t destinationChannel = planar == 2 ? plane : c;
+                        pixels[(static_cast<size_t>(originY + y) * width + originX + x) *
+                            channels + destinationChannel] =
+                            tile[(static_cast<size_t>(y) * decodedWidth + x) * chunkChannels + c];
+                    }
         }
-        if (!decoder) {
-            // Blackmagic's CinemaDNG extension uses Compression=7 for lossy
-            // 12-bit DCT while retaining CFA/LinearRaw photometric metadata.
-        } else {
-        const bool valid = decodedWidth == static_cast<int>(width) &&
-            decodedHeight == static_cast<int>(height) &&
-            components == static_cast<int>(channels) &&
-            lj92_decode(decoder, pixels.data(), width * channels, 0, nullptr, 0) == LJ92_ERROR_NONE;
-        lj92_close(decoder);
-        if (!valid) return false;
-        }
-    } else {
-        return false;
+        // Repurpose the four tile entries so no standard tile tag survives.
+        write16(data.data() + tileHeightE->entryOffset, TIFF_TAG_UNUSED_TILE_LENGTH, little);
+        return finishCanonical(pixels, *tileOffsetsE, *tileCountsE, *tileWidthE);
     }
 
-    const size_t byteCount = pixels.size() * sizeof(uint16_t);
-    if (byteCount > std::numeric_limits<uint32_t>::max()) return false;
-    const uint32_t newBytes = static_cast<uint32_t>(byteCount);
-    std::vector<uint8_t> decoded(newBytes);
-    for (size_t i = 0; i < pixels.size(); ++i) {
-        decoded[i * 2] = little ? pixels[i] & 0xff : pixels[i] >> 8;
-        decoded[i * 2 + 1] = little ? pixels[i] >> 8 : pixels[i] & 0xff;
+    if (!stripOffsetsE || !stripCountsE || !stripOffsetsE->count ||
+        stripOffsetsE->count != stripCountsE->count) return false;
+    const auto rowsPerStripE = find(TIFF_TAG_ROWS_PER_STRIP);
+    const uint32_t rowsPerStrip = rowsPerStripE ? scalar(*rowsPerStripE) : height;
+    if (!rowsPerStrip) return false;
+    const uint64_t stripsPerPlane64 =
+        (static_cast<uint64_t>(height) + rowsPerStrip - 1) / rowsPerStrip;
+    const uint64_t expectedStrips64 = stripsPerPlane64 * (planar == 2 ? channels : 1);
+    if (!stripsPerPlane64 || stripsPerPlane64 > std::numeric_limits<uint32_t>::max() ||
+        expectedStrips64 > std::numeric_limits<uint32_t>::max()) return false;
+    const uint32_t stripsPerPlane = static_cast<uint32_t>(stripsPerPlane64);
+    const uint32_t expectedStrips = static_cast<uint32_t>(expectedStrips64);
+    if (stripOffsetsE->count != expectedStrips) return false;
+    for (uint32_t index = 0; index < expectedStrips; ++index) {
+        uint32_t offset = 0, byteCount = 0;
+        if (!arrayValue(*stripOffsetsE, index, offset) ||
+            !arrayValue(*stripCountsE, index, byteCount)) return false;
+        const uint32_t plane = planar == 2 ? index / stripsPerPlane : 0;
+        const uint32_t strip = planar == 2 ? index % stripsPerPlane : index;
+        const uint32_t originY = strip * rowsPerStrip;
+        const uint32_t rows = std::min(rowsPerStrip, height - originY);
+        const uint32_t chunkChannels = planar == 2 ? 1 : channels;
+        std::vector<uint16_t> decoded;
+        uint32_t decodedWidth = 0, decodedHeight = 0;
+        bool decodedOk = decodeChunk(offset, byteCount, width, rows, chunkChannels,
+                                     decoded, decodedWidth, decodedHeight);
+        if (!decodedOk && compression != TIFF_COMPRESSION_NONE && rows < rowsPerStrip)
+            decodedOk = decodeChunk(offset, byteCount, width, rowsPerStrip, chunkChannels,
+                                    decoded, decodedWidth, decodedHeight);
+        if (!decodedOk || decodedWidth < width || decodedHeight < rows) return false;
+        for (uint32_t y = 0; y < rows; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                for (uint32_t c = 0; c < chunkChannels; ++c) {
+                    const uint32_t destinationChannel = planar == 2 ? plane : c;
+                    pixels[(static_cast<size_t>(originY + y) * width + x) * channels +
+                        destinationChannel] =
+                        decoded[(static_cast<size_t>(y) * decodedWidth + x) * chunkChannels + c];
+                }
     }
-    setScalar(*bitsE, 16);
-    setScalar(*compressionE, TIFF_COMPRESSION_NONE);
-    setScalar(*stripOffsetsE, stripOffset);
-    setScalar(*stripCountsE, newBytes);
-    return replaceTiffStrip(data, stripOffset, stripBytes, decoded, little);
+    if (!rowsPerStripE) return false;
+    return finishCanonical(pixels, *stripOffsetsE, *stripCountsE, *rowsPerStripE);
 }
 
 bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::string& levels) {
@@ -3297,8 +3487,9 @@ bool DNGDecoder::compressLossyJPEG(std::vector<uint8_t>& data, int quality) {
             makeLong(*updatedOffsets, TIFF_TAG_TILE_OFFSETS, currentScalar(*updatedOffsets));
             makeLong(*updatedCounts, TIFF_TAG_TILE_BYTE_COUNTS, currentScalar(*updatedCounts));
             makeLong(*updatedRows, TIFF_TAG_TILE_WIDTH, width);
-            if (!insertTiffLongEntry(data, tiledPhoto->ifdOffset,
-                                     TIFF_TAG_TILE_LENGTH, height, little)) return false;
+            if (!insertTiffScalarEntry(data, tiledPhoto->ifdOffset,
+                                       TIFF_TAG_TILE_LENGTH, TIFF_TYPE_LONG,
+                                       height, little)) return false;
         } else {
             return false;
         }
