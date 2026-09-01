@@ -1844,6 +1844,7 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
     };
     uint32_t packedBitDepth = 0;
     uint32_t linearizationInputMax = 0;
+    uint32_t reportedWhiteLevelMax = 0;
     bool hasLinearization = false;
     for (const auto& entry : entries) {
         if (entry.tag == TIFF_TAG_EXPOSURE_TIME && entry.type == TIFF_TYPE_RATIONAL && entry.count)
@@ -1871,12 +1872,17 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
                         : read32(data.data() + entry.valueOffset + c * 4, little));
         } else if (entry.tag == TIFF_TAG_WHITE_LEVEL && entry.count) {
             metadata.whiteLevelCount = std::min<uint32_t>(4, entry.count);
-            for (uint32_t c = 0; c < metadata.whiteLevelCount; ++c)
+            for (uint32_t c = 0; c < metadata.whiteLevelCount; ++c) {
                 metadata.whiteLevel[c] = entry.type == TIFF_TYPE_RATIONAL
                     ? static_cast<float>(readRational(data, entry, c, little))
                     : static_cast<float>(entry.type == TIFF_TYPE_SHORT
                         ? read16(data.data() + entry.valueOffset + c * 2, little)
                         : read32(data.data() + entry.valueOffset + c * 4, little));
+                reportedWhiteLevelMax = std::max<uint32_t>(reportedWhiteLevelMax,
+                    static_cast<uint32_t>(std::clamp(
+                        std::ceil(static_cast<double>(metadata.whiteLevel[c])),
+                        0.0, 65535.0)));
+            }
         } else if (entry.tag == TIFF_TAG_LINEARIZATION_TABLE && entry.count) {
             // The table is indexed by the stored sample code. Its highest
             // possible input is therefore count - 1, independently of the
@@ -1897,14 +1903,21 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
         else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_2)
             readMatrix(entry, metadata.forwardMatrix2, metadata.hasForwardMatrix2);
     }
-    if (hasLinearization) {
-        metadata.inputBitDepth = 1;
-        while (metadata.inputBitDepth < 16 &&
-               ((uint32_t{1} << metadata.inputBitDepth) - 1) < linearizationInputMax)
-            ++metadata.inputBitDepth;
-    } else {
-        metadata.inputBitDepth = std::min<uint32_t>(16, packedBitDepth);
-    }
+    auto bitsForMaximum = [](uint32_t maximum) {
+        uint32_t bits = 1;
+        while (bits < 16 && ((uint32_t{1} << bits) - 1) < maximum) ++bits;
+        return bits;
+    };
+    metadata.inputBitDepth = 0;
+    auto includeDepth = [&](uint32_t depth) {
+        if (!depth) return;
+        depth = std::min<uint32_t>(16, depth);
+        metadata.inputBitDepth = metadata.inputBitDepth
+            ? std::min(metadata.inputBitDepth, depth) : depth;
+    };
+    if (reportedWhiteLevelMax) includeDepth(bitsForMaximum(reportedWhiteLevelMax));
+    includeDepth(packedBitDepth);
+    if (hasLinearization) includeDepth(bitsForMaximum(linearizationInputMax));
     std::vector<std::pair<size_t, size_t>> imageRanges;
     for (const auto& offsetEntry : entries) {
         if (offsetEntry.tag != TIFF_TAG_STRIP_OFFSETS &&

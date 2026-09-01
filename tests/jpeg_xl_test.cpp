@@ -634,6 +634,10 @@ int main() {
     assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));
+    motioncam::DNGFrameMetadata linearMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, linearMetadata));
+    // A 10-bit WhiteLevel in a 16-bit container is still a 10-bit input.
+    assert(linearMetadata.inputBitDepth == 10);
     auto jpeg92Rgb = mountedRgb;
     assert(motioncam::DNGDecoder::compressLosslessJPEG(jpeg92Rgb));
     assert(motioncam::DNGDecoder::ensureUncompressed(jpeg92Rgb));
