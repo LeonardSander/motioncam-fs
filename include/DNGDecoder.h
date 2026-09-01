@@ -45,6 +45,7 @@ struct DNGFrameMetadata {
     std::array<float, 4> whiteLevel{};
     uint32_t blackLevelCount = 0;
     uint32_t whiteLevelCount = 0;
+    uint32_t inputBitDepth = 0;
     std::array<float, 9> colorMatrix1{};
     std::array<float, 9> colorMatrix2{};
     std::array<float, 9> forwardMatrix1{};

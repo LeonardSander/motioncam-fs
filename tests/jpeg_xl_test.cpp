@@ -673,6 +673,11 @@ int main() {
     assert(logRgb.SetImageData(reinterpret_cast<const unsigned char*>(logSamples.data()),
                                logSamples.size() * sizeof(uint16_t)));
     auto logDctRgb = writeDng(logRgb);
+    auto reducedLogRgb = logDctRgb;
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        reducedLogRgb, motioncam::LogTransformMode::ReduceBy4Bit, 1023));
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(reducedLogRgb));
+    assert(tiffTagValue(reducedLogRgb, 258) == 6);
     assert(motioncam::DNGDecoder::compressLossyJPEG(logDctRgb));
     assert(tiffTagValue(logDctRgb, 50717) == 65534);
     assert(tiffTagValue(logDctRgb, 50714) == logBlack[0]);

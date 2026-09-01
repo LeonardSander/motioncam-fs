@@ -160,6 +160,15 @@ int main() {
     assert(motioncam::DNGDecoder::imagePayloadsEqual(uncompressedA, uncompressedB));
     assert(!motioncam::DNGDecoder::imagePayloadsEqual(
         uncompressedA, uncompressedDifferent));
+    motioncam::DNGFrameMetadata packedMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(uncompressedA, packedMetadata));
+    assert(packedMetadata.inputBitDepth == 16);
+    motioncam::DNGFrameMetadata logMetadata;
+    const auto logDng = makeLogCfaDng(1023, 0);
+    assert(motioncam::DNGDecoder::getColorMetadata(logDng, logMetadata));
+    // LinearizationTable has 1024 inputs, so it takes precedence over the
+    // 16-bit container declared by BitsPerSample.
+    assert(logMetadata.inputBitDepth == 10);
     auto compressedA = uncompressedA, compressedB = uncompressedB;
     assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedA));
     assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedB));

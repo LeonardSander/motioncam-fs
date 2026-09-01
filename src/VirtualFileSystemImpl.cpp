@@ -995,7 +995,8 @@ std::string getDisplayDataLevels(
     float dynWhiteLevel, std::array<float, 4> dynBlackLevel, 
     float statWhiteLevel, std::array<float, 4> statBlackLevel, 
     std::string levels, std::string logTransform,
-    bool applyShadingMap, bool normalizeShadingMap) {
+    bool applyShadingMap, bool normalizeShadingMap,
+    uint32_t inputBitDepth) {
 
     const auto resolvedLevels = resolveDataLevels(
         levels, dynWhiteLevel, dynBlackLevel, statWhiteLevel, statBlackLevel);
@@ -1005,7 +1006,14 @@ std::string getDisplayDataLevels(
     float dstWhiteLevel = srcWhiteLevel;
     std::array<float, 4> dstBlackLevel = srcBlackLevel;
 
-    int useBits = std::min(16, static_cast<int>(std::ceil(std::log2(srcWhiteLevel + 1))));
+    const auto separator = levels.find('/');
+    const std::string selectedWhite = separator == std::string::npos
+        ? levels : levels.substr(0, separator);
+    const bool usesSourceWhite = selectedWhite.empty() || selectedWhite == "Dynamic" ||
+                                 selectedWhite == "Static";
+    int useBits = inputBitDepth > 0 && usesSourceWhite
+        ? static_cast<int>(std::min<uint32_t>(16, inputBitDepth))
+        : std::min(16, static_cast<int>(std::ceil(std::log2(srcWhiteLevel + 1))));
 
     if(logTransform.empty()) {
         if(applyShadingMap) {

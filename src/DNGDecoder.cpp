@@ -1842,6 +1842,9 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             matrix[i] = static_cast<float>(readRational(data, entry, i, little));
         present = true;
     };
+    uint32_t packedBitDepth = 0;
+    uint32_t linearizationInputMax = 0;
+    bool hasLinearization = false;
     for (const auto& entry : entries) {
         if (entry.tag == TIFF_TAG_EXPOSURE_TIME && entry.type == TIFF_TYPE_RATIONAL && entry.count)
             metadata.exposureTime = readRational(data, entry, 0, little);
@@ -1874,6 +1877,17 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
                     : static_cast<float>(entry.type == TIFF_TYPE_SHORT
                         ? read16(data.data() + entry.valueOffset + c * 2, little)
                         : read32(data.data() + entry.valueOffset + c * 4, little));
+        } else if (entry.tag == TIFF_TAG_LINEARIZATION_TABLE && entry.count) {
+            // The table is indexed by the stored sample code. Its highest
+            // possible input is therefore count - 1, independently of the
+            // post-linearization WhiteLevel values contained in the table.
+            hasLinearization = true;
+            linearizationInputMax = std::max(linearizationInputMax, entry.count - 1);
+        } else if (entry.tag == TIFF_TAG_BITS_PER_SAMPLE && entry.count &&
+                   entry.type == TIFF_TYPE_SHORT) {
+            for (uint32_t i = 0; i < entry.count; ++i)
+                packedBitDepth = std::max<uint32_t>(packedBitDepth,
+                    read16(data.data() + entry.valueOffset + i * 2, little));
         } else if (entry.tag == TIFF_TAG_COLOR_MATRIX_1)
             readMatrix(entry, metadata.colorMatrix1, metadata.hasColorMatrix1);
         else if (entry.tag == TIFF_TAG_COLOR_MATRIX_2)
@@ -1882,6 +1896,14 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             readMatrix(entry, metadata.forwardMatrix1, metadata.hasForwardMatrix1);
         else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_2)
             readMatrix(entry, metadata.forwardMatrix2, metadata.hasForwardMatrix2);
+    }
+    if (hasLinearization) {
+        metadata.inputBitDepth = 1;
+        while (metadata.inputBitDepth < 16 &&
+               ((uint32_t{1} << metadata.inputBitDepth) - 1) < linearizationInputMax)
+            ++metadata.inputBitDepth;
+    } else {
+        metadata.inputBitDepth = std::min<uint32_t>(16, packedBitDepth);
     }
     std::vector<std::pair<size_t, size_t>> imageRanges;
     for (const auto& offsetEntry : entries) {

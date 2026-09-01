@@ -100,6 +100,8 @@ private:
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::vector<size_t> mSourceMetadataSizes;
     std::vector<float> mSourceWhiteLevels;
+    std::vector<uint32_t> mSourceInputBitDepths;
+    uint32_t mSourceInputBitDepth = 16;
 };
 
 } // namespace motioncam

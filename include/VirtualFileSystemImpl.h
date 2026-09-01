@@ -199,7 +199,8 @@ std::string getDisplayDataLevels(
     float dynWhiteLevel, std::array<float, 4> dynBlackLevel, 
     float statWhiteLevel, std::array<float, 4> statBlackLevel, 
     std::string levels, std::string logTransform,
-    bool applyShadingMap, bool normalizeShadingMap);
+    bool applyShadingMap, bool normalizeShadingMap,
+    uint32_t inputBitDepth = 0);
 
 } // namespace vfs
 } // namespace motioncam

@@ -114,6 +114,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         std::vector<DNGFrameMetadata> metadata(frames.size());
         mSourceMetadataSizes.resize(frames.size());
         mSourceWhiteLevels.resize(frames.size(), mSourceWhiteLevel);
+        mSourceInputBitDepths.resize(frames.size(), mSourceInputBitDepth);
         exposureSamples.reserve(frames.size());
         size_t missingExposureFrames = 0;
         for (size_t i = 0; i < frames.size(); ++i) {
@@ -122,6 +123,8 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             mSourceMetadataSizes[i] = metadata[i].metadataBytes;
             if (metadata[i].whiteLevelCount)
                 mSourceWhiteLevels[i] = metadata[i].whiteLevel[0];
+            if (metadata[i].inputBitDepth)
+                mSourceInputBitDepths[i] = metadata[i].inputBitDepth;
             if (metadata[i].hasExposure) {
                 exposureSamples.push_back({frames[i].timestamp, metadata[i].iso,
                     metadata[i].exposureTime, metadata[i].baselineExposure,
@@ -139,6 +142,8 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 mSourceWhiteLevel = metadata[0].whiteLevel[0];
             if (metadata[0].blackLevelCount > 0)
                 mSourceBlackLevel = metadata[0].blackLevel;
+            if (metadata[0].inputBitDepth > 0)
+                mSourceInputBitDepth = metadata[0].inputBitDepth;
         }
         if (!frames.empty()) {
             GainMap sourceGainMap;
@@ -235,7 +240,8 @@ void VirtualFileSystemImpl_DNG::init() {
         else if (scale == 1 && mCfaSize > 2 && demosaicMode)
             channels = remosaic ? 1u : 3u;
 
-        uint32_t storedBits = 1;
+        uint32_t storedBits = frameIndex < mSourceInputBitDepths.size()
+            ? mSourceInputBitDepths[frameIndex] : mSourceInputBitDepth;
         // DNG level overrides use this source frame's levels for both Dynamic
         // and Static; only an explicit numeric white changes the code range.
         const float sourceWhite = frameIndex < mSourceWhiteLevels.size()
@@ -245,8 +251,17 @@ void VirtualFileSystemImpl_DNG::init() {
             sourceWhite, mSourceBlackLevel);
         const uint32_t white = static_cast<uint32_t>(
             std::clamp(effectiveLevels.white, 1.0f, 65535.0f));
-        while (storedBits < 16 && ((uint32_t{1} << storedBits) - 1) < white)
-            ++storedBits;
+        // Explicit level overrides define a new quantization range. Otherwise
+        // retain the stored input depth reported by the DNG metadata.
+        const auto levelSeparator = mConfig.levels.find('/');
+        const std::string selectedWhite = levelSeparator == std::string::npos
+            ? mConfig.levels : mConfig.levels.substr(0, levelSeparator);
+        if (!selectedWhite.empty() && selectedWhite != "Dynamic" &&
+            selectedWhite != "Static") {
+            storedBits = 1;
+            while (storedBits < 16 && ((uint32_t{1} << storedBits) - 1) < white)
+                ++storedBits;
+        }
         const bool vignetteBake =
             mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
         const bool logApplied = (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
@@ -526,14 +541,17 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
                             !effectiveGainMaps.empty();
     const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
                              hasGainMap;
-    uint32_t preBakeWhite = 0;
-    if (bakeGainMap && (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
-        !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP)) {
-        DNGFrameMetadata preBakeMetadata;
-        if (!DNGDecoder::getColorMetadata(bytes, preBakeMetadata))
-            throw std::runtime_error("Could not read pre-vignette DNG levels: " + frame.filePath);
-        preBakeWhite = static_cast<uint32_t>(std::clamp(
-            preBakeMetadata.whiteLevel[0], 1.0f, 65535.0f));
+    uint32_t inputQuantizationWhite = 0;
+    const auto levelSeparator = mConfig.levels.find('/');
+    const std::string selectedWhite = levelSeparator == std::string::npos
+        ? mConfig.levels : mConfig.levels.substr(0, levelSeparator);
+    const bool usesSourceWhite = selectedWhite.empty() || selectedWhite == "Dynamic" ||
+                                 selectedWhite == "Static";
+    if (usesSourceWhite) {
+        const uint32_t inputBits = frameIndex < mSourceInputBitDepths.size()
+            ? mSourceInputBitDepths[frameIndex] : mSourceInputBitDepth;
+        if (inputBits > 0 && inputBits <= 16)
+            inputQuantizationWhite = (uint32_t{1} << inputBits) - 1;
     }
     if (hasGainMap && !bakeGainMap &&
         (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
@@ -572,7 +590,8 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if ((mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
         (mConfig.logTransform != LogTransformMode::KeepInput || bakeGainMap) &&
-        !DNGDecoder::applyLogTransform(bytes, mConfig.logTransform, preBakeWhite))
+        !DNGDecoder::applyLogTransform(
+            bytes, mConfig.logTransform, inputQuantizationWhite))
         throw std::runtime_error("Could not apply DNG log transform: " + frame.filePath);
     if (!DNGDecoder::setTimingMetadata(bytes, mFps, outputTimestamp))
         throw std::runtime_error("Could not update DNG timing metadata");
@@ -685,7 +704,8 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         mConfig.levels,
         applyLogCurve ? logTransformModeToString(mConfig.logTransform) : std::string(),
         mSourceHasGainMap && (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION),
-        mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
+        mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+        mSourceInputBitDepth);
     
     // Calculate runtime from frame count and fps
     const int outputFrames = mTotalFrames - mDroppedFrames + mDuplicatedFrames;
