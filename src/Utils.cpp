@@ -1719,7 +1719,11 @@ std::shared_ptr<std::vector<char>> generateDng(
             encodeBits = 16;
         }
     }
-    // For compressed data, keep as unpacked 16-bit but use actualBits for encoding
+    // Compressed codecs consume unpacked uint16 samples. Uncompressed output,
+    // however, must advertise the bit depth of the buffer after packing. This
+    // differs from the sensor precision for RGB sourced from 13/14-bit data:
+    // there is no packed RGB encoder for those depths, so that path deliberately
+    // leaves uint16 samples in processedData and sets encodeBits to 16.
 
     // Create first frame
     tinydngwriter::DNGImage dng;
@@ -1857,8 +1861,11 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     // DNG 1.7 JPEG XL is decoded through a uint16 pixel buffer. Keep sensor
     // values unchanged and describe their meaningful range with WhiteLevel.
-    // For uncompressed: use encodeBits (the packed bit depth)
-    const uint16_t storedBits = (jpegXlCompression || lossyJpegDct) ? 16 : actualBits;
+    // For uncompressed: use encodeBits (the packed bit depth). Advertising
+    // actualBits here made a 14-bit LinearRaw DNG claim three packed 14-bit
+    // samples while its strip actually contained three uint16 samples. Strict
+    // readers such as darktable reject that inconsistent strip layout.
+    const uint16_t storedBits = (jpegXlCompression || lossyJpegDct) ? 16 : encodeBits;
     const uint16_t bps[3] = { storedBits, storedBits, storedBits };
     dng.SetBitsPerSample(samplesPerPixel, bps);
 

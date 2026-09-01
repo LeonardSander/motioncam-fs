@@ -1053,13 +1053,33 @@ namespace {
 
     void writeRational(std::vector<uint8_t>& data, const TiffEntry& entry,
                        uint32_t index, double value, bool little) {
-        constexpr int32_t denominator = 1000000;
+        constexpr uint32_t preferredDenominator = 1000000;
+        const bool signedRational = entry.type == TIFF_TYPE_SRATIONAL;
+        const double numeratorLimit = signedRational
+            ? static_cast<double>(std::numeric_limits<int32_t>::max())
+            : static_cast<double>(std::numeric_limits<uint32_t>::max());
+        // Geometry tags such as DefaultCropSize are unsigned rationals and can
+        // easily exceed UINT32_MAX when multiplied by a fixed 1e6 denominator
+        // (for example a 12032-pixel-wide phone sensor).  Retain micro-unit
+        // precision where possible, but reduce the denominator rather than
+        // clipping the value.  SRATIONAL values keep their signed range.
+        uint32_t denominator = preferredDenominator;
+        const double magnitude = std::abs(value);
+        if (magnitude > 0.0 && magnitude * denominator > numeratorLimit)
+            denominator = std::max<uint32_t>(1, static_cast<uint32_t>(
+                std::floor(numeratorLimit / magnitude)));
         const double scaled = std::round(value * denominator);
-        const int32_t numerator = static_cast<int32_t>(std::clamp(
-            scaled, static_cast<double>(std::numeric_limits<int32_t>::min()),
-            static_cast<double>(std::numeric_limits<int32_t>::max())));
         const size_t pos = entry.valueOffset + static_cast<size_t>(index) * 8;
-        write32(data.data() + pos, static_cast<uint32_t>(numerator), little);
+        if (signedRational) {
+            const auto numerator = static_cast<int32_t>(std::clamp(
+                scaled, static_cast<double>(std::numeric_limits<int32_t>::min()),
+                static_cast<double>(std::numeric_limits<int32_t>::max())));
+            write32(data.data() + pos, static_cast<uint32_t>(numerator), little);
+        } else {
+            const auto numerator = static_cast<uint32_t>(std::clamp(
+                scaled, 0.0, static_cast<double>(std::numeric_limits<uint32_t>::max())));
+            write32(data.data() + pos, numerator, little);
+        }
         write32(data.data() + pos + 4, denominator, little);
     }
 
