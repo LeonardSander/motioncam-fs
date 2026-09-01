@@ -2397,19 +2397,32 @@ bool generateJpegThumbnail(
 }
 
 bool generateJpegThumbnailFromDng(
-    const std::vector<char>& source,
+    std::vector<uint8_t> data,
     const std::string& outputPath,
     int thumbWidth,
     int thumbHeight) {
-    if (source.empty() || thumbWidth < 1 || thumbHeight < 1) return false;
-    std::vector<uint8_t> data(source.begin(), source.end());
+    if (data.empty() || thumbWidth < 1 || thumbHeight < 1) return false;
+    // UI thumbnails are rendered only from the primary raw image. Discard all
+    // embedded previews before any decompression or CFA processing.
+    if (!DNGDecoder::removeThumbnails(data)) return false;
     int repeatSize = 2;
     std::array<uint8_t, 4> phase{0, 1, 1, 2};
     const bool hasCfa = DNGDecoder::getCFAMetadata(data, repeatSize, phase);
-    if (!DNGDecoder::ensureUncompressed(data)) return false;
-    if (hasCfa && !DNGDecoder::processHigherCFA(
-            data, repeatSize, phase, QuadBayerMode::Demosaic, false))
-        return false;
+    if (!DNGDecoder::ensureUncompressed(data, true)) return false;
+    if (hasCfa) {
+        // A UI thumbnail never needs a full-resolution demosaic. First use the
+        // existing sparse proxy path to reduce the CFA to a small ordinary
+        // Bayer image, then demosaic only that reduced image. Besides avoiding
+        // hundreds of MiB of temporary RGB, this keeps thumbnail work from
+        // starving mounted-frame reads.
+        constexpr int thumbnailProxyScale = 16;
+        if (!DNGDecoder::processHigherCFA(
+                data, repeatSize, phase, QuadBayerMode::Demosaic, false,
+                thumbnailProxyScale, false) ||
+            !DNGDecoder::processHigherCFA(
+                data, 2, phase, QuadBayerMode::Demosaic, false, 1, false))
+            return false;
+    }
 
     std::vector<uint8_t> rgb16;
     uint32_t width = 0, height = 0;

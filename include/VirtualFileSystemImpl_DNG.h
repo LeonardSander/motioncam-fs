@@ -94,9 +94,12 @@ private:
     std::map<Timestamp, double> mIsoValues;
     mutable std::mutex mMutex;
     mutable std::mutex mPayloadHashMutex;
+    mutable std::mutex mMaterializeMutex;
     mutable std::shared_mutex mRenderMutex;
     std::unordered_map<size_t, uint64_t> mPayloadHashes;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
+    std::vector<size_t> mSourceMetadataSizes;
+    std::vector<float> mSourceWhiteLevels;
 };
 
 } // namespace motioncam

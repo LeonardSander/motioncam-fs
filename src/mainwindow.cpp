@@ -882,15 +882,21 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void MainWindow::mountFile(const QString& filePath) {
+    QElapsedTimer mountTimer;
+    mountTimer.start();
+    spdlog::info("Mount timing [{}]: request started", filePath.toStdString());
     const QString normalizedPath = QFileInfo(filePath).absoluteFilePath();
     for (const auto& mounted : mMountedFiles)
         if (QFileInfo(mounted.srcFile).absoluteFilePath() == normalizedPath)
             return;
     if (mMountInProgress) {
+        if (mMountPathInProgress == normalizedPath)
+            return;
         QTimer::singleShot(200, this, [this, filePath] { mountFile(filePath); });
         return;
     }
     mMountInProgress = true;
+    mMountPathInProgress = normalizedPath;
     // Extract just the filename from the path
     QFileInfo fileInfo(filePath);
     auto fileName = fileInfo.fileName();
@@ -924,13 +930,19 @@ void MainWindow::mountFile(const QString& filePath) {
 #ifdef __APPLE__
     cleanupStaleMacFuseMounts();
 #elif __linux__
+    const qint64 cleanupStarted = mountTimer.elapsed();
     if (!cleanupStaleLinuxFuseMount(dstPath, mountError)) {
         mountProgress.close();
         mMountInProgress = false;
+        mMountPathInProgress.clear();
         QMessageBox::critical(this, tr("Error"), mountError);
         return;
     }
+    spdlog::info("Mount timing [{}]: stale-mount check {:.1f} ms",
+                 filePath.toStdString(),
+                 static_cast<double>(mountTimer.elapsed() - cleanupStarted));
 #endif
+    const qint64 backendStarted = mountTimer.elapsed();
     auto future = QtConcurrent::run([this, settings, filePath, dstPath, &mountError] {
         try {
             return mFuseFilesystem->mount(
@@ -946,7 +958,12 @@ void MainWindow::mountFile(const QString& filePath) {
     }
     mountProgress.close();
     mountId = future.result();
+    spdlog::info("Mount timing [{}]: backend mount {:.1f} ms (total {:.1f} ms)",
+                 filePath.toStdString(),
+                 static_cast<double>(mountTimer.elapsed() - backendStarted),
+                 static_cast<double>(mountTimer.elapsed()));
     mMountInProgress = false;
+    mMountPathInProgress.clear();
     if (mountId == motioncam::InvalidMountId) {
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(mountError));
         return;
@@ -1305,6 +1322,9 @@ void MainWindow::mountFile(const QString& filePath) {
     mMountedFiles.append(
         motioncam::MountedFile(mountId, filePath));
     autoSaveSession();
+
+    spdlog::info("Mount timing [{}]: UI/card/session complete {:.1f} ms",
+                 filePath.toStdString(), static_cast<double>(mountTimer.elapsed()));
 
     // Update calibration button state
     updateCalibrationButtonStates();
@@ -2760,15 +2780,33 @@ void MainWindow::scheduleOptionsUpdate() {
 }
 
 void MainWindow::applyAutoSettings() {
+    if (mProcessingInProgress || mProcessingWatcher->isRunning()) {
+        mOptionsUpdatePending = true;
+        return;
+    }
+
     if (mSelectedMountIds.isEmpty()) {
         mRenderSettings = mGlobalRenderSettings;
+        QList<motioncam::MountId> mounts;
         for (const auto& file : mMountedFiles) {
             if (mLocalSettings.contains(file.mountId)) continue;
-            mFuseFilesystem->updateOptions(file.mountId, mGlobalRenderSettings);
+            mounts.push_back(file.mountId);
         }
-        updateFpsLabels();
         clearApplyFeedback();
         autoSaveSession();
+        if (mounts.isEmpty()) {
+            updateFpsLabels();
+            return;
+        }
+        const auto settings = mGlobalRenderSettings;
+        mOptionsUpdatePending = false;
+        mProcessingInProgress = true;
+        onProcessingStarted();
+        mProcessingWatcher->setFuture(QtConcurrent::run(
+            [this, mounts = std::move(mounts), settings] {
+                for (const auto mountId : mounts)
+                    mFuseFilesystem->updateOptions(mountId, settings);
+            }));
         return;
     }
 
@@ -2990,7 +3028,12 @@ void MainWindow::updateSelectionUi() {
 
 void MainWindow::onApplySelected() {
     if (mSelectedMountIds.isEmpty()) return;
+    if (mProcessingInProgress || mProcessingWatcher->isRunning()) {
+        mOptionsUpdatePending = true;
+        return;
+    }
     const auto edited = buildRenderSettings();
+    QList<QPair<motioncam::MountId, motioncam::RenderSettings>> updates;
     for (auto id : mSelectedMountIds) {
         auto settings = edited;
         const auto previous = mLocalSettings.value(id, mGlobalRenderSettings);
@@ -3028,12 +3071,23 @@ void MainWindow::onApplySelected() {
         if (ui->badPixelTreatmentComboBox->property("localOverride").toBool()) settings.badPixelTreatment = previous.badPixelTreatment;
         if (ui->cfaPhaseComboBox->property("localOverride").toBool()) settings.cfaPhase = previous.cfaPhase;
         mLocalSettings.insert(id, settings);
-        mFuseFilesystem->updateOptions(id, settings);
+        updates.push_back(qMakePair(id, settings));
         updateLocalBadge(id);
     }
-    updateFpsLabels();
     clearApplyFeedback();
     autoSaveSession();
+    if (updates.isEmpty()) {
+        updateFpsLabels();
+        return;
+    }
+    mOptionsUpdatePending = false;
+    mProcessingInProgress = true;
+    onProcessingStarted();
+    mProcessingWatcher->setFuture(QtConcurrent::run(
+        [this, updates = std::move(updates)] {
+            for (const auto& update : updates)
+                mFuseFilesystem->updateOptions(update.first, update.second);
+        }));
 }
 
 void MainWindow::onApplyAll() {

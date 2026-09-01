@@ -623,7 +623,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            auto session = std::make_unique<Session>(srcFile, dstPath, std::move(fs));
+            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs));
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);
         }
@@ -643,7 +643,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            auto session = std::make_unique<Session>(srcFile, dstPath, std::move(fs));
+            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs));
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);
         }
@@ -661,7 +661,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
             auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            auto session = std::make_unique<Session>(srcFile, dstPath, std::move(fs));
+            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs));
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);
         }
@@ -676,38 +676,52 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
 }
 
 void FuseFileSystemImpl_Win::unmount(MountId mountId) {
-    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
-    mMountedFiles.erase(mountId);
+    std::shared_ptr<VirtualizationInstance> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) return;
+        session = std::move(it->second);
+        mMountedFiles.erase(it);
+    }
+    session.reset();
 }
 
 void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings& settings) {
-    auto it = mMountedFiles.find(mountId);
-    if(it == mMountedFiles.end())
-        return;
-    dynamic_cast<Session*>(mMountedFiles[mountId].get())->updateOptions(settings);
+    std::shared_ptr<VirtualizationInstance> instance;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it != mMountedFiles.end()) instance = it->second;
+    }
+    if (auto* session = dynamic_cast<Session*>(instance.get())) session->updateOptions(settings);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
-    auto it = mMountedFiles.find(mountId);
-    if(it != mMountedFiles.end()) {
-        return dynamic_cast<Session*>(it->second.get())->getFileInfo();
+    std::shared_ptr<VirtualizationInstance> instance;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it != mMountedFiles.end()) instance = it->second;
     }
+    if (auto* session = dynamic_cast<Session*>(instance.get())) return session->getFileInfo();
     return std::nullopt;
 }
 
 bool FuseFileSystemImpl_Win::generateThumbnail(
     MountId mountId, const std::string& outputPath, int width, int height) {
-    std::string sourcePath;
+    std::shared_ptr<VirtualizationInstance> instance;
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         const auto it = mMountedFiles.find(mountId);
         if (it == mMountedFiles.end()) return false;
-        auto* session = dynamic_cast<Session*>(it->second.get());
-        if (!session) return false;
-        sourcePath = session->sourcePath();
-        if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
-            return session->generateThumbnail(outputPath, width, height);
+        instance = it->second;
     }
+    auto* session = dynamic_cast<Session*>(instance.get());
+    if (!session) return false;
+    const std::string sourcePath = session->sourcePath();
+    if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
+        return session->generateThumbnail(outputPath, width, height);
     try {
         const fs::path source(sourcePath);
         Decoder decoder(source.string());
@@ -789,10 +803,16 @@ void FuseFileSystemImpl_Win::finalize(
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
     const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
     bool writeFiles) {
-    const auto it = mMountedFiles.find(mountId);
-    if (it == mMountedFiles.end())
-        throw std::runtime_error("Mount not found");
-    dynamic_cast<Session*>(it->second.get())->finalize(
+    std::shared_ptr<VirtualizationInstance> instance;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) throw std::runtime_error("Mount not found");
+        instance = it->second;
+    }
+    auto* session = dynamic_cast<Session*>(instance.get());
+    if (!session) throw std::runtime_error("Invalid mount session");
+    session->finalize(
         destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
 

@@ -37,7 +37,7 @@ public:
 
 private:
     MountId mNextMountId;
-    std::map<MountId, std::unique_ptr<VirtualizationInstance>> mMountedFiles;
+    std::map<MountId, std::shared_ptr<VirtualizationInstance>> mMountedFiles;
     mutable std::mutex mMountedFilesMutex;
     std::unique_ptr<BS::thread_pool> mIoThreadPool;
     std::unique_ptr<BS::thread_pool> mProcessingThreadPool;

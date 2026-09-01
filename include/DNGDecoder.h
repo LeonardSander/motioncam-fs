@@ -36,6 +36,7 @@ struct DNGSequenceInfo {
 };
 
 struct DNGFrameMetadata {
+    size_t metadataBytes = 0;
     double exposureTime = 0.0;
     double iso = 0.0;
     double baselineExposure = 0.0;
@@ -96,11 +97,16 @@ public:
     static bool getTimingMetadata(const std::vector<uint8_t>& dngData,
                                   Timestamp& timestampNs);
     static bool repairExposureTime(std::vector<uint8_t>& dngData, double exposureTime);
-    static bool ensureUncompressed(std::vector<uint8_t>& dngData);
+    static bool ensureUncompressed(std::vector<uint8_t>& dngData,
+                                   bool backgroundWork = false);
+    static void beginForegroundWork();
+    static void endForegroundWork();
+    static bool removeThumbnails(std::vector<uint8_t>& dngData);
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,
                                    const std::string& levels);
     static bool packUncompressedToWhiteLevel(std::vector<uint8_t>& dngData);
-    static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode);
+    static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode,
+                                  uint32_t quantizationWhite = 0);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
     static bool extractUncompressedRGB16(const std::vector<uint8_t>& dngData,
                                          std::vector<uint8_t>& rgbData,
@@ -126,7 +132,8 @@ public:
                              bool normalizeGainMaps,
                              bool colorOnly,
                              bool optimizeGainMaps = false,
-                             bool debugGainMap = false);
+                             bool debugGainMap = false,
+                             int cfaRepeatSizeOverride = 0);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

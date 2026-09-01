@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <ctime>
 #include <cstring>
@@ -284,6 +285,15 @@ FuseFileSystemImpl_Linux::~FuseFileSystemImpl_Linux() {
 MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
                                         const std::string& srcFile,
                                         const std::string& dstPath) {
+    const auto mountStarted = std::chrono::steady_clock::now();
+    auto stageStarted = mountStarted;
+    auto logStage = [&](const char* stage) {
+        const auto now = std::chrono::steady_clock::now();
+        spdlog::info("Mount timing [{}]: {} {:.1f} ms (total {:.1f} ms)", srcFile, stage,
+                     std::chrono::duration<double, std::milli>(now - stageStarted).count(),
+                     std::chrono::duration<double, std::milli>(now - mountStarted).count());
+        stageStarted = now;
+    };
     const fs::path sourcePath(srcFile);
     const std::string extension = sourcePath.extension().string();
     const std::string filename = sourcePath.filename().string();
@@ -294,8 +304,10 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
         throw std::runtime_error("Source and mount destination must be different paths");
 
     recoverStaleMount(dstPath);
+    logStage("backend stale-mount recovery");
     if (!QDir().mkpath(QString::fromStdString(dstPath)))
         throw std::runtime_error("Failed to create " + dstPath);
+    logStage("mount directory creation");
 
     const std::string baseName = fs::path(dstPath).filename().string();
     std::unique_ptr<IVirtualFileSystem> filesystem;
@@ -318,41 +330,62 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     } else {
         throw std::runtime_error("Invalid format");
     }
+    logStage("virtual filesystem construction");
 
     const MountId mountId = mNextMountId++;
+    auto session = std::make_shared<LinuxFuseSession>(
+        srcFile, dstPath, std::move(filesystem));
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
-        mMountedFiles.emplace(
-            mountId,
-            std::make_unique<LinuxFuseSession>(
-                srcFile, dstPath, std::move(filesystem)));
+        mMountedFiles.emplace(mountId, std::move(session));
     }
+    logStage("FUSE session creation/start");
     return mountId;
 }
 void FuseFileSystemImpl_Linux::unmount(MountId mountId) {
-    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
-    mMountedFiles.erase(mountId);
+    std::shared_ptr<LinuxFuseSession> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) return;
+        session = std::move(it->second);
+        mMountedFiles.erase(it);
+    }
+    // Session shutdown may wait for FUSE or an in-flight user. Never hold the
+    // global mount registry lock while doing that work.
+    session.reset();
 }
 void FuseFileSystemImpl_Linux::updateOptions(MountId mountId, const RenderSettings& settings) {
-    if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
-        it->second->updateOptions(settings);
+    std::shared_ptr<LinuxFuseSession> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
+            session = it->second;
+    }
+    if (session) session->updateOptions(settings);
 }
 std::optional<FileInfo> FuseFileSystemImpl_Linux::getFileInfo(MountId mountId) {
-    if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
-        return it->second->getFileInfo();
+    std::shared_ptr<LinuxFuseSession> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
+            session = it->second;
+    }
+    if (session) return session->getFileInfo();
     return std::nullopt;
 }
 bool FuseFileSystemImpl_Linux::generateThumbnail(
     MountId mountId, const std::string& outputPath, int width, int height) {
-    std::string sourcePath;
+    std::shared_ptr<LinuxFuseSession> session;
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         const auto it = mMountedFiles.find(mountId);
         if (it == mMountedFiles.end()) return false;
-        sourcePath = it->second->sourcePath();
-        if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
-            return it->second->generateThumbnail(outputPath, width, height);
+        session = it->second;
     }
+    const std::string sourcePath = session->sourcePath();
+    if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
+        return session->generateThumbnail(outputPath, width, height);
     try {
         const fs::path source(sourcePath);
         Decoder decoder(source.string());
@@ -377,9 +410,13 @@ void FuseFileSystemImpl_Linux::finalize(
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
     const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
     bool writeFiles) {
-    const auto it = mMountedFiles.find(mountId);
-    if (it == mMountedFiles.end())
-        throw std::runtime_error("Mount not found");
-    it->second->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
+    std::shared_ptr<LinuxFuseSession> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) throw std::runtime_error("Mount not found");
+        session = it->second;
+    }
+    session->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
 } // namespace motioncam

@@ -1103,10 +1103,6 @@
            </widget></item>
           </layout>
          </item>
-         <item><widget class="QLabel" name="badPixelInfoLabel">
-          <property name="text"><string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Bake calibrated bad/PDAF pixel corrections, preserve raw samples with a DNG opcode, or disable treatment.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string></property>
-          <property name="wordWrap"><bool>true</bool></property>
-         </widget></item>
         </layout>
        </item>
        <item>

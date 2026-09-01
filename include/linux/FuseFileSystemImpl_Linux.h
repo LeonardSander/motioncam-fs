@@ -34,7 +34,10 @@ public:
 
 private:
     MountId mNextMountId;
-    std::map<MountId, std::unique_ptr<LinuxFuseSession>> mMountedFiles;
+    // Long-running thumbnail/finalize operations retain their session without
+    // holding the map mutex, so unrelated mounts are never serialized behind
+    // image processing.
+    std::map<MountId, std::shared_ptr<LinuxFuseSession>> mMountedFiles;
     mutable std::mutex mMountedFilesMutex;
     std::unique_ptr<BS::thread_pool> mIoThreadPool;
     std::unique_ptr<BS::thread_pool> mProcessingThreadPool;

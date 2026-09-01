@@ -514,7 +514,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     settings, srcFile, baseName);
             }
 
-            auto session = std::make_unique<Session>(
+            auto session = std::make_shared<Session>(
                 srcFile, dstPath, std::move(filesystem));
 
             if(!session) {
@@ -541,7 +541,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
 }
 
 void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
-    std::unique_ptr<Session> session;
+    std::shared_ptr<Session> session;
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         auto it = mMountedFiles.find(mountId);
@@ -559,31 +559,38 @@ void FuseFileSystemImpl_MacOs::updateOptions(
     MountId mountId,
     const RenderSettings& settings)
 {
-    auto it = mMountedFiles.find(mountId);
-    if(it != mMountedFiles.end()) {
-        it->second->updateOptions(settings);
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it != mMountedFiles.end()) session = it->second;
     }
+    if (session) session->updateOptions(settings);
 }
 
 std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
-    auto it = mMountedFiles.find(mountId);
-    if(it != mMountedFiles.end()) {
-        return it->second->getFileInfo();
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it != mMountedFiles.end()) session = it->second;
     }
+    if (session) return session->getFileInfo();
     return std::nullopt;
 }
 
 bool FuseFileSystemImpl_MacOs::generateThumbnail(
     MountId mountId, const std::string& outputPath, int width, int height) {
-    std::string sourcePath;
+    std::shared_ptr<Session> session;
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         const auto it = mMountedFiles.find(mountId);
         if (it == mMountedFiles.end()) return false;
-        sourcePath = it->second->sourcePath();
-        if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
-            return it->second->generateThumbnail(outputPath, width, height);
+        session = it->second;
     }
+    const std::string sourcePath = session->sourcePath();
+    if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
+        return session->generateThumbnail(outputPath, width, height);
     try {
         const fs::path source(sourcePath);
         Decoder decoder(source.string());
@@ -609,10 +616,14 @@ void FuseFileSystemImpl_MacOs::finalize(
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
     const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
     bool writeFiles) {
-    const auto it = mMountedFiles.find(mountId);
-    if (it == mMountedFiles.end())
-        throw std::runtime_error("Mount not found");
-    it->second->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) throw std::runtime_error("Mount not found");
+        session = it->second;
+    }
+    session->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
 
 } // namespace motioncam

@@ -233,7 +233,7 @@ bool generateJpegThumbnail(
     int thumbHeight);
 
 bool generateJpegThumbnailFromDng(
-    const std::vector<char>& data,
+    std::vector<uint8_t> data,
     const std::string& outputPath,
     int thumbWidth,
     int thumbHeight);

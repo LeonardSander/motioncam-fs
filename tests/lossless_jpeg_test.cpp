@@ -504,7 +504,12 @@ int main() {
                 tiledPixels[y * tiledWidth + x] = static_cast<uint16_t>(y * 100 + x);
         auto tiled = tiledLosslessJpegDng(
             tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2);
+        const size_t compressedTiledSize = tiled.size();
         assert(motioncam::DNGDecoder::ensureUncompressed(tiled));
+        // Canonicalization must replace compressed tile payloads, not retain
+        // them as unreachable data before the new uncompressed strip.
+        assert(tiled.size() < compressedTiledSize +
+               tiledPixels.size() * sizeof(uint16_t));
         auto read16 = [&](size_t at) { return static_cast<uint16_t>(tiled[at] | tiled[at + 1] << 8); };
         auto read32 = [&](size_t at) { return static_cast<uint32_t>(tiled[at] | tiled[at + 1] << 8 |
             tiled[at + 2] << 16 | tiled[at + 3] << 24); };
@@ -708,6 +713,18 @@ int main() {
     assert(std::abs(croppedMaps.front().originH) < 1e-9);
     assert(std::abs(croppedMaps.front().originV) < 1e-9);
     assert(croppedMaps.front().data != originalMaps.front().data);
+
+    // A single GainMap containing all four CFA planes must bake across the
+    // complete higher-CFA grid, even when its encoded pitch is 2x2.
+    auto fourPlaneMap = originalMaps;
+    assert(fourPlaneMap.size() == 1 && fourPlaneMap.front().channels == 4);
+    fourPlaneMap.front().rowPitch = 2;
+    fourPlaneMap.front().colPitch = 2;
+    std::vector<uint8_t> fourPlaneDng(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::replaceGainMaps(fourPlaneDng, 2, fourPlaneMap));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        fourPlaneDng, false, false, false, true, 4));
+
     std::vector<uint8_t> canonical(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(canonical));
     std::vector<motioncam::GainMap> canonicalMaps;
@@ -725,6 +742,22 @@ int main() {
     assert(motioncam::DNGDecoder::bakeGainMaps(baked, false, false));
     assert(baked.size() > originalSize);
     assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(baked));
+
+    // Baking expands the intermediate linear range, but a following log
+    // transform must retain the bit-depth target of the original raw samples.
+    std::vector<uint8_t> bakedLog(gainMapDng.begin(), gainMapDng.end());
+    motioncam::DNGFrameMetadata preBakeMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(bakedLog, preBakeMetadata));
+    const uint32_t preBakeWhite = static_cast<uint32_t>(preBakeMetadata.whiteLevel[0]);
+    assert(motioncam::DNGDecoder::bakeGainMaps(bakedLog, false, false));
+    auto expandedLog = bakedLog;
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        expandedLog, motioncam::LogTransformMode::ReduceBy4Bit));
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(expandedLog));
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        bakedLog, motioncam::LogTransformMode::ReduceBy4Bit, preBakeWhite));
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(bakedLog));
+    assert(bakedLog.size() < expandedLog.size());
 
     std::vector<uint8_t> debugBaked(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::bakeGainMaps(

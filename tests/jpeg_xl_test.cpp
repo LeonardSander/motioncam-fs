@@ -525,9 +525,12 @@ int main() {
     assert(tiffByteTagValues(metadataOverride, 33422) == expected6x6);
     assert(motioncam::DNGDecoder::setTimingMetadata(metadataOverride, 25.0, 0));
     auto hqProxy = processBytes;
+    assert(motioncam::DNGDecoder::ensureUncompressed(hqProxy));
+    const size_t fullResolutionSize = hqProxy.size();
     assert(motioncam::DNGDecoder::processHigherCFA(
         hqProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
         false, 2, true));
+    assert(hqProxy.size() < fullResolutionSize);
     assert(tiffTagValue(hqProxy, 256) == higherWidth / 2);
     assert(tiffTagValue(hqProxy, 257) == higherHeight / 2);
     assert(tiffTagValue(hqProxy, 262) == 32803);
@@ -623,6 +626,11 @@ int main() {
                                rgb.size() * sizeof(uint16_t)));
     assert(rgbDng.GetStripBytes() > 0);
     auto mountedRgb = writeDng(rgbDng);
+    // RGB is also a valid primary DNG photometric interpretation. Thumbnail
+    // removal must not reject the file merely because it has no CFA/LinearRaw IFD.
+    assert(rgbDng.SetPhotometric(tinydngwriter::PHOTOMETRIC_RGB));
+    auto photometricRgb = writeDng(rgbDng);
+    assert(motioncam::DNGDecoder::removeThumbnails(photometricRgb));
     assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));

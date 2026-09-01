@@ -7,6 +7,7 @@
 #include <boost/regex.hpp>
 #include <fstream>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <cmath>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <iomanip>
 #include <setjmp.h>
+#include <thread>
 #include "liblj92/lj92.h"
 #include <jpeglib.h>
 #include <jxl/decode.h>
@@ -27,6 +29,37 @@
 #endif
 
 namespace motioncam {
+
+namespace {
+std::atomic_uint32_t foregroundDngWork{0};
+
+constexpr size_t gainMapPhaseChannel(uint32_t x, uint32_t y,
+                                     uint32_t left, uint32_t top,
+                                     uint32_t phaseGroup) {
+    return (((y - top) / phaseGroup) & 1u) * 2u +
+           (((x - left) / phaseGroup) & 1u);
+}
+
+static_assert(gainMapPhaseChannel(1, 1, 0, 0, 2) == 0); // 4x4 CFA
+static_assert(gainMapPhaseChannel(2, 2, 0, 0, 2) == 3);
+static_assert(gainMapPhaseChannel(2, 2, 0, 0, 3) == 0); // 6x6 CFA
+static_assert(gainMapPhaseChannel(3, 3, 0, 0, 3) == 3);
+static_assert(gainMapPhaseChannel(3, 3, 0, 0, 4) == 0); // 8x8 CFA
+static_assert(gainMapPhaseChannel(4, 4, 0, 0, 4) == 3);
+
+void yieldToForegroundDngWork() {
+    while (foregroundDngWork.load(std::memory_order_acquire) != 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+}
+
+void DNGDecoder::beginForegroundWork() {
+    foregroundDngWork.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void DNGDecoder::endForegroundWork() {
+    foregroundDngWork.fetch_sub(1, std::memory_order_acq_rel);
+}
 
 namespace {
     using SoftwareVersion = std::array<unsigned int, 4>;
@@ -93,6 +126,8 @@ namespace {
     constexpr uint16_t TIFF_TAG_EXIF_IFD = 34665;
     constexpr uint16_t TIFF_TAG_ISO = 34855;
     constexpr uint16_t TIFF_TAG_SUB_IFDS = 330;
+    constexpr uint16_t TIFF_TAG_JPEG_OFFSET = 513;
+    constexpr uint16_t TIFF_TAG_JPEG_BYTE_COUNT = 514;
     constexpr uint16_t TIFF_TAG_AS_SHOT_NEUTRAL = 50728;
     constexpr uint16_t TIFF_TAG_COLOR_MATRIX_1 = 50721;
     constexpr uint16_t TIFF_TAG_COLOR_MATRIX_2 = 50722;
@@ -269,6 +304,67 @@ namespace {
                 pixels[static_cast<size_t>(y) * width + x] =
                     decoded[(static_cast<size_t>(y) * 2 + (x & 1u)) * decodedWidth + x / 2];
         return true;
+    }
+
+    bool decodeLosslessJPEG(const uint8_t* encoded, size_t encodedSize,
+                            uint32_t width, uint32_t height, uint32_t channels,
+                            std::vector<uint16_t>& pixels) {
+        if (!encoded || !encodedSize || !width || !height || !channels || channels > 4)
+            return false;
+        jpeg_decompress_struct codec{};
+        JpegErrorManager error{};
+        std::vector<uint8_t> row8;
+        std::vector<J12SAMPLE> row12;
+        std::vector<J16SAMPLE> row16;
+        codec.err = jpeg_std_error(&error.base);
+        error.base.error_exit = jpegErrorExit;
+        if (setjmp(error.jump)) { jpeg_destroy_decompress(&codec); return false; }
+        jpeg_create_decompress(&codec);
+        jpeg_mem_src(&codec, encoded, static_cast<unsigned long>(encodedSize));
+        if (jpeg_read_header(&codec, TRUE) != JPEG_HEADER_OK ||
+            codec.image_width != width || codec.image_height != height ||
+            codec.num_components != channels || codec.data_precision < 8 ||
+            codec.data_precision > 16) {
+            jpeg_destroy_decompress(&codec);
+            return false;
+        }
+        codec.out_color_space = channels == 1 ? JCS_GRAYSCALE : JCS_UNKNOWN;
+        if (!jpeg_start_decompress(&codec) || codec.output_width != width ||
+            codec.output_height != height || codec.output_components != channels) {
+            jpeg_destroy_decompress(&codec);
+            return false;
+        }
+        const size_t rowSamples = static_cast<size_t>(width) * channels;
+        pixels.resize(rowSamples * height);
+        const int precision = codec.data_precision;
+        if (precision <= 8) row8.resize(rowSamples);
+        else if (precision <= 12) row12.resize(rowSamples);
+        else row16.resize(rowSamples);
+        while (codec.output_scanline < codec.output_height) {
+            const size_t output = static_cast<size_t>(codec.output_scanline) * rowSamples;
+            if (precision <= 8) {
+                JSAMPROW rows[]{row8.data()};
+                if (jpeg_read_scanlines(&codec, rows, 1) != 1) {
+                    jpeg_destroy_decompress(&codec); return false;
+                }
+                std::copy(row8.begin(), row8.end(), pixels.begin() + output);
+            } else if (precision <= 12) {
+                J12SAMPROW rows[]{row12.data()};
+                if (jpeg12_read_scanlines(&codec, rows, 1) != 1) {
+                    jpeg_destroy_decompress(&codec); return false;
+                }
+                std::copy(row12.begin(), row12.end(), pixels.begin() + output);
+            } else {
+                J16SAMPROW rows[]{row16.data()};
+                if (jpeg16_read_scanlines(&codec, rows, 1) != 1) {
+                    jpeg_destroy_decompress(&codec); return false;
+                }
+                std::copy(row16.begin(), row16.end(), pixels.begin() + output);
+            }
+        }
+        const bool ok = jpeg_finish_decompress(&codec) == TRUE;
+        jpeg_destroy_decompress(&codec);
+        return ok;
     }
 
     bool encodeDctJPEG12(const std::vector<uint16_t>& pixels, uint32_t width,
@@ -575,9 +671,15 @@ namespace {
         const auto entries = findTiffEntries(data, little);
         const uint32_t oldRoot = read32(data.data() + 4, little);
         struct PointerPatch { size_t entryOffset; uint32_t rawOffset; };
+        struct ImageOffsetsPatch {
+            size_t entryOffset;
+            uint16_t type;
+            std::vector<uint32_t> offsets;
+        };
         std::vector<PointerPatch> externalPointers;
         std::vector<PointerPatch> inlineIfdPointers;
         std::vector<PointerPatch> subIfdArrays;
+        std::vector<ImageOffsetsPatch> imageOffsets;
         std::map<uint32_t, uint32_t> nextIfds;
         for (const auto& entry : entries) {
             const size_t typeSize = tiffTypeSize(entry.type);
@@ -592,6 +694,20 @@ namespace {
                     inlineIfdPointers.push_back({entry.entryOffset, rawOffset});
                 else
                     subIfdArrays.push_back({entry.entryOffset, rawOffset});
+            }
+            if ((entry.tag == TIFF_TAG_STRIP_OFFSETS ||
+                 entry.tag == TIFF_TAG_TILE_OFFSETS) &&
+                (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+                ImageOffsetsPatch patch{entry.entryOffset, entry.type, {}};
+                patch.offsets.reserve(entry.count);
+                const size_t step = entry.type == TIFF_TYPE_SHORT ? 2 : 4;
+                for (uint32_t i = 0; i < entry.count; ++i) {
+                    const size_t at = entry.valueOffset + static_cast<size_t>(i) * step;
+                    patch.offsets.push_back(entry.type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + at, little)
+                        : read32(data.data() + at, little));
+                }
+                imageOffsets.push_back(std::move(patch));
             }
             if (!nextIfds.count(entry.ifdOffset)) {
                 const uint16_t count = read16(data.data() + entry.ifdOffset, little);
@@ -632,6 +748,127 @@ namespace {
                 if (valueOffset + 4 > data.size()) return false;
                 write32(data.data() + valueOffset,
                         relocated(read32(data.data() + valueOffset, little)), little);
+            }
+        }
+        for (const auto& patch : imageOffsets) {
+            const size_t entryOffset = relocated(static_cast<uint32_t>(patch.entryOffset));
+            const uint32_t count = read32(data.data() + entryOffset + 4, little);
+            const size_t step = patch.type == TIFF_TYPE_SHORT ? 2 : 4;
+            const size_t values = count * step > 4
+                ? read32(data.data() + entryOffset + 8, little)
+                : entryOffset + 8;
+            for (uint32_t i = 0; i < count && i < patch.offsets.size(); ++i) {
+                const uint32_t value = relocated(patch.offsets[i]);
+                if (patch.type == TIFF_TYPE_SHORT)
+                    write16(data.data() + values + static_cast<size_t>(i) * step,
+                            static_cast<uint16_t>(value), little);
+                else
+                    write32(data.data() + values + static_cast<size_t>(i) * step,
+                            value, little);
+            }
+        }
+        for (const auto& [oldIfd, oldNext] : nextIfds) {
+            const uint32_t newIfd = relocated(oldIfd);
+            const uint16_t count = read16(data.data() + newIfd, little);
+            write32(data.data() + static_cast<size_t>(newIfd) + 2 +
+                    static_cast<size_t>(count) * 12, relocated(oldNext), little);
+        }
+        return true;
+    }
+
+    bool removeTiffRanges(std::vector<uint8_t>& data,
+                          const std::vector<std::pair<uint32_t, uint32_t>>& ranges,
+                          bool little) {
+        if (ranges.empty()) return true;
+        const auto entries = findTiffEntries(data, little);
+        const uint32_t oldRoot = read32(data.data() + 4, little);
+        struct PointerPatch { size_t entryOffset; uint32_t rawOffset; };
+        struct ImageOffsetsPatch { size_t entryOffset; uint16_t type; std::vector<uint32_t> offsets; };
+        std::vector<PointerPatch> externalPointers, inlineIfdPointers, subIfdArrays;
+        std::vector<ImageOffsetsPatch> imageOffsets;
+        std::map<uint32_t, uint32_t> nextIfds;
+        for (const auto& entry : entries) {
+            const size_t typeSize = tiffTypeSize(entry.type);
+            if (!typeSize) return false;
+            if (typeSize * static_cast<size_t>(entry.count) > 4)
+                externalPointers.push_back({entry.entryOffset,
+                    read32(data.data() + entry.entryOffset + 8, little)});
+            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_SUB_IFDS) &&
+                entry.type == TIFF_TYPE_LONG) {
+                const uint32_t rawOffset = read32(data.data() + entry.entryOffset + 8, little);
+                if (entry.count == 1) inlineIfdPointers.push_back({entry.entryOffset, rawOffset});
+                else subIfdArrays.push_back({entry.entryOffset, rawOffset});
+            }
+            if ((entry.tag == TIFF_TAG_STRIP_OFFSETS || entry.tag == TIFF_TAG_TILE_OFFSETS) &&
+                (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+                ImageOffsetsPatch patch{entry.entryOffset, entry.type, {}};
+                const size_t step = entry.type == TIFF_TYPE_SHORT ? 2 : 4;
+                for (uint32_t i = 0; i < entry.count; ++i) {
+                    const size_t at = entry.valueOffset + static_cast<size_t>(i) * step;
+                    patch.offsets.push_back(entry.type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + at, little) : read32(data.data() + at, little));
+                }
+                imageOffsets.push_back(std::move(patch));
+            }
+            if (!nextIfds.count(entry.ifdOffset)) {
+                const uint16_t count = read16(data.data() + entry.ifdOffset, little);
+                const size_t nextPos = static_cast<size_t>(entry.ifdOffset) + 2 +
+                    static_cast<size_t>(count) * 12;
+                if (nextPos + 4 <= data.size())
+                    nextIfds[entry.ifdOffset] = read32(data.data() + nextPos, little);
+            }
+        }
+        auto relocated = [&](uint32_t offset) -> uint32_t {
+            uint64_t removed = 0;
+            for (const auto& [start, bytes] : ranges) {
+                const uint64_t end = static_cast<uint64_t>(start) + bytes;
+                if (offset < start) break;
+                if (offset < end) return 0;
+                removed += bytes;
+            }
+            return static_cast<uint32_t>(offset - removed);
+        };
+        size_t removedBytes = 0;
+        for (const auto& range : ranges) removedBytes += range.second;
+        std::vector<uint8_t> rebuilt;
+        rebuilt.reserve(data.size() - removedBytes);
+        size_t cursor = 0;
+        for (const auto& [start, bytes] : ranges) {
+            if (start < cursor || start > data.size() || bytes > data.size() - start) return false;
+            rebuilt.insert(rebuilt.end(), data.begin() + cursor, data.begin() + start);
+            cursor = static_cast<size_t>(start) + bytes;
+        }
+        rebuilt.insert(rebuilt.end(), data.begin() + cursor, data.end());
+        data = std::move(rebuilt);
+        write32(data.data() + 4, relocated(oldRoot), little);
+        auto patchPointer = [&](const PointerPatch& pointer) {
+            const size_t entryOffset = relocated(static_cast<uint32_t>(pointer.entryOffset));
+            write32(data.data() + entryOffset + 8, relocated(pointer.rawOffset), little);
+        };
+        for (const auto& pointer : externalPointers) patchPointer(pointer);
+        for (const auto& pointer : inlineIfdPointers) patchPointer(pointer);
+        for (const auto& pointer : subIfdArrays) {
+            const size_t entryOffset = relocated(static_cast<uint32_t>(pointer.entryOffset));
+            const uint32_t count = read32(data.data() + entryOffset + 4, little);
+            const uint32_t arrayOffset = read32(data.data() + entryOffset + 8, little);
+            for (uint32_t i = 0; i < count; ++i) {
+                const size_t at = static_cast<size_t>(arrayOffset) + i * 4;
+                if (at + 4 > data.size()) return false;
+                write32(data.data() + at, relocated(read32(data.data() + at, little)), little);
+            }
+        }
+        for (const auto& patch : imageOffsets) {
+            const size_t entryOffset = relocated(static_cast<uint32_t>(patch.entryOffset));
+            const uint32_t count = read32(data.data() + entryOffset + 4, little);
+            const size_t step = patch.type == TIFF_TYPE_SHORT ? 2 : 4;
+            const size_t values = count * step > 4
+                ? read32(data.data() + entryOffset + 8, little) : entryOffset + 8;
+            for (uint32_t i = 0; i < count && i < patch.offsets.size(); ++i) {
+                const uint32_t value = relocated(patch.offsets[i]);
+                if (patch.type == TIFF_TYPE_SHORT)
+                    write16(data.data() + values + static_cast<size_t>(i) * step,
+                            static_cast<uint16_t>(value), little);
+                else write32(data.data() + values + static_cast<size_t>(i) * step, value, little);
             }
         }
         for (const auto& [oldIfd, oldNext] : nextIfds) {
@@ -1626,6 +1863,44 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
         else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_2)
             readMatrix(entry, metadata.forwardMatrix2, metadata.hasForwardMatrix2);
     }
+    std::vector<std::pair<size_t, size_t>> imageRanges;
+    for (const auto& offsetEntry : entries) {
+        if (offsetEntry.tag != TIFF_TAG_STRIP_OFFSETS &&
+            offsetEntry.tag != TIFF_TAG_TILE_OFFSETS &&
+            offsetEntry.tag != TIFF_TAG_JPEG_OFFSET) continue;
+        const uint16_t countTag = offsetEntry.tag == TIFF_TAG_STRIP_OFFSETS
+            ? TIFF_TAG_STRIP_BYTE_COUNTS
+            : offsetEntry.tag == TIFF_TAG_TILE_OFFSETS
+                ? TIFF_TAG_TILE_BYTE_COUNTS : TIFF_TAG_JPEG_BYTE_COUNT;
+        const TiffEntry* countEntry = nullptr;
+        for (const auto& candidate : entries)
+            if (candidate.ifdOffset == offsetEntry.ifdOffset && candidate.tag == countTag) {
+                countEntry = &candidate;
+                break;
+            }
+        if (!countEntry || countEntry->count != offsetEntry.count) continue;
+        auto unsignedValue = [&](const TiffEntry& entry, uint32_t index) -> uint32_t {
+            const size_t step = entry.type == TIFF_TYPE_SHORT ? 2 : 4;
+            const size_t at = entry.valueOffset + static_cast<size_t>(index) * step;
+            return entry.type == TIFF_TYPE_SHORT
+                ? read16(data.data() + at, little)
+                : entry.type == TIFF_TYPE_LONG ? read32(data.data() + at, little) : 0;
+        };
+        for (uint32_t i = 0; i < offsetEntry.count; ++i) {
+            const size_t offset = unsignedValue(offsetEntry, i);
+            const size_t bytes = unsignedValue(*countEntry, i);
+            if (offset <= data.size() && bytes <= data.size() - offset && bytes)
+                imageRanges.emplace_back(offset, offset + bytes);
+        }
+    }
+    std::sort(imageRanges.begin(), imageRanges.end());
+    size_t imageBytes = 0, end = 0;
+    for (const auto& range : imageRanges) {
+        if (range.second <= end) continue;
+        imageBytes += range.second - std::max(end, range.first);
+        end = range.second;
+    }
+    metadata.metadataBytes = data.size() - std::min(data.size(), imageBytes);
     return true;
 }
 
@@ -2265,24 +2540,17 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         else output = std::move(rgb);
     }
 
-    const bool metadataBeforeStrip = std::all_of(entries.begin(), entries.end(),
-        [stripOffset](const TiffEntry& entry) { return entry.entryOffset < stripOffset; });
-    if (metadataBeforeStrip && static_cast<size_t>(stripOffset) + stripBytes <= data.size() &&
-        data.size() - (static_cast<size_t>(stripOffset) + stripBytes) < 4096)
-        data.resize(stripOffset);
-    if (data.size() & 1u) data.push_back(0);
-    const uint32_t newOffset = static_cast<uint32_t>(data.size());
     const uint32_t newBytes = static_cast<uint32_t>(output.size() * sizeof(uint16_t));
-    data.resize(data.size() + newBytes);
+    std::vector<uint8_t> outputBytes(newBytes);
     for (size_t i = 0; i < output.size(); ++i) {
-        data[newOffset + i * 2] = little ? output[i] & 0xff : output[i] >> 8;
-        data[newOffset + i * 2 + 1] = little ? output[i] >> 8 : output[i] & 0xff;
+        outputBytes[i * 2] = little ? output[i] & 0xff : output[i] >> 8;
+        outputBytes[i * 2 + 1] = little ? output[i] >> 8 : output[i] & 0xff;
     }
     auto setScalar = [&](const TiffEntry& e, uint32_t value) {
         if (e.type == TIFF_TYPE_SHORT) write16(data.data() + e.valueOffset, value, little);
         else write32(data.data() + e.valueOffset, value, little);
     };
-    setScalar(*compressionE, TIFF_COMPRESSION_NONE); setScalar(*offsetsE, newOffset);
+    setScalar(*compressionE, TIFF_COMPRESSION_NONE); setScalar(*offsetsE, stripOffset);
     setScalar(*countsE, newBytes); setScalar(*sppE, remosaic ? 1 : 3);
     setScalar(*photo, remosaic ? TIFF_PHOTOMETRIC_CFA : 34892); // LinearRaw
     setScalar(*widthE, outputWidth); setScalar(*heightE, outputHeight);
@@ -2356,10 +2624,12 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         write32(data.data() + patternE->entryOffset + 4, 4, little);
         for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
     }
-    return true;
+    return replaceTiffStrip(data, stripOffset, stripBytes, outputBytes, little);
 }
 
-bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
+bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data, bool backgroundWork) {
+    const auto ensureStarted = std::chrono::steady_clock::now();
+    if (backgroundWork) yieldToForegroundDngWork();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -2390,13 +2660,13 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
         if (!insertTiffScalarEntry(data, photo->ifdOffset, TIFF_TAG_COMPRESSION,
                                    TIFF_TYPE_SHORT, TIFF_COMPRESSION_NONE, little))
             return false;
-        return ensureUncompressed(data);
+        return ensureUncompressed(data, backgroundWork);
     }
     if (!find(TIFF_TAG_SAMPLES_PER_PIXEL)) {
         if (!insertTiffScalarEntry(data, photo->ifdOffset, TIFF_TAG_SAMPLES_PER_PIXEL,
                                    TIFF_TYPE_SHORT, 1, little))
             return false;
-        return ensureUncompressed(data);
+        return ensureUncompressed(data, backgroundWork);
     }
     const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
     const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
@@ -2410,7 +2680,7 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
         if (!insertTiffScalarEntry(data, photo->ifdOffset, TIFF_TAG_ROWS_PER_STRIP,
                                    TIFF_TYPE_LONG, scalar(*heightE), little))
             return false;
-        return ensureUncompressed(data);
+        return ensureUncompressed(data, backgroundWork);
     }
 
     const uint32_t compression = scalar(*compressionE);
@@ -2418,6 +2688,7 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
     const uint32_t bits = scalar(*bitsE), channels = scalar(*sppE);
     const auto planarE = find(TIFF_TAG_PLANAR_CONFIGURATION);
     const uint32_t planar = planarE ? scalar(*planarE) : 1;
+    std::atomic_uint32_t turboAttempts{0}, turboSuccesses{0}, legacySuccesses{0};
     if (!width || !height || !channels || channels > 4 || bits < 8 || bits > 16)
         return false;
     if (planar != 1 && planar != 2) return false;
@@ -2488,6 +2759,12 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
                                               chunkChannels, output);
         }
         if (compression != TIFF_COMPRESSION_JPEG) return false;
+        turboAttempts.fetch_add(1, std::memory_order_relaxed);
+        if (decodeLosslessJPEG(data.data() + offset, byteCount, chunkWidth,
+                               chunkHeight, chunkChannels, output)) {
+            turboSuccesses.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
         lj92 decoder = nullptr;
         int dw = 0, dh = 0, db = 0, components = 0;
         const int openResult = lj92_open(&decoder, data.data() + offset, byteCount,
@@ -2513,6 +2790,7 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
                                     0, nullptr, 0) == LJ92_ERROR_NONE;
         lj92_close(decoder);
         if (!ok) return false;
+        legacySuccesses.fetch_add(1, std::memory_order_relaxed);
         decodedWidth = static_cast<uint32_t>(pixelWidth);
         decodedHeight = static_cast<uint32_t>(dh);
         output = std::move(encodedPixels);
@@ -2556,13 +2834,43 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
         if (planarE) setScalar(*planarE, 1);
         return sortTiffIfdEntries(data, photo->ifdOffset, little);
     };
+    auto discardSourceChunks = [&](std::vector<std::pair<uint32_t, uint32_t>> chunks) {
+        chunks.erase(std::remove_if(chunks.begin(), chunks.end(), [](const auto& chunk) {
+            return chunk.second == 0;
+        }), chunks.end());
+        std::sort(chunks.begin(), chunks.end());
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;
+        for (const auto& [offset, bytes] : chunks) {
+            const uint64_t end = static_cast<uint64_t>(offset) + bytes;
+            if (end > data.size()) return false;
+            if (!ranges.empty()) {
+                const uint64_t previousEnd = static_cast<uint64_t>(ranges.back().first) +
+                                             ranges.back().second;
+                if (offset <= previousEnd) {
+                    ranges.back().second = static_cast<uint32_t>(
+                        std::max<uint64_t>(previousEnd, end) - ranges.back().first);
+                    continue;
+                }
+            }
+            ranges.emplace_back(offset, bytes);
+        }
+        // Tile payloads written by DNG encoders are normally one contiguous
+        // run. Coalescing first turns thousands of vector erases and complete
+        // TIFF rescans into a single relocation operation.
+        if (!removeTiffRanges(data, ranges, little)) return false;
+        spdlog::info("DNG decode trace: coalesced {} source chunks into {} removal range(s)",
+                     chunks.size(), ranges.size());
+        return true;
+    };
 
     // A single chunky, uncompressed strip is already the canonical topology.
     if (!tileOffsetsE && !tileCountsE && stripOffsetsE && stripCountsE &&
         stripOffsetsE->count == 1 && stripCountsE->count == 1 &&
         compression == TIFF_COMPRESSION_NONE && planar == 1) return true;
 
+    const auto parsedAt = std::chrono::steady_clock::now();
     std::vector<uint16_t> pixels(imageSamples, 0);
+    const auto allocatedAt = std::chrono::steady_clock::now();
     if (tileOffsetsE || tileCountsE) {
         const auto tileWidthE = find(TIFF_TAG_TILE_WIDTH);
         const auto tileHeightE = find(TIFF_TAG_TILE_LENGTH);
@@ -2585,11 +2893,25 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
         const uint32_t tilesPerPlane = static_cast<uint32_t>(tilesPerPlane64);
         const uint32_t expectedCount = static_cast<uint32_t>(expectedCount64);
         if (tileOffsetsE->count != expectedCount) return false;
+        std::vector<std::pair<uint32_t, uint32_t>> sourceChunks;
+        sourceChunks.reserve(expectedCount);
         for (uint32_t index = 0; index < expectedCount; ++index) {
             uint32_t offset = 0, byteCount = 0;
             if (!arrayValue(*tileOffsetsE, index, offset) ||
                 !arrayValue(*tileCountsE, index, byteCount)) return false;
-            const uint32_t plane = planar == 2 ? index / tilesPerPlane : 0;
+            sourceChunks.emplace_back(offset, byteCount);
+        }
+        std::atomic_uint32_t nextTile{0};
+        std::atomic_bool decodeFailed{false};
+        const unsigned workerCount = std::min<unsigned>(
+            expectedCount, std::min(8u, std::max(1u, std::thread::hardware_concurrency())));
+        auto decodeTiles = [&] {
+            while (!decodeFailed.load(std::memory_order_relaxed)) {
+                if (backgroundWork) yieldToForegroundDngWork();
+                const uint32_t index = nextTile.fetch_add(1, std::memory_order_relaxed);
+                if (index >= expectedCount) return;
+                const auto [offset, byteCount] = sourceChunks[index];
+                const uint32_t plane = planar == 2 ? index / tilesPerPlane : 0;
             const uint32_t spatial = planar == 2 ? index % tilesPerPlane : index;
             const uint32_t originX = (spatial % across) * tileWidth;
             const uint32_t originY = (spatial / across) * tileHeight;
@@ -2606,7 +2928,10 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
                 (copyWidth != tileWidth || copyHeight != tileHeight))
                 decoded = decodeChunk(offset, byteCount, tileWidth, tileHeight,
                                       chunkChannels, tile, decodedWidth, decodedHeight);
-            if (!decoded || decodedWidth < copyWidth || decodedHeight < copyHeight) return false;
+                if (!decoded || decodedWidth < copyWidth || decodedHeight < copyHeight) {
+                    decodeFailed.store(true, std::memory_order_relaxed);
+                    return;
+                }
             for (uint32_t y = 0; y < copyHeight; ++y)
                 for (uint32_t x = 0; x < copyWidth; ++x)
                     for (uint32_t c = 0; c < chunkChannels; ++c) {
@@ -2615,10 +2940,34 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
                             channels + destinationChannel] =
                             tile[(static_cast<size_t>(y) * decodedWidth + x) * chunkChannels + c];
                     }
-        }
+            }
+        };
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+        for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(decodeTiles);
+        for (auto& worker : workers) worker.join();
+        if (decodeFailed.load(std::memory_order_relaxed)) return false;
+        const auto decodedAt = std::chrono::steady_clock::now();
         // Repurpose the four tile entries so no standard tile tag survives.
         write16(data.data() + tileHeightE->entryOffset, TIFF_TAG_UNUSED_TILE_LENGTH, little);
-        return finishCanonical(pixels, *tileOffsetsE, *tileCountsE, *tileWidthE);
+        if (!finishCanonical(pixels, *tileOffsetsE, *tileCountsE, *tileWidthE)) return false;
+        const auto canonicalAt = std::chrono::steady_clock::now();
+        if (!discardSourceChunks(std::move(sourceChunks))) return false;
+        const auto completedAt = std::chrono::steady_clock::now();
+        spdlog::info(
+            "DNG decode trace: {}x{} bits={} channels={} tiles={} tile={}x{} "
+            "workers={} background={} turbo={}/{} legacy={} parse={:.1f} ms "
+            "allocate={:.1f} ms decode={:.1f} ms canonical={:.1f} ms discard={:.1f} ms total={:.1f} ms",
+            width, height, bits, channels, expectedCount, tileWidth, tileHeight,
+            workerCount, backgroundWork, turboSuccesses.load(), turboAttempts.load(),
+            legacySuccesses.load(),
+            std::chrono::duration<double, std::milli>(parsedAt - ensureStarted).count(),
+            std::chrono::duration<double, std::milli>(allocatedAt - parsedAt).count(),
+            std::chrono::duration<double, std::milli>(decodedAt - allocatedAt).count(),
+            std::chrono::duration<double, std::milli>(canonicalAt - decodedAt).count(),
+            std::chrono::duration<double, std::milli>(completedAt - canonicalAt).count(),
+            std::chrono::duration<double, std::milli>(completedAt - ensureStarted).count());
+        return true;
     }
 
     if (!stripOffsetsE || !stripCountsE || !stripOffsetsE->count ||
@@ -2634,10 +2983,13 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
     const uint32_t stripsPerPlane = static_cast<uint32_t>(stripsPerPlane64);
     const uint32_t expectedStrips = static_cast<uint32_t>(expectedStrips64);
     if (stripOffsetsE->count != expectedStrips) return false;
+    std::vector<std::pair<uint32_t, uint32_t>> sourceChunks;
+    sourceChunks.reserve(expectedStrips);
     for (uint32_t index = 0; index < expectedStrips; ++index) {
         uint32_t offset = 0, byteCount = 0;
         if (!arrayValue(*stripOffsetsE, index, offset) ||
             !arrayValue(*stripCountsE, index, byteCount)) return false;
+        sourceChunks.emplace_back(offset, byteCount);
         const uint32_t plane = planar == 2 ? index / stripsPerPlane : 0;
         const uint32_t strip = planar == 2 ? index % stripsPerPlane : index;
         const uint32_t originY = strip * rowsPerStrip;
@@ -2661,7 +3013,119 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data) {
                 }
     }
     if (!rowsPerStripE) return false;
-    return finishCanonical(pixels, *stripOffsetsE, *stripCountsE, *rowsPerStripE);
+    return finishCanonical(pixels, *stripOffsetsE, *stripCountsE, *rowsPerStripE) &&
+           discardSourceChunks(std::move(sourceChunks));
+}
+
+bool DNGDecoder::removeThumbnails(std::vector<uint8_t>& data) {
+    bool little = true;
+    auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    auto scalar = [&](const TiffEntry& entry, uint32_t index = 0) -> uint32_t {
+        if (index >= entry.count) return 0;
+        const size_t step = entry.type == TIFF_TYPE_SHORT ? 2 : 4;
+        const size_t at = entry.valueOffset + static_cast<size_t>(index) * step;
+        return entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + at, little)
+            : entry.type == TIFF_TYPE_LONG ? read32(data.data() + at, little) : 0;
+    };
+
+    std::map<uint32_t, std::vector<TiffEntry>> byIfd;
+    for (const auto& entry : entries) byIfd[entry.ifdOffset].push_back(entry);
+
+    // Photometric interpretation does not reliably distinguish a primary image
+    // from an embedded preview: IFD0 is commonly a small RGB preview while the
+    // full-resolution raw image lives in a SubIFD. Preserve the image-bearing
+    // IFD with the greatest pixel area, regardless of whether it is CFA,
+    // LinearRaw, RGB, or another valid TIFF interpretation.
+    uint32_t primaryIfd = 0;
+    uint64_t primaryPixels = 0;
+    bool foundPrimary = false;
+    for (const auto& [ifd, ifdEntries] : byIfd) {
+        const TiffEntry* width = nullptr;
+        const TiffEntry* height = nullptr;
+        bool hasImagePayload = false;
+        for (const auto& entry : ifdEntries) {
+            if (entry.tag == TIFF_TAG_IMAGE_WIDTH) width = &entry;
+            else if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) height = &entry;
+            else if (entry.tag == TIFF_TAG_STRIP_OFFSETS ||
+                     entry.tag == TIFF_TAG_TILE_OFFSETS ||
+                     entry.tag == TIFF_TAG_JPEG_OFFSET)
+                hasImagePayload = true;
+        }
+        if (!width || !height || !hasImagePayload || !width->count || !height->count)
+            continue;
+        const uint64_t pixels = static_cast<uint64_t>(scalar(*width)) * scalar(*height);
+        if (!pixels) continue;
+        if (!foundPrimary || pixels > primaryPixels) {
+            primaryIfd = ifd;
+            primaryPixels = pixels;
+            foundPrimary = true;
+        }
+    }
+    if (!foundPrimary) return false;
+
+    std::vector<std::pair<uint32_t, uint32_t>> payloads;
+    const std::set<uint16_t> imageTags{
+        254, 255, 256, 257, 258, 259, 262, 273, 274, 277, 278, 279,
+        282, 283, 284, 296, 322, 323, 324, 325, 513, 514,
+        529, 530, 531, 532};
+
+    for (const auto& [ifd, ifdEntries] : byIfd) {
+        if (ifd == primaryIfd) continue;
+        const TiffEntry* offsets = nullptr;
+        const TiffEntry* counts = nullptr;
+        bool imageIfd = false;
+        for (const auto& entry : ifdEntries) {
+            if (entry.tag == TIFF_TAG_STRIP_OFFSETS || entry.tag == TIFF_TAG_TILE_OFFSETS ||
+                entry.tag == TIFF_TAG_JPEG_OFFSET) {
+                offsets = &entry;
+                imageIfd = true;
+            }
+            if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS || entry.tag == TIFF_TAG_TILE_BYTE_COUNTS ||
+                entry.tag == TIFF_TAG_JPEG_BYTE_COUNT)
+                counts = &entry;
+        }
+        if (!imageIfd) continue;
+        if (offsets && counts && offsets->count == counts->count) {
+            for (uint32_t i = 0; i < offsets->count; ++i) {
+                const uint32_t offset = scalar(*offsets, i);
+                const uint32_t bytes = scalar(*counts, i);
+                if (offset <= data.size() && bytes <= data.size() - offset)
+                    payloads.emplace_back(offset, bytes);
+            }
+        }
+
+        const uint16_t count = read16(data.data() + ifd, little);
+        const size_t oldNext = static_cast<size_t>(ifd) + 2 + static_cast<size_t>(count) * 12;
+        if (oldNext + 4 > data.size()) return false;
+        const uint32_t nextIfd = read32(data.data() + oldNext, little);
+        std::vector<std::array<uint8_t, 12>> kept;
+        kept.reserve(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            const size_t at = static_cast<size_t>(ifd) + 2 + static_cast<size_t>(i) * 12;
+            if (imageTags.count(read16(data.data() + at, little))) continue;
+            std::array<uint8_t, 12> record{};
+            std::copy_n(data.data() + at, 12, record.data());
+            kept.push_back(record);
+        }
+        write16(data.data() + ifd, static_cast<uint16_t>(kept.size()), little);
+        size_t at = static_cast<size_t>(ifd) + 2;
+        for (const auto& record : kept) {
+            std::copy(record.begin(), record.end(), data.begin() + at);
+            at += 12;
+        }
+        write32(data.data() + at, nextIfd, little);
+        std::fill(data.begin() + at + 4, data.begin() + oldNext + 4, 0);
+    }
+
+    std::sort(payloads.begin(), payloads.end(), [](const auto& left, const auto& right) {
+        return left.first > right.first;
+    });
+    const std::vector<uint8_t> empty;
+    for (const auto& [offset, bytes] : payloads)
+        if (bytes && !replaceTiffStrip(data, offset, bytes, empty, little)) return false;
+    return true;
 }
 
 bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::string& levels) {
@@ -2811,7 +3275,8 @@ bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
     return replaceTiffStrip(data, oldOffset, oldBytes, packed, little);
 }
 
-bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode mode) {
+bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode mode,
+                                   uint32_t quantizationWhite) {
     if (mode == LogTransformMode::Disabled) return true;
     bool little = true;
     auto entries = findTiffEntries(data, little);
@@ -2853,8 +3318,12 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
     const size_t samples=static_cast<size_t>(width)*height*channels;
     if (!width || !height || (channels != 1 && channels != 3) || !sourceWhite ||
         offset > data.size() || bytes < samples*2 || bytes > data.size()-offset) return false;
+    // Vignette baking may temporarily expand the linear code range. When the
+    // caller supplies the pre-bake white level, preserve the requested output
+    // bit depth and requantize the expanded linear samples directly into it.
+    const uint32_t bitDepthWhite = quantizationWhite ? quantizationWhite : sourceWhite;
     uint32_t storedBits=1;
-    while (storedBits < 16 && ((uint32_t{1}<<storedBits)-1) < sourceWhite) ++storedBits;
+    while (storedBits < 16 && ((uint32_t{1}<<storedBits)-1) < bitDepthWhite) ++storedBits;
     if (mode == LogTransformMode::ReduceBy2Bit) storedBits = std::max(1u, storedBits-2);
     else if (mode == LogTransformMode::ReduceBy4Bit) storedBits = std::max(1u, storedBits-4);
     else if (mode == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits-6);
@@ -3631,7 +4100,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool normalizeGainMaps,
                               bool colorOnly,
                               bool optimizeGainMaps,
-                              bool debugGainMap) {
+                              bool debugGainMap,
+                              int cfaRepeatSizeOverride) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -3759,10 +4229,45 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 TIFF_TAG_UNUSED_LINEARIZATION_TABLE, little);
     }
 
+    int cfaRepeatSize = cfaRepeatSizeOverride;
+    std::array<uint8_t, 4> cfaPhase{};
+    if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0) {
+        if (!getCFAMetadata(data, cfaRepeatSize, cfaPhase) || cfaRepeatSize < 2 ||
+            (cfaRepeatSize % 2) != 0)
+            cfaRepeatSize = 2;
+    }
+    const uint32_t phaseGroup = static_cast<uint32_t>(cfaRepeatSize / 2);
+    const size_t scalarPhaseMapCount = std::count_if(
+        maps.begin(), maps.end(), [](const GainMap& map) {
+            return map.channels == 1 && map.rowPitch == 2 && map.colPitch == 2;
+        });
+    // DNG writers use either one four-plane GainMap or complete groups of four
+    // scalar GainMaps (sometimes one group per image region). Multi-plane maps
+    // are handled directly below; expand every complete scalar group too.
+    const bool groupedScalarPhaseMaps = phaseGroup > 1 &&
+        scalarPhaseMapCount >= 4 && (scalarPhaseMapCount % 4) == 0;
+
     auto mapGain = [&](const GainMap& map, uint32_t x, uint32_t y) {
         if (x < map.left || x >= map.right || y < map.top || y >= map.bottom ||
-            !map.rowPitch || !map.colPitch || (y - map.top) % map.rowPitch ||
-            (x - map.left) % map.colPitch) return 1.0f;
+            !map.rowPitch || !map.colPitch) return 1.0f;
+        // Scalar maps select one CFA phase through their origin and pitch.
+        // Multi-channel maps contain the phase values themselves and cover the
+        // complete pixel grid; applying the scalar pitch test to them leaves
+        // only one corrected pixel in every 2x2 block.
+        if (map.channels == 1) {
+            if (groupedScalarPhaseMaps && map.rowPitch == 2 && map.colPitch == 2) {
+                const uint32_t mapPhaseY = map.top & 1u;
+                const uint32_t mapPhaseX = map.left & 1u;
+                const uint32_t baseTop = map.top - mapPhaseY;
+                const uint32_t baseLeft = map.left - mapPhaseX;
+                const size_t pixelPhase = gainMapPhaseChannel(
+                    x, y, baseLeft, baseTop, phaseGroup);
+                if (pixelPhase != mapPhaseY * 2u + mapPhaseX) return 1.0f;
+            } else if ((y - map.top) % map.rowPitch ||
+                       (x - map.left) % map.colPitch) {
+                return 1.0f;
+            }
+        }
         const double nx = static_cast<double>(x) / std::max(1u, width);
         const double ny = static_cast<double>(y) / std::max(1u, height);
         const double gx = map.spacingH > 0 ? (nx - map.originH) / map.spacingH : 0;
@@ -3773,7 +4278,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         const float fx = static_cast<float>(std::clamp(gx - std::floor(gx), 0.0, 1.0));
         const float fy = static_cast<float>(std::clamp(gy - std::floor(gy), 0.0, 1.0));
         const size_t channel = map.channels >= 4
-            ? std::min<size_t>(map.channels - 1, (y & 1u) * 2 + (x & 1u))
+            ? std::min<size_t>(map.channels - 1,
+                gainMapPhaseChannel(x, y, map.left, map.top, phaseGroup))
             : 0;
         auto at = [&](size_t xx, size_t yy) { return map.data[(yy * map.width + xx) * map.channels + channel]; };
         return (at(x0,y0) * (1-fx) + at(x1,y0) * fx) * (1-fy) +
@@ -3799,11 +4305,16 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         for (const auto& map : maps) gain *= mapGain(map, x, y);
         if (colorOnly && !gridColorSeparated) {
             float localMinimum = gain;
+            const uint32_t repeat = phaseGroup * 2u;
+            const uint32_t groupLeft = (x / repeat) * repeat;
+            const uint32_t groupTop = (y / repeat) * repeat;
             for (uint32_t phaseY = 0; phaseY < 2; ++phaseY)
                 for (uint32_t phaseX = 0; phaseX < 2; ++phaseX) {
                     float phaseGain = 1.0f;
-                    const uint32_t px = std::min(width - 1, (x & ~1u) + phaseX);
-                    const uint32_t py = std::min(height - 1, (y & ~1u) + phaseY);
+                    const uint32_t px = std::min(
+                        width - 1, groupLeft + phaseX * phaseGroup);
+                    const uint32_t py = std::min(
+                        height - 1, groupTop + phaseY * phaseGroup);
                     for (const auto& map : maps) phaseGain *= mapGain(map, px, py);
                     localMinimum = std::min(localMinimum, phaseGain);
                 }

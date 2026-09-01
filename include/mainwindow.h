@@ -170,6 +170,7 @@ private:
     bool mProcessingInProgress;
     bool mOptionsUpdatePending;
     bool mMountInProgress = false;
+    QString mMountPathInProgress;
     bool mDeleteOnUnmount = false;
     motioncam::CachePolicy mCachePolicy = motioncam::CachePolicy::Quota;
     std::uint64_t mCacheQuotaBytes = 30ULL * 1024 * 1024 * 1024;
