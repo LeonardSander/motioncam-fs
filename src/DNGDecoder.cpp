@@ -2476,8 +2476,10 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
             outputChannelBlack[channel] = counts[channel] ? sums[channel] / counts[channel] : 0.0;
 
         utils::demosaicHigherCFA(
-            input, rgb, imageWidth, imageHeight, imageRepeatSize, phase,
-            mode == QuadBayerMode::DemosaicOCL);
+            input, rgb, imageWidth, imageHeight, imageRepeatSize, phase, mode,
+            {static_cast<float>(outputChannelBlack[0]),
+             static_cast<float>(outputChannelBlack[1]),
+             static_cast<float>(outputChannelBlack[2])});
         rgbOutput = !remosaic;
     };
     if (proxy && higherCfaHq && repeatSize == 4) {
@@ -2522,7 +2524,8 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     } else if (proxy) {
         const uint32_t group = repeatSize / 2;
         const bool staged8x8Demosaic = repeatSize == 8 && proxyScale == 2 &&
-            (mode == QuadBayerMode::Demosaic || mode == QuadBayerMode::DemosaicOCL);
+            (mode == QuadBayerMode::Demosaic || mode == QuadBayerMode::DemosaicColor ||
+             mode == QuadBayerMode::DemosaicOCL);
         const uint32_t reductionGroup = staged8x8Demosaic ? 2u : group;
         hqReductionArea = reductionGroup * reductionGroup;
         if (higherCfaHq) {

@@ -198,6 +198,7 @@ static std::string optionsToString(FileRenderOptions options) {
 
 enum class QuadBayerMode {
     Demosaic,
+    DemosaicColor,
     DemosaicOCL,
     CorrectQBCFAMetadata,
     WrongCFAMetadata
@@ -247,6 +248,7 @@ struct CFRTarget {
 inline std::string quadBayerModeToString(QuadBayerMode mode) {
     switch(mode) {
         case QuadBayerMode::Demosaic: return "Demosaic";
+        case QuadBayerMode::DemosaicColor: return "Demosaic (Color)";
         case QuadBayerMode::DemosaicOCL: return "Demosaic (OCL)";
         case QuadBayerMode::CorrectQBCFAMetadata: return "Keep CFA";
         case QuadBayerMode::WrongCFAMetadata: return "Mislabel as 2x2";
@@ -256,6 +258,7 @@ inline std::string quadBayerModeToString(QuadBayerMode mode) {
 
 inline QuadBayerMode stringToQuadBayerMode(const std::string& str) {
     if (str == "Demosaic" || str == "Remosaic") return QuadBayerMode::Demosaic;
+    if (str == "Demosaic (Color)" || str == "Color") return QuadBayerMode::DemosaicColor;
     if (str == "Demosaic (OCL)") return QuadBayerMode::DemosaicOCL;
     if (str == "Wrong CFA Metadata" || str == "Mislabel as 2x2") return QuadBayerMode::WrongCFAMetadata;
     if (str == "Correct QBCFA Metadata" || str == "Keep CFA") return QuadBayerMode::CorrectQBCFAMetadata;

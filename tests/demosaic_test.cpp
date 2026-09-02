@@ -16,7 +16,8 @@ int main() {
         mosaic[static_cast<size_t>(y) * width + x] = flatColor[phase[(y & 1) * 2 + (x & 1)]];
 
     std::vector<uint16_t> rgb;
-    motioncam::utils::demosaicHigherCFA(mosaic, rgb, width, height, 2, phase, false);
+    motioncam::utils::demosaicHigherCFA(
+        mosaic, rgb, width, height, 2, phase, motioncam::QuadBayerMode::Demosaic);
     assert(rgb.size() == mosaic.size() * 3);
     for (int y = 1; y + 1 < height; ++y) for (int x = 1; x + 1 < width; ++x) {
         const size_t pixel = static_cast<size_t>(y) * width + x;
@@ -29,12 +30,76 @@ int main() {
     // A high-frequency native sample must survive as brightness detail.
     const size_t detailPixel = static_cast<size_t>(4) * width + 4;
     mosaic[detailPixel] = 4095;
-    motioncam::utils::demosaicHigherCFA(mosaic, rgb, width, height, 2, phase, false);
+    motioncam::utils::demosaicHigherCFA(
+        mosaic, rgb, width, height, 2, phase, motioncam::QuadBayerMode::Demosaic);
     assert(rgb[detailPixel * 3] == 4095);
     // Detail is reconstructed through the brightness estimate, not left only
     // in the native red plane as colour-difference demosaic would do.
     assert(rgb[detailPixel * 3 + 1] > flatColor[1] * 3);
     assert(rgb[detailPixel * 3 + 2] > flatColor[2] * 3);
+
+    // Demosaic (Color) uses confidence-limited colour and luma detail on quad
+    // CFA instead of forcing every uncertain native residual back into RGB.
+    constexpr int quadWidth = 32, quadHeight = 32;
+    std::vector<uint16_t> bandMosaic(quadWidth * quadHeight);
+    for (int y = 0; y < quadHeight; ++y) for (int x = 0; x < quadWidth; ++x) {
+        const double wave = std::sin(2.0 * 3.14159265358979323846 * (x + y) / 6.0);
+        bandMosaic[static_cast<size_t>(y) * quadWidth + x] =
+            static_cast<uint16_t>(2000.0 + 900.0 * wave);
+    }
+    std::vector<uint16_t> regularBand, colorBand;
+    motioncam::utils::demosaicHigherCFA(
+        bandMosaic, regularBand, quadWidth, quadHeight, 4, phase,
+        motioncam::QuadBayerMode::Demosaic);
+    motioncam::utils::demosaicHigherCFA(
+        bandMosaic, colorBand, quadWidth, quadHeight, 4, phase,
+        motioncam::QuadBayerMode::DemosaicColor);
+    assert(colorBand.size() == regularBand.size());
+    bool differsFromRegular = false;
+    for (int y = 0; y < quadHeight; ++y) for (int x = 0; x < quadWidth; ++x) {
+        const size_t pixel = static_cast<size_t>(y) * quadWidth + x;
+        for (int channel = 0; channel < 3; ++channel)
+            differsFromRegular |= colorBand[pixel * 3 + channel] !=
+                                  regularBand[pixel * 3 + channel];
+    }
+    assert(differsFromRegular);
+
+    // Color detail gain must not scale the encoded black pedestal. A frame at
+    // per-channel black remains at those RGB black levels after demosaic.
+    const std::array<float, 3> channelBlack = {64.0f, 96.0f, 128.0f};
+    std::vector<uint16_t> blackQuad(quadWidth * quadHeight);
+    for (int y = 0; y < quadHeight; ++y) for (int x = 0; x < quadWidth; ++x) {
+        const int native = phase[((y / 2) & 1) * 2 + ((x / 2) & 1)];
+        blackQuad[static_cast<size_t>(y) * quadWidth + x] =
+            static_cast<uint16_t>(channelBlack[native]);
+    }
+    motioncam::utils::demosaicHigherCFA(
+        blackQuad, colorBand, quadWidth, quadHeight, 4, phase,
+        motioncam::QuadBayerMode::DemosaicColor, channelBlack);
+    for (int y = 4; y < quadHeight - 4; ++y) for (int x = 4; x < quadWidth - 4; ++x) {
+        const size_t pixel = static_cast<size_t>(y) * quadWidth + x;
+        for (int channel = 0; channel < 3; ++channel)
+            assert(colorBand[pixel * 3 + channel] == channelBlack[channel]);
+    }
+
+    // Partial groups at the right and bottom edges must not contribute
+    // synthetic zero-valued phase errors to neighbouring complete groups.
+    constexpr int croppedWidth = 31, croppedHeight = 29;
+    std::vector<uint16_t> croppedBlack(croppedWidth * croppedHeight);
+    for (int y = 0; y < croppedHeight; ++y) for (int x = 0; x < croppedWidth; ++x) {
+        const int native = phase[((y / 2) & 1) * 2 + ((x / 2) & 1)];
+        croppedBlack[static_cast<size_t>(y) * croppedWidth + x] =
+            static_cast<uint16_t>(channelBlack[native]);
+    }
+    motioncam::utils::demosaicHigherCFA(
+        croppedBlack, colorBand, croppedWidth, croppedHeight, 4, phase,
+        motioncam::QuadBayerMode::DemosaicColor, channelBlack);
+    assert(colorBand.size() == croppedBlack.size() * 3);
+    for (int y = 4; y < croppedHeight; ++y) for (int x = 4; x < croppedWidth; ++x) {
+        const size_t pixel = static_cast<size_t>(y) * croppedWidth + x;
+        for (int channel = 0; channel < 3; ++channel)
+            assert(colorBand[pixel * 3 + channel] == channelBlack[channel]);
+    }
 
     std::vector<uint16_t> gradient(8 * 8 * 3);
     for (size_t i = 0; i < gradient.size(); ++i) gradient[i] = static_cast<uint16_t>(i);

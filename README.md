@@ -72,7 +72,7 @@ Camera Native finalization can encode LOG60 as HEVC/MOV, AV1/MP4, ProRes LT/Stan
 
 - **Higher CFA Support**
   
-  Fuse detects the CFA repeat size from MCRAW metadata (`cfaSize`, with the legacy remosaic flag mapping to 4x4), DNG CFA tags, or the per-clip JSON sidecar. The Higher CFA Processing control can demosaic 4x4 footage to RGB, use an OCL/4PD-oriented anti-aliasing variant, retain correct 4x4/6x6/8x8 CFA metadata, or deliberately label it as ordinary 2x2 Bayer for compatibility. Enabling Remosaic converts a demosaiced result back to ordinary Bayer for applications that do not accept RGB DNGs.
+  Fuse detects the CFA repeat size from MCRAW metadata (`cfaSize`, with the legacy remosaic flag mapping to 4x4), DNG CFA tags, or the per-clip JSON sidecar. The Higher CFA Processing control can demosaic higher-CFA footage to RGB, use the **Demosaic (Color)** variant to reconstruct green/luminance before interpolating colour differences and remove coherent 2x2 mean/phase gain errors while retaining irregular fine detail, use an OCL/4PD-oriented anti-aliasing variant, retain correct 4x4/6x6/8x8 CFA metadata, or deliberately label it as ordinary 2x2 Bayer for compatibility. Enabling Remosaic converts a demosaiced result back to ordinary Bayer for applications that do not accept RGB DNGs.
 
   With **HQ** enabled, ordinary Bayer and RGB inputs are reduced by averaging RGB blocks without changing black or white levels. Quad Bayer is first averaged into half-resolution ordinary Bayer; at 2x that Bayer image is the output, while 4x/8x demosaic it before the remaining reduction. With HQ disabled, Fuse uses the faster sample-selection reduction.
 

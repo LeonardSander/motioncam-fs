@@ -924,6 +924,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     const uint32_t cfaGroupSize = std::max(1u, cfaRepeatSize / 2);
     const bool staged8x8Demosaic = cfaRepeatSize == 8 && scale == 2 &&
         (quadBayerOption == QuadBayerMode::Demosaic ||
+         quadBayerOption == QuadBayerMode::DemosaicColor ||
          quadBayerOption == QuadBayerMode::DemosaicOCL);
     const uint32_t proxyGroupSize = staged8x8Demosaic ? 2u : cfaGroupSize;
     uint32_t cfaSize = (interpretAsQuadBayer ? 2 : 1);
@@ -1466,6 +1467,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         (hqRgbProxy || (quadBayerHqProxy && draftScale > 2) ||
          draftScale == 1 || staged8x8Demosaic) &&
         (hqProxy || settings.quadBayerOption == QuadBayerMode::Demosaic ||
+         settings.quadBayerOption == QuadBayerMode::DemosaicColor ||
          settings.quadBayerOption == QuadBayerMode::DemosaicOCL);
     const bool remosaic = demosaic && (settings.options & RENDER_OPT_REMOSAIC_TO_BAYER);
 
@@ -1603,8 +1605,10 @@ std::shared_ptr<std::vector<char>> generateDng(
 
         std::vector<uint16_t> rgbSamples;
         demosaicHigherCFA(cfaSamples, rgbSamples, width, height,
-                          processedRepeatSize, cfa,
-                          settings.quadBayerOption == QuadBayerMode::DemosaicOCL);
+                          processedRepeatSize, cfa, settings.quadBayerOption,
+                          {static_cast<float>(channelBlack[0]),
+                           static_cast<float>(channelBlack[1]),
+                           static_cast<float>(channelBlack[2])});
         // Interpolation and luma-detail restoration may legitimately overshoot
         // the input range. Clamp before packed 2/4/6/8/10/12/14-bit encoding;
         // otherwise the packers retain only the low bits and highlights wrap.

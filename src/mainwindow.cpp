@@ -1787,6 +1787,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     bool unsupportedBayer = false;
     const bool demosaicCfa =
         stagingSettings.quadBayerOption == motioncam::QuadBayerMode::Demosaic ||
+        stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicColor ||
         stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicOCL;
     try {
         const QFileInfo inputInfo(srcFile);

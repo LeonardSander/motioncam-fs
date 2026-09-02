@@ -231,6 +231,7 @@ void VirtualFileSystemImpl_DNG::init() {
         const bool remosaic = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
         const bool hq = mConfig.options & RENDER_OPT_HIGHER_CFA_HQ;
         const bool demosaicMode = mConfig.quadBayerOption == QuadBayerMode::Demosaic ||
+                                  mConfig.quadBayerOption == QuadBayerMode::DemosaicColor ||
                                   mConfig.quadBayerOption == QuadBayerMode::DemosaicOCL;
         if (!mHasCfa) channels = remosaic ? 1u : 3u;
         else if (scale > 1 && hq)

@@ -213,8 +213,9 @@ void binQuadBayer(
     uint32_t& outputHeight,
     uint16_t logWhiteLevel = 0);
 
-// Edge- and luma-guided Bayer/higher-CFA demosaic. The OCL variant compensates
-// the radial response difference between pixels sharing an on-sensor lens.
+// Edge- and luma-guided Bayer/higher-CFA demosaic. Color reconstructs green
+// first, interpolates R-G/B-G, and removes coherent 2x2 detail-gain errors;
+// OCL compensates pixels sharing an on-sensor lens.
 void demosaicHigherCFA(
     const std::vector<uint16_t>& cfaData,
     std::vector<uint16_t>& rgbData,
@@ -222,7 +223,8 @@ void demosaicHigherCFA(
     int height,
     int cfaRepeatSize,
     const std::array<uint8_t, 4>& bayerPhase,
-    bool ocl);
+    QuadBayerMode mode,
+    const std::array<float, 3>& channelBlack = {});
 
 bool generateJpegThumbnail(
     std::vector<uint8_t>& data,

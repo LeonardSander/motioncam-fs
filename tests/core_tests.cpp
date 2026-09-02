@@ -71,6 +71,8 @@ int main() {
     assert(defaults.quadBayerOption == QuadBayerMode::Demosaic);
     assert(defaults.badPixelTreatment == BadPixelTreatment::Bake);
     assert(stringToQuadBayerMode("Correct QBCFA Metadata") == QuadBayerMode::CorrectQBCFAMetadata);
+    assert(stringToQuadBayerMode("Demosaic (Color)") == QuadBayerMode::DemosaicColor);
+    assert(quadBayerModeToString(QuadBayerMode::DemosaicColor) == "Demosaic (Color)");
 
     const std::array<float, 4> dynamicBlack{60, 61, 62, 63};
     const std::array<float, 4> staticBlack{64, 65, 66, 67};
