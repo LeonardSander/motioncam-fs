@@ -198,15 +198,13 @@ namespace motioncam {
 
 
 VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
-        BS::thread_pool& ioThreadPool,
+        BS::thread_pool&,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
         const RenderSettings& config,
         const std::string& file,
         const std::string& baseName) :
-        mCache(lruCache),
-        mIoThreadPool(ioThreadPool),
-        mProcessingThreadPool(processingThreadPool),
+        MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
         mBaseName(baseName),
         mTypicalDngSize(0),
@@ -248,8 +246,10 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
         const auto& frames = mDecoder->getFrames();
-        for (size_t i = 0; i < frames.size(); ++i)
-            mFrameIndexByTimestamp[frames[i].timestamp] = i;
+        std::vector<Timestamp> sourceTimestamps;
+        sourceTimestamps.reserve(frames.size());
+        for (const auto& frame : frames) sourceTimestamps.push_back(frame.timestamp);
+        mFrameIndexByTimestamp = vfs::indexTimestamps(sourceTimestamps);
         
         // Calculate frame rate statistics from actual frame timestamps
         calculateFrameRateStats();
@@ -365,30 +365,6 @@ void VirtualFileSystemImpl_DirectLog::init() {
     
     spdlog::info("DirectLog generated {} DNG entries (dropped: {}, duplicated: {})", 
                  mFiles.size(), mDroppedFrames, mDuplicatedFrames);
-}
-
-std::vector<Entry> VirtualFileSystemImpl_DirectLog::listFiles(const std::string& filter) const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    
-    return vfs::filterEntries(mFiles, filter);
-}
-
-std::optional<Entry> VirtualFileSystemImpl_DirectLog::findEntry(const std::string& fullPath) const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    
-    return vfs::findEntry(mFiles, fullPath);
-}
-
-int VirtualFileSystemImpl_DirectLog::readFile(
-    const Entry& entry,
-    const size_t pos,
-    const size_t len,
-    void* dst,
-    std::function<void(size_t, int)> result,
-    bool async) {
-    return vfs::readMountedEntry(entry, pos, len, dst, result, async,
-        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); }, {},
-        vfs::outputFrameNumber(entry));
 }
 
 void VirtualFileSystemImpl_DirectLog::analyzeSidecarExposure() {
@@ -1350,14 +1326,9 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
 }
 
 FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
-    FileInfo info;
-    info.frameRateInfo = mFrameRateInfo;
-    info.fps = mFps;
-    info.totalFrames = mTotalFrames;
-    info.droppedFrames = mDroppedFrames;
-    info.duplicatedFrames = mDuplicatedFrames;
-    info.width = mWidth;
-    info.height = mHeight;
+    FileInfo info = vfs::makeFileInfo(
+        mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
+        mDuplicatedFrames, mWidth, mHeight);
     
     // This describes the input, not the selected DNG render operation. A
     // companion JSON may explicitly reinterpret the input CFA size.

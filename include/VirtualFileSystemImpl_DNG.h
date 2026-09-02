@@ -20,7 +20,7 @@ namespace motioncam {
 class LRUCache;
 class DNGDecoder;
 
-class VirtualFileSystemImpl_DNG : public IVirtualFileSystem
+class VirtualFileSystemImpl_DNG : public MountedDngSource
 {
 public:
     VirtualFileSystemImpl_DNG(
@@ -33,17 +33,6 @@ public:
 
     ~VirtualFileSystemImpl_DNG();
 
-    std::vector<Entry> listFiles(const std::string& filter = "") const override;
-    std::optional<Entry> findEntry(const std::string& fullPath) const override;
-
-    int readFile(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async=true) override;
-
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
     bool generateThumbnail(const std::string& outputPath, int width, int height) override;
@@ -52,6 +41,7 @@ public:
         const Entry& entry, bool jpegCompression = false) override;
 
 private:
+    int readPriority(const Entry& entry) const override;
     void init();
     
     void calculateFrameRateStats();
@@ -60,13 +50,9 @@ private:
         bool nativeResolution = false);
 
 private:
-    LRUCache& mCache;
-    BS::thread_pool& mIoThreadPool;
-    BS::thread_pool& mProcessingThreadPool;
     const std::string mSrcPath;
     const std::string mBaseName;
     size_t mTypicalDngSize;
-    std::vector<Entry> mFiles;
     RenderSettings mConfig;
     float mFps;
     bool mHasFrameNumberSequence = false;
@@ -92,7 +78,6 @@ private:
     std::map<Timestamp, bool> mHasAsShotNeutral;
     std::map<Timestamp, double> mExposureTimes;
     std::map<Timestamp, double> mIsoValues;
-    mutable std::mutex mMutex;
     mutable std::mutex mPayloadHashMutex;
     mutable std::mutex mMaterializeMutex;
     mutable std::shared_mutex mRenderMutex;

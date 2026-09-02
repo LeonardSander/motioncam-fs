@@ -7,6 +7,8 @@
 #include <memory>
 #include <array>
 #include <map>
+#include <mutex>
+#include <unordered_map>
 #include <memory>
 #include <nlohmann/json_fwd.hpp>
 
@@ -20,6 +22,30 @@ struct AudioChunk;
 struct GainMap;
 struct CalibrationData;
 class LRUCache;
+
+// Shared mounted-DNG shell for every source format. Format implementations
+// only render frames; lookup, cache/thread-pool reads, and entry storage are
+// deliberately identical across ingest paths.
+class MountedDngSource : public IVirtualFileSystem {
+public:
+    MountedDngSource(LRUCache& cache, BS::thread_pool& processingThreadPool);
+
+    std::vector<Entry> listFiles(const std::string& filter = "") const override;
+    std::optional<Entry> findEntry(const std::string& fullPath) const override;
+    int readFile(const Entry& entry, size_t pos, size_t len, void* dst,
+                 std::function<void(size_t, int)> result,
+                 bool async = true) override;
+
+protected:
+    virtual int readPriority(const Entry& entry) const;
+    virtual std::function<std::shared_ptr<std::vector<char>>()>
+        staticMaterializer(const Entry& entry);
+
+    LRUCache& mCache;
+    BS::thread_pool& mProcessingThreadPool;
+    std::vector<Entry> mFiles;
+    mutable std::mutex mMutex;
+};
 
 struct FrameRateInfo {
     float minFrameRate;
@@ -112,6 +138,10 @@ std::optional<int> readDesktopIni(
 std::vector<GainMap> loadSidecarGainMaps(
     const nlohmann::json& sidecar, size_t frameNumber, const char* field);
 
+void replaceSidecarGainMapOpcodes(
+    std::vector<uint8_t>& dng, const nlohmann::json& sidecar,
+    size_t frameNumber, bool replaceList2 = true, bool replaceList3 = true);
+
 nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path);
 
 boost::filesystem::path sidecarPath(const std::string& sourcePath);
@@ -143,6 +173,13 @@ void finalize(
     bool writeFiles = true);
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames);
+
+FileInfo makeFileInfo(
+    const FrameRateInfo& frameRateInfo, float fps, int totalFrames,
+    int droppedFrames, int duplicatedFrames, int width, int height);
+
+std::unordered_map<Timestamp, size_t> indexTimestamps(
+    const std::vector<Timestamp>& timestamps);
 
 // CFR (Constant Frame Rate) conversion
 float determineCFRTarget(

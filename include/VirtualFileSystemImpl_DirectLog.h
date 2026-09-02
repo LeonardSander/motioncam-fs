@@ -21,7 +21,7 @@ namespace motioncam {
 class LRUCache;
 class DirectLogDecoder;
 
-class VirtualFileSystemImpl_DirectLog : public IVirtualFileSystem
+class VirtualFileSystemImpl_DirectLog : public MountedDngSource
 {
 public:
     VirtualFileSystemImpl_DirectLog(
@@ -33,17 +33,6 @@ public:
         const std::string& baseName);
 
     ~VirtualFileSystemImpl_DirectLog();
-
-    std::vector<Entry> listFiles(const std::string& filter = "") const override;
-    std::optional<Entry> findEntry(const std::string& fullPath) const override;
-
-    int readFile(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async=true) override;
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
@@ -86,13 +75,9 @@ private:
 
 
 private:
-    LRUCache& mCache;
-    BS::thread_pool& mIoThreadPool;
-    BS::thread_pool& mProcessingThreadPool;
     const std::string mSrcPath;
     const std::string mBaseName;
     size_t mTypicalDngSize;
-    std::vector<Entry> mFiles;
     RenderSettings mConfig;
     float mFps;
     FrameRateInfo mFrameRateInfo;
@@ -110,7 +95,6 @@ private:
     std::map<Timestamp, float> mNormalizedExposureOffsets;
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
-    mutable std::mutex mMutex;
     mutable std::shared_mutex mRenderMutex;
     mutable std::mutex mDngWriterMutex;
     mutable std::condition_variable mDngWriterAvailable;

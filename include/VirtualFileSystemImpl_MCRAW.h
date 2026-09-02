@@ -19,7 +19,7 @@ namespace motioncam {
 class Decoder;
 class LRUCache;
 
-class VirtualFileSystemImpl_MCRAW : public IVirtualFileSystem
+class VirtualFileSystemImpl_MCRAW : public MountedDngSource
 {
 public:
     VirtualFileSystemImpl_MCRAW(
@@ -32,35 +32,23 @@ public:
 
     ~VirtualFileSystemImpl_MCRAW();
 
-    std::vector<Entry> listFiles(const std::string& filter = "") const override;
-    std::optional<Entry> findEntry(const std::string& fullPath) const override;
-
-    int readFile(
-        const Entry& entry,
-        const size_t pos,
-        const size_t len,
-        void* dst,
-        std::function<void(size_t, int)> result,
-        bool async=true) override;
-
     void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const override;
     std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
 
 private:
+    int readPriority(const Entry& entry) const override;
+    std::function<std::shared_ptr<std::vector<char>>()>
+        staticMaterializer(const Entry& entry) override;
     void init();
 
     void applySidecarGainMapOpcodes(std::vector<uint8_t>& dng, size_t frameIndex) const;
 
 private:
-    LRUCache& mCache;
-    BS::thread_pool& mIoThreadPool;
-    BS::thread_pool& mProcessingThreadPool;
     const std::string mSrcPath;
     const std::string mBaseName;
     size_t mTypicalDngSize;
-    std::vector<Entry> mFiles;
     std::vector<Timestamp> mSourceFrames;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::vector<uint8_t> mAudioFile;
@@ -73,7 +61,6 @@ private:
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     std::optional<CalibrationData> mCalibration;
     nlohmann::json mSidecarMetadata;
-    mutable std::mutex mMutex;
     mutable std::shared_mutex mRenderMutex;
 };
 

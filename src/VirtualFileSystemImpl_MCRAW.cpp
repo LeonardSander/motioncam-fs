@@ -25,15 +25,13 @@
 namespace motioncam {
 
 VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
-        BS::thread_pool& ioThreadPool,
+        BS::thread_pool&,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
         const RenderSettings& settings,
         const std::string& file,
         const std::string& baseName) :
-        mCache(lruCache),
-        mIoThreadPool(ioThreadPool),
-        mProcessingThreadPool(processingThreadPool),
+        MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
         mBaseName(baseName),
         mSettings(settings) {
@@ -55,7 +53,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     if(frames.empty())
         return;
     mSourceFrames = frames;
-    for (size_t i = 0; i < frames.size(); ++i) mFrameIndexByTimestamp[frames[i]] = i;
+    mFrameIndexByTimestamp = vfs::indexTimestamps(frames);
     mBaselineExpValue = std::numeric_limits<double>::max();    
     nlohmann::json metadata;
     std::vector<vfs::ExposureSample> exposureSamples;
@@ -235,15 +233,13 @@ void VirtualFileSystemImpl_MCRAW::init() {
                   std::make_move_iterator(mapped.end()));
 
     // Store frame information
-    mFileInfo.frameRateInfo = mFrameRateInfo;
-    mFileInfo.fps = mFps;
-    mFileInfo.totalFrames = static_cast<int>(frames.size());
-    mFileInfo.droppedFrames = droppedFrames;
-    mFileInfo.duplicatedFrames = duplicatedFrames;
-    mFileInfo.width = cropWidth > 0 && cropWidth <= static_cast<uint32_t>(cameraFrameMetadata.width)
+    const int outputWidth = cropWidth > 0 && cropWidth <= static_cast<uint32_t>(cameraFrameMetadata.width)
         ? static_cast<int>(cropWidth) : cameraFrameMetadata.width;
-    mFileInfo.height = cropHeight > 0 && cropHeight <= static_cast<uint32_t>(cameraFrameMetadata.height)
+    const int outputHeight = cropHeight > 0 && cropHeight <= static_cast<uint32_t>(cameraFrameMetadata.height)
         ? static_cast<int>(cropHeight) : cameraFrameMetadata.height;
+    mFileInfo = vfs::makeFileInfo(
+        mFrameRateInfo, mFps, static_cast<int>(frames.size()), droppedFrames,
+        duplicatedFrames, outputWidth, outputHeight);
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
@@ -262,15 +258,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo.timingUsesCfrMapping = applyCFRConversion;
 }
 
-std::vector<Entry> VirtualFileSystemImpl_MCRAW::listFiles(const std::string& filter) const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    return vfs::filterEntries(mFiles, filter);
-}
-
-std::optional<Entry> VirtualFileSystemImpl_MCRAW::findEntry(const std::string& fullPath) const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    return vfs::findEntry(mFiles, fullPath);
-}
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
@@ -343,14 +330,8 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
         frameIndex >= mSidecarMetadata["dynamic"]["frames"].size()) return;
     const auto& frame = mSidecarMetadata["dynamic"]["frames"][frameIndex];
     const bool bake = mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    if (!bake && frame.contains("gainMaps") &&
-        !DNGDecoder::replaceGainMaps(dng, 2,
-            vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, "gainMaps")))
-        throw std::runtime_error("Could not apply MCRAW OpcodeList2 gain-map override");
-    if (!bake && frame.contains("deferredGainMaps") &&
-        !DNGDecoder::replaceGainMaps(dng, 3,
-            vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, "deferredGainMaps")))
-        throw std::runtime_error("Could not apply MCRAW OpcodeList3 gain-map override");
+    vfs::replaceSidecarGainMapOpcodes(
+        dng, mSidecarMetadata, frameIndex, !bake, !bake);
     if (bake && (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
         const char* field = frame.contains("deferredGainMaps")
             ? "deferredGainMaps" : "gainMaps";
@@ -363,21 +344,14 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
     }
 }
 
-int VirtualFileSystemImpl_MCRAW::readFile(
-    const Entry& entry,
-    const size_t pos,
-    const size_t len,
-    void* dst,
-    std::function<void(size_t, int)> result,
-    bool async) {
+int VirtualFileSystemImpl_MCRAW::readPriority(const Entry& entry) const {
+    return boost::ends_with(entry.name, ".dng") ? vfs::outputFrameNumber(entry) : 0;
+}
 
-    std::function<std::shared_ptr<std::vector<char>>()> staticMaterializer;
-    if (boost::ends_with(entry.name, ".wav"))
-        staticMaterializer = [this, entry] { return materializeFile(entry, false); };
-    return vfs::readMountedEntry(entry, pos, len, dst, result, async,
-        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); },
-        staticMaterializer, boost::ends_with(entry.name, ".dng")
-            ? vfs::outputFrameNumber(entry) : 0);
+std::function<std::shared_ptr<std::vector<char>>()>
+VirtualFileSystemImpl_MCRAW::staticMaterializer(const Entry& entry) {
+    if (!boost::ends_with(entry.name, ".wav")) return {};
+    return [this, entry] { return materializeFile(entry, false); };
 }
 
 void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {

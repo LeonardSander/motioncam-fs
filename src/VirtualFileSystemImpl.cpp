@@ -273,6 +273,25 @@ std::vector<GainMap> loadSidecarGainMaps(
     return maps;
 }
 
+void replaceSidecarGainMapOpcodes(
+        std::vector<uint8_t>& dng, const nlohmann::json& sidecar,
+        size_t frameNumber, bool replaceList2, bool replaceList3) {
+    if (!sidecar.contains("dynamic") ||
+        !sidecar["dynamic"].contains("frames") ||
+        frameNumber >= sidecar["dynamic"]["frames"].size()) return;
+    const auto& frame = sidecar["dynamic"]["frames"][frameNumber];
+    auto replace = [&](const char* field, int opcodeList, bool enabled) {
+        if (enabled && frame.contains(field) &&
+            !DNGDecoder::replaceGainMaps(
+                dng, opcodeList, loadSidecarGainMaps(sidecar, frameNumber, field)))
+            throw std::runtime_error(
+                "Could not apply sidecar OpcodeList" + std::to_string(opcodeList) +
+                " gain-map override");
+    };
+    replace("gainMaps", 2, replaceList2);
+    replace("deferredGainMaps", 3, replaceList3);
+}
+
 nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
     if (!boost::filesystem::exists(path)) return {};
     try {
@@ -991,6 +1010,29 @@ std::string getDisplayDataType(bool sourceRgb, int cfaSize) {
     return "RGB";
 }
 
+FileInfo makeFileInfo(
+        const FrameRateInfo& frameRateInfo, float fps, int totalFrames,
+        int droppedFrames, int duplicatedFrames, int width, int height) {
+    FileInfo info{};
+    info.frameRateInfo = frameRateInfo;
+    info.fps = fps;
+    info.totalFrames = totalFrames;
+    info.droppedFrames = droppedFrames;
+    info.duplicatedFrames = duplicatedFrames;
+    info.width = width;
+    info.height = height;
+    return info;
+}
+
+std::unordered_map<Timestamp, size_t> indexTimestamps(
+        const std::vector<Timestamp>& timestamps) {
+    std::unordered_map<Timestamp, size_t> result;
+    result.reserve(timestamps.size());
+    for (size_t index = 0; index < timestamps.size(); ++index)
+        result[timestamps[index]] = index;
+    return result;
+}
+
 std::string getDisplayDataLevels(
     float dynWhiteLevel, std::array<float, 4> dynBlackLevel, 
     float statWhiteLevel, std::array<float, 4> statBlackLevel, 
@@ -1055,4 +1097,37 @@ std::string getDisplayDataLevels(
 }
 
 } // namespace vfs
+
+MountedDngSource::MountedDngSource(
+        LRUCache& cache, BS::thread_pool& processingThreadPool) :
+        mCache(cache), mProcessingThreadPool(processingThreadPool) {}
+
+std::vector<Entry> MountedDngSource::listFiles(const std::string& filter) const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    return vfs::filterEntries(mFiles, filter);
+}
+
+std::optional<Entry> MountedDngSource::findEntry(const std::string& fullPath) const {
+    std::lock_guard<std::mutex> lock(mMutex);
+    return vfs::findEntry(mFiles, fullPath);
+}
+
+int MountedDngSource::readPriority(const Entry& entry) const {
+    return vfs::outputFrameNumber(entry);
+}
+
+std::function<std::shared_ptr<std::vector<char>>()>
+MountedDngSource::staticMaterializer(const Entry&) {
+    return {};
+}
+
+int MountedDngSource::readFile(
+        const Entry& entry, size_t pos, size_t len, void* dst,
+        std::function<void(size_t, int)> result, bool async) {
+    return vfs::readMountedEntry(
+        entry, pos, len, dst, result, async, mProcessingThreadPool,
+        [this, entry] { return materializeFile(entry, false); },
+        staticMaterializer(entry), readPriority(entry));
+}
+
 } // namespace motioncam

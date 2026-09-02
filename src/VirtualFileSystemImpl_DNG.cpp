@@ -49,15 +49,13 @@ bool sameRenderSettings(const RenderSettings& left, const RenderSettings& right)
 }
 
 VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
-        BS::thread_pool& ioThreadPool,
+        BS::thread_pool&,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
         const RenderSettings& config,
         const std::string& file,
         const std::string& baseName) :
-        mCache(lruCache),
-        mIoThreadPool(ioThreadPool),
-        mProcessingThreadPool(processingThreadPool),
+        MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
         mBaseName(baseName),
         mTypicalDngSize(0),
@@ -108,8 +106,10 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         calculateFrameRateStats();
 
         const auto& frames = mDecoder->getFrames();
-        for (size_t i = 0; i < frames.size(); ++i)
-            mFrameIndexByTimestamp[frames[i].timestamp] = i;
+        std::vector<Timestamp> sourceTimestamps;
+        sourceTimestamps.reserve(frames.size());
+        for (const auto& frame : frames) sourceTimestamps.push_back(frame.timestamp);
+        mFrameIndexByTimestamp = vfs::indexTimestamps(sourceTimestamps);
         std::vector<vfs::ExposureSample> exposureSamples;
         std::vector<DNGFrameMetadata> metadata(frames.size());
         mSourceMetadataSizes.resize(frames.size());
@@ -320,29 +320,8 @@ void VirtualFileSystemImpl_DNG::init() {
 
 }
 
-std::vector<Entry> VirtualFileSystemImpl_DNG::listFiles(const std::string& filter) const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    
-    return vfs::filterEntries(mFiles, filter);
-}
-
-std::optional<Entry> VirtualFileSystemImpl_DNG::findEntry(const std::string& fullPath) const {
-    std::lock_guard<std::mutex> lock(mMutex);
-    
-    return vfs::findEntry(mFiles, fullPath);
-}
-
-int VirtualFileSystemImpl_DNG::readFile(
-    const Entry& entry,
-    const size_t pos,
-    const size_t len,
-    void* dst,
-    std::function<void(size_t, int)> result,
-    bool async) {
-    
-    return vfs::readMountedEntry(entry, pos, len, dst, result, async,
-        mProcessingThreadPool, [this, entry] { return materializeFile(entry, false); }, {},
-        mHasFrameNumberSequence ? vfs::outputFrameNumber(entry) : 0);
+int VirtualFileSystemImpl_DNG::readPriority(const Entry& entry) const {
+    return mHasFrameNumberSequence ? vfs::outputFrameNumber(entry) : 0;
 }
 
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
@@ -484,19 +463,7 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if (!DNGDecoder::ensureUncompressed(bytes))
         throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
     logStage("uncompressed decode/canonicalization", bytes.size());
-    if (mSidecarMetadata.contains("dynamic") &&
-        mSidecarMetadata["dynamic"].contains("frames") &&
-        frameIndex < mSidecarMetadata["dynamic"]["frames"].size()) {
-        const auto& overrideFrame = mSidecarMetadata["dynamic"]["frames"][frameIndex];
-        if (overrideFrame.contains("gainMaps") &&
-            !DNGDecoder::replaceGainMaps(bytes, 2,
-                vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, "gainMaps")))
-            throw std::runtime_error("Could not apply DNG OpcodeList2 gain-map override");
-        if (overrideFrame.contains("deferredGainMaps") &&
-            !DNGDecoder::replaceGainMaps(bytes, 3,
-                vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, "deferredGainMaps")))
-            throw std::runtime_error("Could not apply DNG OpcodeList3 gain-map override");
-    }
+    vfs::replaceSidecarGainMapOpcodes(bytes, mSidecarMetadata, frameIndex);
     const std::optional<bool> gainMapOrderOverride =
         mCalibration && mCalibration->hasNeedGainMapOrderFixed
             ? std::optional<bool>(mCalibration->needGainMapOrderFixed)
@@ -684,14 +651,9 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
 }
 
 FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
-    FileInfo info;
-    info.frameRateInfo = mFrameRateInfo;
-    info.fps = mFps;
-    info.totalFrames = mTotalFrames;
-    info.droppedFrames = mDroppedFrames;
-    info.duplicatedFrames = mDuplicatedFrames;
-    info.width = mWidth;
-    info.height = mHeight;
+    FileInfo info = vfs::makeFileInfo(
+        mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
+        mDuplicatedFrames, mWidth, mHeight);
     
     // DNG sequences are pass-through, so we show source format
     info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";
