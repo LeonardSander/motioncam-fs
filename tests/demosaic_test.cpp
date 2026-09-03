@@ -139,5 +139,21 @@ int main() {
                                    reducedWidth, reducedHeight);
     assert(reducedWidth == 4 && reducedHeight == 4);
     assert(binned[0] == 2); // Rounded average of 0, 1, 2, and 3.
+
+    std::vector<uint16_t> sixBySix(12 * 12);
+    for (size_t i = 0; i < sixBySix.size(); ++i)
+        sixBySix[i] = static_cast<uint16_t>(i);
+    motioncam::utils::binHigherCFA(sixBySix, binned, 12, 12, 3,
+                                   reducedWidth, reducedHeight);
+    assert(reducedWidth == 4 && reducedHeight == 4);
+    assert(binned[0] == (0 + 1 + 2 + 12 + 13 + 14 + 24 + 25 + 26 + 4) / 9);
+
+    std::vector<uint16_t> eightByEight(16 * 16, 400);
+    motioncam::utils::binHigherCFA(eightByEight, binned, 16, 16, 4,
+                                   reducedWidth, reducedHeight);
+    assert(reducedWidth == 4 && reducedHeight == 4 && binned[0] == 400);
+    motioncam::utils::binHigherCFA(eightByEight, binned, 16, 16, 2,
+                                   reducedWidth, reducedHeight);
+    assert(reducedWidth == 8 && reducedHeight == 8 && binned[0] == 400);
     return 0;
 }

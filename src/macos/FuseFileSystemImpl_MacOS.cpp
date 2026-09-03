@@ -548,6 +548,7 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
         if (it != mMountedFiles.end()) {
             session = std::move(it->second);
             mMountedFiles.erase(it);
+            mPreviewRenderers.erase(mountId);
         }
     }
     // Session destruction waits for the FUSE loop to exit. Keep this synchronous
@@ -624,6 +625,26 @@ void FuseFileSystemImpl_MacOs::finalize(
         session = it->second;
     }
     session->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
+}
+void FuseFileSystemImpl_MacOs::finalizePreview(
+    MountId mountId, const RenderSettings& settings, const FinalizeOptions& options,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress,
+    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) {
+    std::shared_ptr<PreviewRenderer> renderer;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) throw std::runtime_error("Mount not found");
+        auto& cached = mPreviewRenderers[mountId];
+        if (!cached) {
+            cached = std::make_shared<PreviewRenderer>(
+                *mIoThreadPool, *mProcessingThreadPool, it->second->sourcePath(),
+                "gallery-preview-" + std::to_string(mountId));
+        }
+        renderer = cached;
+    }
+    renderer->finalize(settings, QDir::tempPath().toStdString(), options,
+                       progress, fileReady);
 }
 
 } // namespace motioncam

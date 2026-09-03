@@ -43,6 +43,13 @@ public:
         const std::function<bool(size_t, size_t, const std::string&)>& progress,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady = {},
         bool writeFiles = true) = 0;
+    // Render with an isolated virtual filesystem. Preview settings must never
+    // mutate the mounted projection or invalidate/re-estimate its entries.
+    virtual void finalizePreview(
+        MountId mountId, const RenderSettings& settings,
+        const FinalizeOptions& options,
+        const std::function<bool(size_t, size_t, const std::string&)>& progress,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) = 0;
 
 protected:
     IFuseFileSystem() = default;

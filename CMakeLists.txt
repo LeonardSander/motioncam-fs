@@ -30,8 +30,8 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network Concurrent)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Concurrent)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network Concurrent Multimedia)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Concurrent Multimedia)
 
 set(APP_NAME "MotionCam Fuse")
 set(DEPENDENCIES_PATH deps)
@@ -44,8 +44,10 @@ set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
         src/FrameTimingDialog.cpp
+        src/ClipPlayerDialog.cpp
         src/settingsdialog.cpp
         src/VirtualFileSystemImpl.cpp
+        src/PreviewVirtualFileSystem.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
         src/VirtualFileSystemImpl_DirectLog.cpp
         src/VirtualFileSystemImpl_DNG.cpp
@@ -61,6 +63,7 @@ set(PROJECT_SOURCES
 
         include/mainwindow.h
         include/FrameTimingDialog.h
+        include/ClipPlayerDialog.h
         include/settingsdialog.h
         include/Types.h
         include/DataLevels.h
@@ -416,6 +419,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Network
   Qt${QT_VERSION_MAJOR}::Concurrent
+  Qt${QT_VERSION_MAJOR}::Multimedia
   Boost::filesystem
   Boost::locale
   Boost::regex

@@ -23,6 +23,37 @@ struct GainMap;
 struct CalibrationData;
 class LRUCache;
 
+// Owns the expensive, source-specific preview decoder and its private cache.
+// The renderer is reused while settings remain unchanged, so player seeks do
+// not repeatedly scan the source and rebuild timing/exposure analysis.
+class PreviewRenderer {
+public:
+    PreviewRenderer(BS::thread_pool& ioThreadPool,
+                    BS::thread_pool& processingThreadPool,
+                    std::string source, std::string baseName);
+
+    void finalize(
+        const RenderSettings& settings,
+        const std::string& destination,
+        const FinalizeOptions& options,
+        const std::function<bool(size_t, size_t, const std::string&)>& progress,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady);
+
+private:
+    struct State;
+    BS::thread_pool& mIoThreadPool;
+    BS::thread_pool& mProcessingThreadPool;
+    std::string mSource;
+    std::string mBaseName;
+    std::mutex mMutex;
+    std::shared_ptr<State> mState;
+};
+
+std::unique_ptr<IVirtualFileSystem> createVirtualFileSystem(
+    BS::thread_pool& ioThreadPool, BS::thread_pool& processingThreadPool,
+    LRUCache& cache, const RenderSettings& settings,
+    const std::string& source, const std::string& baseName);
+
 // Shared mounted-DNG shell for every source format. Format implementations
 // only render frames; lookup, cache/thread-pool reads, and entry storage are
 // deliberately identical across ingest paths.
@@ -67,12 +98,16 @@ struct FileInfo {
     std::string dataType;        // "Bayer CFA", "Quad Bayer CFA", or "RGB"
     std::string levelsInfo;      // e.g., "1023/64 -> 1023/0 10b"
     float runtimeSeconds;        // Runtime in seconds based on audio track
+    std::shared_ptr<const std::vector<uint8_t>> audioWav;
     // Native presentation timestamps for frame-timing visualization. The
     // timestamp unit is timingTimeBaseNum / timingTimeBaseDen seconds.
     std::shared_ptr<const std::vector<std::int64_t>> presentationTimestamps;
     int timingTimeBaseNum = 0;
     int timingTimeBaseDen = 0;
     bool timingUsesCfrMapping = false;
+    // False for independent DNG still collections. Such folders may contain
+    // mixed dimensions and must not advance into the next mounted clip.
+    bool isSequence = true;
 };
 
 namespace vfs {

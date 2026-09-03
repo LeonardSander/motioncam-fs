@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <QByteArray>
 
 using motioncam::Timestamp;
@@ -41,6 +42,28 @@ bool directLogDiagnosticsEnabled() {
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
+}
+
+std::pair<uint32_t, uint32_t> legacyGainMapCoordinateExtent(
+        uint32_t inputWidth, uint32_t inputHeight,
+        uint32_t mapRight, uint32_t mapBottom) {
+    // Camera Native sidecars written before coordinateWidth/coordinateHeight
+    // used one of these full-sensor coordinate spaces. Pick the smallest one
+    // that contains both the encoded video and the gain-map bounds.
+    constexpr std::array<std::pair<uint32_t, uint32_t>, 5> sensorExtents{{
+        {2048, 1536},
+        {4096, 3072},
+        {4608, 3456},
+        {8192, 6144},
+        {9248, 6944},
+    }};
+    const uint32_t requiredWidth = std::max(inputWidth, mapRight);
+    const uint32_t requiredHeight = std::max(inputHeight, mapBottom);
+    for (const auto& extent : sensorExtents)
+        if (extent.first >= requiredWidth && extent.second >= requiredHeight)
+            return extent;
+    throw std::runtime_error(
+        "DirectLog gain-map coordinates exceed the largest legacy sensor extent");
 }
 
 template<typename Function>
@@ -291,7 +314,13 @@ void VirtualFileSystemImpl_DirectLog::init() {
     size_t firstDngSize = 0;
 
     // Generate one sample DNG to determine actual file size (mimics MCRAW approach)
-    if (!frames.empty()) {
+    if (mConfig.streamingPreview) {
+        // Callback-only previews neither pad nor expose projected file sizes.
+        // Avoid allocating a full-resolution RGB image and encoding one or two
+        // synthetic sizing DNGs before the real preview frame is decoded.
+        mTypicalDngSize = 1;
+        firstDngSize = 1;
+    } else if (!frames.empty()) {
         // Uncompressed DNG size is independent of sample values. Avoid decoding
         // and color-converting frame zero whenever the mount settings change.
         std::vector<uint16_t> sampleRgbData(
@@ -548,11 +577,17 @@ void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
             const double spacingH = format.at("spacingH").get<double>();
             const double originV = format.at("originV").get<double>();
             const double originH = format.at("originH").get<double>();
-            if (!format.contains("coordinateWidth") || !format.contains("coordinateHeight"))
-                throw std::runtime_error(
-                    "DirectLog gain-map sidecar lacks sensor coordinate dimensions");
-            const uint32_t coordinateWidth = format.at("coordinateWidth").get<uint32_t>();
-            const uint32_t coordinateHeight = format.at("coordinateHeight").get<uint32_t>();
+            uint32_t coordinateWidth = 0;
+            uint32_t coordinateHeight = 0;
+            if (format.contains("coordinateWidth") && format.contains("coordinateHeight")) {
+                coordinateWidth = format.at("coordinateWidth").get<uint32_t>();
+                coordinateHeight = format.at("coordinateHeight").get<uint32_t>();
+            } else {
+                std::tie(coordinateWidth, coordinateHeight) =
+                    legacyGainMapCoordinateExtent(
+                        static_cast<uint32_t>(mWidth), static_cast<uint32_t>(mHeight),
+                        right, bottom);
+            }
             if (!rowPitch || !colPitch || top >= bottom || left >= right)
                 throw std::runtime_error("Invalid DirectLog gain-map geometry");
             if (!coordinateWidth || !coordinateHeight)
@@ -1142,9 +1177,12 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
 
         const int outputFrameNumber = vfs::outputFrameNumber(entry);
         const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
-        // Applications inspect the first DNG to establish sequence metadata
-        // and native dimensions. Keep it full resolution even in draft mode.
-        const bool sequenceMetadataFrame = outputFrameNumber == 0;
+        // Applications inspect the first mounted DNG to establish sequence
+        // metadata and native dimensions. Gallery frames are a homogeneous
+        // RGB stream, so frame zero must use the same proxy scale as every
+        // following frame.
+        const bool sequenceMetadataFrame =
+            !mConfig.streamingPreview && outputFrameNumber == 0;
         const bool directProxyDecode = proxyScale > 1 && !sequenceMetadataFrame &&
             !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ);
         const int decodedWidth = sequenceMetadataFrame && proxyScale > 1

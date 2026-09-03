@@ -151,7 +151,8 @@ public:
                                  QuadBayerMode mode,
                                  bool remosaic,
                                  int proxyScale = 1,
-                                 bool higherCfaHq = true);
+                                 bool higherCfaHq = true,
+                                 bool nearestNeighborDemosaic = false);
     
     static bool isDNGSequence(const std::string& path);
     static bool imagePayloadsEqual(const std::vector<uint8_t>& left,

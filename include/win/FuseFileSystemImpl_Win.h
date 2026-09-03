@@ -14,6 +14,7 @@ namespace motioncam {
 
 class VirtualizationInstance;
 class LRUCache;
+class PreviewRenderer;
 
 class FuseFileSystemImpl_Win : public IFuseFileSystem
 {
@@ -34,6 +35,9 @@ public:
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>& = {},
         bool = true) override;
+    void finalizePreview(MountId, const RenderSettings&, const FinalizeOptions&,
+        const std::function<bool(size_t, size_t, const std::string&)>&,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>&) override;
 
 private:
     MountId mNextMountId;
@@ -44,6 +48,7 @@ private:
     std::unique_ptr<LRUCache> mCache;
     CachePolicy mCachePolicy{CachePolicy::Quota};
     std::uint64_t mCacheQuotaBytes{30ULL * 1024 * 1024 * 1024};
+    std::map<MountId, std::shared_ptr<PreviewRenderer>> mPreviewRenderers;
 
 };
 

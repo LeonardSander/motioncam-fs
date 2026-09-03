@@ -12,6 +12,7 @@ namespace motioncam {
 
 struct LinuxFuseSession;
 class LRUCache;
+class PreviewRenderer;
 
 // Linux counterpart to the Windows projected-filesystem provider.  FUSE3
 // exposes generated frames as a read-only, kernel-cached filesystem.
@@ -31,6 +32,9 @@ public:
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>& = {},
         bool = true) override;
+    void finalizePreview(MountId, const RenderSettings&, const FinalizeOptions&,
+        const std::function<bool(size_t, size_t, const std::string&)>&,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>&) override;
 
 private:
     MountId mNextMountId;
@@ -42,6 +46,7 @@ private:
     std::unique_ptr<BS::thread_pool> mIoThreadPool;
     std::unique_ptr<BS::thread_pool> mProcessingThreadPool;
     std::unique_ptr<LRUCache> mCache;
+    std::map<MountId, std::shared_ptr<PreviewRenderer>> mPreviewRenderers;
 };
 
 } // namespace motioncam

@@ -21,6 +21,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <QDir>
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -683,6 +684,7 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
         if (it == mMountedFiles.end()) return;
         session = std::move(it->second);
         mMountedFiles.erase(it);
+        mPreviewRenderers.erase(mountId);
     }
     session.reset();
 }
@@ -814,6 +816,28 @@ void FuseFileSystemImpl_Win::finalize(
     if (!session) throw std::runtime_error("Invalid mount session");
     session->finalize(
         destination, jpegCompression, options, progress, fileReady, writeFiles);
+}
+void FuseFileSystemImpl_Win::finalizePreview(
+    MountId mountId, const RenderSettings& settings, const FinalizeOptions& options,
+    const std::function<bool(size_t, size_t, const std::string&)>& progress,
+    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) {
+    std::shared_ptr<PreviewRenderer> renderer;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        const auto it = mMountedFiles.find(mountId);
+        if (it == mMountedFiles.end()) throw std::runtime_error("Mount not found");
+        auto* session = dynamic_cast<Session*>(it->second.get());
+        if (!session) throw std::runtime_error("Invalid mount session");
+        auto& cached = mPreviewRenderers[mountId];
+        if (!cached) {
+            cached = std::make_shared<PreviewRenderer>(
+                *mIoThreadPool, *mProcessingThreadPool, session->sourcePath(),
+                "gallery-preview-" + std::to_string(mountId));
+        }
+        renderer = cached;
+    }
+    renderer->finalize(settings, QDir::tempPath().toStdString(), options,
+                       progress, fileReady);
 }
 
 }

@@ -213,6 +213,18 @@ void binQuadBayer(
     uint32_t& outputHeight,
     uint16_t logWhiteLevel = 0);
 
+// Averages contiguous same-colour blocks in a higher CFA. A factor equal to
+// half the CFA repeat produces ordinary Bayer; factor 2 turns 8x8 into 4x4.
+void binHigherCFA(
+    const std::vector<uint16_t>& input,
+    std::vector<uint16_t>& output,
+    uint32_t width,
+    uint32_t height,
+    uint32_t factor,
+    uint32_t& outputWidth,
+    uint32_t& outputHeight,
+    uint16_t logWhiteLevel = 0);
+
 // Edge- and luma-guided Bayer/higher-CFA demosaic. Color reconstructs green
 // first, interpolates R-G/B-G, and removes coherent 2x2 detail-gain errors;
 // OCL compensates pixels sharing an on-sensor lens.

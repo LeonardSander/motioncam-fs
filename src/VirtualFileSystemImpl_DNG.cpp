@@ -44,7 +44,8 @@ bool sameRenderSettings(const RenderSettings& left, const RenderSettings& right)
            left.quadBayerOption == right.quadBayerOption &&
            left.cfaPhase == right.cfaPhase &&
            left.jxlDistance == right.jxlDistance &&
-           left.cameraNativeStaging == right.cameraNativeStaging;
+           left.cameraNativeStaging == right.cameraNativeStaging &&
+           left.streamingPreview == right.streamingPreview;
 }
 }
 
@@ -222,6 +223,16 @@ void VirtualFileSystemImpl_DNG::init() {
         uint32_t height = frameIndex < frames.size() && frames[frameIndex].height > 0
             ? static_cast<uint32_t>(frames[frameIndex].height)
             : static_cast<uint32_t>(mHeight);
+        const bool binning = mHasCfa && mCfaSize > 2 &&
+            (mConfig.quadBayerOption == QuadBayerMode::Binning ||
+             mConfig.quadBayerOption == QuadBayerMode::Bin8x8To4x4);
+        if (binning) {
+            const uint32_t factor = mConfig.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+                                    mCfaSize == 8
+                ? 2u : static_cast<uint32_t>(mCfaSize / 2);
+            width = std::max<uint32_t>(1, width / factor);
+            height = std::max<uint32_t>(1, height / factor);
+        }
         if (scale > 1) {
             width = std::max<uint32_t>(1, width / static_cast<uint32_t>(scale));
             height = std::max<uint32_t>(1, height / static_cast<uint32_t>(scale));
@@ -235,8 +246,6 @@ void VirtualFileSystemImpl_DNG::init() {
                                   mConfig.quadBayerOption == QuadBayerMode::DemosaicOCL;
         if (!mHasCfa) channels = remosaic ? 1u : 3u;
         else if (scale > 1 && hq)
-            channels = (mCfaSize == 4 && scale == 2) || remosaic ? 1u : 3u;
-        else if (scale > 1 && mCfaSize == 8 && scale == 2 && demosaicMode)
             channels = remosaic ? 1u : 3u;
         else if (scale == 1 && mCfaSize > 2 && demosaicMode)
             channels = remosaic ? 1u : 3u;
@@ -343,7 +352,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
             ? vfs::outputTimestamp(entry, timestamp, frames.front().timestamp, mFps, true)
             : timestamp - frames.front().timestamp;
         const bool firstFrame = frameIt->second == 0;
-        const bool nativeResolution = mHasFrameNumberSequence && firstFrame &&
+        const bool nativeResolution = !mConfig.streamingPreview &&
+            mHasFrameNumberSequence && firstFrame &&
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1;
         DNGDecoder::beginForegroundWork();
         struct ForegroundGuard {
@@ -358,7 +368,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
             frameIt->second, outputTimestamp, jpegCompression, nativeResolution);
         const auto transformedAt = std::chrono::steady_clock::now();
         const size_t advertisedSize = entry.size;
-        if (!jpegCompression) {
+        if (!jpegCompression && !mConfig.streamingPreview) {
             if (bytes.size() > advertisedSize)
                 throw std::runtime_error(
                     "Transformed DNG size " + std::to_string(bytes.size()) +
@@ -464,6 +474,17 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if (!DNGDecoder::ensureUncompressed(bytes))
         throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
     logStage("uncompressed decode/canonicalization", bytes.size());
+    int frameCfaSize = mCfaSize;
+    std::array<uint8_t, 4> frameCfaPhase = mCfaPhase;
+    bool frameHasCfa = DNGDecoder::getCFAMetadata(bytes, frameCfaSize, frameCfaPhase);
+    // A folder sidecar is an explicit folder-wide override. Otherwise every
+    // independent DNG retains its own CFA repeat and phase metadata.
+    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
+        frameCfaSize = mCalibration->cfaSize;
+        frameHasCfa = frameCfaSize >= 2;
+    }
+    if (mCalibration && !mCalibration->cfaPhase.empty())
+        frameCfaPhase = mCfaPhase;
     vfs::replaceSidecarGainMapOpcodes(bytes, mSidecarMetadata, frameIndex);
     const std::optional<bool> gainMapOrderOverride =
         mCalibration && mCalibration->hasNeedGainMapOrderFixed
@@ -533,17 +554,27 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
             mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
             mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP,
-            mCfaSize))
+            frameCfaSize))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frame.filePath);
     if (hasGainMap && !bakeGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(bytes))
         throw std::runtime_error("Could not canonicalize DNG gain maps: " + frame.filePath);
     logStage("metadata and gain-map processing", bytes.size());
 
     const int outputScale = requestedScale;
-    if ((mCfaSize > 2 || (mHasCfa && mConfig.cameraNativeStaging) || outputScale > 1 ||
+    QuadBayerMode processingMode = mConfig.quadBayerOption;
+    const bool selectedDemosaic = processingMode == QuadBayerMode::Demosaic ||
+                                  processingMode == QuadBayerMode::DemosaicColor ||
+                                  processingMode == QuadBayerMode::DemosaicOCL;
+    // A private, non-proxy gallery stream keeps its CFA so the display path
+    // can bin higher CFA to Bayer and choose nearest-neighbour when HQ is off.
+    // Mounted DNGs never set streamingPreview and retain their selected mode.
+    if (mConfig.streamingPreview && outputScale == 1 &&
+        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ) && selectedDemosaic)
+        processingMode = QuadBayerMode::CorrectQBCFAMetadata;
+    if ((frameCfaSize > 2 || (frameHasCfa && mConfig.cameraNativeStaging) || outputScale > 1 ||
          (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
         !DNGDecoder::processHigherCFA(
-            bytes, mCfaSize, mCfaPhase, mConfig.quadBayerOption,
+            bytes, frameCfaSize, frameCfaPhase, processingMode,
             mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
             outputScale,
             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
@@ -655,6 +686,7 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     FileInfo info = vfs::makeFileInfo(
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
+    info.isSequence = mHasFrameNumberSequence;
     
     // DNG sequences are pass-through, so we show source format
     info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";

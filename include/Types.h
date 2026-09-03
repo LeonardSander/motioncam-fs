@@ -8,6 +8,7 @@
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include <boost/filesystem.hpp>
 
@@ -200,6 +201,8 @@ enum class QuadBayerMode {
     Demosaic,
     DemosaicColor,
     DemosaicOCL,
+    Binning,
+    Bin8x8To4x4,
     CorrectQBCFAMetadata,
     WrongCFAMetadata
 };
@@ -250,6 +253,8 @@ inline std::string quadBayerModeToString(QuadBayerMode mode) {
         case QuadBayerMode::Demosaic: return "Demosaic";
         case QuadBayerMode::DemosaicColor: return "Demosaic (Color)";
         case QuadBayerMode::DemosaicOCL: return "Demosaic (OCL)";
+        case QuadBayerMode::Binning: return "Binning";
+        case QuadBayerMode::Bin8x8To4x4: return "Bin 8x8 to 4x4";
         case QuadBayerMode::CorrectQBCFAMetadata: return "Keep CFA";
         case QuadBayerMode::WrongCFAMetadata: return "Mislabel as 2x2";
         default: return "Demosaic";
@@ -260,6 +265,8 @@ inline QuadBayerMode stringToQuadBayerMode(const std::string& str) {
     if (str == "Demosaic" || str == "Remosaic") return QuadBayerMode::Demosaic;
     if (str == "Demosaic (Color)" || str == "Color") return QuadBayerMode::DemosaicColor;
     if (str == "Demosaic (OCL)") return QuadBayerMode::DemosaicOCL;
+    if (str == "Binning") return QuadBayerMode::Binning;
+    if (str == "Bin 8x8 to 4x4") return QuadBayerMode::Bin8x8To4x4;
     if (str == "Wrong CFA Metadata" || str == "Mislabel as 2x2") return QuadBayerMode::WrongCFAMetadata;
     if (str == "Correct QBCFA Metadata" || str == "Keep CFA") return QuadBayerMode::CorrectQBCFAMetadata;
     return QuadBayerMode::Demosaic;
@@ -339,6 +346,9 @@ struct RenderSettings {
     // Internal export mode: write normalized, unpacked 16-bit RGB staging DNGs
     // for the Camera Native encoder. This is never persisted as a UI option.
     bool cameraNativeStaging;
+    // Internal gallery mode: materialized frames are consumed as a stream and
+    // are not constrained by projected-file size estimates.
+    bool streamingPreview;
 
     // Constructor with defaults
     RenderSettings()
@@ -355,6 +365,7 @@ struct RenderSettings {
         , cfaPhase("Don't override CFA")
         , jxlDistance(-1.0f)
         , cameraNativeStaging(false)
+        , streamingPreview(false)
     {}
 
     // Constructor with all parameters (strings for backward compatibility)
@@ -382,6 +393,7 @@ struct RenderSettings {
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
         , cameraNativeStaging(false)
+        , streamingPreview(false)
     {}
 
     // Constructor with enum types directly
@@ -409,10 +421,17 @@ struct RenderSettings {
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
         , cameraNativeStaging(false)
+        , streamingPreview(false)
     {}
 };
 
 struct FinalizeOptions {
+    // Skip this many source DNG frames before finalization. Used by streaming
+    // preview so seeking does not render and discard every preceding frame.
+    size_t firstDngFrame = 0;
+    // Streaming previews may discard an overdue output frame before its
+    // expensive materialization. The index is in the complete DNG sequence.
+    std::function<bool(size_t)> skipDngFrame;
     bool interpolateDuplicatedFrames = false;
     // Compare adjacent source DNG image payloads and mark matching finalized
     // frames as duplicates. This is finalization-only and does not affect mounts.

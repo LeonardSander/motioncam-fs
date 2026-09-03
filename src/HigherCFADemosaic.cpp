@@ -455,6 +455,44 @@ void binQuadBayer(const std::vector<uint16_t>& input, std::vector<uint16_t>& out
     }
 }
 
+void binHigherCFA(const std::vector<uint16_t>& input, std::vector<uint16_t>& output,
+                  uint32_t width, uint32_t height, uint32_t factor,
+                  uint32_t& outputWidth, uint32_t& outputHeight,
+                  uint16_t logWhiteLevel) {
+    outputWidth = factor ? width / factor : 0;
+    outputHeight = factor ? height / factor : 0;
+    if (!factor || !outputWidth || !outputHeight ||
+        input.size() < static_cast<size_t>(width) * height) {
+        output.clear();
+        return;
+    }
+    output.resize(static_cast<size_t>(outputWidth) * outputHeight);
+    const uint64_t area = static_cast<uint64_t>(factor) * factor;
+    for (uint32_t y = 0; y < outputHeight; ++y) {
+        for (uint32_t x = 0; x < outputWidth; ++x) {
+            double linearSum = 0.0;
+            uint64_t sum = 0;
+            for (uint32_t by = 0; by < factor; ++by) {
+                for (uint32_t bx = 0; bx < factor; ++bx) {
+                    const uint16_t sample = input[
+                        (static_cast<size_t>(y) * factor + by) * width + x * factor + bx];
+                    if (logWhiteLevel) {
+                        const double encoded = static_cast<double>(sample) / logWhiteLevel;
+                        linearSum += (std::pow(61.0, encoded) - 1.0) / 60.0;
+                    } else {
+                        sum += sample;
+                    }
+                }
+            }
+            output[static_cast<size_t>(y) * outputWidth + x] = logWhiteLevel
+                ? static_cast<uint16_t>(std::llround(
+                    std::log2(1.0 + 60.0 * linearSum / area) /
+                    std::log2(61.0) * logWhiteLevel))
+                : static_cast<uint16_t>((sum + area / 2) / area);
+        }
+    }
+}
+
 
 } // namespace utils
 } // namespace motioncam

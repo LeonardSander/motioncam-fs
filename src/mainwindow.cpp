@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "FrameTimingDialog.h"
+#include "ClipPlayerDialog.h"
 #include "ui_mainwindow.h"
 #include "settingsdialog.h"
 #include "CalibrationData.h"
@@ -93,6 +94,182 @@ namespace {
     constexpr auto RIFE_REVISION = "b0542ef99f380f0fe17a1b44151ac6935e8b82d4";
     constexpr auto RIFE_ARCHIVE_SHA256 =
         "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
+
+    void applyGalleryColorTransform(std::vector<uint8_t>& bytes,
+                                    const motioncam::DNGFrameMetadata& metadata) {
+        if (bytes.size() % 6 != 0) return;
+        auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
+        const size_t pixelCount = bytes.size() / 6;
+        static const std::array<uint16_t, 65536> srgbTransfer = [] {
+            std::array<uint16_t, 65536> result{};
+            for (size_t index = 0; index < result.size(); ++index) {
+                const float value = static_cast<float>(index) / 65535.0f;
+                const float encoded = value <= 0.0031308f
+                    ? value * 12.92f
+                    : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
+                result[index] = static_cast<uint16_t>(
+                    std::lround(std::clamp(encoded, 0.0f, 1.0f) * 65535.0f));
+            }
+            return result;
+        }();
+        const float exposure = std::exp2(static_cast<float>(metadata.baselineExposure));
+        const std::array<float,3> gains{
+            exposure / std::max(0.001f, metadata.asShotNeutral[0]),
+            exposure / std::max(0.001f, metadata.asShotNeutral[1]),
+            exposure / std::max(0.001f, metadata.asShotNeutral[2])};
+        // ForwardMatrix maps white-balanced camera RGB to XYZ D50. Convert
+        // that to linear sRGB (D65); without it, retain thumbnail-compatible
+        // white balance and exposure handling.
+        const std::array<float,9> xyzToSrgbD50{
+             3.1338561f,-1.6168667f,-0.4906146f,
+            -0.9787684f, 1.9161415f, 0.0334540f,
+             0.0719453f,-0.2289914f, 1.4052427f};
+        auto transfer=[](float value){
+            const size_t index = static_cast<size_t>(std::lround(
+                std::clamp(value, 0.0f, 1.0f) * 65535.0f));
+            return srgbTransfer[index];
+        };
+        const bool hasMatrix = metadata.hasForwardMatrix2 || metadata.hasForwardMatrix1;
+        std::array<float, 9> cameraToDisplay{};
+        if (hasMatrix) {
+            const auto& forward = metadata.hasForwardMatrix2
+                ? metadata.forwardMatrix2 : metadata.forwardMatrix1;
+            // Both matrices and channel gains are constant for the frame.
+            // Fold them here rather than doing two matrix passes per pixel.
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    for (int xyz = 0; xyz < 3; ++xyz)
+                        cameraToDisplay[row * 3 + column] +=
+                            xyzToSrgbD50[row * 3 + xyz] *
+                            forward[xyz * 3 + column] * gains[column];
+                }
+            }
+        }
+        std::array<std::array<uint16_t, 65536>, 3> channelTransfer;
+        if (!hasMatrix) {
+            for (size_t value = 0; value < 65536; ++value) {
+                const float normalized = static_cast<float>(value) / 65535.0f;
+                for (int channel = 0; channel < 3; ++channel)
+                    channelTransfer[channel][value] = transfer(normalized * gains[channel]);
+            }
+        }
+        auto convertRange = [&](size_t begin, size_t end) {
+            if (!hasMatrix) {
+                for (size_t pixel = begin; pixel < end; ++pixel) {
+                    for (int channel = 0; channel < 3; ++channel)
+                        pixels[pixel * 3 + channel] =
+                            channelTransfer[channel][pixels[pixel * 3 + channel]];
+                }
+                return;
+            }
+            constexpr float normalize = 1.0f / 65535.0f;
+            for (size_t pixel = begin; pixel < end; ++pixel) {
+                const float camera[3]{pixels[pixel * 3] * normalize,
+                                      pixels[pixel * 3 + 1] * normalize,
+                                      pixels[pixel * 3 + 2] * normalize};
+                for (int row = 0; row < 3; ++row) {
+                    const float value = cameraToDisplay[row * 3] * camera[0] +
+                                        cameraToDisplay[row * 3 + 1] * camera[1] +
+                                        cameraToDisplay[row * 3 + 2] * camera[2];
+                    pixels[pixel * 3 + row] = transfer(value);
+                }
+            }
+        };
+        constexpr size_t minimumPixelsPerWorker = 256 * 1024;
+        const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
+            4, std::max<size_t>(1,
+                (pixelCount + minimumPixelsPerWorker - 1) / minimumPixelsPerWorker)));
+        std::vector<std::thread> threads;
+        threads.reserve(workers - 1);
+        for (unsigned int worker = 1; worker < workers; ++worker) {
+            const size_t begin = pixelCount * worker / workers;
+            const size_t end = pixelCount * (worker + 1) / workers;
+            threads.emplace_back(convertRange, begin, end);
+        }
+        convertRange(0, pixelCount / workers);
+        for (auto& thread : threads) thread.join();
+    }
+
+    motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
+        settings.options = static_cast<motioncam::FileRenderOptions>(
+            settings.options & ~(
+                motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
+                motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
+        settings.cameraModel.clear();
+        if (settings.quadBayerOption == motioncam::QuadBayerMode::CorrectQBCFAMetadata ||
+            settings.quadBayerOption == motioncam::QuadBayerMode::WrongCFAMetadata)
+            settings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+        settings.cameraNativeStaging = true;
+        settings.streamingPreview = true;
+        return settings;
+    }
+
+    motioncam::RenderSettings thumbnailRenderSettings(motioncam::RenderSettings settings) {
+        settings = previewRenderSettings(std::move(settings));
+        // Card images are only 176x112. Run the same preprocessing pipeline on
+        // a small proxy so full-resolution CFA demosaic and display conversion
+        // do not dominate mount/settings updates. HQ proxy demosaic is useful
+        // for exported frames but its extra detail is not visible at card size.
+        settings.options = static_cast<motioncam::FileRenderOptions>(
+            settings.options | motioncam::RENDER_OPT_DRAFT);
+        settings.options = static_cast<motioncam::FileRenderOptions>(
+            settings.options & ~motioncam::RENDER_OPT_HIGHER_CFA_HQ);
+        settings.draftScale = std::max(16, settings.draftScale);
+        return settings;
+    }
+
+    bool decodePreviewFrame(const std::vector<uint8_t>& dng,
+                            const motioncam::RenderSettings& settings,
+                            std::vector<uint8_t>& rgb,
+                            uint32_t& width, uint32_t& height) {
+        if (!motioncam::DNGDecoder::extractUncompressedRGB16(dng, rgb, width, height)) {
+            std::vector<uint8_t> demosaiced = dng;
+            int repeatSize = 0;
+            std::array<uint8_t,4> phase{};
+            const bool highQuality =
+                settings.options & motioncam::RENDER_OPT_HIGHER_CFA_HQ;
+            if (!motioncam::DNGDecoder::getCFAMetadata(
+                    demosaiced, repeatSize, phase) ||
+                !motioncam::DNGDecoder::ensureUncompressed(demosaiced))
+                return false;
+            if (!highQuality && repeatSize > 2) {
+                if (!motioncam::DNGDecoder::processHigherCFA(
+                        demosaiced, repeatSize, phase,
+                        motioncam::QuadBayerMode::Binning, false, 1, false) ||
+                    !motioncam::DNGDecoder::getCFAMetadata(
+                        demosaiced, repeatSize, phase) || repeatSize != 2)
+                    return false;
+            }
+            if (!motioncam::DNGDecoder::processHigherCFA(
+                    demosaiced, repeatSize, phase,
+                    motioncam::QuadBayerMode::Demosaic, false, 1,
+                    highQuality, !highQuality) ||
+                !motioncam::DNGDecoder::extractUncompressedRGB16(
+                    demosaiced, rgb, width, height))
+                return false;
+        }
+        motioncam::DNGFrameMetadata metadata;
+        if (!motioncam::DNGDecoder::getColorMetadata(dng, metadata))
+            spdlog::warn("Preview frame has no complete DNG color metadata; using neutral display defaults");
+        applyGalleryColorTransform(rgb, metadata);
+        return true;
+    }
+
+    QImage previewImage(const std::vector<uint8_t>& rgb, uint32_t width, uint32_t height) {
+        if (!width || !height || rgb.size() < static_cast<size_t>(width) * height * 6)
+            return {};
+        QImage image(static_cast<int>(width), static_cast<int>(height), QImage::Format_RGB888);
+        for (uint32_t y = 0; y < height; ++y) {
+            auto* destination = image.scanLine(static_cast<int>(y));
+            for (uint32_t x = 0; x < width; ++x) {
+                const size_t input = (static_cast<size_t>(y) * width + x) * 6;
+                destination[x * 3] = rgb[input + 1];
+                destination[x * 3 + 1] = rgb[input + 3];
+                destination[x * 3 + 2] = rgb[input + 5];
+            }
+        }
+        return image;
+    }
 
     bool isCameraNativeFormat(const QString& mode) {
         const QString trimmed = mode.trimmed();
@@ -621,6 +798,19 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow() {
     autoSaveSession();
     saveSettings();
+    ++mGalleryGeneration;
+    // Gallery workers may be waiting for a UI-thread handoff. Keep servicing
+    // those cancellation handoffs until every worker has observed shutdown;
+    // waiting directly on the UI thread can otherwise deadlock.
+    for (;;) {
+        bool allFinished = true;
+        for (const auto& future : mGalleryTasks.futures())
+            allFinished &= future.isFinished();
+        if (allFinished) break;
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+        QThread::msleep(1);
+    }
+    mGalleryTasks.waitForFinished();
     mThumbnailTasks.waitForFinished();
 
     // Wait for any ongoing processing
@@ -818,6 +1008,12 @@ void MainWindow::restoreSettings() {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (auto* card = qobject_cast<QWidget*>(watched);
+        card && card->property("clipCard").toBool() &&
+        event->type() == QEvent::MouseButtonDblClick) {
+        playMount(card->property("mountId").toInt());
+        return true;
+    }
     if (auto* card = qobject_cast<QWidget*>(watched);
         card && card->property("clipCard").toBool() &&
         event->type() == QEvent::MouseButtonRelease) {
@@ -1271,6 +1467,7 @@ void MainWindow::mountFile(const QString& filePath) {
     connect(localReset, &QPushButton::clicked, this, [this, mountId] {
         mLocalSettings.remove(mountId);
         mFuseFilesystem->updateOptions(mountId, mGlobalRenderSettings);
+        updateThumbnail(mountId);
         updateLocalBadge(mountId);
         updateSelectionUi();
         autoSaveSession();
@@ -1303,8 +1500,8 @@ void MainWindow::mountFile(const QString& filePath) {
         openMountedDirectory(fileWidget);
     });
 
-    connect(playButton, &QPushButton::clicked, this, [this, filePath] {
-        playFile(filePath);
+    connect(playButton, &QPushButton::clicked, this, [this, mountId] {
+        playMount(mountId);
     });
 
     connect(removeButton, &QPushButton::clicked, this, [this, fileWidget] {
@@ -1330,24 +1527,318 @@ void MainWindow::mountFile(const QString& filePath) {
     updateCalibrationButtonStates();
 }
 
-void MainWindow::playFile(const QString& path) {
-    bool success = false;
+motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
+    return mLocalSettings.value(mountId, mGlobalRenderSettings);
+}
 
-#ifdef _WIN32
-    const QString playerPath = mPlayerPath.isEmpty()
-        ? QDir(QCoreApplication::applicationDirPath()).absoluteFilePath("../Player/MotionCamPlayer.exe")
-        : mPlayerPath;
-    success = QProcess::startDetached(QDir::cleanPath(playerPath), QStringList() << path);
-#elif __APPLE__
-    success = mPlayerPath.isEmpty()
-        ? QProcess::startDetached("/usr/bin/open", QStringList() << "-a" << "MotionCam Player" << path)
-        : QProcess::startDetached("/usr/bin/open", QStringList() << "-a" << mPlayerPath << path);
-#elif __linux__
-    if (!mPlayerPath.isEmpty()) success = QProcess::startDetached(mPlayerPath, QStringList() << path);
-#endif
+void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeconds) {
+    auto settings = previewRenderSettings(settingsForMount(mountId));
+    const auto info = mFuseFilesystem->getFileInfo(mountId);
+    if (!info) return;
+    if (!mClipPlayer) return;
+    const auto generation = ++mGalleryGeneration;
+    const double previewFps = info->isSequence
+        ? (info->fps > 0.0f ? info->fps : 24.0f) : 1.0;
+    const int playbackFrames=std::max(1,info->totalFrames-info->droppedFrames+
+        info->duplicatedFrames);
+    const size_t firstFrame = static_cast<size_t>(std::clamp(
+        std::floor(startSeconds * previewFps), 0.0,
+        static_cast<double>(playbackFrames-1)));
+    QPointer<ClipPlayerDialog> player(mClipPlayer);
+    const auto playbackTarget=mClipPlayer->playbackTarget();
+    const auto incomingFrame=mClipPlayer->incomingFrame();
+    auto render = [this, mountId, settings, generation, firstFrame, player, playbackTarget, incomingFrame] {
+        try {
+            motioncam::FinalizeOptions options;
+            options.firstDngFrame = firstFrame;
+            options.skipDngFrame = [playbackTarget,incomingFrame](size_t frame) {
+                const bool skip=frame<static_cast<size_t>(std::max(0,playbackTarget->load()));
+                if(!skip)incomingFrame->store(static_cast<int>(frame));
+                return skip;
+            };
+            bool presentedFirstFrame = false;
+            mFuseFilesystem->finalizePreview(
+                mountId, settings, options,
+                [this, generation](size_t, size_t, const std::string&) {
+                    return mGalleryGeneration.load() == generation;
+                },
+                [this, generation, player, settings, &presentedFirstFrame](
+                    const std::vector<uint8_t>& dng, motioncam::Timestamp) {
+                    // A materialization already in progress may complete after
+                    // the gallery closes. Do not touch the dialog or process
+                    // that frame once its preview generation is cancelled.
+                    if (mGalleryGeneration.load() != generation) return;
+                    std::vector<uint8_t> rgb;
+                    uint32_t width = 0, height = 0;
+                    if (!decodePreviewFrame(dng, settings, rgb, width, height))
+                        throw std::runtime_error("Could not decode gallery frame to RGB48");
+                    if (mGalleryGeneration.load() != generation) return;
+                    const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),
+                                           static_cast<qsizetype>(rgb.size()));
+                    if (!presentedFirstFrame) {
+                        QMetaObject::invokeMethod(this, [&, width, height] {
+                            if (player) player->presentRgb48Frame(
+                                bytes, static_cast<int>(width), static_cast<int>(height));
+                        }, Qt::BlockingQueuedConnection);
+                        presentedFirstFrame = true;
+                    }
+                    auto pushResult = ClipPlayerDialog::FramePushResult::Retry;
+                    while (pushResult == ClipPlayerDialog::FramePushResult::Retry &&
+                           mGalleryGeneration.load() == generation) {
+                        QMetaObject::invokeMethod(this, [&] {
+                            if (player) pushResult = player->pushRgb48Frame(
+                                bytes, static_cast<int>(width), static_cast<int>(height));
+                            else pushResult = ClipPlayerDialog::FramePushResult::Stopped;
+                        }, Qt::BlockingQueuedConnection);
+                        if (pushResult == ClipPlayerDialog::FramePushResult::Retry)
+                            QThread::msleep(5);
+                    }
+                    if (pushResult == ClipPlayerDialog::FramePushResult::Stopped)
+                        throw std::runtime_error("Gallery decoder stopped accepting frames");
+                });
+            if (mGalleryGeneration.load() == generation)
+                QMetaObject::invokeMethod(this, [player] {
+                    if (player) player->finishRgb48Frames();
+                }, Qt::BlockingQueuedConnection);
+        } catch (const std::exception& error) {
+            if (mGalleryGeneration.load() != generation) return;
+            const QString detail = QString::fromUtf8(error.what());
+            spdlog::error("Gallery render failed: {}", error.what());
+            QMetaObject::invokeMethod(this, [player, detail] {
+                if (player) player->failRgb48Frames(detail);
+            }, Qt::BlockingQueuedConnection);
+        }
+    };
+    mGalleryTasks.addFuture(QtConcurrent::run(std::move(render)));
+}
 
-    if (!success)
-        QMessageBox::warning(this, "Error", QString("Failed to launch player with file: %1").arg(path));
+void MainWindow::playMount(motioncam::MountId mountId) {
+    if (mClipPlayer) {
+        mClipPlayer->selectMount(mountId);
+        mClipPlayer->raise();
+        mClipPlayer->activateWindow();
+        return;
+    }
+    QVector<ClipPlayerDialog::Clip> clips;
+    for (const auto& mounted : mMountedFiles) {
+        auto* card = fileWidgetForMount(mounted.mountId);
+        const auto info = mFuseFilesystem->getFileInfo(mounted.mountId);
+        if (!card || !info) continue;
+        ClipPlayerDialog::Clip clip;
+        clip.mountId = mounted.mountId;
+        clip.title = QFileInfo(mounted.srcFile).completeBaseName();
+        clip.sourceFile = mounted.srcFile;
+        // Independent DNGs form a still gallery, not a 24 fps video sequence.
+        // Give each item a stable one-second viewing interval.
+        clip.fps = info->isSequence
+            ? (info->fps > 0.0f ? info->fps : 24.0f) : 1.0f;
+        clip.durationSeconds = info->runtimeSeconds > 0.0f ? info->runtimeSeconds
+                                                           : info->totalFrames / clip.fps;
+        clip.sourceFrames = std::max(1,info->totalFrames-info->droppedFrames+
+            info->duplicatedFrames);
+        clip.width = info->width;
+        clip.height = info->height;
+        clip.isSequence = info->isSequence;
+        clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
+        clip.audioWav = info->audioWav;
+        clips.push_back(std::move(clip));
+    }
+    if (clips.isEmpty()) return;
+    mGalleryMountId = mountId;
+    mClipPlayer = new ClipPlayerDialog(std::move(clips), mountId, this);
+    connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
+            [this](int id, double startSeconds) {
+                mGalleryMountId = id;
+                startGalleryRender(id, startSeconds);
+            });
+    connect(mClipPlayer, &ClipPlayerDialog::playbackClosed, this, [this] {
+        if (!mClipPlayer) return;
+        ++mGalleryGeneration;
+        mGalleryMountId = motioncam::InvalidMountId;
+    });
+    mClipPlayer->show();
+    startGalleryRender(mountId);
+}
+
+void MainWindow::startGalleryPerformanceTest(
+        const QString& sessionPath, int playbackMilliseconds) {
+    const QFileInfo session(sessionPath);
+    if (!session.isFile()) {
+        spdlog::error("GALLERY_PERF event=suite_failed reason=session_not_found path={}",
+                      session.absoluteFilePath().toStdString());
+        QCoreApplication::exit(2);
+        return;
+    }
+
+    const auto suiteStarted = std::chrono::steady_clock::now();
+    mGalleryPerformanceTestActive = true;
+    spdlog::info("GALLERY_PERF event=suite_start session={} playback_ms={}",
+                 session.absoluteFilePath().toStdString(), playbackMilliseconds);
+    loadSessionFromFile(session.absoluteFilePath());
+    if (mMountedFiles.isEmpty()) {
+        spdlog::error("GALLERY_PERF event=suite_failed reason=no_mounted_clips");
+        QCoreApplication::exit(3);
+        return;
+    }
+
+    struct RunState {
+        enum class Phase { Init, Playback, Seek, SeekPlayback };
+        QVector<motioncam::MountId> mounts;
+        int clipIndex = 0;
+        int playbackMs = 3000;
+        int presentedFrames = 0;
+        int actionSerial = 0;
+        Phase phase = Phase::Init;
+        QElapsedTimer actionTimer;
+        QElapsedTimer sampleTimer;
+    };
+    auto state = std::make_shared<RunState>();
+    state->playbackMs = std::max(250, playbackMilliseconds);
+    for (const auto& file : mMountedFiles) state->mounts.push_back(file.mountId);
+
+    // Benchmark card previews first and let them finish before gallery timing
+    // starts, so the two workloads cannot compete for decode/processing pools.
+    QEventLoop thumbnailLoop;
+    int thumbnailsPending = state->mounts.size();
+    bool thumbnailTimedOut = false;
+    const auto thumbnailConnection = connect(
+        this, &MainWindow::thumbnailPerformanceFinished, &thumbnailLoop,
+        [&](motioncam::MountId mountId, bool success, qint64 elapsedMs) {
+            spdlog::info(
+                "GALLERY_PERF event=thumbnail_complete mount={} success={} latency_ms={}",
+                mountId, success, elapsedMs);
+            if (--thumbnailsPending == 0) thumbnailLoop.quit();
+        });
+    QTimer thumbnailTimeout;
+    thumbnailTimeout.setSingleShot(true);
+    connect(&thumbnailTimeout, &QTimer::timeout, &thumbnailLoop, [&] {
+        thumbnailTimedOut = true;
+        thumbnailLoop.quit();
+    });
+    mPerformanceThumbnailRun = true;
+    for (const auto mountId : state->mounts) {
+        spdlog::info("GALLERY_PERF event=thumbnail_start mount={}", mountId);
+        updateThumbnail(mountId);
+    }
+    mPerformanceThumbnailRun = false;
+    thumbnailTimeout.start(120000);
+    if (thumbnailsPending > 0) thumbnailLoop.exec();
+    disconnect(thumbnailConnection);
+    if (thumbnailTimedOut) {
+        spdlog::error("GALLERY_PERF event=timeout phase=thumbnails pending={}",
+                      thumbnailsPending);
+        QCoreApplication::exit(7);
+        return;
+    }
+
+    playMount(state->mounts.front());
+    if (!mClipPlayer) {
+        spdlog::error("GALLERY_PERF event=suite_failed reason=gallery_not_created");
+        QCoreApplication::exit(4);
+        return;
+    }
+    mClipPlayer->setAutomaticAdvanceEnabled(false);
+
+    auto finishSuite = [this, state, suiteStarted] {
+        const double totalMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - suiteStarted).count();
+        spdlog::info("GALLERY_PERF event=suite_complete clips={} total_ms={:.3f}",
+                     state->mounts.size(), totalMs);
+        if (mClipPlayer) mClipPlayer->close();
+        QCoreApplication::quit();
+    };
+
+    auto startClip = std::make_shared<std::function<void()>>();
+    auto startSample = std::make_shared<std::function<void(bool)>>();
+    *startClip = [this, state, startClip, finishSuite] {
+        if (state->clipIndex >= state->mounts.size()) {
+            finishSuite();
+            return;
+        }
+        const auto mountId = state->mounts[state->clipIndex];
+        state->phase = RunState::Phase::Init;
+        state->presentedFrames = 0;
+        state->actionTimer.restart();
+        const int serial = ++state->actionSerial;
+        spdlog::info("GALLERY_PERF event=clip_init_start clip={} mount={}",
+                     state->clipIndex, mountId);
+        if (mClipPlayer) {
+            if (mClipPlayer->currentMountId() == mountId)
+                mClipPlayer->reloadCurrentClip();
+            else
+                mClipPlayer->selectMount(mountId);
+        }
+        QTimer::singleShot(120000, this, [state, serial, mountId] {
+            if (state->actionSerial != serial) return;
+            spdlog::error("GALLERY_PERF event=timeout phase=init mount={}", mountId);
+            QCoreApplication::exit(5);
+        });
+    };
+    *startSample = [this, state, startClip, startSample](bool afterSeek) {
+        state->phase = afterSeek ? RunState::Phase::SeekPlayback
+                                 : RunState::Phase::Playback;
+        state->presentedFrames = 0;
+        state->sampleTimer.restart();
+        const int serial = ++state->actionSerial;
+        QTimer::singleShot(state->playbackMs, this,
+            [this, state, startClip, startSample, afterSeek, serial] {
+                if (state->actionSerial != serial || !mClipPlayer) return;
+                const qint64 elapsed = std::max<qint64>(1, state->sampleTimer.elapsed());
+                const double presentedFps = state->presentedFrames * 1000.0 / elapsed;
+                spdlog::info(
+                    "GALLERY_PERF event=playback_sample clip={} mount={} after_seek={} elapsed_ms={} frames={} presented_fps={:.3f}",
+                    state->clipIndex, mClipPlayer->currentMountId(), afterSeek,
+                    elapsed, state->presentedFrames, presentedFps);
+                if (!afterSeek) {
+                    state->phase = RunState::Phase::Seek;
+                    state->actionTimer.restart();
+                    const int seekSerial = ++state->actionSerial;
+                    const double target = mClipPlayer->currentDurationSeconds() * 0.5;
+                    spdlog::info("GALLERY_PERF event=seek_start clip={} mount={} target_s={:.3f}",
+                                 state->clipIndex, mClipPlayer->currentMountId(), target);
+                    mClipPlayer->seekToSeconds(target);
+                    QTimer::singleShot(120000, this,
+                        [state, seekSerial, mountId = mClipPlayer->currentMountId()] {
+                            if (state->actionSerial != seekSerial) return;
+                            spdlog::error("GALLERY_PERF event=timeout phase=seek mount={}",
+                                          mountId);
+                            QCoreApplication::exit(6);
+                        });
+                } else {
+                    ++state->clipIndex;
+                    (*startClip)();
+                }
+            });
+    };
+
+    connect(mClipPlayer, &ClipPlayerDialog::framePresented, this,
+        [state](int mountId, int) {
+            if (state->clipIndex >= state->mounts.size() ||
+                mountId != state->mounts[state->clipIndex]) return;
+            if (state->phase == RunState::Phase::Playback ||
+                state->phase == RunState::Phase::SeekPlayback)
+                ++state->presentedFrames;
+        });
+    connect(mClipPlayer, &ClipPlayerDialog::firstFramePresented, this,
+        [this, state, startSample](int mountId) {
+            if (state->clipIndex >= state->mounts.size() ||
+                mountId != state->mounts[state->clipIndex]) return;
+            if (state->phase == RunState::Phase::Init) {
+                ++state->actionSerial;
+                spdlog::info("GALLERY_PERF event=clip_init_complete clip={} mount={} latency_ms={}",
+                             state->clipIndex, mountId, state->actionTimer.elapsed());
+                (*startSample)(false);
+            } else if (state->phase == RunState::Phase::Seek) {
+                ++state->actionSerial;
+                spdlog::info("GALLERY_PERF event=seek_complete clip={} mount={} latency_ms={}",
+                             state->clipIndex, mountId, state->actionTimer.elapsed());
+                (*startSample)(true);
+            }
+        });
+
+    // playMount started the first render before the diagnostic signal hooks
+    // were installed. Restart it so init timing always has a matching event.
+    (*startClip)();
 }
 
 void MainWindow::openMountedDirectory(QWidget* fileWidget) {
@@ -1398,6 +1889,12 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     bool ok = false;
     auto mountId = fileWidget->property("mountId").toInt(&ok);
     if(ok) {
+        // The player owns a snapshot of the mounted clip list. Close it before
+        // changing that list so it cannot keep rendering or navigate back to
+        // an unmounted clip. closeEvent also cancels the active generation.
+        if (mClipPlayer) mClipPlayer->close();
+        if (const auto cancellation = mThumbnailCancellations.take(mountId))
+            cancellation->store(true);
         if (auto* dialog = mTimingDialogs.value(mountId).data()) dialog->close();
         mFuseFilesystem->unmount(mountId);
         mSelectedMountIds.remove(mountId);
@@ -2624,12 +3121,12 @@ void MainWindow::updateUi() {
         }
         ui->draftQuality->setEnabled(true);
         ui->higherCfaHqCheckBox->setEnabled(true);
-        ui->quadBayerComboBox->setEnabled(false);
+        ui->quadBayerComboBox->setEnabled(true);
     } else {
         ui->draftQuality->setCurrentIndex(-1);
         mRenderSettings.draftScale = 1;
         ui->draftQuality->setEnabled(false);
-        ui->higherCfaHqCheckBox->setEnabled(false);
+        ui->higherCfaHqCheckBox->setEnabled(true);
         ui->quadBayerComboBox->setEnabled(true);
     }
 
@@ -3099,6 +3596,7 @@ void MainWindow::onApplyAll() {
     for (const auto& file : mMountedFiles) {
         mFuseFilesystem->updateOptions(file.mountId, mGlobalRenderSettings);
         updateLocalBadge(file.mountId);
+        updateThumbnail(file.mountId);
     }
     updateFpsLabels();
     clearApplyFeedback();
@@ -3109,21 +3607,64 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
     auto* card = fileWidgetForMount(mountId);
     auto* label = card ? card->findChild<QLabel*>("thumbnailLabel") : nullptr;
     if (!label) return;
-    const QString path = QDir::temp().filePath(QStringLiteral("motioncam-fuse-%1.jpg").arg(mountId));
-    label->setText(tr("Generating..."));
+    // Keep background thumbnail decoding out of playback benchmark samples.
+    if (mGalleryPerformanceTestActive && !mPerformanceThumbnailRun) {
+        label->setText(tr("Performance test"));
+        return;
+    }
+    // Keep the last completed image visible while its replacement renders.
+    // Only the initial load needs a textual placeholder.
+    if (!label->property("hasThumbnail").toBool())
+        label->setText(tr("Generating..."));
+    if (const auto previous = mThumbnailCancellations.value(mountId))
+        previous->store(true);
+    const auto cancelled = std::make_shared<std::atomic_bool>(false);
+    mThumbnailCancellations.insert(mountId, cancelled);
     QPointer<QLabel> guardedLabel(label);
-    auto render = [this, mountId, path, guardedLabel] {
-        const bool generated = mFuseFilesystem->generateThumbnail(
-            mountId, path.toStdString(), 352, 224);
-        QMetaObject::invokeMethod(this, [path, guardedLabel, generated] {
+    const auto settings = thumbnailRenderSettings(settingsForMount(mountId));
+    const auto started = std::chrono::steady_clock::now();
+    const bool performanceRun = mPerformanceThumbnailRun;
+    auto render = [this, mountId, settings, guardedLabel, cancelled, started,
+                   performanceRun] {
+        QImage image;
+        try {
+            motioncam::FinalizeOptions options;
+            options.skipDngFrame = [](size_t frame) { return frame > 0; };
+            mFuseFilesystem->finalizePreview(
+                mountId, settings, options,
+                [cancelled](size_t, size_t, const std::string&) {
+                    return !cancelled->load();
+                },
+                [&](const std::vector<uint8_t>& dng, motioncam::Timestamp) {
+                    if (cancelled->load() || !image.isNull()) return;
+                    std::vector<uint8_t> rgb;
+                    uint32_t width = 0, height = 0;
+                    if (!decodePreviewFrame(dng, settings, rgb, width, height))
+                        throw std::runtime_error("Could not decode thumbnail preview frame");
+                    image = previewImage(rgb, width, height);
+                });
+        } catch (const std::exception& error) {
+            if (!cancelled->load())
+                spdlog::warn("Could not generate processed thumbnail: {}", error.what());
+        }
+        if (cancelled->load()) return;
+        QMetaObject::invokeMethod(this, [this, mountId, guardedLabel,
+                                        image = std::move(image), cancelled,
+                                        started, performanceRun] {
+            if (cancelled->load()) return;
+            const qint64 elapsedMs = static_cast<qint64>(
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started).count());
+            if (performanceRun)
+                emit thumbnailPerformanceFinished(mountId, !image.isNull(), elapsedMs);
             if (!guardedLabel) return;
-            const QPixmap image(path);
-            if (generated && !image.isNull()) {
-                const QPixmap preview = image.scaled(
+            if (!image.isNull()) {
+                const QPixmap preview = QPixmap::fromImage(image).scaled(
                     QSize(176, 112), Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 guardedLabel->setFixedSize(preview.size());
                 guardedLabel->setPixmap(preview);
-            } else {
+                guardedLabel->setProperty("hasThumbnail", true);
+            } else if (!guardedLabel->property("hasThumbnail").toBool()) {
                 guardedLabel->setText(QObject::tr("No preview"));
             }
         }, Qt::QueuedConnection);
@@ -3168,6 +3709,11 @@ void MainWindow::onProcessingFinished() {
 
     // Update FPS labels after processing completes
     updateFpsLabels();
+    for (const auto& file : mMountedFiles)
+        updateThumbnail(file.mountId);
+    if (mClipPlayer && mGalleryMountId != motioncam::InvalidMountId) {
+        mClipPlayer->reloadCurrentClip();
+    }
 }
 
 void MainWindow::onDraftModeQualityChanged(int index) {
@@ -3660,6 +4206,7 @@ void MainWindow::reloadCalibration(QWidget* fileWidget) {
     // create a local settings override for the currently selected clip.
     mFuseFilesystem->updateOptions(
         mountId, mLocalSettings.value(mountId, mGlobalRenderSettings));
+    updateThumbnail(mountId);
     updateFpsLabels();
 }
 

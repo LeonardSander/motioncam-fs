@@ -533,10 +533,53 @@ int main() {
     assert(hqProxy.size() < fullResolutionSize);
     assert(tiffTagValue(hqProxy, 256) == higherWidth / 2);
     assert(tiffTagValue(hqProxy, 257) == higherHeight / 2);
-    assert(tiffTagValue(hqProxy, 262) == 32803);
-    assert(tiffTagValue(hqProxy, 277) == 1);
+    assert(tiffTagValue(hqProxy, 262) == 34892);
+    assert(tiffTagValue(hqProxy, 277) == 3);
     assert((tiffLong4Tag(hqProxy, 50829) ==
             std::array<uint32_t, 4>{0, 0, higherHeight / 2, higherWidth / 2}));
+    auto galleryProxy = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        galleryProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+        false, 2, false));
+    assert(tiffTagValue(galleryProxy, 262) == 32803);
+    assert(tiffTagValue(galleryProxy, 277) == 1);
+    int galleryRepeat = 0;
+    std::array<uint8_t, 4> galleryPhase{};
+    assert(motioncam::DNGDecoder::getCFAMetadata(
+        galleryProxy, galleryRepeat, galleryPhase));
+    assert(galleryRepeat == 2);
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        galleryProxy, galleryRepeat, galleryPhase,
+        motioncam::QuadBayerMode::Demosaic, false, 1, false, true));
+    assert(tiffTagValue(galleryProxy, 262) == 34892);
+    assert(tiffTagValue(galleryProxy, 277) == 3);
+    auto binned = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        binned, higherRepeat, phase, motioncam::QuadBayerMode::Binning,
+        false, 1, false));
+    assert(tiffTagValue(binned, 256) == higherWidth / 2);
+    assert(tiffTagValue(binned, 257) == higherHeight / 2);
+    assert(tiffTagValue(binned, 262) == 32803);
+    assert(tiffTagValue(binned, 277) == 1);
+    assert(tiffTagValue(binned, 33421) == 2);
+    int binnedRepeat = 0;
+    std::array<uint8_t, 4> binnedPhase{};
+    assert(motioncam::DNGDecoder::getCFAMetadata(
+        binned, binnedRepeat, binnedPhase));
+    assert(binnedRepeat == 2);
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        binned, binnedRepeat, binnedPhase,
+        motioncam::QuadBayerMode::Demosaic, false, 1, false, true));
+    assert(tiffTagValue(binned, 262) == 34892);
+    assert(tiffTagValue(binned, 277) == 3);
+    auto partialEightBin = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        partialEightBin, 8, phase, motioncam::QuadBayerMode::Bin8x8To4x4,
+        false, 1, false));
+    assert(tiffTagValue(partialEightBin, 256) == higherWidth / 2);
+    assert(tiffTagValue(partialEightBin, 257) == higherHeight / 2);
+    assert(tiffTagValue(partialEightBin, 262) == 32803);
+    assert(tiffTagValue(partialEightBin, 33421) == 4);
     auto hqRemosaic = processBytes;
     assert(motioncam::DNGDecoder::processHigherCFA(
         hqRemosaic, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,

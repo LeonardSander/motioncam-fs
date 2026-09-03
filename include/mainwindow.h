@@ -14,6 +14,7 @@
 #include <QFutureSynchronizer>
 #include <QPointer>
 #include <optional>
+#include <atomic>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -71,6 +72,7 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class FrameTimingDialog;
+class ClipPlayerDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -82,6 +84,11 @@ public:
 
     void mountFile(const QString& filePath);
     void promptToResumeSession();
+    void startGalleryPerformanceTest(const QString& sessionPath, int playbackMilliseconds);
+
+signals:
+    void thumbnailPerformanceFinished(motioncam::MountId mountId, bool success,
+                                      qint64 elapsedMilliseconds);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -113,7 +120,9 @@ private slots:
     void onSaveSessionAs();
     void onClearRecentSessions();
 
-    void playFile(const QString& path);
+    void playMount(motioncam::MountId mountId);
+    void startGalleryRender(motioncam::MountId mountId, double startSeconds = 0.0);
+    motioncam::RenderSettings settingsForMount(motioncam::MountId mountId) const;
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
 #ifdef _WIN32
@@ -186,10 +195,17 @@ private:
     QStringList mRecentSessions;
     QMenu* mRecentSessionsMenu = nullptr;
     QFutureSynchronizer<void> mThumbnailTasks;
+    QHash<motioncam::MountId, std::shared_ptr<std::atomic_bool>> mThumbnailCancellations;
     QHash<motioncam::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
+    QPointer<ClipPlayerDialog> mClipPlayer;
+    motioncam::MountId mGalleryMountId = motioncam::InvalidMountId;
+    std::atomic_uint64_t mGalleryGeneration{0};
+    QFutureSynchronizer<void> mGalleryTasks;
     bool mSettingsDirty = false;
     bool mAutoApplyClipSettings = true;
     bool mUnmountOnFinalize = true;
+    bool mGalleryPerformanceTestActive = false;
+    bool mPerformanceThumbnailRun = false;
     QString mApplySelectedButtonBaseStyle;
     QString mApplyAllButtonBaseStyle;
     

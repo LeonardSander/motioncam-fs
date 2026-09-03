@@ -936,7 +936,7 @@
              <item>
             <widget class="QCheckBox" name="higherCfaHqCheckBox">
              <property name="toolTip">
-              <string>Reduce resolution by discarding pixel values for better playback performance or by averaging them.</string>
+              <string>Use high-quality demosaic and averaged proxy reduction. When disabled, gallery playback uses fast nearest-neighbor demosaic.</string>
              </property>
              <property name="text">
               <string>HQ</string>
@@ -1000,6 +1000,16 @@
              <item>
               <property name="text">
                <string>Demosaic (OCL)</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Binning</string>
+              </property>
+             </item>
+             <item>
+              <property name="text">
+               <string>Bin 8x8 to 4x4</string>
               </property>
              </item>
              <item>

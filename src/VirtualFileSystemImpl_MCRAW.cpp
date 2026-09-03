@@ -123,6 +123,14 @@ void VirtualFileSystemImpl_MCRAW::init() {
     utils::overrideLensShadingMap(cameraFrameMetadata,
         vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"));
    
+    const std::optional<float> firstExposureOverride =
+        (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
+            ? std::optional<float>(mSmoothedExposureOffsets.at(frames[0]))
+            : std::nullopt;
+    const std::optional<std::array<float, 3>> firstNeutralOverride =
+        (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
+            ? std::optional<std::array<float, 3>>(mSmoothedAsShotNeutrals.at(frames[0]))
+            : std::nullopt;
     auto dngData = utils::generateDng(
         data,
         cameraFrameMetadata,
@@ -132,7 +140,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mBaselineExpValue,
         mSettings,
         mCalibration,
-        false  // Compression always false for virtual filesystem
+        false,  // Compression always false for virtual filesystem
+        firstExposureOverride,
+        firstNeutralOverride
     );
 
     {
@@ -145,7 +155,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
 
     mTypicalDngSize = dngData->size();
     size_t firstDngSize = mTypicalDngSize;
-    if (vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1) {
+    if (!mSettings.streamingPreview &&
+        vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1) {
         RenderSettings nativeSettings = mSettings;
         nativeSettings.options = static_cast<FileRenderOptions>(
             nativeSettings.options & ~RENDER_OPT_DRAFT);
@@ -168,7 +179,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
     Entry audioEntry;
 
     std::vector<AudioChunk> audioChunks;
-    decoder.loadAudio(audioChunks);
+    if (!mSettings.streamingPreview)
+        decoder.loadAudio(audioChunks);
 
     float audioDurationSec = 0.0f;
 
@@ -229,6 +241,11 @@ void VirtualFileSystemImpl_MCRAW::init() {
     auto mapped = vfs::mapFramesToCfr(sourceEntries, frames, mBaseName + "-", mFps,
         applyCFRConversion, droppedFrames, duplicatedFrames);
     if (!mapped.empty()) mapped.front().size = firstDngSize;
+    // Streaming initialization already rendered frame zero to determine the
+    // output layout. Preserve it so finalization does not decode and process
+    // the same source frame a second time.
+    if (mSettings.streamingPreview && !mapped.empty())
+        mCache.put(mapped.front(), dngData);
     mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
                   std::make_move_iterator(mapped.end()));
 
@@ -251,6 +268,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
         mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
     mFileInfo.runtimeSeconds = audioDurationSec;
+    if (!mAudioFile.empty())
+        mFileInfo.audioWav = std::make_shared<const std::vector<uint8_t>>(mAudioFile);
     mFileInfo.presentationTimestamps =
         std::make_shared<const std::vector<std::int64_t>>(frames.begin(), frames.end());
     mFileInfo.timingTimeBaseNum = 1;
@@ -282,7 +301,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
         const int outputFrameNumber = vfs::outputFrameNumber(entry);
         RenderSettings frameSettings = mSettings;
-        if (outputFrameNumber == 0 &&
+        if (!mSettings.streamingPreview && outputFrameNumber == 0 &&
             vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1)
             frameSettings.options = static_cast<FileRenderOptions>(
                 frameSettings.options & ~RENDER_OPT_DRAFT);

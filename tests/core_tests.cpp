@@ -73,6 +73,9 @@ int main() {
     assert(stringToQuadBayerMode("Correct QBCFA Metadata") == QuadBayerMode::CorrectQBCFAMetadata);
     assert(stringToQuadBayerMode("Demosaic (Color)") == QuadBayerMode::DemosaicColor);
     assert(quadBayerModeToString(QuadBayerMode::DemosaicColor) == "Demosaic (Color)");
+    assert(stringToQuadBayerMode("Binning") == QuadBayerMode::Binning);
+    assert(stringToQuadBayerMode("Bin 8x8 to 4x4") == QuadBayerMode::Bin8x8To4x4);
+    assert(quadBayerModeToString(QuadBayerMode::Binning) == "Binning");
 
     const std::array<float, 4> dynamicBlack{60, 61, 62, 63};
     const std::array<float, 4> staticBlack{64, 65, 66, 67};

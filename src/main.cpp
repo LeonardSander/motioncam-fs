@@ -13,6 +13,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QUrl>
+#include <algorithm>
 #include <spdlog/spdlog.h>
 
 #ifdef __APPLE__
@@ -164,12 +165,28 @@ int main(int argc, char *argv[])
     QCommandLineOption fileOption(QStringList() << "f" << "file",
                                   "Mount file on startup",
                                   "filename");
+    QCommandLineOption galleryPerfOption(
+        QStringList() << "gallery-perf-session",
+        "Load a session and automate gallery playback diagnostics",
+        "session");
+    QCommandLineOption galleryPerfPlaybackOption(
+        QStringList() << "gallery-perf-playback-ms",
+        "Playback sample duration before and after each seek",
+        "milliseconds", "3000");
 
     parser.addOption(fileOption);
+    parser.addOption(galleryPerfOption);
+    parser.addOption(galleryPerfPlaybackOption);
     parser.process(app);
 
     // Get file parameter if provided
     QString fileToMount;
+    const QString galleryPerfSession = parser.value(galleryPerfOption);
+    bool galleryPerfDurationOk = false;
+    const int galleryPerfPlaybackMs = parser.value(galleryPerfPlaybackOption)
+        .toInt(&galleryPerfDurationOk);
+    if (!galleryPerfSession.isEmpty())
+        qputenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS", "1");
 
     if (parser.isSet(fileOption)) {
         fileToMount = parser.value(fileOption);
@@ -230,7 +247,14 @@ int main(int argc, char *argv[])
             window.activateWindow();
         });
 #endif
-    if (fileToMount.isEmpty())
+    if (!galleryPerfSession.isEmpty()) {
+        QTimer::singleShot(0, &window,
+            [&window, galleryPerfSession, galleryPerfPlaybackMs, galleryPerfDurationOk] {
+                window.startGalleryPerformanceTest(
+                    galleryPerfSession,
+                    galleryPerfDurationOk ? std::max(250, galleryPerfPlaybackMs) : 3000);
+            });
+    } else if (fileToMount.isEmpty())
         QTimer::singleShot(0, &window, [&window] { window.promptToResumeSession(); });
     return app.exec();
 }

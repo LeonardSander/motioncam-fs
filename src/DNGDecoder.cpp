@@ -2135,7 +2135,8 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
                                   QuadBayerMode mode,
                                   bool remosaic,
                                   int proxyScale,
-                                  bool higherCfaHq) {
+                                  bool higherCfaHq,
+                                  bool nearestNeighborDemosaic) {
     const bool proxy = proxyScale > 1;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -2396,7 +2397,9 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
     if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE || !sppE ||
         offsetsE->count != 1 || countsE->count != 1) return false;
-    const uint32_t width = scalar(*widthE), height = scalar(*heightE), bits = scalar(*bitsE);
+    uint32_t width = scalar(*widthE), height = scalar(*heightE);
+    const uint32_t sourceWidth = width, sourceHeight = height;
+    const uint32_t bits = scalar(*bitsE);
     const uint32_t compression = scalar(*compressionE), stripOffset = scalar(*offsetsE);
     const uint32_t stripBytes = scalar(*countsE);
     if (!width || !height || bits < 8 || bits > 16 || stripOffset > data.size() ||
@@ -2475,39 +2478,89 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         for (int channel = 0; channel < 3; ++channel)
             outputChannelBlack[channel] = counts[channel] ? sums[channel] / counts[channel] : 0.0;
 
-        utils::demosaicHigherCFA(
-            input, rgb, imageWidth, imageHeight, imageRepeatSize, phase, mode,
-            {static_cast<float>(outputChannelBlack[0]),
-             static_cast<float>(outputChannelBlack[1]),
-             static_cast<float>(outputChannelBlack[2])});
+        if (nearestNeighborDemosaic) {
+            rgb.resize(static_cast<size_t>(imageWidth) * imageHeight * 3);
+            const int block = std::max(1, imageRepeatSize / 2);
+            auto colorAt = [&](int x, int y) {
+                const int phaseX = (x % imageRepeatSize) / block;
+                const int phaseY = (y % imageRepeatSize) / block;
+                return phase[static_cast<size_t>(phaseY) * 2 + phaseX];
+            };
+            using Offset = std::pair<int16_t, int16_t>;
+            std::vector<std::vector<Offset>> nearestOffsets(
+                static_cast<size_t>(imageRepeatSize) * imageRepeatSize * 3);
+            for (int phaseY = 0; phaseY < imageRepeatSize; ++phaseY) {
+                for (int phaseX = 0; phaseX < imageRepeatSize; ++phaseX) {
+                    for (int channel = 0; channel < 3; ++channel) {
+                        auto& candidates = nearestOffsets[
+                            (static_cast<size_t>(phaseY) * imageRepeatSize + phaseX) * 3 + channel];
+                        for (int dy = -imageRepeatSize; dy <= imageRepeatSize; ++dy) {
+                            for (int dx = -imageRepeatSize; dx <= imageRepeatSize; ++dx) {
+                                int sampleX = (phaseX + dx) % imageRepeatSize;
+                                int sampleY = (phaseY + dy) % imageRepeatSize;
+                                if (sampleX < 0) sampleX += imageRepeatSize;
+                                if (sampleY < 0) sampleY += imageRepeatSize;
+                                if (colorAt(sampleX, sampleY) == channel)
+                                    candidates.emplace_back(dx, dy);
+                            }
+                        }
+                        std::stable_sort(candidates.begin(), candidates.end(),
+                            [](const Offset& left, const Offset& right) {
+                                const int leftDistance = left.first * left.first + left.second * left.second;
+                                const int rightDistance = right.first * right.first + right.second * right.second;
+                                return leftDistance < rightDistance;
+                            });
+                    }
+                }
+            }
+            for (int y = 0; y < static_cast<int>(imageHeight); ++y) {
+                for (int x = 0; x < static_cast<int>(imageWidth); ++x) {
+                    const size_t destination =
+                        (static_cast<size_t>(y) * imageWidth + x) * 3;
+                    for (int channel = 0; channel < 3; ++channel) {
+                        const auto& candidates = nearestOffsets[
+                            (static_cast<size_t>(y % imageRepeatSize) * imageRepeatSize +
+                             x % imageRepeatSize) * 3 + channel];
+                        for (const auto& [dx, dy] : candidates) {
+                            const int sourceX = x + dx;
+                            const int sourceY = y + dy;
+                            if (sourceX < 0 || sourceX >= static_cast<int>(imageWidth) ||
+                                sourceY < 0 || sourceY >= static_cast<int>(imageHeight)) continue;
+                            rgb[destination + channel] =
+                                input[static_cast<size_t>(sourceY) * imageWidth + sourceX];
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            utils::demosaicHigherCFA(
+                input, rgb, imageWidth, imageHeight, imageRepeatSize, phase, mode,
+                {static_cast<float>(outputChannelBlack[0]),
+                 static_cast<float>(outputChannelBlack[1]),
+                 static_cast<float>(outputChannelBlack[2])});
+        }
         rgbOutput = !remosaic;
     };
-    if (proxy && higherCfaHq && repeatSize == 4) {
-        std::vector<uint16_t> binnedBayer;
-        utils::binQuadBayer(pixels, binnedBayer, width, height,
+    const bool explicitBinning = mode == QuadBayerMode::Binning ||
+                                 mode == QuadBayerMode::Bin8x8To4x4;
+    if (explicitBinning && repeatSize > 2) {
+        const uint32_t factor = mode == QuadBayerMode::Bin8x8To4x4 && repeatSize == 8
+            ? 2u : static_cast<uint32_t>(repeatSize / 2);
+        std::vector<uint16_t> binned;
+        utils::binHigherCFA(pixels, binned, width, height, factor,
                             outputWidth, outputHeight);
-        if (binnedBayer.empty()) return false;
-        if (proxyScale == 2) {
-            output = std::move(binnedBayer);
-            remosaic = true; // The direct 2x result is already ordinary Bayer.
-        } else {
-            std::vector<uint16_t> binnedRgb;
-            demosaicWithRgbBlackMetadata(binnedBayer, binnedRgb,
-                                         outputWidth, outputHeight, 2, 1.0);
-            std::vector<uint16_t> reducedRgb;
-            const uint32_t remainingScale =
-                std::max(1, proxyScale / 2);
-            utils::reduceRGB(binnedRgb, reducedRgb, outputWidth, outputHeight,
-                             remainingScale, true, outputWidth, outputHeight);
-            if (reducedRgb.empty()) return false;
-            if (remosaic)
-                remosaicCFA(reducedRgb, output, outputWidth, outputHeight, phase);
-            else
-                output = std::move(reducedRgb);
-        }
-        // Averaging preserves the numeric black/white levels.
-        hqReductionArea = 1;
-        hqReductionShift = 0;
+        if (binned.empty()) return false;
+        pixels = std::move(binned);
+        width = outputWidth;
+        height = outputHeight;
+        repeatSize /= static_cast<int>(factor);
+    }
+    if (explicitBinning && !proxy) {
+        output = pixels;
+        outputWidth = width;
+        outputHeight = height;
+        remosaic = true;
     } else if (proxy && higherCfaHq) {
         std::vector<uint16_t> fullRgb;
         demosaicWithRgbBlackMetadata(pixels, fullRgb, width, height, repeatSize, 1.0);
@@ -2523,10 +2576,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         hqReductionShift = 0;
     } else if (proxy) {
         const uint32_t group = repeatSize / 2;
-        const bool staged8x8Demosaic = repeatSize == 8 && proxyScale == 2 &&
-            (mode == QuadBayerMode::Demosaic || mode == QuadBayerMode::DemosaicColor ||
-             mode == QuadBayerMode::DemosaicOCL);
-        const uint32_t reductionGroup = staged8x8Demosaic ? 2u : group;
+        const uint32_t reductionGroup = group;
         hqReductionArea = reductionGroup * reductionGroup;
         if (higherCfaHq) {
             double largestLevel = 0.0;
@@ -2553,10 +2603,8 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
                 ++hqReductionShift;
             }
         }
-        const uint32_t sourceScale = staged8x8Demosaic
-            ? 2u
-            : reductionGroup * std::max(1u,
-                (static_cast<uint32_t>(proxyScale) + reductionGroup - 1) / reductionGroup);
+        const uint32_t sourceScale = reductionGroup * std::max(1u,
+            (static_cast<uint32_t>(proxyScale) + reductionGroup - 1) / reductionGroup);
         outputWidth = (width / sourceScale) & ~3u;
         outputHeight = (height / sourceScale) & ~3u;
         if (!outputWidth || !outputHeight) return false;
@@ -2580,17 +2628,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
                     static_cast<uint16_t>(value);
             }
         }
-        if (staged8x8Demosaic) {
-            std::vector<uint16_t> rgb;
-            const double levelScale = static_cast<double>(hqReductionArea) /
-                static_cast<double>(uint32_t{1} << hqReductionShift);
-            demosaicWithRgbBlackMetadata(
-                output, rgb, outputWidth, outputHeight, 4, levelScale);
-            if (remosaic) remosaicCFA(rgb, output, outputWidth, outputHeight, phase);
-            else output = std::move(rgb);
-        } else {
-            remosaic = true; // Full block reduction is already ordinary 2x2 Bayer.
-        }
+        remosaic = true; // Complete CFA-block reduction is ordinary 2x2 Bayer.
     } else {
         std::vector<uint16_t> rgb;
         demosaicWithRgbBlackMetadata(pixels, rgb, width, height, repeatSize, 1.0);
@@ -2612,7 +2650,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     setScalar(*countsE, newBytes); setScalar(*sppE, remosaic ? 1 : 3);
     setScalar(*photo, remosaic ? TIFF_PHOTOMETRIC_CFA : 34892); // LinearRaw
     setScalar(*widthE, outputWidth); setScalar(*heightE, outputHeight);
-    if (!updateGeometryMetadata(width, height, outputWidth, outputHeight)) return false;
+    if (!updateGeometryMetadata(sourceWidth, sourceHeight, outputWidth, outputHeight)) return false;
     if (proxy && higherCfaHq) {
         const double levelScale = static_cast<double>(hqReductionArea) /
             static_cast<double>(uint32_t{1} << hqReductionShift);
@@ -2676,11 +2714,15 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         write32(data.data() + bitsE->entryOffset + 4, 1, little);
         write16(data.data() + bitsE->entryOffset + 8, 16, little);
         write16(data.data() + bitsE->entryOffset + 10, 0, little);
-        write32(data.data() + dimE->entryOffset + 4, 2, little);
-        write16(data.data() + dimE->entryOffset + 8, 2, little);
-        write16(data.data() + dimE->entryOffset + 10, 2, little);
-        write32(data.data() + patternE->entryOffset + 4, 4, little);
-        for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
+        if (explicitBinning && !proxy && repeatSize > 2) {
+            if (!writeHigherCfaMetadata()) return false;
+        } else {
+            write32(data.data() + dimE->entryOffset + 4, 2, little);
+            write16(data.data() + dimE->entryOffset + 8, 2, little);
+            write16(data.data() + dimE->entryOffset + 10, 2, little);
+            write32(data.data() + patternE->entryOffset + 4, 4, little);
+            for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
+        }
     }
     return replaceTiffStrip(data, stripOffset, stripBytes, outputBytes, little);
 }
@@ -4199,6 +4241,21 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     std::vector<GainMap> maps;
     if (!parseOpcodeGainMaps(data.data() + opcodeE->valueOffset, opcodeE->count, maps))
         return false;
+    bool motionCamProducer = false;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_SOFTWARE || !entry.count ||
+            entry.valueOffset + entry.count > data.size()) continue;
+        std::string software(
+            reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
+        software = software.c_str();
+        boost::algorithm::trim(software);
+        boost::algorithm::to_lower(software);
+        constexpr std::string_view product = "motioncam";
+        motionCamProducer |= boost::algorithm::starts_with(software, product) &&
+            (software.size() == product.size() ||
+             std::isspace(static_cast<unsigned char>(software[product.size()])) ||
+             software[product.size()] == '-' || software[product.size()] == 'v');
+    }
     std::vector<uint8_t> luminanceOpcodes;
     bool gridColorSeparated = false;
     std::optional<double> luminanceBaseline;
@@ -4305,6 +4362,41 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const bool groupedScalarPhaseMaps = phaseGroup > 1 &&
         scalarPhaseMapCount >= 4 && (scalarPhaseMapCount % 4) == 0;
 
+    auto sharedScalarOrigin = [&](const GainMap& map, bool horizontal) {
+        double origin = horizontal ? map.originH : map.originV;
+        const double spacing = horizontal ? map.spacingH : map.spacingV;
+        size_t compatible = 0;
+        for (const auto& candidate : maps) {
+            if (candidate.channels != 1 || candidate.rowPitch != 2 ||
+                candidate.colPitch != 2 || candidate.right != map.right ||
+                candidate.bottom != map.bottom || candidate.width != map.width ||
+                candidate.height != map.height || candidate.spacingH != map.spacingH ||
+                candidate.spacingV != map.spacingV)
+                continue;
+            origin = std::min(origin, horizontal ? candidate.originH : candidate.originV);
+            ++compatible;
+        }
+        if (!motionCamProducer || compatible < 4 || spacing <= 0.0)
+            return horizontal ? map.originH : map.originV;
+
+        // MotionCam's four scalar CFA opcodes encode the same physical lens
+        // shading grid, but older files add half a grid interval to MapOrigin
+        // for the odd row/column phases. Applying those origins independently
+        // displaces the optical center by about 128 sensor pixels. Keep the
+        // phase selection in Top/Left and use the common grid origin for bake.
+        const double encoded = horizontal ? map.originH : map.originV;
+        const double halfStep = spacing * 0.5;
+        if (std::abs(encoded - origin) < 1e-9 ||
+            std::abs(encoded - origin - halfStep) < 1e-9)
+            return origin;
+        return encoded;
+    };
+    std::vector<std::pair<double, double>> effectiveOrigins;
+    effectiveOrigins.reserve(maps.size());
+    for (const auto& map : maps)
+        effectiveOrigins.emplace_back(
+            sharedScalarOrigin(map, true), sharedScalarOrigin(map, false));
+
     auto mapGain = [&](const GainMap& map, uint32_t x, uint32_t y) {
         if (x < map.left || x >= map.right || y < map.top || y >= map.bottom ||
             !map.rowPitch || !map.colPitch) return 1.0f;
@@ -4314,22 +4406,45 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         // only one corrected pixel in every 2x2 block.
         if (map.channels == 1) {
             if (groupedScalarPhaseMaps && map.rowPitch == 2 && map.colPitch == 2) {
-                const uint32_t mapPhaseY = map.top & 1u;
-                const uint32_t mapPhaseX = map.left & 1u;
-                const uint32_t baseTop = map.top - mapPhaseY;
-                const uint32_t baseLeft = map.left - mapPhaseX;
+                // Canonical scalar phase maps offset top/left from the original
+                // GainMap bounds. Determine phase relative to that group origin,
+                // not absolute image parity: a cropped map may start on an odd
+                // sensor row or column.
+                uint32_t groupTop = map.top, groupLeft = map.left;
+                for (const auto& candidate : maps) {
+                    if (candidate.channels == 1 && candidate.rowPitch == 2 &&
+                        candidate.colPitch == 2 && candidate.right == map.right &&
+                        candidate.bottom == map.bottom && candidate.width == map.width &&
+                        candidate.height == map.height && candidate.originH == map.originH &&
+                        candidate.originV == map.originV && candidate.spacingH == map.spacingH &&
+                        candidate.spacingV == map.spacingV) {
+                        groupTop = std::min(groupTop, candidate.top);
+                        groupLeft = std::min(groupLeft, candidate.left);
+                    }
+                }
+                const uint32_t mapPhase = ((map.top - groupTop) & 1u) * 2u +
+                                          ((map.left - groupLeft) & 1u);
+                const uint32_t mapPhaseY = mapPhase / 2u;
+                const uint32_t mapPhaseX = mapPhase % 2u;
                 const size_t pixelPhase = gainMapPhaseChannel(
-                    x, y, baseLeft, baseTop, phaseGroup);
+                    x, y, groupLeft, groupTop, phaseGroup);
                 if (pixelPhase != mapPhaseY * 2u + mapPhaseX) return 1.0f;
             } else if ((y - map.top) % map.rowPitch ||
                        (x - map.left) % map.colPitch) {
                 return 1.0f;
             }
         }
-        const double nx = static_cast<double>(x) / std::max(1u, width);
-        const double ny = static_cast<double>(y) / std::max(1u, height);
-        const double gx = map.spacingH > 0 ? (nx - map.originH) / map.spacingH : 0;
-        const double gy = map.spacingV > 0 ? (ny - map.originV) / map.spacingV : 0;
+        // Match dng_gain_map_interpolator from the Adobe DNG SDK. Gain-map
+        // coordinates are evaluated at pixel centers within the image bounds;
+        // using the integer pixel corner offsets the map on both axes and is
+        // particularly visible between four interleaved CFA phase maps.
+        const double nx = (static_cast<double>(x) + 0.5) / std::max(1u, width);
+        const double ny = (static_cast<double>(y) + 0.5) / std::max(1u, height);
+        const size_t mapIndex = static_cast<size_t>(&map - maps.data());
+        const double originH = effectiveOrigins[mapIndex].first;
+        const double originV = effectiveOrigins[mapIndex].second;
+        const double gx = map.spacingH > 0 ? (nx - originH) / map.spacingH : 0;
+        const double gy = map.spacingV > 0 ? (ny - originV) / map.spacingV : 0;
         const size_t x0 = std::min<size_t>(map.width - 1, static_cast<size_t>(std::max(0.0, std::floor(gx))));
         const size_t y0 = std::min<size_t>(map.height - 1, static_cast<size_t>(std::max(0.0, std::floor(gy))));
         const size_t x1 = std::min<size_t>(map.width - 1, x0 + 1), y1 = std::min<size_t>(map.height - 1, y0 + 1);

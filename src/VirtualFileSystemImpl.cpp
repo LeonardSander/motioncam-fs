@@ -397,6 +397,25 @@ void finalize(
         return entry.type != EntryType::FILE_ENTRY || entry.name == "desktop.ini";
     }), entries.end());
 
+    // Callback-only finalization is a DNG frame stream. Ancillary entries such
+    // as audio.wav are supplied separately and must not be materialized or
+    // written to the caller's destination (which may be a shared temp path).
+    if (!writeFiles) {
+        entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& entry) {
+            return entry.name.size() < 4 ||
+                entry.name.substr(entry.name.size() - 4) != ".dng";
+        }), entries.end());
+    }
+
+    if (options.firstDngFrame) {
+        size_t dngsSeen = 0;
+        entries.erase(std::remove_if(entries.begin(), entries.end(), [&](const Entry& entry) {
+            const bool dng = entry.name.size() >= 4 &&
+                entry.name.substr(entry.name.size() - 4) == ".dng";
+            return dng && dngsSeen++ < options.firstDngFrame;
+        }), entries.end());
+    }
+
     auto outputPath = [&](const Entry& entry) {
         stdfs::path path(destination);
         for (const auto& part : entry.pathParts) path /= part;
@@ -502,14 +521,17 @@ void finalize(
     size_t completed = 0;
     size_t nextReady = 0;
     std::vector<bool> ready(entries.size(), false);
+    std::vector<bool> skipped(entries.size(), false);
     std::vector<std::vector<uint8_t>> finalizedDngs(entries.size());
     auto emitReady = [&] {
         while (nextReady < entries.size() && ready[nextReady]) {
-            const auto& entry = entries[nextReady++];
+            const size_t readyIndex=nextReady++;
+            const auto& entry = entries[readyIndex];
             if (fileReady && entry.name.size() >= 4 &&
-                entry.name.substr(entry.name.size() - 4) == ".dng") {
+                entry.name.substr(entry.name.size() - 4) == ".dng" &&
+                !skipped[readyIndex]) {
                 Timestamp timestamp = 0;
-                auto& bytes = finalizedDngs[nextReady - 1];
+                auto& bytes = finalizedDngs[readyIndex];
                 if (bytes.empty() && writeFiles) bytes = readBytes(outputPath(entry));
                 if (!DNGDecoder::getTimingMetadata(bytes, timestamp))
                     throw std::runtime_error("Finalized DNG is missing timing metadata: " + entry.name);
@@ -609,8 +631,16 @@ for line in sys.stdin:
     }
 
     stdfs::create_directories(destination);
+    size_t dngIndex = options.firstDngFrame;
     for (size_t index = 0; index < entries.size(); ++index) {
         report("Rendering " + entries[index].name);
+        const bool dngEntry=isDng(entries[index]);
+        const size_t currentDngIndex=dngIndex;
+        if(dngEntry)++dngIndex;
+        if(!writeFiles&&dngEntry&&options.skipDngFrame&&
+           options.skipDngFrame(currentDngIndex)){
+            ++completed;skipped[index]=true;ready[index]=true;emitReady();continue;
+        }
         const bool delayCompression = interpolate && gapMember[index];
         auto data = filesystem.materializeFile(entries[index],
             delayCompression ? false : jpegCompression);

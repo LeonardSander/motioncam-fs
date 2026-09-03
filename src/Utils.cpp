@@ -922,18 +922,12 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         cropTarget = "0x0";
 
     const uint32_t cfaGroupSize = std::max(1u, cfaRepeatSize / 2);
-    const bool staged8x8Demosaic = cfaRepeatSize == 8 && scale == 2 &&
-        (quadBayerOption == QuadBayerMode::Demosaic ||
-         quadBayerOption == QuadBayerMode::DemosaicColor ||
-         quadBayerOption == QuadBayerMode::DemosaicOCL);
-    const uint32_t proxyGroupSize = staged8x8Demosaic ? 2u : cfaGroupSize;
+    const uint32_t proxyGroupSize = cfaGroupSize;
     uint32_t cfaSize = (interpretAsQuadBayer ? 2 : 1);
     // Keep proxy sampling aligned to complete same-colour CFA blocks. The
     // requested UI scale is rounded up to the next valid block multiple.
     const uint32_t sourceScale = cfaRepeatSize > 2 && scale > 1
-        ? (staged8x8Demosaic
-            ? 2u
-            : proxyGroupSize * std::max(1u, (scale + proxyGroupSize - 1) / proxyGroupSize))
+        ? proxyGroupSize * std::max(1u, (scale + proxyGroupSize - 1) / proxyGroupSize)
         : scale;
 
     uint32_t newWidth, newHeight;
@@ -1456,20 +1450,27 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0)
         cfaRepeatSize = metadata.needRemosaic ? 4 : 2;
     const bool higherCFA = cfaRepeatSize > 2;
+    const bool explicitBinning = settings.quadBayerOption == QuadBayerMode::Binning ||
+                                 settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
     const bool lossyJpegDct = compressionEnabled && isLossyJpegDct(settings.jxlDistance);
     const bool hqProxy = draftScale > 1 &&
         (settings.options & RENDER_OPT_HIGHER_CFA_HQ);
-    const bool quadBayerHqProxy = hqProxy && cfaRepeatSize == 4;
-    const bool hqRgbProxy = hqProxy && !quadBayerHqProxy;
-    const int preprocessScale = hqProxy ? 1 : draftScale;
-    const bool staged8x8Demosaic = !hqProxy && cfaRepeatSize == 8 && draftScale == 2;
+    const int preprocessScale = hqProxy || explicitBinning ? 1 : draftScale;
     const bool demosaic = (higherCFA || settings.cameraNativeStaging || hqProxy) &&
-        (hqRgbProxy || (quadBayerHqProxy && draftScale > 2) ||
-         draftScale == 1 || staged8x8Demosaic) &&
+        (hqProxy || draftScale == 1) &&
+        (!settings.streamingPreview ||
+         (settings.options & RENDER_OPT_HIGHER_CFA_HQ)) &&
         (hqProxy || settings.quadBayerOption == QuadBayerMode::Demosaic ||
          settings.quadBayerOption == QuadBayerMode::DemosaicColor ||
          settings.quadBayerOption == QuadBayerMode::DemosaicOCL);
     const bool remosaic = demosaic && (settings.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+
+    if (settings.streamingPreview && frameNumber == 0) {
+        spdlog::info(
+            "Gallery MCRAW staging: cfa_repeat={} draft_scale={} hq={} demosaic={} remosaic={} camera_native={}",
+            cfaRepeatSize, draftScale, hqProxy, demosaic, remosaic,
+            settings.cameraNativeStaging);
+    }
 
     std::string cropTarget = settings.cropTarget;
     if(!(settings.options & RENDER_OPT_CROPPING))
@@ -1567,29 +1568,55 @@ std::shared_ptr<std::vector<char>> generateDng(
         true // includeOpcode
     );
 
-    if (quadBayerHqProxy) {
-        std::vector<uint16_t> quadSamples(static_cast<size_t>(width) * height);
-        std::memcpy(quadSamples.data(), processedData.data(),
-                    quadSamples.size() * sizeof(uint16_t));
-        std::vector<uint16_t> binnedBayer;
+    int processedRepeatSize = cfaRepeatSize;
+    if (explicitBinning && processedRepeatSize > 2) {
+        std::vector<uint16_t> source(static_cast<size_t>(width) * height);
+        std::memcpy(source.data(), processedData.data(), source.size() * sizeof(uint16_t));
+        const uint32_t factor = settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+                                processedRepeatSize == 8
+            ? 2u : static_cast<uint32_t>(processedRepeatSize / 2);
+        std::vector<uint16_t> binned;
         uint32_t binnedWidth = 0, binnedHeight = 0;
-        binQuadBayer(quadSamples, binnedBayer, width, height,
+        binHigherCFA(source, binned, width, height, factor,
                      binnedWidth, binnedHeight,
                      effectiveLogTransform != LogTransformMode::Disabled && !debugShadingMap
                          ? dstWhiteLevel : 0);
-        if (binnedBayer.empty())
-            throw std::runtime_error("Could not bin quad-Bayer proxy image");
-        processedData.resize(binnedBayer.size() * sizeof(uint16_t));
-        std::memcpy(processedData.data(), binnedBayer.data(), processedData.size());
+        if (binned.empty()) throw std::runtime_error("Could not bin higher-CFA image");
+        processedData.resize(binned.size() * sizeof(uint16_t));
+        std::memcpy(processedData.data(), binned.data(), processedData.size());
         width = binnedWidth;
         height = binnedHeight;
+        processedRepeatSize /= static_cast<int>(factor);
+
+        if (draftScale > 1 && !hqProxy) {
+            source = std::move(binned);
+            const uint32_t group = static_cast<uint32_t>(processedRepeatSize / 2);
+            const uint32_t sourceScale = group * std::max(1u,
+                (static_cast<uint32_t>(draftScale) + group - 1) / group);
+            const uint32_t reducedWidth = (width / sourceScale) & ~3u;
+            const uint32_t reducedHeight = (height / sourceScale) & ~3u;
+            if (!reducedWidth || !reducedHeight)
+                throw std::runtime_error("Proxy scale is too large for the binned image");
+            std::vector<uint16_t> reduced(static_cast<size_t>(reducedWidth) * reducedHeight);
+            const uint32_t selection = (group - 1) / 2;
+            for (uint32_t y = 0; y < reducedHeight; y += 2)
+                for (uint32_t x = 0; x < reducedWidth; x += 2)
+                    for (uint32_t by = 0; by < 2; ++by)
+                        for (uint32_t bx = 0; bx < 2; ++bx)
+                            reduced[static_cast<size_t>(y + by) * reducedWidth + x + bx] =
+                                source[(static_cast<size_t>(y) * sourceScale + by * group + selection) * width +
+                                       x * sourceScale + bx * group + selection];
+            processedData.resize(reduced.size() * sizeof(uint16_t));
+            std::memcpy(processedData.data(), reduced.data(), processedData.size());
+            width = reducedWidth;
+            height = reducedHeight;
+            processedRepeatSize = 2;
+        }
     }
 
     if (demosaic) {
         std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
         std::memcpy(cfaSamples.data(), processedData.data(), cfaSamples.size() * sizeof(uint16_t));
-        const int processedRepeatSize = quadBayerHqProxy ? 2 :
-            (staged8x8Demosaic ? 4 : cfaRepeatSize);
         std::array<uint32_t, 3> blackSums = {0, 0, 0};
         std::array<uint32_t, 3> blackCounts = {0, 0, 0};
         for (int phaseIndex = 0; phaseIndex < 4; ++phaseIndex) {
@@ -1615,12 +1642,10 @@ std::shared_ptr<std::vector<char>> generateDng(
         const uint16_t outputWhite = dstWhiteLevel;
         for (uint16_t& sample : rgbSamples)
             sample = std::min(sample, outputWhite);
-        if (hqRgbProxy || quadBayerHqProxy) {
+        if (hqProxy) {
             std::vector<uint16_t> reduced;
             uint32_t reducedWidth = 0, reducedHeight = 0;
-            const uint32_t rgbScale = quadBayerHqProxy
-                ? static_cast<uint32_t>(draftScale / 2)
-                : static_cast<uint32_t>(draftScale);
+            const uint32_t rgbScale = static_cast<uint32_t>(draftScale);
             reduceRGB(rgbSamples, reduced, width, height,
                       rgbScale, true,
                       reducedWidth, reducedHeight,
@@ -1723,6 +1748,14 @@ std::shared_ptr<std::vector<char>> generateDng(
             encodeBits = 16;
         }
     }
+    // Camera-native/gallery staging intentionally keeps processedData as
+    // unpacked uint16_t samples. RGB staging already reaches 16 bits through
+    // its normalization above, but a non-HQ proxy may remain CFA at the
+    // sensor's 10/12/14-bit white level. Advertising that nominal depth makes
+    // readers treat the uint16 buffer as tightly packed rows, producing a
+    // resolution-dependent stride mismatch and a scrambled gallery image.
+    if (settings.cameraNativeStaging)
+        encodeBits = 16;
     // Compressed codecs consume unpacked uint16 samples. Uncompressed output,
     // however, must advertise the bit depth of the buffer after packing. This
     // differs from the sensor precision for RGB sourced from 13/14-bit data:
@@ -1798,7 +1831,18 @@ std::shared_ptr<std::vector<char>> generateDng(
     }
     dng.SetBaselineExposure(normalizedExposureOffset + exposureOffset + gainMapExposureOffset);
 
-    if (higherCFA && !demosaic && draftScale == 1 &&
+    if ((explicitBinning || settings.streamingPreview) && !demosaic &&
+        draftScale == 1 && processedRepeatSize > 2) {
+        dng.SetCFARepeatPatternDim(processedRepeatSize, processedRepeatSize);
+        std::vector<uint8_t> expanded(
+            static_cast<size_t>(processedRepeatSize) * processedRepeatSize);
+        const int group = processedRepeatSize / 2;
+        for (int y = 0; y < processedRepeatSize; ++y)
+            for (int x = 0; x < processedRepeatSize; ++x)
+                expanded[static_cast<size_t>(y) * processedRepeatSize + x] =
+                    cfa[((y / group) & 1) * 2 + ((x / group) & 1)];
+        dng.SetCFAPattern(static_cast<unsigned int>(expanded.size()), expanded.data());
+    } else if (higherCFA && !demosaic && draftScale == 1 &&
         settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata) {
         dng.SetCFARepeatPatternDim(cfaRepeatSize, cfaRepeatSize);
         std::vector<uint8_t> expanded(static_cast<size_t>(cfaRepeatSize) * cfaRepeatSize);

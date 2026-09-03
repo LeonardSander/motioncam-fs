@@ -105,8 +105,16 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
 class FakeFileSystem final : public motioncam::IVirtualFileSystem {
 public:
     FakeFileSystem(std::vector<uint8_t> left, std::vector<uint8_t> right,
-                   size_t duplicatedFrames = 1, bool markDuplicates = true)
+                   size_t duplicatedFrames = 1, bool markDuplicates = true,
+                   bool includeAncillary = false)
         : mLeft(std::move(left)), mRight(std::move(right)) {
+        if (includeAncillary) {
+            motioncam::Entry audio;
+            audio.type = motioncam::EntryType::FILE_ENTRY;
+            audio.name = "audio.wav";
+            audio.size = 4;
+            mEntries.push_back(audio);
+        }
         for (size_t i = 0; i < duplicatedFrames + 2; ++i) {
             motioncam::Entry entry;
             entry.type = motioncam::EntryType::FILE_ENTRY;
@@ -125,6 +133,11 @@ public:
     int readFile(const motioncam::Entry&, size_t, size_t, void*,
                  std::function<void(size_t, int)>, bool) override { return -1; }
     std::shared_ptr<std::vector<char>> materializeFile(const motioncam::Entry& entry, bool) override {
+        if (entry.name == "audio.wav") {
+            ++mAncillaryMaterializations;
+            return std::make_shared<std::vector<char>>(
+                std::initializer_list<char>{'R', 'I', 'F', 'F'});
+        }
         const auto& source = std::get<int64_t>(entry.userData) == 0 ? mLeft : mRight;
         auto timed = source;
         const auto frame = static_cast<motioncam::Timestamp>(
@@ -143,9 +156,11 @@ public:
     }
     void updateOptions(const motioncam::RenderSettings&) override {}
     motioncam::FileInfo getFileInfo() const override { return {}; }
+    int ancillaryMaterializations() const { return mAncillaryMaterializations; }
 private:
     std::vector<uint8_t> mLeft, mRight;
     std::vector<motioncam::Entry> mEntries;
+    int mAncillaryMaterializations = 0;
 };
 } // namespace
 
@@ -259,7 +274,8 @@ int main() {
 
     FakeFileSystem streamingFilesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
-        makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2));
+        makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2),
+        1, true, true);
     size_t streamedFrames = 0;
     motioncam::vfs::finalize(streamingFilesystem, (root / "stream-out").string(),
         false, options, {},
@@ -268,6 +284,7 @@ int main() {
             ++streamedFrames;
         }, false);
     assert(streamedFrames == 3);
+    assert(streamingFilesystem.ancillaryMaterializations() == 0);
     assert(fs::is_empty(root / "stream-out"));
 
     FakeFileSystem compressedStreamingFilesystem(

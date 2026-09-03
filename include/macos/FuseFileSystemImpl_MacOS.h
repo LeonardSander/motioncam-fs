@@ -14,6 +14,7 @@ namespace motioncam {
 
 struct Session;
 class LRUCache;
+class PreviewRenderer;
 
 class FuseFileSystemImpl_MacOs : public IFuseFileSystem
 {
@@ -40,6 +41,9 @@ public:
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>& = {},
         bool = true) override;
+    void finalizePreview(MountId, const RenderSettings&, const FinalizeOptions&,
+        const std::function<bool(size_t, size_t, const std::string&)>&,
+        const std::function<void(const std::vector<uint8_t>&, Timestamp)>&) override;
 
 private:
     MountId mNextMountId;
@@ -48,6 +52,7 @@ private:
     std::unique_ptr<BS::thread_pool> mIoThreadPool;
     std::unique_ptr<BS::thread_pool> mProcessingThreadPool;
     std::unique_ptr<LRUCache> mCache;
+    std::map<MountId, std::shared_ptr<PreviewRenderer>> mPreviewRenderers;
 };
 
 } // namespace motioncam
