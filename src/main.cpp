@@ -14,6 +14,7 @@
 #include <QPushButton>
 #include <QUrl>
 #include <algorithm>
+#include <chrono>
 #include <spdlog/spdlog.h>
 
 #ifdef __APPLE__
@@ -125,7 +126,9 @@ bool platformReady() {
 
 int main(int argc, char *argv[])
 {
+    const auto processStarted = std::chrono::steady_clock::now();
     SingleApplication app(argc, argv);
+    const auto applicationConstructed = std::chrono::steady_clock::now();
 
 #ifdef __APPLE__
     installCrashHandler();
@@ -179,14 +182,26 @@ int main(int argc, char *argv[])
     parser.addOption(galleryPerfPlaybackOption);
     parser.process(app);
 
+    const auto commandLineParsed = std::chrono::steady_clock::now();
+
     // Get file parameter if provided
     QString fileToMount;
     const QString galleryPerfSession = parser.value(galleryPerfOption);
     bool galleryPerfDurationOk = false;
     const int galleryPerfPlaybackMs = parser.value(galleryPerfPlaybackOption)
         .toInt(&galleryPerfDurationOk);
-    if (!galleryPerfSession.isEmpty())
+    if (!galleryPerfSession.isEmpty()) {
         qputenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS", "1");
+        qputenv("MOTIONCAM_GALLERY_DIAGNOSTICS", "1");
+        const auto milliseconds = [](auto duration) {
+            return std::chrono::duration<double, std::milli>(duration).count();
+        };
+        spdlog::info(
+            "GALLERY_PERF event=process_startup_checkpoint application_ms={:.3f} command_line_ms={:.3f} elapsed_ms={:.3f}",
+            milliseconds(applicationConstructed - processStarted),
+            milliseconds(commandLineParsed - applicationConstructed),
+            milliseconds(commandLineParsed - processStarted));
+    }
 
     if (parser.isSet(fileOption)) {
         fileToMount = parser.value(fileOption);
@@ -212,7 +227,15 @@ int main(int argc, char *argv[])
 #endif
 
     // Create main window
+    const auto windowStarted = std::chrono::steady_clock::now();
     MainWindow window;
+    if (!galleryPerfSession.isEmpty())
+        spdlog::info(
+            "GALLERY_PERF event=window_init_complete latency_ms={:.3f} process_elapsed_ms={:.3f}",
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - windowStarted).count(),
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - processStarted).count());
     qInstallMessageHandler(messageHandler);
 
     // Handle messages from other instances
@@ -249,12 +272,23 @@ int main(int argc, char *argv[])
 #endif
     if (!galleryPerfSession.isEmpty()) {
         QTimer::singleShot(0, &window,
-            [&window, galleryPerfSession, galleryPerfPlaybackMs, galleryPerfDurationOk] {
+            [&window, galleryPerfSession, galleryPerfPlaybackMs, galleryPerfDurationOk,
+             processStarted] {
+                spdlog::info(
+                    "GALLERY_PERF event=test_dispatch process_elapsed_ms={:.3f}",
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - processStarted).count());
                 window.startGalleryPerformanceTest(
                     galleryPerfSession,
                     galleryPerfDurationOk ? std::max(250, galleryPerfPlaybackMs) : 3000);
             });
     } else if (fileToMount.isEmpty())
         QTimer::singleShot(0, &window, [&window] { window.promptToResumeSession(); });
-    return app.exec();
+    const int exitCode = app.exec();
+    if (!galleryPerfSession.isEmpty())
+        spdlog::info(
+            "GALLERY_PERF event=event_loop_exit code={} process_elapsed_ms={:.3f}",
+            exitCode, std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - processStarted).count());
+    return exitCode;
 }

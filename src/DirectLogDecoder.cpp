@@ -7,7 +7,11 @@
 #include <array>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <thread>
+#include <unordered_map>
 
 namespace {
 
@@ -22,6 +26,119 @@ bool directLogDiagnosticsEnabled() {
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
+}
+
+struct CachedDirectLogTimeline {
+    motioncam::DirectLogVideoInfo videoInfo;
+    std::vector<motioncam::DirectLogFrameInfo> frames;
+};
+
+std::mutex directLogTimelineCacheMutex;
+std::unordered_map<std::string, CachedDirectLogTimeline> directLogTimelineCache;
+constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000002ULL;
+
+std::string directLogTimelineCacheKey(const std::string& path) {
+    std::error_code error;
+    const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
+    const auto size = std::filesystem::file_size(absolute, error);
+    if (error) return absolute.string();
+    const auto modified = std::filesystem::last_write_time(absolute, error);
+    if (error) return absolute.string() + ":" + std::to_string(size);
+    return absolute.string() + ":" + std::to_string(size) + ":" +
+           std::to_string(modified.time_since_epoch().count());
+}
+
+std::filesystem::path directLogTimelineCachePath(const std::string& key) {
+    const char* cacheRoot = std::getenv("XDG_CACHE_HOME");
+    std::filesystem::path root;
+    if (cacheRoot && cacheRoot[0] != '\0') root = cacheRoot;
+    else if (const char* home = std::getenv("HOME")) root = std::filesystem::path(home) / ".cache";
+    else root = std::filesystem::temp_directory_path();
+    return root / "motioncam-fuse" / "directlog-timelines" /
+           (std::to_string(std::hash<std::string>{}(key)) + ".bin");
+}
+
+template<typename T> bool readValue(std::istream& input, T& value) {
+    return static_cast<bool>(input.read(reinterpret_cast<char*>(&value), sizeof(value)));
+}
+template<typename T> void writeValue(std::ostream& output, const T& value) {
+    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+bool readString(std::istream& input, std::string& value, uint32_t maximum = 16384) {
+    uint32_t size = 0;
+    if (!readValue(input, size) || size > maximum) return false;
+    value.resize(size);
+    return size == 0 || static_cast<bool>(input.read(value.data(), size));
+}
+void writeString(std::ostream& output, const std::string& value) {
+    const uint32_t size = static_cast<uint32_t>(value.size());
+    writeValue(output, size);
+    output.write(value.data(), size);
+}
+
+bool loadPersistentTimeline(const std::string& key, CachedDirectLogTimeline& cached) {
+    std::ifstream input(directLogTimelineCachePath(key), std::ios::binary);
+    uint64_t magic = 0;
+    std::string storedKey;
+    if (!readValue(input, magic) || magic != directLogTimelineCacheMagic ||
+        !readString(input, storedKey) || storedKey != key) return false;
+    auto& video = cached.videoInfo;
+    uint8_t hlg = 0, log60 = 0;
+    uint64_t count = 0;
+    if (!readValue(input, video.width) || !readValue(input, video.height) ||
+        !readValue(input, video.fps) || !readValue(input, video.totalFrames) ||
+        !readString(input, video.pixelFormat, 256) || !readValue(input, hlg) ||
+        !readValue(input, log60) || !readValue(input, video.duration) ||
+        !readValue(input, count) || count > 10000000) return false;
+    video.isHLG = hlg != 0;
+    video.isLOG60 = log60 != 0;
+    cached.frames.resize(static_cast<size_t>(count));
+    for (size_t index = 0; index < cached.frames.size(); ++index) {
+        auto& frame = cached.frames[index];
+        uint8_t keyFrame = 0;
+        if (!readValue(input, frame.pts) || !readValue(input, frame.timestamp) ||
+            !readValue(input, frame.width) || !readValue(input, frame.height) ||
+            !readValue(input, frame.timeBase) || !readValue(input, keyFrame)) return false;
+        frame.frameNumber = static_cast<int>(index);
+        frame.pixelFormat = video.pixelFormat;
+        frame.keyFrame = keyFrame != 0;
+    }
+    return video.totalFrames == static_cast<int64_t>(cached.frames.size()) &&
+           !cached.frames.empty() && input.peek() == std::char_traits<char>::eof();
+}
+
+void savePersistentTimeline(const std::string& key, const CachedDirectLogTimeline& cached) {
+    const auto path = directLogTimelineCachePath(key);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return;
+    const auto temporary = path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output) return;
+    writeValue(output, directLogTimelineCacheMagic);
+    writeString(output, key);
+    const auto& video = cached.videoInfo;
+    writeValue(output, video.width); writeValue(output, video.height);
+    writeValue(output, video.fps); writeValue(output, video.totalFrames);
+    writeString(output, video.pixelFormat);
+    writeValue(output, static_cast<uint8_t>(video.isHLG));
+    writeValue(output, static_cast<uint8_t>(video.isLOG60));
+    writeValue(output, video.duration);
+    writeValue(output, static_cast<uint64_t>(cached.frames.size()));
+    for (const auto& frame : cached.frames) {
+        writeValue(output, frame.pts); writeValue(output, frame.timestamp);
+        writeValue(output, frame.width); writeValue(output, frame.height);
+        writeValue(output, frame.timeBase);
+        writeValue(output, static_cast<uint8_t>(frame.keyFrame));
+    }
+    output.close();
+    if (!output) { std::filesystem::remove(temporary, error); return; }
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(path, error);
+        error.clear();
+        std::filesystem::rename(temporary, path, error);
+    }
 }
 
 void configureSoftwareThreading(AVCodecContext* context) {
@@ -55,7 +172,7 @@ void parallelPixelRanges(size_t count, Function&& function) {
 
 namespace motioncam {
 
-DirectLogDecoder::DirectLogDecoder(const std::string& filePath) 
+DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
     : mFilePath(filePath),
       mFormatContext(nullptr),
       mCodecContext(nullptr),
@@ -70,9 +187,18 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
       mLastDecodedFrame(-1) {
     
     spdlog::info("DirectLogDecoder: Initializing for {}", filePath);
-    
+    const auto initializationStarted = std::chrono::steady_clock::now();
+    auto stageStarted = initializationStarted;
     initFFmpeg();
+    if (directLogDiagnosticsEnabled())
+        spdlog::info("DirectLog diagnostic: decoder_init stage=ffmpeg_open latency_ms={:.3f}",
+                     elapsedMilliseconds(stageStarted));
+    stageStarted = std::chrono::steady_clock::now();
     analyzeVideo();
+    if (directLogDiagnosticsEnabled())
+        spdlog::info(
+            "DirectLog diagnostic: decoder_init stage=timeline latency_ms={:.3f} total_ms={:.3f}",
+            elapsedMilliseconds(stageStarted), elapsedMilliseconds(initializationStarted));
 }
 
 DirectLogDecoder::~DirectLogDecoder() {
@@ -111,6 +237,21 @@ void DirectLogDecoder::initFFmpeg() {
     mCodec = avcodec_find_decoder(codecpar->codec_id);
     if (!mCodec) {
         throw std::runtime_error("Unsupported codec");
+    }
+    // Decoder registration order can resolve a codec ID to an external
+    // software decoder (notably AV1 -> libdav1d). Probe FFmpeg's native
+    // decoder first because it advertises the platform hardware configs;
+    // external decoders remain the explicit software fallback below.
+    const char* nativeDecoderName = nullptr;
+    switch (codecpar->codec_id) {
+        case AV_CODEC_ID_AV1: nativeDecoderName = "av1"; break;
+        case AV_CODEC_ID_HEVC: nativeDecoderName = "hevc"; break;
+        case AV_CODEC_ID_H264: nativeDecoderName = "h264"; break;
+        default: break;
+    }
+    if (nativeDecoderName) {
+        if (const AVCodec* nativeDecoder = avcodec_find_decoder_by_name(nativeDecoderName))
+            mCodec = nativeDecoder;
     }
     
     // Allocate codec context
@@ -186,6 +327,27 @@ void DirectLogDecoder::initFFmpeg() {
 }
 
 void DirectLogDecoder::analyzeVideo() {
+    const std::string cacheKey = directLogTimelineCacheKey(mFilePath);
+    {
+        std::lock_guard<std::mutex> lock(directLogTimelineCacheMutex);
+        if (const auto cached = directLogTimelineCache.find(cacheKey);
+            cached != directLogTimelineCache.end()) {
+            mVideoInfo = cached->second.videoInfo;
+            mFrames = cached->second.frames;
+            spdlog::info("DirectLogDecoder: reused cached timeline for {} ({} frames)",
+                         mFilePath, mFrames.size());
+            return;
+        }
+        CachedDirectLogTimeline persistent;
+        if (loadPersistentTimeline(cacheKey, persistent)) {
+            mVideoInfo = persistent.videoInfo;
+            mFrames = persistent.frames;
+            directLogTimelineCache.emplace(cacheKey, std::move(persistent));
+            spdlog::info("DirectLogDecoder: reused persistent timeline for {} ({} frames)",
+                         mFilePath, mFrames.size());
+            return;
+        }
+    }
     mVideoInfo.width = mCodecContext->width;
     mVideoInfo.height = mCodecContext->height;
     
@@ -276,6 +438,12 @@ void DirectLogDecoder::analyzeVideo() {
     if (mCodecContext) {
         avcodec_flush_buffers(mCodecContext);
     }
+    {
+        std::lock_guard<std::mutex> lock(directLogTimelineCacheMutex);
+        CachedDirectLogTimeline cached{mVideoInfo, mFrames};
+        directLogTimelineCache[cacheKey] = cached;
+        savePersistentTimeline(cacheKey, cached);
+    }
     
     spdlog::info("DirectLogDecoder: Analyzed video - {}x{} @ {:.2f}fps, {} frames, format: {}, HLG: {}, LOG60: {}",
                  mVideoInfo.width, mVideoInfo.height, mVideoInfo.fps, mVideoInfo.totalFrames,
@@ -304,8 +472,15 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
     int precedingKeyFrame = frameNumber;
     while (precedingKeyFrame > 0 && !mFrames[precedingKeyFrame].keyFrame)
         --precedingKeyFrame;
+    // Staying in the current GOP is only beneficial for the small skips made
+    // by preview frame-rate limiting. A user seek can land hundreds of frames
+    // ahead while still sharing a (missing or very distant) keyframe; treating
+    // that as sequential made the decoder walk every intervening frame.
+    constexpr int maxSequentialSkip = 8;
+    const int forwardDistance = frameNumber - mLastDecodedFrame;
     const bool sequential = mLastDecodedFrame >= precedingKeyFrame &&
-                            frameNumber > mLastDecodedFrame;
+                            forwardDistance > 0 &&
+                            forwardDistance <= maxSequentialSkip;
     if (diagnostics)
         spdlog::info("DirectLog diagnostic: frame={} decoder begin mode={} pts={}",
                      frameNumber, sequential ? "sequential" : "seek", frameInfo.pts);
@@ -413,13 +588,16 @@ bool DirectLogDecoder::initHardwareDecoder() {
     const AVHWDeviceType preferred[] = {
 #ifdef _WIN32
         AV_HWDEVICE_TYPE_D3D11VA,
-#endif
         AV_HWDEVICE_TYPE_CUDA,
-#ifdef __APPLE__
+        AV_HWDEVICE_TYPE_QSV,
+#elif defined(__APPLE__)
         AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-#endif
+#else
+        AV_HWDEVICE_TYPE_CUDA,
         AV_HWDEVICE_TYPE_VAAPI,
-        AV_HWDEVICE_TYPE_QSV
+        AV_HWDEVICE_TYPE_QSV,
+#endif
+        AV_HWDEVICE_TYPE_VULKAN
     };
     for (AVHWDeviceType deviceType : preferred) {
         for (int index = 0;; ++index) {
@@ -429,8 +607,15 @@ bool DirectLogDecoder::initHardwareDecoder() {
                 !(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
                 continue;
             AVBufferRef* device = nullptr;
-            if (av_hwdevice_ctx_create(&device, deviceType, nullptr, nullptr, 0) < 0)
+            const int createResult = av_hwdevice_ctx_create(
+                &device, deviceType, nullptr, nullptr, 0);
+            if (createResult < 0) {
+                if (directLogDiagnosticsEnabled())
+                    spdlog::info(
+                        "DirectLog diagnostic: hardware device={} unavailable error={}",
+                        av_hwdevice_get_type_name(deviceType), createResult);
                 continue;
+            }
             mHardwareDeviceContext = device;
             mHardwarePixelFormat = config->pix_fmt;
             mCodecContext->hw_device_ctx = av_buffer_ref(mHardwareDeviceContext);

@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <optional>
 #include <atomic>
+#include <mutex>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -120,7 +121,7 @@ private slots:
     void onSaveSessionAs();
     void onClearRecentSessions();
 
-    void playMount(motioncam::MountId mountId);
+    void playMount(motioncam::MountId mountId, bool startRender = true);
     void startGalleryRender(motioncam::MountId mountId, double startSeconds = 0.0);
     motioncam::RenderSettings settingsForMount(motioncam::MountId mountId) const;
     void openMountedDirectory(QWidget* fileWidget);
@@ -200,6 +201,9 @@ private:
     QPointer<ClipPlayerDialog> mClipPlayer;
     motioncam::MountId mGalleryMountId = motioncam::InvalidMountId;
     std::atomic_uint64_t mGalleryGeneration{0};
+    // Preview filesystems are independent per mount. Serialize their large
+    // frame working sets so cancellation cannot overlap multiple 108 MP jobs.
+    std::mutex mGalleryRenderMutex;
     QFutureSynchronizer<void> mGalleryTasks;
     bool mSettingsDirty = false;
     bool mAutoApplyClipSettings = true;

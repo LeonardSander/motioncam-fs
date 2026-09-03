@@ -56,11 +56,6 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         spdlog::warn("Gallery FFmpeg could not be started: {}", detail.toStdString());
     });
     connect(&mFrameTimer,&QTimer::timeout,this,&ClipPlayerDialog::showNextFrame);
-    mResizeTimer.setSingleShot(true);
-    mResizeTimer.setInterval(250);
-    connect(&mResizeTimer,&QTimer::timeout,this,[this]{
-        if(!mClosing&&mIndex>=0&&mClips[mIndex].sourceFrames>1)reloadCurrentClip();
-    });
     connect(mPlayPause,&QPushButton::clicked,this,[this]{
         mPaused=!mPaused;mPlayPause->setText(mPaused?tr("Play"):tr("Pause"));
         if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseMs=audioPositionMs();mAudioClock.invalidate();mAudioSink->suspend();}}
@@ -101,7 +96,6 @@ void ClipPlayerDialog::reloadCurrentClip(){if(mIndex>=0)openClip(mIndex,mPositio
 
 void ClipPlayerDialog::stopDecoder(){
     mFrameTimer.stop();
-    mResizeTimer.stop();
     if(mDecoder.state()==QProcess::NotRunning)return;
     mStoppingDecoder=true;
     mDecoder.closeWriteChannel();
@@ -195,6 +189,13 @@ void ClipPlayerDialog::configureAudio(){
     const bool canLoadFromSource=!clip.sourceAudioChecked&&!clip.sourceFile.isEmpty();
     const bool available=!sourceAudio.isEmpty();
     mAudioButton->setEnabled(available||canLoadFromSource);
+    // Opening the gallery must not synchronously initialize PipeWire/CoreAudio
+    // or copy and parse a potentially large WAV while audio is muted. Keep the
+    // capability visible and defer all device/buffer work until the user opts in.
+    if(!mAudioEnabled){
+        mAudioButton->setText(tr("Audio: Muted"));
+        return;
+    }
     if(!available){
         if(!canLoadFromSource){mAudioButton->setChecked(false);mAudioButton->setText(tr("Audio: Muted"));}
         else {
@@ -361,7 +362,13 @@ void ClipPlayerDialog::setAudioEnabled(bool enabled){
     mAudioButton->setText(mAudioEnabled?tr("Audio: On"):tr("Audio: Muted"));
     if(mIndex>=0)updateFrameTimerInterval();
     if(mAudioEnabled){
-        if(!mAudioSink){beginSourceAudioLoad();return;}
+        if(!mAudioSink){
+            if(mIndex>=0&&mIndex<mClips.size()&&mClips[mIndex].audioWav)
+                configureAudio();
+            else
+                beginSourceAudioLoad();
+            if(!mAudioSink)return;
+        }
         if(!mPaused&&mFirstFrameReady){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
         else mAudioStartPending=true;
     }else{
@@ -567,6 +574,5 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
     if(!mLastPresentedImage.isNull())mVideo->setPixmap(QPixmap::fromImage(mLastPresentedImage).scaled(
         mVideo->size(),Qt::KeepAspectRatio,Qt::SmoothTransformation));
-    if(isVisible()&&!mClosing&&mIndex>=0&&mClips[mIndex].sourceFrames>1)mResizeTimer.start();
 }
 void ClipPlayerDialog::keyPressEvent(QKeyEvent* e){if(e->key()==Qt::Key_Space){mPlayPause->click();e->accept();return;}if(e->key()==Qt::Key_Right){advance();e->accept();return;}if(e->key()==Qt::Key_Left&&!mClips.isEmpty()){openClip((mIndex-1+mClips.size())%mClips.size());e->accept();return;}QDialog::keyPressEvent(e);}

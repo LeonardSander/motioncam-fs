@@ -78,7 +78,6 @@ private:
     QByteArray mBytes; QVector<QImage> mFrames; QImage mLastPresentedImage;
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
     int mNextInputFrame=0;
-    QTimer mResizeTimer;
     double mPositionSeconds=0.0, mStartSeconds=0.0;
     bool mPaused=false, mTriedSoftware=false, mClosing=false, mPlaybackFailed=false;
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;

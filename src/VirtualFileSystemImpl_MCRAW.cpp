@@ -19,8 +19,131 @@
 #include <audiofile/AudioFile.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <mutex>
 #include <tuple>
+
+namespace {
+struct CachedMcrawAnalysis {
+    std::vector<motioncam::Timestamp> frames;
+    double baselineExposure = 0.0;
+    std::map<motioncam::Timestamp, float> smoothedExposure;
+    std::map<motioncam::Timestamp, std::array<float, 3>> smoothedNeutral;
+};
+std::mutex mcrawAnalysisCacheMutex;
+std::unordered_map<std::string, CachedMcrawAnalysis> mcrawAnalysisCache;
+constexpr uint64_t mcrawAnalysisCacheMagic = 0x4d43464d43000001ULL;
+
+std::string mcrawAnalysisCacheKey(const std::string& path) {
+    std::error_code error;
+    const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
+    const auto size = std::filesystem::file_size(absolute, error);
+    if (error) return absolute.string();
+    const auto modified = std::filesystem::last_write_time(absolute, error);
+    return absolute.string() + ":" + std::to_string(size) +
+           (error ? "" : ":" + std::to_string(modified.time_since_epoch().count()));
+}
+
+std::filesystem::path mcrawAnalysisCachePath(const std::string& key) {
+    const char* cacheRoot = std::getenv("XDG_CACHE_HOME");
+    std::filesystem::path root;
+    if (cacheRoot && cacheRoot[0] != '\0') root = cacheRoot;
+    else if (const char* home = std::getenv("HOME")) root = std::filesystem::path(home) / ".cache";
+    else root = std::filesystem::temp_directory_path();
+    return root / "motioncam-fuse" / "mcraw-analysis" /
+           (std::to_string(std::hash<std::string>{}(key)) + ".bin");
+}
+
+template<typename T> bool readCacheValue(std::istream& input, T& value) {
+    return static_cast<bool>(input.read(reinterpret_cast<char*>(&value), sizeof(value)));
+}
+template<typename T> void writeCacheValue(std::ostream& output, const T& value) {
+    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+bool readCacheString(std::istream& input, std::string& value) {
+    uint32_t size = 0;
+    if (!readCacheValue(input, size) || size > 16384) return false;
+    value.resize(size);
+    return size == 0 || static_cast<bool>(input.read(value.data(), size));
+}
+void writeCacheString(std::ostream& output, const std::string& value) {
+    const uint32_t size = static_cast<uint32_t>(value.size());
+    writeCacheValue(output, size);
+    output.write(value.data(), size);
+}
+bool loadPersistentMcrawAnalysis(const std::string& key, CachedMcrawAnalysis& cached) {
+    std::ifstream input(mcrawAnalysisCachePath(key), std::ios::binary);
+    uint64_t magic = 0, frameCount = 0, exposureCount = 0, neutralCount = 0;
+    std::string storedKey;
+    if (!readCacheValue(input, magic) || magic != mcrawAnalysisCacheMagic ||
+        !readCacheString(input, storedKey) || storedKey != key ||
+        !readCacheValue(input, cached.baselineExposure) ||
+        !readCacheValue(input, frameCount) || frameCount > 10000000) return false;
+    cached.frames.resize(static_cast<size_t>(frameCount));
+    for (auto& frame : cached.frames) if (!readCacheValue(input, frame)) return false;
+    if (!readCacheValue(input, exposureCount) || exposureCount > frameCount) return false;
+    for (uint64_t index = 0; index < exposureCount; ++index) {
+        motioncam::Timestamp timestamp;
+        float value;
+        if (!readCacheValue(input, timestamp) || !readCacheValue(input, value)) return false;
+        cached.smoothedExposure.emplace(timestamp, value);
+    }
+    if (!readCacheValue(input, neutralCount) || neutralCount > frameCount) return false;
+    for (uint64_t index = 0; index < neutralCount; ++index) {
+        motioncam::Timestamp timestamp;
+        std::array<float, 3> value;
+        if (!readCacheValue(input, timestamp) ||
+            !input.read(reinterpret_cast<char*>(value.data()), sizeof(value))) return false;
+        cached.smoothedNeutral.emplace(timestamp, value);
+    }
+    return !cached.frames.empty() && input.peek() == std::char_traits<char>::eof();
+}
+void savePersistentMcrawAnalysis(const std::string& key, const CachedMcrawAnalysis& cached) {
+    const auto path = mcrawAnalysisCachePath(key);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return;
+    const auto temporary = path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output) return;
+    writeCacheValue(output, mcrawAnalysisCacheMagic);
+    writeCacheString(output, key);
+    writeCacheValue(output, cached.baselineExposure);
+    writeCacheValue(output, static_cast<uint64_t>(cached.frames.size()));
+    for (const auto frame : cached.frames) writeCacheValue(output, frame);
+    writeCacheValue(output, static_cast<uint64_t>(cached.smoothedExposure.size()));
+    for (const auto& [timestamp, value] : cached.smoothedExposure) {
+        writeCacheValue(output, timestamp); writeCacheValue(output, value);
+    }
+    writeCacheValue(output, static_cast<uint64_t>(cached.smoothedNeutral.size()));
+    for (const auto& [timestamp, value] : cached.smoothedNeutral) {
+        writeCacheValue(output, timestamp);
+        output.write(reinterpret_cast<const char*>(value.data()), sizeof(value));
+    }
+    output.close();
+    if (!output) { std::filesystem::remove(temporary, error); return; }
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(path, error);
+        error.clear();
+        std::filesystem::rename(temporary, path, error);
+    }
+}
+
+double elapsedMs(const std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+}
+bool galleryDiagnosticsEnabled() {
+    const char* value = std::getenv("MOTIONCAM_GALLERY_DIAGNOSTICS");
+    return value && value[0] != '\0' && std::string(value) != "0";
+}
+}
 
 namespace motioncam {
 
@@ -35,6 +158,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mSrcPath(file),
         mBaseName(baseName),
         mSettings(settings) {
+    const auto initializationStarted = std::chrono::steady_clock::now();
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     
@@ -47,45 +171,77 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         }
     }
     
-    Decoder decoder(mSrcPath);
-    auto frames = decoder.getFrames();
-    std::sort(frames.begin(), frames.end());
-    if(frames.empty())
-        return;
-    mSourceFrames = frames;
-    mFrameIndexByTimestamp = vfs::indexTimestamps(frames);
-    mBaselineExpValue = std::numeric_limits<double>::max();    
-    nlohmann::json metadata;
-    std::vector<vfs::ExposureSample> exposureSamples;
-    exposureSamples.reserve(frames.size());
-    for(const auto& frame : frames) {
-        decoder.loadFrameMetadata(frame, metadata);
-        const auto cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
-        mBaselineExpValue = std::min(mBaselineExpValue, cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
-        vfs::ExposureSample sample;
-        sample.timestamp = frame;
-        sample.iso = cameraFrameMetadata.iso;
-        sample.exposureSeconds = cameraFrameMetadata.exposureTime;
-        for (size_t channel = 0; channel < 3; ++channel) {
-            const double neutral = metadata.contains("asShotNeutral") &&
-                    metadata["asShotNeutral"].is_array() &&
-                    metadata["asShotNeutral"].size() > channel
-                ? metadata["asShotNeutral"][channel].get<double>()
-                : 1.0;
-            sample.asShotNeutral[channel] = static_cast<float>(neutral);
+    const auto cacheKey = mcrawAnalysisCacheKey(mSrcPath);
+    bool reusedAnalysis = false;
+    {
+        std::lock_guard lock(mcrawAnalysisCacheMutex);
+        if (const auto cached = mcrawAnalysisCache.find(cacheKey);
+            cached != mcrawAnalysisCache.end()) {
+            mSourceFrames = cached->second.frames;
+            mBaselineExpValue = cached->second.baselineExposure;
+            mSmoothedExposureOffsets = cached->second.smoothedExposure;
+            mSmoothedAsShotNeutrals = cached->second.smoothedNeutral;
+            reusedAnalysis = true;
+        } else {
+            CachedMcrawAnalysis persistent;
+            if (loadPersistentMcrawAnalysis(cacheKey, persistent)) {
+                mSourceFrames = persistent.frames;
+                mBaselineExpValue = persistent.baselineExposure;
+                mSmoothedExposureOffsets = persistent.smoothedExposure;
+                mSmoothedAsShotNeutrals = persistent.smoothedNeutral;
+                mcrawAnalysisCache.emplace(cacheKey, std::move(persistent));
+                reusedAnalysis = true;
+            }
         }
-        exposureSamples.push_back(sample);
     }
-
-    // Two seconds on either side is intentionally large enough to absorb
-    // aggressive frame-to-frame changes while retaining deliberate trends.
-    const double frameRate = frames.size() > 1
-        ? vfs::calculateFrameRate(frames).medianFrameRate
-        : 30.0;
-    const auto analysis = vfs::analyzeExposureMetadata(exposureSamples, frameRate);
-    mSmoothedExposureOffsets = analysis.smoothedBaseline;
-    mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
+    if (!reusedAnalysis) {
+        Decoder decoder(mSrcPath);
+        auto frames = decoder.getFrames();
+        std::sort(frames.begin(), frames.end());
+        if(frames.empty()) return;
+        mSourceFrames = frames;
+        mBaselineExpValue = std::numeric_limits<double>::max();
+        nlohmann::json metadata;
+        std::vector<vfs::ExposureSample> exposureSamples;
+        exposureSamples.reserve(frames.size());
+        for(const auto& frame : frames) {
+            decoder.loadFrameMetadata(frame, metadata);
+            const auto cameraFrameMetadata = CameraFrameMetadata::limitedParse(metadata);
+            mBaselineExpValue = std::min(mBaselineExpValue,
+                cameraFrameMetadata.iso * cameraFrameMetadata.exposureTime);
+            vfs::ExposureSample sample;
+            sample.timestamp = frame;
+            sample.iso = cameraFrameMetadata.iso;
+            sample.exposureSeconds = cameraFrameMetadata.exposureTime;
+            for (size_t channel = 0; channel < 3; ++channel) {
+                const double neutral = metadata.contains("asShotNeutral") &&
+                        metadata["asShotNeutral"].is_array() &&
+                        metadata["asShotNeutral"].size() > channel
+                    ? metadata["asShotNeutral"][channel].get<double>() : 1.0;
+                sample.asShotNeutral[channel] = static_cast<float>(neutral);
+            }
+            exposureSamples.push_back(sample);
+        }
+        const double frameRate = frames.size() > 1
+            ? vfs::calculateFrameRate(frames).medianFrameRate : 30.0;
+        const auto analysis = vfs::analyzeExposureMetadata(exposureSamples, frameRate);
+        mSmoothedExposureOffsets = analysis.smoothedBaseline;
+        mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
+        std::lock_guard lock(mcrawAnalysisCacheMutex);
+        CachedMcrawAnalysis cached{mSourceFrames, mBaselineExpValue,
+            mSmoothedExposureOffsets, mSmoothedAsShotNeutrals};
+        mcrawAnalysisCache[cacheKey] = cached;
+        savePersistentMcrawAnalysis(cacheKey, cached);
+    }
+    mFrameIndexByTimestamp = vfs::indexTimestamps(mSourceFrames);
+    if (galleryDiagnosticsEnabled())
+        spdlog::info("GALLERY_PERF event=mcraw_analysis source={} reused={} frames={} latency_ms={:.3f}",
+                     mSrcPath, reusedAnalysis, mSourceFrames.size(),
+                     elapsedMs(initializationStarted));
     init();
+    if (galleryDiagnosticsEnabled())
+        spdlog::info("GALLERY_PERF event=mcraw_vfs_init source={} reused_analysis={} total_ms={:.3f}",
+                     mSrcPath, reusedAnalysis, elapsedMs(initializationStarted));
 }
 
 VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
