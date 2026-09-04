@@ -89,6 +89,11 @@ extern "C" {
 #endif
 
 namespace {
+    bool invertColorMatrix(const std::array<float, 9>& input,
+                           std::array<float, 9>& inverse);
+    bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
+                          std::array<float, 9>& cameraToXyzD50);
+
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
     constexpr auto RIFE_REVISION = "b0542ef99f380f0fe17a1b44151ac6935e8b82d4";
@@ -96,7 +101,8 @@ namespace {
         "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
 
     void applyGalleryColorTransform(std::vector<uint8_t>& bytes,
-                                    const motioncam::DNGFrameMetadata& metadata) {
+                                    const motioncam::DNGFrameMetadata& metadata,
+                                    bool ignoreForwardMat) {
         if (bytes.size() % 6 != 0) return;
         auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
         const size_t pixelCount = bytes.size() / 6;
@@ -129,24 +135,38 @@ namespace {
                 std::clamp(value, 0.0f, 1.0f) * 65535.0f));
             return srgbTransfer[index];
         };
-        const bool hasMatrix = metadata.hasForwardMatrix2 || metadata.hasForwardMatrix1;
+        const bool hasMatrix = ignoreForwardMat
+            ? (metadata.hasColorMatrix2 || metadata.hasColorMatrix1)
+            : (metadata.hasForwardMatrix2 || metadata.hasForwardMatrix1);
         std::array<float, 9> cameraToDisplay{};
         if (hasMatrix) {
-            const auto& forward = metadata.hasForwardMatrix2
-                ? metadata.forwardMatrix2 : metadata.forwardMatrix1;
+            const auto& sourceMatrix = ignoreForwardMat
+                ? (metadata.hasColorMatrix1 ? metadata.colorMatrix1 : metadata.colorMatrix2)
+                : (metadata.hasForwardMatrix2 ? metadata.forwardMatrix2 : metadata.forwardMatrix1);
+            std::array<float, 9> inverted{};
+            const std::array<float, 9>* matrix = &sourceMatrix;
+            if (ignoreForwardMat) {
+                if (!colorMatrixToD50(metadata, inverted)) {
+                    spdlog::warn("Preview ColorMatrix transform is invalid; using neutral display transform");
+                    matrix = nullptr;
+                } else matrix = &inverted;
+            }
             // Both matrices and channel gains are constant for the frame.
             // Fold them here rather than doing two matrix passes per pixel.
-            for (int row = 0; row < 3; ++row) {
+            if (matrix) for (int row = 0; row < 3; ++row) {
                 for (int column = 0; column < 3; ++column) {
                     for (int xyz = 0; xyz < 3; ++xyz)
                         cameraToDisplay[row * 3 + column] +=
                             xyzToSrgbD50[row * 3 + xyz] *
-                            forward[xyz * 3 + column] * gains[column];
+                            (*matrix)[xyz * 3 + column] *
+                            (ignoreForwardMat ? exposure : gains[column]);
                 }
             }
         }
+        const bool useMatrix = std::any_of(cameraToDisplay.begin(), cameraToDisplay.end(),
+                                           [](float value) { return value != 0.0f; });
         std::array<std::array<uint16_t, 65536>, 3> channelTransfer;
-        if (!hasMatrix) {
+        if (!useMatrix) {
             for (size_t value = 0; value < 65536; ++value) {
                 const float normalized = static_cast<float>(value) / 65535.0f;
                 for (int channel = 0; channel < 3; ++channel)
@@ -154,7 +174,7 @@ namespace {
             }
         }
         auto convertRange = [&](size_t begin, size_t end) {
-            if (!hasMatrix) {
+            if (!useMatrix) {
                 for (size_t pixel = begin; pixel < end; ++pixel) {
                     for (int channel = 0; channel < 3; ++channel)
                         pixels[pixel * 3 + channel] =
@@ -194,6 +214,7 @@ namespace {
         settings.options = static_cast<motioncam::FileRenderOptions>(
             settings.options & ~(
                 motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
+                motioncam::RENDER_OPT_LOG_TRANSFORM |
                 motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
         settings.cameraModel.clear();
         if (settings.quadBayerOption == motioncam::QuadBayerMode::CorrectQBCFAMetadata ||
@@ -202,6 +223,125 @@ namespace {
         settings.cameraNativeStaging = true;
         settings.streamingPreview = true;
         return settings;
+    }
+
+    int normalizedGalleryOrientation(int orientation) {
+        return orientation == 0 || orientation == 90 || orientation == 180 || orientation == 270
+            ? orientation : -1;
+    }
+
+    bool invertColorMatrix(const std::array<float, 9>& input,
+                           std::array<float, 9>& inverse) {
+        const float determinant = input[0] * (input[4] * input[8] - input[5] * input[7]) -
+            input[1] * (input[3] * input[8] - input[5] * input[6]) +
+            input[2] * (input[3] * input[7] - input[4] * input[6]);
+        if (std::abs(determinant) < 1.0e-8f) return false;
+        const float scale = 1.0f / determinant;
+        inverse = {(input[4] * input[8] - input[5] * input[7]) * scale,
+            (input[2] * input[7] - input[1] * input[8]) * scale,
+            (input[1] * input[5] - input[2] * input[4]) * scale,
+            (input[5] * input[6] - input[3] * input[8]) * scale,
+            (input[0] * input[8] - input[2] * input[6]) * scale,
+            (input[2] * input[3] - input[0] * input[5]) * scale,
+            (input[3] * input[7] - input[4] * input[6]) * scale,
+            (input[1] * input[6] - input[0] * input[7]) * scale,
+            (input[0] * input[4] - input[1] * input[3]) * scale};
+        return true;
+    }
+
+    std::array<float, 9> multiplyMatrix(const std::array<float, 9>& a,
+                                        const std::array<float, 9>& b) {
+        std::array<float, 9> result{};
+        for (int row = 0; row < 3; ++row)
+            for (int column = 0; column < 3; ++column)
+                for (int inner = 0; inner < 3; ++inner)
+                    result[row * 3 + column] +=
+                        a[row * 3 + inner] * b[inner * 3 + column];
+        return result;
+    }
+
+    std::array<float, 3> multiplyVector(const std::array<float, 9>& matrix,
+                                        const std::array<float, 3>& value) {
+        return {matrix[0] * value[0] + matrix[1] * value[1] + matrix[2] * value[2],
+                matrix[3] * value[0] + matrix[4] * value[1] + matrix[5] * value[2],
+                matrix[6] * value[0] + matrix[7] * value[1] + matrix[8] * value[2]};
+    }
+
+    double illuminantTemperature(uint16_t illuminant) {
+        switch (illuminant) {
+            case 17: return 2856.0; // Standard Light A
+            case 18: return 4874.0; // Standard Light B
+            case 19: return 6774.0; // Standard Light C
+            case 20: return 5503.0; // D55
+            case 21: return 6504.0; // D65
+            case 22: return 7504.0; // D75
+            case 23: return 5003.0; // D50
+            case 24: return 3200.0; // ISO studio tungsten
+            default: return 0.0;
+        }
+    }
+
+    double correlatedColorTemperature(double x, double y) {
+        const double denominator = y - 0.1858;
+        if (std::abs(denominator) < 1.0e-9) return 5000.0;
+        const double n = (x - 0.3320) / denominator;
+        return std::clamp(449.0 * n * n * n + 3525.0 * n * n +
+                          6823.3 * n + 5520.33, 2000.0, 25000.0);
+    }
+
+    bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
+                          std::array<float, 9>& cameraToXyzD50) {
+        if (!metadata.hasColorMatrix1 && !metadata.hasColorMatrix2) return false;
+        const double temperature1 = illuminantTemperature(metadata.calibrationIlluminant1);
+        const double temperature2 = illuminantTemperature(metadata.calibrationIlluminant2);
+        double sceneTemperature = temperature1 > 0.0 ? temperature1 : 5000.0;
+        std::array<float, 9> inverse{};
+        std::array<float, 9> interpolated{};
+        std::array<float, 3> sourceWhite{0.96422f, 1.0f, 0.82521f};
+        for (int iteration = 0; iteration < 4; ++iteration) {
+            double weight = metadata.hasColorMatrix1 ? 1.0 : 0.0;
+            if (metadata.hasColorMatrix1 && metadata.hasColorMatrix2 &&
+                temperature1 > 0.0 && temperature2 > 0.0 && temperature1 != temperature2) {
+                weight = std::clamp((1.0 / sceneTemperature - 1.0 / temperature2) /
+                                    (1.0 / temperature1 - 1.0 / temperature2), 0.0, 1.0);
+            }
+            for (size_t index = 0; index < interpolated.size(); ++index) {
+                const float first = metadata.hasColorMatrix1
+                    ? metadata.colorMatrix1[index] : metadata.colorMatrix2[index];
+                const float second = metadata.hasColorMatrix2
+                    ? metadata.colorMatrix2[index] : first;
+                interpolated[index] = static_cast<float>(first * weight + second * (1.0 - weight));
+            }
+            if (!invertColorMatrix(interpolated, inverse)) return false;
+            sourceWhite = multiplyVector(inverse, metadata.asShotNeutral);
+            const double sum = sourceWhite[0] + sourceWhite[1] + sourceWhite[2];
+            if (!(sum > 1.0e-8)) return false;
+            sceneTemperature = correlatedColorTemperature(sourceWhite[0] / sum,
+                                                           sourceWhite[1] / sum);
+        }
+        const float sourceScale = sourceWhite[1] != 0.0f ? 1.0f / sourceWhite[1] : 1.0f;
+        for (float& value : sourceWhite) value *= sourceScale;
+        constexpr std::array<float, 9> bradford{
+             0.8951f, 0.2664f,-0.1614f,
+            -0.7502f, 1.7135f, 0.0367f,
+             0.0389f,-0.0685f, 1.0296f};
+        constexpr std::array<float, 9> bradfordInverse{
+             0.9869929f,-0.1470543f, 0.1599627f,
+             0.4323053f, 0.5183603f, 0.0492912f,
+            -0.0085287f, 0.0400428f, 0.9684867f};
+        constexpr std::array<float, 3> d50{0.96422f, 1.0f, 0.82521f};
+        const auto sourceCone = multiplyVector(bradford, sourceWhite);
+        const auto targetCone = multiplyVector(bradford, d50);
+        if (std::abs(sourceCone[0]) < 1.0e-8f || std::abs(sourceCone[1]) < 1.0e-8f ||
+            std::abs(sourceCone[2]) < 1.0e-8f) return false;
+        const std::array<float, 9> coneScale{
+            targetCone[0] / sourceCone[0],0,0,
+            0,targetCone[1] / sourceCone[1],0,
+            0,0,targetCone[2] / sourceCone[2]};
+        const auto adaptation = multiplyMatrix(
+            bradfordInverse, multiplyMatrix(coneScale, bradford));
+        cameraToXyzD50 = multiplyMatrix(adaptation, inverse);
+        return true;
     }
 
     motioncam::RenderSettings thumbnailRenderSettings(motioncam::RenderSettings settings) {
@@ -251,21 +391,29 @@ namespace {
         motioncam::DNGFrameMetadata metadata;
         if (!motioncam::DNGDecoder::getColorMetadata(dng, metadata))
             spdlog::warn("Preview frame has no complete DNG color metadata; using neutral display defaults");
-        applyGalleryColorTransform(rgb, metadata);
+        applyGalleryColorTransform(rgb, metadata, settings.ignoreForwardMat);
         return true;
     }
 
-    QImage previewImage(const std::vector<uint8_t>& rgb, uint32_t width, uint32_t height) {
+    QImage previewImage(const std::vector<uint8_t>& rgb, uint32_t width, uint32_t height,
+                        int orientation) {
         if (!width || !height || rgb.size() < static_cast<size_t>(width) * height * 6)
             return {};
-        QImage image(static_cast<int>(width), static_cast<int>(height), QImage::Format_RGB888);
+        orientation = normalizedGalleryOrientation(orientation);
+        const uint32_t outputWidth = orientation == 90 || orientation == 270 ? height : width;
+        const uint32_t outputHeight = orientation == 90 || orientation == 270 ? width : height;
+        QImage image(static_cast<int>(outputWidth), static_cast<int>(outputHeight), QImage::Format_RGB888);
         for (uint32_t y = 0; y < height; ++y) {
-            auto* destination = image.scanLine(static_cast<int>(y));
             for (uint32_t x = 0; x < width; ++x) {
                 const size_t input = (static_cast<size_t>(y) * width + x) * 6;
-                destination[x * 3] = rgb[input + 1];
-                destination[x * 3 + 1] = rgb[input + 3];
-                destination[x * 3 + 2] = rgb[input + 5];
+                uint32_t outputX = x, outputY = y;
+                if (orientation == 90) { outputX = height - 1 - y; outputY = x; }
+                else if (orientation == 180) { outputX = width - 1 - x; outputY = height - 1 - y; }
+                else if (orientation == 270) { outputX = y; outputY = width - 1 - x; }
+                auto* destination = image.scanLine(static_cast<int>(outputY)) + outputX * 3;
+                destination[0] = rgb[input + 1];
+                destination[1] = rgb[input + 3];
+                destination[2] = rgb[input + 5];
             }
         }
         return image;
@@ -562,6 +710,8 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     settings.badPixelTreatment = mRenderSettings.badPixelTreatment;
     settings.cfaPhase = mRenderSettings.cfaPhase;
     settings.jxlDistance = mRenderSettings.jxlDistance;
+    settings.orientation = mRenderSettings.orientation;
+    settings.ignoreForwardMat = mRenderSettings.ignoreForwardMat;
 
     return settings;
 }
@@ -1566,7 +1716,20 @@ void MainWindow::mountFile(const QString& filePath) {
 }
 
 motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
-    return mLocalSettings.value(mountId, mGlobalRenderSettings);
+    auto settings = mLocalSettings.value(mountId, mGlobalRenderSettings);
+    for (const auto& mounted : mMountedFiles) {
+        if (mounted.mountId != mountId) continue;
+        const auto sidecarPath = motioncam::vfs::sidecarPath(mounted.srcFile.toStdString());
+        if (boost::filesystem::exists(sidecarPath)) {
+            const auto sidecar = motioncam::CalibrationData::loadFromFile(sidecarPath.string());
+            if (sidecar) {
+                if (sidecar->hasOrientation) settings.orientation = sidecar->orientation;
+                if (sidecar->hasIgnoreForwardMat) settings.ignoreForwardMat = sidecar->ignoreForwardMat;
+            }
+        }
+        break;
+    }
+    return settings;
 }
 
 void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeconds) {
@@ -1730,6 +1893,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
             info->duplicatedFrames);
         clip.width = info->width;
         clip.height = info->height;
+        clip.orientation = settingsForMount(mounted.mountId).orientation;
         clip.isSequence = info->isSequence;
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
@@ -3873,7 +4037,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
                     uint32_t width = 0, height = 0;
                     if (!decodePreviewFrame(dng, settings, rgb, width, height))
                         throw std::runtime_error("Could not decode thumbnail preview frame");
-                    image = previewImage(rgb, width, height);
+                    image = previewImage(rgb, width, height, settings.orientation);
                 });
         } catch (const std::exception& error) {
             if (!cancelled->load())
@@ -4060,6 +4224,8 @@ void MainWindow::saveSessionToFile(const QString& path) {
         object["badPixelTreatment"] = QString::fromStdString(badPixelTreatmentToString(settings.badPixelTreatment));
         object["cfaPhase"] = QString::fromStdString(settings.cfaPhase);
         object["jxlDistance"] = settings.jxlDistance;
+        object["orientation"] = normalizedGalleryOrientation(settings.orientation);
+        object["ignoreForwardMat"] = settings.ignoreForwardMat;
         return object;
     };
     QJsonObject root;
@@ -4126,6 +4292,8 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         settings.badPixelTreatment = stringToBadPixelTreatment(object["badPixelTreatment"].toString("Bake").toStdString());
         settings.cfaPhase = object["cfaPhase"].toString("Don't override CFA").toStdString();
         settings.jxlDistance = static_cast<float>(object["jxlDistance"].toDouble(-1.0));
+        settings.orientation = normalizedGalleryOrientation(object["orientation"].toInt(-1));
+        settings.ignoreForwardMat = object["ignoreForwardMat"].toBool(false);
         return settings;
     };
     const auto root = document.object();

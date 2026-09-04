@@ -50,6 +50,8 @@ struct DNGFrameMetadata {
     std::array<float, 9> colorMatrix2{};
     std::array<float, 9> forwardMatrix1{};
     std::array<float, 9> forwardMatrix2{};
+    uint16_t calibrationIlluminant1 = 0;
+    uint16_t calibrationIlluminant2 = 0;
     bool hasExposure = false;
     bool hasBaselineExposure = false;
     bool hasAsShotNeutral = false;

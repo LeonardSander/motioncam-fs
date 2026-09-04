@@ -343,6 +343,11 @@ struct RenderSettings {
     // Compression selector: -2 is 12-bit CinemaDNG JPEG DCT, -1 is JPEG 92 lossless,
     // zero is lossless JXL, and positive values are lossy JXL.
     float jxlDistance;
+    // Gallery/thumbnail-only display overrides. orientation is -1 when the
+    // source orientation should be retained; otherwise it is clockwise
+    // degrees and must be one of 0, 90, 180, or 270.
+    int orientation;
+    bool ignoreForwardMat;
     // Internal export mode: write normalized, unpacked 16-bit RGB staging DNGs
     // for the Camera Native encoder. This is never persisted as a UI option.
     bool cameraNativeStaging;
@@ -364,6 +369,8 @@ struct RenderSettings {
         , quadBayerOption(QuadBayerMode::Demosaic)
         , cfaPhase("Don't override CFA")
         , jxlDistance(-1.0f)
+        , orientation(-1)
+        , ignoreForwardMat(false)
         , cameraNativeStaging(false)
         , streamingPreview(false)
     {}
@@ -392,6 +399,8 @@ struct RenderSettings {
         , quadBayerOption(stringToQuadBayerMode(qb))
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
+        , orientation(-1)
+        , ignoreForwardMat(false)
         , cameraNativeStaging(false)
         , streamingPreview(false)
     {}
@@ -420,6 +429,8 @@ struct RenderSettings {
         , quadBayerOption(quadBayer)
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
+        , orientation(-1)
+        , ignoreForwardMat(false)
         , cameraNativeStaging(false)
         , streamingPreview(false)
     {}

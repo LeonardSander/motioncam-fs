@@ -485,8 +485,46 @@ void VirtualFileSystemImpl_DirectLog::prepareSidecarGainMapOpcodes(
             throw std::runtime_error("Unsupported DirectLog gain-map layout");
     };
     if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
-        classify(gainMaps);
-        classify(deferredGainMaps);
+        if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
+            if (gainMaps.size() == 1 && gainMaps.front().channels == 4) {
+                auto& map = gainMaps.front();
+                const size_t points = static_cast<size_t>(map.width) * map.height;
+                for (size_t point = 0; point < points; ++point) {
+                    float minimum = std::numeric_limits<float>::max();
+                    for (uint32_t channel = 0; channel < 4; ++channel)
+                        minimum = std::min(minimum, map.data[point * 4 + channel]);
+                    if (std::isfinite(minimum) && minimum > 0.0f)
+                        for (uint32_t channel = 0; channel < 4; ++channel)
+                            map.data[point * 4 + channel] /= minimum;
+                }
+                opcodeList2 = std::move(gainMaps);
+            } else if (gainMaps.size() == 4 &&
+                       std::all_of(gainMaps.begin(), gainMaps.end(), [](const GainMap& map) {
+                           return map.channels == 1;
+                       })) {
+                const size_t samples = gainMaps.front().data.size();
+                if (std::any_of(gainMaps.begin(), gainMaps.end(), [samples](const GainMap& map) {
+                        return map.data.size() != samples;
+                    }))
+                    throw std::runtime_error("DirectLog gain-map planes have mismatched dimensions");
+                for (size_t sample = 0; sample < samples; ++sample) {
+                    float minimum = std::numeric_limits<float>::max();
+                    for (const auto& map : gainMaps)
+                        minimum = std::min(minimum, map.data[sample]);
+                    if (std::isfinite(minimum) && minimum > 0.0f)
+                        for (auto& map : gainMaps) map.data[sample] /= minimum;
+                }
+                opcodeList2 = std::move(gainMaps);
+            } else if (!gainMaps.empty() &&
+                       !(gainMaps.size() == 1 && gainMaps.front().channels == 1)) {
+                throw std::runtime_error("Unsupported DirectLog color gain-map layout");
+            }
+            // Single-plane and deferred maps contain only luminance, which is
+            // intentionally discarded when correction is reduced to color.
+        } else {
+            classify(gainMaps);
+            classify(deferredGainMaps);
+        }
     } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
         if (deferredGainMaps.size() == 1 && deferredGainMaps.front().channels == 1)
             opcodeList3 = deferredGainMaps;

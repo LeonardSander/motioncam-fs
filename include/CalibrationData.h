@@ -42,6 +42,10 @@ struct CalibrationData {
     bool hasNeedGainMapOrderFixed = false;
     bool hasFullSensorResolution = false;
     bool hasBadPixels = false;
+    int orientation = -1;
+    bool ignoreForwardMat = false;
+    bool hasOrientation = false;
+    bool hasIgnoreForwardMat = false;
     
     // Parse from JSON file
     static std::optional<CalibrationData> loadFromFile(const std::string& filePath);

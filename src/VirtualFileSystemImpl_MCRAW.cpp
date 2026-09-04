@@ -39,6 +39,47 @@ std::mutex mcrawAnalysisCacheMutex;
 std::unordered_map<std::string, CachedMcrawAnalysis> mcrawAnalysisCache;
 constexpr uint64_t mcrawAnalysisCacheMagic = 0x4d43464d43000001ULL;
 
+std::string effectiveCfaArrangement(
+        const motioncam::RenderSettings& settings,
+        const std::optional<motioncam::CalibrationData>& calibration,
+        std::string sensorArrangement) {
+    auto validOverride = [](std::string phase) {
+        boost::algorithm::to_lower(phase);
+        return phase == "rggb" || phase == "bggr" ||
+               phase == "grbg" || phase == "gbrg" ? phase : std::string{};
+    };
+    if (!settings.cfaPhase.empty() && settings.cfaPhase != "Don't override CFA") {
+        if (auto phase = validOverride(settings.cfaPhase); !phase.empty()) return phase;
+    } else if (calibration && !calibration->cfaPhase.empty()) {
+        if (auto phase = validOverride(calibration->cfaPhase); !phase.empty()) return phase;
+    }
+    boost::algorithm::to_lower(sensorArrangement);
+    return sensorArrangement;
+}
+
+void reorderNativeShadingMapToCfaPhases(
+        motioncam::CameraFrameMetadata& metadata,
+        std::string sensorArrangement) {
+    if (metadata.lensShadingMap.size() != 4) return;
+    boost::algorithm::to_lower(sensorArrangement);
+    std::array<uint8_t, 4> cfa{};
+    if (sensorArrangement == "rggb") cfa = {0, 1, 1, 2};
+    else if (sensorArrangement == "bggr") cfa = {2, 1, 1, 0};
+    else if (sensorArrangement == "grbg") cfa = {1, 0, 2, 1};
+    else if (sensorArrangement == "gbrg") cfa = {1, 2, 0, 1};
+    else return;
+
+    // MotionCam stores Android LensShadingMap channels as R, G-even,
+    // G-odd, B. The processing and DNG opcode paths use spatial CFA phases.
+    const auto channels = metadata.lensShadingMap;
+    for (size_t phase = 0; phase < cfa.size(); ++phase) {
+        const size_t source = cfa[phase] == 0 ? 0
+            : cfa[phase] == 2 ? 3
+            : phase / 2 == 0 ? 1 : 2;
+        metadata.lensShadingMap[phase] = channels[source];
+    }
+}
+
 std::string mcrawAnalysisCacheKey(const std::string& path) {
     std::error_code error;
     const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
@@ -276,6 +317,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
+    reorderNativeShadingMapToCfaPhases(
+        cameraFrameMetadata, effectiveCfaArrangement(
+            mSettings, mCalibration, cameraConfig.sensorArrangement));
     utils::overrideLensShadingMap(cameraFrameMetadata,
         vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"));
    
@@ -468,13 +512,17 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfig = CameraConfiguration::parse(decoder->getContainerMetadata());
+        reorderNativeShadingMapToCfaPhases(
+            frameMetadata, effectiveCfaArrangement(
+                frameSettings, mCalibration, cameraConfig.sensorArrangement));
         utils::overrideLensShadingMap(frameMetadata,
             vfs::loadSidecarGainMaps(mSidecarMetadata,
                 frameIt->second, "gainMaps"));
         auto output = utils::generateDng(
             frameData,
             frameMetadata,
-            CameraConfiguration::parse(decoder->getContainerMetadata()),
+            cameraConfig,
             mFps,
             outputFrameNumber,
             mBaselineExpValue,
@@ -507,6 +555,12 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
     const bool bake = mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     vfs::replaceSidecarGainMapOpcodes(
         dng, mSidecarMetadata, frameIndex, !bake, !bake);
+    if (!bake && frame.contains("gainMaps") &&
+        (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
+        !DNGDecoder::transformGainMaps(
+            dng, false, true,
+            mSettings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
+        throw std::runtime_error("Could not reduce MCRAW sidecar gain map to color");
     if (bake && (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
         const char* field = frame.contains("deferredGainMaps")
             ? "deferredGainMaps" : "gainMaps";

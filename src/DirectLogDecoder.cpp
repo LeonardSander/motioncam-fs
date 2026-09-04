@@ -48,6 +48,12 @@ std::string directLogTimelineCacheKey(const std::string& path) {
            std::to_string(modified.time_since_epoch().count());
 }
 
+// FFmpeg's timeline scan and hardware probing can allocate several decoder
+// surfaces/thread pools.  The gallery may request a second decoder for a
+// thumbnail while the mounted decoder is still alive; serialize initialization
+// so those peak allocations cannot stack during a long import.
+std::mutex directLogInitializationMutex;
+
 std::filesystem::path directLogTimelineCachePath(const std::string& key) {
     const char* cacheRoot = std::getenv("XDG_CACHE_HOME");
     std::filesystem::path root;
@@ -142,7 +148,11 @@ void savePersistentTimeline(const std::string& key, const CachedDirectLogTimelin
 }
 
 void configureSoftwareThreading(AVCodecContext* context) {
-    context->thread_count = 0;
+    // Automatic threading can create a large frame-thread pool for high
+    // resolution HEVC/AV1.  A bounded pool keeps multiple imported clips from
+    // exhausting system memory while retaining parallel decode.
+    context->thread_count = static_cast<int>(std::min(
+        4u, std::max(1u, std::thread::hardware_concurrency())));
     context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 }
 
@@ -188,6 +198,7 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
     
     spdlog::info("DirectLogDecoder: Initializing for {}", filePath);
     const auto initializationStarted = std::chrono::steady_clock::now();
+    std::lock_guard initializationLock(directLogInitializationMutex);
     auto stageStarted = initializationStarted;
     initFFmpeg();
     if (directLogDiagnosticsEnabled())

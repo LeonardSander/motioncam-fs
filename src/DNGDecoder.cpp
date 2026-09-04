@@ -133,6 +133,8 @@ namespace {
     constexpr uint16_t TIFF_TAG_COLOR_MATRIX_2 = 50722;
     constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_1 = 50964;
     constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_2 = 50965;
+    constexpr uint16_t TIFF_TAG_CALIBRATION_ILLUMINANT_1 = 50778;
+    constexpr uint16_t TIFF_TAG_CALIBRATION_ILLUMINANT_2 = 50779;
     constexpr uint16_t TIFF_TAG_BASELINE_EXPOSURE = 50730;
     constexpr uint16_t TIFF_TAG_TIME_CODES = 51043;
     constexpr uint16_t TIFF_TAG_FRAME_RATE = 51044;
@@ -1902,6 +1904,12 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             readMatrix(entry, metadata.forwardMatrix1, metadata.hasForwardMatrix1);
         else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_2)
             readMatrix(entry, metadata.forwardMatrix2, metadata.hasForwardMatrix2);
+        else if (entry.tag == TIFF_TAG_CALIBRATION_ILLUMINANT_1 &&
+                 entry.type == TIFF_TYPE_SHORT && entry.count)
+            metadata.calibrationIlluminant1 = read16(data.data() + entry.valueOffset, little);
+        else if (entry.tag == TIFF_TAG_CALIBRATION_ILLUMINANT_2 &&
+                 entry.type == TIFF_TYPE_SHORT && entry.count)
+            metadata.calibrationIlluminant2 = read16(data.data() + entry.valueOffset, little);
     }
     auto bitsForMaximum = [](uint32_t maximum) {
         uint32_t bits = 1;

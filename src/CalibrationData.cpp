@@ -172,6 +172,20 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             data.asShotNeutral = parseArray<float, 3>(j["asShotNeutral"]);
             data.hasAsShotNeutral = true;
         }
+
+        if (j.contains("orientation") && j["orientation"].is_number_integer()) {
+            const int orientation = j["orientation"].get<int>();
+            if (orientation == 0 || orientation == 90 || orientation == 180 || orientation == 270) {
+                data.orientation = orientation;
+                data.hasOrientation = true;
+            } else {
+                spdlog::warn("Ignoring invalid orientation override: {}", orientation);
+            }
+        }
+        if (j.contains("ignoreForwardMat") && j["ignoreForwardMat"].is_boolean()) {
+            data.ignoreForwardMat = j["ignoreForwardMat"].get<bool>();
+            data.hasIgnoreForwardMat = true;
+        }
         
         if (j.contains("cfaPhase")) {
             data.cfaPhase = j["cfaPhase"].get<std::string>();
@@ -281,6 +295,7 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             data.hasForwardMatrix1 || data.hasForwardMatrix2 ||
             data.hasAsShotNeutral || data.hasDataLevels || data.hasCfaSize ||
             data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution || data.hasBadPixels ||
+            data.hasOrientation || data.hasIgnoreForwardMat ||
             !data.cfaPhase.empty()) {
             return data;
         }

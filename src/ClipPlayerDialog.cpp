@@ -157,14 +157,23 @@ void ClipPlayerDialog::startDecoder(bool vulkan){
         f=vulkan?QString("format=rgba,hwupload,scale_vulkan=w=%1:h=%2,hwdownload,format=rgba").arg(mWidth).arg(mHeight)
                 :QStringLiteral("format=rgba");
     else {
-        const double scale=std::min(double(mWidth)/inputWidth,double(mHeight)/inputHeight);
-        const int fitWidth=std::max(2,int(inputWidth*scale)&~1);
-        const int fitHeight=std::max(2,int(inputHeight*scale)&~1);
+        const bool swap=clip.orientation==90||clip.orientation==270;
+        const int displayInputWidth=swap?inputHeight:inputWidth;
+        const int displayInputHeight=swap?inputWidth:inputHeight;
+        const double scale=std::min(double(mWidth)/displayInputWidth,double(mHeight)/displayInputHeight);
+        const int fitWidth=std::max(2,int(displayInputWidth*scale)&~1);
+        const int fitHeight=std::max(2,int(displayInputHeight*scale)&~1);
+        QString rotate;
+        if(clip.orientation==90)rotate=QStringLiteral(",transpose=clock");
+        else if(clip.orientation==180)rotate=QStringLiteral(",hflip,vflip");
+        else if(clip.orientation==270)rotate=QStringLiteral(",transpose=cclock");
+        const int preRotateWidth=swap?fitHeight:fitWidth;
+        const int preRotateHeight=swap?fitWidth:fitHeight;
         f=vulkan
-            ?QString("format=rgba,hwupload,scale_vulkan=w=%1:h=%2,hwdownload,format=rgba,pad=%3:%4:(ow-iw)/2:(oh-ih)/2:black")
-                .arg(fitWidth).arg(fitHeight).arg(mWidth).arg(mHeight)
-            :QString("scale=%1:%2:force_original_aspect_ratio=decrease,pad=%1:%2:(ow-iw)/2:(oh-ih)/2:black,format=rgba")
-                .arg(mWidth).arg(mHeight);
+            ?QString("format=rgba,hwupload,scale_vulkan=w=%1:h=%2,hwdownload,format=rgba%3,pad=%4:%5:(ow-iw)/2:(oh-ih)/2:black")
+                .arg(preRotateWidth).arg(preRotateHeight).arg(rotate).arg(mWidth).arg(mHeight)
+            :QString("scale=%1:%2%3,pad=%4:%5:(ow-iw)/2:(oh-ih)/2:black,format=rgba")
+                .arg(preRotateWidth).arg(preRotateHeight).arg(rotate).arg(mWidth).arg(mHeight);
     }
     a<<"-an"<<"-vf"<<f<<"-pix_fmt"<<"rgba"<<"-f"<<"rawvideo"<<"pipe:1";mDecoder.setProcessChannelMode(QProcess::SeparateChannels);mDecoder.start(exe,a,QIODevice::ReadWrite);
     updateFrameTimerInterval();mFrameTimer.start();
@@ -508,8 +517,19 @@ void ClipPlayerDialog::decoderFinished(int code,QProcess::ExitStatus status){
 }
 QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height)const{
     if(width<=0||height<=0||frame.size()<qint64(width)*height*6)return {};
-    QImage image(width,height,QImage::Format_RGB888);const auto* source=reinterpret_cast<const uchar*>(frame.constData());
-    for(int y=0;y<height;++y){uchar* destination=image.scanLine(y);for(int x=0;x<width;++x){const qsizetype input=(qsizetype(y)*width+x)*6,output=qsizetype(x)*3;destination[output]=source[input+1];destination[output+1]=source[input+3];destination[output+2]=source[input+5];}}
+    const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
+    const bool swap=orientation==90||orientation==270;
+    QImage image(swap?height:width,swap?width:height,QImage::Format_RGB888);
+    const auto* source=reinterpret_cast<const uchar*>(frame.constData());
+    for(int y=0;y<height;++y)for(int x=0;x<width;++x){
+        int outputX=x,outputY=y;
+        if(orientation==90){outputX=height-1-y;outputY=x;}
+        else if(orientation==180){outputX=width-1-x;outputY=height-1-y;}
+        else if(orientation==270){outputX=y;outputY=width-1-x;}
+        const qsizetype input=(qsizetype(y)*width+x)*6;
+        uchar* destination=image.scanLine(outputY)+qsizetype(outputX)*3;
+        destination[0]=source[input+1];destination[1]=source[input+3];destination[2]=source[input+5];
+    }
     return image;
 }
 ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
