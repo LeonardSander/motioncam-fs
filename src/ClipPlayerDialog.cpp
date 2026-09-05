@@ -148,10 +148,16 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(&mDecoder,&QProcess::readyReadStandardOutput,this,&ClipPlayerDialog::consumeOutput);
     connect(&mDecoder,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,&ClipPlayerDialog::decoderFinished);
     connect(&mDecoder, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (mClosing || mStoppingDecoder || error == QProcess::Crashed) return;
+        // Killing a decoder with buffered input can queue WriteError after
+        // stopDecoder() returns and the same QProcess has already been
+        // restarted. Process exits (including genuine broken pipes) are
+        // diagnosed by decoderFinished(), which also has FFmpeg's stderr.
+        if (mClosing || mStoppingDecoder || error == QProcess::Crashed ||
+            error == QProcess::WriteError) return;
         mPlaybackFailed = true;
         mFrameTimer.stop();
-        const QString detail = mDecoder.errorString();
+        const QString decoderError=QString::fromUtf8(mDecoder.readAllStandardError()).trimmed();
+        const QString detail=decoderError.isEmpty()?mDecoder.errorString():decoderError;
         mTitle->setText(tr("FFmpeg could not be started: %1").arg(detail));
         if(mLastPresentedImage.isNull())mVideo->setText(tr("Playback unavailable"));
         spdlog::warn("Gallery FFmpeg could not be started: {}", detail.toStdString());
@@ -250,7 +256,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     // synchronously; newly queued callbacks cannot run until this returns.
     mPlaybackTarget->store(requestedFrame);mIncomingFrame->store(requestedFrame);
     emit currentClipChanged(requestedClip.mountId,requestedSeconds);
-    stopDecoder();mBytes.clear();mFrames.clear();
+    stopDecoder();mBytes.clear();mBytesOffset=0;mFrames.clear();mSubmittedFrames.clear();
     mAudioLoadCancelled->store(true);
     mAudioLoadCancelled=std::make_shared<std::atomic_bool>(false);
     ++mAudioLoadGeneration;mAudioLoading=false;
@@ -290,6 +296,7 @@ void ClipPlayerDialog::startDecoder(){
     if(mVideo->parentWidget()&&mVideo->parentWidget()->layout())
         mVideo->parentWidget()->layout()->activate();
     const QSize area=mVideo->size().expandedTo(QSize(640,360));mWidth=std::max(2,area.width()&~1);mHeight=std::max(2,area.height()&~1);mFrameBytes=mWidth*mHeight*4;
+    mBytes.reserve(static_cast<qsizetype>(mFrameBytes)*3);
     const auto& clip=mClips[mIndex];
     const bool normalizeMixedFrames=!clip.isSequence;
     const int inputWidth=normalizeMixedFrames?mWidth:clip.width;
@@ -820,9 +827,20 @@ void ClipPlayerDialog::consumeOutput(){
     // Bound decoded video to three frames. Leaving excess bytes in QProcess
     // applies back-pressure to FFmpeg instead of buffering an entire clip.
     constexpr int queueFrames=3;
-    const qint64 room=std::max<qint64>(0,qint64(mFrameBytes)*(queueFrames-mFrames.size())-mBytes.size());
+    const qsizetype available=mBytes.size()-mBytesOffset;
+    const qint64 room=std::max<qint64>(0,qint64(mFrameBytes)*
+        (queueFrames-static_cast<int>(mFrames.size()))-available);
     if(room>0)mBytes+=mDecoder.read(room);
-    while(mFrameBytes>0&&mBytes.size()>=mFrameBytes&&mFrames.size()<queueFrames){QImage v(reinterpret_cast<const uchar*>(mBytes.constData()),mWidth,mHeight,mWidth*4,QImage::Format_RGBA8888);mFrames.push_back(v.copy());mBytes.remove(0,mFrameBytes);}
+    while(mFrameBytes>0&&mBytes.size()-mBytesOffset>=mFrameBytes&&
+          static_cast<int>(mFrames.size())<queueFrames&&!mSubmittedFrames.empty()){
+        QImage view(reinterpret_cast<const uchar*>(mBytes.constData()+mBytesOffset),
+                    mWidth,mHeight,mWidth*4,QImage::Format_RGBA8888);
+        const int sourceFrame=mSubmittedFrames.front();mSubmittedFrames.pop_front();
+        mFrames.push_back({view.copy(),sourceFrame});
+        mBytesOffset+=mFrameBytes;
+    }
+    if(mBytesOffset==mBytes.size()){mBytes.clear();mBytesOffset=0;}
+    else if(mBytesOffset>=qint64(mFrameBytes)*2){mBytes.remove(0,mBytesOffset);mBytesOffset=0;}
 }
 void ClipPlayerDialog::showNextFrame(){
     consumeOutput();
@@ -836,9 +854,9 @@ void ClipPlayerDialog::showNextFrame(){
         // Dropping is restricted to the pre-materialization scheduler; if
         // rendering itself exceeds one frame period, discarding here would
         // reject every completed frame forever.
-        if(mFrames.isEmpty()||qRound(mPositionSeconds*fps)>audioFrame)return;
+        if(mFrames.empty()||qRound(mPositionSeconds*fps)>audioFrame)return;
     }
-    if(!mFrames.isEmpty()){
+    if(!mFrames.empty()){
         const QSize viewport=mVideo->size().expandedTo(QSize(640,360));
         const int viewportWidth=std::max(2,viewport.width()&~1);
         const int viewportHeight=std::max(2,viewport.height()&~1);
@@ -846,12 +864,18 @@ void ClipPlayerDialog::showNextFrame(){
             // This frame belongs to a decoder created for an intermediate
             // resize geometry. Never promote it to the visible surface. The
             // pending restart will render the retained frame at final size.
+            // Keep the input-ID and byte queues intact until openClip() stops
+            // and resets the complete pipeline. Clearing only materialized
+            // frames cannot relabel output still buffered inside FFmpeg.
             mFrames.clear();
             mWaitingForFirstFrame=!mLastPresentedImage.isNull();
-            mSurfaceUpdateTimer.setInterval(300);mSurfaceUpdateTimer.start();
+            if(!mSurfaceUpdateTimer.isActive()){
+                mSurfaceUpdateTimer.setInterval(300);mSurfaceUpdateTimer.start();
+            }
             return;
         }
-        mLastPresentedImage=mFrames.takeFirst();
+        const QueuedFrame queued=std::move(mFrames.front());mFrames.pop_front();
+        mLastPresentedImage=queued.image;
         mWaitingForFirstFrame=false;
         mLastImageIsSource=false;
         mLastSurfaceScale=mDecoderSurfaceScale;
@@ -863,10 +887,10 @@ void ClipPlayerDialog::showNextFrame(){
             if(mAudioEnabled&&mAudioStartPending&&!mPaused){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
         }
         const double fps=std::max(1.0,mClips[mIndex].fps);
-        const int presentedFrame=std::clamp(qRound(mPositionSeconds*fps),0,mPosition->maximum());
+        const int presentedFrame=std::clamp(queued.sourceFrame,0,mPosition->maximum());
         if(!mPosition->isSliderDown())mPosition->setValue(presentedFrame);
         emit framePresented(currentMountId(),presentedFrame);
-        mPositionSeconds+=1.0/fps;
+        mPositionSeconds=(presentedFrame+1)/fps;
         // A paused surface refresh still needs to consume and present its
         // first frame. Stop only after that replacement has reached the UI.
         if(mPaused)mFrameTimer.stop();
@@ -1011,7 +1035,7 @@ void ClipPlayerDialog::decoderFinished(int code,QProcess::ExitStatus status){
     if(mClosing||mStoppingDecoder)return;consumeOutput();
     const QString decoderError=QString::fromUtf8(mDecoder.readAllStandardError()).trimmed();
     if(!decoderError.isEmpty())spdlog::warn("Gallery FFmpeg: {}",decoderError.toStdString());
-    if(mFrames.isEmpty()&&(status!=QProcess::NormalExit||code!=0)){
+    if(mFrames.empty()&&(status!=QProcess::NormalExit||code!=0)){
         mPlaybackFailed=true;mFrameTimer.stop();
         QString detail=decoderError;
         if(detail.size()>1200)detail=detail.right(1200);
@@ -1048,11 +1072,16 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         mNextInputFrame=mIncomingFrame->load();
         mPositionSeconds=mNextInputFrame/std::max(1.0,mClips[mIndex].fps);
     }
+    // Bound frames accepted by the complete transform pipeline, including
+    // data FFmpeg has already consumed from QProcess but not returned yet.
+    // bytesToWrite() alone cannot observe that internal backlog.
+    if(mSubmittedFrames.size()>=6)return FramePushResult::Retry;
     if(mDecoder.bytesToWrite()>qint64(mInputFrameBytes)*2)return FramePushResult::Retry;
     if(mClips[mIndex].isSequence){
         if(width!=mClips[mIndex].width||height!=mClips[mIndex].height||
            frame.size()!=qint64(width)*height*6)return FramePushResult::Stopped;
         if(mDecoder.write(frame)!=frame.size())return FramePushResult::Retry;
+        mSubmittedFrames.push_back(mNextInputFrame);
         ++mNextInputFrame;return FramePushResult::Accepted;
     }
     const QImage source=rgb48Image(frame,width,height);if(source.isNull())return FramePushResult::Stopped;
@@ -1061,6 +1090,7 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     QPainter painter(&canvas);painter.drawImage((mWidth-scaled.width())/2,(mHeight-scaled.height())/2,scaled);painter.end();
     const QByteArray bytes(reinterpret_cast<const char*>(canvas.constBits()),canvas.sizeInBytes());
     if(mDecoder.write(bytes)!=bytes.size())return FramePushResult::Retry;
+    mSubmittedFrames.push_back(mNextInputFrame);
     ++mNextInputFrame;return FramePushResult::Accepted;
 }
 void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int height){

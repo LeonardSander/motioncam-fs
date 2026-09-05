@@ -9,6 +9,7 @@
 #include <QtGlobal>
 #include <memory>
 #include <atomic>
+#include <deque>
 #include <vector>
 class QLabel; class QPushButton; class QSlider;
 class QEvent;
@@ -52,6 +53,7 @@ protected:
     void keyPressEvent(QKeyEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 private:
+    struct QueuedFrame { QImage image; int sourceFrame=0; };
     void openClip(int, double startSeconds=0.0); void startDecoder();
     void stopDecoder();
     void decoderFinished(int, QProcess::ExitStatus); void consumeOutput();
@@ -95,7 +97,9 @@ private:
 #endif
     QByteArray mAudioPcm; QElapsedTimer mAudioClock;
     qint64 mAudioClockBaseMs=0; int mAudioBytesPerSecond=0, mAudioBlockAlign=1;
-    QByteArray mBytes; QVector<QImage> mFrames; QImage mLastPresentedImage;
+    QByteArray mBytes; qsizetype mBytesOffset=0;
+    std::deque<QueuedFrame> mFrames; std::deque<int> mSubmittedFrames;
+    QImage mLastPresentedImage;
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
     int mNextInputFrame=0;
     double mPositionSeconds=0.0, mStartSeconds=0.0;
