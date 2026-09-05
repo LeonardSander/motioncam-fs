@@ -100,7 +100,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mVideo->setFrameShape(QFrame::NoFrame);mVideo->setLineWidth(0);mVideo->setContentsMargins(0,0,0,0);
     mVideo->setStyleSheet("background:#606060;color:#e0e0e0;border:none;margin:0;padding:0;");stack->addWidget(mVideo);
     mOverlay=new QWidget(stage);mOverlay->setStyleSheet("background:transparent;");
-    auto* overlayLayout=new QVBoxLayout(mOverlay);overlayLayout->setContentsMargins(0,10,0,0);
+    auto* overlayLayout=new QVBoxLayout(mOverlay);overlayLayout->setContentsMargins(10,10,10,0);
     mTitle=new QLabel(mOverlay);mTitle->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
     overlayLayout->addWidget(mTitle,0,Qt::AlignLeft);overlayLayout->addStretch(1);
     auto* controls=new QHBoxLayout;controls->setSpacing(8);auto* previous=new QPushButton(mOverlay);
@@ -120,13 +120,36 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlay->setGraphicsEffect(mOverlayOpacity);mOverlayOpacity->setOpacity(1.0);
     mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);mOverlayAnimation->setDuration(260);
-    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(2200);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{setOverlayVisible(false);});
+    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{setOverlayVisible(false);});
     mSurfaceUpdateTimer.setSingleShot(true);mSurfaceUpdateTimer.setInterval(300);
     connect(&mSurfaceUpdateTimer,&QTimer::timeout,this,[this]{
         // A later resize may arrive while a prior surface is still starting.
         // The retained image, rather than first-frame state, is the authority
         // for whether it is safe and necessary to restart at the final size.
-        if(mIndex>=0&&!mLastPresentedImage.isNull())seekToFrame(mPosition->value());
+        if(mIndex<0||mLastPresentedImage.isNull())return;
+        // While zoom is animating, build the crop for its already-known final
+        // target in parallel. Keep presenting the intermediate transform until
+        // that backing surface arrives.
+        const bool prefetchingZoom=mZoomAnimationTimer.isActive();
+        const double animatedZoom=mZoomPercent;
+        if(prefetchingZoom)mZoomPercent=mZoomAnimationTarget;
+        seekToFrame(mPosition->value());
+        if(prefetchingZoom){mZoomPercent=animatedZoom;updateDisplayedImage();}
+    });
+    mZoomAnimationTimer.setInterval(16);
+    mZoomAnimationTimer.setTimerType(Qt::PreciseTimer);
+    connect(&mZoomAnimationTimer,&QTimer::timeout,this,&ClipPlayerDialog::advanceZoomAnimation);
+    mSurfaceBlendTimer.setInterval(16);mSurfaceBlendTimer.setTimerType(Qt::PreciseTimer);
+    connect(&mSurfaceBlendTimer,&QTimer::timeout,this,[this]{
+        constexpr int frames=2;
+        const double opacity=std::min(1.0,double(++mSurfaceBlendFrame)/frames);
+        QImage blended=mSurfaceBlendFrom.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        QPainter painter(&blended);painter.setOpacity(opacity);
+        painter.drawImage(blended.rect(),mSurfaceBlendTo);painter.end();
+        mVideo->setPixmap(QPixmap::fromImage(blended));
+        if(mSurfaceBlendFrame>=frames){
+            mSurfaceBlendTimer.stop();mSurfaceBlendFrom=QImage();mSurfaceBlendTo=QImage();
+        }
     });
     // Collapse wheel bursts and window-manager resize storms into one preview
     // generation instead of repeatedly tearing down an active producer.
@@ -221,6 +244,12 @@ QString ClipPlayerDialog::ffmpegPath()const{
 
 void ClipPlayerDialog::openClip(int index,double startSeconds){
     if(index<0||index>=mClips.size())return;
+    const bool changingClip=index!=mIndex;
+    if(changingClip){
+        // A requested (unsnapped) wheel value belongs to the geometry that
+        // produced it. Do not carry that hidden accumulator into another clip.
+        mZoomAnimationTimer.stop();mZoomAnimationStartupDelay=false;
+    }
     mSurfaceUpdateTimer.stop();
     const auto& requestedClip=mClips[index];
     const int requestedLastFrame=std::max(0,requestedClip.sourceFrames-1);
@@ -238,6 +267,8 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     ++mAudioLoadGeneration;mAudioLoading=false;
     mFirstFrameReady=false;mAudioStartPending=mAudioEnabled;
     mIndex=index;
+    if(changingClip)
+        mRequestedZoomPercent=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     const auto& clip=mClips[index];
     const int lastFrame=std::max(0,clip.sourceFrames-1);
     const int startFrame=std::clamp(static_cast<int>(std::floor(
@@ -249,7 +280,10 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mPosition->setRange(0,lastFrame);mPosition->setValue(startFrame);
     static_cast<DuplicateSlider*>(mPosition)->setDuplicates(clip.duplicateFrames);
     mTriedSoftware=false;mPlaybackFailed=false;mPaused=false;mPlayPause->setEnabled(true);updateButtonIcons();
-    mTitle->setText(QString("%1 — %2 / %3").arg(mClips[index].title).arg(index+1).arg(mClips.size()));
+    const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
+    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[index].title)
+        .arg(index+1).arg(mClips.size()).arg(mZoomPercent>0.0
+            ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit")));
     mWaitingForFirstFrame=!mLastPresentedImage.isNull();
     if(!mWaitingForFirstFrame)mVideo->setText(tr("Preparing Vulkan playback…"));
     configureAudio();
@@ -328,8 +362,9 @@ void ClipPlayerDialog::startDecoder(bool vulkan){
                     .arg(preRotateWidth).arg(preRotateHeight).arg(rotate).arg(mWidth).arg(mHeight);
         }
     }
-    mDecoderSurfaceScale=mZoomPercent>0.0?mZoomPercent/100.0:fitScale();
-    mDecoderSurfacePan=mPanSourcePixels;
+    mDecoderSurfaceScale=surfaceScaleForZoom(mZoomPercent);
+    mDecoderSurfacePan=mZoomPercent>0.0
+        ?effectivePanForZoom(mPanSourcePixels,mZoomPercent):QPointF();
     a<<"-an"<<"-vf"<<f<<"-pix_fmt"<<"rgba"<<"-f"<<"rawvideo"<<"pipe:1";mDecoder.setProcessChannelMode(QProcess::SeparateChannels);mDecoder.start(exe,a,QIODevice::ReadWrite);
     updateFrameTimerInterval();mFrameTimer.start();
 }
@@ -345,17 +380,153 @@ double ClipPlayerDialog::fitScale() const{
 void ClipPlayerDialog::changeZoom(double wheelSteps){
     if(std::abs(wheelSteps)<0.0001||mIndex<0||mIndex>=mClips.size())return;
     const double minimum=fitScale()*100.0;
-    double current=mZoomPercent>0.0?mZoomPercent:minimum;
-    double target=current+wheelSteps*2.0;
-    if(wheelSteps>0){const double crossed=std::ceil(current/100.0)*100.0;if(crossed>current&&crossed<=target)target=crossed;}
-    else {const double crossed=std::floor(current/100.0)*100.0;if(crossed<current&&crossed>=target)target=crossed;}
-    target=std::clamp(target,minimum,3200.0);
-    const double zoom=target<=minimum+0.01?0.0:target;
-    if(std::abs(zoom-mZoomPercent)<0.01)return;
-    mZoomPercent=zoom;if(zoom<=0.0)mPanSourcePixels=QPointF();
-    updateDisplayedImage();mSurfaceUpdateTimer.start();
+    if(mRequestedZoomPercent<=0.0)
+        mRequestedZoomPercent=mZoomPercent>0.0?mZoomPercent:minimum;
+    // Move through zoom space logarithmically. A wheel notch is an 8% scale
+    // change, so it remains precise below 100% but covers the large range to
+    // 3200% in a practical number of turns.
+    mRequestedZoomPercent=std::clamp(mRequestedZoomPercent*
+        std::exp(wheelSteps*std::log(1.08)),minimum,3200.0);
+    double target=mRequestedZoomPercent;
+    if(target<=minimum*1.05)target=0.0;
+    else {
+        const double integerScale=std::round(target/100.0)*100.0;
+        if(integerScale>=minimum&&integerScale<=3200.0&&
+           std::abs(target-integerScale)<=integerScale*0.05)target=integerScale;
+    }
+    setZoomAnimationTarget(target);
+}
+
+void ClipPlayerDialog::setZoomAnimationTarget(double target){
+    const double minimum=fitScale()*100.0;
+    const double current=mZoomPercent>0.0?mZoomPercent:minimum;
+    const double effectiveTarget=target>0.0?target:minimum;
+    if(std::abs(effectiveTarget-current)<0.01){
+        mZoomPercent=target;mZoomAnimationTimer.stop();return;
+    }
+    mSurfaceUpdateTimer.stop();
+    const bool wasAnimating=mZoomAnimationTimer.isActive();
+    mZoomAnimationStart=current;
+    mZoomAnimationTarget=target;
+    // Wheel events continually restart this short debounce. Once the gesture
+    // pauses, decoder preparation overlaps the remaining animation.
+    mSurfaceUpdateTimer.setInterval(48);mSurfaceUpdateTimer.start();
+    if(!wasAnimating){
+        mZoomAnimationStartupDelay=true;
+        mZoomAnimationClock.restart();
+        mZoomAnimationTimer.start();
+    }else if(!mZoomAnimationStartupDelay){
+        // Only the beginning of a gesture is buffered. Further wheel events
+        // retarget the animation without repeatedly adding input latency.
+        mZoomAnimationClock.restart();
+    }
+}
+
+void ClipPlayerDialog::advanceZoomAnimation(){
+    constexpr double startupDelayMs=32.0; // Approximately two frames at 60 Hz.
+    if(mZoomAnimationStartupDelay){
+        if(mZoomAnimationClock.elapsed()<startupDelayMs)return;
+        mZoomAnimationStartupDelay=false;
+        mZoomAnimationClock.restart();
+    }
+    const double minimum=fitScale()*100.0;
+    const double target=mZoomAnimationTarget>0.0?mZoomAnimationTarget:minimum;
+    const double elapsed=std::max(0.0,double(mZoomAnimationClock.elapsed()));
+    const double progress=std::clamp(elapsed/140.0,0.0,1.0);
+    // Cubic ease-out approaches the destination monotonically. Log-space
+    // interpolation also makes the apparent scale velocity uniform.
+    const double eased=1.0-std::pow(1.0-progress,3.0);
+    const double value=std::exp(std::log(std::max(0.0001,mZoomAnimationStart))+
+        (std::log(std::max(0.0001,target))-std::log(std::max(0.0001,mZoomAnimationStart)))*eased);
+    mZoomPercent=progress>=1.0?mZoomAnimationTarget:value;
+    if(mZoomPercent<=0.0)mPanSourcePixels=QPointF();
+    else clampPanToZoom();
+    updateDisplayedImage();
+    const double shown=mZoomPercent>0.0?mZoomPercent:minimum;
     mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[mIndex].title)
-        .arg(mIndex+1).arg(mClips.size()).arg(zoom?tr("Zoom %1%").arg(zoom,0,'f',1):tr("Scale to fit")));
+        .arg(mIndex+1).arg(mClips.size()).arg(mZoomPercent>0.0
+            ?tr("Zoom %1%").arg(shown,0,'f',1):tr("Scale to fit")));
+    if(progress>=1.0){
+        mZoomAnimationTimer.stop();mZoomAnimationStartupDelay=false;
+        const QPointF desiredScale=surfaceScaleForZoom(mZoomPercent);
+        const QPointF desiredPan=mZoomPercent>0.0
+            ?effectivePanForZoom(mPanSourcePixels,mZoomPercent):QPointF();
+        const bool cropAlreadyPrepared=
+            std::abs(mDecoderSurfaceScale.x()-desiredScale.x())<0.000001&&
+            std::abs(mDecoderSurfaceScale.y()-desiredScale.y())<0.000001&&
+            QLineF(mDecoderSurfacePan,desiredPan).length()<0.000001;
+        if(!cropAlreadyPrepared){
+            mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
+        }
+    }
+}
+
+void ClipPlayerDialog::clampPanToZoom(){
+    if(mZoomPercent<=0.0||mIndex<0||mIndex>=mClips.size()){
+        mPanSourcePixels=QPointF();return;
+    }
+    const auto& clip=mClips[mIndex];
+    if(clip.width<=0||clip.height<=0)return;
+    const bool swap=clip.orientation==90||clip.orientation==270;
+    const int viewportWidth=std::max(1,mWidth>0?mWidth:mVideo->width());
+    const int viewportHeight=std::max(1,mHeight>0?mHeight:mVideo->height());
+    const int targetPreWidth=swap?viewportHeight:viewportWidth;
+    const int targetPreHeight=swap?viewportWidth:viewportHeight;
+    const double zoom=mZoomPercent/100.0;
+    const int cropWidth=std::max(1,std::min(clip.width,qCeil(targetPreWidth/zoom)));
+    const int cropHeight=std::max(1,std::min(clip.height,qCeil(targetPreHeight/zoom)));
+    const double maxPanX=std::max(0.0,(clip.width-cropWidth)/2.0);
+    const double maxPanY=std::max(0.0,(clip.height-cropHeight)/2.0);
+    mPanSourcePixels.setX(std::clamp(mPanSourcePixels.x(),-maxPanX,maxPanX));
+    mPanSourcePixels.setY(std::clamp(mPanSourcePixels.y(),-maxPanY,maxPanY));
+}
+
+QPointF ClipPlayerDialog::effectivePanForZoom(const QPointF& pan,double zoomPercent)const{
+    if(zoomPercent<=0.0||mIndex<0||mIndex>=mClips.size())return {};
+    const auto& clip=mClips[mIndex];
+    if(clip.width<=0||clip.height<=0)return pan;
+    const bool swap=clip.orientation==90||clip.orientation==270;
+    const int viewportWidth=std::max(1,mWidth>0?mWidth:mVideo->width());
+    const int viewportHeight=std::max(1,mHeight>0?mHeight:mVideo->height());
+    const int targetPreWidth=swap?viewportHeight:viewportWidth;
+    const int targetPreHeight=swap?viewportWidth:viewportHeight;
+    const double zoom=zoomPercent/100.0;
+    const int cropWidth=std::max(1,std::min(clip.width,qCeil(targetPreWidth/zoom)));
+    const int cropHeight=std::max(1,std::min(clip.height,qCeil(targetPreHeight/zoom)));
+    const double centeredX=(clip.width-cropWidth)/2.0;
+    const double centeredY=(clip.height-cropHeight)/2.0;
+    // FFmpeg resolves crop origins to whole source pixels. Use that same
+    // effective center in the retained-surface transform so the optimized
+    // replacement cannot introduce a subpixel-phase position jump.
+    return QPointF(qRound(centeredX+pan.x())-centeredX,
+                   qRound(centeredY+pan.y())-centeredY);
+}
+
+QPointF ClipPlayerDialog::surfaceScaleForZoom(double zoomPercent)const{
+    if(mIndex<0||mIndex>=mClips.size())return {1.0,1.0};
+    const auto& clip=mClips[mIndex];
+    if(clip.width<=0||clip.height<=0)return {1.0,1.0};
+    const bool swap=clip.orientation==90||clip.orientation==270;
+    const int viewportWidth=std::max(2,mWidth>0?mWidth:(mVideo->width()&~1));
+    const int viewportHeight=std::max(2,mHeight>0?mHeight:(mVideo->height()&~1));
+    if(zoomPercent<=0.0){
+        const int displayWidth=swap?clip.height:clip.width;
+        const int displayHeight=swap?clip.width:clip.height;
+        const double scale=std::min({double(viewportWidth)/displayWidth,
+                                     double(viewportHeight)/displayHeight,32.0});
+        const int outputWidth=std::max(2,int(displayWidth*scale)&~1);
+        const int outputHeight=std::max(2,int(displayHeight*scale)&~1);
+        return {double(outputWidth)/displayWidth,double(outputHeight)/displayHeight};
+    }
+    const int targetPreWidth=swap?viewportHeight:viewportWidth;
+    const int targetPreHeight=swap?viewportWidth:viewportHeight;
+    const double zoom=zoomPercent/100.0;
+    const int cropWidth=std::max(1,std::min(clip.width,qCeil(targetPreWidth/zoom)));
+    const int cropHeight=std::max(1,std::min(clip.height,qCeil(targetPreHeight/zoom)));
+    const int scaledWidth=std::min(targetPreWidth,qRound(cropWidth*zoom));
+    const int scaledHeight=std::min(targetPreHeight,qRound(cropHeight*zoom));
+    return swap?QPointF(double(scaledHeight)/cropHeight,double(scaledWidth)/cropWidth)
+               :QPointF(double(scaledWidth)/cropWidth,double(scaledHeight)/cropHeight);
 }
 
 void ClipPlayerDialog::updateButtonIcons(){
@@ -369,9 +540,19 @@ void ClipPlayerDialog::setOverlayVisible(bool visible){
     mOverlayAnimation->setEndValue(visible?1.0:0.0);mOverlayAnimation->start();
     if(!visible)QToolTip::hideText();
 }
-void ClipPlayerDialog::revealOverlay(){setOverlayVisible(true);mOverlayTimer.start();}
+void ClipPlayerDialog::revealOverlay(){
+    const bool alreadyFadingIn=mOverlayAnimation->state()==QAbstractAnimation::Running&&
+        mOverlayAnimation->endValue().toDouble()>0.5;
+    if(!alreadyFadingIn&&(mOverlayOpacity->opacity()<0.999||
+                          mOverlayAnimation->state()==QAbstractAnimation::Running))
+        setOverlayVisible(true);
+    mOverlayTimer.start();
+}
 void ClipPlayerDialog::updateDisplayedImage(){
-    if(mLastPresentedImage.isNull()||mWaitingForFirstFrame)return;
+    // The old surface remains the interactive fallback while a decoder
+    // refresh is pending. Suppressing it here made all wheel/drag input appear
+    // ignored until the replacement frame arrived, especially during play.
+    if(mLastPresentedImage.isNull())return;
     if(mLastImageIsSource){
         if(mZoomPercent<=0.0){
             const double scale=fitScale();
@@ -384,9 +565,12 @@ void ClipPlayerDialog::updateDisplayedImage(){
         // Transform the latest displayed playback frame while a replacement
         // surface is pending. This avoids jumping back to the first source
         // preview frame during wheel and drag interaction.
-        const double desiredScale=mZoomPercent>0.0?mZoomPercent/100.0:fitScale();
-        const double ratio=desiredScale/std::max(0.0001,mLastSurfaceScale);
-        QPointF oldDisplayPan=mLastSurfacePan,newDisplayPan=mPanSourcePixels;
+        const QPointF desiredScale=surfaceScaleForZoom(mZoomPercent);
+        const QPointF ratio(desiredScale.x()/std::max(0.0001,mLastSurfaceScale.x()),
+                            desiredScale.y()/std::max(0.0001,mLastSurfaceScale.y()));
+        QPointF oldDisplayPan=mLastSurfacePan;
+        QPointF newDisplayPan=mZoomPercent>0.0
+            ?effectivePanForZoom(mPanSourcePixels,mZoomPercent):QPointF();
         const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
         auto orientPan=[orientation](const QPointF& pan){
             if(orientation==90)return QPointF(-pan.y(),pan.x());
@@ -395,12 +579,12 @@ void ClipPlayerDialog::updateDisplayedImage(){
             return pan;
         };
         oldDisplayPan=orientPan(oldDisplayPan);newDisplayPan=orientPan(newDisplayPan);
-        const QSizeF sourceSize(mLastPresentedImage.width()/ratio,
-                                mLastPresentedImage.height()/ratio);
+        const QSizeF sourceSize(mLastPresentedImage.width()/ratio.x(),
+                                mLastPresentedImage.height()/ratio.y());
         const QPointF center(mLastPresentedImage.width()/2.0+
-                (newDisplayPan.x()-oldDisplayPan.x())*mLastSurfaceScale,
+                (newDisplayPan.x()-oldDisplayPan.x())*mLastSurfaceScale.x(),
             mLastPresentedImage.height()/2.0+
-                (newDisplayPan.y()-oldDisplayPan.y())*mLastSurfaceScale);
+                (newDisplayPan.y()-oldDisplayPan.y())*mLastSurfaceScale.y());
         const QRectF source(center.x()-sourceSize.width()/2.0,
             center.y()-sourceSize.height()/2.0,sourceSize.width(),sourceSize.height());
         QImage canvas(mVideo->size(),QImage::Format_RGB888);canvas.fill(QColor(96,96,96));
@@ -661,6 +845,9 @@ void ClipPlayerDialog::showNextFrame(){
         if(mFrames.isEmpty()||qRound(mPositionSeconds*fps)>audioFrame)return;
     }
     if(!mFrames.isEmpty()){
+        if(mSurfaceBlendTimer.isActive()){
+            mSurfaceBlendTimer.stop();mSurfaceBlendFrom=QImage();mSurfaceBlendTo=QImage();
+        }
         const QSize viewport=mVideo->size().expandedTo(QSize(640,360));
         const int viewportWidth=std::max(2,viewport.width()&~1);
         const int viewportHeight=std::max(2,viewport.height()&~1);
@@ -670,15 +857,28 @@ void ClipPlayerDialog::showNextFrame(){
             // pending restart will render the retained frame at final size.
             mFrames.clear();
             mWaitingForFirstFrame=!mLastPresentedImage.isNull();
-            mSurfaceUpdateTimer.start();
+            mSurfaceUpdateTimer.setInterval(300);mSurfaceUpdateTimer.start();
             return;
         }
+        const bool refreshedSurface=mWaitingForFirstFrame&&!mVideo->pixmap(Qt::ReturnByValue).isNull();
+        const QImage priorSurface=refreshedSurface?mVideo->grab().toImage():QImage();
         mLastPresentedImage=mFrames.takeFirst();
         mWaitingForFirstFrame=false;
         mLastImageIsSource=false;
         mLastSurfaceScale=mDecoderSurfaceScale;
         mLastSurfacePan=mDecoderSurfacePan;
         updateDisplayedImage();
+        if(refreshedSurface&&!priorSurface.isNull()){
+            mSurfaceBlendFrom=priorSurface;
+            mSurfaceBlendTo=mVideo->grab().toImage();
+            if(mSurfaceBlendFrom.size()==mSurfaceBlendTo.size()){
+                mSurfaceBlendFrame=0;
+                mVideo->setPixmap(QPixmap::fromImage(mSurfaceBlendFrom));
+                mSurfaceBlendTimer.start();
+            }else{
+                mSurfaceBlendFrom=QImage();mSurfaceBlendTo=QImage();
+            }
+        }
         if(!mFirstFrameReady){
             mFirstFrameReady=true;
             emit firstFramePresented(currentMountId());
@@ -689,6 +889,9 @@ void ClipPlayerDialog::showNextFrame(){
         if(!mPosition->isSliderDown())mPosition->setValue(presentedFrame);
         emit framePresented(currentMountId(),presentedFrame);
         mPositionSeconds+=1.0/fps;
+        // A paused surface refresh still needs to consume and present its
+        // first frame. Stop only after that replacement has reached the UI.
+        if(mPaused)mFrameTimer.stop();
     }else{
         if(!mPlaybackFailed&&mDecoder.state()==QProcess::NotRunning&&mBytes.isEmpty()){
             mFrameTimer.stop();if(mClips[mIndex].autoAdvance)advance();else {mPaused=true;updateButtonIcons();}
@@ -712,7 +915,13 @@ void ClipPlayerDialog::seekToFrame(int frame){
     const bool wasPaused=mPaused;
     openClip(mIndex,std::clamp(frame,0,mPosition->maximum())/
         std::max(1.0,mClips[mIndex].fps));
-    if(wasPaused){mPaused=true;updateButtonIcons();mFrameTimer.stop();}
+    if(wasPaused){
+        mPaused=true;updateButtonIcons();
+        // Keep the timer alive until showNextFrame() presents one refreshed
+        // crop. Previously it was stopped here, leaving paused zoom/pan
+        // updates queued invisibly until Play was pressed.
+        if(mClips[mIndex].sourceFrames>1&&!mFrameTimer.isActive())mFrameTimer.start();
+    }
 }
 QString ClipPlayerDialog::runtimeText(double seconds){
     const qint64 milliseconds=std::max<qint64>(0,qRound64(seconds*1000.0));
@@ -740,6 +949,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
                          event->type()==QEvent::Enter))
         revealOverlay();
     if(belongsToPlayer&&event->type()==QEvent::Wheel){
+        revealOverlay();
         const auto* wheel=static_cast<QWheelEvent*>(event);
         const double steps=!wheel->pixelDelta().isNull()
             ? wheel->pixelDelta().y()/40.0 : wheel->angleDelta().y()/120.0;
@@ -752,7 +962,10 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
             mPanning=false;unsetCursor();mFullscreenButton->click();return true;
         }
     }
-    if(belongsToPlayer&&panSurface&&mZoomPercent>0.0){
+    // Once a pan starts, keep tracking it across overlay children and outside
+    // the image widget. The application-level filter still receives those
+    // events, and accepting the release prevents a stuck drag state.
+    if(belongsToPlayer&&(panSurface||mPanning)&&mZoomPercent>0.0){
         auto* mouse=event->type()==QEvent::MouseButtonPress||event->type()==QEvent::MouseMove||
             event->type()==QEvent::MouseButtonRelease?static_cast<QMouseEvent*>(event):nullptr;
         if(mouse&&event->type()==QEvent::MouseButtonPress&&mouse->button()==Qt::LeftButton){
@@ -775,10 +988,12 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
             if(orientation==90)sourceDelta=QPointF(displayDelta.y(),-displayDelta.x());
             else if(orientation==180)sourceDelta=-displayDelta;
             else if(orientation==270)sourceDelta=QPointF(-displayDelta.y(),displayDelta.x());
-            mPanSourcePixels+=sourceDelta;mLastPanGlobal=global;updateDisplayedImage();return true;
+            mPanSourcePixels+=sourceDelta;clampPanToZoom();
+            mLastPanGlobal=global;updateDisplayedImage();return true;
         }
         if(mouse&&event->type()==QEvent::MouseButtonRelease&&mPanning&&mouse->button()==Qt::LeftButton){
-            mPanning=false;unsetCursor();mSurfaceUpdateTimer.start();return true;
+            mPanning=false;unsetCursor();
+            mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();return true;
         }
     }
     if(watched!=mPosition)return QDialog::eventFilter(watched,event);
@@ -915,6 +1130,11 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
 }
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
+    // Scale-to-fit is viewport-relative. Rebase the hidden wheel
+    // accumulator immediately so the next gesture starts at the new fit,
+    // rather than jumping from the previous window geometry.
+    if(mZoomPercent<=0.0&&mIndex>=0)
+        mRequestedZoomPercent=fitScale()*100.0;
     // Never redraw the old frame into the new widget geometry here. Doing so
     // stretches an old-resolution surface during live resize/fullscreen
     // transitions. Also stop presentation immediately: otherwise a frame
@@ -927,7 +1147,7 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
         // frames immediately. A decoder whose first frame is still pending
         // remains ticking so the size guard in showNextFrame() can reject it.
         if(mFirstFrameReady)mFrameTimer.stop();
-        mSurfaceUpdateTimer.start();
+        mSurfaceUpdateTimer.setInterval(300);mSurfaceUpdateTimer.start();
     }
 }
 void ClipPlayerDialog::keyPressEvent(QKeyEvent* e){if(e->key()==Qt::Key_Escape&&isFullScreen()){showNormal();updateButtonIcons();e->accept();return;}if(e->key()==Qt::Key_F){mFullscreenButton->click();e->accept();return;}if(e->key()==Qt::Key_Space){mPlayPause->click();e->accept();return;}if(e->key()==Qt::Key_Right){advance();e->accept();return;}if(e->key()==Qt::Key_Left&&!mClips.isEmpty()){openClip((mIndex-1+mClips.size())%mClips.size());e->accept();return;}QDialog::keyPressEvent(e);}

@@ -68,6 +68,11 @@ private:
     void revealOverlay();
     void setOverlayVisible(bool visible);
     void changeZoom(double wheelSteps);
+    void advanceZoomAnimation();
+    void setZoomAnimationTarget(double target);
+    void clampPanToZoom();
+    QPointF effectivePanForZoom(const QPointF& pan, double zoomPercent) const;
+    QPointF surfaceScaleForZoom(double zoomPercent) const;
     void updateDisplayedImage();
     double fitScale() const;
     void updateFrameTimerInterval();
@@ -79,7 +84,11 @@ private:
     QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
     QWidget* mOverlay=nullptr; QGraphicsOpacityEffect* mOverlayOpacity=nullptr;
-    QPropertyAnimation* mOverlayAnimation=nullptr; QTimer mOverlayTimer, mSurfaceUpdateTimer;
+    QPropertyAnimation* mOverlayAnimation=nullptr;
+    QTimer mOverlayTimer, mSurfaceUpdateTimer, mZoomAnimationTimer, mSurfaceBlendTimer;
+    QElapsedTimer mZoomAnimationClock;
+    QImage mSurfaceBlendFrom, mSurfaceBlendTo;
+    int mSurfaceBlendFrame=0;
     QBuffer* mAudioBuffer=nullptr;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
     QAudioSink* mAudioSink=nullptr;
@@ -97,10 +106,13 @@ private:
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;
     int mAudioLoadGeneration=0;
     double mZoomPercent=0.0; // 0 is scale-to-fit; otherwise absolute source scale.
+    double mRequestedZoomPercent=0.0;
+    double mZoomAnimationStart=0.0, mZoomAnimationTarget=0.0;
+    bool mZoomAnimationStartupDelay=false;
     bool mLastImageIsSource=false;
-    double mLastSurfaceScale=1.0;
+    QPointF mLastSurfaceScale{1.0,1.0};
     QPointF mLastSurfacePan;
-    double mDecoderSurfaceScale=1.0;
+    QPointF mDecoderSurfaceScale{1.0,1.0};
     QPointF mDecoderSurfacePan;
     bool mPanning=false;
     bool mWaitingForFirstFrame=false;
