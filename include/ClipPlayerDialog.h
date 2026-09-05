@@ -52,7 +52,7 @@ protected:
     void keyPressEvent(QKeyEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 private:
-    void openClip(int, double startSeconds=0.0); void startDecoder(bool);
+    void openClip(int, double startSeconds=0.0); void startDecoder();
     void stopDecoder();
     void decoderFinished(int, QProcess::ExitStatus); void consumeOutput();
     void showNextFrame(); void advance(); QString ffmpegPath() const;
@@ -85,10 +85,8 @@ private:
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
     QWidget* mOverlay=nullptr; QGraphicsOpacityEffect* mOverlayOpacity=nullptr;
     QPropertyAnimation* mOverlayAnimation=nullptr;
-    QTimer mOverlayTimer, mSurfaceUpdateTimer, mZoomAnimationTimer, mSurfaceBlendTimer;
+    QTimer mOverlayTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
     QElapsedTimer mZoomAnimationClock;
-    QImage mSurfaceBlendFrom, mSurfaceBlendTo;
-    int mSurfaceBlendFrame=0;
     QBuffer* mAudioBuffer=nullptr;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
     QAudioSink* mAudioSink=nullptr;
@@ -101,14 +99,15 @@ private:
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
     int mNextInputFrame=0;
     double mPositionSeconds=0.0, mStartSeconds=0.0;
-    bool mPaused=false, mTriedSoftware=false, mClosing=false, mPlaybackFailed=false;
+    bool mPaused=false, mClosing=false, mPlaybackFailed=false;
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;
     int mAudioLoadGeneration=0;
     double mZoomPercent=0.0; // 0 is scale-to-fit; otherwise absolute source scale.
     double mRequestedZoomPercent=0.0;
-    double mZoomAnimationStart=0.0, mZoomAnimationTarget=0.0;
+    double mZoomAnimationTarget=0.0;
     bool mZoomAnimationStartupDelay=false;
+    bool mViewportRefreshPending=false;
     bool mLastImageIsSource=false;
     QPointF mLastSurfaceScale{1.0,1.0};
     QPointF mLastSurfacePan;
