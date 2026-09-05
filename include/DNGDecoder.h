@@ -37,6 +37,7 @@ struct DNGSequenceInfo {
 
 struct DNGFrameMetadata {
     size_t metadataBytes = 0;
+    std::string uniqueCameraModel;
     double exposureTime = 0.0;
     double iso = 0.0;
     double baselineExposure = 0.0;

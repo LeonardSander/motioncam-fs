@@ -140,6 +140,7 @@ namespace {
     constexpr uint16_t TIFF_TAG_FRAME_RATE = 51044;
     constexpr uint16_t TIFF_TAG_XMP = 700;
     constexpr uint16_t TIFF_TAG_SOFTWARE = 305;
+    constexpr uint16_t TIFF_TAG_UNIQUE_CAMERA_MODEL = 50708;
     constexpr uint16_t TIFF_TYPE_BYTE = 1;
     constexpr uint16_t TIFF_TYPE_SHORT = 3;
     constexpr uint16_t TIFF_TYPE_LONG = 4;
@@ -1844,12 +1845,23 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             matrix[i] = static_cast<float>(readRational(data, entry, i, little));
         present = true;
     };
+    auto readAscii = [&](const TiffEntry& entry) {
+        if (entry.type != 2 || !entry.count || entry.valueOffset >= data.size())
+            return std::string{};
+        const size_t available = std::min<size_t>(entry.count, data.size() - entry.valueOffset);
+        const auto* text = reinterpret_cast<const char*>(data.data() + entry.valueOffset);
+        size_t length = 0;
+        while (length < available && text[length] != '\0') ++length;
+        return std::string(text, length);
+    };
     uint32_t packedBitDepth = 0;
     uint32_t linearizationInputMax = 0;
     uint32_t reportedWhiteLevelMax = 0;
     bool hasLinearization = false;
     for (const auto& entry : entries) {
-        if (entry.tag == TIFF_TAG_EXPOSURE_TIME && entry.type == TIFF_TYPE_RATIONAL && entry.count)
+        if (entry.tag == TIFF_TAG_UNIQUE_CAMERA_MODEL)
+            metadata.uniqueCameraModel = readAscii(entry);
+        else if (entry.tag == TIFF_TAG_EXPOSURE_TIME && entry.type == TIFF_TYPE_RATIONAL && entry.count)
             metadata.exposureTime = readRational(data, entry, 0, little);
         else if (entry.tag == TIFF_TAG_ISO && entry.count) {
             metadata.iso = entry.type == TIFF_TYPE_SHORT

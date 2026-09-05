@@ -2670,13 +2670,16 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     }
 
     // Camera Native is deliberately fed linear RGB. LOG60 is applied once by
-    // FFmpeg immediately before RGB-to-YUV conversion, without dithering.
+    // FFmpeg immediately before the ordered-dithered RGB-to-YUV conversion.
     auto stagingSettings = buildRenderSettings();
     stagingSettings.options &= ~motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
     stagingSettings.options &= ~motioncam::RENDER_OPT_JPEG_COMPRESSION;
     stagingSettings.options &= ~motioncam::RENDER_OPT_LOG_TRANSFORM;
     stagingSettings.draftScale = 1;
     stagingSettings.logTransform = motioncam::LogTransformMode::Disabled;
+    // Camera model identity is not represented by the Camera Native sidecar;
+    // do not apply its DNG-only BaselineExposure compensation during staging.
+    stagingSettings.cameraModel.clear();
     stagingSettings.cameraNativeStaging = true;
     mFuseFilesystem->updateOptions(mountId, stagingSettings);
 
@@ -2963,9 +2966,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             : (proRes || cineForm || chroma == "422") ? "yuv422p10le"
             : chroma == "444" ? "yuv444p10le" : "yuv420p10le";
         const QString videoFilter = cineFormRgb
-            ? log60Lut + ",format=gbrp12le"
+            ? log60Lut +
+                ",zscale=matrixin=gbr:matrix=gbr:rangein=full:range=full:dither=ordered,format=gbrp12le"
             : log60Lut +
-                ",zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=none,format=" +
+                ",zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=ordered,format=" +
                 pixelFormat;
         args << "-map" << "0:v:0";
         if (QFile::exists(audioPath))
@@ -2977,9 +2981,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             // Level 4 keeps preset/quality unchanged while bounding its frame
             // pipeline (148 PPCS in SVT-AV1 4.1).
             if (av1Encoder == "libsvtav1") {
-                QString svtParams = "lp=4:keyint=10s:tune=0:enable-overlays=1:scd=1:scm=0";
+                QString svtParams =
+                    "lp=4:keyint=10s:tune=1:sharpness=0:enable-overlays=1:scd=1:scm=0";
                 if (hdrNoise)
-                    svtParams = "lp=4:keyint=10s:tune=5:noise=8:enable-overlays=1:scd=1:scm=0";
+                    svtParams =
+                        "lp=4:keyint=10s:tune=5:sharpness=0:noise=8:enable-overlays=1:scd=1:scm=0";
                 args << "-c:v" << av1Encoder << "-crf" << QString::number(av1Crf)
                      << "-preset" << QString::number(av1Preset)
                      << "-svtav1-params" << svtParams;
@@ -2987,7 +2993,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
                 const QString av1Profile = chroma == "422" ? "2" : "1";
                 args << "-c:v" << "libaom-av1" << "-crf" << QString::number(av1Crf)
                      << "-b:v" << "0" << "-cpu-used" << QString::number(av1Preset)
-                     << "-profile:v" << av1Profile << "-row-mt" << "1";
+                     << "-profile:v" << av1Profile << "-row-mt" << "1"
+                     << "-tune" << "psnr";
             }
         } else if (proRes) {
             const QString profile = mode.contains("ProRes LT") ? "1"
@@ -3003,7 +3010,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
                 : chroma == "444" ? "main444-10" : "main10";
             args << "-c:v" << "libx265" << "-preset" << encoderPreset
                  << "-crf" << encoderCrf << "-profile:v" << hevcProfile
-                 << "-x265-params" << "range=full:colorprim=bt2020:colormatrix=bt2020nc";
+                 << "-x265-params"
+                 << "range=full:colorprim=bt2020:colormatrix=bt2020nc:psy-rd=1.0";
         }
         args << "-pix_fmt" << pixelFormat
              << "-color_range" << "pc";

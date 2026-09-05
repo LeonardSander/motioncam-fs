@@ -411,6 +411,12 @@ bool VirtualFileSystemImpl_DNG::generateThumbnail(
             const auto decoderReady = std::chrono::steady_clock::now();
             std::vector<uint8_t> source;
             if (!decoder.extractFrame(0, source)) return;
+            DNGFrameMetadata metadata;
+            if (!decoder.getFrameMetadata(0, metadata)) return;
+            if (boost::icontains(metadata.uniqueCameraModel, "Panasonic")) {
+                const double baseline = metadata.baselineExposure + 2.0;
+                if (!DNGDecoder::updateMetadata(source, &baseline, nullptr)) return;
+            }
             const auto sourceReady = std::chrono::steady_clock::now();
             generated = utils::generateJpegThumbnailFromDng(
                 std::move(source), outputPath, width, height);
@@ -510,15 +516,28 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         ? mSmoothedExposureOffsets.find(timestamp)
         : mNormalizedExposureOffsets.find(timestamp);
     const auto neutralIt = mSmoothedAsShotNeutrals.find(timestamp);
-    const bool updateExposure = (normalize || smoothExposure) &&
+    const bool updateCalculatedExposure = (normalize || smoothExposure) &&
         baselineIt != (smoothExposure ? mSmoothedExposureOffsets.end()
                                      : mNormalizedExposureOffsets.end());
+    DNGFrameMetadata sourceMetadata;
+    if (!mDecoder->getFrameMetadata(static_cast<int>(frameIndex), sourceMetadata))
+        throw std::runtime_error("Could not read DNG frame metadata");
+    const bool sourcePanasonic =
+        boost::icontains(sourceMetadata.uniqueCameraModel, "Panasonic");
+    // Panasonic output identity requires a -2 EV BaselineExposure compensation.
+    // A Panasonic source already contains it, so changing to a neutral identity
+    // (including previews) removes that compensation by adding 2 EV.
+    const double modelExposureAdjustment = mConfig.cameraNativeStaging
+        ? 0.0
+        : vfs::configuredExposureOffset(mConfig) + (sourcePanasonic ? 2.0 : 0.0);
+    const bool updateModelExposure = std::abs(modelExposureAdjustment) > 1e-9;
     const bool updateWhiteBalance = smoothWhiteBalance &&
         neutralIt != mSmoothedAsShotNeutrals.end();
-    if (updateExposure || updateWhiteBalance) {
-        double baseline = updateExposure
-            ? baselineIt->second + vfs::configuredExposureOffset(mConfig) : 0.0;
-        const double* baselinePtr = updateExposure ? &baseline : nullptr;
+    if (updateCalculatedExposure || updateModelExposure || updateWhiteBalance) {
+        const double baseline = (updateCalculatedExposure
+            ? baselineIt->second : sourceMetadata.baselineExposure) + modelExposureAdjustment;
+        const double* baselinePtr = (updateCalculatedExposure || updateModelExposure)
+            ? &baseline : nullptr;
         const std::array<float, 3>* neutralPtr = updateWhiteBalance
             ? &neutralIt->second : nullptr;
         if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
