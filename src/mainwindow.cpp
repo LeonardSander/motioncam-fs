@@ -953,6 +953,9 @@ MainWindow::~MainWindow() {
     if (!mGalleryPerformanceTestActive) autoSaveSession();
     saveSettings();
     ++mGalleryGeneration;
+    // The gallery is an independent top-level window, so it is not destroyed
+    // automatically with MainWindow. Close it before waiting for its workers.
+    if (mClipPlayer) mClipPlayer->close();
     // Gallery workers may be waiting for a UI-thread handoff. Keep servicing
     // those cancellation handoffs until every worker has observed shutdown;
     // waiting directly on the UI thread can otherwise deadlock.
@@ -1812,6 +1815,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                            static_cast<qsizetype>(rgb.size()));
                     if (!presentedFirstFrame) {
                         QMetaObject::invokeMethod(this, [&, width, height] {
+                            if (mGalleryGeneration.load() != generation) return;
                             if (player) player->presentRgb48Frame(
                                 bytes, static_cast<int>(width), static_cast<int>(height));
                         }, Qt::BlockingQueuedConnection);
@@ -1821,7 +1825,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     while (pushResult == ClipPlayerDialog::FramePushResult::Retry &&
                            mGalleryGeneration.load() == generation) {
                         QMetaObject::invokeMethod(this, [&] {
-                            if (player) pushResult = player->pushRgb48Frame(
+                            if (mGalleryGeneration.load() != generation)
+                                pushResult = ClipPlayerDialog::FramePushResult::Stopped;
+                            else if (player) pushResult = player->pushRgb48Frame(
                                 bytes, static_cast<int>(width), static_cast<int>(height));
                             else pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                         }, Qt::BlockingQueuedConnection);
@@ -1835,7 +1841,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     ++deliveredFrames;
                 });
             if (mGalleryGeneration.load() == generation)
-                QMetaObject::invokeMethod(this, [player] {
+                QMetaObject::invokeMethod(this, [this, player, generation] {
+                    if (mGalleryGeneration.load() != generation) return;
                     if (player) player->finishRgb48Frames();
                 }, Qt::BlockingQueuedConnection);
             if (diagnostics) {
@@ -1859,7 +1866,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
             }
             const QString detail = QString::fromUtf8(error.what());
             spdlog::error("Gallery render failed: {}", error.what());
-            QMetaObject::invokeMethod(this, [player, detail] {
+            QMetaObject::invokeMethod(this, [this, player, detail, generation] {
+                if (mGalleryGeneration.load() != generation) return;
                 if (player) player->failRgb48Frames(detail);
             }, Qt::BlockingQueuedConnection);
         }
@@ -1897,11 +1905,16 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         clip.isSequence = info->isSequence;
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
+        clip.duplicateFrames = info->duplicateFrameMask;
         clips.push_back(std::move(clip));
     }
     if (clips.isEmpty()) return;
     mGalleryMountId = mountId;
-    mClipPlayer = new ClipPlayerDialog(std::move(clips), mountId, this);
+    // A QWidget parent also establishes a transient-window relationship. Some
+    // window managers then keep a maximized gallery permanently above the
+    // main window. WA_DeleteOnClose handles ownership for this independent
+    // top-level window; mClipPlayer is a QPointer and clears on deletion.
+    mClipPlayer = new ClipPlayerDialog(std::move(clips), mountId, nullptr);
     connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
             [this](int id, double startSeconds) {
                 mGalleryMountId = id;
@@ -4108,6 +4121,17 @@ void MainWindow::onProcessingFinished() {
     for (const auto& file : mMountedFiles)
         updateThumbnail(file.mountId);
     if (mClipPlayer && mGalleryMountId != motioncam::InvalidMountId) {
+        for (const auto& mounted : mMountedFiles) {
+            const auto info = mFuseFilesystem->getFileInfo(mounted.mountId);
+            if (!info) continue;
+            const double fps = info->isSequence && info->fps > 0.0f ? info->fps : 1.0;
+            const int frames = std::max(1, info->totalFrames - info->droppedFrames +
+                info->duplicatedFrames);
+            const double duration = info->runtimeSeconds > 0.0f
+                ? info->runtimeSeconds : frames / fps;
+            mClipPlayer->updateClipInfo(mounted.mountId, fps, duration, frames,
+                info->width, info->height, info->duplicateFrameMask);
+        }
         mClipPlayer->reloadCurrentClip();
     }
 }

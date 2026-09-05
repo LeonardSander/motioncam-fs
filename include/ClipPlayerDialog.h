@@ -1,6 +1,7 @@
 #pragma once
 #include <QDialog>
 #include <QImage>
+#include <QPointF>
 #include <QProcess>
 #include <QTimer>
 #include <QVector>
@@ -12,6 +13,7 @@
 class QLabel; class QPushButton; class QSlider;
 class QEvent;
 class QBuffer;
+class QGraphicsOpacityEffect; class QPropertyAnimation; class QWidget;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
 class QAudioSink;
 #else
@@ -21,7 +23,7 @@ class ClipPlayerDialog final : public QDialog {
     Q_OBJECT
 public:
     enum class FramePushResult { Accepted, Retry, Stopped };
-    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; };
+    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; };
     explicit ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent=nullptr);
     ~ClipPlayerDialog() override;
     int currentMountId() const;
@@ -32,6 +34,9 @@ public:
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     void reloadCurrentClip();
+    void updateClipInfo(int mountId, double fps, double durationSeconds, int sourceFrames,
+                        int width, int height,
+                        std::shared_ptr<const std::vector<bool>> duplicateFrames);
     FramePushResult pushRgb48Frame(const QByteArray& frame, int width, int height);
     void presentRgb48Frame(const QByteArray& frame, int width, int height);
     void finishRgb48Frames();
@@ -59,6 +64,12 @@ private:
     static QByteArray sourceAudioWav(const Clip& clip, const QString& ffmpegExecutable,
                                      const std::shared_ptr<std::atomic_bool>& cancelled);
     void setAudioEnabled(bool enabled);
+    void updateButtonIcons();
+    void revealOverlay();
+    void setOverlayVisible(bool visible);
+    void changeZoom(double wheelSteps);
+    void updateDisplayedImage();
+    double fitScale() const;
     void updateFrameTimerInterval();
     void startAudioAt(double seconds);
     qint64 audioPositionMs() const;
@@ -66,7 +77,9 @@ private:
     static QString runtimeText(double seconds);
     QImage rgb48Image(const QByteArray& frame, int width, int height) const;
     QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr;
-    QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
+    QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
+    QWidget* mOverlay=nullptr; QGraphicsOpacityEffect* mOverlayOpacity=nullptr;
+    QPropertyAnimation* mOverlayAnimation=nullptr; QTimer mOverlayTimer, mSurfaceUpdateTimer;
     QBuffer* mAudioBuffer=nullptr;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
     QAudioSink* mAudioSink=nullptr;
@@ -83,6 +96,15 @@ private:
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;
     int mAudioLoadGeneration=0;
+    double mZoomPercent=0.0; // 0 is scale-to-fit; otherwise absolute source scale.
+    bool mLastImageIsSource=false;
+    double mLastSurfaceScale=1.0;
+    QPointF mLastSurfacePan;
+    double mDecoderSurfaceScale=1.0;
+    QPointF mDecoderSurfacePan;
+    bool mPanning=false;
+    bool mWaitingForFirstFrame=false;
+    QPointF mPanSourcePixels, mLastPanGlobal;
     std::shared_ptr<std::atomic_bool> mAudioLoadCancelled=
         std::make_shared<std::atomic_bool>(false);
     std::shared_ptr<std::atomic<int>> mPlaybackTarget=std::make_shared<std::atomic<int>>(0);

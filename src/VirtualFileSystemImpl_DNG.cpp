@@ -687,6 +687,12 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
     info.isSequence = mHasFrameNumberSequence;
+    auto duplicateMask = std::make_shared<std::vector<bool>>();
+    for (const auto& entry : mFiles)
+        if (boost::filesystem::path(entry.name).extension() == ".dng" ||
+            boost::filesystem::path(entry.name).extension() == ".DNG")
+            duplicateMask->push_back(entry.duplicateFrame);
+    info.duplicateFrameMask = std::move(duplicateMask);
     
     // DNG sequences are pass-through, so we show source format
     info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";

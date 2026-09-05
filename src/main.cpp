@@ -15,6 +15,7 @@
 #include <QUrl>
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <spdlog/spdlog.h>
 
 #ifdef __APPLE__
@@ -127,6 +128,12 @@ bool platformReady() {
 int main(int argc, char *argv[])
 {
     const auto processStarted = std::chrono::steady_clock::now();
+#ifndef _WIN32
+    // Pipe consumers such as the gallery FFmpeg process can exit between a
+    // state check and a buffered write. Let QProcess report EPIPE instead of
+    // allowing the process-wide default SIGPIPE action to terminate the app.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     SingleApplication app(argc, argv);
     const auto applicationConstructed = std::chrono::steady_clock::now();
 

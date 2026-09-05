@@ -457,6 +457,13 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo = vfs::makeFileInfo(
         mFrameRateInfo, mFps, static_cast<int>(frames.size()), droppedFrames,
         duplicatedFrames, outputWidth, outputHeight);
+    auto duplicateMask = std::make_shared<std::vector<bool>>();
+    duplicateMask->reserve(mapped.size());
+    for (const auto& entry : mFiles)
+        if (boost::filesystem::path(entry.name).extension() == ".dng" ||
+            boost::filesystem::path(entry.name).extension() == ".DNG")
+            duplicateMask->push_back(entry.duplicateFrame);
+    mFileInfo.duplicateFrameMask = std::move(duplicateMask);
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;

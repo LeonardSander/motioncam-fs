@@ -93,6 +93,9 @@ struct FileInfo {
     int totalFrames;
     int droppedFrames;
     int duplicatedFrames;
+    // Output-frame mask used by the gallery timeline. This follows the CFR
+    // projection, so inserted holds line up with the player's frame numbers.
+    std::shared_ptr<const std::vector<bool>> duplicateFrameMask;
     int width;
     int height;
     std::string dataType;        // "Bayer CFA", "Quad Bayer CFA", or "RGB"

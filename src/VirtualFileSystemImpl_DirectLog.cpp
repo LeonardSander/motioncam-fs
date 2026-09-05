@@ -1405,6 +1405,12 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     FileInfo info = vfs::makeFileInfo(
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
+    auto duplicateMask = std::make_shared<std::vector<bool>>();
+    for (const auto& entry : mFiles)
+        if (boost::filesystem::path(entry.name).extension() == ".dng" ||
+            boost::filesystem::path(entry.name).extension() == ".DNG")
+            duplicateMask->push_back(entry.duplicateFrame);
+    info.duplicateFrameMask = std::move(duplicateMask);
     
     // This describes the input, not the selected DNG render operation. A
     // companion JSON may explicitly reinterpret the input CFA size.
