@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <optional>
 #include <atomic>
+#include <functional>
 #include <mutex>
 
 #ifdef _WIN32
@@ -67,6 +68,7 @@ class QMenu;
 class QPushButton;
 class QKeyEvent;
 class QTimer;
+class QProgressDialog;
 namespace Ui {
 class MainWindow;
 }
@@ -133,7 +135,7 @@ private slots:
     void finalizeCameraNative(QWidget* fileWidget, const QString& mode);
     void createCalibrationJson(QWidget* fileWidget);
     void reloadCalibration(QWidget* fileWidget);
-    void updateCalibrationButtonStates();
+    void updateCalibrationButtonStates(QWidget* onlyFileWidget = nullptr);
 
 private:
     void saveSettings();
@@ -145,6 +147,9 @@ private:
     void updateClipIndices();
     void updateLocalBadge(motioncam::MountId mountId);
     void updateThumbnail(motioncam::MountId mountId);
+    void mountFiles(
+        const QStringList& filePaths,
+        const std::function<void(const motioncam::MountedFile&)>& mounted = {});
     QWidget* fileWidgetForMount(motioncam::MountId mountId) const;
     void saveSessionToFile(const QString& path);
     void loadSessionFromFile(const QString& path);
@@ -181,6 +186,8 @@ private:
     bool mOptionsUpdatePending;
     bool mMountInProgress = false;
     QString mMountPathInProgress;
+    QPointer<QProgressDialog> mImportBatchProgress;
+    bool mImportBatchActive = false;
     bool mDeleteOnUnmount = false;
     motioncam::CachePolicy mCachePolicy = motioncam::CachePolicy::Quota;
     std::uint64_t mCacheQuotaBytes = 30ULL * 1024 * 1024 * 1024;

@@ -324,8 +324,9 @@ void loadSidecar(
         std::optional<CalibrationData>& calibration) {
     metadata = loadSidecarMetadataFile(path);
     calibration.reset();
-    if (boost::filesystem::exists(path))
-        calibration = CalibrationData::loadFromFile(path.string());
+    // Projection metadata and calibration share the same sidecar. Reuse the
+    // parsed document instead of reading and parsing the file a second time.
+    if (!metadata.empty()) calibration = CalibrationData::parse(metadata);
 }
 
 std::shared_ptr<std::vector<char>> materializeCached(

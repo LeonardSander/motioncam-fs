@@ -43,6 +43,7 @@ using namespace motioncam;
 #include <QPainter>
 #include <QFrame>
 #include <QProgressDialog>
+#include <QProgressBar>
 #include <QThread>
 #include <QUuid>
 #include <QTemporaryDir>
@@ -1215,6 +1216,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
             if (dropEvent->mimeData()->hasUrls()) {
                 const auto urls = dropEvent->mimeData()->urls();
 
+                QStringList filePaths;
                 for (const auto& url : urls) {
                     auto filePath = url.toLocalFile();
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
@@ -1224,9 +1226,11 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                           filePath.endsWith(".mkv", Qt::CaseInsensitive))) ||
                         filePath.endsWith(".dng", Qt::CaseInsensitive) ||
                         QFileInfo(filePath).isDir()) {
-                        mountFile(filePath);
+                        filePaths.append(filePath);
                     }
                 }
+
+                mountFiles(filePaths);
 
                 dropEvent->acceptProposedAction();
             }
@@ -1279,13 +1283,18 @@ void MainWindow::mountFile(const QString& filePath) {
     auto dstPath = destinationRoot + "/" + mountName;
     motioncam::MountId mountId;
 
-    QProgressDialog mountProgress(
-        tr("Reading and mounting %1...").arg(fileInfo.fileName()), QString(), 0, 0, this);
-    mountProgress.setWindowModality(Qt::WindowModal);
-    mountProgress.setCancelButton(nullptr);
-    mountProgress.setMinimumDuration(0);
-    mountProgress.show();
-    QApplication::processEvents();
+    std::unique_ptr<QProgressDialog> singleProgress;
+    QProgressDialog* mountProgress = mImportBatchProgress.data();
+    if (!mountProgress) {
+        singleProgress = std::make_unique<QProgressDialog>(
+            tr("Reading and mounting %1...").arg(fileInfo.fileName()), QString(), 0, 0, this);
+        mountProgress = singleProgress.get();
+        mountProgress->setWindowModality(Qt::WindowModal);
+        mountProgress->setCancelButton(nullptr);
+        mountProgress->setMinimumDuration(0);
+        mountProgress->show();
+        QApplication::processEvents();
+    }
     QString mountError;
     const auto settings = buildRenderSettings();
 #ifdef __APPLE__
@@ -1293,7 +1302,7 @@ void MainWindow::mountFile(const QString& filePath) {
 #elif __linux__
     const qint64 cleanupStarted = mountTimer.elapsed();
     if (!cleanupStaleLinuxFuseMount(dstPath, mountError)) {
-        mountProgress.close();
+        if (singleProgress) mountProgress->close();
         mMountInProgress = false;
         mMountPathInProgress.clear();
         QMessageBox::critical(this, tr("Error"), mountError);
@@ -1320,7 +1329,7 @@ void MainWindow::mountFile(const QString& filePath) {
         QApplication::processEvents(QEventLoop::AllEvents, 20);
         QThread::msleep(10);
     }
-    mountProgress.close();
+    if (singleProgress) mountProgress->close();
     mountId = future.result();
     const qint64 fuseElapsed = mountTimer.elapsed() - backendStarted;
     if (mGalleryPerformanceTestActive)
@@ -1702,7 +1711,7 @@ void MainWindow::mountFile(const QString& filePath) {
     // Session loading writes the complete session after the batch. Rewriting
     // it for every imported clip adds quadratic JSON/file-system work and is
     // especially visible in automated multi-clip diagnostics.
-    if (!mGalleryPerformanceTestActive) autoSaveSession();
+    if (!mGalleryPerformanceTestActive && !mImportBatchActive) autoSaveSession();
 
     spdlog::info("Mount timing [{}]: UI/card/session complete {:.1f} ms",
                  filePath.toStdString(), static_cast<double>(mountTimer.elapsed()));
@@ -1714,8 +1723,57 @@ void MainWindow::mountFile(const QString& filePath) {
             fuseElapsed, importElapsed - backendStarted - fuseElapsed);
     }
 
-    // Update calibration button state
+    // During a batch, update the newly visible card immediately without
+    // repeatedly reparsing the sidecars of every previously imported clip.
+    updateCalibrationButtonStates(mImportBatchActive ? fileWidget : nullptr);
+}
+
+void MainWindow::mountFiles(
+        const QStringList& filePaths,
+        const std::function<void(const motioncam::MountedFile&)>& mounted) {
+    if (filePaths.isEmpty()) return;
+    if (filePaths.size() == 1) {
+        const int before = mMountedFiles.size();
+        mountFile(filePaths.front());
+        if (mounted && mMountedFiles.size() > before)
+            mounted(mMountedFiles.back());
+        return;
+    }
+
+    QProgressDialog progress(
+        tr("Importing %1 clips...").arg(filePaths.size()),
+        QString(), 0, filePaths.size(), this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setCancelButton(nullptr);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    if (auto* bar = progress.findChild<QProgressBar*>())
+        bar->setFormat(tr("0 / %1").arg(filePaths.size()));
+    mImportBatchProgress = &progress;
+    mImportBatchActive = true;
+    progress.show();
+    QApplication::processEvents();
+
+    int imported = 0;
+    for (int processed = 0; processed < filePaths.size(); ++processed) {
+        const int before = mMountedFiles.size();
+        mountFile(filePaths.at(processed));
+        if (mMountedFiles.size() > before) {
+            ++imported;
+            if (mounted) mounted(mMountedFiles.back());
+        }
+        progress.setValue(processed + 1);
+        if (auto* bar = progress.findChild<QProgressBar*>())
+            bar->setFormat(tr("%1 / %2").arg(imported).arg(filePaths.size()));
+        QApplication::processEvents();
+    }
+
+    mImportBatchProgress.clear();
+    mImportBatchActive = false;
+    progress.close();
     updateCalibrationButtonStates();
+    if (!mGalleryPerformanceTestActive) autoSaveSession();
 }
 
 motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
@@ -4335,19 +4393,27 @@ void MainWindow::loadSessionFromFile(const QString& path) {
     mGlobalRenderSettings = decode(root["globalSettings"].toObject());
     mRenderSettings = mGlobalRenderSettings;
     updateSelectionUi();
+    QStringList clipPaths;
+    QHash<QString, QJsonObject> clipsByPath;
     for (const auto& value : clips) {
         const auto clip = value.toObject();
         const QString clipPath = clip["path"].toString();
         if (!QFileInfo::exists(clipPath)) continue;
-        mountFile(clipPath);
+        clipPaths.append(clipPath);
+        clipsByPath.insert(QFileInfo(clipPath).absoluteFilePath(), clip);
+    }
+    mountFiles(clipPaths, [this, &clipsByPath, &decode](
+            const motioncam::MountedFile& mounted) {
+        const auto clip = clipsByPath.value(
+            QFileInfo(mounted.srcFile).absoluteFilePath());
         if (clip.contains("localSettings") && !mMountedFiles.isEmpty()) {
-            const auto id = mMountedFiles.back().mountId;
+            const auto id = mounted.mountId;
             const auto local = decode(clip["localSettings"].toObject());
             mLocalSettings.insert(id, local);
             mFuseFilesystem->updateOptions(id, local);
             updateLocalBadge(id);
         }
-    }
+    });
     if (QFileInfo(path).absoluteFilePath() == QFileInfo(autoSessionPath()).absoluteFilePath())
         mCurrentSessionFile.clear();
     else {
@@ -4645,11 +4711,13 @@ void MainWindow::reloadCalibration(QWidget* fileWidget) {
     updateFpsLabels();
 }
 
-void MainWindow::updateCalibrationButtonStates() {
+void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     if (!scrollContent) return;
 
-    auto fileWidgets = scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+    auto fileWidgets = onlyFileWidget
+        ? QList<QWidget*>{onlyFileWidget}
+        : scrollContent->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
 
     QString selectedJsonPath;
     QWidget* selectedFileWidget = nullptr;
