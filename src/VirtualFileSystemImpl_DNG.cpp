@@ -3,6 +3,7 @@
 #include "DNGDecoder.h"
 #include "CalibrationData.h"
 #include "DataLevels.h"
+#include "GainMapBake.h"
 #include "Utils.h"
 #include "LRUCache.h"
 #include "Types.h"
@@ -278,9 +279,12 @@ void VirtualFileSystemImpl_DNG::init() {
             !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
             (mConfig.logTransform != LogTransformMode::KeepInput || vignetteBake);
         if (vignetteBake && !logApplied) {
-            const uint32_t headroom =
-                (mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP) ? 4u : 2u;
-            storedBits = std::min(16u, storedBits + headroom);
+            std::array<double, 4> sourceBlack{};
+            std::copy(effectiveLevels.black.begin(), effectiveLevels.black.end(),
+                      sourceBlack.begin());
+            storedBits = planLinearGainBake(
+                effectiveLevels.white, sourceBlack,
+                mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP).destinationBits;
         }
         if (logApplied) {
             if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) storedBits = std::max(1u, storedBits - 2);
@@ -492,6 +496,11 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if (mCalibration && !mCalibration->cfaPhase.empty())
         frameCfaPhase = mCfaPhase;
     vfs::replaceSidecarGainMapOpcodes(bytes, mSidecarMetadata, frameIndex);
+    // Sidecars and source DNGs may encode OpcodeList2 as one four-plane map or
+    // four scalar maps. Canonicalize before every subsequent operation so the
+    // repair, crop, transform, and bake paths all consume the same layout.
+    if (!DNGDecoder::canonicalizeGainMapOpcodes(bytes))
+        throw std::runtime_error("Could not canonicalize DNG gain-map override: " + frame.filePath);
     const std::optional<bool> gainMapOrderOverride =
         mCalibration && mCalibration->hasNeedGainMapOrderFixed
             ? std::optional<bool>(mCalibration->needGainMapOrderFixed)
@@ -545,10 +554,20 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     }
 
     std::vector<GainMap> effectiveGainMaps;
-    const bool hasGainMap = DNGDecoder::getGainMaps(bytes, 2, effectiveGainMaps) &&
-                            !effectiveGainMaps.empty();
+    const bool hasOpcode2GainMap =
+        DNGDecoder::getGainMaps(bytes, 2, effectiveGainMaps) &&
+        !effectiveGainMaps.empty();
+    std::vector<GainMap> opcode3GainMaps;
+    const bool hasEligibleOpcode3Luma =
+        DNGDecoder::hasOnlySinglePlaneGainMap(bytes, 3) &&
+        DNGDecoder::getGainMaps(bytes, 3, opcode3GainMaps) &&
+        opcode3GainMaps.size() == 1 && opcode3GainMaps.front().channels == 1;
+    // A lone OpcodeList3 luma map is a valid bake input: the corresponding
+    // color component may already have been baked by an earlier color-only pass.
+    const bool hasGainMap = hasOpcode2GainMap || hasEligibleOpcode3Luma;
+    const bool colorOnlyGainMap = mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
     const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-                             hasGainMap;
+        (hasOpcode2GainMap || (hasEligibleOpcode3Luma && !colorOnlyGainMap));
     uint32_t inputQuantizationWhite = 0;
     const auto levelSeparator = mConfig.levels.find('/');
     const std::string selectedWhite = levelSeparator == std::string::npos
@@ -561,11 +580,40 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         if (inputBits > 0 && inputBits <= 16)
             inputQuantizationWhite = (uint32_t{1} << inputBits) - 1;
     }
-    if (hasGainMap && !bakeGainMap &&
+    const int outputScale = requestedScale;
+    QuadBayerMode processingMode = mConfig.quadBayerOption;
+    const bool selectedDemosaic = processingMode == QuadBayerMode::Demosaic ||
+                                  processingMode == QuadBayerMode::DemosaicColor ||
+                                  processingMode == QuadBayerMode::DemosaicOCL;
+    if (mConfig.streamingPreview && outputScale == 1 &&
+        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ) && selectedDemosaic)
+        processingMode = QuadBayerMode::CorrectQBCFAMetadata;
+    const bool remosaicRequested = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
+    const bool uniformRgbBlack =
+        sourceMetadata.blackLevel[0] == sourceMetadata.blackLevel[1] &&
+        sourceMetadata.blackLevel[1] == sourceMetadata.blackLevel[2];
+    const bool processingDemosaic =
+        processingMode == QuadBayerMode::Demosaic ||
+        processingMode == QuadBayerMode::DemosaicColor ||
+        processingMode == QuadBayerMode::DemosaicOCL;
+    // Proxy reduction and RGB remosaic define the stored samples and therefore
+    // precede gain-map baking. CFA proxy reduction preserves the mosaic; an
+    // explicitly selected demosaic is performed in a second pass afterwards.
+    const bool topologyBeforeBake = bakeGainMap &&
+        (outputScale > 1 ||
+         (!frameHasCfa && remosaicRequested && uniformRgbBlack));
+    if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
+            bytes, frameCfaSize, frameCfaPhase, processingMode,
+            remosaicRequested,
+            outputScale, mConfig.options & RENDER_OPT_HIGHER_CFA_HQ,
+            false, true))
+        throw std::runtime_error("Unsupported pre-vignette DNG topology conversion: " + frame.filePath);
+    if (hasOpcode2GainMap && !bakeGainMap &&
         (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
         !DNGDecoder::transformGainMaps(bytes, false, true, false))
         throw std::runtime_error("Unsupported DNG gain-map color transform: " + frame.filePath);
-    if (hasGainMap && (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
+    if (hasOpcode2GainMap && !bakeGainMap &&
+        (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
         !DNGDecoder::transformGainMaps(bytes, false, false, true))
         throw std::runtime_error("Unsupported DNG gain-map optimization: " + frame.filePath);
     if (bakeGainMap && !DNGDecoder::bakeGainMaps(
@@ -573,31 +621,28 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
             mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
             mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP,
-            frameCfaSize))
+            topologyBeforeBake ? 2 : frameCfaSize))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frame.filePath);
-    if (hasGainMap && !bakeGainMap && !DNGDecoder::canonicalizeGainMapOpcodes(bytes))
-        throw std::runtime_error("Could not canonicalize DNG gain maps: " + frame.filePath);
     logStage("metadata and gain-map processing", bytes.size());
 
-    const int outputScale = requestedScale;
-    QuadBayerMode processingMode = mConfig.quadBayerOption;
-    const bool selectedDemosaic = processingMode == QuadBayerMode::Demosaic ||
-                                  processingMode == QuadBayerMode::DemosaicColor ||
-                                  processingMode == QuadBayerMode::DemosaicOCL;
     // A private, non-proxy gallery stream keeps its CFA so the display path
     // can bin higher CFA to Bayer and choose nearest-neighbour when HQ is off.
     // Mounted DNGs never set streamingPreview and retain their selected mode.
-    if (mConfig.streamingPreview && outputScale == 1 &&
-        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ) && selectedDemosaic)
-        processingMode = QuadBayerMode::CorrectQBCFAMetadata;
-    if ((frameCfaSize > 2 || (frameHasCfa && mConfig.cameraNativeStaging) || outputScale > 1 ||
+    if (!topologyBeforeBake &&
+        (frameCfaSize > 2 || (frameHasCfa && mConfig.cameraNativeStaging) || outputScale > 1 ||
          (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
         !DNGDecoder::processHigherCFA(
             bytes, frameCfaSize, frameCfaPhase, processingMode,
-            mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER,
+            remosaicRequested,
             outputScale,
             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
         throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + frame.filePath);
+    if (topologyBeforeBake && frameHasCfa && outputScale > 1 && processingDemosaic &&
+        !remosaicRequested &&
+        !DNGDecoder::processHigherCFA(
+            bytes, 2, frameCfaPhase, processingMode,
+            false, 1, false))
+        throw std::runtime_error("Unsupported post-vignette DNG demosaic: " + frame.filePath);
     logStage("CFA/proxy processing", bytes.size());
 
     if (mConfig.options & RENDER_OPT_BAKE_ISO) {

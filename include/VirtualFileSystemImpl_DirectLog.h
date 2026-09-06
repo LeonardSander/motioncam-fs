@@ -63,12 +63,16 @@ private:
                          int decodedWidth = 0, int decodedHeight = 0,
                          bool inputLogEncoded = false);
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
-    void prepareSidecarGainMapOpcodes(
-        int frameNumber, std::vector<GainMap>& opcodeList2,
-        std::vector<GainMap>& opcodeList3) const;
+    struct PreparedSidecarGainMaps {
+        std::vector<GainMap> bakeList2, bakeList3;
+        std::vector<GainMap> opcodeList2, opcodeList3;
+        float exposureOffset = 0.0f;
+        std::array<float, 3> neutralScale{1.0f, 1.0f, 1.0f};
+        std::array<uint8_t, 4> cfa{2, 1, 1, 0};
+    };
+    PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void applySidecarGainMaps(std::vector<uint16_t>& rgbData, int frameNumber,
-                              float& exposureOffset,
-                              std::array<float, 3>& neutralScale,
+                              const PreparedSidecarGainMaps& prepared,
                               int imageWidth = 0, int imageHeight = 0) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;

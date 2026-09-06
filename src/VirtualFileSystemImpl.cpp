@@ -3,6 +3,7 @@
 #include "DNGDecoder.h"
 #include "LRUCache.h"
 #include "CalibrationData.h"
+#include "GainMapBake.h"
 #include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
@@ -290,6 +291,9 @@ void replaceSidecarGainMapOpcodes(
     };
     replace("gainMaps", 2, replaceList2);
     replace("deferredGainMaps", 3, replaceList3);
+    if ((replaceList2 || replaceList3) &&
+        !DNGDecoder::canonicalizeGainMapOpcodes(dng))
+        throw std::runtime_error("Could not canonicalize sidecar gain-map override");
 }
 
 nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
@@ -1088,15 +1092,21 @@ std::string getDisplayDataLevels(
         ? static_cast<int>(std::min<uint32_t>(16, inputBitDepth))
         : std::min(16, static_cast<int>(std::ceil(std::log2(srcWhiteLevel + 1))));
 
-    if(logTransform.empty()) {
-        if(applyShadingMap) {
-            useBits += 2;
-            if(normalizeShadingMap)
-                useBits += 2;
-            dstWhiteLevel = std::pow(2.0f, std::min(16, useBits)) - 1;
-            for (auto& v : dstBlackLevel)
-                v = 0;
-        }            
+    if (logTransform.empty()) {
+        if (applyShadingMap) {
+            // Gain-map baking sizes its expanded range from the selected white
+            // level, even when a DNG stores those samples in a wider container.
+            useBits = std::min(16, static_cast<int>(
+                std::ceil(std::log2(srcWhiteLevel + 1))));
+            std::array<double, 4> sourceBlack{};
+            std::copy(srcBlackLevel.begin(), srcBlackLevel.end(), sourceBlack.begin());
+            const auto bakeLevels = planLinearGainBake(
+                srcWhiteLevel, sourceBlack, normalizeShadingMap);
+            useBits = static_cast<int>(bakeLevels.destinationBits);
+            dstWhiteLevel = static_cast<float>(bakeLevels.destinationWhite);
+            for (size_t channel = 0; channel < dstBlackLevel.size(); ++channel)
+                dstBlackLevel[channel] = static_cast<float>(bakeLevels.destinationBlack[channel]);
+        }
     } else {
         if (logTransform == "Reduce by 2bit" || logTransform == "Reduce by 2bit lq")
             useBits -= 2;

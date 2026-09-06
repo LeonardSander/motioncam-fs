@@ -105,14 +105,6 @@ void encodeTo14Bit(std::vector<uint8_t>& data, uint32_t& width, uint32_t& height
 // Shading Map Operations
 // ============================================================================
 
-void normalizeShadingMap(std::vector<std::vector<float>>& shadingMap);
-void invertShadingMap(std::vector<std::vector<float>>& shadingMap);
-void colorOnlyShadingMap(
-    std::vector<std::vector<float>>& shadingMap,
-    int lensShadingMapWidth,
-    int lensShadingMapHeight,
-    const std::array<uint8_t, 4> cfa);
-
 float getShadingMapValue(
     float x, float y,
     int channel,

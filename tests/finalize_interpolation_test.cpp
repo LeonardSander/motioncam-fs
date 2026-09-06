@@ -165,6 +165,11 @@ private:
 } // namespace
 
 int main() {
+    const std::array<float, 4> black{64.0f, 64.0f, 64.0f, 64.0f};
+    assert(motioncam::vfs::getDisplayDataLevels(
+        15408.0f, black, 15408.0f, black,
+        "Dynamic", "", true, false, 16) == "15408/64 -> 65535/256 16b");
+
     namespace fs = std::filesystem;
     const auto uncompressedA = makeDng(
         1234, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);

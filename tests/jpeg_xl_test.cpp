@@ -85,6 +85,42 @@ static uint32_t tiffTagValue(const std::vector<uint8_t>& dng, uint16_t wantedTag
     return 0;
 }
 
+static std::vector<uint16_t> tiffShortTagValues(
+        std::vector<uint8_t>& dng, uint16_t wantedTag,
+        const std::vector<uint16_t>* replacement = nullptr) {
+    auto u16 = [&](size_t at) {
+        return static_cast<uint16_t>(dng[at] | dng[at + 1] << 8);
+    };
+    auto u32 = [&](size_t at) {
+        return static_cast<uint32_t>(dng[at] | dng[at + 1] << 8 |
+            dng[at + 2] << 16 | dng[at + 3] << 24);
+    };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t entries = u16(ifd);
+        for (uint16_t i = 0; i < entries; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) != wantedTag || u16(entry + 2) != 3) continue;
+            const uint32_t count = u32(entry + 4);
+            const size_t offset = count * 2 > 4 ? u32(entry + 8) : entry + 8;
+            assert(offset + count * 2 <= dng.size());
+            if (replacement) {
+                assert(replacement->size() == count);
+                for (uint32_t value = 0; value < count; ++value) {
+                    dng[offset + value * 2] = (*replacement)[value] & 0xff;
+                    dng[offset + value * 2 + 1] = (*replacement)[value] >> 8;
+                }
+            }
+            std::vector<uint16_t> result(count);
+            for (uint32_t value = 0; value < count; ++value)
+                result[value] = u16(offset + value * 2);
+            return result;
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + entries * 12);
+    }
+    assert(false && "TIFF SHORT tag not found");
+    return {};
+}
+
 static uint16_t tiffTagType(const std::vector<uint8_t>& dng, uint16_t wantedTag) {
     assert(dng.size() >= 8 && dng[0] == 'I' && dng[1] == 'I');
     auto u16 = [&](size_t offset) {
@@ -669,6 +705,28 @@ int main() {
                                rgb.size() * sizeof(uint16_t)));
     assert(rgbDng.GetStripBytes() > 0);
     auto mountedRgb = writeDng(rgbDng);
+    tinydngwriter::GainMapParams rgbLumaGain{};
+    rgbLumaGain.top = 0; rgbLumaGain.left = 0;
+    rgbLumaGain.bottom = rgbHeight; rgbLumaGain.right = rgbWidth;
+    rgbLumaGain.plane = 0; rgbLumaGain.planes = 3;
+    rgbLumaGain.row_pitch = 1; rgbLumaGain.col_pitch = 1;
+    rgbLumaGain.map_points_v = 2; rgbLumaGain.map_points_h = 2;
+    rgbLumaGain.map_spacing_v = 1.0; rgbLumaGain.map_spacing_h = 1.0;
+    rgbLumaGain.map_planes = 1;
+    rgbLumaGain.gain_data = {1.25f, 1.25f, 1.25f, 1.25f};
+    tinydngwriter::OpcodeList rgbLumaOpcodes;
+    rgbLumaOpcodes.AddGainMap(rgbLumaGain);
+    assert(rgbDng.SetOpcodeList3(rgbLumaOpcodes));
+    auto rgbWithLuma = writeDng(rgbDng);
+    const std::vector<uint16_t> mixedRgbBits{16, 12, 10};
+    assert(tiffShortTagValues(rgbWithLuma, 258, &mixedRgbBits) == mixedRgbBits);
+    assert(motioncam::DNGDecoder::bakeGainMaps(rgbWithLuma, false, false));
+    assert(tiffShortTagValues(rgbWithLuma, 258) ==
+           std::vector<uint16_t>({16, 16, 16}));
+    assert(tiffTagValue(rgbWithLuma, 277) == 3);
+    assert(tiffTagValue(rgbWithLuma, 50717) == 4095);
+    std::vector<motioncam::GainMap> consumedRgbLuma;
+    assert(!motioncam::DNGDecoder::getGainMaps(rgbWithLuma, 3, consumedRgbLuma));
     // RGB is also a valid primary DNG photometric interpretation. Thumbnail
     // removal must not reject the file merely because it has no CFA/LinearRaw IFD.
     assert(rgbDng.SetPhotometric(tinydngwriter::PHOTOMETRIC_RGB));

@@ -7,6 +7,7 @@
 #include "AudioWriter.h"
 #include "LRUCache.h"
 #include "DNGDecoder.h"
+#include "GainMapBake.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -62,12 +63,9 @@ void reorderNativeShadingMapToCfaPhases(
         std::string sensorArrangement) {
     if (metadata.lensShadingMap.size() != 4) return;
     boost::algorithm::to_lower(sensorArrangement);
-    std::array<uint8_t, 4> cfa{};
-    if (sensorArrangement == "rggb") cfa = {0, 1, 1, 2};
-    else if (sensorArrangement == "bggr") cfa = {2, 1, 1, 0};
-    else if (sensorArrangement == "grbg") cfa = {1, 0, 2, 1};
-    else if (sensorArrangement == "gbrg") cfa = {1, 2, 0, 1};
-    else return;
+    if (sensorArrangement != "rggb" && sensorArrangement != "bggr" &&
+        sensorArrangement != "grbg" && sensorArrangement != "gbrg") return;
+    const auto cfa = motioncam::cfaColorsFromPhase(sensorArrangement);
 
     // MotionCam stores Android LensShadingMap channels as R, G-even,
     // G-odd, B. The processing and DNG opcode paths use spatial CFA phases.
@@ -560,14 +558,13 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
         frameIndex >= mSidecarMetadata["dynamic"]["frames"].size()) return;
     const auto& frame = mSidecarMetadata["dynamic"]["frames"][frameIndex];
     const bool bake = mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    // OpcodeList2 was already built from the sidecar-overridden frame metadata
+    // by generateDng(). Only the independently stored deferred layer still
+    // needs to be attached here. Replacing and transforming list 2 again would
+    // run color reduction/optimization twice.
     vfs::replaceSidecarGainMapOpcodes(
-        dng, mSidecarMetadata, frameIndex, !bake, !bake);
-    if (!bake && frame.contains("gainMaps") &&
-        (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
-        !DNGDecoder::transformGainMaps(
-            dng, false, true,
-            mSettings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS))
-        throw std::runtime_error("Could not reduce MCRAW sidecar gain map to color");
+        dng, mSidecarMetadata, frameIndex, false,
+        !bake && !(mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR));
     if (bake && (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
         const char* field = frame.contains("deferredGainMaps")
             ? "deferredGainMaps" : "gainMaps";
@@ -578,6 +575,8 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
                 throw std::runtime_error("Could not apply MCRAW deferred gain-map override");
         }
     }
+    if (!DNGDecoder::canonicalizeGainMapOpcodes(dng))
+        throw std::runtime_error("Could not canonicalize MCRAW sidecar gain maps");
 }
 
 int VirtualFileSystemImpl_MCRAW::readPriority(const Entry& entry) const {

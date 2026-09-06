@@ -6,6 +6,7 @@
 #include "DataLevels.h"
 #include "VirtualFileSystemImpl.h"
 #include "DNGDecoder.h"
+#include "GainMapBake.h"
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +21,37 @@
 
 namespace motioncam {
 namespace utils {
+
+namespace {
+
+std::vector<GainMap> canonicalGainMaps(
+        const std::vector<std::vector<float>>& planes, uint32_t width,
+        uint32_t height) {
+    if (planes.empty()) return {};
+    GainMap map{};
+    map.width = width;
+    map.height = height;
+    map.channels = static_cast<uint32_t>(planes.size());
+    map.rowPitch = map.colPitch = 1;
+    const size_t points = static_cast<size_t>(width) * height;
+    map.data.resize(points * map.channels);
+    for (size_t point = 0; point < points; ++point)
+        for (size_t channel = 0; channel < planes.size(); ++channel)
+            map.data[point * map.channels + channel] = planes[channel][point];
+    return {std::move(map)};
+}
+
+void storeCanonicalGainMaps(const std::vector<GainMap>& maps,
+                            std::vector<std::vector<float>>& planes) {
+    if (maps.empty()) return;
+    const auto& map = maps.front();
+    const size_t points = static_cast<size_t>(map.width) * map.height;
+    for (size_t point = 0; point < points; ++point)
+        for (size_t channel = 0; channel < map.channels; ++channel)
+            planes[channel][point] = map.data[point * map.channels + channel];
+}
+
+} // namespace
 
 void overrideLensShadingMap(
         CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps) {
@@ -286,98 +318,11 @@ namespace {
             return lsUnknown;
     }
 
-    void colorOnlyShadingMapInternal(std::vector<std::vector<float>>& shadingMap, int lensShadingMapWidth, int lensShadingMapHeight, const std::array<uint8_t, 4> cfa) {
-        if (shadingMap.empty() || shadingMap[0].empty())
-            return; // Handle empty case
-
-        float maxValue = 0.0f;
-
-        for (const auto& row : shadingMap) 
-            for (float value : row) 
-                maxValue = std::max(maxValue, value);
-        
-        if (maxValue == 0.0f)   // Avoid division by zero
-            return;
-
-        bool aggressive = false;            //TODO: add ui option for aggressive color fix reduction that if effective breaks awb and might not improve highlight reconstruction
-
-        auto minValue00 = 10.0f;
-        auto minValue01 = 10.0f;
-        auto minValue10 = 10.0f;
-        auto minValue11 = 10.0f;
-
-        for(int j = 0; j < lensShadingMapHeight; j++) {
-            for(int i = 0; i < lensShadingMapWidth; i++) {
-                if(shadingMap[0][j*lensShadingMapWidth+i] < minValue00)
-                    minValue00 = shadingMap[0][j*lensShadingMapWidth+i];
-                if(shadingMap[1][j*lensShadingMapWidth+i] < minValue01)
-                    minValue01 = shadingMap[1][j*lensShadingMapWidth+i];
-                if(shadingMap[2][j*lensShadingMapWidth+i] < minValue10)
-                    minValue10 = shadingMap[2][j*lensShadingMapWidth+i];
-                if(shadingMap[3][j*lensShadingMapWidth+i] < minValue11)
-                    minValue11 = shadingMap[3][j*lensShadingMapWidth+i];
-        }}       
-
-        if (cfa == std::array<uint8_t, 4>{0, 1, 1, 2} || cfa == std::array<uint8_t, 4>{2, 1, 1, 0}) {
-            minValue01 = std::min(minValue01, minValue10);
-            minValue01 = minValue10;
-        } else if (cfa == std::array<uint8_t, 4>{1, 0, 2, 1} || cfa == std::array<uint8_t, 4>{1, 2, 0, 1}) {
-            minValue00 = std::min(minValue00, minValue11);
-            minValue00 = minValue11;
-        }   
-        
-        for(int j = 0; j < lensShadingMapHeight; j++) {
-            for(int i = 0; i < lensShadingMapWidth; i++) {
-                if (aggressive) {                               // remove image-global white balance adjustment in shadingMap     
-                    shadingMap[0][j*lensShadingMapWidth+i] = shadingMap[0][j*lensShadingMapWidth+i] / minValue00;   
-                    shadingMap[1][j*lensShadingMapWidth+i] = shadingMap[1][j*lensShadingMapWidth+i] / minValue01;
-                    shadingMap[2][j*lensShadingMapWidth+i] = shadingMap[2][j*lensShadingMapWidth+i] / minValue10;
-                    shadingMap[3][j*lensShadingMapWidth+i] = shadingMap[3][j*lensShadingMapWidth+i] / minValue11;
-                }
-                auto localMinValue = std::min(shadingMap[0][j*lensShadingMapWidth+i], std::min(shadingMap[1][j*lensShadingMapWidth+i], std::min(shadingMap[2][j*lensShadingMapWidth+i], shadingMap[3][j*lensShadingMapWidth+i])));
-                for(int channel = 0; channel < 4; channel++) {
-                    shadingMap[channel][j*lensShadingMapWidth+i] = shadingMap[channel][j*lensShadingMapWidth+i] / localMinValue;
-                }
-            }
-        }       // For every position in the shading map, divide gain by the minimum value of the four channels
-    }       
-
     inline float getShadingMapValueInternal(
         float x, float y, int channel, const std::vector<std::vector<float>>& lensShadingMap, int lensShadingMapWidth, int lensShadingMapHeight)
     {
-        // Clamp input coordinates to [0, 1] range
-        x = std::max(0.0f, std::min(1.0f, x));
-        y = std::max(0.0f, std::min(1.0f, y));
-
-        // Convert normalized coordinates to map coordinates
-        const float mapX = x * (lensShadingMapWidth - 1);
-        const float mapY = y * (lensShadingMapHeight - 1);
-
-        // Get integer coordinates for the four surrounding pixels
-        const int x0 = static_cast<int>(std::floor(mapX));
-        const int y0 = static_cast<int>(std::floor(mapY));
-        const int x1 = std::min(x0 + 1, lensShadingMapWidth - 1);
-        const int y1 = std::min(y0 + 1, lensShadingMapHeight - 1);
-
-        // Calculate interpolation weights
-        const float wx = mapX - x0;  // Weight for x-direction interpolation
-        const float wy = mapY - y0;  // Weight for y-direction interpolation
-
-        // Get the four surrounding pixel values
-        const float val00 = lensShadingMap[channel][y0*lensShadingMapWidth+x0];  // Top-left
-        const float val01 = lensShadingMap[channel][y0*lensShadingMapWidth+x1];  // Top-right
-        const float val10 = lensShadingMap[channel][y1*lensShadingMapWidth+x0];  // Bottom-left
-        const float val11 = lensShadingMap[channel][y1*lensShadingMapWidth+x1];  // Bottom-right
-
-        // Perform bilinear interpolation
-        const float valTop = val00 * (1.0f - wx) + val01 * wx;     // Interpolation at y0
-        const float valBottom = val10 * (1.0f - wx) + val11 * wx;  // Interpolation at y1
-
-        // Then interpolate along y-axis. Invalid gain-map entries must not be
-        // allowed to reach the float-to-uint16 conversion: on common platforms
-        // a NaN there becomes zero and shows up as a clipped colour channel.
-        const float value = valTop * (1.0f - wy) + valBottom * wy;
-        return std::isfinite(value) && value > 0.0f ? value : 1.0f;
+        return getShadingMapValue(x, y, channel, lensShadingMap,
+                                  lensShadingMapWidth, lensShadingMapHeight);
     }
 }
 
@@ -1012,28 +957,20 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     tinydngwriter::OpcodeList opcodeList3;
 
     if (vignetteOnlyColor) {
-        if (applyShadingMap) {
+        auto maps = canonicalGainMaps(lensShadingMap,
+            metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+        auto separation = lensShadingMap.size() >= 4
+            ? separateGainMapLuminance(maps)
+            : GainMapLuminanceSeparation<GainMap>{};
+        if (applyShadingMap && separation.valid) {
             CameraFrameMetadata luminanceMetadata = metadata;
-            const size_t points = static_cast<size_t>(metadata.lensShadingMapWidth) *
-                                  metadata.lensShadingMapHeight;
-            std::vector<float> luminance(points, 1.0f);
-            for (size_t point = 0; point < points; ++point) {
-                float minimum = std::numeric_limits<float>::max();
-                for (const auto& channel : lensShadingMap)
-                    if (point < channel.size()) minimum = std::min(minimum, channel[point]);
-                if (std::isfinite(minimum) && minimum > 0.0f)
-                    luminance[point] = minimum;
-            }
-            float luminanceMinimum = std::numeric_limits<float>::max();
-            for (float gain : luminance)
-                if (std::isfinite(gain) && gain > 0.0f)
-                    luminanceMinimum = std::min(luminanceMinimum, gain);
-            if (optimizeGainMaps && std::isfinite(luminanceMinimum) && luminanceMinimum > 0.0f) {
+            if (optimizeGainMaps) {
+                const float luminanceMinimum =
+                    normalizePositiveGainMinimum(separation.luminance.data);
                 gainMapExposureOffset += std::log2(luminanceMinimum);
-                for (float& gain : luminance)
-                    if (std::isfinite(gain) && gain > 0.0f) gain /= luminanceMinimum;
             }
-            luminanceMetadata.lensShadingMap.assign(1, luminance);
+            luminanceMetadata.lensShadingMap.assign(
+                1, std::move(separation.luminance.data));
             // OpcodeList3 runs on demosaiced RGB. Its single map plane is
             // reused for all three target image planes.
             opcodeList3 = createLensShadingOpcodeList(
@@ -1041,25 +978,30 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         }
         // Without baking, intentionally discard luminance and retain only the
         // local color ratios in OpcodeList2.
-        if (lensShadingMap.size() >= 4) {
-            utils::colorOnlyShadingMap(lensShadingMap, metadata.lensShadingMapWidth,
-                                       metadata.lensShadingMapHeight, cfa);
-        } else {
+        if (separation.valid)
+            storeCanonicalGainMaps(maps, lensShadingMap);
+        else
             for (auto& plane : lensShadingMap)
                 std::fill(plane.begin(), plane.end(), 1.0f);
-        }
     }
-    // When applying shading map, increase precision
+    if (applyShadingMap) {
+        auto maps = canonicalGainMaps(lensShadingMap,
+            metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+        transformGainMapLayersForBake<GainMap>(
+            std::array<std::vector<GainMap>*, 1>{&maps},
+            normaliseShadingMap, debugShadingMap);
+        storeCanonicalGainMaps(maps, lensShadingMap);
+    }
+    // Linear vignette baking expands the resolved levels by an exact bit shift.
+    // Retaining the correspondingly scaled destination black level gives
+    // unsigned DNG samples room for negative, black-subtracted excursions.
+    // Log encoding remains black-subtracted and uses a zero destination black.
     if(applyShadingMap) {
-        if (normaliseShadingMap)
-            utils::normalizeShadingMap(lensShadingMap);
-        if(normaliseShadingMap) {
-            useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
-        } else {
-            if (debugShadingMap) 
-                utils::invertShadingMap(lensShadingMap);
-            else if (logTransform != LogTransformMode::Disabled) {                 
-                if (logTransform == LogTransformMode::KeepInput) 
+        if (logTransform != LogTransformMode::Disabled) {
+            if (normaliseShadingMap) {
+                useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
+            } else if (!debugShadingMap) {
+                if (logTransform == LogTransformMode::KeepInput)
                     useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0);
                 else if (logTransform == LogTransformMode::ReduceBy2Bit) 
                     useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2));
@@ -1072,14 +1014,20 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                 else 
                     useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
                 useBits = std::max(1, useBits); // Ensure at least 1 bit
-                dstWhiteLevel = std::pow(2.0f, useBits) - 1; 
-            } else {
-                useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                dstWhiteLevel = std::pow(2.0f, useBits) - 1;  
+                dstWhiteLevel = std::pow(2.0f, useBits) - 1;
             }
+            for(auto& v : dstBlackLevel)
+                v = 0;
+        } else {
+            std::array<double, 4> sourceBlack{};
+            std::copy(srcBlackLevel.begin(), srcBlackLevel.end(), sourceBlack.begin());
+            const auto bakeLevels = planLinearGainBake(
+                srcWhiteLevel, sourceBlack, normaliseShadingMap);
+            useBits = static_cast<int>(bakeLevels.destinationBits);
+            dstWhiteLevel = static_cast<float>(bakeLevels.destinationWhite);
+            for (size_t channel = 0; channel < dstBlackLevel.size(); ++channel)
+                dstBlackLevel[channel] = static_cast<float>(bakeLevels.destinationBlack[channel]);
         }
-        for(auto& v : dstBlackLevel)
-            v = 0;
     } else if (logTransform != LogTransformMode::Disabled) {
         if (logTransform == LogTransformMode::ReduceBy2Bit) {
             useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2));
@@ -1198,7 +1146,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                         p[i] = std::max(0.0f, linear[i] * (srcWhiteLevel - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
                 } else if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 4; i++)
-                        p[i] = std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i]) * (dstWhiteLevel - dstBlackLevel[i]);
+                        p[i] = static_cast<float>(applyLinearGain(
+                            s[i], shadingMapVals[i], srcBlackLevel[i], srcWhiteLevel,
+                            dstBlackLevel[i], dstWhiteLevel) - dstBlackLevel[i]);
                 } else {
                     std::array<float, 4> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
                     for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
@@ -1271,7 +1221,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
 
                 if (logTransform == LogTransformMode::Disabled) {               // Linearize and (maybe) apply shading map
                     for (int i = 0; i < 16; i++)
-                        p[i] = std::max(0.0f, p[i] * (dstWhiteLevel - dstBlackLevel[i/4]));
+                        p[i] = static_cast<float>(applyLinearGain(
+                            s[i], shadingMapVals[i], srcBlackLevel[i/4], srcWhiteLevel,
+                            dstBlackLevel[i/4], dstWhiteLevel) - dstBlackLevel[i/4]);
                 } else {
                     std::array<float, 16> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
                     for (int i = 0; i < 16; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
@@ -1373,57 +1325,23 @@ std::shared_ptr<std::vector<char>> generateDng(
         }
     }
 
-    if(sensorArrangement == "rggb")
-        cfa = { 0, 1, 1, 2 };
-    else if(sensorArrangement == "bggr")
-        cfa = { 2, 1, 1, 0 };
-    else if(sensorArrangement == "grbg")
-        cfa = { 1, 0, 2, 1 };
-    else if(sensorArrangement == "gbrg")
-        cfa = { 1, 2, 0, 1 };
-    else
+    if(sensorArrangement != "rggb" && sensorArrangement != "bggr" &&
+       sensorArrangement != "grbg" && sensorArrangement != "gbrg")
         throw std::runtime_error("Invalid sensor arrangement");
+    cfa = cfaColorsFromPhase(sensorArrangement);
 
     CameraFrameMetadata gainMetadata = metadata;
     float gainMapExposureOffset = 0.0f;
     std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
     if ((settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
         !gainMetadata.lensShadingMap.empty()) {
-        std::array<float, 3> channelMin{
-            std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
-            std::numeric_limits<float>::max()};
-        for (size_t plane = 0; plane < gainMetadata.lensShadingMap.size(); ++plane) {
-            const size_t color = plane < cfa.size() ? std::min<size_t>(2, cfa[plane])
-                                                   : std::min<size_t>(2, plane);
-            for (float gain : gainMetadata.lensShadingMap[plane])
-                if (std::isfinite(gain) && gain > 0.0f)
-                    channelMin[color] = std::min(channelMin[color], gain);
-        }
-        if (gainMetadata.lensShadingMap.size() == 1) {
-            float minimum = std::numeric_limits<float>::max();
-            for (float gain : gainMetadata.lensShadingMap[0])
-                if (std::isfinite(gain) && gain > 0.0f)
-                    minimum = std::min(minimum, gain);
-            if (std::isfinite(minimum) && minimum > 0.0f)
-                channelMin.fill(minimum);
-        }
-        float commonMin = std::numeric_limits<float>::max();
-        for (float& value : channelMin) {
-            if (!std::isfinite(value) || value <= 0.0f) value = 1.0f;
-            commonMin = std::min(commonMin, value);
-        }
-        if (std::isfinite(commonMin) && commonMin > 0.0f) {
-            gainMapExposureOffset = std::log2(commonMin);
-            for (size_t color = 0; color < 3; ++color)
-                gainMapNeutralScale[color] = commonMin / channelMin[color];
-            for (size_t plane = 0; plane < gainMetadata.lensShadingMap.size(); ++plane) {
-                const size_t color = plane < cfa.size() ? std::min<size_t>(2, cfa[plane])
-                                                       : std::min<size_t>(2, plane);
-                for (float& gain : gainMetadata.lensShadingMap[plane])
-                    if (std::isfinite(gain) && gain > 0.0f) gain /= channelMin[color];
-            }
-
-        }
+        auto maps = canonicalGainMaps(gainMetadata.lensShadingMap,
+            gainMetadata.lensShadingMapWidth, gainMetadata.lensShadingMapHeight);
+        const auto adjustment = optimizeGainMapLayers<GainMap>(
+            std::array{&maps}, cfa);
+        gainMapExposureOffset = static_cast<float>(adjustment.exposureOffset);
+        gainMapNeutralScale = adjustment.neutralScale;
+        storeCanonicalGainMaps(maps, gainMetadata.lensShadingMap);
     }
 
     // The quality combo retains its selected scale while proxy mode is disabled.
@@ -2094,109 +2012,6 @@ unsigned short bitsNeeded(unsigned short value) {
     return bits;
 }
 
-void normalizeShadingMap(std::vector<std::vector<float>>& shadingMap) {
-    if (shadingMap.empty() || shadingMap[0].empty()) {
-        return;
-    }
-
-    float maxValue = 0.0f;
-    for (const auto& row : shadingMap) {
-        for (float value : row) {
-            maxValue = std::max(maxValue, value);
-        }
-    }
-
-    if (maxValue == 0.0f) {
-        return;
-    }
-
-    for (auto& row : shadingMap) {
-        for (float& value : row) {
-            value /= maxValue;
-        }
-    }
-}
-
-void invertShadingMap(std::vector<std::vector<float>>& shadingMap) {
-    if (shadingMap.empty() || shadingMap[0].empty()) 
-        return;
-    
-    for (const auto& row : shadingMap) 
-        for (float value : row) 
-            if (value <= 0.0f) 
-                return;
-              
-    for (auto& row : shadingMap) 
-        for (float& value : row) 
-            value = 1 / value;
-}
-
-void colorOnlyShadingMap(
-    std::vector<std::vector<float>>& shadingMap,
-    int lensShadingMapWidth,
-    int lensShadingMapHeight,
-    const std::array<uint8_t, 4> cfa)
-{
-    if (shadingMap.empty() || shadingMap[0].empty())
-        return;
-
-    float maxValue = 0.0f;
-    for (const auto& row : shadingMap) 
-        for (float value : row) 
-            maxValue = std::max(maxValue, value);
-    
-    if (maxValue == 0.0f)
-        return;
-
-    bool aggressive = false;
-
-    auto minValue00 = 10.0f;
-    auto minValue01 = 10.0f;
-    auto minValue10 = 10.0f;
-    auto minValue11 = 10.0f;
-
-    for (int j = 0; j < lensShadingMapHeight; j++) {
-        for (int i = 0; i < lensShadingMapWidth; i++) {
-            if (shadingMap[0][j*lensShadingMapWidth+i] < minValue00)
-                minValue00 = shadingMap[0][j*lensShadingMapWidth+i];
-            if (shadingMap[1][j*lensShadingMapWidth+i] < minValue01)
-                minValue01 = shadingMap[1][j*lensShadingMapWidth+i];
-            if (shadingMap[2][j*lensShadingMapWidth+i] < minValue10)
-                minValue10 = shadingMap[2][j*lensShadingMapWidth+i];
-            if (shadingMap[3][j*lensShadingMapWidth+i] < minValue11)
-                minValue11 = shadingMap[3][j*lensShadingMapWidth+i];
-        }
-    }
-
-    if (cfa == std::array<uint8_t, 4>{0, 1, 1, 2} || cfa == std::array<uint8_t, 4>{2, 1, 1, 0}) {
-        minValue01 = std::min(minValue01, minValue10);
-        minValue01 = minValue10;
-    } else if (cfa == std::array<uint8_t, 4>{1, 0, 2, 1} || cfa == std::array<uint8_t, 4>{1, 2, 0, 1}) {
-        minValue00 = std::min(minValue00, minValue11);
-        minValue00 = minValue11;
-    }
-    
-    for (int j = 0; j < lensShadingMapHeight; j++) {
-        for (int i = 0; i < lensShadingMapWidth; i++) {
-            if (aggressive) {
-                shadingMap[0][j*lensShadingMapWidth+i] = shadingMap[0][j*lensShadingMapWidth+i] / minValue00;
-                shadingMap[1][j*lensShadingMapWidth+i] = shadingMap[1][j*lensShadingMapWidth+i] / minValue01;
-                shadingMap[2][j*lensShadingMapWidth+i] = shadingMap[2][j*lensShadingMapWidth+i] / minValue10;
-                shadingMap[3][j*lensShadingMapWidth+i] = shadingMap[3][j*lensShadingMapWidth+i] / minValue11;
-            }
-            auto localMinValue = std::min(
-                shadingMap[0][j*lensShadingMapWidth+i],
-                std::min(shadingMap[1][j*lensShadingMapWidth+i],
-                std::min(shadingMap[2][j*lensShadingMapWidth+i],
-                shadingMap[3][j*lensShadingMapWidth+i])));
-            for (int channel = 0; channel < 4; channel++) {
-                shadingMap[channel][j*lensShadingMapWidth+i] = 
-                    shadingMap[channel][j*lensShadingMapWidth+i] / localMinValue;
-            }
-        }
-    }
-}
-
 float getShadingMapValue(
     float x, float y,
     int channel,
@@ -2204,29 +2019,15 @@ float getShadingMapValue(
     int lensShadingMapWidth,
     int lensShadingMapHeight)
 {
-    x = std::max(0.0f, std::min(1.0f, x));
-    y = std::max(0.0f, std::min(1.0f, y));
-
-    const float mapX = x * (lensShadingMapWidth - 1);
-    const float mapY = y * (lensShadingMapHeight - 1);
-
-    const int x0 = static_cast<int>(std::floor(mapX));
-    const int y0 = static_cast<int>(std::floor(mapY));
-    const int x1 = std::min(x0 + 1, lensShadingMapWidth - 1);
-    const int y1 = std::min(y0 + 1, lensShadingMapHeight - 1);
-
-    const float wx = mapX - x0;
-    const float wy = mapY - y0;
-
-    const float val00 = lensShadingMap[channel][y0*lensShadingMapWidth+x0];
-    const float val01 = lensShadingMap[channel][y0*lensShadingMapWidth+x1];
-    const float val10 = lensShadingMap[channel][y1*lensShadingMapWidth+x0];
-    const float val11 = lensShadingMap[channel][y1*lensShadingMapWidth+x1];
-
-    const float valTop = val00 * (1.0f - wx) + val01 * wx;
-    const float valBottom = val10 * (1.0f - wx) + val11 * wx;
-
-    return valTop * (1.0f - wy) + valBottom * wy;
+    const auto sx = sampleGainMapAxis(
+        std::clamp(x, 0.0f, 1.0f) * (lensShadingMapWidth - 1),
+        lensShadingMapWidth);
+    const auto sy = sampleGainMapAxis(
+        std::clamp(y, 0.0f, 1.0f) * (lensShadingMapHeight - 1),
+        lensShadingMapHeight);
+    return sampleGainMapBilinear(sx, sy, [&](uint32_t px, uint32_t py) {
+        return lensShadingMap[channel][py * lensShadingMapWidth + px];
+    });
 }
 
 void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData,
@@ -2404,10 +2205,7 @@ bool generateJpegThumbnail(
         data.size() < static_cast<size_t>(width) * height * sizeof(uint16_t))
         return false;
 
-    std::array<uint8_t, 4> cfa{0, 1, 1, 2};
-    if (cameraConfiguration.sensorArrangement == "bggr") cfa = {2, 1, 1, 0};
-    else if (cameraConfiguration.sensorArrangement == "grbg") cfa = {1, 0, 2, 1};
-    else if (cameraConfiguration.sensorArrangement == "gbrg") cfa = {1, 2, 0, 1};
+    const auto cfa = cfaColorsFromPhase(cameraConfiguration.sensorArrangement);
 
     const float black = std::accumulate(metadata.dynamicBlackLevel.begin(),
         metadata.dynamicBlackLevel.end(), 0.0f) / 4.0f;

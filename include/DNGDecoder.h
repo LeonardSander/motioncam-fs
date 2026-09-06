@@ -89,6 +89,8 @@ public:
                                  DNGFrameMetadata& metadata);
     static bool getGainMaps(const std::vector<uint8_t>& dngData,
                             int opcodeList, std::vector<GainMap>& gainMaps);
+    static bool hasOnlySinglePlaneGainMap(const std::vector<uint8_t>& dngData,
+                                          int opcodeList);
     static bool replaceGainMaps(std::vector<uint8_t>& dngData,
                                 int opcodeList, const std::vector<GainMap>& gainMaps);
     bool getCFAMetadata(int frameNumber, int& repeatSize, std::array<uint8_t, 4>& phase);
@@ -155,7 +157,8 @@ public:
                                  bool remosaic,
                                  int proxyScale = 1,
                                  bool higherCfaHq = true,
-                                 bool nearestNeighborDemosaic = false);
+                                 bool nearestNeighborDemosaic = false,
+                                 bool topologyOnly = false);
     
     static bool isDNGSequence(const std::string& path);
     static bool imagePayloadsEqual(const std::vector<uint8_t>& left,

@@ -2,6 +2,7 @@
 #include "tinydng/tiny_dng_writer.h"
 #include "liblj92/lj92.h"
 #include "DNGDecoder.h"
+#include "GainMapBake.h"
 #include <jpeglib.h>
 
 #include <algorithm>
@@ -225,6 +226,24 @@ static bool ifdsAreTagSorted(const std::vector<uint8_t>& dng) {
 }
 
 int main() {
+    // Only the two CFA representations may be split into color and luminance.
+    motioncam::GainMap region{};
+    region.top = 0; region.left = 0; region.bottom = 8; region.right = 8;
+    region.plane = 0; region.planes = 1;
+    region.rowPitch = region.colPitch = 2;
+    region.width = region.height = 2;
+    region.spacingV = region.spacingH = 1.0;
+    region.channels = 1;
+    region.data.assign(4, 2.0f);
+    std::vector<motioncam::GainMap> unrelatedRegions(4, region);
+    unrelatedRegions[1].left = 2;
+    unrelatedRegions[2].top = 2;
+    unrelatedRegions[3].top = unrelatedRegions[3].left = 2;
+    const auto originalRegions = unrelatedRegions;
+    assert(!motioncam::reduceGainMapStackToColor(unrelatedRegions));
+    for (size_t i = 0; i < unrelatedRegions.size(); ++i)
+        assert(unrelatedRegions[i].data == originalRegions[i].data);
+
     // Uncompressed tiles, compressed strips, planar LinearRaw, and omitted
     // TIFF defaults all normalize to one chunky, uncompressed strip.
     {
@@ -689,6 +708,23 @@ int main() {
             addedGainMapDng[offset + 3] << 24);
     };
     const uint32_t rootIfd = read32le(4);
+    std::vector<uint8_t> malformedGainMapDng(gainMapDng.begin(), gainMapDng.end());
+    bool corruptedOpcodeList = false;
+    for (uint16_t i = 0; i < read16le(rootIfd); ++i) {
+        const size_t entry = static_cast<size_t>(rootIfd) + 2 + i * 12;
+        if (read16le(entry) != 51009) continue;
+        const uint32_t opcodeOffset = read32le(entry + 8);
+        assert(opcodeOffset + 20 <= malformedGainMapDng.size());
+        // The opcode payload byte count is big-endian. Make it exceed the TIFF
+        // tag payload so baking must reject the malformed list, not ignore it.
+        std::fill_n(malformedGainMapDng.begin() + opcodeOffset + 16, 4, 0xff);
+        corruptedOpcodeList = true;
+        break;
+    }
+    assert(corruptedOpcodeList);
+    assert(!motioncam::DNGDecoder::bakeGainMaps(
+        malformedGainMapDng, false, false));
+
     bool removedOpcodeTag = false;
     for (uint16_t i = 0; i < read16le(rootIfd); ++i) {
         const size_t entry = static_cast<size_t>(rootIfd) + 2 + i * 12;
@@ -816,6 +852,16 @@ int main() {
 
     std::vector<uint8_t> colorBaked(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::bakeGainMaps(colorBaked, false, true));
+    // Color/luminance separation must be representation-independent. A single
+    // four-plane map and its canonical four scalar maps produce identical
+    // baked pixels and the same deferred luminance layer.
+    std::vector<uint8_t> scalarColorBaked(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorBaked));
+    assert(motioncam::DNGDecoder::bakeGainMaps(scalarColorBaked, false, true));
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(colorBaked, scalarColorBaked));
+    std::vector<motioncam::GainMap> scalarLuminanceMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        scalarColorBaked, 3, scalarLuminanceMaps));
     // The unbaked luminance remainder is a single-map-plane OpcodeList3
     // operation targeting all three post-demosaic image planes.
     std::vector<motioncam::GainMap> luminanceMaps;
@@ -828,6 +874,50 @@ int main() {
     assert(luminanceMaps.front().rowPitch == 1);
     assert(luminanceMaps.front().colPitch == 1);
     assert(luminanceMaps.front().channels == 1);
+    assert(scalarLuminanceMaps.size() == 1);
+    assert(scalarLuminanceMaps.front().data == luminanceMaps.front().data);
+
+    // Color-only baking must leave an already deferred luminance map alone.
+    const auto colorOnlyLuminance = colorBaked;
+    std::vector<uint8_t> colorOnlyAgain = colorOnlyLuminance;
+    assert(motioncam::DNGDecoder::bakeGainMaps(colorOnlyAgain, false, true));
+    assert(colorOnlyAgain == colorOnlyLuminance);
+
+    // If both opcode stages carry gain, color-only baking combines the newly
+    // separated luminance with the existing OpcodeList3 remainder instead of
+    // creating a second OpcodeList3 tag.
+    auto existingLuminance = luminanceMaps.front();
+    std::fill(existingLuminance.data.begin(), existingLuminance.data.end(), 2.0f);
+    std::vector<uint8_t> bothOpcodeStages(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        bothOpcodeStages, 3, {existingLuminance}));
+    motioncam::DNGFrameMetadata beforeCombinedOptimization;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        bothOpcodeStages, beforeCombinedOptimization));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        bothOpcodeStages, false, true, true));
+    motioncam::DNGFrameMetadata afterCombinedOptimization;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        bothOpcodeStages, afterCombinedOptimization));
+    assert(std::abs(afterCombinedOptimization.baselineExposure -
+                    beforeCombinedOptimization.baselineExposure - 1.0) < 1e-5);
+    std::vector<motioncam::GainMap> combinedLuminance;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        bothOpcodeStages, 3, combinedLuminance));
+    assert(combinedLuminance.size() == 1);
+    std::vector<motioncam::GainMap> consumedColorMaps;
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        bothOpcodeStages, 2, consumedColorMaps));
+
+    // A later full bake must accept the lone OpcodeList3 luminance remainder;
+    // the channel-relative correction is already present in the pixels.
+    std::vector<uint8_t> fullyBakedAfterColor = colorBaked;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        fullyBakedAfterColor, false, false));
+    std::vector<motioncam::GainMap> consumedLuminanceMaps;
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        fullyBakedAfterColor, 3, consumedLuminanceMaps));
+    assert(consumedLuminanceMaps.empty());
 
     // Legacy MotionCam DNGs store the four CFA phases as four separate
     // one-channel GainMap opcodes. All of them must be transformed in place.
