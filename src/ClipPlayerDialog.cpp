@@ -18,8 +18,12 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSlider>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QCheckBox>
 #include <QStackedLayout>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QStyle>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -59,6 +63,15 @@ QIcon fullscreenIcon(bool restore) {
     return QIcon(pixmap);
 }
 
+QIcon thumbnailChevronIcon(bool up) {
+    QPixmap pixmap(30,30);pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(Qt::white,3.0,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+    const qreal upper=up?9.0:20.0,lower=up?20.0:9.0;
+    painter.drawPolyline(QPolygonF({QPointF(5.0,lower),QPointF(15.0,upper),QPointF(25.0,lower)}));
+    return QIcon(pixmap);
+}
+
 class DuplicateSlider final : public QSlider {
 public:
     explicit DuplicateSlider(QWidget* parent) : QSlider(Qt::Horizontal,parent) {}
@@ -81,10 +94,22 @@ protected:
 private:
     std::shared_ptr<const std::vector<bool>> mDuplicates;
 };
+
+class FrameThumbnailLabel final : public QLabel {
+public:
+    using QLabel::QLabel;
+    std::function<void()> clicked;
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if(event->button()==Qt::LeftButton&&clicked){clicked();event->accept();return;}
+        QLabel::mousePressEvent(event);
+    }
+};
 }
 
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
+    mThumbnailDiskCache=std::make_unique<QTemporaryDir>();
     setAttribute(Qt::WA_DeleteOnClose); setWindowTitle(tr("Mounted clip gallery")); resize(1100,720);
     setStyleSheet("QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
     setMouseTracking(true);
@@ -106,13 +131,30 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     auto* controls=new QHBoxLayout;controls->setSpacing(8);auto* previous=new QPushButton(mOverlay);
     mPlayPause=new QPushButton(mOverlay); auto* next=new QPushButton(mOverlay);
     mAudioButton=new QPushButton(mOverlay);mAudioButton->setCheckable(true);
-    mFullscreenButton=new QPushButton(mOverlay);
-    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)}");}
+    mFullscreenButton=new QPushButton(mOverlay);mThumbnailToggle=new QPushButton(mOverlay);
+    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)}");}
     previous->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));previous->setToolTip(tr("Previous clip"));
     next->setIcon(style()->standardIcon(QStyle::SP_MediaSkipForward));next->setToolTip(tr("Next clip"));
     mPlayPause->setToolTip(tr("Play / pause"));mAudioButton->setToolTip(tr("Mute / unmute audio"));mFullscreenButton->setToolTip(tr("Toggle fullscreen"));
     mFullscreenButton->setIcon(fullscreenIcon(false));
-    controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mAudioButton);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);overlayLayout->addSpacing(20);
+    mThumbnailToggle->setToolTip(tr("Show frame thumbnails"));
+    mThumbnailToggle->setIcon(thumbnailChevronIcon(true));mThumbnailToggle->setIconSize(QSize(22,22));
+    controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mThumbnailToggle);controls->addWidget(mAudioButton);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);
+    mThumbnailScroll=new QScrollArea(mOverlay);mThumbnailScroll->setWidgetResizable(true);
+    mThumbnailScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    mThumbnailScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    mThumbnailScroll->setFixedHeight(170);mThumbnailScroll->setFrameShape(QFrame::NoFrame);
+    mThumbnailScroll->setStyleSheet(
+        "QScrollArea{background:rgba(0,0,0,80);border:0;}"
+        "QWidget#galleryThumbnailContent{background:transparent;}"
+        "QScrollBar:horizontal{background:rgba(0,0,0,25);height:10px;margin:0;border:0;}"
+        "QScrollBar::handle:horizontal{background:rgba(255,255,255,40);min-width:30px;border:0;border-radius:5px;}"
+        "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;border:0;background:transparent;}"
+        "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}");
+    mThumbnailContent=new QWidget(mThumbnailScroll);mThumbnailContent->setObjectName(QStringLiteral("galleryThumbnailContent"));
+    mThumbnailScroll->setWidget(mThumbnailContent);mThumbnailScroll->hide();overlayLayout->addWidget(mThumbnailScroll);overlayLayout->addSpacing(8);
+    connect(mThumbnailScroll->horizontalScrollBar(),&QScrollBar::valueChanged,
+        this,[this]{updateVisibleThumbnailWidgets();});
     mPosition=new DuplicateSlider(mOverlay); mPosition->setRange(0,0);
     mPosition->setStyleSheet("QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
     mPosition->setMouseTracking(true);
@@ -164,6 +206,11 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     });
     connect(&mFrameTimer,&QTimer::timeout,this,&ClipPlayerDialog::showNextFrame);
     connect(mPlayPause,&QPushButton::clicked,this,[this]{
+        if(mPaused&&mThumbnailScroll&&mThumbnailScroll->isVisible()&&mPosition&&
+           mPosition->value()>=mPosition->maximum()&&
+           mDecoder.state()==QProcess::NotRunning&&mFrames.empty()&&mBytes.isEmpty()){
+            openClip(mIndex,0.0);return;
+        }
         mPaused=!mPaused;updateButtonIcons();
         if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseMs=audioPositionMs();mAudioClock.invalidate();mAudioSink->suspend();}}
         else {updateFrameTimerInterval();mFrameTimer.start();if(mAudioEnabled&&mAudioSink){
@@ -174,6 +221,20 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(mAudioButton,&QPushButton::toggled,this,&ClipPlayerDialog::setAudioEnabled);
     connect(previous,&QPushButton::clicked,this,[this]{ if(!mClips.isEmpty())openClip((mIndex-1+mClips.size())%mClips.size()); });
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
+    connect(mThumbnailToggle,&QPushButton::clicked,this,[this]{
+        const bool show=!mThumbnailScroll->isVisible();mThumbnailScroll->setVisible(show);
+        mThumbnailCollectionEnabled->store(show);
+        mThumbnailToggle->setIcon(thumbnailChevronIcon(!show));
+        mThumbnailToggle->setToolTip(show?tr("Hide frame thumbnails"):tr("Show frame thumbnails"));
+        const double seconds=mIndex>=0?mPosition->value()/std::max(1.0,mClips[mIndex].fps):0.0;
+        if(show){
+            rebuildThumbnailStrip();revealOverlay();
+            emit thumbnailBackfillRequested(currentMountId(),seconds);
+        }else{
+            emit currentClipChanged(currentMountId(),seconds);
+            revealOverlay();
+        }
+    });
     connect(mFullscreenButton,&QPushButton::clicked,this,[this]{
         if(isFullScreen())showNormal();else showFullScreen();
         updateButtonIcons();revealOverlay();
@@ -206,11 +267,15 @@ void ClipPlayerDialog::setAutomaticAdvanceEnabled(bool enabled){
 void ClipPlayerDialog::reloadCurrentClip(){if(mIndex>=0)openClip(mIndex,mPositionSeconds);}
 void ClipPlayerDialog::updateClipInfo(int mountId,double fps,double durationSeconds,
         int sourceFrames,int width,int height,
-        std::shared_ptr<const std::vector<bool>> duplicateFrames){
+        std::shared_ptr<const std::vector<bool>> duplicateFrames,
+        std::shared_ptr<const std::vector<int>> sourceFrameToOutput,
+        std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated){
     for(auto& clip:mClips)if(clip.mountId==mountId){
         clip.fps=std::max(1.0,fps);clip.durationSeconds=std::max(0.0,durationSeconds);
         clip.sourceFrames=std::max(1,sourceFrames);clip.width=width;clip.height=height;
-        clip.duplicateFrames=std::move(duplicateFrames);break;
+        clip.duplicateFrames=std::move(duplicateFrames);
+        clip.sourceFrameToOutput=std::move(sourceFrameToOutput);
+        clip.sourceFrameDuplicated=std::move(sourceFrameDuplicated);break;
     }
 }
 
@@ -283,6 +348,8 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mIncomingFrame->store(startFrame);
     mPosition->setRange(0,lastFrame);mPosition->setValue(startFrame);
     static_cast<DuplicateSlider*>(mPosition)->setDuplicates(clip.duplicateFrames);
+    mCurrentThumbnailSource=sourceFrameForOutput(startFrame);
+    if(mThumbnailScroll->isVisible())rebuildThumbnailStrip();
     mPlaybackFailed=false;mPaused=false;mPlayPause->setEnabled(true);updateButtonIcons();
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[index].title)
@@ -294,6 +361,199 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mViewportRefreshPending=false;
     if(mClips[index].sourceFrames>1)startDecoder();
     else {mFrameTimer.stop();mPlayPause->setEnabled(false);}
+}
+
+int ClipPlayerDialog::sourceFrameForOutput(int outputFrame)const{
+    if(mIndex<0||mIndex>=mClips.size())return -1;
+    const auto& map=mClips[mIndex].sourceFrameToOutput;
+    if(!map)return outputFrame;
+    for(int source=0;source<static_cast<int>(map->size());++source)
+        if((*map)[source]==outputFrame)return source;
+    int nearest=-1,nearestOutput=-1;
+    for(int source=0;source<static_cast<int>(map->size());++source)
+        if((*map)[source]>=0&&(*map)[source]<outputFrame&&(*map)[source]>nearestOutput){
+            nearest=source;nearestOutput=(*map)[source];
+        }
+    return nearest;
+}
+
+void ClipPlayerDialog::rebuildThumbnailStrip(){
+    if(!mThumbnailContent||mIndex<0||mIndex>=mClips.size())return;
+    delete mThumbnailContent->layout();
+    const auto children=mThumbnailContent->findChildren<QWidget*>(QString(),Qt::FindDirectChildrenOnly);
+    for(auto* child:children)delete child;
+    mThumbnailLabels.clear();mThumbnailItems.clear();
+    const auto& clip=mClips[mIndex];
+    const int sourceCount=clip.sourceFrameToOutput
+        ?static_cast<int>(clip.sourceFrameToOutput->size()):clip.sourceFrames;
+    constexpr int itemStride=192;
+    mThumbnailContent->setFixedSize(16+sourceCount*itemStride,156);
+    updateVisibleThumbnailWidgets();
+    QTimer::singleShot(0,this,[this]{centerCurrentThumbnail();});
+}
+
+void ClipPlayerDialog::updateVisibleThumbnailWidgets(){
+    if(!mThumbnailContent||!mThumbnailScroll||!mThumbnailScroll->isVisible()||
+       mIndex<0||mIndex>=mClips.size())return;
+    constexpr int itemStride=192;
+    const auto& clip=mClips[mIndex];
+    const int sourceCount=clip.sourceFrameToOutput
+        ?static_cast<int>(clip.sourceFrameToOutput->size()):clip.sourceFrames;
+    const int scroll=mThumbnailScroll->horizontalScrollBar()->value();
+    const int viewport=std::max(1,mThumbnailScroll->viewport()->width());
+    const int first=std::max(0,scroll/itemStride-2);
+    const int last=std::min(sourceCount-1,(scroll+viewport)/itemStride+2);
+    const auto existing=mThumbnailItems.keys();
+    for(int source:existing)if(source<first||source>last){
+        delete mThumbnailItems.take(source)->parentWidget();
+        mThumbnailLabels.remove(source);
+    }
+    for(int source=first;source<=last;++source){
+        if(mThumbnailItems.contains(source))continue;
+        const int output=clip.sourceFrameToOutput&&source<static_cast<int>(clip.sourceFrameToOutput->size())
+            ?(*clip.sourceFrameToOutput)[source]:source;
+        const bool dropped=output<0;
+        const bool duplicated=clip.sourceFrameDuplicated&&source<static_cast<int>(clip.sourceFrameDuplicated->size())&&(*clip.sourceFrameDuplicated)[source];
+        auto* item=new QWidget(mThumbnailContent);item->setGeometry(8+source*itemStride,7,184,142);
+        auto* column=new QVBoxLayout(item);column->setContentsMargins(0,0,0,0);column->setSpacing(2);
+        auto* frameBackground=new QWidget(item);frameBackground->setFixedSize(184,120);
+        frameBackground->setProperty("frameStatusColor",dropped?QColor(235,190,35,60):
+            duplicated?QColor(225,45,45,60):QColor(Qt::transparent));
+        auto* frameLayout=new QHBoxLayout(frameBackground);frameLayout->setContentsMargins(4,4,4,4);
+        auto* label=new FrameThumbnailLabel(frameBackground);label->setFixedSize(176,112);label->setAlignment(Qt::AlignCenter);
+        label->setCursor(Qt::PointingHandCursor);label->setText(dropped?QString():tr("Loading…"));
+        const QString color=dropped?QStringLiteral("transparent"):QStringLiteral("rgba(20,20,20,120)");
+        label->setStyleSheet(QString("background:%1;border:0;").arg(color));
+        label->clicked=[this,source,output,dropped]{
+            if(dropped){
+                if(!mPaused)mPlayPause->click();
+                emit sourceFrameThumbnailRequested(currentMountId(),source);
+            }
+            else seekToFrame(output);
+        };
+        auto* check=new QCheckBox(QString::number(source+1),item);
+        check->setStyleSheet("color:white;background:transparent;");
+        check->setChecked(clip.selectedSourceFrames.contains(source));
+        connect(check,&QCheckBox::toggled,this,[this,source](bool selected){
+            if(mIndex<0)return;
+            if(selected)mClips[mIndex].selectedSourceFrames.insert(source);
+            else mClips[mIndex].selectedSourceFrames.remove(source);
+            emit sourceFrameSelectionChanged(currentMountId(),source,selected);
+        });
+        frameLayout->addWidget(label);
+        column->addWidget(frameBackground);column->addWidget(check,0,Qt::AlignLeft);
+        item->show();mThumbnailLabels.insert(source,label);mThumbnailItems.insert(source,frameBackground);
+        refreshThumbnailLabel(source);
+    }
+}
+
+void ClipPlayerDialog::refreshThumbnailLabel(int sourceFrame){
+    auto* label=mThumbnailLabels.value(sourceFrame,nullptr);if(!label)return;
+    auto* item=mThumbnailItems.value(sourceFrame,nullptr);if(!item)return;
+    const bool current=sourceFrame==mCurrentThumbnailSource;
+    const QColor status=item->property("frameStatusColor").value<QColor>();
+    const QColor background=current?QColor(25,118,210,90):status;
+    item->setStyleSheet(QString("background:rgba(%1,%2,%3,%4);border:0;border-radius:4px;")
+        .arg(background.red()).arg(background.green()).arg(background.blue()).arg(background.alpha())
+        );
+    QImage cached=mThumbnailCache.value(currentMountId()).value(sourceFrame);
+    if(cached.isNull()&&mThumbnailDiskCache&&mThumbnailDiskCache->isValid()){
+        cached.load(thumbnailCachePath(currentMountId(),sourceFrame));
+        if(!cached.isNull())cacheThumbnail(currentMountId(),sourceFrame,cached,false);
+    }
+    if(cached.isNull()){label->setPixmap(QPixmap());return;}
+    label->setPixmap(QPixmap::fromImage(cached));label->setText(QString());
+}
+
+void ClipPlayerDialog::setCurrentThumbnailFrame(int outputFrame){
+    const int source=sourceFrameForOutput(outputFrame);if(source==mCurrentThumbnailSource)return;
+    const int previous=mCurrentThumbnailSource;mCurrentThumbnailSource=source;
+    if(previous>=0)refreshThumbnailLabel(previous);
+    if(source>=0)refreshThumbnailLabel(source);
+    centerCurrentThumbnail();
+}
+
+void ClipPlayerDialog::setDroppedCursorVisible(bool visible){
+    if(mDroppedCursorVisible==visible)return;mDroppedCursorVisible=visible;updateCursorStyle();
+}
+void ClipPlayerDialog::setDuplicateCursorVisible(bool visible){
+    if(mDuplicateCursorVisible==visible)return;mDuplicateCursorVisible=visible;updateCursorStyle();
+}
+void ClipPlayerDialog::updateCursorStyle(){
+    const QString tooltip=QStringLiteral(
+        "QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
+    if(!mDroppedCursorVisible&&!mDuplicateCursorVisible){mPosition->setStyleSheet(tooltip);return;}
+    const QString color=mDroppedCursorVisible?QStringLiteral("#e6bd24"):QStringLiteral("#d93636");
+    const QString border=mDroppedCursorVisible?QStringLiteral("#ffe27a"):QStringLiteral("#ff8585");
+    mPosition->setStyleSheet(tooltip+QString(
+        " QSlider::handle:horizontal{background:%1;border:1px solid %2;"
+        "width:16px;margin:-5px 0;border-radius:8px;}").arg(color,border));
+}
+void ClipPlayerDialog::centerCurrentThumbnail(){
+    if(!mThumbnailScroll||!mThumbnailScroll->isVisible())return;
+    auto* bar=mThumbnailScroll->horizontalScrollBar();
+    const int center=8+mCurrentThumbnailSource*192+92;
+    bar->setValue(std::clamp(center-mThumbnailScroll->viewport()->width()/2,
+        bar->minimum(),bar->maximum()));
+    updateVisibleThumbnailWidgets();
+}
+
+QString ClipPlayerDialog::thumbnailCachePath(int mountId,int sourceFrame)const{
+    if(!mThumbnailDiskCache||!mThumbnailDiskCache->isValid())return {};
+    return QDir(mThumbnailDiskCache->path()).filePath(
+        QStringLiteral("%1-%2.jpg").arg(mountId).arg(sourceFrame));
+}
+
+void ClipPlayerDialog::cacheThumbnail(int mountId,int sourceFrame,const QImage& image,
+                                      bool persistToDisk){
+    constexpr int maximumCachedFrames=512;
+    if(persistToDisk&&mThumbnailDiskCache&&mThumbnailDiskCache->isValid()){
+        const QString path=thumbnailCachePath(mountId,sourceFrame);
+        if(!QFileInfo::exists(path)&&!image.save(path,"JPG",80))
+            spdlog::warn("Could not persist gallery thumbnail cache entry");
+    }
+    auto& cache=mThumbnailCache[mountId];const QPair<int,int> key{mountId,sourceFrame};
+    mThumbnailCacheOrder.removeAll(key);mThumbnailCacheOrder.append(key);
+    cache.insert(sourceFrame,image);
+    while(mThumbnailCacheOrder.size()>maximumCachedFrames){
+        const auto expired=mThumbnailCacheOrder.takeFirst();
+        auto found=mThumbnailCache.find(expired.first);
+        if(found==mThumbnailCache.end())continue;
+        found->remove(expired.second);
+        if(found->isEmpty())mThumbnailCache.erase(found);
+    }
+}
+
+void ClipPlayerDialog::setSourceFrameThumbnail(int sourceFrame,const QByteArray& frame,int width,int height){
+    if(!mThumbnailCollectionEnabled->load())return;
+    const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
+    QImage scaled=image.scaled(QSize(176,112),Qt::KeepAspectRatio,Qt::SmoothTransformation);
+    cacheThumbnail(currentMountId(),sourceFrame,scaled);
+    refreshThumbnailLabel(sourceFrame);
+}
+
+void ClipPlayerDialog::setOutputFrameThumbnail(int outputFrame,const QByteArray& frame,int width,int height){
+    const int source=sourceFrameForOutput(outputFrame);if(source>=0)setSourceFrameThumbnail(source,frame,width,height);
+}
+void ClipPlayerDialog::presentDroppedSourceFrame(int sourceFrame,const QByteArray& frame,int width,int height){
+    if(!mThumbnailCollectionEnabled->load()||mIndex<0)return;
+    setSourceFrameThumbnail(sourceFrame,frame,width,height);
+    const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
+    mLastPresentedImage=image;mLastImageIsSource=true;mWaitingForFirstFrame=false;
+    int cursor=0;const auto& map=mClips[mIndex].sourceFrameToOutput;
+    if(map)for(int source=sourceFrame-1;source>=0;--source)
+        if((*map)[source]>=0){cursor=(*map)[source];break;}
+    mPosition->setValue(cursor);mPlaybackTarget->store(cursor);
+    mPositionSeconds=cursor/std::max(1.0,mClips[mIndex].fps);
+    const int previous=mCurrentThumbnailSource;mCurrentThumbnailSource=sourceFrame;
+    if(previous>=0)refreshThumbnailLabel(previous);
+    refreshThumbnailLabel(sourceFrame);
+    setDuplicateCursorVisible(false);setDroppedCursorVisible(true);
+    centerCurrentThumbnail();updateDisplayedImage();completeFrameStep();
+}
+void ClipPlayerDialog::clearFrameSelections(){
+    for(auto& clip:mClips)clip.selectedSourceFrames.clear();
+    if(mThumbnailScroll&&mThumbnailScroll->isVisible())rebuildThumbnailStrip();
 }
 
 void ClipPlayerDialog::startDecoder(){
@@ -850,6 +1110,8 @@ void ClipPlayerDialog::consumeOutput(){
     }
     if(mBytesOffset==mBytes.size()){mBytes.clear();mBytesOffset=0;}
     else if(mBytesOffset>=qint64(mFrameBytes)*2){mBytes.remove(0,mBytesOffset);mBytesOffset=0;}
+    if(mFrameStepInProgress&&!mFrames.empty())
+        QTimer::singleShot(0,this,&ClipPlayerDialog::showNextFrame);
 }
 void ClipPlayerDialog::showNextFrame(){
     consumeOutput();
@@ -897,15 +1159,21 @@ void ClipPlayerDialog::showNextFrame(){
         }
         const double fps=std::max(1.0,mClips[mIndex].fps);
         const int presentedFrame=std::clamp(queued.sourceFrame,0,mPosition->maximum());
+        setDroppedCursorVisible(false);
+        const auto& duplicateMask=mClips[mIndex].duplicateFrames;
+        setDuplicateCursorVisible(duplicateMask&&presentedFrame<static_cast<int>(duplicateMask->size())&&
+            (*duplicateMask)[presentedFrame]);
         if(!mPosition->isSliderDown())mPosition->setValue(presentedFrame);
+        setCurrentThumbnailFrame(presentedFrame);
         emit framePresented(currentMountId(),presentedFrame);
         mPositionSeconds=(presentedFrame+1)/fps;
+        completeFrameStep();
         // A paused surface refresh still needs to consume and present its
         // first frame. Stop only after that replacement has reached the UI.
         if(mPaused)mFrameTimer.stop();
     }else{
         if(!mPlaybackFailed&&mDecoder.state()==QProcess::NotRunning&&mBytes.isEmpty()){
-            mFrameTimer.stop();if(mClips[mIndex].autoAdvance)advance();else {mPaused=true;updateButtonIcons();}
+            mFrameTimer.stop();if(mClips[mIndex].autoAdvance&&!mThumbnailScroll->isVisible())advance();else {mPaused=true;updateButtonIcons();}
         }
     }
 }
@@ -923,6 +1191,8 @@ void ClipPlayerDialog::updateSeekPosition(int x){
 }
 void ClipPlayerDialog::seekToFrame(int frame){
     if(mIndex<0||mIndex>=mClips.size())return;
+    setDroppedCursorVisible(false);
+    setDuplicateCursorVisible(false);
     const bool wasPaused=mPaused;
     openClip(mIndex,std::clamp(frame,0,mPosition->maximum())/
         std::max(1.0,mClips[mIndex].fps));
@@ -933,6 +1203,59 @@ void ClipPlayerDialog::seekToFrame(int frame){
         // updates queued invisibly until Play was pressed.
         if(mClips[mIndex].sourceFrames>1&&!mFrameTimer.isActive())mFrameTimer.start();
     }
+}
+void ClipPlayerDialog::stepFrame(int direction){
+    if(mIndex<0||!mPosition||direction==0)return;
+    direction=direction>0?1:-1;
+    if(mFrameStepInProgress){mQueuedFrameStep=direction;return;}
+    mFrameStepInProgress=true;
+    if(!mPaused)mPlayPause->click();
+    const auto sourceCount=[this](int index){
+        const auto& map=mClips[index].sourceFrameToOutput;
+        return map?static_cast<int>(map->size()):mClips[index].sourceFrames;
+    };
+    int source=mCurrentThumbnailSource;
+    if(source<0)source=sourceFrameForOutput(mPosition->value());
+    int targetSource=source+direction;
+    if(direction>0&&targetSource>=sourceCount(mIndex)&&!mClips.isEmpty()){
+        const int next=(mIndex+1)%mClips.size();const auto& nextMap=mClips[next].sourceFrameToOutput;
+        int output=0;
+        if(nextMap)for(int candidate=0;candidate<static_cast<int>(nextMap->size());++candidate)
+            if((*nextMap)[candidate]>=0){output=(*nextMap)[candidate];break;}
+        openClip(next,output/std::max(1.0,mClips[next].fps));
+        mPaused=true;updateButtonIcons();
+        if(mClips[mIndex].sourceFrames>1&&!mFrameTimer.isActive())mFrameTimer.start();
+        if(nextMap&&!nextMap->empty()&&(*nextMap)[0]<0)
+            emit sourceFrameThumbnailRequested(currentMountId(),0);
+        return;
+    }
+    if(direction<0&&targetSource<0&&!mClips.isEmpty()){
+        const int previous=(mIndex-1+mClips.size())%mClips.size();
+        targetSource=std::max(0,sourceCount(previous)-1);
+        const auto& previousMap=mClips[previous].sourceFrameToOutput;
+        int output=targetSource;
+        if(previousMap){
+            output=0;for(int candidate=targetSource;candidate>=0;--candidate)
+                if((*previousMap)[candidate]>=0){output=(*previousMap)[candidate];break;}
+        }
+        openClip(previous,output/std::max(1.0,mClips[previous].fps));
+        mPaused=true;updateButtonIcons();
+        if(mClips[mIndex].sourceFrames>1&&!mFrameTimer.isActive())mFrameTimer.start();
+        if(previousMap&&(*previousMap)[targetSource]<0)
+            emit sourceFrameThumbnailRequested(currentMountId(),targetSource);
+        return;
+    }
+    const auto& map=mClips[mIndex].sourceFrameToOutput;
+    if(map&&(*map)[targetSource]<0){
+        emit sourceFrameThumbnailRequested(currentMountId(),targetSource);return;
+    }
+    seekToFrame(map?(*map)[targetSource]:targetSource);
+}
+void ClipPlayerDialog::completeFrameStep(){
+    if(!mFrameStepInProgress)return;
+    mFrameStepInProgress=false;
+    const int queued=mQueuedFrameStep;mQueuedFrameStep=0;
+    if(queued)QTimer::singleShot(0,this,[this,queued]{stepFrame(queued);});
 }
 QString ClipPlayerDialog::runtimeText(double seconds){
     const qint64 milliseconds=std::max<qint64>(0,qRound64(seconds*1000.0));
@@ -955,6 +1278,12 @@ QString ClipPlayerDialog::framePositionText(int frame)const{
 bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     const auto* watchedWidget=qobject_cast<QWidget*>(watched);
     const bool belongsToPlayer=watchedWidget&&watchedWidget->window()==this;
+    if(belongsToPlayer&&event->type()==QEvent::KeyPress){
+        auto* key=static_cast<QKeyEvent*>(event);
+        if(key->key()==Qt::Key_Left||key->key()==Qt::Key_Right){
+            stepFrame(key->key()==Qt::Key_Right?1:-1);event->accept();return true;
+        }
+    }
     if(belongsToPlayer&&(event->type()==QEvent::MouseMove||
                          event->type()==QEvent::MouseButtonPress||
                          event->type()==QEvent::Enter))
@@ -962,6 +1291,15 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     if(belongsToPlayer&&event->type()==QEvent::Wheel){
         revealOverlay();
         const auto* wheel=static_cast<QWheelEvent*>(event);
+        const bool overThumbnails=mThumbnailScroll&&mThumbnailScroll->isVisible()&&
+            watchedWidget&&(watchedWidget==mThumbnailScroll||mThumbnailScroll->isAncestorOf(watchedWidget));
+        if(overThumbnails){
+            const QPoint pixels=wheel->pixelDelta();const QPoint angle=wheel->angleDelta();
+            const int delta=!pixels.isNull()?(pixels.x()!=0?pixels.x():pixels.y()):
+                (angle.x()!=0?angle.x():angle.y())/2;
+            auto* bar=mThumbnailScroll->horizontalScrollBar();
+            bar->setValue(bar->value()-delta);event->accept();return true;
+        }
         const double steps=!wheel->pixelDelta().isNull()
             ? wheel->pixelDelta().y()/40.0 : wheel->angleDelta().y()/120.0;
         changeZoom(steps);event->accept();return true;
@@ -1121,16 +1459,20 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
     const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
     mLastPresentedImage=image;mLastImageIsSource=true;
     mWaitingForFirstFrame=false;
+    setDroppedCursorVisible(false);
+    setDuplicateCursorVisible(false);
     updateDisplayedImage();
+    setCurrentThumbnailFrame(0);
     mFirstFrameReady=true;
     emit firstFramePresented(currentMountId());
+    completeFrameStep();
     if(mAudioEnabled&&mAudioStartPending&&!mPaused){
         startAudioAt(mPositionSeconds);mAudioStartPending=false;
     }
     spdlog::info("Gallery presented processed RGB48 frame {}x{}",width,height);
 }
 void ClipPlayerDialog::finishRgb48Frames(){if(mIndex>=0&&mClips[mIndex].sourceFrames<=1)return;if(mDecoder.state()==QProcess::Running)mDecoder.closeWriteChannel();}
-void ClipPlayerDialog::failRgb48Frames(const QString& error){mPlaybackFailed=true;mFrameTimer.stop();mTitle->setText(tr("Frame rendering failed: %1").arg(error));mDecoder.kill();}
+void ClipPlayerDialog::failRgb48Frames(const QString& error){mPlaybackFailed=true;mFrameTimer.stop();mTitle->setText(tr("Frame rendering failed: %1").arg(error));mDecoder.kill();completeFrameStep();}
 void ClipPlayerDialog::advance(){if(!mClips.isEmpty())openClip((mIndex+1)%mClips.size());}
 void ClipPlayerDialog::closeEvent(QCloseEvent* e){
     mClosing=true;
@@ -1140,6 +1482,7 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
 }
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
+    updateVisibleThumbnailWidgets();
     // Scale-to-fit is viewport-relative. Rebase the hidden wheel
     // accumulator immediately so the next gesture starts at the new fit,
     // rather than jumping from the previous window geometry.
@@ -1160,4 +1503,13 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
         mSurfaceUpdateTimer.setInterval(300);mSurfaceUpdateTimer.start();
     }
 }
-void ClipPlayerDialog::keyPressEvent(QKeyEvent* e){if(e->key()==Qt::Key_Escape&&isFullScreen()){showNormal();updateButtonIcons();e->accept();return;}if(e->key()==Qt::Key_F){mFullscreenButton->click();e->accept();return;}if(e->key()==Qt::Key_Space){mPlayPause->click();e->accept();return;}if(e->key()==Qt::Key_Right){advance();e->accept();return;}if(e->key()==Qt::Key_Left&&!mClips.isEmpty()){openClip((mIndex-1+mClips.size())%mClips.size());e->accept();return;}QDialog::keyPressEvent(e);}
+void ClipPlayerDialog::keyPressEvent(QKeyEvent* e){
+    if(e->key()==Qt::Key_Escape&&isFullScreen()){showNormal();updateButtonIcons();e->accept();return;}
+    if(e->key()==Qt::Key_F){mFullscreenButton->click();e->accept();return;}
+    if(e->key()==Qt::Key_Space){mPlayPause->click();e->accept();return;}
+    if((e->key()==Qt::Key_Right||e->key()==Qt::Key_Left)&&mIndex>=0){
+        stepFrame(e->key()==Qt::Key_Right?1:-1);
+        e->accept();return;
+    }
+    QDialog::keyPressEvent(e);
+}

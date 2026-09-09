@@ -106,24 +106,53 @@ std::vector<Entry> mapFramesToCfr(
             if (pts < nextOutput) { ++droppedFrames; continue; }
             while (nextOutput < pts) {
                 Entry held = sourceEntries[previousSource];
+                held.sourceFrame = static_cast<int>(previousSource);
                 held.duplicateFrame = true;
                 held.name = constructFrameFilename(baseName, nextOutput++, 6, "dng");
                 output.push_back(std::move(held));
                 ++duplicatedFrames;
             }
             Entry current = sourceEntries[i];
+            current.sourceFrame = static_cast<int>(i);
             current.name = constructFrameFilename(baseName, nextOutput++, 6, "dng");
             output.push_back(std::move(current));
             previousSource = i;
         }
     } else {
-        for (const auto& source : sourceEntries) {
-            Entry entry = source;
+        for (size_t i = 0; i < sourceEntries.size(); ++i) {
+            Entry entry = sourceEntries[i];
+            entry.sourceFrame = static_cast<int>(i);
             entry.name = constructFrameFilename(baseName, nextOutput++, 6, "dng");
             output.push_back(std::move(entry));
         }
     }
     return output;
+}
+
+void buildGalleryFrameMap(
+        const std::vector<Timestamp>& sourceTimestamps,
+        const std::vector<Entry>& mappedEntries,
+        std::shared_ptr<const std::vector<int>>& sourceFrameToOutput,
+        std::shared_ptr<const std::vector<bool>>& sourceFrameDuplicated) {
+    auto outputs = std::make_shared<std::vector<int>>(sourceTimestamps.size(), -1);
+    auto duplicated = std::make_shared<std::vector<bool>>(sourceTimestamps.size(), false);
+    int outputFrame = 0;
+    std::vector<int> occurrences(sourceTimestamps.size(), 0);
+    for (const auto& entry : mappedEntries) {
+        if (!boost::algorithm::iends_with(entry.name, ".dng")) continue;
+        if (entry.sourceFrame >= 0 &&
+            entry.sourceFrame < static_cast<int>(sourceTimestamps.size())) {
+            const size_t source = static_cast<size_t>(entry.sourceFrame);
+            if ((*outputs)[source] < 0)
+                (*outputs)[source] = outputFrame;
+            ++occurrences[source];
+        }
+        ++outputFrame;
+    }
+    for (size_t index = 0; index < occurrences.size(); ++index)
+        (*duplicated)[index] = occurrences[index] > 1;
+    sourceFrameToOutput = std::move(outputs);
+    sourceFrameDuplicated = std::move(duplicated);
 }
 
 std::vector<Entry> filterEntries(const std::vector<Entry>& entries, const std::string& filter) {
@@ -642,7 +671,7 @@ for line in sys.stdin:
         const bool dngEntry=isDng(entries[index]);
         const size_t currentDngIndex=dngIndex;
         if(dngEntry)++dngIndex;
-        if(!writeFiles&&dngEntry&&options.skipDngFrame&&
+        if(dngEntry&&options.skipDngFrame&&
            options.skipDngFrame(currentDngIndex)){
             ++completed;skipped[index]=true;ready[index]=true;emitReady();continue;
         }

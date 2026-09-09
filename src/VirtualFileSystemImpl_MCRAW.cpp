@@ -84,7 +84,7 @@ std::string mcrawAnalysisCacheKey(const std::string& path) {
     const auto size = std::filesystem::file_size(absolute, error);
     if (error) return absolute.string();
     const auto modified = std::filesystem::last_write_time(absolute, error);
-    return absolute.string() + ":" + std::to_string(size) +
+    return "timestamp-repair-v1:" + absolute.string() + ":" + std::to_string(size) +
            (error ? "" : ":" + std::to_string(modified.time_since_epoch().count()));
 }
 
@@ -380,8 +380,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
     if (!mSettings.streamingPreview)
         decoder.loadAudio(audioChunks);
 
-    float audioDurationSec = 0.0f;
-
     if(!audioChunks.empty()) {
         auto fpsFraction = utils::toFraction(mFps);
         AudioSampleFormat audioFormat = audioChunks[0].format;
@@ -402,7 +400,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
             decoder.numAudioChannels());
 
         // Calculate total audio duration
-        size_t totalSamples = 0;
         for(auto& x : audioChunks) {
             int numFrames = x.sampleCount() / decoder.numAudioChannels();
             if (audioFormat == AudioSampleFormat::Float32) {
@@ -410,11 +407,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
             } else {
                 audioWriter.write(x.int16Data, numFrames);
             }
-            totalSamples += numFrames;
-        }
-        
-        if (decoder.audioSampleRateHz() > 0) {
-            audioDurationSec = static_cast<float>(totalSamples) / static_cast<float>(decoder.audioSampleRateHz());
         }
     }
 
@@ -462,6 +454,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
             boost::filesystem::path(entry.name).extension() == ".DNG")
             duplicateMask->push_back(entry.duplicateFrame);
     mFileInfo.duplicateFrameMask = std::move(duplicateMask);
+    vfs::buildGalleryFrameMap(frames, mFiles,
+        mFileInfo.sourceFrameToOutput, mFileInfo.sourceFrameDuplicated);
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
@@ -472,7 +466,20 @@ void VirtualFileSystemImpl_MCRAW::init() {
         mSettings.levels, logTransformModeToString(mSettings.logTransform),
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
         mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
-    mFileInfo.runtimeSeconds = audioDurationSec;
+    // Video timestamps/frame mapping define clip duration. Audio capture can
+    // start late or end early and must not shorten or extend the image stream.
+    if (applyCFRConversion) {
+        mFileInfo.runtimeSeconds = mFps > 0.0f
+            ? static_cast<float>(mapped.size()) / mFps : 0.0f;
+    } else if (frames.size() > 1) {
+        const double spanSeconds = static_cast<double>(frames.back() - frames.front()) / 1e9;
+        const double finalFrameSeconds = mFrameRateInfo.medianFrameRate > 0.0f
+            ? 1.0 / mFrameRateInfo.medianFrameRate : 0.0;
+        mFileInfo.runtimeSeconds = static_cast<float>(
+            std::max(0.0, spanSeconds + finalFrameSeconds));
+    } else {
+        mFileInfo.runtimeSeconds = mFps > 0.0f ? 1.0f / mFps : 0.0f;
+    }
     if (!mAudioFile.empty())
         mFileInfo.audioWav = std::make_shared<const std::vector<uint8_t>>(mAudioFile);
     mFileInfo.presentationTimestamps =

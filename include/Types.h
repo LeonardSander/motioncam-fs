@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <locale>
 
 #include <boost/filesystem.hpp>
 
@@ -37,6 +38,9 @@ struct Entry {
     std::variant<int64_t> userData;
     bool duplicateFrame = false;
     bool syntheticFrame = false;
+    // Stable identity of the original image. Unlike timestamps, this remains
+    // unambiguous when damaged or repeated timestamps occur.
+    int sourceFrame = -1;
 
     // Custom hash function for Entry
     struct Hash {
@@ -301,14 +305,21 @@ inline CFRTarget stringToCFRTarget(const std::string& str) {
     if (str == "Median (Slowmotion)") return CFRTarget(CFRMode::MedianSlowMotion);
     if (str == "Average (Testing)") return CFRTarget(CFRMode::AverageTesting);
 
-    // Try to parse as custom float
+    // Parse custom rates independently of the process locale. std::stof uses
+    // the current C locale, so a German locale can reject the decimal point
+    // used by the UI presets and silently fall back to Prefer Integer.
     try {
         std::string normalized = str;
         if (normalized.find('.') == std::string::npos)
             std::replace(normalized.begin(), normalized.end(), ',', '.');
-        std::size_t parsed = 0;
-        float value = std::stof(normalized, &parsed);
-        if (normalized.find_first_not_of(" \t\r\n", parsed) != std::string::npos)
+        std::istringstream stream(normalized);
+        stream.imbue(std::locale::classic());
+        float value = 0.0f;
+        if (!(stream >> value))
+            throw std::invalid_argument("invalid frame rate");
+        stream >> std::ws;
+        if (stream.peek() != std::char_traits<char>::eof() ||
+            !std::isfinite(value) || value <= 0.0f)
             throw std::invalid_argument("trailing characters in frame rate");
         return CFRTarget(CFRMode::Custom, value);
     } catch (...) {
@@ -440,8 +451,8 @@ struct FinalizeOptions {
     // Skip this many source DNG frames before finalization. Used by streaming
     // preview so seeking does not render and discard every preceding frame.
     size_t firstDngFrame = 0;
-    // Streaming previews may discard an overdue output frame before its
-    // expensive materialization. The index is in the complete DNG sequence.
+    // Discard an output DNG before materialization. Used by streaming previews
+    // and selective on-disk finalization. The index is in the complete DNG sequence.
     std::function<bool(size_t)> skipDngFrame;
     bool interpolateDuplicatedFrames = false;
     // Compare adjacent source DNG image payloads and mark matching finalized

@@ -362,6 +362,24 @@ int main() {
     assert(motioncam::vfs::outputTimestamp(
         cadence[2], 2000000000LL, 0, 1.0f, true) == 2000000000LL);
 
+    // Source identity must not depend on timestamps being unique. Cameras can
+    // emit repeated or repaired timestamps without making either frame a drop.
+    std::vector<motioncam::Entry> repeatedTimestampSources(2);
+    repeatedTimestampSources[0].type=repeatedTimestampSources[1].type=
+        motioncam::EntryType::FILE_ENTRY;
+    repeatedTimestampSources[0].userData=repeatedTimestampSources[1].userData=42LL;
+    int repeatedDrops=0,repeatedDuplicates=0;
+    const auto repeatedMapped=motioncam::vfs::mapFramesToCfr(
+        repeatedTimestampSources,{42LL,42LL},"repeat-",24.0f,false,
+        repeatedDrops,repeatedDuplicates);
+    std::shared_ptr<const std::vector<int>> repeatedOutputs;
+    std::shared_ptr<const std::vector<bool>> repeatedFlags;
+    motioncam::vfs::buildGalleryFrameMap({42LL,42LL},repeatedMapped,
+        repeatedOutputs,repeatedFlags);
+    assert(repeatedOutputs&&repeatedOutputs->size()==2);
+    assert((*repeatedOutputs)[0]==0&&(*repeatedOutputs)[1]==1);
+    assert(!(*repeatedFlags)[0]&&!(*repeatedFlags)[1]);
+
     motioncam::Entry mountedEntry;
     mountedEntry.type = motioncam::EntryType::FILE_ENTRY;
     mountedEntry.name = "frame-000001.dng";

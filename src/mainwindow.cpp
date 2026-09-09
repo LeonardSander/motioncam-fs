@@ -22,6 +22,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QKeyEvent>
+#include <QCloseEvent>
 
 using namespace motioncam;
 #include <QMimeData>
@@ -38,12 +39,14 @@ using namespace motioncam;
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDir>
+#include <QDirIterator>
 #include <QSignalBlocker>
 #include <QLabel>
 #include <QPainter>
 #include <QFrame>
 #include <QProgressDialog>
 #include <QProgressBar>
+#include <QScrollBar>
 #include <QThread>
 #include <QUuid>
 #include <QTemporaryDir>
@@ -90,6 +93,60 @@ extern "C" {
 #endif
 
 namespace {
+    bool mergeDirectoryContents(const QString& sourcePath,const QString& destinationPath,
+                                QString& error) {
+        if(!QDir().mkpath(destinationPath)){
+            error=QObject::tr("Could not create selection folder");return false;
+        }
+        QDir source(sourcePath);
+        QDirIterator iterator(sourcePath,QDir::Files|QDir::NoDotAndDotDot,
+                              QDirIterator::Subdirectories);
+        while(iterator.hasNext()){
+            const QString sourceFile=iterator.next();
+            const QString relative=source.relativeFilePath(sourceFile);
+            const QString destinationFile=QDir(destinationPath).filePath(relative);
+            if(!QDir().mkpath(QFileInfo(destinationFile).absolutePath())){
+                error=QObject::tr("Could not create selection subfolder for %1").arg(relative);
+                return false;
+            }
+            QFile input(sourceFile);QSaveFile destination(destinationFile);
+            if(!input.open(QIODevice::ReadOnly)||!destination.open(QIODevice::WriteOnly)){
+                error=QObject::tr("Could not save selected frame %1").arg(relative);
+                return false;
+            }
+            while(!input.atEnd()){
+                const QByteArray block=input.read(1024*1024);
+                if(block.isEmpty()&&input.error()!=QFileDevice::NoError){
+                    destination.cancelWriting();
+                    error=QObject::tr("Could not read finalized frame %1").arg(relative);
+                    return false;
+                }
+                if(destination.write(block)!=block.size()){
+                    destination.cancelWriting();
+                    error=QObject::tr("Could not save selected frame %1").arg(relative);
+                    return false;
+                }
+            }
+            if(!destination.commit()){
+                error=QObject::tr("Could not overwrite selected frame %1").arg(relative);
+                return false;
+            }
+            input.close();QFile::remove(sourceFile);
+        }
+        return true;
+    }
+
+    void removeAdjacentClipSeparator(QVBoxLayout* layout, int cardIndex) {
+        if (!layout || cardIndex < 0) return;
+        const int candidates[] = {cardIndex - 1, cardIndex + 1};
+        for (const int index : candidates) {
+            if (index < 0 || index >= layout->count()) continue;
+            auto* frame = qobject_cast<QFrame*>(layout->itemAt(index)->widget());
+            if (!frame || frame->frameShape() != QFrame::HLine) continue;
+            layout->removeWidget(frame);frame->deleteLater();return;
+        }
+    }
+
     bool invertColorMatrix(const std::array<float, 9>& input,
                            std::array<float, 9>& inverse);
     bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
@@ -868,6 +925,15 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(ui->defaultBtn, &QPushButton::clicked, this, &MainWindow::onSetDefaultSettings);
 
+    auto* selectedFrameButtons = new QHBoxLayout();
+    mFinalizeSelectedFramesButton = new QPushButton(tr("Finalize Selected Frames"), this);
+    mClearSelectedFramesButton = new QPushButton(tr("Clear Selected Frames"), this);
+    selectedFrameButtons->addWidget(mFinalizeSelectedFramesButton);
+    selectedFrameButtons->addWidget(mClearSelectedFramesButton);
+    ui->compressionSection->addLayout(selectedFrameButtons);
+    connect(mFinalizeSelectedFramesButton,&QPushButton::clicked,this,&MainWindow::finalizeSelectedFrames);
+    connect(mClearSelectedFramesButton,&QPushButton::clicked,this,&MainWindow::clearSelectedFrames);
+
     ui->defaultSection->removeWidget(ui->defaultBtn);
     auto* applyButtons = new QHBoxLayout();
     mApplySelectedButton = new QPushButton(tr("Apply to Selected"), this);
@@ -1167,6 +1233,12 @@ void MainWindow::restoreSettings() {
     ui->logTransformComboBox->setCurrentText(QString::fromStdString(logTransformModeToString(mRenderSettings.logTransform)));
 
     updateUi();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event) {
+    ++mGalleryGeneration;
+    if (mClipPlayer) mClipPlayer->close();
+    QMainWindow::closeEvent(event);
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
@@ -1656,6 +1728,19 @@ void MainWindow::mountFile(const QString& filePath) {
         autoSaveSession();
     });
 
+    // Dynamic clip cards live before the designer's stretch/empty-state
+    // items. Append at the end of that dynamic section so visual order matches
+    // import/session order.
+    int insertionIndex = 0;
+    while (insertionIndex < scrollLayout->count()) {
+        auto* widget = scrollLayout->itemAt(insertionIndex)->widget();
+        if (!widget || (!widget->property("clipCard").toBool() &&
+                        !(qobject_cast<QFrame*>(widget) &&
+                          qobject_cast<QFrame*>(widget)->frameShape() == QFrame::HLine)))
+            break;
+        ++insertionIndex;
+    }
+
     // Add separator if there are already mounted files
     if (!mMountedFiles.empty()) {
         auto* separator = new QFrame(scrollContent);
@@ -1664,11 +1749,24 @@ void MainWindow::mountFile(const QString& filePath) {
         separator->setFrameShadow(QFrame::Plain);
         separator->setLineWidth(1);
         separator->setStyleSheet("QFrame { color: #e0e0e0; margin: 16px 0px; }");
-        scrollLayout->insertWidget(0, separator);
+        scrollLayout->insertWidget(insertionIndex++, separator);
     }
 
     // Add the file widget to the scroll area
-    scrollLayout->insertWidget(0, fileWidget);
+    scrollLayout->insertWidget(insertionIndex, fileWidget);
+    if (mImportBatchActive) {
+        QTimer::singleShot(0, this, [this] {
+            auto* area=ui->dragAndDropScrollArea;
+            if(area->widget()&&area->widget()->layout())area->widget()->layout()->activate();
+            auto* bar=area->verticalScrollBar();bar->setValue(bar->maximum());
+            // Scroll ranges may receive one more geometry update after the
+            // card's images/labels settle. Follow that final range as well.
+            QTimer::singleShot(0,this,[this]{
+                auto* finalBar=ui->dragAndDropScrollArea->verticalScrollBar();
+                finalBar->setValue(finalBar->maximum());
+            });
+        });
+    }
     updateClipIndices();
     if (!mGalleryPerformanceTestActive) {
         QTimer::singleShot(250, this, [this, mountId] { updateThumbnail(mountId); });
@@ -1793,7 +1891,8 @@ motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountI
     return settings;
 }
 
-void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeconds) {
+void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeconds,
+                                    bool backfillThumbnails) {
     auto settings = previewRenderSettings(settingsForMount(mountId));
     const auto info = mFuseFilesystem->getFileInfo(mountId);
     if (!info) return;
@@ -1806,15 +1905,18 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
         ? (info->fps > 0.0f ? info->fps : 24.0f) : 1.0;
     const int playbackFrames=std::max(1,info->totalFrames-info->droppedFrames+
         info->duplicatedFrames);
-    const size_t firstFrame = static_cast<size_t>(std::clamp(
+    const size_t playbackFirstFrame = static_cast<size_t>(std::clamp(
         std::floor(startSeconds * previewFps), 0.0,
         static_cast<double>(playbackFrames-1)));
+    const size_t firstFrame = backfillThumbnails ? 0 : playbackFirstFrame;
     QPointer<ClipPlayerDialog> player(mClipPlayer);
     const auto playbackTarget=mClipPlayer->playbackTarget();
     const auto incomingFrame=mClipPlayer->incomingFrame();
+    const auto thumbnailCollectionEnabled=mClipPlayer->thumbnailCollectionEnabled();
     const bool diagnostics = mGalleryPerformanceTestActive;
-    auto render = [this, mountId, settings, generation, firstFrame, player,
-                   playbackTarget, incomingFrame, diagnostics] {
+    auto render = [this, mountId, settings, generation, firstFrame, playbackFirstFrame,
+                   backfillThumbnails, player, playbackTarget, incomingFrame,
+                   thumbnailCollectionEnabled, diagnostics] {
         const auto taskStarted = std::chrono::steady_clock::now();
         size_t deliveredFrames = 0;
         double displayDecodeMs = 0.0;
@@ -1842,7 +1944,11 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
         try {
             motioncam::FinalizeOptions options;
             options.firstDngFrame = firstFrame;
-            options.skipDngFrame = [playbackTarget,incomingFrame](size_t frame) {
+            options.skipDngFrame = [playbackTarget,incomingFrame,backfillThumbnails,
+                                    playbackFirstFrame](size_t frame) {
+                if(backfillThumbnails&&frame<playbackFirstFrame){
+                    incomingFrame->store(static_cast<int>(frame));return false;
+                }
                 const bool skip=frame<static_cast<size_t>(std::max(0,playbackTarget->load()));
                 if(!skip)incomingFrame->store(static_cast<int>(frame));
                 return skip;
@@ -1853,7 +1959,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                 [this, generation](size_t, size_t, const std::string&) {
                     return mGalleryGeneration.load() == generation;
                 },
-                [this, generation, player, settings, &presentedFirstFrame,
+                [this, generation, player, mountId, settings, incomingFrame, thumbnailCollectionEnabled,
+                 backfillThumbnails, playbackTarget, &presentedFirstFrame,
                  &deliveredFrames, &displayDecodeMs, &deliveryWaitMs](
                     const std::vector<uint8_t>& dng, motioncam::Timestamp) {
                     // A materialization already in progress may complete after
@@ -1871,6 +1978,18 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     const auto deliveryStarted = std::chrono::steady_clock::now();
                     const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),
                                            static_cast<qsizetype>(rgb.size()));
+                    const int thumbnailOutputFrame=incomingFrame->load();
+                    if(thumbnailCollectionEnabled->load()){
+                        QMetaObject::invokeMethod(this,[this,player,mountId,generation,
+                                                        thumbnailCollectionEnabled,bytes,width,height,
+                                                        thumbnailOutputFrame]{
+                            if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
+                               player->currentMountId()==mountId&&thumbnailCollectionEnabled->load())
+                                player->setOutputFrameThumbnail(thumbnailOutputFrame,bytes,
+                                static_cast<int>(width),static_cast<int>(height));
+                        },Qt::QueuedConnection);
+                    }
+                    if(backfillThumbnails&&thumbnailOutputFrame<playbackTarget->load())return;
                     if (!presentedFirstFrame) {
                         QMetaObject::invokeMethod(this, [&, width, height] {
                             if (mGalleryGeneration.load() != generation) return;
@@ -1964,6 +2083,9 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
         clip.duplicateFrames = info->duplicateFrameMask;
+        clip.sourceFrameToOutput = info->sourceFrameToOutput;
+        clip.sourceFrameDuplicated = info->sourceFrameDuplicated;
+        clip.selectedSourceFrames = mSelectedFrames.value(mounted.mountId);
         clips.push_back(std::move(clip));
     }
     if (clips.isEmpty()) return;
@@ -1983,8 +2105,119 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         ++mGalleryGeneration;
         mGalleryMountId = motioncam::InvalidMountId;
     });
+    connect(mClipPlayer,&ClipPlayerDialog::sourceFrameSelectionChanged,this,
+        [this](int id,int frame,bool selected){
+            if(selected)mSelectedFrames[id].insert(frame);
+            else {mSelectedFrames[id].remove(frame);if(mSelectedFrames[id].isEmpty())mSelectedFrames.remove(id);}
+            autoSaveSession();
+            if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
+        });
+    connect(mClipPlayer,&ClipPlayerDialog::sourceFrameThumbnailRequested,this,
+        &MainWindow::renderDroppedFrameThumbnail);
+    connect(mClipPlayer,&ClipPlayerDialog::thumbnailBackfillRequested,this,
+        [this](int id,double seconds){startGalleryRender(id,seconds,true);});
     mClipPlayer->show();
     if (startRender) startGalleryRender(mountId);
+}
+
+void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sourceFrame){
+    if(!mClipPlayer||sourceFrame<0)return;
+    const auto generation=++mGalleryGeneration;
+    auto settings=previewRenderSettings(settingsForMount(mountId));
+    settings.options=static_cast<motioncam::FileRenderOptions>(
+        static_cast<unsigned int>(settings.options)&
+        ~static_cast<unsigned int>(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+    QPointer<ClipPlayerDialog> player(mClipPlayer);
+    auto render=[this,mountId,sourceFrame,settings,generation,player]{
+        std::unique_lock gallerySlot(mGalleryRenderMutex);
+        if(mGalleryGeneration.load()!=generation)return;
+        try{
+            motioncam::FinalizeOptions options;options.firstDngFrame=static_cast<size_t>(sourceFrame);
+            options.skipDngFrame=[sourceFrame](size_t frame){return frame!=static_cast<size_t>(sourceFrame);};
+            bool delivered=false;
+            mFuseFilesystem->finalizePreview(mountId,settings,options,
+                [this,generation](size_t,size_t,const std::string&){return mGalleryGeneration.load()==generation;},
+                [this,generation,player,mountId,sourceFrame,&delivered,settings](const std::vector<uint8_t>& dng,motioncam::Timestamp){
+                    if(delivered||mGalleryGeneration.load()!=generation)return;
+                    std::vector<uint8_t> rgb;uint32_t width=0,height=0;
+                    if(!decodePreviewFrame(dng,settings,rgb,width,height))return;
+                    delivered=true;
+                    const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),static_cast<qsizetype>(rgb.size()));
+                    QMetaObject::invokeMethod(this,[this,player,mountId,generation,sourceFrame,bytes,width,height]{
+                        if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
+                           player->currentMountId()==mountId&&player->thumbnailCollectionEnabled()->load())
+                            player->presentDroppedSourceFrame(sourceFrame,bytes,
+                            static_cast<int>(width),static_cast<int>(height));
+                    },Qt::QueuedConnection);
+                });
+        }catch(const std::exception& error){spdlog::warn("Dropped-frame thumbnail failed: {}",error.what());}
+        QMetaObject::invokeMethod(this,[this,player,mountId,generation]{
+            if(mGalleryGeneration.load()!=generation||!player||player!=mClipPlayer||
+               player->currentMountId()!=mountId||!player->thumbnailCollectionEnabled()->load())return;
+            const auto info=mFuseFilesystem->getFileInfo(mountId);
+            const double fps=info&&info->fps>0.0f?info->fps:24.0;
+            startGalleryRender(mountId,std::max(0,player->playbackTarget()->load())/fps);
+        },Qt::QueuedConnection);
+    };
+    mGalleryTasks.addFuture(QtConcurrent::run(std::move(render)));
+}
+
+void MainWindow::clearSelectedFrames(){
+    mSelectedFrames.clear();autoSaveSession();
+    if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
+    if(mClipPlayer)mClipPlayer->clearFrameSelections();
+}
+
+void MainWindow::finalizeSelectedFrames(){
+    QList<motioncam::MountId> renderIds;
+    if(mSelectedMountIds.isEmpty()){
+        for(const auto& mounted:mMountedFiles)if(!mSelectedFrames.value(mounted.mountId).isEmpty())renderIds.append(mounted.mountId);
+    }else{
+        for(auto id:mSelectedMountIds)if(!mSelectedFrames.value(id).isEmpty())renderIds.append(id);
+    }
+    if(renderIds.isEmpty()){
+        QMessageBox::information(this,tr("Finalize Selected Frames"),tr("No frames are selected in the target clips."));return;
+    }
+    for(auto mountId:renderIds){
+        auto* card=fileWidgetForMount(mountId);if(!card)continue;
+        const QString output=card->property("mountPath").toString()+QStringLiteral("-selection");
+        const QString temporary=output+QStringLiteral(".finalizing-")+QUuid::createUuid().toString(QUuid::WithoutBraces);
+        QDir().mkpath(temporary);
+        const auto selected=mSelectedFrames.value(mountId);
+        auto original=settingsForMount(mountId);auto sourceSettings=original;
+        sourceSettings.options=static_cast<motioncam::FileRenderOptions>(
+            static_cast<unsigned int>(sourceSettings.options)&
+            ~static_cast<unsigned int>(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+        mFuseFilesystem->updateOptions(mountId,sourceSettings);
+        motioncam::FinalizeOptions options;
+        options.skipDngFrame=[selected](size_t frame){return !selected.contains(static_cast<int>(frame));};
+        QProgressDialog progress(tr("Finalizing selected frames…"),tr("Cancel"),0,selected.size(),this);
+        progress.setWindowModality(Qt::WindowModal);progress.setMinimumDuration(0);
+        try{
+            mFuseFilesystem->finalize(mountId,temporary.toStdString(),false,options,
+                [&progress](size_t completed,size_t count,const std::string& name){
+                    progress.setMaximum(static_cast<int>(count));progress.setValue(static_cast<int>(completed));
+                    if(!name.empty())progress.setLabelText(QString::fromStdString(name));
+                    QApplication::processEvents();return !progress.wasCanceled();
+                });
+            mFuseFilesystem->updateOptions(mountId,original);
+            if(progress.wasCanceled()){QDir(temporary).removeRecursively();continue;}
+            if(!QFileInfo::exists(output)){
+                if(!QDir(QFileInfo(output).absolutePath()).rename(temporary,output))
+                    throw std::runtime_error("Could not publish selection folder");
+            }else{
+                QString mergeError;
+                if(!mergeDirectoryContents(temporary,output,mergeError))
+                    throw std::runtime_error(mergeError.toStdString());
+                QDir(temporary).removeRecursively();
+            }
+        }catch(const std::exception& error){
+            mFuseFilesystem->updateOptions(mountId,original);QDir(temporary).removeRecursively();
+            if(progress.wasCanceled()||std::string(error.what())=="Finalization cancelled")return;
+            QMessageBox::critical(this,tr("Finalize Selected Frames"),QString::fromUtf8(error.what()));return;
+        }
+    }
+    QMessageBox::information(this,tr("Finalize Selected Frames"),tr("Selected frames were saved to each clip's -selection folder."));
 }
 
 void MainWindow::startGalleryPerformanceTest(
@@ -2334,20 +2567,8 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
     const QString mountPath = fileWidget->property("mountPath").toString();
 
-    // Find and remove the separator above this file widget if it exists
     int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
-    if (fileWidgetIndex > 0) {
-        auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
-        if (itemAbove && itemAbove->widget()) {
-            auto* widgetAbove = itemAbove->widget();
-            // Check if it's a separator (QFrame with HLine shape)
-            auto* frame = qobject_cast<QFrame*>(widgetAbove);
-            if (frame && frame->frameShape() == QFrame::HLine) {
-                scrollLayout->removeWidget(frame);
-                frame->deleteLater();
-            }
-        }
-    }
+    removeAdjacentClipSeparator(scrollLayout,fileWidgetIndex);
 
     scrollLayout->removeWidget(fileWidget);
     fileWidget->deleteLater();
@@ -2365,6 +2586,7 @@ void MainWindow::removeFile(QWidget* fileWidget) {
         if (auto* dialog = mTimingDialogs.value(mountId).data()) dialog->close();
         mFuseFilesystem->unmount(mountId);
         mSelectedMountIds.remove(mountId);
+        mSelectedFrames.remove(mountId);
         mLocalSettings.remove(mountId);
 
 #ifdef _WIN32
@@ -2479,17 +2701,7 @@ void MainWindow::discardFile(QWidget* fileWidget) {
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
 
     int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
-    if (fileWidgetIndex > 0) {
-        auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
-        if (itemAbove && itemAbove->widget()) {
-            auto* widgetAbove = itemAbove->widget();
-            auto* frame = qobject_cast<QFrame*>(widgetAbove);
-            if (frame && frame->frameShape() == QFrame::HLine) {
-                scrollLayout->removeWidget(frame);
-                frame->deleteLater();
-            }
-        }
-    }
+    removeAdjacentClipSeparator(scrollLayout,fileWidgetIndex);
 
     scrollLayout->removeWidget(fileWidget);
     fileWidget->deleteLater();
@@ -3554,17 +3766,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
 
     int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
-    if (fileWidgetIndex > 0) {
-        auto* itemAbove = scrollLayout->itemAt(fileWidgetIndex - 1);
-        if (itemAbove && itemAbove->widget()) {
-            auto* widgetAbove = itemAbove->widget();
-            auto* frame = qobject_cast<QFrame*>(widgetAbove);
-            if (frame && frame->frameShape() == QFrame::HLine) {
-                scrollLayout->removeWidget(frame);
-                frame->deleteLater();
-            }
-        }
-    }
+    removeAdjacentClipSeparator(scrollLayout,fileWidgetIndex);
 
     scrollLayout->removeWidget(fileWidget);
     fileWidget->deleteLater();
@@ -3838,7 +4040,7 @@ void MainWindow::updateClipIndices() {
     auto* layout = content ? qobject_cast<QVBoxLayout*>(content->layout()) : nullptr;
     if (!layout) return;
     int number = 1;
-    for (int i = layout->count() - 1; i >= 0; --i) {
+    for (int i = 0; i < layout->count(); ++i) {
         auto* card = layout->itemAt(i)->widget();
         if (!card || !card->property("mountId").isValid()) continue;
         if (auto* label = card->findChild<QLabel*>("indexLabel"))
@@ -4196,7 +4398,8 @@ void MainWindow::onProcessingFinished() {
             const double duration = info->runtimeSeconds > 0.0f
                 ? info->runtimeSeconds : frames / fps;
             mClipPlayer->updateClipInfo(mounted.mountId, fps, duration, frames,
-                info->width, info->height, info->duplicateFrameMask);
+                info->width, info->height, info->duplicateFrameMask,
+                info->sourceFrameToOutput,info->sourceFrameDuplicated);
         }
         mClipPlayer->reloadCurrentClip();
     }
@@ -4319,7 +4522,7 @@ void MainWindow::saveSessionToFile(const QString& path) {
         return object;
     };
     QJsonObject root;
-    root["version"] = 2;
+    root["version"] = 3;
     root["globalSettings"] = encode(mGlobalRenderSettings);
     root["cacheFolder"] = mCacheRootFolder;
     QJsonArray clips;
@@ -4328,6 +4531,11 @@ void MainWindow::saveSessionToFile(const QString& path) {
         clip["path"] = file.srcFile;
         if (mLocalSettings.contains(file.mountId))
             clip["localSettings"] = encode(mLocalSettings.value(file.mountId));
+        QJsonArray selectedFrames;
+        QList<int> ordered=mSelectedFrames.value(file.mountId).values();
+        std::sort(ordered.begin(),ordered.end());
+        for(int frame:ordered)selectedFrames.append(frame);
+        clip["selectedFrames"] = selectedFrames;
         clips.append(clip);
     }
     root["clips"] = clips;
@@ -4354,6 +4562,7 @@ void MainWindow::clearSession() {
     }
     mLocalSettings.clear();
     mSelectedMountIds.clear();
+    mSelectedFrames.clear();
     updateSelectionUi();
 }
 
@@ -4413,6 +4622,10 @@ void MainWindow::loadSessionFromFile(const QString& path) {
             mFuseFilesystem->updateOptions(id, local);
             updateLocalBadge(id);
         }
+        QSet<int> selected;
+        for(const auto& value:clip["selectedFrames"].toArray())
+            if(value.isDouble()&&value.toInt()>=0)selected.insert(value.toInt());
+        if(!selected.isEmpty())mSelectedFrames.insert(mounted.mountId,std::move(selected));
     });
     if (QFileInfo(path).absoluteFilePath() == QFileInfo(autoSessionPath()).absoluteFilePath())
         mCurrentSessionFile.clear();

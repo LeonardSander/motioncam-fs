@@ -96,6 +96,11 @@ struct FileInfo {
     // Output-frame mask used by the gallery timeline. This follows the CFR
     // projection, so inserted holds line up with the player's frame numbers.
     std::shared_ptr<const std::vector<bool>> duplicateFrameMask;
+    // Gallery source-frame model. sourceFrameToOutput contains -1 for frames
+    // removed by CFR conversion. sourceFrameDuplicated marks a source frame
+    // which also supplies one or more inserted hold frames.
+    std::shared_ptr<const std::vector<int>> sourceFrameToOutput;
+    std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated;
     int width;
     int height;
     std::string dataType;        // "Bayer CFA", "Quad Bayer CFA", or "RGB"
@@ -140,6 +145,12 @@ std::vector<Entry> mapFramesToCfr(
     bool convert,
     int& droppedFrames,
     int& duplicatedFrames);
+
+void buildGalleryFrameMap(
+    const std::vector<Timestamp>& sourceTimestamps,
+    const std::vector<Entry>& mappedEntries,
+    std::shared_ptr<const std::vector<int>>& sourceFrameToOutput,
+    std::shared_ptr<const std::vector<bool>>& sourceFrameDuplicated);
 
 std::vector<Entry> filterEntries(
     const std::vector<Entry>& entries, const std::string& filter);

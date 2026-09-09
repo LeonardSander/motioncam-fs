@@ -67,6 +67,7 @@ class QLabel;
 class QMenu;
 class QPushButton;
 class QKeyEvent;
+class QCloseEvent;
 class QTimer;
 class QProgressDialog;
 namespace Ui {
@@ -96,6 +97,7 @@ signals:
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onProcessingStarted();
@@ -124,7 +126,8 @@ private slots:
     void onClearRecentSessions();
 
     void playMount(motioncam::MountId mountId, bool startRender = true);
-    void startGalleryRender(motioncam::MountId mountId, double startSeconds = 0.0);
+    void startGalleryRender(motioncam::MountId mountId, double startSeconds = 0.0,
+                            bool backfillThumbnails = false);
     motioncam::RenderSettings settingsForMount(motioncam::MountId mountId) const;
     void openMountedDirectory(QWidget* fileWidget);
     void removeFile(QWidget* fileWidget);
@@ -132,6 +135,9 @@ private slots:
     void discardFile(QWidget* fileWidget);
 #endif
     void finalizeFile(QWidget* fileWidget);
+    void finalizeSelectedFrames();
+    void clearSelectedFrames();
+    void renderDroppedFrameThumbnail(motioncam::MountId mountId, int sourceFrame);
     void finalizeCameraNative(QWidget* fileWidget, const QString& mode);
     void createCalibrationJson(QWidget* fileWidget);
     void reloadCalibration(QWidget* fileWidget);
@@ -195,6 +201,9 @@ private:
     QTimer* mCacheCleanupTimer = nullptr;
     QHash<motioncam::MountId, motioncam::RenderSettings> mLocalSettings;
     QSet<motioncam::MountId> mSelectedMountIds;
+    QHash<motioncam::MountId, QSet<int>> mSelectedFrames;
+    QPushButton* mFinalizeSelectedFramesButton = nullptr;
+    QPushButton* mClearSelectedFramesButton = nullptr;
     QPushButton* mApplySelectedButton = nullptr;
     QPushButton* mApplyAllButton = nullptr;
     QLabel* mSelectedFilesLabel = nullptr;

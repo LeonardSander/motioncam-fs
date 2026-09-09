@@ -1216,6 +1216,11 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
             boost::filesystem::path(entry.name).extension() == ".DNG")
             duplicateMask->push_back(entry.duplicateFrame);
     info.duplicateFrameMask = std::move(duplicateMask);
+    std::vector<Timestamp> galleryTimestamps;
+    galleryTimestamps.reserve(mDecoder->getFrames().size());
+    for (const auto& frame : mDecoder->getFrames()) galleryTimestamps.push_back(frame.timestamp);
+    vfs::buildGalleryFrameMap(galleryTimestamps, mFiles,
+        info.sourceFrameToOutput, info.sourceFrameDuplicated);
     
     // This describes the input, not the selected DNG render operation. A
     // companion JSON may explicitly reinterpret the input CFA size.
