@@ -218,10 +218,19 @@ void ClipPlayerDialog::stopDecoder(){
     mFrameTimer.stop();
     if(mDecoder.state()==QProcess::NotRunning)return;
     mStoppingDecoder=true;
-    // Do not close the write channel first: QProcess may still have multiple
-    // raw frames buffered. closeWriteChannel()+waitForFinished() makes Qt try
-    // to flush them after FFmpeg has exited, raising SIGPIPE on Unix.
-    mDecoder.kill();
+    // QProcess::write() buffers complete raw frames in Qt. Killing FFmpeg
+    // before that buffer is empty leaves waitForFinished() trying to flush to
+    // a closed pipe, which raises SIGPIPE (and stops under a debugger) during
+    // zoom/resize decoder restarts. Close stdin gracefully while the consumer
+    // is still alive and drain its output so neither side blocks. Once Qt has
+    // no pending input, terminating FFmpeg cannot produce a broken pipe.
+    mDecoder.closeWriteChannel();
+    while(mDecoder.state()!=QProcess::NotRunning&&mDecoder.bytesToWrite()>0){
+        mDecoder.readAllStandardOutput();
+        mDecoder.waitForBytesWritten(20);
+    }
+    mDecoder.readAllStandardOutput();
+    if(mDecoder.state()!=QProcess::NotRunning)mDecoder.kill();
     if(!mDecoder.waitForFinished(2000)){
         spdlog::warn("Gallery FFmpeg did not terminate within two seconds");
     }
