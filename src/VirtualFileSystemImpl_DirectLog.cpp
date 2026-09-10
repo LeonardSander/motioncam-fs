@@ -840,6 +840,14 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetXResolution(72.0f);
         dng.SetYResolution(72.0f);
         dng.SetResolutionUnit(2); // inches
+        const int orientation = mCalibration && mCalibration->hasOrientation
+            ? mCalibration->orientation
+            : mConfig.orientation >= 0 ? mConfig.orientation
+                                       : videoInfo.orientation;
+        if (orientation == 90) dng.SetOrientation(6);
+        else if (orientation == 180) dng.SetOrientation(3);
+        else if (orientation == 270) dng.SetOrientation(8);
+        else dng.SetOrientation(1);
         if (mFps > 0.0f) {
             dng.SetFrameRate(mFps);
         }
@@ -1210,6 +1218,9 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     FileInfo info = vfs::makeFileInfo(
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
+    info.orientation = mDecoder->getVideoInfo().orientation;
+    if (mCalibration && mCalibration->hasOrientation)
+        info.orientation = mCalibration->orientation;
     auto duplicateMask = std::make_shared<std::vector<bool>>();
     for (const auto& entry : mFiles)
         if (boost::filesystem::path(entry.name).extension() == ".dng" ||

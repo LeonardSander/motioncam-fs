@@ -47,6 +47,9 @@ struct DNGFrameMetadata {
     uint32_t blackLevelCount = 0;
     uint32_t whiteLevelCount = 0;
     uint32_t inputBitDepth = 0;
+    // Clockwise display rotation represented by TIFF Orientation, or -1 when
+    // the tag is absent/invalid. Mirroring is intentionally not represented.
+    int orientation = -1;
     std::array<float, 9> colorMatrix1{};
     std::array<float, 9> colorMatrix2{};
     std::array<float, 9> forwardMatrix1{};
@@ -87,6 +90,7 @@ public:
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
     static bool getColorMetadata(const std::vector<uint8_t>& dngData,
                                  DNGFrameMetadata& metadata);
+    static bool setOrientation(std::vector<uint8_t>& dngData, int clockwiseDegrees);
     static bool getGainMaps(const std::vector<uint8_t>& dngData,
                             int opcodeList, std::vector<GainMap>& gainMaps);
     static bool hasOnlySinglePlaneGainMap(const std::vector<uint8_t>& dngData,

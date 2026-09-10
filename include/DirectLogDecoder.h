@@ -14,6 +14,7 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
+#include <libavutil/display.h>
 #include <libswscale/swscale.h>
 }
 
@@ -41,6 +42,7 @@ struct DirectLogVideoInfo {
     bool isHLG;
     bool isLOG60;
     double duration;
+    int orientation = -1;
 };
 
 class DirectLogDecoder {

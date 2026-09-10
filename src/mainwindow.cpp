@@ -2078,7 +2078,8 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
             info->duplicatedFrames);
         clip.width = info->width;
         clip.height = info->height;
-        clip.orientation = settingsForMount(mounted.mountId).orientation;
+        const int orientationOverride = settingsForMount(mounted.mountId).orientation;
+        clip.orientation = orientationOverride >= 0 ? orientationOverride : info->orientation;
         clip.isSequence = info->isSequence;
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
@@ -2942,6 +2943,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     // Camera Native is deliberately fed linear RGB. LOG60 is applied once by
     // FFmpeg immediately before the ordered-dithered RGB-to-YUV conversion.
     auto stagingSettings = buildRenderSettings();
+    // Per-source JSON is authoritative for display orientation and therefore
+    // also overrides orientation inherited from the source container/DNG.
+    stagingSettings.orientation = settingsForMount(mountId).orientation;
     stagingSettings.options &= ~motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
     stagingSettings.options &= ~motioncam::RENDER_OPT_JPEG_COMPRESSION;
     stagingSettings.options &= ~motioncam::RENDER_OPT_LOG_TRANSFORM;
@@ -2959,6 +2963,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         QMessageBox::warning(this, "Camera Native finalization", "Clip information is unavailable.");
         return;
     }
+    const int outputOrientation = stagingSettings.orientation >= 0
+        ? stagingSettings.orientation : info->orientation;
     // FileInfo::dataType is a display label and deliberately continues to say
     // "Quad Bayer CFA" even when the selected finalization path demosaics it.
     // Inspect source CFA metadata so every CFA source has demosaic enabled
@@ -3222,7 +3228,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
-        QStringList args{"-hide_banner", "-y", "-f", "nut", "-i", "pipe:0"};
+        QStringList args{"-hide_banner", "-y"};
+        // Attach a real track display matrix to the NUT input and prevent
+        // FFmpeg from baking it into pixels. A plain output `rotate` metadata
+        // tag is discarded when encoding a new MOV/MP4 stream.
+        if (outputOrientation == 90 || outputOrientation == 180 || outputOrientation == 270)
+            args << "-display_rotation:v:0" << QString::number(-outputOrientation)
+                 << "-noautorotate";
+        args << "-f" << "nut" << "-i" << "pipe:0";
         const QString audioPath = stageDir.absoluteFilePath("audio.wav");
         if (QFile::exists(audioPath))
             args << "-i" << audioPath;
@@ -4298,7 +4311,11 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
     const auto cancelled = std::make_shared<std::atomic_bool>(false);
     mThumbnailCancellations.insert(mountId, cancelled);
     QPointer<QLabel> guardedLabel(label);
-    const auto settings = thumbnailRenderSettings(settingsForMount(mountId));
+    auto settings = thumbnailRenderSettings(settingsForMount(mountId));
+    if (settings.orientation < 0) {
+        if (const auto info = mFuseFilesystem->getFileInfo(mountId))
+            settings.orientation = info->orientation;
+    }
     const auto started = std::chrono::steady_clock::now();
     const bool performanceRun = mPerformanceThumbnailRun;
     auto render = [this, mountId, settings, guardedLabel, cancelled, started,

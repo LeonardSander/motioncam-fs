@@ -35,7 +35,7 @@ struct CachedDirectLogTimeline {
 
 std::mutex directLogTimelineCacheMutex;
 std::unordered_map<std::string, CachedDirectLogTimeline> directLogTimelineCache;
-constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000002ULL;
+constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000003ULL;
 
 std::string directLogTimelineCacheKey(const std::string& path) {
     std::error_code error;
@@ -95,6 +95,7 @@ bool loadPersistentTimeline(const std::string& key, CachedDirectLogTimeline& cac
         !readValue(input, video.fps) || !readValue(input, video.totalFrames) ||
         !readString(input, video.pixelFormat, 256) || !readValue(input, hlg) ||
         !readValue(input, log60) || !readValue(input, video.duration) ||
+        !readValue(input, video.orientation) ||
         !readValue(input, count) || count > 10000000) return false;
     video.isHLG = hlg != 0;
     video.isLOG60 = log60 != 0;
@@ -130,6 +131,7 @@ void savePersistentTimeline(const std::string& key, const CachedDirectLogTimelin
     writeValue(output, static_cast<uint8_t>(video.isHLG));
     writeValue(output, static_cast<uint8_t>(video.isLOG60));
     writeValue(output, video.duration);
+    writeValue(output, video.orientation);
     writeValue(output, static_cast<uint64_t>(cached.frames.size()));
     for (const auto& frame : cached.frames) {
         writeValue(output, frame.pts); writeValue(output, frame.timestamp);
@@ -390,6 +392,22 @@ void DirectLogDecoder::analyzeVideo() {
     // Check if HLG based on filename
     mVideoInfo.isHLG = boost::icontains(mFilePath, "HLG_NATIVE");
     mVideoInfo.isLOG60 = boost::icontains(mFilePath, "LOG60_NATIVE");
+    mVideoInfo.orientation = -1;
+    const AVStream* videoStream = mFormatContext->streams[mVideoStreamIndex];
+    if (const AVPacketSideData* display = av_packet_side_data_get(
+            videoStream->codecpar->coded_side_data,
+            videoStream->codecpar->nb_coded_side_data,
+            AV_PKT_DATA_DISPLAYMATRIX)) {
+        const double counterClockwise = av_display_rotation_get(
+            reinterpret_cast<const int32_t*>(display->data));
+        if (std::isfinite(counterClockwise)) {
+            // av_display_rotation_get() reports counter-clockwise rotation;
+            // the rest of the application represents display rotation clockwise.
+            const int clockwise = static_cast<int>(std::lround(-counterClockwise));
+            mVideoInfo.orientation = ((clockwise % 360) + 360) % 360;
+            mVideoInfo.orientation = ((mVideoInfo.orientation + 45) / 90 * 90) % 360;
+        }
+    }
     
     // Don't rely on container's average framerate - we'll calculate from actual frame timestamps
     // This allows proper CFR conversion handling similar to MCRAW

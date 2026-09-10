@@ -1798,8 +1798,19 @@ std::shared_ptr<std::vector<char>> generateDng(
         break;
 
     default:
-        dngOrientation = DngOrientation::kUnknown;
+        // TIFF Orientation only defines values 1 through 8. Missing capture
+        // metadata must therefore fall back to the neutral orientation.
+        dngOrientation = isFlipped ? DngOrientation::kMirror : DngOrientation::kNormal;
         break;
+    }
+
+    if (calibration && calibration->hasOrientation) {
+        switch (calibration->orientation) {
+        case 90: dngOrientation = DngOrientation::kRotate90CW; break;
+        case 180: dngOrientation = DngOrientation::kRotate180; break;
+        case 270: dngOrientation = DngOrientation::kRotate90CCW; break;
+        default: dngOrientation = DngOrientation::kNormal; break;
+        }
     }
 
     dng.SetOrientation(dngOrientation);

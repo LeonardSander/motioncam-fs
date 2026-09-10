@@ -85,6 +85,41 @@ static uint32_t tiffTagValue(const std::vector<uint8_t>& dng, uint16_t wantedTag
     return 0;
 }
 
+static std::vector<uint8_t> previewIfdOrientationDng(uint16_t orientation) {
+    constexpr uint32_t rootIfd = 8;
+    constexpr uint16_t rootCount = 6;
+    constexpr uint32_t rawIfd = rootIfd + 2 + rootCount * 12 + 4;
+    constexpr uint16_t rawCount = 5;
+    constexpr uint32_t previewPixels = rawIfd + 2 + rawCount * 12 + 4;
+    constexpr uint32_t rawPixels = previewPixels + 1;
+    std::vector<uint8_t> dng(rawPixels + 8, 0);
+    auto put16 = [&](size_t at, uint16_t value) {
+        dng[at] = static_cast<uint8_t>(value);
+        dng[at + 1] = static_cast<uint8_t>(value >> 8);
+    };
+    auto put32 = [&](size_t at, uint32_t value) {
+        for (int byte = 0; byte < 4; ++byte)
+            dng[at + byte] = static_cast<uint8_t>(value >> (byte * 8));
+    };
+    auto entry = [&](size_t& at, uint16_t tag, uint16_t type, uint32_t value) {
+        put16(at, tag); put16(at + 2, type); put32(at + 4, 1);
+        if (type == 3) put16(at + 8, static_cast<uint16_t>(value));
+        else put32(at + 8, value);
+        at += 12;
+    };
+    dng[0] = 'I'; dng[1] = 'I'; put16(2, 42); put32(4, rootIfd);
+    put16(rootIfd, rootCount);
+    size_t at = rootIfd + 2;
+    entry(at, 256, 4, 1); entry(at, 257, 4, 1); entry(at, 273, 4, previewPixels);
+    entry(at, 274, 3, orientation); entry(at, 278, 4, 1); entry(at, 279, 4, 1);
+    put32(at, rawIfd);
+    put16(rawIfd, rawCount);
+    at = rawIfd + 2;
+    entry(at, 256, 4, 2); entry(at, 257, 4, 2); entry(at, 273, 4, rawPixels);
+    entry(at, 278, 4, 2); entry(at, 279, 4, 8); put32(at, 0);
+    return dng;
+}
+
 static std::vector<uint16_t> tiffShortTagValues(
         std::vector<uint8_t>& dng, uint16_t wantedTag,
         const std::vector<uint16_t>* replacement = nullptr) {
@@ -843,6 +878,29 @@ int main() {
     assert(tiffTagValue(mountedRgb, 258) == 10);
     assert(tiffTagValue(mountedRgb, 279) ==
            ((rgbWidth * channels * 10 + 7) / 8) * rgbHeight);
+    // Orientation overrides must work both when the source omitted tag 274 and
+    // when a later override replaces the existing inline SHORT value.
+    assert(motioncam::DNGDecoder::setOrientation(mountedRgb, 90));
+    assert(tiffTagValue(mountedRgb, 274) == 6);
+    motioncam::DNGFrameMetadata orientedMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
+    assert(orientedMetadata.orientation == 90);
+    assert(motioncam::DNGDecoder::setOrientation(mountedRgb, 270));
+    assert(tiffTagValue(mountedRgb, 274) == 8);
+    assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
+    assert(orientedMetadata.orientation == 270);
+
+    // Camera DNGs commonly put Orientation in an IFD0 preview while storing
+    // the full raw in a following IFD. Resolve that tag deterministically and
+    // migrate it onto the retained raw IFD before deleting the preview.
+    auto previewOrientation = previewIfdOrientationDng(6);
+    assert(motioncam::DNGDecoder::getColorMetadata(previewOrientation, orientedMetadata));
+    assert(orientedMetadata.orientation == 90);
+    assert(motioncam::DNGDecoder::removeThumbnails(previewOrientation));
+    orientedMetadata.orientation = -1;
+    assert(motioncam::DNGDecoder::getColorMetadata(previewOrientation, orientedMetadata));
+    assert(orientedMetadata.orientation == 90);
+    assert(tiffTagValue(previewOrientation, 274) == 6);
 
     auto remosaicedRgb = writeDng(rgbDng);
     assert(motioncam::DNGDecoder::ensureUncompressed(remosaicedRgb));

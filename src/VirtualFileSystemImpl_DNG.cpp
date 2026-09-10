@@ -514,6 +514,9 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         throw std::runtime_error("Could not crop full-sensor DNG gain maps");
     if (!DNGDecoder::overrideDataLevels(bytes, mConfig.levels))
         throw std::runtime_error("Could not override source DNG data levels");
+    if (mCalibration && mCalibration->hasOrientation &&
+        !DNGDecoder::setOrientation(bytes, mCalibration->orientation))
+        throw std::runtime_error("Could not override source DNG orientation");
     if (const auto exposure = mExposureTimes.find(timestamp);
         exposure != mExposureTimes.end())
         DNGDecoder::repairExposureTime(bytes, exposure->second);
@@ -751,6 +754,12 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
     info.isSequence = mHasFrameNumberSequence;
+    if (!mDecoder->getFrames().empty()) {
+        DNGFrameMetadata metadata;
+        if (mDecoder->getFrameMetadata(0, metadata)) info.orientation = metadata.orientation;
+    }
+    if (mCalibration && mCalibration->hasOrientation)
+        info.orientation = mCalibration->orientation;
     auto duplicateMask = std::make_shared<std::vector<bool>>();
     for (const auto& entry : mFiles)
         if (boost::filesystem::path(entry.name).extension() == ".dng" ||

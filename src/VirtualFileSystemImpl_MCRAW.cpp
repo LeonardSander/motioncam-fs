@@ -447,6 +447,15 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo = vfs::makeFileInfo(
         mFrameRateInfo, mFps, static_cast<int>(frames.size()), droppedFrames,
         duplicatedFrames, outputWidth, outputHeight);
+    switch (cameraFrameMetadata.orientation) {
+    case ScreenOrientation::PORTRAIT: mFileInfo.orientation = 90; break;
+    case ScreenOrientation::REVERSE_PORTRAIT: mFileInfo.orientation = 270; break;
+    case ScreenOrientation::REVERSE_LANDSCAPE: mFileInfo.orientation = 180; break;
+    case ScreenOrientation::LANDSCAPE: mFileInfo.orientation = 0; break;
+    default: break;
+    }
+    if (mCalibration && mCalibration->hasOrientation)
+        mFileInfo.orientation = mCalibration->orientation;
     auto duplicateMask = std::make_shared<std::vector<bool>>();
     duplicateMask->reserve(mapped.size());
     for (const auto& entry : mFiles)

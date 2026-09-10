@@ -167,6 +167,7 @@ namespace {
     }
     constexpr uint16_t TIFF_TAG_IMAGE_WIDTH = 256;
     constexpr uint16_t TIFF_TAG_IMAGE_HEIGHT = 257;
+    constexpr uint16_t TIFF_TAG_ORIENTATION = 274;
     constexpr uint16_t TIFF_TAG_BITS_PER_SAMPLE = 258;
     constexpr uint16_t TIFF_TAG_COMPRESSION = 259;
     constexpr uint16_t TIFF_TAG_PHOTOMETRIC = 262;
@@ -670,6 +671,42 @@ namespace {
             pending.push_back(read32(data.data() + entriesEnd, little));
         }
         return result;
+    }
+
+    std::optional<uint32_t> primaryImageIfd(
+            const std::vector<uint8_t>& data,
+            const std::vector<TiffEntry>& entries, bool little) {
+        std::map<uint32_t, std::vector<const TiffEntry*>> byIfd;
+        for (const auto& entry : entries) byIfd[entry.ifdOffset].push_back(&entry);
+        std::optional<uint32_t> primary;
+        uint64_t primaryPixels = 0;
+        auto scalar = [&](const TiffEntry& entry) -> uint32_t {
+            return entry.type == TIFF_TYPE_SHORT
+                ? read16(data.data() + entry.valueOffset, little)
+                : entry.type == TIFF_TYPE_LONG
+                    ? read32(data.data() + entry.valueOffset, little) : 0;
+        };
+        for (const auto& [ifd, ifdEntries] : byIfd) {
+            const TiffEntry* width = nullptr;
+            const TiffEntry* height = nullptr;
+            bool hasImagePayload = false;
+            for (const auto* entry : ifdEntries) {
+                if (entry->tag == TIFF_TAG_IMAGE_WIDTH) width = entry;
+                else if (entry->tag == TIFF_TAG_IMAGE_HEIGHT) height = entry;
+                else if (entry->tag == TIFF_TAG_STRIP_OFFSETS ||
+                         entry->tag == TIFF_TAG_TILE_OFFSETS ||
+                         entry->tag == TIFF_TAG_JPEG_OFFSET)
+                    hasImagePayload = true;
+            }
+            if (!width || !height || !hasImagePayload || !width->count || !height->count)
+                continue;
+            const uint64_t pixels = static_cast<uint64_t>(scalar(*width)) * scalar(*height);
+            if (pixels && (!primary || pixels > primaryPixels)) {
+                primary = ifd;
+                primaryPixels = pixels;
+            }
+        }
+        return primary;
     }
 
     bool sortTiffIfdEntries(std::vector<uint8_t>& data, uint32_t ifd, bool little) {
@@ -1858,11 +1895,51 @@ bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
     return true;
 }
 
+bool DNGDecoder::setOrientation(std::vector<uint8_t>& data, int clockwiseDegrees) {
+    const uint16_t value = clockwiseDegrees == 90 ? 6
+        : clockwiseDegrees == 180 ? 3 : clockwiseDegrees == 270 ? 8 : 1;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    const auto primaryIfd = primaryImageIfd(data, entries, little);
+    if (!primaryIfd) return false;
+    const TiffEntry* orientationEntry = nullptr;
+    for (const auto& entry : entries)
+        if (entry.ifdOffset == *primaryIfd &&
+            entry.tag == TIFF_TAG_ORIENTATION && entry.type == TIFF_TYPE_SHORT && entry.count) {
+            orientationEntry = &entry;
+            break;
+        }
+    if (orientationEntry) {
+        write16(data.data() + orientationEntry->valueOffset, value, little);
+        return true;
+    }
+    return insertTiffScalarEntry(data, *primaryIfd,
+                                 TIFF_TAG_ORIENTATION, TIFF_TYPE_SHORT, value, little);
+}
+
 bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
                                   DNGFrameMetadata& metadata) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
+    const auto primaryIfd = primaryImageIfd(data, entries, little);
+    const uint32_t rootIfd = data.size() >= 8 ? read32(data.data() + 4, little) : 0;
+    const TiffEntry* primaryOrientation = nullptr;
+    const TiffEntry* rootOrientation = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_ORIENTATION || entry.type != TIFF_TYPE_SHORT || !entry.count)
+            continue;
+        if (primaryIfd && entry.ifdOffset == *primaryIfd) primaryOrientation = &entry;
+        if (entry.ifdOffset == rootIfd) rootOrientation = &entry;
+    }
+    if (const TiffEntry* entry = primaryOrientation ? primaryOrientation : rootOrientation) {
+        const uint16_t orientation = read16(data.data() + entry->valueOffset, little);
+        if (orientation == 1 || orientation == 2) metadata.orientation = 0;
+        else if (orientation == 3 || orientation == 4) metadata.orientation = 180;
+        else if (orientation == 5 || orientation == 8) metadata.orientation = 270;
+        else if (orientation == 6 || orientation == 7) metadata.orientation = 90;
+    }
     auto readMatrix = [&](const TiffEntry& entry, std::array<float, 9>& matrix,
                           bool& present) {
         if (entry.type != TIFF_TYPE_SRATIONAL || entry.count < matrix.size()) return;
@@ -3163,6 +3240,12 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data, bool backgroundW
 }
 
 bool DNGDecoder::removeThumbnails(std::vector<uint8_t>& data) {
+    // Orientation is commonly stored only in IFD0 even when the full raw is a
+    // SubIFD. Copy its resolved value to the image IFD we are about to retain.
+    DNGFrameMetadata metadata;
+    if (getColorMetadata(data, metadata) && metadata.orientation >= 0 &&
+        !setOrientation(data, metadata.orientation))
+        return false;
     bool little = true;
     auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -3183,32 +3266,9 @@ bool DNGDecoder::removeThumbnails(std::vector<uint8_t>& data) {
     // full-resolution raw image lives in a SubIFD. Preserve the image-bearing
     // IFD with the greatest pixel area, regardless of whether it is CFA,
     // LinearRaw, RGB, or another valid TIFF interpretation.
-    uint32_t primaryIfd = 0;
-    uint64_t primaryPixels = 0;
-    bool foundPrimary = false;
-    for (const auto& [ifd, ifdEntries] : byIfd) {
-        const TiffEntry* width = nullptr;
-        const TiffEntry* height = nullptr;
-        bool hasImagePayload = false;
-        for (const auto& entry : ifdEntries) {
-            if (entry.tag == TIFF_TAG_IMAGE_WIDTH) width = &entry;
-            else if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) height = &entry;
-            else if (entry.tag == TIFF_TAG_STRIP_OFFSETS ||
-                     entry.tag == TIFF_TAG_TILE_OFFSETS ||
-                     entry.tag == TIFF_TAG_JPEG_OFFSET)
-                hasImagePayload = true;
-        }
-        if (!width || !height || !hasImagePayload || !width->count || !height->count)
-            continue;
-        const uint64_t pixels = static_cast<uint64_t>(scalar(*width)) * scalar(*height);
-        if (!pixels) continue;
-        if (!foundPrimary || pixels > primaryPixels) {
-            primaryIfd = ifd;
-            primaryPixels = pixels;
-            foundPrimary = true;
-        }
-    }
-    if (!foundPrimary) return false;
+    const auto selectedPrimaryIfd = primaryImageIfd(data, entries, little);
+    if (!selectedPrimaryIfd) return false;
+    const uint32_t primaryIfd = *selectedPrimaryIfd;
 
     std::vector<std::pair<uint32_t, uint32_t>> payloads;
     const std::set<uint16_t> imageTags{
