@@ -2960,6 +2960,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         return;
     }
 
+    const QFileInfo inputInfo(srcFile);
+    const QString calibrationPath = inputInfo.isDir()
+        ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + ".json")
+        : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + ".json";
+    const auto sourceCalibration = QFile::exists(calibrationPath)
+        ? CalibrationData::loadFromFile(calibrationPath.toStdString())
+        : std::nullopt;
+
     // Camera Native is deliberately fed linear RGB. LOG60 is applied once by
     // FFmpeg immediately before the ordered-dithered RGB-to-YUV conversion.
     auto stagingSettings = buildRenderSettings();
@@ -2971,6 +2979,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     stagingSettings.options &= ~motioncam::RENDER_OPT_LOG_TRANSFORM;
     stagingSettings.draftScale = 1;
     stagingSettings.logTransform = motioncam::LogTransformMode::Disabled;
+    // ignoreForwardMat is a gallery display preference. Camera Native output
+    // must retain the source/calibration ForwardMatrix tags in its sidecar.
+    stagingSettings.ignoreForwardMat = false;
     // Camera model identity is not represented by the Camera Native sidecar;
     // do not apply its DNG-only BaselineExposure compensation during staging.
     stagingSettings.cameraModel.clear();
@@ -2995,13 +3006,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicColor ||
         stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicOCL;
     try {
-        const QFileInfo inputInfo(srcFile);
-        const QString calibrationPath = inputInfo.isDir()
-            ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + ".json")
-            : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + ".json";
-        const auto calibration = QFile::exists(calibrationPath)
-            ? CalibrationData::loadFromFile(calibrationPath.toStdString())
-            : std::nullopt;
+        const auto& calibration = sourceCalibration;
         const int cfaSizeOverride = calibration && calibration->hasCfaSize && calibration->cfaSize > 0
             ? calibration->cfaSize : 0;
         if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive)) {
@@ -3532,6 +3537,33 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             diagnostic += encoder.readAll();
             throw std::runtime_error(("FFmpeg failed:\n" +
                 QString::fromUtf8(diagnostic.right(4000))).toStdString());
+        }
+
+        // The source sidecar is authoritative for explicit calibration
+        // overrides. Keep those values independently of the temporary staging
+        // DNG: its RGB conversion is an implementation detail and must not be
+        // allowed to strip ForwardMatrix tags from the Camera Native sidecar.
+        if (sourceCalibration) {
+            if (sourceCalibration->hasColorMatrix1) {
+                colorMetadata.colorMatrix1 = sourceCalibration->colorMatrix1;
+                colorMetadata.hasColorMatrix1 = true;
+            }
+            if (sourceCalibration->hasColorMatrix2) {
+                colorMetadata.colorMatrix2 = sourceCalibration->colorMatrix2;
+                colorMetadata.hasColorMatrix2 = true;
+            }
+            if (sourceCalibration->hasForwardMatrix1) {
+                colorMetadata.forwardMatrix1 = sourceCalibration->forwardMatrix1;
+                colorMetadata.hasForwardMatrix1 = true;
+            }
+            if (sourceCalibration->hasForwardMatrix2) {
+                colorMetadata.forwardMatrix2 = sourceCalibration->forwardMatrix2;
+                colorMetadata.hasForwardMatrix2 = true;
+            }
+            if (sourceCalibration->hasAsShotNeutral) {
+                colorMetadata.asShotNeutral = sourceCalibration->asShotNeutral;
+                colorMetadata.hasAsShotNeutral = true;
+            }
         }
 
         nlohmann::json sidecar;
