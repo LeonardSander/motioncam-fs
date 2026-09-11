@@ -125,7 +125,8 @@ jobs:
             artifact_suffix: macos-x86_64
             qt_version: 6.7.2
             qt_install: aqt
-          - os: macos-14
+            macos_target: "15.0"
+          - os: macos-15
             platform: macos
             build_type: Release
             build_dir: build-macos-arm64
@@ -135,6 +136,7 @@ jobs:
             artifact_suffix: macos-arm64
             qt_version: 6.7.2
             qt_install: brew
+            macos_target: "15.0"
 
     steps:
     # ---------- CHECKOUT ----------
@@ -261,8 +263,9 @@ jobs:
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
-          -DVCPKG_OSX_DEPLOYMENT_TARGET=12.0 \
+          -DVCPKG_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
           -DCMAKE_OSX_ARCHITECTURES=${{ matrix.mac_arch }} \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
           -DCMAKE_IGNORE_PREFIX_PATH="$BREW_PREFIX" \
           -DQt6_DIR="$QT_PREFIX/lib/cmake/Qt6" \
           -DJPEG_ROOT="$VCPKG_PREFIX" \
