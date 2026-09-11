@@ -36,6 +36,10 @@ public:
     void seekToSeconds(double seconds);
     double currentDurationSeconds() const;
     void setAutomaticAdvanceEnabled(bool enabled);
+    void setPlaybackPaused(bool paused);
+    bool isPlaybackPaused() const { return mPaused; }
+    void requestThumbnailBackfill();
+    void setThumbnailStripVisible(bool visible);
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     std::shared_ptr<std::atomic_bool> thumbnailCollectionEnabled() const { return mThumbnailCollectionEnabled; }
@@ -111,6 +115,7 @@ private:
     void centerCurrentThumbnail();
     int sourceFrameForOutput(int outputFrame) const;
     QImage rgb48Image(const QByteArray& frame, int width, int height) const;
+    QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
     QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
     QPushButton* mThumbnailToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;

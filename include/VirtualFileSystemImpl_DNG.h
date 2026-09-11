@@ -35,16 +35,26 @@ public:
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
-    bool generateThumbnail(const std::string& outputPath, int width, int height) override;
     bool sourceImagePayloadsEqual(const Entry& left, const Entry& right) override;
     std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
+    bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame) override;
 
 private:
+    struct PreparedFrame {
+        std::vector<uint8_t> dng;
+        DNGFrameMetadata sourceMetadata;
+        int cfaSize = 2;
+        std::array<uint8_t, 4> cfaPhase{0, 1, 1, 2};
+        bool hasCfa = false;
+    };
     int readPriority(const Entry& entry) const override;
     void init();
     
     void calculateFrameRateStats();
+    DNGFrameMetadata resolvedFrameMetadata(
+        size_t frameIndex, DNGFrameMetadata metadata) const;
+    PreparedFrame prepareFrame(size_t frameIndex, bool canonicalizeImage = true);
     std::vector<uint8_t> transformFrame(
         size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
         bool nativeResolution = false);
@@ -52,7 +62,6 @@ private:
 private:
     const std::string mSrcPath;
     const std::string mBaseName;
-    size_t mTypicalDngSize;
     RenderSettings mConfig;
     float mFps;
     bool mHasFrameNumberSequence = false;
@@ -74,8 +83,6 @@ private:
     std::map<Timestamp, float> mNormalizedExposureOffsets;
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
-    std::map<Timestamp, bool> mHasBaselineExposure;
-    std::map<Timestamp, bool> mHasAsShotNeutral;
     std::map<Timestamp, double> mExposureTimes;
     std::map<Timestamp, double> mIsoValues;
     mutable std::mutex mPayloadHashMutex;

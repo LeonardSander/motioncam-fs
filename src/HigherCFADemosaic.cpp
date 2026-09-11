@@ -1,4 +1,5 @@
 #include "Utils.h"
+#include "GainMapBake.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,6 +7,183 @@
 
 namespace motioncam {
 namespace utils {
+
+void demosaicCfaForOutput(
+        const std::vector<uint16_t>& cfaData, std::vector<uint16_t>& rgbData,
+        int width, int height, int cfaRepeatSize,
+        const std::array<uint8_t, 4>& bayerPhase, QuadBayerMode mode,
+        const std::array<float, 3>& channelBlack, bool nearestColour) {
+    if (!nearestColour) {
+        demosaicHigherCFA(cfaData, rgbData, width, height, cfaRepeatSize,
+                          bayerPhase, mode, channelBlack);
+        return;
+    }
+    if (width <= 0 || height <= 0 || cfaRepeatSize < 2 ||
+        cfaData.size() != static_cast<size_t>(width) * height) {
+        rgbData.clear();
+        return;
+    }
+
+    const int block = std::max(1, cfaRepeatSize / 2);
+    auto colorAt = [&](int x, int y) {
+        return bayerPhase[((y % cfaRepeatSize) / block) * 2 +
+                          ((x % cfaRepeatSize) / block)];
+    };
+    using Offset = std::pair<int16_t, int16_t>;
+    std::vector<std::vector<Offset>> offsets(
+        static_cast<size_t>(cfaRepeatSize) * cfaRepeatSize * 3);
+    for (int phaseY = 0; phaseY < cfaRepeatSize; ++phaseY)
+        for (int phaseX = 0; phaseX < cfaRepeatSize; ++phaseX)
+            for (int channel = 0; channel < 3; ++channel) {
+                auto& candidates = offsets[
+                    (static_cast<size_t>(phaseY) * cfaRepeatSize + phaseX) * 3 + channel];
+                for (int dy = -cfaRepeatSize; dy <= cfaRepeatSize; ++dy)
+                    for (int dx = -cfaRepeatSize; dx <= cfaRepeatSize; ++dx) {
+                        int sampleX = (phaseX + dx) % cfaRepeatSize;
+                        int sampleY = (phaseY + dy) % cfaRepeatSize;
+                        if (sampleX < 0) sampleX += cfaRepeatSize;
+                        if (sampleY < 0) sampleY += cfaRepeatSize;
+                        if (colorAt(sampleX, sampleY) == channel)
+                            candidates.emplace_back(dx, dy);
+                    }
+                std::stable_sort(candidates.begin(), candidates.end(),
+                    [](const Offset& left, const Offset& right) {
+                        return left.first * left.first + left.second * left.second <
+                               right.first * right.first + right.second * right.second;
+                    });
+            }
+
+    rgbData.assign(static_cast<size_t>(width) * height * 3, 0);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            for (int channel = 0; channel < 3; ++channel) {
+                const auto& candidates = offsets[
+                    (static_cast<size_t>(y % cfaRepeatSize) * cfaRepeatSize +
+                     x % cfaRepeatSize) * 3 + channel];
+                for (const auto& [dx, dy] : candidates) {
+                    const int sourceX = x + dx, sourceY = y + dy;
+                    if (sourceX < 0 || sourceY < 0 || sourceX >= width || sourceY >= height)
+                        continue;
+                    rgbData[(static_cast<size_t>(y) * width + x) * 3 + channel] =
+                        cfaData[static_cast<size_t>(sourceY) * width + sourceX];
+                    break;
+                }
+            }
+}
+
+bool normalizeRgb16(const std::vector<uint16_t>& input,
+                    std::vector<uint16_t>& output,
+                    const std::array<double, 3>& black,
+                    const std::array<double, 3>& white) {
+    if (input.size() % 3 != 0) return false;
+    for (size_t channel = 0; channel < 3; ++channel)
+        if (!(white[channel] > black[channel])) return false;
+    output.resize(input.size());
+    for (size_t index = 0; index < input.size(); ++index) {
+        const size_t channel = index % 3;
+        const uint16_t normalized = static_cast<uint16_t>(std::clamp(std::lround(
+            (input[index] - black[channel]) /
+                (white[channel] - black[channel]) * 65535.0),
+            0l, 65535l));
+        output[index] = normalized;
+    }
+    return true;
+}
+
+bool normalizeRgb16Bytes(const std::vector<uint16_t>& input,
+                         std::vector<uint8_t>& output,
+                         const std::array<double, 3>& black,
+                         const std::array<double, 3>& white) {
+    if (input.size() % 3 != 0) return false;
+    for (size_t channel = 0; channel < 3; ++channel)
+        if (!(white[channel] > black[channel])) return false;
+    output.resize(input.size() * sizeof(uint16_t));
+    auto* normalized = reinterpret_cast<uint16_t*>(output.data());
+    for (size_t index = 0; index < input.size(); ++index) {
+        const size_t channel = index % 3;
+        normalized[index] = static_cast<uint16_t>(std::clamp(std::lround(
+            (input[index] - black[channel]) /
+                (white[channel] - black[channel]) * 65535.0),
+            0l, 65535l));
+    }
+    return true;
+}
+
+void parseCropTarget(const std::string& target, uint32_t& width,
+                     uint32_t& height, uint32_t& stride) {
+    width = height = stride = 0;
+    const size_t separator = target.find('x');
+    if (separator == std::string::npos) return;
+    try {
+        size_t heightEnd = 0;
+        width = std::stoul(target.substr(0, separator));
+        height = std::stoul(target.substr(separator + 1), &heightEnd);
+        const size_t suffix = separator + 1 + heightEnd;
+        if (suffix < target.size()) {
+            if (target[suffix] != '_' || suffix + 1 >= target.size())
+                throw std::invalid_argument("invalid crop suffix");
+            size_t strideEnd = 0;
+            stride = std::stoul(target.substr(suffix + 1), &strideEnd);
+            if (suffix + 1 + strideEnd != target.size())
+                throw std::invalid_argument("invalid stride");
+        }
+    } catch (const std::exception&) {
+        width = height = stride = 0;
+    }
+}
+
+bool cropInterleaved(const std::vector<uint16_t>& input,
+                     std::vector<uint16_t>& output,
+                     uint32_t width, uint32_t height, uint32_t channels,
+                     uint32_t cropWidth, uint32_t cropHeight) {
+    if (!channels || !cropWidth || !cropHeight || cropWidth > width || cropHeight > height ||
+        input.size() != static_cast<size_t>(width) * height * channels) return false;
+    const uint32_t left = (width - cropWidth) / 2;
+    const uint32_t top = (height - cropHeight) / 2;
+    output.resize(static_cast<size_t>(cropWidth) * cropHeight * channels);
+    for (uint32_t y = 0; y < cropHeight; ++y)
+        std::copy_n(input.begin() +
+                        (static_cast<size_t>(top + y) * width + left) * channels,
+                    static_cast<size_t>(cropWidth) * channels,
+                    output.begin() + static_cast<size_t>(y) * cropWidth * channels);
+    return true;
+}
+
+void encodeLog60(std::vector<uint16_t>& samples,
+                 uint32_t width, uint32_t height, uint32_t channels,
+                 const std::array<double, 4>& blackLevel,
+                 double whiteLevel, uint16_t encodedWhite) {
+    if (!channels || (channels != 1 && channels != 3) || !encodedWhite ||
+        samples.size() != static_cast<size_t>(width) * height * channels)
+        throw std::invalid_argument("Invalid LOG60 image");
+    for (uint32_t y = 0; y < height; ++y)
+        for (uint32_t x = 0; x < width; ++x)
+            for (uint32_t channel = 0; channel < channels; ++channel) {
+                const size_t index = (static_cast<size_t>(y) * width + x) *
+                                     channels + channel;
+                const uint32_t level = channels == 1
+                    ? ((y & 1u) * 2u + (x & 1u)) : channel;
+                const double normalized = std::clamp(
+                    (samples[index] - blackLevel[level]) /
+                    std::max(1.0, whiteLevel - blackLevel[level]), 0.0, 1.0);
+                const double encoded = std::log2(1.0 + 60.0 * normalized) /
+                                       std::log2(61.0);
+                samples[index] = static_cast<uint16_t>(
+                    std::lround(encoded * encodedWhite));
+            }
+}
+
+void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData,
+                        std::vector<uint16_t>& bayerData,
+                        int width, int height, const std::string& cfaPhase) {
+    const auto phase = cfaColorsFromPhase(cfaPhase);
+    bayerData.resize(static_cast<size_t>(width) * height);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            const size_t pixel = static_cast<size_t>(y) * width + x;
+            bayerData[pixel] = rgbData[pixel * 3 + phase[((y & 1) << 1) | (x & 1)]];
+        }
+}
 
 void demosaicHigherCFA(
     const std::vector<uint16_t>& cfaData,

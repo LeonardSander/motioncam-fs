@@ -212,8 +212,13 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             openClip(mIndex,0.0);return;
         }
         mPaused=!mPaused;updateButtonIcons();
-        if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseMs=audioPositionMs();mAudioClock.invalidate();mAudioSink->suspend();}}
-        else {updateFrameTimerInterval();mFrameTimer.start();if(mAudioEnabled&&mAudioSink){
+        if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseMs=audioPositionMs();mAudioClock.invalidate();mAudioSink->suspend();}
+            if(mThumbnailScroll&&mThumbnailScroll->isVisible())
+                emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
+        }
+        else {updateFrameTimerInterval();mFrameTimer.start();if(mThumbnailScroll&&mThumbnailScroll->isVisible())
+                emit currentClipChanged(currentMountId(),mPositionSeconds);
+            if(mAudioEnabled&&mAudioSink){
             if(mAudioStartPending&&mFirstFrameReady){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
             else if(!mAudioStartPending){mAudioClock.start();mAudioSink->resume();}
         }}
@@ -229,7 +234,9 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         const double seconds=mIndex>=0?mPosition->value()/std::max(1.0,mClips[mIndex].fps):0.0;
         if(show){
             rebuildThumbnailStrip();revealOverlay();
-            emit thumbnailBackfillRequested(currentMountId(),seconds);
+            // Active playback already produces thumbnails for every presented
+            // frame. Only use the separate backfill renderer while idle.
+            if(mPaused)emit thumbnailBackfillRequested(currentMountId(),seconds);
         }else{
             emit currentClipChanged(currentMountId(),seconds);
             revealOverlay();
@@ -245,6 +252,15 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
 
 ClipPlayerDialog::~ClipPlayerDialog(){mClosing=true;mAudioLoadCancelled->store(true);++mAudioLoadGeneration;stopDecoder();}
 int ClipPlayerDialog::currentMountId()const{return mIndex>=0&&mIndex<mClips.size()?mClips[mIndex].mountId:-1;}
+void ClipPlayerDialog::setPlaybackPaused(bool paused){if(mPaused!=paused&&mPlayPause)mPlayPause->click();}
+void ClipPlayerDialog::requestThumbnailBackfill(){
+    if(mThumbnailScroll&&mThumbnailScroll->isVisible())
+        emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
+}
+void ClipPlayerDialog::setThumbnailStripVisible(bool visible){
+    if(mThumbnailScroll&&mThumbnailScroll->isVisible()!=visible&&mThumbnailToggle)
+        mThumbnailToggle->click();
+}
 bool ClipPlayerDialog::selectMount(int mountId){
     for(int index=0;index<mClips.size();++index){
         if(mClips[index].mountId!=mountId)continue;
@@ -314,6 +330,8 @@ QString ClipPlayerDialog::ffmpegPath()const{
 void ClipPlayerDialog::openClip(int index,double startSeconds){
     if(index<0||index>=mClips.size())return;
     const bool changingClip=index!=mIndex;
+    const bool preservePausedNavigation=changingClip&&mPaused&&mThumbnailScroll&&
+        mThumbnailScroll->isVisible();
     if(changingClip){
         // A requested (unsnapped) wheel value belongs to the geometry that
         // produced it. Do not carry that hidden accumulator into another clip.
@@ -350,7 +368,8 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     static_cast<DuplicateSlider*>(mPosition)->setDuplicates(clip.duplicateFrames);
     mCurrentThumbnailSource=sourceFrameForOutput(startFrame);
     if(mThumbnailScroll->isVisible())rebuildThumbnailStrip();
-    mPlaybackFailed=false;mPaused=false;mPlayPause->setEnabled(true);updateButtonIcons();
+    mPlaybackFailed=false;mPaused=preservePausedNavigation;
+    mPlayPause->setEnabled(true);updateButtonIcons();
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[index].title)
         .arg(index+1).arg(mClips.size()).arg(mZoomPercent>0.0
@@ -526,9 +545,8 @@ void ClipPlayerDialog::cacheThumbnail(int mountId,int sourceFrame,const QImage& 
 
 void ClipPlayerDialog::setSourceFrameThumbnail(int sourceFrame,const QByteArray& frame,int width,int height){
     if(!mThumbnailCollectionEnabled->load())return;
-    const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
-    QImage scaled=image.scaled(QSize(176,112),Qt::KeepAspectRatio,Qt::SmoothTransformation);
-    cacheThumbnail(currentMountId(),sourceFrame,scaled);
+    const QImage thumbnail=rgb48Thumbnail(frame,width,height);if(thumbnail.isNull())return;
+    cacheThumbnail(currentMountId(),sourceFrame,thumbnail);
     refreshThumbnailLabel(sourceFrame);
 }
 
@@ -1155,6 +1173,8 @@ void ClipPlayerDialog::showNextFrame(){
         if(!mFirstFrameReady){
             mFirstFrameReady=true;
             emit firstFramePresented(currentMountId());
+            if(mPaused&&mThumbnailScroll&&mThumbnailScroll->isVisible())
+                emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
             if(mAudioEnabled&&mAudioStartPending&&!mPaused){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
         }
         const double fps=std::max(1.0,mClips[mIndex].fps);
@@ -1404,6 +1424,33 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
         const qsizetype input=(qsizetype(y)*width+x)*6;
         uchar* destination=image.scanLine(outputY)+qsizetype(outputX)*3;
         destination[0]=source[input+1];destination[1]=source[input+3];destination[2]=source[input+5];
+    }
+    return image;
+}
+QImage ClipPlayerDialog::rgb48Thumbnail(const QByteArray& frame,int width,int height)const{
+    if(width<=0||height<=0||frame.size()<qint64(width)*height*6)return {};
+    const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
+    const bool swap=orientation==90||orientation==270;
+    const int orientedWidth=swap?height:width,orientedHeight=swap?width:height;
+    const double scale=std::min(176.0/orientedWidth,112.0/orientedHeight);
+    const int outputWidth=std::max(1,static_cast<int>(std::floor(orientedWidth*scale)));
+    const int outputHeight=std::max(1,static_cast<int>(std::floor(orientedHeight*scale)));
+    QImage image(outputWidth,outputHeight,QImage::Format_RGB888);
+    const auto* source=reinterpret_cast<const uchar*>(frame.constData());
+    for(int y=0;y<outputHeight;++y){
+        auto* destination=image.scanLine(y);
+        const int orientedY=std::min(orientedHeight-1,y*orientedHeight/outputHeight);
+        for(int x=0;x<outputWidth;++x){
+            const int orientedX=std::min(orientedWidth-1,x*orientedWidth/outputWidth);
+            int sourceX=orientedX,sourceY=orientedY;
+            if(orientation==90){sourceX=orientedY;sourceY=height-1-orientedX;}
+            else if(orientation==180){sourceX=width-1-orientedX;sourceY=height-1-orientedY;}
+            else if(orientation==270){sourceX=width-1-orientedY;sourceY=orientedX;}
+            const qsizetype input=(qsizetype(sourceY)*width+sourceX)*6;
+            destination[x*3]=source[input+1];
+            destination[x*3+1]=source[input+3];
+            destination[x*3+2]=source[input+5];
+        }
     }
     return image;
 }

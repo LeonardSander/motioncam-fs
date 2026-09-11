@@ -34,6 +34,7 @@ bool galleryDiagnosticsEnabled() {
     static const bool enabled = std::getenv("MOTIONCAM_GALLERY_DIAGNOSTICS") != nullptr;
     return enabled;
 }
+
 }
 
 struct PreviewRenderer::State {
@@ -58,11 +59,10 @@ PreviewRenderer::PreviewRenderer(
       mSource(std::move(source)),
       mBaseName(std::move(baseName)) {}
 
-void PreviewRenderer::finalize(
-    const RenderSettings& settings, const std::string& destination,
-    const FinalizeOptions& options,
+void PreviewRenderer::render(
+    const RenderSettings& settings, const PreviewOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
-    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) {
+    const std::function<void(PreviewFrame&&)>& frameReady) {
     const auto requestStarted = std::chrono::steady_clock::now();
     std::shared_ptr<State> state;
     bool rebuilt = false;
@@ -90,8 +90,32 @@ void PreviewRenderer::finalize(
     const double waitMs = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - waitStarted).count();
     const auto renderStarted = std::chrono::steady_clock::now();
-    vfs::finalize(*state->filesystem, destination, false, options,
-                  progress, fileReady, false);
+    auto entries = state->filesystem->listFiles("");
+    entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& entry) {
+        return entry.type != EntryType::FILE_ENTRY ||
+            !boost::iequals(boost::filesystem::path(entry.name).extension().string(), ".dng");
+    }), entries.end());
+    const size_t firstFrame = std::min(options.firstFrame, entries.size());
+    size_t completed = 0;
+    for (size_t index = firstFrame; index < entries.size(); ++index) {
+        if (progress && !progress(completed, entries.size() - firstFrame,
+                "Rendering " + entries[index].name))
+            throw std::runtime_error("Preview rendering cancelled");
+        if (options.skipFrame && options.skipFrame(index)) {
+            ++completed;
+            continue;
+        }
+        PreviewFrame frame;
+        if (!state->filesystem->materializePreviewFrame(entries[index], frame)) {
+            auto bytes = state->filesystem->materializeFile(entries[index], false);
+            if (!bytes) throw std::runtime_error("Failed to render " + entries[index].name);
+            std::vector<uint8_t> dng(bytes->begin(), bytes->end());
+            if (!DNGDecoder::decodePreview(std::move(dng), settings, frame))
+                throw std::runtime_error("Could not decode preview " + entries[index].name);
+        }
+        frameReady(std::move(frame));
+        ++completed;
+    }
     if (galleryDiagnosticsEnabled())
         spdlog::info(
             "GALLERY_PERF event=preview_render source={} rebuilt={} queue_ms={:.3f} render_ms={:.3f} total_ms={:.3f}",

@@ -146,6 +146,9 @@ public:
         assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
         return std::make_shared<std::vector<char>>(timed.begin(), timed.end());
     }
+    bool materializePreviewFrame(const motioncam::Entry&, motioncam::PreviewFrame&) override {
+        return false;
+    }
     bool sourceImagePayloadsEqual(const motioncam::Entry& left,
                                   const motioncam::Entry& right) override {
         const auto leftDng = materializeFile(left, false);
@@ -231,10 +234,10 @@ int main() {
     assert((readyTimestamps == std::vector<motioncam::Timestamp>{0, 1, 2}));
     std::ifstream stream(root / "out" / "frame-000001.dng", std::ios::binary);
     std::vector<uint8_t> dng{std::istreambuf_iterator<char>(stream), {}};
-    std::vector<uint8_t> rgb;
-    uint32_t width = 0, height = 0;
-    assert(motioncam::DNGDecoder::extractUncompressedRGB16(dng, rgb, width, height));
-    assert(rgb[0] == 0 && rgb[1] == 128);
+    motioncam::PreviewFrame preview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        dng, motioncam::RenderSettings{}, preview, false));
+    assert(preview.rgb[0] == 0 && preview.rgb[1] == 128);
     motioncam::DNGFrameMetadata metadata;
     assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
     assert(std::abs(metadata.exposureTime - 0.02) < 1e-5);

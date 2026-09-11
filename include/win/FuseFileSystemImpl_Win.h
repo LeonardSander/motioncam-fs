@@ -26,8 +26,6 @@ public:
     void unmount(MountId mountId) override;
     void updateOptions(MountId mountId, const RenderSettings& settings) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
-    bool generateThumbnail(MountId mountId, const std::string& outputPath,
-                           int width = 320, int height = 240) override;
     void setCachePolicy(CachePolicy policy) override;
     void setCacheQuotaBytes(std::uint64_t bytes) override;
     void cleanupCacheExpired() override;
@@ -35,9 +33,9 @@ public:
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>& = {},
         bool = true) override;
-    void finalizePreview(MountId, const RenderSettings&, const FinalizeOptions&,
+    void renderPreview(MountId, const RenderSettings&, const PreviewOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&,
-        const std::function<void(const std::vector<uint8_t>&, Timestamp)>&) override;
+        const std::function<void(PreviewFrame&&)>&) override;
 
 private:
     MountId mNextMountId;

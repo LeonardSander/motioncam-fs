@@ -103,30 +103,6 @@ std::vector<unsigned short> makeLogLinearizationTable(unsigned int storedWhiteLe
 }
 
 
-void parseCropTarget(const std::string& target, uint32_t& width,
-                     uint32_t& height, uint32_t& stride) {
-    width = height = stride = 0;
-    const size_t separatorPos = target.find('x');
-    if (separatorPos == std::string::npos)
-        return;
-    try {
-        size_t heightEnd = 0;
-        width = std::stoul(target.substr(0, separatorPos));
-        height = std::stoul(target.substr(separatorPos + 1), &heightEnd);
-        const size_t suffixPos = separatorPos + 1 + heightEnd;
-        if (suffixPos < target.size()) {
-            if (target[suffixPos] != '_' || suffixPos + 1 >= target.size())
-                throw std::invalid_argument("invalid crop suffix");
-            size_t strideEnd = 0;
-            stride = std::stoul(target.substr(suffixPos + 1), &strideEnd);
-            if (suffixPos + 1 + strideEnd != target.size())
-                throw std::invalid_argument("invalid stride");
-        }
-    } catch (const std::exception&) {
-        width = height = stride = 0;
-    }
-}
-
 // ============================================================================
 // vectorbuf and vector_ostream implementations
 // ============================================================================
@@ -951,8 +927,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     const float shadingMapScaleX = 1.0f / static_cast<float>(fullWidth);
     const float shadingMapScaleY = 1.0f / static_cast<float>(fullHeight);
 
-    int useBits = 0;
-
     tinydngwriter::OpcodeList opcodeList2;
     tinydngwriter::OpcodeList opcodeList3;
 
@@ -992,59 +966,13 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
             normaliseShadingMap, debugShadingMap);
         storeCanonicalGainMaps(maps, lensShadingMap);
     }
-    // Linear vignette baking expands the resolved levels by an exact bit shift.
-    // Retaining the correspondingly scaled destination black level gives
-    // unsigned DNG samples room for negative, black-subtracted excursions.
-    // Log encoding remains black-subtracted and uses a zero destination black.
-    if(applyShadingMap) {
-        if (logTransform != LogTransformMode::Disabled) {
-            if (normaliseShadingMap) {
-                useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 4);
-            } else if (!debugShadingMap) {
-                if (logTransform == LogTransformMode::KeepInput)
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 0);
-                else if (logTransform == LogTransformMode::ReduceBy2Bit) 
-                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2));
-                else if (logTransform == LogTransformMode::ReduceBy4Bit) 
-                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4));
-                else if (logTransform == LogTransformMode::ReduceBy6Bit) 
-                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6));
-                else if (logTransform == LogTransformMode::ReduceBy8Bit) 
-                    useBits = std::min(16, std::max(1, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8));
-                else 
-                    useBits = std::min(16, utils::bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) + 2);
-                useBits = std::max(1, useBits); // Ensure at least 1 bit
-                dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-            }
-            for(auto& v : dstBlackLevel)
-                v = 0;
-        } else {
-            std::array<double, 4> sourceBlack{};
-            std::copy(srcBlackLevel.begin(), srcBlackLevel.end(), sourceBlack.begin());
-            const auto bakeLevels = planLinearGainBake(
-                srcWhiteLevel, sourceBlack, normaliseShadingMap);
-            useBits = static_cast<int>(bakeLevels.destinationBits);
-            dstWhiteLevel = static_cast<float>(bakeLevels.destinationWhite);
-            for (size_t channel = 0; channel < dstBlackLevel.size(); ++channel)
-                dstBlackLevel[channel] = static_cast<float>(bakeLevels.destinationBlack[channel]);
-        }
-    } else if (logTransform != LogTransformMode::Disabled) {
-        if (logTransform == LogTransformMode::ReduceBy2Bit) {
-            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 2));
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == LogTransformMode::ReduceBy4Bit) {
-            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 4));
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == LogTransformMode::ReduceBy6Bit) {
-            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 6));
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        } else if (logTransform == LogTransformMode::ReduceBy8Bit) {
-            useBits = std::min(16, std::max(1, bitsNeeded(static_cast<unsigned short>(dstWhiteLevel)) - 8));
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1;
-        }
-        for(auto& v : dstBlackLevel)
-            v = 0;
-    }
+    const auto outputLevels = planDngOutputLevels(
+        dstWhiteLevel,
+        {dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3]},
+        applyShadingMap, normaliseShadingMap, debugShadingMap, logTransform);
+    dstWhiteLevel = static_cast<float>(outputLevels.white);
+    for (size_t channel = 0; channel < dstBlackLevel.size(); ++channel)
+        dstBlackLevel[channel] = static_cast<float>(outputLevels.black[channel]);
 
     // Create opcode list if requested and shading map is not applied to image data
     if(includeOpcode && !applyShadingMap) {
@@ -1294,7 +1222,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     const std::optional<CalibrationData>& calibration,
     bool compressionEnabled,
     const std::optional<float>& baselineExposureOverride,
-    const std::optional<std::array<float, 3>>& asShotNeutralOverride)
+    const std::optional<std::array<float, 3>>& asShotNeutralOverride,
+    PreviewFrame* previewFrame)
 {
     Measure m("generateDng");
 
@@ -1344,44 +1273,23 @@ std::shared_ptr<std::vector<char>> generateDng(
         storeCanonicalGainMaps(maps, gainMetadata.lensShadingMap);
     }
 
-    // The quality combo retains its selected scale while proxy mode is disabled.
-    const int draftScale =
-        settings.options & RENDER_OPT_DRAFT ? settings.draftScale : 1;
-
     // Extract options from settings
     bool applyShadingMap = settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     bool vignetteOnlyColor = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
     bool normalizeShadingMap = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     bool debugShadingMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = settings.options & RENDER_OPT_NORMALIZE_EXPOSURE;
-    LogTransformMode effectiveLogTransform =
-        settings.options & RENDER_OPT_LOG_TRANSFORM
-            ? settings.logTransform
-            : LogTransformMode::Disabled;
-    // Keep Input exists to avoid losing precision when vignette correction is
-    // baked into the pixels. Without that processing the input is already
-    // linear, so adding a log curve and LinearizationTable would be incorrect.
-    if (effectiveLogTransform == LogTransformMode::KeepInput && !applyShadingMap)
-        effectiveLogTransform = LogTransformMode::Disabled;
-    int cfaRepeatSize = calibration && calibration->hasCfaSize
-        ? calibration->cfaSize : metadata.cfaSize;
-    if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0)
-        cfaRepeatSize = metadata.needRemosaic ? 4 : 2;
-    const bool higherCFA = cfaRepeatSize > 2;
-    const bool explicitBinning = settings.quadBayerOption == QuadBayerMode::Binning ||
-                                 settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
+    const auto processingPlan = planDngFrameProcessing(settings, metadata, calibration);
+    const int draftScale = processingPlan.draftScale;
+    const auto effectiveLogTransform = processingPlan.logTransform;
+    const int cfaRepeatSize = processingPlan.cfaRepeatSize;
+    const bool higherCFA = processingPlan.higherCfa;
+    const bool explicitBinning = processingPlan.explicitBinning;
     const bool lossyJpegDct = compressionEnabled && isLossyJpegDct(settings.jxlDistance);
-    const bool hqProxy = draftScale > 1 &&
-        (settings.options & RENDER_OPT_HIGHER_CFA_HQ);
-    const int preprocessScale = hqProxy || explicitBinning ? 1 : draftScale;
-    const bool demosaic = (higherCFA || settings.cameraNativeStaging || hqProxy) &&
-        (hqProxy || draftScale == 1) &&
-        (!settings.streamingPreview ||
-         (settings.options & RENDER_OPT_HIGHER_CFA_HQ)) &&
-        (hqProxy || settings.quadBayerOption == QuadBayerMode::Demosaic ||
-         settings.quadBayerOption == QuadBayerMode::DemosaicColor ||
-         settings.quadBayerOption == QuadBayerMode::DemosaicOCL);
-    const bool remosaic = demosaic && (settings.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+    const bool hqProxy = processingPlan.hqProxy;
+    const int preprocessScale = processingPlan.preprocessScale;
+    const bool demosaic = processingPlan.demosaic;
+    const bool remosaic = processingPlan.remosaic;
 
     if (settings.streamingPreview && frameNumber == 0) {
         spdlog::info(
@@ -1487,6 +1395,10 @@ std::shared_ptr<std::vector<char>> generateDng(
     );
 
     int processedRepeatSize = cfaRepeatSize;
+    // preprocessData's sparse draft path emits ordinary Bayer, regardless of
+    // the source 4x4/6x6/8x8 repeat size.
+    if (draftScale > 1 && !hqProxy && !explicitBinning)
+        processedRepeatSize = 2;
     if (explicitBinning && processedRepeatSize > 2) {
         std::vector<uint16_t> source(static_cast<size_t>(width) * height);
         std::memcpy(source.data(), processedData.data(), source.size() * sizeof(uint16_t));
@@ -1614,18 +1526,134 @@ std::shared_ptr<std::vector<char>> generateDng(
                        dstWhiteLevel);
     }
 
+    if (previewFrame) {
+      std::vector<uint16_t> rgbSamples;
+      std::array<float, 3> rgbBlack{};
+      if (demosaic && !remosaic) {
+        rgbSamples.resize(processedData.size() / sizeof(uint16_t));
+        std::memcpy(rgbSamples.data(), processedData.data(),
+                    processedData.size());
+        rgbBlack = {static_cast<float>(dstBlackLevel[0]),
+                    static_cast<float>(dstBlackLevel[1]),
+                    static_cast<float>(dstBlackLevel[2])};
+      } else {
+        std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
+        std::memcpy(cfaSamples.data(), processedData.data(),
+                    processedData.size());
+        std::array<unsigned int, 3> sums{}, counts{};
+        for (int phase = 0; phase < 4; ++phase) {
+          sums[cfa[phase]] += dstBlackLevel[phase];
+          ++counts[cfa[phase]];
+        }
+        for (int channel = 0; channel < 3; ++channel)
+          rgbBlack[channel] =
+              counts[channel]
+                  ? static_cast<float>(sums[channel]) / counts[channel]
+                  : 0.0f;
+
+        // Gallery preview quality is controlled by HQ independently of output
+        // resolution: HQ uses the proper demosaic, while HQ-off uses the fast
+        // nearest-colour reconstruction at both native and proxy resolution.
+        const bool nearestColourPreview =
+            !(settings.options & RENDER_OPT_HIGHER_CFA_HQ);
+        demosaicCfaForOutput(cfaSamples, rgbSamples, width, height,
+                             processedRepeatSize, cfa, QuadBayerMode::Demosaic,
+                             rgbBlack, nearestColourPreview);
+        if (rgbSamples.empty())
+          throw std::runtime_error("Could not demosaic preview image");
+      }
+      const double previewWhite = dstWhiteLevel;
+      if (!normalizeRgb16Bytes(
+              rgbSamples, previewFrame->rgb,
+              {rgbBlack[0], rgbBlack[1], rgbBlack[2]},
+              {previewWhite, previewWhite, previewWhite}))
+        throw std::runtime_error("Could not normalize preview image");
+      previewFrame->width = width;
+      previewFrame->height = height;
+      auto &color = previewFrame->metadata;
+      color.iso = metadata.iso;
+      color.exposureTime = metadata.exposureTime / 1e9;
+      color.hasExposure = true;
+      const float normalized =
+          baselineExposureOverride ? *baselineExposureOverride
+          : normalizeExposure
+              ? std::log2(baselineExpValue /
+                          (metadata.iso * metadata.exposureTime))
+              : 0.0f;
+      color.baselineExposure = normalized +
+                               vfs::configuredExposureOffset(settings) +
+                               gainMapExposureOffset;
+      color.hasBaselineExposure = true;
+      color.asShotNeutral = calibration && calibration->hasAsShotNeutral
+                                ? calibration->asShotNeutral
+                            : asShotNeutralOverride ? *asShotNeutralOverride
+                                                    : metadata.asShotNeutral;
+      for (size_t channel = 0; channel < 3; ++channel)
+        color.asShotNeutral[channel] *= gainMapNeutralScale[channel];
+      color.hasAsShotNeutral = true;
+      auto setMatrix = [&](auto calibrationPresent, auto calibrationValue,
+                           auto cameraValue, std::array<float, 9> &destination,
+                           bool &present) {
+        if (calibration && (*calibration).*calibrationPresent) {
+          destination = (*calibration).*calibrationValue;
+          present = true;
+        } else if (!isZeroMatrix(cameraConfiguration.*cameraValue)) {
+          destination = cameraConfiguration.*cameraValue;
+          present = true;
+        }
+      };
+      setMatrix(&CalibrationData::hasColorMatrix1,
+                &CalibrationData::colorMatrix1,
+                &CameraConfiguration::colorMatrix1, color.colorMatrix1,
+                color.hasColorMatrix1);
+      setMatrix(&CalibrationData::hasColorMatrix2,
+                &CalibrationData::colorMatrix2,
+                &CameraConfiguration::colorMatrix2, color.colorMatrix2,
+                color.hasColorMatrix2);
+      setMatrix(&CalibrationData::hasForwardMatrix1,
+                &CalibrationData::forwardMatrix1,
+                &CameraConfiguration::forwardMatrix1, color.forwardMatrix1,
+                color.hasForwardMatrix1);
+      setMatrix(&CalibrationData::hasForwardMatrix2,
+                &CalibrationData::forwardMatrix2,
+                &CameraConfiguration::forwardMatrix2, color.forwardMatrix2,
+                color.hasForwardMatrix2);
+      color.calibrationIlluminant1 =
+          getColorIlluminant(cameraConfiguration.colorIlluminant1);
+      color.calibrationIlluminant2 =
+          getColorIlluminant(cameraConfiguration.colorIlluminant2);
+      auto sourceOrientation = [&]() {
+        switch (metadata.orientation) {
+        case ScreenOrientation::PORTRAIT:
+          return 90;
+        case ScreenOrientation::REVERSE_PORTRAIT:
+          return 270;
+        case ScreenOrientation::REVERSE_LANDSCAPE:
+          return 180;
+        case ScreenOrientation::LANDSCAPE:
+          return 0;
+        default:
+          return -1;
+        }
+      };
+      color.orientation = calibration && calibration->hasOrientation
+                              ? calibration->orientation
+                              : sourceOrientation();
+      return nullptr;
+    }
+
     spdlog::debug("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
 
     // Encode to reduce size in container
-    auto actualBits = utils::bitsNeeded(dstWhiteLevel);
-    auto encodeBits = actualBits;
+    auto encodeBits = utils::bitsNeeded(dstWhiteLevel);
     const bool writerCompression = compressionEnabled && !lossyJpegDct;
     const bool jpegXlCompression = writerCompression && settings.jxlDistance >= 0.0f;
 
     // Compressed codecs consume unpacked uint16 samples.
     // The compression will handle the redundancy
     if (!writerCompression && !settings.cameraNativeStaging && !lossyJpegDct) {
+        encodeBits = dngPackedBits(dstWhiteLevel, demosaic && !remosaic, false);
         if (demosaic && !remosaic) {
             if (encodeBits <= 4) encodeRGBTo4Bit(processedData, width, height), encodeBits = 4;
             else if (encodeBits <= 6) encodeRGBTo6Bit(processedData, width, height), encodeBits = 6;
@@ -2041,57 +2069,94 @@ float getShadingMapValue(
     });
 }
 
-void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData, std::vector<uint16_t>& bayerData,
-                        int width, int height, const std::string& cfaPhase) {
-    // Determine CFA pattern (default to BGGR if not specified or invalid)
-    std::string pattern = cfaPhase.empty() ? "bggr" : cfaPhase;
-    std::transform(pattern.begin(), pattern.end(), pattern.begin(), ::tolower);
-    
-    // Validate pattern
-    if (pattern != "bggr" && pattern != "rggb" && pattern != "grbg" && pattern != "gbrg") {
-        pattern = "bggr";
-    }
-    
-    // Allocate output buffer (single channel)
-    bayerData.resize(width * height);
-    
-    // Map pattern to channel indices at each position
-    // Pattern format: [0,0] [0,1] [1,0] [1,1]
-    int channelMap[2][2]; // [row%2][col%2] -> channel (0=R, 1=G, 2=B)
-    
-    if (pattern == "bggr") {
-        // B G
-        // G R
-        channelMap[0][0] = 2; channelMap[0][1] = 1;
-        channelMap[1][0] = 1; channelMap[1][1] = 0;
-    } else if (pattern == "rggb") {
-        // R G
-        // G B
-        channelMap[0][0] = 0; channelMap[0][1] = 1;
-        channelMap[1][0] = 1; channelMap[1][1] = 2;
-    } else if (pattern == "grbg") {
-        // G R
-        // B G
-        channelMap[0][0] = 1; channelMap[0][1] = 0;
-        channelMap[1][0] = 2; channelMap[1][1] = 1;
-    } else { // gbrg
-        // G B
-        // R G
-        channelMap[0][0] = 1; channelMap[0][1] = 2;
-        channelMap[1][0] = 0; channelMap[1][1] = 1;
-    }
-    
-    // Convert RGB to Bayer by selecting appropriate channel for each pixel
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            int channel = channelMap[y % 2][x % 2];
-            int rgbIdx = (y * width + x) * 3 + channel;
-            int bayerIdx = y * width + x;
-            bayerData[bayerIdx] = rgbData[rgbIdx];
-        }
-    }
+uint32_t dngPackedBits(uint16_t whiteLevel, bool rgb, bool cameraNativeStaging) {
+    if (cameraNativeStaging) return 16;
+    const uint32_t bits = bitsNeeded(whiteLevel);
+    if (rgb && bits > 12) return 16;
+    if (bits <= 2) return 2;
+    if (bits <= 4) return 4;
+    if (bits <= 6) return 6;
+    if (bits <= 8) return 8;
+    if (bits <= 10) return 10;
+    if (bits <= 12) return 12;
+    if (!rgb && bits <= 14) return 14;
+    return 16;
 }
 
+DngOutputLevels planDngOutputLevels(
+        double sourceWhite, const std::array<double, 4>& sourceBlack,
+        bool applyShadingMap, bool normalizeShadingMap, bool debugShadingMap,
+        LogTransformMode logTransform) {
+    DngOutputLevels result{sourceWhite, sourceBlack};
+    auto reducedWhite = [&](int reduction, int expansion = 0) {
+        const int bits = std::clamp(
+            static_cast<int>(bitsNeeded(static_cast<uint16_t>(result.white))) -
+                reduction + expansion,
+            1, 16);
+        result.white = static_cast<double>((uint32_t{1} << bits) - 1);
+    };
+    if (applyShadingMap) {
+        if (logTransform != LogTransformMode::Disabled) {
+            if (!debugShadingMap) {
+                if (normalizeShadingMap) { /* Preserve the resolved white level. */ }
+                else if (logTransform == LogTransformMode::ReduceBy2Bit) reducedWhite(2);
+                else if (logTransform == LogTransformMode::ReduceBy4Bit) reducedWhite(4);
+                else if (logTransform == LogTransformMode::ReduceBy6Bit) reducedWhite(6);
+                else if (logTransform == LogTransformMode::ReduceBy8Bit) reducedWhite(8);
+                else if (logTransform == LogTransformMode::KeepInput) reducedWhite(0);
+                else reducedWhite(0, 2);
+            }
+            result.black.fill(0.0);
+        } else {
+            const auto planned = planLinearGainBake(
+                result.white, result.black, normalizeShadingMap);
+            result.white = planned.destinationWhite;
+            result.black = planned.destinationBlack;
+        }
+    } else if (logTransform != LogTransformMode::Disabled) {
+        if (logTransform == LogTransformMode::ReduceBy2Bit) reducedWhite(2);
+        else if (logTransform == LogTransformMode::ReduceBy4Bit) reducedWhite(4);
+        else if (logTransform == LogTransformMode::ReduceBy6Bit) reducedWhite(6);
+        else if (logTransform == LogTransformMode::ReduceBy8Bit) reducedWhite(8);
+        result.black.fill(0.0);
+    }
+    return result;
+}
+
+DngFrameProcessingPlan planDngFrameProcessing(
+        const RenderSettings& settings, const CameraFrameMetadata& metadata,
+        const std::optional<CalibrationData>& calibration) {
+    DngFrameProcessingPlan plan;
+    plan.draftScale = settings.options & RENDER_OPT_DRAFT ? settings.draftScale : 1;
+    plan.logTransform = settings.options & RENDER_OPT_LOG_TRANSFORM
+        ? settings.logTransform : LogTransformMode::Disabled;
+    if (plan.logTransform == LogTransformMode::KeepInput &&
+        !(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION))
+        plan.logTransform = LogTransformMode::Disabled;
+    plan.cfaRepeatSize = calibration && calibration->hasCfaSize
+        ? calibration->cfaSize : metadata.cfaSize;
+    if (plan.cfaRepeatSize < 2 || (plan.cfaRepeatSize % 2) != 0)
+        plan.cfaRepeatSize = metadata.needRemosaic ? 4 : 2;
+    plan.higherCfa = plan.cfaRepeatSize > 2;
+    plan.explicitBinning = settings.quadBayerOption == QuadBayerMode::Binning ||
+        settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
+    plan.hqProxy = plan.draftScale > 1 &&
+        (settings.options & RENDER_OPT_HIGHER_CFA_HQ);
+    plan.preprocessScale = plan.hqProxy || plan.explicitBinning
+        ? 1 : plan.draftScale;
+    const bool selectedDemosaic =
+        settings.quadBayerOption == QuadBayerMode::Demosaic ||
+        settings.quadBayerOption == QuadBayerMode::DemosaicColor ||
+        settings.quadBayerOption == QuadBayerMode::DemosaicOCL;
+    plan.demosaic = (plan.higherCfa || settings.cameraNativeStaging || plan.hqProxy) &&
+        (plan.hqProxy || plan.draftScale == 1) &&
+        (!settings.streamingPreview ||
+         (settings.options & RENDER_OPT_HIGHER_CFA_HQ)) &&
+        (plan.hqProxy || selectedDemosaic);
+    plan.remosaic = plan.demosaic &&
+        (settings.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+    return plan;
+}
 // Simple 5x7 bitmap font for digits and common characters
 namespace {
     // Each character is 5 pixels wide, 7 pixels tall
@@ -2198,155 +2263,6 @@ void burnInText(
         
         xOffset += charWidth + charSpacing;
     }
-}
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
-bool generateJpegThumbnail(
-    std::vector<uint8_t>& data,
-    const CameraFrameMetadata& metadata,
-    const CameraConfiguration& cameraConfiguration,
-    const std::string& outputPath,
-    int thumbWidth,
-    int thumbHeight) {
-    const int width = static_cast<int>(metadata.width);
-    const int height = static_cast<int>(metadata.height);
-    if (width < 2 || height < 2 || thumbWidth < 1 || thumbHeight < 1 ||
-        data.size() < static_cast<size_t>(width) * height * sizeof(uint16_t))
-        return false;
-
-    const auto cfa = cfaColorsFromPhase(cameraConfiguration.sensorArrangement);
-
-    const float black = std::accumulate(metadata.dynamicBlackLevel.begin(),
-        metadata.dynamicBlackLevel.end(), 0.0f) / 4.0f;
-    const float range = std::max(1.0f, metadata.dynamicWhiteLevel - black);
-    const std::array<float, 3> gains{
-        1.0f / std::max(metadata.asShotNeutral[0], 0.001f),
-        1.0f / std::max(metadata.asShotNeutral[1], 0.001f),
-        1.0f / std::max(metadata.asShotNeutral[2], 0.001f)};
-    const float scale = std::min(static_cast<float>(thumbWidth) / width,
-                                 static_cast<float>(thumbHeight) / height);
-    const int renderedWidth = std::max(1, static_cast<int>(std::lround(width * scale)));
-    const int renderedHeight = std::max(1, static_cast<int>(std::lround(height * scale)));
-    const auto* raw = reinterpret_cast<const uint16_t*>(data.data());
-    std::vector<uint8_t> rgb(static_cast<size_t>(renderedWidth) * renderedHeight * 3);
-    auto srgb = [](float value) {
-        value = std::clamp(value, 0.0f, 1.0f);
-        return value <= 0.0031308f ? value * 12.92f
-                                  : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
-    };
-    for (int y = 0; y < renderedHeight; ++y) {
-        for (int x = 0; x < renderedWidth; ++x) {
-            int sx = std::clamp(static_cast<int>(x / scale), 0, width - 2) & ~1;
-            int sy = std::clamp(static_cast<int>(y / scale), 0, height - 2) & ~1;
-            const int base = sy * width + sx;
-            const uint16_t px[4]{raw[base], raw[base + 1], raw[base + width], raw[base + width + 1]};
-            float channels[3]{};
-            int counts[3]{};
-            for (int i = 0; i < 4; ++i) {
-                channels[cfa[i]] += px[i];
-                ++counts[cfa[i]];
-            }
-            const size_t out = (static_cast<size_t>(y) * renderedWidth + x) * 3;
-            for (int channel = 0; channel < 3; ++channel) {
-                const float sample = counts[channel] ? channels[channel] / counts[channel] : black;
-                const float value = ((sample - black) / range) * gains[channel];
-                rgb[out + channel] = static_cast<uint8_t>(std::lround(srgb(value) * 255.0f));
-            }
-        }
-    }
-    return stbi_write_jpg(outputPath.c_str(), renderedWidth, renderedHeight, 3,
-                          rgb.data(), 88) != 0;
-}
-
-bool generateJpegThumbnailFromDng(
-    std::vector<uint8_t> data,
-    const std::string& outputPath,
-    int thumbWidth,
-    int thumbHeight) {
-    if (data.empty() || thumbWidth < 1 || thumbHeight < 1) return false;
-    // UI thumbnails are rendered only from the primary raw image. Discard all
-    // embedded previews before any decompression or CFA processing.
-    if (!DNGDecoder::removeThumbnails(data)) return false;
-    int repeatSize = 2;
-    std::array<uint8_t, 4> phase{0, 1, 1, 2};
-    const bool hasCfa = DNGDecoder::getCFAMetadata(data, repeatSize, phase);
-    if (!DNGDecoder::ensureUncompressed(data, true)) return false;
-    if (hasCfa) {
-        // A UI thumbnail never needs a full-resolution demosaic. First use the
-        // existing sparse proxy path to reduce the CFA to a small ordinary
-        // Bayer image, then demosaic only that reduced image. Besides avoiding
-        // hundreds of MiB of temporary RGB, this keeps thumbnail work from
-        // starving mounted-frame reads.
-        constexpr int thumbnailProxyScale = 16;
-        if (!DNGDecoder::processHigherCFA(
-                data, repeatSize, phase, QuadBayerMode::Demosaic, false,
-                thumbnailProxyScale, false) ||
-            !DNGDecoder::processHigherCFA(
-                data, 2, phase, QuadBayerMode::Demosaic, false, 1, false))
-            return false;
-    }
-
-    std::vector<uint8_t> rgb16;
-    uint32_t width = 0, height = 0;
-    if (!DNGDecoder::extractUncompressedRGB16(data, rgb16, width, height) ||
-        width < 1 || height < 1) return false;
-
-    DNGFrameMetadata metadata;
-    if (!DNGDecoder::getColorMetadata(data, metadata)) return false;
-    std::vector<uint16_t> samples(rgb16.size() / sizeof(uint16_t));
-    for (size_t i = 0; i < samples.size(); ++i)
-        samples[i] = static_cast<uint16_t>(
-            rgb16[i * 2] | static_cast<uint16_t>(rgb16[i * 2 + 1]) << 8);
-    return generateJpegThumbnailFromRgb16(
-        samples, width, height, metadata.asShotNeutral,
-        outputPath, thumbWidth, thumbHeight);
-}
-
-bool generateJpegThumbnailFromRgb16(
-    const std::vector<uint16_t>& data,
-    uint32_t width,
-    uint32_t height,
-    const std::array<float, 3>& asShotNeutral,
-    const std::string& outputPath,
-    int thumbWidth,
-    int thumbHeight) {
-    if (width < 1 || height < 1 || thumbWidth < 1 || thumbHeight < 1 ||
-        data.size() < static_cast<size_t>(width) * height * 3) return false;
-    const std::array<float, 3> gains{
-        1.0f / std::max(asShotNeutral[0], 0.001f),
-        1.0f / std::max(asShotNeutral[1], 0.001f),
-        1.0f / std::max(asShotNeutral[2], 0.001f)};
-    const float scale = std::min(static_cast<float>(thumbWidth) / width,
-                                 static_cast<float>(thumbHeight) / height);
-    const int renderedWidth = std::max(1, static_cast<int>(std::lround(width * scale)));
-    const int renderedHeight = std::max(1, static_cast<int>(std::lround(height * scale)));
-    std::vector<uint8_t> rgb(static_cast<size_t>(renderedWidth) * renderedHeight * 3);
-    auto srgb = [](float value) {
-        value = std::clamp(value, 0.0f, 1.0f);
-        return value <= 0.0031308f ? value * 12.92f
-            : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
-    };
-    for (int y = 0; y < renderedHeight; ++y) {
-        for (int x = 0; x < renderedWidth; ++x) {
-            const uint32_t sx = std::min(width - 1,
-                static_cast<uint32_t>(x / scale));
-            const uint32_t sy = std::min(height - 1,
-                static_cast<uint32_t>(y / scale));
-            const size_t input = (static_cast<size_t>(sy) * width + sx) * 3;
-            const size_t output = (static_cast<size_t>(y) * renderedWidth + x) * 3;
-            std::array<float, 3> linear{};
-            for (int channel = 0; channel < 3; ++channel)
-                linear[channel] = (data[input + channel] / 65535.0f) * gains[channel];
-            for (int channel = 0; channel < 3; ++channel) {
-                const float value = linear[channel];
-                rgb[output + channel] = static_cast<uint8_t>(std::lround(srgb(value) * 255.0f));
-            }
-        }
-    }
-    return stbi_write_jpg(outputPath.c_str(), renderedWidth, renderedHeight, 3,
-                          rgb.data(), 88) != 0;
 }
 
 } // namespace utils

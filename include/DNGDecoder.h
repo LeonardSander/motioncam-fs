@@ -7,11 +7,9 @@
 #include <cstdint>
 #include <unordered_map>
 #include <array>
-#include "Types.h"
+#include "DNGImage.h"
 
 namespace motioncam {
-
-typedef int64_t Timestamp;
 
 struct DNGFrameInfo {
     int frameNumber;
@@ -35,46 +33,6 @@ struct DNGSequenceInfo {
     bool hasFrameNumberSequence = false;
 };
 
-struct DNGFrameMetadata {
-    size_t metadataBytes = 0;
-    std::string uniqueCameraModel;
-    double exposureTime = 0.0;
-    double iso = 0.0;
-    double baselineExposure = 0.0;
-    std::array<float, 3> asShotNeutral = {1.0f, 1.0f, 1.0f};
-    std::array<float, 4> blackLevel{};
-    std::array<float, 4> whiteLevel{};
-    uint32_t blackLevelCount = 0;
-    uint32_t whiteLevelCount = 0;
-    uint32_t inputBitDepth = 0;
-    // Clockwise display rotation represented by TIFF Orientation, or -1 when
-    // the tag is absent/invalid. Mirroring is intentionally not represented.
-    int orientation = -1;
-    std::array<float, 9> colorMatrix1{};
-    std::array<float, 9> colorMatrix2{};
-    std::array<float, 9> forwardMatrix1{};
-    std::array<float, 9> forwardMatrix2{};
-    uint16_t calibrationIlluminant1 = 0;
-    uint16_t calibrationIlluminant2 = 0;
-    bool hasExposure = false;
-    bool hasBaselineExposure = false;
-    bool hasAsShotNeutral = false;
-    bool hasColorMatrix1 = false;
-    bool hasColorMatrix2 = false;
-    bool hasForwardMatrix1 = false;
-    bool hasForwardMatrix2 = false;
-};
-
-struct GainMap {
-    uint32_t top, left, bottom, right;
-    uint32_t coordinateWidth = 0, coordinateHeight = 0;
-    uint32_t plane, planes;
-    uint32_t rowPitch, colPitch;
-    uint32_t width, height, channels;
-    double spacingV, spacingH, originV, originH;
-    std::vector<float> data;
-};
-
 class DNGDecoder {
 public:
     DNGDecoder(const std::string& sequencePath);
@@ -84,9 +42,7 @@ public:
     const std::vector<DNGFrameInfo>& getFrames() const { return mFrames; }
     
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
-    bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
-    bool getGainMaps(int frameNumber, std::vector<GainMap>& gainMaps);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
     static bool getColorMetadata(const std::vector<uint8_t>& dngData,
                                  DNGFrameMetadata& metadata);
@@ -118,13 +74,24 @@ public:
     static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode,
                                   uint32_t quantizationWhite = 0);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
-    static bool extractUncompressedRGB16(const std::vector<uint8_t>& dngData,
-                                         std::vector<uint8_t>& rgbData,
-                                         uint32_t& width,
-                                         uint32_t& height);
-    static bool replaceUncompressedRGB16(std::vector<uint8_t>& dngData,
-                                         const std::vector<uint8_t>& rgbData,
-                                         uint32_t width, uint32_t height);
+    static bool getImageLayout(const std::vector<uint8_t>& dngData,
+                               DNGImageLayout& layout);
+    static bool decodeImage(std::vector<uint8_t> dngData,
+                            DecodedDNGImage& image,
+                            bool backgroundWork = false,
+                            bool applyLinearization = true);
+    // Writes unpacked samples into an existing DNG metadata template. The
+    // template's image topology must match; container canonicalization and
+    // endian encoding are handled here.
+    static bool encodeImage(std::vector<uint8_t>& dngTemplate,
+                            const DecodedDNGImage& image);
+    static bool decodePreview(std::vector<uint8_t> dngData,
+                              const RenderSettings& settings,
+                              PreviewFrame& frame,
+                              bool applyPreviewScale = false);
+    static bool replaceNormalizedRGB16(std::vector<uint8_t>& dngData,
+                                       const std::vector<uint8_t>& rgbData,
+                                       uint32_t width, uint32_t height);
     static bool markSyntheticFrame(std::vector<uint8_t>& dngData);
     static bool markDuplicateFrame(std::vector<uint8_t>& dngData);
     static bool isSyntheticFrame(const std::vector<uint8_t>& dngData);

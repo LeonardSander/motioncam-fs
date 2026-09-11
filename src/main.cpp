@@ -183,10 +183,15 @@ int main(int argc, char *argv[])
         QStringList() << "gallery-perf-playback-ms",
         "Playback sample duration before and after each seek",
         "milliseconds", "3000");
+    QCommandLineOption galleryPerfThumbnailsOption(
+        QStringList() << "gallery-perf-thumbnails",
+        "Generate thumbnails concurrently during the cold gallery startup (on/off)",
+        "mode", "on");
 
     parser.addOption(fileOption);
     parser.addOption(galleryPerfOption);
     parser.addOption(galleryPerfPlaybackOption);
+    parser.addOption(galleryPerfThumbnailsOption);
     parser.process(app);
 
     const auto commandLineParsed = std::chrono::steady_clock::now();
@@ -197,6 +202,8 @@ int main(int argc, char *argv[])
     bool galleryPerfDurationOk = false;
     const int galleryPerfPlaybackMs = parser.value(galleryPerfPlaybackOption)
         .toInt(&galleryPerfDurationOk);
+    const bool galleryPerfThumbnails =
+        parser.value(galleryPerfThumbnailsOption).compare("off", Qt::CaseInsensitive) != 0;
     if (!galleryPerfSession.isEmpty()) {
         qputenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS", "1");
         qputenv("MOTIONCAM_GALLERY_DIAGNOSTICS", "1");
@@ -280,14 +287,15 @@ int main(int argc, char *argv[])
     if (!galleryPerfSession.isEmpty()) {
         QTimer::singleShot(0, &window,
             [&window, galleryPerfSession, galleryPerfPlaybackMs, galleryPerfDurationOk,
-             processStarted] {
+             galleryPerfThumbnails, processStarted] {
                 spdlog::info(
                     "GALLERY_PERF event=test_dispatch process_elapsed_ms={:.3f}",
                     std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - processStarted).count());
                 window.startGalleryPerformanceTest(
                     galleryPerfSession,
-                    galleryPerfDurationOk ? std::max(250, galleryPerfPlaybackMs) : 3000);
+                    galleryPerfDurationOk ? std::max(250, galleryPerfPlaybackMs) : 3000,
+                    galleryPerfThumbnails);
             });
     } else if (fileToMount.isEmpty())
         QTimer::singleShot(0, &window, [&window] { window.promptToResumeSession(); });

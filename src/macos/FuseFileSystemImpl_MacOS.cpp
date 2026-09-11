@@ -113,9 +113,6 @@ public:
 
     FileInfo getFileInfo() const;
     const std::string& sourcePath() const { return mSrcFile; }
-    bool generateThumbnail(const std::string& path, int width, int height) {
-        return mFs->generateThumbnail(path, width, height);
-    }
     void finalize(const std::string&, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>&, bool);
@@ -564,7 +561,10 @@ void FuseFileSystemImpl_MacOs::updateOptions(
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         const auto it = mMountedFiles.find(mountId);
-        if (it != mMountedFiles.end()) session = it->second;
+        if (it != mMountedFiles.end()) {
+            session = it->second;
+            mPreviewRenderers.erase(mountId);
+        }
     }
     if (session) session->updateOptions(settings);
 }
@@ -578,37 +578,6 @@ std::optional<FileInfo> FuseFileSystemImpl_MacOs::getFileInfo(MountId mountId) {
     }
     if (session) return session->getFileInfo();
     return std::nullopt;
-}
-
-bool FuseFileSystemImpl_MacOs::generateThumbnail(
-    MountId mountId, const std::string& outputPath, int width, int height) {
-    std::shared_ptr<Session> session;
-    {
-        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
-        const auto it = mMountedFiles.find(mountId);
-        if (it == mMountedFiles.end()) return false;
-        session = it->second;
-    }
-    const std::string sourcePath = session->sourcePath();
-    if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
-        return session->generateThumbnail(outputPath, width, height);
-    try {
-        const fs::path source(sourcePath);
-        Decoder decoder(source.string());
-        auto frames = decoder.getFrames();
-        if (frames.empty()) return false;
-        std::sort(frames.begin(), frames.end());
-        std::vector<uint8_t> data;
-        nlohmann::json metadata;
-        decoder.loadFrame(frames.front(), data, metadata);
-        return utils::generateJpegThumbnail(
-            data, CameraFrameMetadata::parse(metadata),
-            CameraConfiguration::parse(decoder.getContainerMetadata()),
-            outputPath, width, height);
-    } catch (const std::exception& error) {
-        spdlog::warn("Could not generate thumbnail: {}", error.what());
-        return false;
-    }
 }
 
 void FuseFileSystemImpl_MacOs::finalize(
@@ -626,10 +595,10 @@ void FuseFileSystemImpl_MacOs::finalize(
     }
     session->finalize(destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
-void FuseFileSystemImpl_MacOs::finalizePreview(
-    MountId mountId, const RenderSettings& settings, const FinalizeOptions& options,
+void FuseFileSystemImpl_MacOs::renderPreview(
+    MountId mountId, const RenderSettings& settings, const PreviewOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
-    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) {
+    const std::function<void(PreviewFrame&&)>& frameReady) {
     std::shared_ptr<PreviewRenderer> renderer;
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
@@ -643,8 +612,7 @@ void FuseFileSystemImpl_MacOs::finalizePreview(
         }
         renderer = cached;
     }
-    renderer->finalize(settings, QDir::tempPath().toStdString(), options,
-                       progress, fileReady);
+    renderer->render(settings, options, progress, frameReady);
 }
 
 } // namespace motioncam

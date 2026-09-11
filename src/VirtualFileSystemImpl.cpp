@@ -354,12 +354,40 @@ boost::filesystem::path sidecarPath(const std::string& sourcePath) {
 
 void loadSidecar(
         const boost::filesystem::path& path, nlohmann::json& metadata,
-        std::optional<CalibrationData>& calibration) {
-    metadata = loadSidecarMetadataFile(path);
-    calibration.reset();
-    // Projection metadata and calibration share the same sidecar. Reuse the
-    // parsed document instead of reading and parsing the file a second time.
-    if (!metadata.empty()) calibration = CalibrationData::parse(metadata);
+        std::optional<CalibrationData>& calibration, bool refresh) {
+    struct CachedSidecar {
+        nlohmann::json metadata;
+        std::optional<CalibrationData> calibration;
+        uint64_t lastAccess = 0;
+    };
+    constexpr size_t maxCachedSidecars = 16;
+    static std::mutex cacheMutex;
+    static std::unordered_map<std::string, CachedSidecar> cache;
+    static uint64_t accessSerial = 0;
+
+    const auto key = boost::filesystem::absolute(path).lexically_normal().string();
+    std::lock_guard lock(cacheMutex);
+    auto found = cache.find(key);
+    if (refresh || found == cache.end()) {
+        CachedSidecar parsed;
+        parsed.metadata = loadSidecarMetadataFile(path);
+        if (!parsed.metadata.empty())
+            parsed.calibration = CalibrationData::parse(parsed.metadata);
+        parsed.lastAccess = ++accessSerial;
+        found = cache.insert_or_assign(key, std::move(parsed)).first;
+    } else {
+        found->second.lastAccess = ++accessSerial;
+    }
+    while (cache.size() > maxCachedSidecars) {
+        const auto oldest = std::min_element(cache.begin(), cache.end(),
+            [](const auto& left, const auto& right) {
+                return left.second.lastAccess < right.second.lastAccess;
+            });
+        if (oldest == cache.end()) break;
+        cache.erase(oldest);
+    }
+    metadata = found->second.metadata;
+    calibration = found->second.calibration;
 }
 
 std::shared_ptr<std::vector<char>> materializeCached(
@@ -709,17 +737,16 @@ for line in sys.stdin:
             ? readBytes(outputPath(entries[gap.right])) : finalizedDngs[gap.right];
         auto extractRgb = [&](std::vector<uint8_t> dng, const std::string& name,
                               uint32_t& width, uint32_t& height) {
-            int repeat = 0;
-            std::array<uint8_t, 4> phase{};
-            const bool remosaic = DNGDecoder::getCFAMetadata(dng, repeat, phase);
-            if (!DNGDecoder::ensureUncompressed(dng) ||
-                (remosaic && !DNGDecoder::processHigherCFA(
-                    dng, repeat, phase, QuadBayerMode::Demosaic, false)))
-                throw std::runtime_error("Could not demosaic RIFE input " + name);
-            std::vector<uint8_t> rgb;
-            if (!DNGDecoder::extractUncompressedRGB16(dng, rgb, width, height))
+            RenderSettings decodeSettings;
+            decodeSettings.options = RENDER_OPT_HIGHER_CFA_HQ;
+            decodeSettings.quadBayerOption = QuadBayerMode::Demosaic;
+            PreviewFrame decoded;
+            if (!DNGDecoder::decodePreview(
+                    std::move(dng), decodeSettings, decoded, false))
                 throw std::runtime_error("Could not extract RGB pixels from " + name);
-            return rgb;
+            width = decoded.width;
+            height = decoded.height;
+            return decoded.rgb;
         };
         uint32_t width = 0, height = 0, rightWidth = 0, rightHeight = 0;
         auto leftRgb = extractRgb(leftDng, entries[gap.left].name, width, height);
@@ -774,7 +801,7 @@ for line in sys.stdin:
                 throw std::runtime_error("Could not prepare synthesized DNG " + entries[frame].name);
             const double ratio = static_cast<double>(j + 1) / static_cast<double>(gap.frames.size() + 1);
             const auto rgb = readBytes(outputs[j]);
-            if (!DNGDecoder::replaceUncompressedRGB16(dng, rgb, width, height) ||
+            if (!DNGDecoder::replaceNormalizedRGB16(dng, rgb, width, height) ||
                 !DNGDecoder::interpolateFrameMetadata(dng, leftDng, rightDng, ratio) ||
                 (remosaic && (!DNGDecoder::processHigherCFA(
                     dng, 2, phase, QuadBayerMode::Demosaic, true) ||

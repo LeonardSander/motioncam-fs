@@ -685,21 +685,6 @@ AVFrame* DirectLogDecoder::transferableFrame(AVFrame* frame) {
     return mTransferFrame;
 }
 
-bool DirectLogDecoder::extractFrameByTimestamp(Timestamp timestamp, std::vector<uint16_t>& rgbData) {
-    // Find frame with closest timestamp
-    auto it = std::lower_bound(mFrames.begin(), mFrames.end(), timestamp,
-                              [](const DirectLogFrameInfo& frame, Timestamp ts) {
-                                  return frame.timestamp < ts;
-                              });
-    
-    if (it == mFrames.end()) {
-        it = mFrames.end() - 1;
-    }
-    
-    int frameNumber = static_cast<int>(std::distance(mFrames.begin(), it));
-    return extractFrame(frameNumber, rgbData);
-}
-
 void DirectLogDecoder::setFullRangeOverride(std::optional<bool> fullRange) {
     std::lock_guard<std::mutex> lock(mMutex);
     mFullRangeOverride = fullRange;

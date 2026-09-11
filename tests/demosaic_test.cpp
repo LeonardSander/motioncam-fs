@@ -27,6 +27,24 @@ int main() {
         assert(rgb[pixel * 3 + native] == mosaic[pixel]);
     }
 
+    // Both DNG and native-source output paths use this boundary. HQ output
+    // delegates to the regular demosaic; fast non-HQ previews request
+    // nearest-colour reconstruction explicitly.
+    std::vector<uint16_t> sharedRgb;
+    motioncam::utils::demosaicCfaForOutput(
+        mosaic, sharedRgb, width, height, 2, phase,
+        motioncam::QuadBayerMode::Demosaic, {}, false);
+    assert(sharedRgb == rgb);
+    motioncam::utils::demosaicCfaForOutput(
+        mosaic, sharedRgb, width, height, 2, phase,
+        motioncam::QuadBayerMode::Demosaic, {}, true);
+    assert(sharedRgb.size() == mosaic.size() * 3);
+    for (int y = 1; y + 1 < height; ++y) for (int x = 1; x + 1 < width; ++x) {
+        const size_t pixel = static_cast<size_t>(y) * width + x;
+        for (int channel = 0; channel < 3; ++channel)
+            assert(sharedRgb[pixel * 3 + channel] == flatColor[channel]);
+    }
+
     // A high-frequency native sample must survive as brightness detail.
     const size_t detailPixel = static_cast<size_t>(4) * width + 4;
     mosaic[detailPixel] = 4095;

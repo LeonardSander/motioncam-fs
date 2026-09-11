@@ -88,11 +88,14 @@ public:
 
     void mountFile(const QString& filePath);
     void promptToResumeSession();
-    void startGalleryPerformanceTest(const QString& sessionPath, int playbackMilliseconds);
+    void startGalleryPerformanceTest(const QString& sessionPath, int playbackMilliseconds,
+                                     bool generateThumbnails);
 
 signals:
     void thumbnailPerformanceFinished(motioncam::MountId mountId, bool success,
                                       qint64 elapsedMilliseconds);
+    void galleryThumbnailBackfillFinished(motioncam::MountId mountId, int frames,
+                                          qint64 elapsedMilliseconds);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "Types.h"
+#include "DNGImage.h"
 
 namespace motioncam {
 
@@ -31,7 +32,6 @@ public:
     virtual void unmount(MountId mountId) = 0;
     virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
-    virtual bool generateThumbnail(MountId, const std::string&, int = 320, int = 240) { return false; }
     virtual void setCachePolicy(CachePolicy) {}
     virtual void setCacheQuotaBytes(std::uint64_t) {}
     virtual void cleanupCacheExpired() {}
@@ -45,11 +45,11 @@ public:
         bool writeFiles = true) = 0;
     // Render with an isolated virtual filesystem. Preview settings must never
     // mutate the mounted projection or invalidate/re-estimate its entries.
-    virtual void finalizePreview(
+    virtual void renderPreview(
         MountId mountId, const RenderSettings& settings,
-        const FinalizeOptions& options,
+        const PreviewOptions& options,
         const std::function<bool(size_t, size_t, const std::string&)>& progress,
-        const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) = 0;
+        const std::function<void(PreviewFrame&&)>& frameReady) = 0;
 
 protected:
     IFuseFileSystem() = default;

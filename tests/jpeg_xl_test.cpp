@@ -355,6 +355,20 @@ int main() {
         rewriteTiffTag(tiledJxl, 278, 322, 4, width);
         rewriteTiffTag(tiledJxl, 279, 325);
         rewriteTiffTag(tiledJxl, 283, 323, 4, height);
+        motioncam::DNGImageLayout tiledLayout;
+        assert(motioncam::DNGDecoder::getImageLayout(tiledJxl, tiledLayout));
+        assert(tiledLayout.storage == motioncam::DNGStorageLayout::Tiles);
+        assert(tiledLayout.pixels == motioncam::DNGPixelLayout::CFA);
+        assert(tiledLayout.compression == 52546 && tiledLayout.cfaRepeatSize == repeat);
+        motioncam::DecodedDNGImage decodedTiled;
+        assert(motioncam::DNGDecoder::decodeImage(tiledJxl, decodedTiled));
+        assert(decodedTiled.layout.storage == motioncam::DNGStorageLayout::Tiles);
+        assert(decodedTiled.samples == cfa);
+        auto encodedFromTemplate = tiledJxl;
+        assert(motioncam::DNGDecoder::encodeImage(encodedFromTemplate, decodedTiled));
+        motioncam::DecodedDNGImage encodedRoundTrip;
+        assert(motioncam::DNGDecoder::decodeImage(encodedFromTemplate, encodedRoundTrip));
+        assert(encodedRoundTrip.samples == cfa);
         assert(motioncam::DNGDecoder::ensureUncompressed(tiledJxl));
         assert(tiffTagValue(tiledJxl, 259) == 1);
         assert(tiffTagValue(tiledJxl, 279) == cfa.size() * sizeof(uint16_t));
@@ -740,6 +754,15 @@ int main() {
                                rgb.size() * sizeof(uint16_t)));
     assert(rgbDng.GetStripBytes() > 0);
     auto mountedRgb = writeDng(rgbDng);
+    motioncam::DNGImageLayout rgbLayout;
+    assert(motioncam::DNGDecoder::getImageLayout(mountedRgb, rgbLayout));
+    assert(rgbLayout.storage == motioncam::DNGStorageLayout::Strips);
+    assert(rgbLayout.pixels == motioncam::DNGPixelLayout::LinearRGB);
+    assert(rgbLayout.samplesPerPixel == 3 && rgbLayout.bitsPerSample == 16);
+    motioncam::DecodedDNGImage decodedRgb;
+    assert(motioncam::DNGDecoder::decodeImage(mountedRgb, decodedRgb));
+    assert(decodedRgb.layout.storage == motioncam::DNGStorageLayout::Strips);
+    assert(decodedRgb.samples.size() == rgb.size());
     tinydngwriter::GainMapParams rgbLumaGain{};
     rgbLumaGain.top = 0; rgbLumaGain.left = 0;
     rgbLumaGain.bottom = rgbHeight; rgbLumaGain.right = rgbWidth;
@@ -842,12 +865,12 @@ int main() {
         replacement[i] = static_cast<uint8_t>(value & 0xff);
         replacement[i + 1] = static_cast<uint8_t>(value >> 8);
     }
-    assert(motioncam::DNGDecoder::replaceUncompressedRGB16(
+    assert(motioncam::DNGDecoder::replaceNormalizedRGB16(
         syntheticRgb, replacement, rgbWidth, rgbHeight));
-    std::vector<uint8_t> replaced;
-    uint32_t replacedWidth = 0, replacedHeight = 0;
-    assert(motioncam::DNGDecoder::extractUncompressedRGB16(
-        syntheticRgb, replaced, replacedWidth, replacedHeight));
+    motioncam::PreviewFrame replacedFrame;
+    assert(motioncam::DNGDecoder::decodePreview(
+        syntheticRgb, motioncam::RenderSettings{}, replacedFrame, false));
+    const auto& replaced = replacedFrame.rgb;
     assert(replaced.size() == replacement.size());
     for (size_t i = 0; i < replaced.size(); i += 2) {
         const int actual = replaced[i] | replaced[i + 1] << 8;

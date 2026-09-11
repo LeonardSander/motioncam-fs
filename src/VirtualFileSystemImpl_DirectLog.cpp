@@ -1007,110 +1007,68 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     }
 }
 
+VirtualFileSystemImpl_DirectLog::ProcessedFrame
+VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput) {
+    ProcessedFrame result;
+    result.timestamp = std::get<Timestamp>(entry.userData);
+    const auto frameIt = mFrameIndexByTimestamp.find(result.timestamp);
+    if (frameIt == mFrameIndexByTimestamp.end())
+        throw std::runtime_error("DirectLog source frame not found");
+    result.frameNumber = static_cast<int>(frameIt->second);
+
+    const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
+    const bool sequenceMetadataFrame = dngOutput && !mConfig.streamingPreview &&
+        vfs::outputFrameNumber(entry) == 0;
+    const bool directProxyDecode = proxyScale > 1 && !sequenceMetadataFrame &&
+        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ);
+    result.width = sequenceMetadataFrame && proxyScale > 1
+        ? mWidth : (directProxyDecode ? mWidth / proxyScale : 0);
+    result.height = sequenceMetadataFrame && proxyScale > 1
+        ? mHeight : (directProxyDecode ? mHeight / proxyScale : 0);
+
+    result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
+    const bool bakesGainMaps = !result.gainMaps.bakeList2.empty() ||
+                               !result.gainMaps.bakeList3.empty();
+    result.inputLogEncoded = dngOutput && mDecoder->getVideoInfo().isLOG60 &&
+        (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+        mConfig.logTransform != LogTransformMode::Disabled && !bakesGainMaps;
+    if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
+                                result.height, result.inputLogEncoded))
+        throw std::runtime_error("Could not decode DirectLog frame");
+    applySidecarGainMaps(result.rgb, result.frameNumber, result.gainMaps,
+                         result.width, result.height);
+
+    result.metadata = frameMetadata(result.frameNumber);
+    const bool normalizeExposure = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
+    if (normalizeExposure || smoothExposure) {
+        const auto& offsets = smoothExposure
+            ? mSmoothedExposureOffsets : mNormalizedExposureOffsets;
+        if (offsets.count(result.timestamp))
+            result.metadata.baselineExposure = offsets.at(result.timestamp);
+    }
+    if ((mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE) &&
+        mSmoothedAsShotNeutrals.count(result.timestamp))
+        result.metadata.asShotNeutral = mSmoothedAsShotNeutrals.at(result.timestamp);
+    return result;
+}
+
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
-        const auto timestamp = std::get<Timestamp>(entry.userData);
-        const auto& frames = mDecoder->getFrames();
-        const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
-        if (frameIt == mFrameIndexByTimestamp.end())
-            throw std::runtime_error("DirectLog source frame not found");
-        const int frameNumber = static_cast<int>(frameIt->second);
-        const bool diagnostics = directLogDiagnosticsEnabled();
         const auto materializeStart = std::chrono::steady_clock::now();
-        auto stageStart = materializeStart;
+        const auto& frames = mDecoder->getFrames();
+        auto processed = processFrame(entry, true);
+        const auto timestamp = processed.timestamp;
+        const int frameNumber = processed.frameNumber;
+        const bool diagnostics = directLogDiagnosticsEnabled();
+        auto stageStart = std::chrono::steady_clock::now();
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} materialize begin name={}",
                          frameNumber, entry.name);
 
         const int outputFrameNumber = vfs::outputFrameNumber(entry);
-        const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
-        // Applications inspect the first mounted DNG to establish sequence
-        // metadata and native dimensions. Gallery frames are a homogeneous
-        // RGB stream, so frame zero must use the same proxy scale as every
-        // following frame.
-        const bool sequenceMetadataFrame =
-            !mConfig.streamingPreview && outputFrameNumber == 0;
-        const bool directProxyDecode = proxyScale > 1 && !sequenceMetadataFrame &&
-            !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ);
-        const int decodedWidth = sequenceMetadataFrame && proxyScale > 1
-            ? mWidth : (directProxyDecode ? mWidth / proxyScale : 0);
-        const int decodedHeight = sequenceMetadataFrame && proxyScale > 1
-            ? mHeight : (directProxyDecode ? mHeight / proxyScale : 0);
-        bool bakesGainMaps = false;
-        if ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-            mSidecarMetadata.contains("dynamic")) {
-            const auto& dynamic = mSidecarMetadata["dynamic"];
-            if (dynamic.contains("frames") && dynamic.contains("gainMapFormats") &&
-                static_cast<size_t>(frameNumber) < dynamic["frames"].size()) {
-                const auto& sidecarFrame = dynamic["frames"][frameNumber];
-                auto fieldHasMaps = [&](const char* field) {
-                    return sidecarFrame.contains(field) && sidecarFrame[field].is_array() &&
-                           !sidecarFrame[field].empty();
-                };
-                if (!(mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
-                    bakesGainMaps = fieldHasMaps("gainMaps") || fieldHasMaps("deferredGainMaps");
-                } else if (fieldHasMaps("gainMaps")) {
-                    for (const auto& reference : sidecarFrame["gainMaps"]) {
-                        const size_t formatIndex = reference.at("format").get<size_t>();
-                        if (formatIndex >= dynamic["gainMapFormats"].size()) continue;
-                        const auto& format = dynamic["gainMapFormats"][formatIndex];
-                        const uint32_t channels = format.at("channels").get<uint32_t>();
-                        const uint32_t rowPitch = format.at("rowPitch").get<uint32_t>();
-                        const uint32_t colPitch = format.at("colPitch").get<uint32_t>();
-                        // A pitch-one single-plane map is pure luminance and
-                        // is deliberately deferred in color-only mode.
-                        if (channels > 1 || rowPitch > 1 || colPitch > 1) {
-                            bakesGainMaps = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        const bool preserveNativeLog = mDecoder->getVideoInfo().isLOG60 &&
-            (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
-            mConfig.logTransform != LogTransformMode::Disabled &&
-            !bakesGainMaps;
-        std::vector<uint16_t> rgbData;
-        if (!mDecoder->extractFrame(frameNumber, rgbData, decodedWidth, decodedHeight,
-                                    preserveNativeLog))
-            throw std::runtime_error("Could not decode DirectLog frame");
-        if (diagnostics) {
-            spdlog::info("DirectLog diagnostic: frame={} decode_ms={:.3f}; gain-map stage begin",
-                         frameNumber, elapsedMilliseconds(stageStart));
-            stageStart = std::chrono::steady_clock::now();
-        }
-        float gainMapExposureOffset = 0.0f;
-        std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
-        const auto preparedGainMaps = prepareSidecarGainMaps(frameNumber);
-        gainMapExposureOffset = preparedGainMaps.exposureOffset;
-        gainMapNeutralScale = preparedGainMaps.neutralScale;
-        applySidecarGainMaps(rgbData, frameNumber, preparedGainMaps,
-                             decodedWidth, decodedHeight);
-        if (diagnostics) {
-            spdlog::info("DirectLog diagnostic: frame={} gain_map_ms={:.3f}; metadata stage begin",
-                         frameNumber, elapsedMilliseconds(stageStart));
-            stageStart = std::chrono::steady_clock::now();
-        }
-        auto metadata = frameMetadata(frameNumber);
-        const bool normalizeExposure = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
-        const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
-        const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
-        const bool optimizeGainMaps = mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
-        if (normalizeExposure || smoothExposure || optimizeGainMaps) {
-            const auto& offsets = smoothExposure
-                ? mSmoothedExposureOffsets : mNormalizedExposureOffsets;
-            if ((normalizeExposure || smoothExposure) && offsets.count(timestamp))
-                metadata.baselineExposure = offsets.at(timestamp);
-            // With optimization alone, assigning the parsed source value is
-            // intentional: convertRGBToDNG then adds the gain-map compensation.
-        }
-        if (smoothWhiteBalance && mSmoothedAsShotNeutrals.count(timestamp))
-            metadata.asShotNeutral = mSmoothedAsShotNeutrals.at(timestamp);
-        const auto& opcodeList2Maps = preparedGainMaps.opcodeList2;
-        const auto& opcodeList3Maps = preparedGainMaps.opcodeList3;
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} metadata_ms={:.3f}; DNG construction begin",
                          frameNumber, elapsedMilliseconds(stageStart));
@@ -1134,12 +1092,17 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
             }
         } writerSlot(*this);
         std::vector<uint8_t> dngData;
-        if (!convertRGBToDNG(std::move(rgbData), dngData, outputFrameNumber, timestamp, jpegCompression,
-                             gainMapExposureOffset, gainMapNeutralScale, metadata.iso,
-                             metadata.shutterSpeed, metadata.baselineExposure,
-                             metadata.asShotNeutral,
-                             opcodeList2Maps, opcodeList3Maps,
-                             decodedWidth, decodedHeight, preserveNativeLog))
+        if (!convertRGBToDNG(std::move(processed.rgb), dngData, outputFrameNumber,
+                             timestamp, jpegCompression,
+                             processed.gainMaps.exposureOffset,
+                             processed.gainMaps.neutralScale,
+                             processed.metadata.iso, processed.metadata.shutterSpeed,
+                             processed.metadata.baselineExposure,
+                             processed.metadata.asShotNeutral,
+                             processed.gainMaps.opcodeList2,
+                             processed.gainMaps.opcodeList3,
+                             processed.width, processed.height,
+                             processed.inputLogEncoded))
             throw std::runtime_error("Could not generate DirectLog DNG");
         const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
         const Timestamp outputTimestamp = vfs::outputTimestamp(
@@ -1155,30 +1118,53 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
     });
 }
 
-bool VirtualFileSystemImpl_DirectLog::generateThumbnail(
-        const std::string& outputPath, int width, int height) {
-    try {
-        std::array<float, 3> neutral{1.0f, 1.0f, 1.0f};
-        {
-            std::shared_lock renderLock(mRenderMutex);
-            std::lock_guard<std::mutex> lock(mMutex);
-            const auto metadata = frameMetadata(0);
-            neutral = metadata.asShotNeutral.value_or(
-                mCalibration && mCalibration->hasAsShotNeutral
-                    ? mCalibration->asShotNeutral
-                    : neutral);
-        }
-        DirectLogDecoder decoder(mSrcPath);
-        const auto& info = decoder.getVideoInfo();
-        std::vector<uint16_t> rgb;
-        if (!decoder.extractFrame(0, rgb)) return false;
-        return utils::generateJpegThumbnailFromRgb16(
-            rgb, info.width, info.height, neutral,
-            outputPath, width, height);
-    } catch (const std::exception& error) {
-        spdlog::warn("Could not generate DirectLog thumbnail: {}", error.what());
-        return false;
+bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
+        const Entry& entry, PreviewFrame& preview) {
+    std::shared_lock renderLock(mRenderMutex);
+    ProcessedFrame processed;
+    try { processed = processFrame(entry, false); }
+    catch (const std::exception&) { return false; }
+    auto& metadata = processed.metadata;
+    auto& gainMaps = processed.gainMaps;
+    preview.width = processed.width > 0 ? static_cast<uint32_t>(processed.width)
+                                     : static_cast<uint32_t>(mWidth);
+    preview.height = processed.height > 0 ? static_cast<uint32_t>(processed.height)
+                                       : static_cast<uint32_t>(mHeight);
+    preview.rgb.resize(processed.rgb.size() * sizeof(uint16_t));
+    std::memcpy(preview.rgb.data(), processed.rgb.data(), preview.rgb.size());
+    preview.timestamp = vfs::outputTimestamp(
+        entry, processed.timestamp, mDecoder->getFrames().front().timestamp, mFps,
+        mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
+    preview.metadata.iso = metadata.iso;
+    preview.metadata.exposureTime = metadata.shutterSpeed;
+    preview.metadata.baselineExposure = metadata.baselineExposure +
+        vfs::configuredExposureOffset(mConfig) + gainMaps.exposureOffset;
+    preview.metadata.hasExposure = metadata.shutterSpeed > 0.0;
+    preview.metadata.hasBaselineExposure = true;
+    auto neutral = metadata.asShotNeutral;
+    if (!neutral && mCalibration && mCalibration->hasAsShotNeutral)
+        neutral = mCalibration->asShotNeutral;
+    if (neutral) {
+        for (size_t channel = 0; channel < 3; ++channel)
+            (*neutral)[channel] *= gainMaps.neutralScale[channel];
+        preview.metadata.asShotNeutral = *neutral;
+        preview.metadata.hasAsShotNeutral = true;
     }
+    if (mCalibration) {
+        preview.metadata.colorMatrix1 = mCalibration->colorMatrix1;
+        preview.metadata.colorMatrix2 = mCalibration->colorMatrix2;
+        preview.metadata.forwardMatrix1 = mCalibration->forwardMatrix1;
+        preview.metadata.forwardMatrix2 = mCalibration->forwardMatrix2;
+        preview.metadata.hasColorMatrix1 = mCalibration->hasColorMatrix1;
+        preview.metadata.hasColorMatrix2 = mCalibration->hasColorMatrix2;
+        preview.metadata.hasForwardMatrix1 = mCalibration->hasForwardMatrix1;
+        preview.metadata.hasForwardMatrix2 = mCalibration->hasForwardMatrix2;
+        if (mCalibration->hasColorMatrix1 || mCalibration->hasForwardMatrix1)
+            preview.metadata.calibrationIlluminant1 = 21;
+        if (mCalibration->hasColorMatrix2 || mCalibration->hasForwardMatrix2)
+            preview.metadata.calibrationIlluminant2 = 17;
+    }
+    return preview.rgb.size() == static_cast<size_t>(preview.width) * preview.height * 6;
 }
 
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
@@ -1197,7 +1183,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     mCalibration.reset();
     mSidecarMetadata = nlohmann::json();
     if (boost::filesystem::exists(calibPath)) {
-        vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
+        vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration, true);
         if (mCalibration.has_value()) {
             spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
         }

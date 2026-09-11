@@ -75,6 +75,7 @@ set(PROJECT_SOURCES
         include/VirtualFileSystemImpl_DNG.h
         include/DirectLogDecoder.h
         include/DNGDecoder.h
+        include/DNGImage.h
         include/LRUCache.h
         include/AudioWriter.h
         include/Measure.h

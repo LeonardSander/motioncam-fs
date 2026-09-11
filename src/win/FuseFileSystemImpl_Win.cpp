@@ -104,9 +104,6 @@ public:
     void updateOptions(const RenderSettings& settings);
     FileInfo getFileInfo() const;
     const std::string& sourcePath() const { return mSrcPath; }
-    bool generateThumbnail(const std::string& path, int width, int height) {
-        return mFs->generateThumbnail(path, width, height);
-    }
     const std::string& destinationPath() const { return mDstPath; }
     HRESULT dehydrate(const std::filesystem::path& relativePath) {
         PRJ_UPDATE_FAILURE_CAUSES cause = PRJ_UPDATE_FAILURE_CAUSE_NONE;
@@ -694,7 +691,10 @@ void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         const auto it = mMountedFiles.find(mountId);
-        if (it != mMountedFiles.end()) instance = it->second;
+        if (it != mMountedFiles.end()) {
+            instance = it->second;
+            mPreviewRenderers.erase(mountId);
+        }
     }
     if (auto* session = dynamic_cast<Session*>(instance.get())) session->updateOptions(settings);
 }
@@ -708,39 +708,6 @@ std::optional<FileInfo> FuseFileSystemImpl_Win::getFileInfo(MountId mountId) {
     }
     if (auto* session = dynamic_cast<Session*>(instance.get())) return session->getFileInfo();
     return std::nullopt;
-}
-
-bool FuseFileSystemImpl_Win::generateThumbnail(
-    MountId mountId, const std::string& outputPath, int width, int height) {
-    std::shared_ptr<VirtualizationInstance> instance;
-    {
-        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
-        const auto it = mMountedFiles.find(mountId);
-        if (it == mMountedFiles.end()) return false;
-        instance = it->second;
-    }
-    auto* session = dynamic_cast<Session*>(instance.get());
-    if (!session) return false;
-    const std::string sourcePath = session->sourcePath();
-    if (!boost::iequals(fs::path(sourcePath).extension().string(), ".mcraw"))
-        return session->generateThumbnail(outputPath, width, height);
-    try {
-        const fs::path source(sourcePath);
-        Decoder decoder(source.string());
-        auto frames = decoder.getFrames();
-        if (frames.empty()) return false;
-        std::sort(frames.begin(), frames.end());
-        std::vector<uint8_t> data;
-        nlohmann::json metadata;
-        decoder.loadFrame(frames.front(), data, metadata);
-        return utils::generateJpegThumbnail(
-            data, CameraFrameMetadata::parse(metadata),
-            CameraConfiguration::parse(decoder.getContainerMetadata()),
-            outputPath, width, height);
-    } catch (const std::exception& error) {
-        spdlog::warn("Could not generate thumbnail: {}", error.what());
-        return false;
-    }
 }
 
 void FuseFileSystemImpl_Win::setCachePolicy(CachePolicy policy) {
@@ -817,10 +784,10 @@ void FuseFileSystemImpl_Win::finalize(
     session->finalize(
         destination, jpegCompression, options, progress, fileReady, writeFiles);
 }
-void FuseFileSystemImpl_Win::finalizePreview(
-    MountId mountId, const RenderSettings& settings, const FinalizeOptions& options,
+void FuseFileSystemImpl_Win::renderPreview(
+    MountId mountId, const RenderSettings& settings, const PreviewOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
-    const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady) {
+    const std::function<void(PreviewFrame&&)>& frameReady) {
     std::shared_ptr<PreviewRenderer> renderer;
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
@@ -836,8 +803,7 @@ void FuseFileSystemImpl_Win::finalizePreview(
         }
         renderer = cached;
     }
-    renderer->finalize(settings, QDir::tempPath().toStdString(), options,
-                       progress, fileReady);
+    renderer->render(settings, options, progress, frameReady);
 }
 
 }

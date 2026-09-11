@@ -315,11 +315,12 @@ int main() {
         auto planar = chunkedDng(w, h, 16, 3, 1, w, h, false, true, planes);
         assert(motioncam::DNGDecoder::ensureUncompressed(planar));
         assert(tagScalar(planar, 284) == 1);
-        std::vector<uint8_t> rgb; uint32_t outW = 0, outH = 0;
-        assert(motioncam::DNGDecoder::extractUncompressedRGB16(planar, rgb, outW, outH));
-        assert(outW == w && outH == h && rgb.size() == expected.size() * 2);
+        motioncam::DecodedDNGImage decoded;
+        assert(motioncam::DNGDecoder::decodeImage(planar, decoded, false, false));
+        assert(decoded.layout.width == w && decoded.layout.height == h &&
+               decoded.samples.size() == expected.size());
         for (size_t i = 0; i < expected.size(); ++i)
-            assert(static_cast<uint16_t>(rgb[i * 2] | rgb[i * 2 + 1] << 8) == expected[i]);
+            assert(decoded.samples[i] == expected[i]);
     }
     {
         constexpr uint32_t w = 5, h = 4;
@@ -340,11 +341,12 @@ int main() {
         auto planar = chunkedDng(w, h, 12, 3, 7, w, h, false, true, encodedPlanes);
         assert(motioncam::DNGDecoder::ensureUncompressed(planar));
         assert(tagScalar(planar, 284) == 1 && ifdsAreTagSorted(planar));
-        std::vector<uint8_t> rgb; uint32_t outW = 0, outH = 0;
-        assert(motioncam::DNGDecoder::extractUncompressedRGB16(planar, rgb, outW, outH));
-        assert(outW == w && outH == h && rgb.size() == expected.size() * 2);
+        motioncam::DecodedDNGImage decoded;
+        assert(motioncam::DNGDecoder::decodeImage(planar, decoded, false, false));
+        assert(decoded.layout.width == w && decoded.layout.height == h &&
+               decoded.samples.size() == expected.size());
         for (size_t i = 0; i < expected.size(); ++i)
-            assert(static_cast<uint16_t>(rgb[i * 2] | rgb[i * 2 + 1] << 8) == expected[i]);
+            assert(decoded.samples[i] == expected[i]);
     }
     {
         constexpr uint32_t w = 4, h = 2;

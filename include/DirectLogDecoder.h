@@ -7,6 +7,8 @@
 #include <mutex>
 #include <optional>
 
+#include "Types.h"
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -19,8 +21,6 @@ extern "C" {
 }
 
 namespace motioncam {
-
-typedef int64_t Timestamp;
 
 struct DirectLogFrameInfo {
     int frameNumber;
@@ -56,7 +56,6 @@ public:
     bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
                       int outputWidth = 0, int outputHeight = 0,
                       bool preserveLogEncoded = false);
-    bool extractFrameByTimestamp(Timestamp timestamp, std::vector<uint16_t>& rgbData);
     void setFullRangeOverride(std::optional<bool> fullRange);
     
     static bool isHLGVideo(const std::string& filePath);

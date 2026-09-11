@@ -8,6 +8,7 @@
 #include "LRUCache.h"
 #include "DNGDecoder.h"
 #include "GainMapBake.h"
+#include "DataLevels.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -305,13 +306,12 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFps = vfs::determineCFRTarget(mFrameRateInfo, mSettings.cfrTarget, applyCFRConversion);
 
     // Calculate typical DNG size that we can use for all files
-    std::vector<uint8_t> data;
     nlohmann::json metadata;
 
     uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
     if (mSettings.options & RENDER_OPT_CROPPING)
         utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
-    decoder.loadFrame(frames[0], data, metadata, static_cast<int>(strideOverride));
+    decoder.loadFrameMetadata(frames[0], metadata);
 
     auto cameraConfig = CameraConfiguration::parse(decoder.getContainerMetadata());
     auto cameraFrameMetadata = CameraFrameMetadata::parse(metadata);
@@ -320,53 +320,110 @@ void VirtualFileSystemImpl_MCRAW::init() {
             mSettings, mCalibration, cameraConfig.sensorArrangement));
     utils::overrideLensShadingMap(cameraFrameMetadata,
         vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"));
-   
-    const std::optional<float> firstExposureOverride =
-        (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
-            ? std::optional<float>(mSmoothedExposureOffsets.at(frames[0]))
-            : std::nullopt;
-    const std::optional<std::array<float, 3>> firstNeutralOverride =
-        (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
-            ? std::optional<std::array<float, 3>>(mSmoothedAsShotNeutrals.at(frames[0]))
-            : std::nullopt;
-    auto dngData = utils::generateDng(
-        data,
-        cameraFrameMetadata,
-        cameraConfig,
-        mFps,
-        0,
-        mBaselineExpValue,
-        mSettings,
-        mCalibration,
-        false,  // Compression always false for virtual filesystem
-        firstExposureOverride,
-        firstNeutralOverride
-    );
 
-    {
-        std::vector<uint8_t> timed(dngData->begin(), dngData->end());
-        applySidecarGainMapOpcodes(timed, 0);
-        if (!DNGDecoder::setTimingMetadata(timed, mFps, 0))
-            throw std::runtime_error("Could not size DNG timing metadata");
-        dngData = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
+    // Match DNG-sequence sizing by accounting for the metadata that will be
+    // serialized alongside the pixels. JSON sidecars may store compressed gain
+    // maps, whereas DNG opcodes contain their expanded float samples, so include
+    // both the serialized documents and the expanded native/sidecar map data.
+    constexpr size_t transformedMetadataAllowance = 256 * 1024;
+    auto staticSidecarMetadata = mSidecarMetadata;
+    if (staticSidecarMetadata.is_object())
+        staticSidecarMetadata.erase("dynamic");
+    size_t serializedMetadataBytes = metadata.dump().size() +
+        staticSidecarMetadata.dump().size();
+    if (cameraFrameMetadata.lensShadingMapWidth > 0 &&
+        cameraFrameMetadata.lensShadingMapHeight > 0) {
+        const size_t gainMapPlanes = std::min<size_t>(
+            4, cameraFrameMetadata.lensShadingMap.size());
+        const size_t gainMapSamples =
+            static_cast<size_t>(cameraFrameMetadata.lensShadingMapWidth) *
+            static_cast<size_t>(cameraFrameMetadata.lensShadingMapHeight) *
+            gainMapPlanes;
+        serializedMetadataBytes += gainMapSamples * sizeof(float);
+    }
+    if (mSidecarMetadata.contains("dynamic") &&
+        mSidecarMetadata["dynamic"].contains("frames")) {
+        const auto& dynamicFrames = mSidecarMetadata["dynamic"]["frames"];
+        size_t largestDynamicFrameBytes = 0;
+        for (size_t frame = 0; frame < dynamicFrames.size(); ++frame) {
+            size_t dynamicFrameBytes = dynamicFrames[frame].dump().size();
+            for (const char* field : {"gainMaps", "deferredGainMaps"}) {
+                const auto maps = vfs::loadSidecarGainMaps(
+                    mSidecarMetadata, frame, field);
+                for (const auto& map : maps)
+                    dynamicFrameBytes += map.data.size() * sizeof(float);
+            }
+            largestDynamicFrameBytes = std::max(
+                largestDynamicFrameBytes, dynamicFrameBytes);
+        }
+        serializedMetadataBytes += largestDynamicFrameBytes;
     }
 
-    mTypicalDngSize = dngData->size();
-    size_t firstDngSize = mTypicalDngSize;
-    if (!mSettings.streamingPreview &&
-        vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1) {
-        RenderSettings nativeSettings = mSettings;
-        nativeSettings.options = static_cast<FileRenderOptions>(
-            nativeSettings.options & ~RENDER_OPT_DRAFT);
-        auto nativeDng = utils::generateDng(
-            data, cameraFrameMetadata, cameraConfig, mFps, 0, mBaselineExpValue,
-            nativeSettings, mCalibration, false);
-        std::vector<uint8_t> timed(nativeDng->begin(), nativeDng->end());
-        applySidecarGainMapOpcodes(timed, 0);
-        if (!DNGDecoder::setTimingMetadata(timed, mFps, 0))
-            throw std::runtime_error("Could not size native MCRAW metadata frame");
-        firstDngSize = timed.size();
-    }
+    // Mounted-file sizes only need a safe upper bound. Rendering frame zero to
+    // measure it made higher-CFA imports perform a full demosaic before the
+    // user had requested any frame. Use the same conservative uncompressed
+    // geometry estimate as DNG sequences and render lazily on first read.
+    auto estimatedDngSize = [&](bool nativeResolution) {
+        RenderSettings plannedSettings = mSettings;
+        if (nativeResolution)
+            plannedSettings.options = static_cast<FileRenderOptions>(
+                plannedSettings.options & ~RENDER_OPT_DRAFT);
+        const auto plan = utils::planDngFrameProcessing(
+            plannedSettings, cameraFrameMetadata, mCalibration);
+        uint32_t width = cropWidth > 0 ? cropWidth
+            : static_cast<uint32_t>(cameraFrameMetadata.width);
+        uint32_t height = cropHeight > 0 ? cropHeight
+            : static_cast<uint32_t>(cameraFrameMetadata.height);
+        const int cfaSize = plan.cfaRepeatSize;
+        const bool binning = cfaSize > 2 && plan.explicitBinning;
+        if (binning) {
+            const uint32_t factor = mSettings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+                                    cfaSize == 8 ? 2u : static_cast<uint32_t>(cfaSize / 2);
+            width = std::max<uint32_t>(1, width / factor);
+            height = std::max<uint32_t>(1, height / factor);
+        }
+        const int scale = plan.draftScale;
+        if (scale > 1) {
+            width = std::max<uint32_t>(1, width / static_cast<uint32_t>(scale));
+            height = std::max<uint32_t>(1, height / static_cast<uint32_t>(scale));
+        }
+        const uint32_t channels = plan.demosaic && !plan.remosaic ? 3u : 1u;
+        const auto levels = resolveDataLevels(
+            mSettings.levels, cameraFrameMetadata.dynamicWhiteLevel,
+            cameraFrameMetadata.dynamicBlackLevel, cameraConfig.whiteLevel,
+            cameraConfig.blackLevel);
+        double storedWhite = std::clamp<double>(levels.white, 1.0, 65535.0);
+        std::array<double, 4> storedBlack{};
+        std::copy(levels.black.begin(), levels.black.end(), storedBlack.begin());
+        if (cfaSize > 2 && scale > 1 && plan.hqProxy) {
+            const double area = std::pow(std::max(1, cfaSize / 2), 2);
+            storedWhite *= area;
+            for (double& black : storedBlack) black *= area;
+            while (storedWhite > 65535.0) {
+                storedWhite *= 0.5;
+                for (double& black : storedBlack) black *= 0.5;
+            }
+        }
+        const bool vignetteBake =
+            mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+        const auto outputLevels = utils::planDngOutputLevels(
+            storedWhite, storedBlack, vignetteBake,
+            mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+            mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP, plan.logTransform);
+        storedWhite = outputLevels.white;
+        const uint32_t storedBits = utils::dngPackedBits(
+            static_cast<uint16_t>(storedWhite), channels == 3,
+            mSettings.cameraNativeStaging);
+        const size_t rowBytes =
+            (static_cast<size_t>(width) * channels * storedBits + 7) / 8;
+        return rowBytes * height +
+               serializedMetadataBytes + transformedMetadataAllowance;
+    };
+    mTypicalDngSize = mSettings.streamingPreview ? 1 : estimatedDngSize(false);
+    const bool nativeFirstFrame = !mSettings.streamingPreview &&
+        vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1;
+    const size_t firstDngSize = mSettings.streamingPreview
+        ? 1 : estimatedDngSize(nativeFirstFrame);
 
     // Generate file entries
     mFiles.reserve(frames.size()*2);
@@ -431,11 +488,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
     auto mapped = vfs::mapFramesToCfr(sourceEntries, frames, mBaseName + "-", mFps,
         applyCFRConversion, droppedFrames, duplicatedFrames);
     if (!mapped.empty()) mapped.front().size = firstDngSize;
-    // Streaming initialization already rendered frame zero to determine the
-    // output layout. Preserve it so finalization does not decode and process
-    // the same source frame a second time.
-    if (mSettings.streamingPreview && !mapped.empty())
-        mCache.put(mapped.front(), dngData);
     mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
                   std::make_move_iterator(mapped.end()));
 
@@ -447,6 +499,13 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo = vfs::makeFileInfo(
         mFrameRateInfo, mFps, static_cast<int>(frames.size()), droppedFrames,
         duplicatedFrames, outputWidth, outputHeight);
+    const auto sidecar = vfs::sidecarPath(mSrcPath);
+    mFileInfo.sidecarState = !boost::filesystem::exists(sidecar)
+        ? 0 : (mCalibration.has_value() ? 1 : 2);
+    if (mCalibration && mCalibration->hasIgnoreForwardMat) {
+        mFileInfo.hasIgnoreForwardMatOverride = true;
+        mFileInfo.ignoreForwardMatOverride = mCalibration->ignoreForwardMat;
+    }
     switch (cameraFrameMetadata.orientation) {
     case ScreenOrientation::PORTRAIT: mFileInfo.orientation = 90; break;
     case ScreenOrientation::REVERSE_PORTRAIT: mFileInfo.orientation = 270; break;
@@ -562,9 +621,53 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             timed, frameIt->second);
         if (!DNGDecoder::setTimingMetadata(timed, mFps, outputTimestamp))
             throw std::runtime_error("Could not write DNG timing metadata");
+        if (!jpegCompression && !mSettings.streamingPreview) {
+            if (timed.size() > entry.size)
+                throw std::runtime_error(
+                    "Generated MCRAW DNG exceeds advertised mounted size");
+            timed.resize(entry.size, 0);
+        }
         output = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
         return output;
     });
+}
+
+bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
+        const Entry& entry, PreviewFrame& preview) {
+    std::shared_lock renderLock(mRenderMutex);
+    thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
+    auto& decoder = decoders[mSrcPath];
+    if (!decoder) decoder = std::make_unique<Decoder>(mSrcPath);
+    const auto timestamp = std::get<Timestamp>(entry.userData);
+    const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
+    if (frameIt == mFrameIndexByTimestamp.end()) return false;
+
+    std::vector<uint8_t> frameData;
+    nlohmann::json metadata;
+    uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
+    if (mSettings.options & RENDER_OPT_CROPPING)
+        utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
+    decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
+    auto frameMetadata = CameraFrameMetadata::parse(metadata);
+    auto cameraConfig = CameraConfiguration::parse(decoder->getContainerMetadata());
+    reorderNativeShadingMapToCfaPhases(
+        frameMetadata, effectiveCfaArrangement(mSettings, mCalibration,
+                                                cameraConfig.sensorArrangement));
+    utils::overrideLensShadingMap(frameMetadata,
+        vfs::loadSidecarGainMaps(mSidecarMetadata, frameIt->second, "gainMaps"));
+    std::optional<float> exposureOverride;
+    if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
+        exposureOverride = mSmoothedExposureOffsets.at(timestamp);
+    std::optional<std::array<float, 3>> neutralOverride;
+    if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
+        neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
+    utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
+        vfs::outputFrameNumber(entry), mBaselineExpValue, mSettings, mCalibration,
+        false, exposureOverride, neutralOverride, &preview);
+    preview.timestamp = vfs::outputTimestamp(
+        entry, timestamp, mSourceFrames.front(), mFps,
+        mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
+    return !preview.rgb.empty();
 }
 
 void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
@@ -612,7 +715,7 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     mCache.clear();
-    vfs::loadSidecar(vfs::sidecarPath(mSrcPath), mSidecarMetadata, mCalibration);
+    vfs::loadSidecar(vfs::sidecarPath(mSrcPath), mSidecarMetadata, mCalibration, true);
     init();
 }
 

@@ -24,6 +24,19 @@ struct CameraFrameMetadata;
 struct CameraConfiguration;
 struct GainMap;
 
+struct DngFrameProcessingPlan {
+    int cfaRepeatSize = 2;
+    int draftScale = 1;
+    int preprocessScale = 1;
+    bool higherCfa = false;
+    bool explicitBinning = false;
+    bool hqProxy = false;
+    bool demosaic = false;
+    bool remosaic = false;
+    LogTransformMode logTransform = LogTransformMode::Disabled;
+};
+struct PreviewFrame;
+
 namespace utils {
 
 void overrideLensShadingMap(
@@ -73,6 +86,18 @@ public:
 // ============================================================================
 
 unsigned short bitsNeeded(unsigned short value);
+struct DngOutputLevels {
+    double white = 65535.0;
+    std::array<double, 4> black{};
+};
+DngOutputLevels planDngOutputLevels(
+    double sourceWhite, const std::array<double, 4>& sourceBlack,
+    bool applyShadingMap, bool normalizeShadingMap, bool debugShadingMap,
+    LogTransformMode logTransform);
+DngFrameProcessingPlan planDngFrameProcessing(
+    const RenderSettings& settings, const CameraFrameMetadata& metadata,
+    const std::optional<CalibrationData>& calibration);
+uint32_t dngPackedBits(uint16_t whiteLevel, bool rgb, bool cameraNativeStaging);
 
 void addSinglePlaneGainMaps(tinydngwriter::OpcodeList& opcodeList,
                             const tinydngwriter::GainMapParams& params,
@@ -160,7 +185,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     const std::optional<CalibrationData>& calibration = std::nullopt,
     bool compressionEnabled = false,
     const std::optional<float>& baselineExposureOverride = std::nullopt,
-    const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt);
+    const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt,
+    PreviewFrame* previewFrame = nullptr);
 
 // Draws a centered, outlined ISO label into unpacked 16-bit image samples.
 void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
@@ -193,6 +219,26 @@ void reduceRGB(
     uint32_t& outputWidth,
     uint32_t& outputHeight,
     uint16_t logWhiteLevel = 0);
+
+// Center-crops interleaved image samples. Returns false when the requested
+// crop is empty or exceeds the source image.
+bool cropInterleaved(
+    const std::vector<uint16_t>& input,
+    std::vector<uint16_t>& output,
+    uint32_t width,
+    uint32_t height,
+    uint32_t channels,
+    uint32_t cropWidth,
+    uint32_t cropHeight);
+
+void encodeLog60(
+    std::vector<uint16_t>& samples,
+    uint32_t width,
+    uint32_t height,
+    uint32_t channels,
+    const std::array<double, 4>& blackLevel,
+    double whiteLevel,
+    uint16_t encodedWhite);
 
 // Averages each 2x2 same-colour block of a 4x4 quad-Bayer image into one
 // sample, producing an ordinary 2x2 Bayer mosaic at half resolution.
@@ -230,28 +276,30 @@ void demosaicHigherCFA(
     QuadBayerMode mode,
     const std::array<float, 3>& channelBlack = {});
 
-bool generateJpegThumbnail(
-    std::vector<uint8_t>& data,
-    const CameraFrameMetadata& metadata,
-    const CameraConfiguration& cameraConfiguration,
-    const std::string& outputPath,
-    int thumbWidth,
-    int thumbHeight);
+// Shared CFA-to-RGB boundary used by DNG and native-source previews. Callers
+// select nearest-colour reconstruction whenever gallery HQ is disabled.
+void demosaicCfaForOutput(
+    const std::vector<uint16_t>& cfaData,
+    std::vector<uint16_t>& rgbData,
+    int width,
+    int height,
+    int cfaRepeatSize,
+    const std::array<uint8_t, 4>& bayerPhase,
+    QuadBayerMode mode,
+    const std::array<float, 3>& channelBlack,
+    bool nearestColour);
 
-bool generateJpegThumbnailFromDng(
-    std::vector<uint8_t> data,
-    const std::string& outputPath,
-    int thumbWidth,
-    int thumbHeight);
+bool normalizeRgb16(
+    const std::vector<uint16_t>& input,
+    std::vector<uint16_t>& output,
+    const std::array<double, 3>& black,
+    const std::array<double, 3>& white);
 
-bool generateJpegThumbnailFromRgb16(
-    const std::vector<uint16_t>& data,
-    uint32_t width,
-    uint32_t height,
-    const std::array<float, 3>& asShotNeutral,
-    const std::string& outputPath,
-    int thumbWidth,
-    int thumbHeight);
+bool normalizeRgb16Bytes(
+    const std::vector<uint16_t>& input,
+    std::vector<uint8_t>& output,
+    const std::array<double, 3>& black,
+    const std::array<double, 3>& white);
 
 } // namespace utils
 } // namespace motioncam

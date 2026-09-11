@@ -60,7 +60,6 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
         mBaseName(baseName),
-        mTypicalDngSize(0),
         mFps(0),
         mTotalFrames(0),
         mDroppedFrames(0),
@@ -136,8 +135,6 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             } else {
                 ++missingExposureFrames;
             }
-            mHasBaselineExposure[frames[i].timestamp] = metadata[i].hasBaselineExposure;
-            mHasAsShotNeutral[frames[i].timestamp] = metadata[i].hasAsShotNeutral;
         }
         if (!metadata.empty()) {
             if (metadata[0].whiteLevelCount > 0)
@@ -207,7 +204,6 @@ void VirtualFileSystemImpl_DNG::init() {
 
     const auto& frames = mDecoder->getFrames();
     if (frames.empty()) {
-        mTypicalDngSize = 0;
         return;
     }
     // Only a proper numbered sequence keeps frame zero at native resolution as
@@ -302,7 +298,6 @@ void VirtualFileSystemImpl_DNG::init() {
     std::vector<size_t> measuredDngSizes(frames.size());
     for (size_t i = 0; i < frames.size(); ++i)
         measuredDngSizes[i] = estimatedSize(i, false);
-    mTypicalDngSize = measuredDngSizes.front();
     const size_t firstDngSize = estimatedSize(0, hasNativeMetadataFrame);
 
     std::vector<Entry> sourceEntries;
@@ -393,58 +388,141 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     });
 }
 
-bool VirtualFileSystemImpl_DNG::generateThumbnail(
-        const std::string& outputPath, int width, int height) {
-    try {
-        const auto started = std::chrono::steady_clock::now();
-        bool generated = false;
-        double decoderMs = 0.0, sourceMs = 0.0, renderMs = 0.0;
-        std::thread background([&] {
-#ifdef __linux__
-            // This dedicated thread exits after the thumbnail, so lowering its
-            // scheduling priority cannot leak into Qt's shared worker pool.
-            const auto tid = static_cast<pid_t>(::syscall(SYS_gettid));
-            ::setpriority(PRIO_PROCESS, tid, 19);
-            constexpr int ioPriorityWhoProcess = 1;
-            constexpr int ioPriorityClassIdle = 3;
-            ::syscall(SYS_ioprio_set, ioPriorityWhoProcess, tid,
-                      ioPriorityClassIdle << 13);
-#endif
-            const auto decoderStarted = std::chrono::steady_clock::now();
-            DNGDecoder decoder(mSrcPath);
-            const auto decoderReady = std::chrono::steady_clock::now();
-            std::vector<uint8_t> source;
-            if (!decoder.extractFrame(0, source)) return;
-            DNGFrameMetadata metadata;
-            if (!decoder.getFrameMetadata(0, metadata)) return;
-            if (boost::icontains(metadata.uniqueCameraModel, "Panasonic")) {
-                const double baseline = metadata.baselineExposure + 2.0;
-                if (!DNGDecoder::updateMetadata(source, &baseline, nullptr)) return;
+bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
+        const Entry& entry, PreviewFrame& preview) {
+    std::shared_lock renderLock(mRenderMutex);
+    const auto timestamp = std::get<Timestamp>(entry.userData);
+    const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
+    if (frameIt == mFrameIndexByTimestamp.end()) return false;
+    const bool converted = mHasFrameNumberSequence &&
+        (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
+    const Timestamp outputTimestamp = converted
+        ? vfs::outputTimestamp(entry, timestamp, mDecoder->getFrames().front().timestamp,
+                               mFps, true)
+        : timestamp - mDecoder->getFrames().front().timestamp;
+    DNGDecoder::beginForegroundWork();
+    struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
+    std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
+    {
+        try {
+            // Preview decoding consumes the source storage layout directly;
+            // avoid first rebuilding the same samples as an uncompressed DNG.
+            auto prepared = prepareFrame(frameIt->second, false);
+            if (DNGDecoder::decodePreview(
+                    std::move(prepared.dng), mConfig, preview, true)) {
+                preview.timestamp = outputTimestamp;
+                if (mConfig.options & RENDER_OPT_BAKE_ISO) {
+                    const auto iso = mIsoValues.find(timestamp);
+                    const double value = iso != mIsoValues.end()
+                        ? iso->second : preview.metadata.iso;
+                    utils::bakeIsoOverlay(
+                        reinterpret_cast<uint16_t*>(preview.rgb.data()),
+                        preview.width, preview.height, 3, value, 0, 65535);
+                }
+                return true;
             }
-            const auto sourceReady = std::chrono::steady_clock::now();
-            generated = utils::generateJpegThumbnailFromDng(
-                std::move(source), outputPath, width, height);
-            const auto completed = std::chrono::steady_clock::now();
-            decoderMs = std::chrono::duration<double, std::milli>(
-                decoderReady - decoderStarted).count();
-            sourceMs = std::chrono::duration<double, std::milli>(
-                sourceReady - decoderReady).count();
-            renderMs = std::chrono::duration<double, std::milli>(
-                completed - sourceReady).count();
-        });
-        background.join();
-        const auto completed = std::chrono::steady_clock::now();
-        spdlog::info(
-            "DNG thumbnail timing [{}]: total {:.1f} ms "
-            "(decoder {:.1f}, source read {:.1f}, low-priority render/write {:.1f})",
-            mSrcPath,
-            std::chrono::duration<double, std::milli>(completed - started).count(),
-            decoderMs, sourceMs, renderMs);
-        return generated;
-    } catch (const std::exception& error) {
-        spdlog::warn("Could not generate DNG thumbnail: {}", error.what());
-        return false;
+        } catch (const std::exception& error) {
+            spdlog::warn("Decoded DNG preview preparation failed for {}: {}",
+                         entry.name, error.what());
+        }
+        spdlog::warn("Decoded DNG preview path failed for {}; using DNG transform fallback",
+                     entry.name);
     }
+    materializeLock.unlock();
+    auto bytes = transformFrame(frameIt->second, outputTimestamp, false, false);
+    return DNGDecoder::decodePreview(std::move(bytes), mConfig, preview);
+}
+
+VirtualFileSystemImpl_DNG::PreparedFrame
+VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImage) {
+    const auto& frames = mDecoder->getFrames();
+    if (frameIndex >= frames.size()) throw std::out_of_range("DNG source frame index");
+    PreparedFrame result;
+    if (!mDecoder->extractFrame(static_cast<int>(frameIndex), result.dng))
+        throw std::runtime_error("Could not read source DNG");
+    if (!mDecoder->getFrameMetadata(static_cast<int>(frameIndex), result.sourceMetadata))
+        throw std::runtime_error("Could not read DNG frame metadata");
+    if (!DNGDecoder::removeThumbnails(result.dng))
+        throw std::runtime_error("Could not remove source DNG thumbnails");
+    if (canonicalizeImage && !DNGDecoder::ensureUncompressed(result.dng))
+        throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
+
+    result.cfaSize = mCfaSize;
+    result.cfaPhase = mCfaPhase;
+    result.hasCfa = DNGDecoder::getCFAMetadata(
+        result.dng, result.cfaSize, result.cfaPhase);
+    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
+        result.cfaSize = mCalibration->cfaSize;
+        result.hasCfa = result.cfaSize >= 2;
+    }
+    if (mCalibration && !mCalibration->cfaPhase.empty())
+        result.cfaPhase = mCfaPhase;
+
+    vfs::replaceSidecarGainMapOpcodes(result.dng, mSidecarMetadata, frameIndex);
+    if (!DNGDecoder::canonicalizeGainMapOpcodes(result.dng))
+        throw std::runtime_error("Could not canonicalize DNG gain-map override");
+    const std::optional<bool> gainMapOrderOverride =
+        mCalibration && mCalibration->hasNeedGainMapOrderFixed
+            ? std::optional<bool>(mCalibration->needGainMapOrderFixed)
+            : std::nullopt;
+    if (!DNGDecoder::repairGainMapCfaPhase(result.dng, gainMapOrderOverride))
+        throw std::runtime_error("Could not reconcile DNG gain maps with its CFA phase");
+    if (mCalibration && mCalibration->hasFullSensorResolution &&
+        !DNGDecoder::cropGainMapsToFullSensor(
+            result.dng, mCalibration->fullSensorResolution[0],
+            mCalibration->fullSensorResolution[1]))
+        throw std::runtime_error("Could not crop full-sensor DNG gain maps");
+    if (!DNGDecoder::overrideDataLevels(result.dng, mConfig.levels))
+        throw std::runtime_error("Could not override source DNG data levels");
+
+    const auto resolved = resolvedFrameMetadata(frameIndex, result.sourceMetadata);
+    if (resolved.orientation != result.sourceMetadata.orientation &&
+        !DNGDecoder::setOrientation(result.dng, resolved.orientation))
+        throw std::runtime_error("Could not override source DNG orientation");
+    if (resolved.exposureTime != result.sourceMetadata.exposureTime)
+        DNGDecoder::repairExposureTime(result.dng, resolved.exposureTime);
+    const bool updateBaseline =
+        resolved.baselineExposure != result.sourceMetadata.baselineExposure;
+    const bool updateNeutral = resolved.asShotNeutral != result.sourceMetadata.asShotNeutral;
+    if ((updateBaseline || updateNeutral) && !DNGDecoder::updateMetadata(
+            result.dng, updateBaseline ? &resolved.baselineExposure : nullptr,
+            updateNeutral ? &resolved.asShotNeutral : nullptr))
+        throw std::runtime_error("Could not update DNG exposure/white-balance tags");
+    return result;
+}
+
+DNGFrameMetadata VirtualFileSystemImpl_DNG::resolvedFrameMetadata(
+        size_t frameIndex, DNGFrameMetadata metadata) const {
+    const Timestamp timestamp = mDecoder->getFrames().at(frameIndex).timestamp;
+    if (mCalibration && mCalibration->hasOrientation)
+        metadata.orientation = mCalibration->orientation;
+    if (const auto exposure = mExposureTimes.find(timestamp); exposure != mExposureTimes.end()) {
+        metadata.exposureTime = exposure->second;
+        metadata.hasExposure = true;
+    }
+    const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
+    const auto baseline = smoothExposure
+        ? mSmoothedExposureOffsets.find(timestamp) : mNormalizedExposureOffsets.find(timestamp);
+    const auto baselineEnd = smoothExposure
+        ? mSmoothedExposureOffsets.end() : mNormalizedExposureOffsets.end();
+    if ((normalize || smoothExposure) && baseline != baselineEnd) {
+        metadata.baselineExposure = baseline->second;
+        metadata.hasBaselineExposure = true;
+    }
+    if (!mConfig.cameraNativeStaging) {
+        metadata.baselineExposure += vfs::configuredExposureOffset(mConfig) +
+            (boost::icontains(metadata.uniqueCameraModel, "Panasonic") ? 2.0 : 0.0);
+        metadata.hasBaselineExposure = true;
+    }
+    if ((mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)) {
+        if (const auto neutral = mSmoothedAsShotNeutrals.find(timestamp);
+            neutral != mSmoothedAsShotNeutrals.end()) {
+            metadata.asShotNeutral = neutral->second;
+            metadata.hasAsShotNeutral = true;
+        }
+    }
+    return metadata;
 }
 
 std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
@@ -474,87 +552,13 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
                      static_cast<double>(byteCount) / (1024.0 * 1024.0));
         stageStarted = now;
     };
-    std::vector<uint8_t> bytes;
-    if (!mDecoder->extractFrame(static_cast<int>(frameIndex), bytes))
-        throw std::runtime_error("Could not read source DNG");
-    logStage("source read", bytes.size());
-    if (!DNGDecoder::removeThumbnails(bytes))
-        throw std::runtime_error("Could not remove source DNG thumbnails");
-    logStage("thumbnail removal", bytes.size());
-    if (!DNGDecoder::ensureUncompressed(bytes))
-        throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
-    logStage("uncompressed decode/canonicalization", bytes.size());
-    int frameCfaSize = mCfaSize;
-    std::array<uint8_t, 4> frameCfaPhase = mCfaPhase;
-    bool frameHasCfa = DNGDecoder::getCFAMetadata(bytes, frameCfaSize, frameCfaPhase);
-    // A folder sidecar is an explicit folder-wide override. Otherwise every
-    // independent DNG retains its own CFA repeat and phase metadata.
-    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
-        frameCfaSize = mCalibration->cfaSize;
-        frameHasCfa = frameCfaSize >= 2;
-    }
-    if (mCalibration && !mCalibration->cfaPhase.empty())
-        frameCfaPhase = mCfaPhase;
-    vfs::replaceSidecarGainMapOpcodes(bytes, mSidecarMetadata, frameIndex);
-    // Sidecars and source DNGs may encode OpcodeList2 as one four-plane map or
-    // four scalar maps. Canonicalize before every subsequent operation so the
-    // repair, crop, transform, and bake paths all consume the same layout.
-    if (!DNGDecoder::canonicalizeGainMapOpcodes(bytes))
-        throw std::runtime_error("Could not canonicalize DNG gain-map override: " + frame.filePath);
-    const std::optional<bool> gainMapOrderOverride =
-        mCalibration && mCalibration->hasNeedGainMapOrderFixed
-            ? std::optional<bool>(mCalibration->needGainMapOrderFixed)
-            : std::nullopt;
-    if (!DNGDecoder::repairGainMapCfaPhase(bytes, gainMapOrderOverride))
-        throw std::runtime_error("Could not reconcile DNG gain maps with its CFA phase");
-    if (mCalibration && mCalibration->hasFullSensorResolution &&
-        !DNGDecoder::cropGainMapsToFullSensor(
-            bytes, mCalibration->fullSensorResolution[0],
-            mCalibration->fullSensorResolution[1]))
-        throw std::runtime_error("Could not crop full-sensor DNG gain maps");
-    if (!DNGDecoder::overrideDataLevels(bytes, mConfig.levels))
-        throw std::runtime_error("Could not override source DNG data levels");
-    if (mCalibration && mCalibration->hasOrientation &&
-        !DNGDecoder::setOrientation(bytes, mCalibration->orientation))
-        throw std::runtime_error("Could not override source DNG orientation");
-    if (const auto exposure = mExposureTimes.find(timestamp);
-        exposure != mExposureTimes.end())
-        DNGDecoder::repairExposureTime(bytes, exposure->second);
-
-    const bool normalize = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
-    const bool smoothExposure = mConfig.options & RENDER_OPT_SMOOTH_EXPOSURE;
-    const bool smoothWhiteBalance = mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE;
-    const auto baselineIt = smoothExposure
-        ? mSmoothedExposureOffsets.find(timestamp)
-        : mNormalizedExposureOffsets.find(timestamp);
-    const auto neutralIt = mSmoothedAsShotNeutrals.find(timestamp);
-    const bool updateCalculatedExposure = (normalize || smoothExposure) &&
-        baselineIt != (smoothExposure ? mSmoothedExposureOffsets.end()
-                                     : mNormalizedExposureOffsets.end());
-    DNGFrameMetadata sourceMetadata;
-    if (!mDecoder->getFrameMetadata(static_cast<int>(frameIndex), sourceMetadata))
-        throw std::runtime_error("Could not read DNG frame metadata");
-    const bool sourcePanasonic =
-        boost::icontains(sourceMetadata.uniqueCameraModel, "Panasonic");
-    // Panasonic output identity requires a -2 EV BaselineExposure compensation.
-    // A Panasonic source already contains it, so changing to a neutral identity
-    // (including previews) removes that compensation by adding 2 EV.
-    const double modelExposureAdjustment = mConfig.cameraNativeStaging
-        ? 0.0
-        : vfs::configuredExposureOffset(mConfig) + (sourcePanasonic ? 2.0 : 0.0);
-    const bool updateModelExposure = std::abs(modelExposureAdjustment) > 1e-9;
-    const bool updateWhiteBalance = smoothWhiteBalance &&
-        neutralIt != mSmoothedAsShotNeutrals.end();
-    if (updateCalculatedExposure || updateModelExposure || updateWhiteBalance) {
-        const double baseline = (updateCalculatedExposure
-            ? baselineIt->second : sourceMetadata.baselineExposure) + modelExposureAdjustment;
-        const double* baselinePtr = (updateCalculatedExposure || updateModelExposure)
-            ? &baseline : nullptr;
-        const std::array<float, 3>* neutralPtr = updateWhiteBalance
-            ? &neutralIt->second : nullptr;
-        if (!DNGDecoder::updateMetadata(bytes, baselinePtr, neutralPtr))
-            throw std::runtime_error("Could not update DNG exposure/white-balance tags");
-    }
+    auto prepared = prepareFrame(frameIndex);
+    auto bytes = std::move(prepared.dng);
+    const auto& sourceMetadata = prepared.sourceMetadata;
+    const int frameCfaSize = prepared.cfaSize;
+    const auto frameCfaPhase = prepared.cfaPhase;
+    const bool frameHasCfa = prepared.hasCfa;
+    logStage("source preparation", bytes.size());
 
     std::vector<GainMap> effectiveGainMaps;
     const bool hasOpcode2GainMap =
@@ -727,7 +731,7 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     const auto calibPath = vfs::sidecarPath(mSrcPath);
     nlohmann::json sidecarMetadata;
     std::optional<CalibrationData> calibration;
-    vfs::loadSidecar(calibPath, sidecarMetadata, calibration);
+    vfs::loadSidecar(calibPath, sidecarMetadata, calibration, true);
     if (sameRenderSettings(mConfig, config) && sidecarMetadata == mSidecarMetadata)
         return;
 

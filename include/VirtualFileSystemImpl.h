@@ -32,12 +32,11 @@ public:
                     BS::thread_pool& processingThreadPool,
                     std::string source, std::string baseName);
 
-    void finalize(
+    void render(
         const RenderSettings& settings,
-        const std::string& destination,
-        const FinalizeOptions& options,
+        const PreviewOptions& options,
         const std::function<bool(size_t, size_t, const std::string&)>& progress,
-        const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady);
+        const std::function<void(PreviewFrame&&)>& frameReady);
 
 private:
     struct State;
@@ -116,6 +115,12 @@ struct FileInfo {
     int timingTimeBaseNum = 0;
     int timingTimeBaseDen = 0;
     bool timingUsesCfrMapping = false;
+    // Sidecar validation is performed while constructing the mounted source.
+    // Expose that result so UI status checks do not parse large sidecars again.
+    // -1 means the source implementation does not report sidecar state.
+    int sidecarState = -1; // 0 absent, 1 valid, 2 invalid
+    bool hasIgnoreForwardMatOverride = false;
+    bool ignoreForwardMatOverride = false;
     // False for independent DNG still collections. Such folders may contain
     // mixed dimensions and must not advance into the next mounted clip.
     bool isSequence = true;
@@ -201,7 +206,8 @@ boost::filesystem::path sidecarPath(const std::string& sourcePath);
 void loadSidecar(
     const boost::filesystem::path& path,
     nlohmann::json& metadata,
-    std::optional<CalibrationData>& calibration);
+    std::optional<CalibrationData>& calibration,
+    bool refresh = false);
 
 std::shared_ptr<std::vector<char>> materializeCached(
     LRUCache& cache, const Entry& entry, bool bypassCache,

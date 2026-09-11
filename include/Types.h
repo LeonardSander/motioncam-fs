@@ -448,11 +448,10 @@ struct RenderSettings {
 };
 
 struct FinalizeOptions {
-    // Skip this many source DNG frames before finalization. Used by streaming
-    // preview so seeking does not render and discard every preceding frame.
+    // Skip this many source DNG frames when writing a partial sequence.
     size_t firstDngFrame = 0;
-    // Discard an output DNG before materialization. Used by streaming previews
-    // and selective on-disk finalization. The index is in the complete DNG sequence.
+    // Omit an output DNG from persistent finalization. The index is in the
+    // complete DNG sequence.
     std::function<bool(size_t)> skipDngFrame;
     bool interpolateDuplicatedFrames = false;
     // Compare adjacent source DNG image payloads and mark matching finalized
@@ -462,6 +461,11 @@ struct FinalizeOptions {
     // Optional interpreter override, also used by deterministic integration tests.
     std::string rifePythonExecutable;
     float jxlDistance = -1.0f;
+};
+
+struct PreviewOptions {
+    size_t firstFrame = 0;
+    std::function<bool(size_t)> skipFrame;
 };
 
 } // namespace

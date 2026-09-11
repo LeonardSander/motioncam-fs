@@ -36,9 +36,9 @@ public:
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
-    bool generateThumbnail(const std::string& outputPath, int width, int height) override;
     std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
+    bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame) override;
 
 private:
     struct FrameMetadata {
@@ -70,6 +70,17 @@ private:
         std::array<float, 3> neutralScale{1.0f, 1.0f, 1.0f};
         std::array<uint8_t, 4> cfa{2, 1, 1, 0};
     };
+    struct ProcessedFrame {
+        std::vector<uint16_t> rgb;
+        FrameMetadata metadata;
+        PreparedSidecarGainMaps gainMaps;
+        Timestamp timestamp = 0;
+        int frameNumber = 0;
+        int width = 0;
+        int height = 0;
+        bool inputLogEncoded = false;
+    };
+    ProcessedFrame processFrame(const Entry& entry, bool dngOutput);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void applySidecarGainMaps(std::vector<uint16_t>& rgbData, int frameNumber,
                               const PreparedSidecarGainMaps& prepared,
