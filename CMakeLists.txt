@@ -296,9 +296,6 @@ endif()
 # distro packages and vcpkg), with a conventional library fallback.
 find_package(PkgConfig QUIET)
 find_package(JPEG REQUIRED)
-# Keep compiler-default paths such as Intel Homebrew's /usr/local/include from
-# overriding the header that belongs to the JPEG library found by CMake.
-include_directories(BEFORE "${JPEG_INCLUDE_DIR}")
 if(PkgConfig_FOUND)
     pkg_check_modules(JXL QUIET IMPORTED_TARGET libjxl)
 endif()
