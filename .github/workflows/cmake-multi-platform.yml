@@ -250,13 +250,22 @@ jobs:
             QT_PREFIX="$(brew --prefix qt@6)"
           fi
         fi
+        # Do not add the whole Homebrew prefix to CMake's dependency search.
+        # Intel Homebrew can provide an ABI-80 jpeglib.h in /usr/local while
+        # the vcpkg libjpeg-turbo archive uses ABI 62. Mixing the two only
+        # shows up at runtime in jpeg_Create*(). Qt and macFUSE are located
+        # explicitly, and all other manifest dependencies come from vcpkg.
+        VCPKG_PREFIX="${GITHUB_WORKSPACE}/${{ matrix.build_dir }}/vcpkg_installed/${{ matrix.vcpkg_triplet }}"
         cmake -S . -B "${{ matrix.build_dir }}" \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
+          -DVCPKG_OSX_DEPLOYMENT_TARGET=12.0 \
           -DCMAKE_OSX_ARCHITECTURES=${{ matrix.mac_arch }} \
-          -DCMAKE_PREFIX_PATH="$QT_PREFIX;$BREW_PREFIX" \
+          -DCMAKE_IGNORE_PREFIX_PATH="$BREW_PREFIX" \
+          -DQt6_DIR="$QT_PREFIX/lib/cmake/Qt6" \
+          -DJPEG_ROOT="$VCPKG_PREFIX" \
           -DFUSE_T_FRAMEWORK="$FUSE_LIB"
 
 
