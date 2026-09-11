@@ -207,11 +207,14 @@ jobs:
       if: matrix.platform == 'macos'
       run: brew install --cask macfuse
 
-    # Intel Homebrew's jpeg headers use ABI 80, while vcpkg's libjpeg-turbo
-    # library uses ABI 62. Keep vcpkg as the only visible JPEG installation.
-    - name: Unlink Homebrew JPEG (macOS Intel)
+    # The Intel runner has an unowned ABI-80 jpeglib.h in /usr/local/include,
+    # while vcpkg's libjpeg-turbo library and headers use ABI 62.
+    - name: Hide system JPEG header (macOS Intel)
       if: matrix.platform == 'macos' && matrix.mac_arch == 'x86_64'
-      run: brew unlink jpeg
+      run: |
+        if [ -e /usr/local/include/jpeglib.h ]; then
+          sudo mv /usr/local/include/jpeglib.h /tmp/jpeglib.h.runner
+        fi
 
     # ---------- CONFIGURE ----------
     - name: Clean build directory (macOS)
