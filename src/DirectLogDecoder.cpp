@@ -45,7 +45,7 @@ std::string directLogTimelineCacheKey(const std::string& path) {
     const auto modified = std::filesystem::last_write_time(absolute, error);
     if (error) return absolute.string() + ":" + std::to_string(size);
     return absolute.string() + ":" + std::to_string(size) + ":" +
-           std::to_string(modified.time_since_epoch().count());
+           std::to_string(static_cast<long long>(modified.time_since_epoch().count()));
 }
 
 // FFmpeg's timeline scan and hardware probing can allocate several decoder

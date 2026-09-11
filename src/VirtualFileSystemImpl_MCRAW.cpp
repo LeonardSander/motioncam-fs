@@ -86,7 +86,8 @@ std::string mcrawAnalysisCacheKey(const std::string& path) {
     if (error) return absolute.string();
     const auto modified = std::filesystem::last_write_time(absolute, error);
     return "timestamp-repair-v1:" + absolute.string() + ":" + std::to_string(size) +
-           (error ? "" : ":" + std::to_string(modified.time_since_epoch().count()));
+           (error ? "" : ":" + std::to_string(
+               static_cast<long long>(modified.time_since_epoch().count())));
 }
 
 std::filesystem::path mcrawAnalysisCachePath(const std::string& key) {
