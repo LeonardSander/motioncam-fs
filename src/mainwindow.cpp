@@ -193,6 +193,19 @@ namespace {
                 std::clamp(value, 0.0f, 1.0f) * 65535.0f));
             return srgbTransfer[index];
         };
+        constexpr float highlightBlendStart = 0.90f;
+        auto neutralHighlightWeight = [](uint16_t red, uint16_t green, uint16_t blue) {
+            const float leastExposed = static_cast<float>(
+                std::min({red, green, blue})) / 65535.0f;
+            const float t = std::clamp(
+                (leastExposed - highlightBlendStart) / (1.0f - highlightBlendStart),
+                0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+        auto neutralHighlightLevel = [](float red, float green, float blue) {
+            return red + green + blue - std::min({red, green, blue}) -
+                   std::max({red, green, blue});
+        };
         const bool hasMatrix = ignoreForwardMat
             ? (metadata.hasColorMatrix2 || metadata.hasColorMatrix1)
             : (metadata.hasForwardMatrix2 || metadata.hasForwardMatrix1);
@@ -234,23 +247,57 @@ namespace {
         auto convertRange = [&](size_t begin, size_t end) {
             if (!useMatrix) {
                 for (size_t pixel = begin; pixel < end; ++pixel) {
+                    const size_t offset = pixel * 3;
+                    const int clippedChannels = (pixels[offset] == 65535) +
+                        (pixels[offset + 1] == 65535) + (pixels[offset + 2] == 65535);
+                    const bool sourceClipped = clippedChannels > 0;
+                    const float neutralWeight = neutralHighlightWeight(
+                        pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+                    if (!sourceClipped && neutralWeight == 0.0f) {
+                        for (int channel = 0; channel < 3; ++channel)
+                            pixels[offset + channel] =
+                                channelTransfer[channel][pixels[offset + channel]];
+                        continue;
+                    }
+                    float display[3];
                     for (int channel = 0; channel < 3; ++channel)
-                        pixels[pixel * 3 + channel] =
-                            channelTransfer[channel][pixels[pixel * 3 + channel]];
+                        display[channel] = pixels[offset + channel] / 65535.0f * gains[channel];
+                    if (sourceClipped)
+                        display[1] = std::max(display[1], std::min(display[0], display[2]));
+                    const float neutral = neutralHighlightLevel(
+                        display[0], display[1], display[2]);
+                    for (int channel = 0; channel < 3; ++channel)
+                        pixels[offset + channel] = transfer(
+                            display[channel] * (1.0f - neutralWeight) +
+                            neutral * neutralWeight);
                 }
                 return;
             }
             constexpr float normalize = 1.0f / 65535.0f;
             for (size_t pixel = begin; pixel < end; ++pixel) {
-                const float camera[3]{pixels[pixel * 3] * normalize,
-                                      pixels[pixel * 3 + 1] * normalize,
-                                      pixels[pixel * 3 + 2] * normalize};
+                const size_t offset = pixel * 3;
+                const int clippedChannels = (pixels[offset] == 65535) +
+                    (pixels[offset + 1] == 65535) + (pixels[offset + 2] == 65535);
+                const bool sourceClipped = clippedChannels > 0;
+                const float neutralWeight = neutralHighlightWeight(
+                    pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+                const float camera[3]{pixels[offset] * normalize,
+                                      pixels[offset + 1] * normalize,
+                                      pixels[offset + 2] * normalize};
+                float display[3];
                 for (int row = 0; row < 3; ++row) {
-                    const float value = cameraToDisplay[row * 3] * camera[0] +
-                                        cameraToDisplay[row * 3 + 1] * camera[1] +
-                                        cameraToDisplay[row * 3 + 2] * camera[2];
-                    pixels[pixel * 3 + row] = transfer(value);
+                    display[row] = cameraToDisplay[row * 3] * camera[0] +
+                                   cameraToDisplay[row * 3 + 1] * camera[1] +
+                                   cameraToDisplay[row * 3 + 2] * camera[2];
                 }
+                if (sourceClipped)
+                    display[1] = std::max(display[1], std::min(display[0], display[2]));
+                const float neutral = neutralHighlightLevel(
+                    display[0], display[1], display[2]);
+                for (int channel = 0; channel < 3; ++channel)
+                    pixels[offset + channel] = transfer(
+                        display[channel] * (1.0f - neutralWeight) +
+                        neutral * neutralWeight);
             }
         };
         constexpr size_t minimumPixelsPerWorker = 256 * 1024;

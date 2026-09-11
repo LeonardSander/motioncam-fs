@@ -1056,10 +1056,13 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                 }                
                 
                 if(applyShadingMap) {                              
-                    // Calculate position in shading map     
+                    // Calculate position in shading map
                     const int group = cfaGroupSize;
                     auto shadingChannel = [&](uint32_t px, uint32_t py) {
-                        return cfa[((py / group) & 1) * 2 + ((px / group) & 1)];
+                        // Gain-map planes are stored in spatial CFA-phase order,
+                        // not as R/G/B color channels. Keep the two green phases
+                        // distinct and select the plane at this sensor position.
+                        return ((py / group) & 1) * 2 + ((px / group) & 1);
                     };
                     shadingMapVals[0] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, shadingChannel(srcX, srcY), lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
                     shadingMapVals[1] = getShadingMapValueInternal((srcX + left + proxyGroupSize) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, shadingChannel(srcX + proxyGroupSize, srcY), lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
