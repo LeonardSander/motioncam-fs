@@ -213,6 +213,22 @@ enum class QuadBayerMode {
 
 enum class BadPixelTreatment { Bake, OpcodeOnly, Disabled };
 
+enum class VignetteCorrectionMode { Bake, Resample, Uncropped, Exclude };
+
+inline std::string vignetteCorrectionModeToString(VignetteCorrectionMode value) {
+    if (value == VignetteCorrectionMode::Resample) return "Resample";
+    if (value == VignetteCorrectionMode::Uncropped) return "Uncropped";
+    if (value == VignetteCorrectionMode::Exclude) return "Exclude";
+    return "Bake";
+}
+
+inline VignetteCorrectionMode stringToVignetteCorrectionMode(const std::string& value) {
+    if (value == "Resample") return VignetteCorrectionMode::Resample;
+    if (value == "Uncropped") return VignetteCorrectionMode::Uncropped;
+    if (value == "Exclude") return VignetteCorrectionMode::Exclude;
+    return VignetteCorrectionMode::Bake;
+}
+
 inline std::string badPixelTreatmentToString(BadPixelTreatment value) {
     if (value == BadPixelTreatment::OpcodeOnly) return "Opcode Only";
     if (value == BadPixelTreatment::Disabled) return "Disabled";
@@ -349,6 +365,7 @@ struct RenderSettings {
     LogTransformMode logTransform;
     std::string exposureCompensation;
     BadPixelTreatment badPixelTreatment;
+    VignetteCorrectionMode vignetteCorrection;
     QuadBayerMode quadBayerOption;
     std::string cfaPhase;
     // Compression selector: -2 is 12-bit CinemaDNG JPEG DCT, -1 is JPEG 92 lossless,
@@ -377,6 +394,7 @@ struct RenderSettings {
         , logTransform(LogTransformMode::KeepInput)
         , exposureCompensation("")
         , badPixelTreatment(BadPixelTreatment::Bake)
+        , vignetteCorrection(VignetteCorrectionMode::Bake)
         , quadBayerOption(QuadBayerMode::Demosaic)
         , cfaPhase("Don't override CFA")
         , jxlDistance(-1.0f)
@@ -407,6 +425,8 @@ struct RenderSettings {
         , logTransform(stringToLogTransformMode(log))
         , exposureCompensation(exp)
         , badPixelTreatment(BadPixelTreatment::Bake)
+        , vignetteCorrection((opts & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+            ? VignetteCorrectionMode::Bake : VignetteCorrectionMode::Resample)
         , quadBayerOption(stringToQuadBayerMode(qb))
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)
@@ -437,6 +457,8 @@ struct RenderSettings {
         , logTransform(logTrans)
         , exposureCompensation(expComp)
         , badPixelTreatment(BadPixelTreatment::Bake)
+        , vignetteCorrection((opts & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+            ? VignetteCorrectionMode::Bake : VignetteCorrectionMode::Resample)
         , quadBayerOption(quadBayer)
         , cfaPhase(cfa)
         , jxlDistance(-1.0f)

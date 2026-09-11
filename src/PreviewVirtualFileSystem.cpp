@@ -23,6 +23,7 @@ bool sameSettings(const RenderSettings& a, const RenderSettings& b) {
            a.logTransform == b.logTransform &&
            a.exposureCompensation == b.exposureCompensation &&
            a.badPixelTreatment == b.badPixelTreatment &&
+           a.vignetteCorrection == b.vignetteCorrection &&
            a.quadBayerOption == b.quadBayerOption &&
            a.cfaPhase == b.cfaPhase &&
            a.jxlDistance == b.jxlDistance &&

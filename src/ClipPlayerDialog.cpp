@@ -280,7 +280,20 @@ double ClipPlayerDialog::currentDurationSeconds()const{
 void ClipPlayerDialog::setAutomaticAdvanceEnabled(bool enabled){
     for(auto& clip:mClips)clip.autoAdvance=enabled&&clip.isSequence&&clip.sourceFrames>1;
 }
-void ClipPlayerDialog::reloadCurrentClip(){if(mIndex>=0)openClip(mIndex,mPositionSeconds);}
+void ClipPlayerDialog::reloadCurrentClip(){
+    if(mIndex<0)return;
+    const bool wasPaused=mPaused;
+    const double reloadSeconds=wasPaused&&mPosition
+        ?mPosition->value()/std::max(1.0,mClips[mIndex].fps)
+        :mPositionSeconds;
+    openClip(mIndex,reloadSeconds);
+    if(wasPaused){
+        // Settings updates need one replacement frame, but must not turn a
+        // paused gallery back into active playback.
+        mPaused=true;updateButtonIcons();
+        if(mClips[mIndex].sourceFrames>1&&!mFrameTimer.isActive())mFrameTimer.start();
+    }
+}
 void ClipPlayerDialog::updateClipInfo(int mountId,double fps,double durationSeconds,
         int sourceFrames,int width,int height,
         std::shared_ptr<const std::vector<bool>> duplicateFrames,

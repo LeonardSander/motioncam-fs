@@ -752,6 +752,18 @@ int main() {
     assert(std::abs(croppedMaps.front().originV) < 1e-9);
     assert(croppedMaps.front().data != originalMaps.front().data);
 
+    std::vector<uint8_t> croppedDeferredGainMapDng(
+        gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        croppedDeferredGainMapDng, 3, originalMaps));
+    assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
+        croppedDeferredGainMapDng, width * 2, height * 2));
+    std::vector<motioncam::GainMap> croppedDeferredMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        croppedDeferredGainMapDng, 3, croppedDeferredMaps));
+    assert(croppedDeferredMaps.size() == originalMaps.size());
+    assert(croppedDeferredMaps.front().data != originalMaps.front().data);
+
     // A single GainMap containing all four CFA planes must bake across the
     // complete higher-CFA grid, even when its encoded pitch is 2x2.
     auto fourPlaneMap = originalMaps;

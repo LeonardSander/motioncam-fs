@@ -670,7 +670,9 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_DRAFT;
 
-    if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked)
+    settings.vignetteCorrection = stringToVignetteCorrectionMode(
+        ui->vignetteCorrectionComboBox->currentText().toStdString());
+    if(settings.vignetteCorrection == motioncam::VignetteCorrectionMode::Bake)
         settings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
 
     if(ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
@@ -800,7 +802,8 @@ MainWindow::MainWindow(QWidget *parent)
         }
         onRenderSettingsChanged(state);
     });
-    connect(ui->vignetteCorrectionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->vignetteCorrectionComboBox, &QComboBox::currentTextChanged, this,
+            [this](const QString&) { onRenderSettingsChanged(Qt::CheckState::Unchecked); });
     connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -1023,7 +1026,8 @@ void MainWindow::saveSettings() {
     QSettings settings(PACKAGE_NAME, APP_NAME);
 
     settings.setValue("draftMode", ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked);
-    settings.setValue("applyVignetteCorrection", ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("vignetteCorrection", QString::fromStdString(
+        vignetteCorrectionModeToString(mRenderSettings.vignetteCorrection)));
     settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("optimizeGainMaps", ui->optimizeGainMapsCheckBox->isChecked());
@@ -1070,9 +1074,12 @@ void MainWindow::restoreSettings() {
     ui->draftModeCheckBox->setCheckState(
         settings.value("draftMode").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
 
-    ui->vignetteCorrectionCheckBox->setCheckState(
-        !settings.contains("applyVignetteCorrection") ? Qt::CheckState::Checked :
-        (settings.value("applyVignetteCorrection").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
+    const QString vignetteMode = settings.contains("vignetteCorrection")
+        ? settings.value("vignetteCorrection").toString()
+        : (!settings.contains("applyVignetteCorrection") ||
+           settings.value("applyVignetteCorrection").toBool() ? "Bake" : "Resample");
+    mRenderSettings.vignetteCorrection = stringToVignetteCorrectionMode(vignetteMode.toStdString());
+    ui->vignetteCorrectionComboBox->setCurrentText(vignetteMode);
 
     ui->scaleRawCheckBox->setCheckState(
         settings.value("scaleRaw").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
@@ -3903,7 +3910,7 @@ void MainWindow::updateUi() {
 
     // Pixel normalization is bake-only; reduce-to-color can also transform a
     // deferred OpcodeList2 gain map.
-    if(ui->vignetteCorrectionCheckBox->checkState() == Qt::CheckState::Checked) {
+    if(ui->vignetteCorrectionComboBox->currentText() == "Bake") {
         ui->scaleRawCheckBox->setEnabled(true);
         if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) {
             ui->debugVignetteCheckBox->setEnabled(false);
@@ -3917,7 +3924,9 @@ void MainWindow::updateUi() {
         ui->debugVignetteCheckBox->setEnabled(false);
         ui->debugVignetteCheckBox->setChecked(false);
     }
-    ui->vignetteOnlyColorCheckBox->setEnabled(true);
+    const bool retainsGainMaps = ui->vignetteCorrectionComboBox->currentText() != "Exclude";
+    ui->vignetteOnlyColorCheckBox->setEnabled(retainsGainMaps);
+    ui->optimizeGainMapsCheckBox->setEnabled(retainsGainMaps);
 
     // Update calibration button states
     updateCalibrationButtonStates();
@@ -4130,7 +4139,7 @@ void MainWindow::updateSelectionUi() {
         ? mGlobalRenderSettings
         : mLocalSettings.value(*mSelectedMountIds.constBegin(), mGlobalRenderSettings);
     mRenderSettings = settings;
-    const QSignalBlocker b1(ui->draftModeCheckBox), b2(ui->vignetteCorrectionCheckBox),
+    const QSignalBlocker b1(ui->draftModeCheckBox), b2(ui->vignetteCorrectionComboBox),
         b3(ui->vignetteOnlyColorCheckBox), b4(ui->optimizeGainMapsCheckBox),
         b5(ui->scaleRawCheckBox), b6(ui->debugVignetteCheckBox),
         b7(ui->normalizeExposureCheckBox), b8(ui->smoothExposureCheckBox),
@@ -4144,7 +4153,7 @@ void MainWindow::updateSelectionUi() {
         b23(ui->draftQuality), b24(ui->remosaicCheckBox),
         b25(ui->higherCfaHqCheckBox), b26(ui->dngCompressionCheckBox),
         b27(ui->dngCompressionModeComboBox), b28(ui->badPixelTreatmentComboBox);
-    for (auto* box : {ui->draftModeCheckBox, ui->vignetteCorrectionCheckBox,
+    for (auto* box : {ui->draftModeCheckBox,
                       ui->vignetteOnlyColorCheckBox, ui->optimizeGainMapsCheckBox,
                       ui->scaleRawCheckBox, ui->debugVignetteCheckBox,
                       ui->normalizeExposureCheckBox, ui->smoothExposureCheckBox,
@@ -4162,6 +4171,7 @@ void MainWindow::updateSelectionUi() {
                          static_cast<QWidget*>(ui->logTransformComboBox),
                          static_cast<QWidget*>(ui->quadBayerComboBox),
                          static_cast<QWidget*>(ui->badPixelTreatmentComboBox),
+                         static_cast<QWidget*>(ui->vignetteCorrectionComboBox),
                          static_cast<QWidget*>(ui->cfaPhaseComboBox),
                          static_cast<QWidget*>(ui->draftQuality)}) {
         widget->setProperty("localOverride", false);
@@ -4172,7 +4182,8 @@ void MainWindow::updateSelectionUi() {
         return static_cast<bool>(settings.options & option);
     };
     ui->draftModeCheckBox->setChecked(checked(motioncam::RENDER_OPT_DRAFT));
-    ui->vignetteCorrectionCheckBox->setChecked(checked(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION));
+    ui->vignetteCorrectionComboBox->setCurrentText(QString::fromStdString(
+        vignetteCorrectionModeToString(settings.vignetteCorrection)));
     ui->vignetteOnlyColorCheckBox->setChecked(checked(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
     ui->optimizeGainMapsCheckBox->setChecked(checked(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
     ui->scaleRawCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
@@ -4232,7 +4243,6 @@ void MainWindow::updateSelectionUi() {
             if (mixed) box->setCheckState(Qt::PartiallyChecked);
         };
         markCheck(ui->draftModeCheckBox, mixedFlag(motioncam::RENDER_OPT_DRAFT));
-        markCheck(ui->vignetteCorrectionCheckBox, mixedFlag(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION));
         markCheck(ui->vignetteOnlyColorCheckBox, mixedFlag(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
         markCheck(ui->optimizeGainMapsCheckBox, mixedFlag(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
         markCheck(ui->scaleRawCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
@@ -4266,6 +4276,7 @@ void MainWindow::updateSelectionUi() {
         markValue(ui->logTransformComboBox, [](const auto& s) { return s.logTransform; });
         markValue(ui->quadBayerComboBox, [](const auto& s) { return s.quadBayerOption; });
         markValue(ui->badPixelTreatmentComboBox, [](const auto& s) { return s.badPixelTreatment; });
+        markValue(ui->vignetteCorrectionComboBox, [](const auto& s) { return s.vignetteCorrection; });
         markValue(ui->cfaPhaseComboBox, [](const auto& s) { return s.cfaPhase; });
     }
     updateUi();
@@ -4288,7 +4299,6 @@ void MainWindow::onApplySelected() {
             else settings.options = static_cast<motioncam::FileRenderOptions>(settings.options & ~option);
         };
         preserveMixedFlag(ui->draftModeCheckBox, motioncam::RENDER_OPT_DRAFT);
-        preserveMixedFlag(ui->vignetteCorrectionCheckBox, motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
         preserveMixedFlag(ui->vignetteOnlyColorCheckBox, motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR);
         preserveMixedFlag(ui->optimizeGainMapsCheckBox, motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS);
         preserveMixedFlag(ui->scaleRawCheckBox, motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP);
@@ -4314,6 +4324,7 @@ void MainWindow::onApplySelected() {
         if (ui->logTransformComboBox->property("localOverride").toBool()) settings.logTransform = previous.logTransform;
         if (ui->quadBayerComboBox->property("localOverride").toBool()) settings.quadBayerOption = previous.quadBayerOption;
         if (ui->badPixelTreatmentComboBox->property("localOverride").toBool()) settings.badPixelTreatment = previous.badPixelTreatment;
+        if (ui->vignetteCorrectionComboBox->property("localOverride").toBool()) settings.vignetteCorrection = previous.vignetteCorrection;
         if (ui->cfaPhaseComboBox->property("localOverride").toBool()) settings.cfaPhase = previous.cfaPhase;
         mLocalSettings.insert(id, settings);
         updates.push_back(qMakePair(id, settings));
@@ -4590,6 +4601,7 @@ void MainWindow::saveSessionToFile(const QString& path) {
         object["exposureCompensation"] = QString::fromStdString(settings.exposureCompensation);
         object["quadBayerOption"] = QString::fromStdString(quadBayerModeToString(settings.quadBayerOption));
         object["badPixelTreatment"] = QString::fromStdString(badPixelTreatmentToString(settings.badPixelTreatment));
+        object["vignetteCorrection"] = QString::fromStdString(vignetteCorrectionModeToString(settings.vignetteCorrection));
         object["cfaPhase"] = QString::fromStdString(settings.cfaPhase);
         object["jxlDistance"] = settings.jxlDistance;
         object["orientation"] = normalizedGalleryOrientation(settings.orientation);
@@ -4664,6 +4676,8 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         settings.exposureCompensation = object["exposureCompensation"].toString().toStdString();
         settings.quadBayerOption = stringToQuadBayerMode(object["quadBayerOption"].toString("Demosaic").toStdString());
         settings.badPixelTreatment = stringToBadPixelTreatment(object["badPixelTreatment"].toString("Bake").toStdString());
+        settings.vignetteCorrection = stringToVignetteCorrectionMode(object["vignetteCorrection"].toString(
+            settings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION ? "Bake" : "Resample").toStdString());
         settings.cfaPhase = object["cfaPhase"].toString("Don't override CFA").toStdString();
         settings.jxlDistance = static_cast<float>(object["jxlDistance"].toDouble(-1.0));
         settings.orientation = normalizedGalleryOrientation(object["orientation"].toInt(-1));
@@ -4848,7 +4862,7 @@ void MainWindow::onSaveSessionAs() {
 
 void MainWindow::onSetDefaultSettings(bool checked) {
     ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);
-    ui->vignetteCorrectionCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->vignetteCorrectionComboBox->setCurrentText("Bake");
     ui->scaleRawCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);
@@ -4875,6 +4889,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     mRenderSettings.logTransform = stringToLogTransformMode("Keep Input");
     mRenderSettings.quadBayerOption = stringToQuadBayerMode("Demosaic");
     mRenderSettings.badPixelTreatment = BadPixelTreatment::Bake;
+    mRenderSettings.vignetteCorrection = VignetteCorrectionMode::Bake;
     mRenderSettings.cfaPhase = "Don't override CFA";
 
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));

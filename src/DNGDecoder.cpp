@@ -3399,8 +3399,9 @@ bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::strin
     if (black) for (uint32_t i = 0; i < sourceBlack.size(); ++i)
         sourceBlack[i] = scalar(*black, i);
     const float sourceWhite = scalar(*white);
+    const size_t blackChannels = scalar(*photo) == 34892 ? 3u : 4u;
     const auto resolved = resolveDataLevels(
-        levels, sourceWhite, sourceBlack, sourceWhite, sourceBlack);
+        levels, sourceWhite, sourceBlack, sourceWhite, sourceBlack, blackChannels);
 
     const bool overridesWhite = levels.substr(0, levels.find('/')) != "Dynamic" &&
                                 levels.substr(0, levels.find('/')) != "Static";
@@ -3410,6 +3411,17 @@ bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::strin
     const bool overridesBlack = !blackSelection.empty() &&
         blackSelection != "Dynamic" && blackSelection != "Static";
     if (overridesBlack && !black) return false;
+
+    // Numeric levels describe the linear domain. If the DNG stores a transfer
+    // table, consume it first so the override tags refer to the table's output.
+    // Keep every table output sample verbatim; unlike DirectLog, this path must
+    // not normalize or otherwise requantize the source DNG's linear values.
+    if ((overridesWhite || overridesBlack) && find(TIFF_TAG_LINEARIZATION_TABLE)) {
+        DecodedDNGImage image;
+        if (!decodeImage(data, image, false, true)) return false;
+        if (!encodeImage(data, image)) return false;
+        return overrideDataLevels(data, levels);
+    }
 
     auto writeLevel = [&](const TiffEntry& entry, uint32_t index, float value) {
         index = std::min(index, entry.count - 1);
@@ -4988,31 +5000,35 @@ bool DNGDecoder::cropGainMapsToFullSensor(
     };
     for (const auto& entry : entries) {
         if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
-            scalar(entry) == TIFF_PHOTOMETRIC_CFA) photo = &entry;
+            (scalar(entry) == TIFF_PHOTOMETRIC_CFA || scalar(entry) == 34892))
+            photo = &entry;
     }
     if (!photo) return true;
-    const TiffEntry* opcode = nullptr;
+    std::array<const TiffEntry*, 2> opcodes{};
     const TiffEntry* widthE = nullptr;
     const TiffEntry* heightE = nullptr;
     for (const auto& entry : entries) {
         if (entry.ifdOffset != photo->ifdOffset) continue;
-        if (entry.tag == TIFF_TAG_OPCODE_LIST_2) opcode = &entry;
+        if (entry.tag == TIFF_TAG_OPCODE_LIST_2) opcodes[0] = &entry;
+        if (entry.tag == TIFF_TAG_OPCODE_LIST_3) opcodes[1] = &entry;
         if (entry.tag == TIFF_TAG_IMAGE_WIDTH) widthE = &entry;
         if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) heightE = &entry;
     }
-    if (!opcode || !opcode->count) return true;
     if (!widthE || !heightE) return false;
     const uint32_t width = scalar(*widthE), height = scalar(*heightE);
     if (!width || !height || fullWidth < width || fullHeight < height) return false;
     if (fullWidth == width && fullHeight == height) return true;
 
-    std::vector<GainMap> maps;
-    if (!parseOpcodeGainMaps(data.data() + opcode->valueOffset, opcode->count, maps))
-        return false;
-    if (maps.empty()) return true;
     const double cropLeft = (static_cast<double>(fullWidth) - width) * 0.5;
     const double cropTop = (static_cast<double>(fullHeight) - height) * 0.5;
-    for (auto& map : maps) {
+    size_t mappedCount = 0;
+    for (const TiffEntry* opcode : opcodes) {
+      if (!opcode || !opcode->count) continue;
+      std::vector<GainMap> maps;
+      if (!parseOpcodeGainMaps(data.data() + opcode->valueOffset, opcode->count, maps))
+          return false;
+      if (maps.empty()) continue;
+      for (auto& map : maps) {
         // Some MotionCam gain maps use 1/pointCount instead of
         // 1/(pointCount-1), leaving the final row/column short of the sensor
         // edge. Extending that malformed grid by clamping produces visible
@@ -5058,16 +5074,18 @@ bool DNGDecoder::cropGainMapsToFullSensor(
         map.originV = 0.0;
         map.spacingH = map.width > 1 ? 1.0 / (map.width - 1) : 1.0;
         map.spacingV = map.height > 1 ? 1.0 / (map.height - 1) : 1.0;
-    }
+      }
 
-    std::vector<std::pair<size_t, size_t>> payloads;
-    if (!locateGainMapPayloads(data.data() + opcode->valueOffset,
-                               opcode->count, payloads) ||
-        !overwriteGainMapPayloads(data, opcode->valueOffset, payloads, maps))
-        return false;
+      std::vector<std::pair<size_t, size_t>> payloads;
+      if (!locateGainMapPayloads(data.data() + opcode->valueOffset,
+                                 opcode->count, payloads) ||
+          !overwriteGainMapPayloads(data, opcode->valueOffset, payloads, maps))
+          return false;
+      mappedCount += maps.size();
+    }
     spdlog::info(
-        "Mapped {}x{} full-sensor gain maps onto centered {}x{} crop",
-        fullWidth, fullHeight, width, height);
+        "Mapped {} gain maps from {}x{} full sensor onto centered {}x{} crop",
+        mappedCount, fullWidth, fullHeight, width, height);
     return true;
 }
 

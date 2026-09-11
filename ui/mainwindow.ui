@@ -485,6 +485,11 @@
            </item>
            <item>
             <property name="text">
+             <string>65535/0,0,0</string>
+            </property>
+           </item>
+           <item>
+            <property name="text">
              <string>4095/64</string>
             </property>
            </item>
@@ -720,19 +725,29 @@
           <number>8</number>
          </property>
          <item>
-          <widget class="QCheckBox" name="vignetteCorrectionCheckBox">
+          <layout class="QHBoxLayout" name="vignetteCorrectionLayout">
+           <item>
+          <widget class="QLabel" name="vignetteCorrectionTitle">
            <property name="text">
-            <string>Bake in Vignette Correction</string>
-           </property>
-           <property name="checked">
-            <bool>true</bool>
+            <string>Vignette Correction</string>
            </property>
           </widget>
+           </item>
+           <item>
+            <widget class="QComboBox" name="vignetteCorrectionComboBox">
+             <property name="minimumSize"><size><width>100</width><height>30</height></size></property>
+             <item><property name="text"><string>Bake</string></property></item>
+             <item><property name="text"><string>Resample</string></property></item>
+             <item><property name="text"><string>Uncropped</string></property></item>
+             <item><property name="text"><string>Exclude</string></property></item>
+            </widget>
+           </item>
+          </layout>
          </item>
          <item>
           <widget class="QLabel" name="vignetteCorrectionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Apply Gainmaps to raw pixel values before writing to DNG.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Bake gainmaps into pixels, resample them for a cropped image, retain their uncropped geometry, or exclude them. Color reduction and optimization still apply in Resample and Uncropped modes.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

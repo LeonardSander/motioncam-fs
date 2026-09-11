@@ -42,6 +42,7 @@ bool sameRenderSettings(const RenderSettings& left, const RenderSettings& right)
            left.logTransform == right.logTransform &&
            left.exposureCompensation == right.exposureCompensation &&
            left.badPixelTreatment == right.badPixelTreatment &&
+           left.vignetteCorrection == right.vignetteCorrection &&
            left.quadBayerOption == right.quadBayerOption &&
            left.cfaPhase == right.cfaPhase &&
            left.jxlDistance == right.jxlDistance &&
@@ -71,6 +72,12 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
     // Load calibration JSON if it exists (for DNG folder)
     const auto calibPath = vfs::sidecarPath(mSrcPath);
     vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
+    if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
+    if (mCalibration && mCalibration->hasCenterCrop) {
+        mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
+                             std::to_string(mCalibration->centerCrop[1]);
+        mConfig.options |= RENDER_OPT_CROPPING;
+    }
     if (boost::filesystem::exists(calibPath)) {
         if (mCalibration.has_value()) {
             spdlog::info("Loaded calibration for DNG sequence: {}", calibPath.string());
@@ -459,6 +466,11 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         result.cfaPhase = mCfaPhase;
 
     vfs::replaceSidecarGainMapOpcodes(result.dng, mSidecarMetadata, frameIndex);
+    if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude) {
+        if (!DNGDecoder::replaceGainMaps(result.dng, 2, {}) ||
+            !DNGDecoder::replaceGainMaps(result.dng, 3, {}))
+            throw std::runtime_error("Could not exclude source DNG gain maps");
+    }
     if (!DNGDecoder::canonicalizeGainMapOpcodes(result.dng))
         throw std::runtime_error("Could not canonicalize DNG gain-map override");
     const std::optional<bool> gainMapOrderOverride =
@@ -467,7 +479,12 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
             : std::nullopt;
     if (!DNGDecoder::repairGainMapCfaPhase(result.dng, gainMapOrderOverride))
         throw std::runtime_error("Could not reconcile DNG gain maps with its CFA phase");
-    if (mCalibration && mCalibration->hasFullSensorResolution &&
+    // Camera Native finalization expects the original opcode geometry and
+    // performs its own sensor-aware processing. Resample therefore falls back
+    // to Uncropped for its staging DNGs.
+    if (!mConfig.cameraNativeStaging &&
+        mConfig.vignetteCorrection == VignetteCorrectionMode::Resample &&
+        mCalibration && mCalibration->hasFullSensorResolution &&
         !DNGDecoder::cropGainMapsToFullSensor(
             result.dng, mCalibration->fullSensorResolution[0],
             mCalibration->fullSensorResolution[1]))
@@ -740,6 +757,12 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     mConfig = config;
     mSidecarMetadata = std::move(sidecarMetadata);
     mCalibration = std::move(calibration);
+    if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
+    if (mCalibration && mCalibration->hasCenterCrop) {
+        mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
+                             std::to_string(mCalibration->centerCrop[1]);
+        mConfig.options |= RENDER_OPT_CROPPING;
+    }
     if (boost::filesystem::exists(calibPath)) {
         if (mCalibration)
             spdlog::info("Reloaded calibration for DNG sequence: {}", calibPath.string());
@@ -780,6 +803,9 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";
     const bool applyLogCurve = (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
         mConfig.logTransform != LogTransformMode::Disabled &&
+        (mConfig.logTransform != LogTransformMode::KeepInput ||
+         (mSourceHasGainMap &&
+          (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION))) &&
         !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
     info.levelsInfo = vfs::getDisplayDataLevels(
         mSourceWhiteLevel, mSourceBlackLevel,

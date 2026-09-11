@@ -3,6 +3,7 @@
 #include "DirectLogDecoder.h"
 #include "DNGDecoder.h"
 #include "CalibrationData.h"
+#include "DataLevels.h"
 #include "Utils.h"
 #include "GainMapBake.h"
 #include "LRUCache.h"
@@ -31,6 +32,33 @@
 using motioncam::Timestamp;
 
 namespace {
+
+motioncam::ResolvedDataLevels directLogDataLevels(
+        const motioncam::RenderSettings& settings, float defaultWhite = 65535.0f) {
+    const std::array<float, 4> black{0, 0, 0, 0};
+    return motioncam::resolveDataLevels(
+        settings.levels, defaultWhite, black, defaultWhite, black, 3);
+}
+
+int directLogLogBits(motioncam::LogTransformMode mode) {
+    if (mode == motioncam::LogTransformMode::ReduceBy2Bit) return 10;
+    if (mode == motioncam::LogTransformMode::ReduceBy4Bit) return 8;
+    if (mode == motioncam::LogTransformMode::ReduceBy6Bit) return 6;
+    if (mode == motioncam::LogTransformMode::ReduceBy8Bit) return 4;
+    return 12;
+}
+
+bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings) {
+    if (!(settings.options & motioncam::RENDER_OPT_LOG_TRANSFORM) ||
+        settings.logTransform == motioncam::LogTransformMode::Disabled)
+        return false;
+    if (settings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        return true;
+    const auto levels = directLogDataLevels(settings);
+    const auto white = static_cast<uint16_t>(std::clamp(
+        std::lround(levels.white), 1l, 65535l));
+    return directLogLogBits(settings.logTransform) < motioncam::utils::bitsNeeded(white);
+}
 
 bool directLogDiagnosticsEnabled() {
     static const bool enabled = [] {
@@ -106,14 +134,14 @@ std::vector<uint8_t> packSamples(
         return output;
     }
 
-    const uint16_t mask = bitsPerSample == 16
+    const uint16_t maximum = bitsPerSample == 16
         ? 0xffffu
         : static_cast<uint16_t>((1u << bitsPerSample) - 1u);
 
     for (size_t row = 0; row < rows; ++row) {
         size_t bitOffset = row * rowBytes * 8;
         for (size_t column = 0; column < samplesPerRow; ++column) {
-            const uint16_t sample = samples[row * samplesPerRow + column] & mask;
+            const uint16_t sample = std::min(samples[row * samplesPerRow + column], maximum);
             for (int bit = static_cast<int>(bitsPerSample) - 1; bit >= 0; --bit) {
                 output[bitOffset / 8] |= static_cast<uint8_t>(
                     ((sample >> bit) & 1u) << (7 - bitOffset % 8));
@@ -174,6 +202,12 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
+            if (mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
+            if (mCalibration->hasCenterCrop) {
+                mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
+                                     std::to_string(mCalibration->centerCrop[1]);
+                mConfig.options |= RENDER_OPT_CROPPING;
+            }
             spdlog::info("Loaded calibration for DirectLog: {}", calibPath.string());
         }
     }
@@ -385,6 +419,8 @@ std::vector<GainMap> VirtualFileSystemImpl_DirectLog::loadSidecarGainMaps(
 VirtualFileSystemImpl_DirectLog::PreparedSidecarGainMaps
 VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     PreparedSidecarGainMaps prepared;
+    if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude)
+        return prepared;
     auto gainMaps = loadSidecarGainMaps(frameNumber, "gainMaps");
     auto deferredGainMaps = loadSidecarGainMaps(frameNumber, "deferredGainMaps");
     std::string cfaPhase = "bggr";
@@ -458,13 +494,16 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
 void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
         std::vector<uint16_t>& rgbData, int frameNumber,
         const PreparedSidecarGainMaps& prepared,
-        int imageWidth, int imageHeight) const {
+        int imageWidth, int imageHeight,
+        int sourceLeft, int sourceTop, int sourceWidth, int sourceHeight) const {
     const bool bakeCorrection =
         (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) != 0;
     const bool optimize = (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) != 0;
     if ((!bakeCorrection && !optimize) || !mSidecarMetadata.contains("dynamic")) return;
     if (imageWidth <= 0) imageWidth = mWidth;
     if (imageHeight <= 0) imageHeight = mHeight;
+    if (sourceWidth <= 0) sourceWidth = mWidth;
+    if (sourceHeight <= 0) sourceHeight = mHeight;
     if (rgbData.size() < static_cast<size_t>(imageWidth) * imageHeight * 3)
         throw std::runtime_error("DirectLog gain-map image dimensions do not match pixels");
     const auto& dynamic = mSidecarMetadata["dynamic"];
@@ -519,19 +558,21 @@ void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
                 affectedColors[0] && affectedColors[1] && affectedColors[2])
                 continue;
 
-            const double sourcePerPixelX = static_cast<double>(mWidth) / imageWidth;
-            const double sourcePerPixelY = static_cast<double>(mHeight) / imageHeight;
+            const double sourcePerPixelX = static_cast<double>(sourceWidth) / imageWidth;
+            const double sourcePerPixelY = static_cast<double>(sourceHeight) / imageHeight;
             const bool commonSinglePlane = channels == 1 &&
                 affectedColors[0] && affectedColors[1] && affectedColors[2];
             const bool remosaicOutput =
                 (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
             parallelRows(imageHeight, [&](int beginY, int endY) {
                 for (int y = beginY; y < endY; ++y) {
-                    const double sensorY = top + (y + 0.5) * sourcePerPixelY - 0.5;
+                    const double sensorY = sourceTop + top +
+                        (y + 0.5) * sourcePerPixelY - 0.5;
                     for (int x = 0; x < imageWidth; ++x) {
                         const size_t pixel = (static_cast<size_t>(y) * imageWidth + x) * 3;
                         auto interpolatedGain = [&](uint32_t color) {
-                            const double sensorX = left + (x + 0.5) * sourcePerPixelX - 0.5;
+                            const double sensorX = sourceLeft + left +
+                                (x + 0.5) * sourcePerPixelX - 0.5;
                             return sampleGainMapColorNormalized(
                                 preparedMap, sensorX / coordinateWidth,
                                 sensorY / coordinateHeight, color, cfa);
@@ -588,9 +629,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         int height = decodedHeight > 0 ? decodedHeight : videoInfo.height;
         
         // Determine if we should apply log curve and bit reduction
-        const bool applyLogCurve =
-            (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
-            mConfig.logTransform != LogTransformMode::Disabled;
+        const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
         int bitReduction = 0;
         
         if (applyLogCurve) {
@@ -695,7 +734,12 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                                [&logLut](uint16_t sample) { return logLut[sample]; });
             }
         }
-        
+
+        const auto outputLevels = directLogDataLevels(
+            mConfig, applyLogCurve ? 65534.0f : 65535.0f);
+        // Numeric level overrides are metadata-only in the linear path. Keep
+        // all decoded and vignette-corrected samples in their 16-bit domain.
+
         std::vector<uint16_t> imageSamples;
         int samplesPerPixel = 3;
         int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
@@ -857,6 +901,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetBaselineExposure(static_cast<float>(baselineExposure) +
                                 exposureOffset + gainMapExposureOffset);
         
+        // Level overrides describe the already-linear 16-bit domain. They only
+        // change metadata; decoded samples remain untouched.
         // Set white/black levels and linearization table
         if (applyLogCurve) {
             const auto linearizationTable = utils::makeLogLinearizationTable(
@@ -865,20 +911,21 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 throw std::runtime_error("Invalid DirectLog log white level");
             dng.SetLinearizationTable(static_cast<unsigned int>(linearizationTable.size()),
                                       linearizationTable.data());
-            
-            // Set black level to 0 and white level to 65534 (as per MCRAW implementation)
-            unsigned short blackLevel[4] = {0, 0, 0, 0};
-            dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
-            dng.SetWhiteLevel(65534);
-        } else {
-            // Without a linearization table, white level is the maximum value
-            // representable by the stored sample bit depth.
-            const unsigned int whiteLevel =
-                (static_cast<unsigned int>(1) << encodeBits) - 1;
-            dng.SetWhiteLevel(whiteLevel);
-            unsigned short blackLevel[4] = {0, 0, 0, 0};
-            dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
         }
+        dng.SetWhiteLevel(static_cast<unsigned int>(std::clamp(
+            std::lround(outputLevels.white), 0l, 65535l)));
+        unsigned short blackLevel[4]{};
+        if (shouldRemosaic) {
+            for (size_t phase = 0; phase < 4; ++phase)
+                blackLevel[phase] = static_cast<unsigned short>(std::clamp(
+                    std::lround(outputLevels.black[remosaicChannels[phase]]),
+                    0l, 65535l));
+        } else {
+            for (size_t channel = 0; channel < 3; ++channel)
+                blackLevel[channel] = static_cast<unsigned short>(std::clamp(
+                    std::lround(outputLevels.black[channel]), 0l, 65535l));
+        }
+        dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
         
         diagnosticStage = std::chrono::steady_clock::now();
         if (!dng.SetImageData(imageData, imageDataSize)) {
@@ -993,6 +1040,13 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         diagnosticStage = std::chrono::steady_clock::now();
         std::string dngStr = std::move(oss).str();
         dngData.assign(dngStr.begin(), dngStr.end());
+        if (!mConfig.cameraNativeStaging &&
+            mConfig.vignetteCorrection == VignetteCorrectionMode::Resample &&
+            mCalibration && mCalibration->hasFullSensorResolution &&
+            !DNGDecoder::cropGainMapsToFullSensor(
+                dngData, mCalibration->fullSensorResolution[0],
+                mCalibration->fullSensorResolution[1]))
+            throw std::runtime_error("Could not resample DirectLog gain maps for crop");
         if (lossyJpegDct && !DNGDecoder::compressLossyJPEG(dngData))
             throw std::runtime_error("Failed to enable lossy JPEG DCT compression");
         if (diagnostics)
@@ -1019,8 +1073,11 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput
     const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
     const bool sequenceMetadataFrame = dngOutput && !mConfig.streamingPreview &&
         vfs::outputFrameNumber(entry) == 0;
+    const bool sourceCropRequested =
+        (mConfig.options & RENDER_OPT_CROPPING) ||
+        (mCalibration && mCalibration->hasLeftTopCropStride);
     const bool directProxyDecode = proxyScale > 1 && !sequenceMetadataFrame &&
-        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ);
+        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ) && !sourceCropRequested;
     result.width = sequenceMetadataFrame && proxyScale > 1
         ? mWidth : (directProxyDecode ? mWidth / proxyScale : 0);
     result.height = sequenceMetadataFrame && proxyScale > 1
@@ -1029,14 +1086,65 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
     const bool bakesGainMaps = !result.gainMaps.bakeList2.empty() ||
                                !result.gainMaps.bakeList3.empty();
+    const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
     result.inputLogEncoded = dngOutput && mDecoder->getVideoInfo().isLOG60 &&
-        (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
-        mConfig.logTransform != LogTransformMode::Disabled && !bakesGainMaps;
+        applyLogCurve && !bakesGainMaps;
     if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
                                 result.height, result.inputLogEncoded))
         throw std::runtime_error("Could not decode DirectLog frame");
+    if (result.width <= 0) result.width = mWidth;
+    if (result.height <= 0) result.height = mHeight;
+
+    int sourceLeft = 0, sourceTop = 0;
+    int sourceWidth = mWidth, sourceHeight = mHeight;
+    auto cropRgb = [&](int targetWidth, int targetHeight, bool centered) {
+        if (targetWidth <= 0 || targetHeight <= 0 || targetWidth > result.width ||
+            targetHeight > result.height ||
+            (targetWidth == result.width && targetHeight == result.height)) return;
+        const int left = centered ? (result.width - targetWidth) / 2 : 0;
+        const int top = centered ? (result.height - targetHeight) / 2 : 0;
+        const double sourcePerPixelX = static_cast<double>(sourceWidth) / result.width;
+        const double sourcePerPixelY = static_cast<double>(sourceHeight) / result.height;
+        std::vector<uint16_t> cropped(static_cast<size_t>(targetWidth) * targetHeight * 3);
+        for (int y = 0; y < targetHeight; ++y)
+            std::copy_n(result.rgb.begin() +
+                            (static_cast<size_t>(y + top) * result.width + left) * 3,
+                        static_cast<size_t>(targetWidth) * 3,
+                        cropped.begin() + static_cast<size_t>(y) * targetWidth * 3);
+        result.rgb = std::move(cropped);
+        sourceLeft += static_cast<int>(std::lround(left * sourcePerPixelX));
+        sourceTop += static_cast<int>(std::lround(top * sourcePerPixelY));
+        sourceWidth = static_cast<int>(std::lround(targetWidth * sourcePerPixelX));
+        sourceHeight = static_cast<int>(std::lround(targetHeight * sourcePerPixelY));
+        result.width = targetWidth;
+        result.height = targetHeight;
+    };
+    if (mCalibration && mCalibration->hasLeftTopCropStride)
+        cropRgb(mCalibration->leftTopCropStride[0],
+                mCalibration->leftTopCropStride[1], false);
+    if (mConfig.options & RENDER_OPT_CROPPING) {
+        uint32_t cropWidth = 0, cropHeight = 0, ignoredStride = 0;
+        utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, ignoredStride);
+        cropRgb(static_cast<int>(cropWidth), static_cast<int>(cropHeight), true);
+    }
     applySidecarGainMaps(result.rgb, result.frameNumber, result.gainMaps,
-                         result.width, result.height);
+                         result.width, result.height,
+                         sourceLeft, sourceTop, sourceWidth, sourceHeight);
+    if (proxyScale > 1 && !sequenceMetadataFrame && !directProxyDecode) {
+        std::vector<uint16_t> reduced;
+        uint32_t reducedWidth = 0, reducedHeight = 0;
+        utils::reduceRGB(result.rgb, reduced,
+                         static_cast<uint32_t>(result.width),
+                         static_cast<uint32_t>(result.height),
+                         static_cast<uint32_t>(proxyScale),
+                         mConfig.options & RENDER_OPT_HIGHER_CFA_HQ,
+                         reducedWidth, reducedHeight);
+        if (reduced.empty())
+            throw std::runtime_error("Proxy scale is too large for the DirectLog image");
+        result.rgb = std::move(reduced);
+        result.width = static_cast<int>(reducedWidth);
+        result.height = static_cast<int>(reducedHeight);
+    }
 
     result.metadata = frameMetadata(result.frameNumber);
     const bool normalizeExposure = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
@@ -1130,8 +1238,15 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                                      : static_cast<uint32_t>(mWidth);
     preview.height = processed.height > 0 ? static_cast<uint32_t>(processed.height)
                                        : static_cast<uint32_t>(mHeight);
-    preview.rgb.resize(processed.rgb.size() * sizeof(uint16_t));
-    std::memcpy(preview.rgb.data(), processed.rgb.data(), preview.rgb.size());
+    const std::array<float, 4> defaultBlack{0, 0, 0, 0};
+    const auto previewLevels = resolveDataLevels(
+        mConfig.levels, 65535.0f, defaultBlack,
+        65535.0f, defaultBlack, 3);
+    if (!utils::normalizeRgb16Bytes(
+            processed.rgb, preview.rgb,
+            {previewLevels.black[0], previewLevels.black[1], previewLevels.black[2]},
+            {previewLevels.white, previewLevels.white, previewLevels.white}))
+        return false;
     preview.timestamp = vfs::outputTimestamp(
         entry, processed.timestamp, mDecoder->getFrames().front().timestamp, mFps,
         mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
@@ -1141,6 +1256,10 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         vfs::configuredExposureOffset(mConfig) + gainMaps.exposureOffset;
     preview.metadata.hasExposure = metadata.shutterSpeed > 0.0;
     preview.metadata.hasBaselineExposure = true;
+    preview.metadata.whiteLevel.fill(previewLevels.white);
+    preview.metadata.whiteLevelCount = 3;
+    preview.metadata.blackLevel = previewLevels.black;
+    preview.metadata.blackLevelCount = 3;
     auto neutral = metadata.asShotNeutral;
     if (!neutral && mCalibration && mCalibration->hasAsShotNeutral)
         neutral = mCalibration->asShotNeutral;
@@ -1185,6 +1304,12 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration, true);
         if (mCalibration.has_value()) {
+            if (mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
+            if (mCalibration->hasCenterCrop) {
+                mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
+                                     std::to_string(mCalibration->centerCrop[1]);
+                mConfig.options |= RENDER_OPT_CROPPING;
+            }
             spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
         }
     }
@@ -1201,9 +1326,27 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
 }
 
 FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
+    int outputWidth = mWidth;
+    int outputHeight = mHeight;
+    auto applyReportedCrop = [&](int width, int height) {
+        if (width > 0 && height > 0 && width <= outputWidth && height <= outputHeight) {
+            outputWidth = width;
+            outputHeight = height;
+        }
+    };
+    // Match processFrame(): the optional left/top source crop is applied
+    // first, followed by the configured centered crop.
+    if (mCalibration && mCalibration->hasLeftTopCropStride)
+        applyReportedCrop(mCalibration->leftTopCropStride[0],
+                          mCalibration->leftTopCropStride[1]);
+    if (mConfig.options & RENDER_OPT_CROPPING) {
+        uint32_t cropWidth = 0, cropHeight = 0, ignoredStride = 0;
+        utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, ignoredStride);
+        applyReportedCrop(static_cast<int>(cropWidth), static_cast<int>(cropHeight));
+    }
     FileInfo info = vfs::makeFileInfo(
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
-        mDuplicatedFrames, mWidth, mHeight);
+        mDuplicatedFrames, outputWidth, outputHeight);
     info.orientation = mDecoder->getVideoInfo().orientation;
     if (mCalibration && mCalibration->hasOrientation)
         info.orientation = mCalibration->orientation;
@@ -1226,32 +1369,22 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.dataType = vfs::getDisplayDataType(true, cfaSize);
     
     // Determine levels info
-    const bool applyLogCurve =
-        (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
-        mConfig.logTransform != LogTransformMode::Disabled;
-    int srcBits = 16;
-    int dstBits = 16;
-    
+    const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
+    const std::array<float, 4> sourceBlack{0, 0, 0, 0};
+    const auto displayLevels = resolveDataLevels(
+        mConfig.levels, 65535.0f, sourceBlack, 65535.0f, sourceBlack, 3);
+    const int inputBits = utils::bitsNeeded(static_cast<uint16_t>(std::clamp(
+        std::lround(displayLevels.white), 1l, 65535l)));
+    info.levelsInfo = std::to_string(static_cast<int>(displayLevels.white)) + "/" +
+        std::to_string(static_cast<int>(displayLevels.black[0]));
     if (applyLogCurve) {
-        // Strip " lq" suffix if present for comparison
-        dstBits = 12; // Start with 12-bit log
-        if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) {
-            dstBits = 10;
-        } else if (mConfig.logTransform == LogTransformMode::ReduceBy4Bit) {
-            dstBits = 8;
-        } else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) {
-            dstBits = 6;
-        } else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) {
-            dstBits = 4;
-        }
+        const int outputBits = directLogLogBits(mConfig.logTransform);
+        info.levelsInfo += " -> " +
+            std::to_string((1 << outputBits) - 1) + "/0 " +
+            std::to_string(outputBits) + "b log";
+    } else {
+        info.levelsInfo += " " + std::to_string(inputBits) + "b";
     }
-    
-    int srcWhiteLevel = (1 << srcBits) - 1;
-    int dstWhiteLevel = (1 << dstBits) - 1;
-    
-    info.levelsInfo = std::to_string(srcWhiteLevel) + "/0 -> " + 
-                      std::to_string(dstWhiteLevel) + "/0 " + std::to_string(dstBits) + "b" +
-                      (applyLogCurve ? " log" : "");
     
     // Calculate runtime from video duration
     info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(mTotalFrames) / mFps) : 0.0f;

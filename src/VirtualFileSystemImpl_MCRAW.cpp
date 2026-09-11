@@ -208,6 +208,12 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
+            if (mCalibration->hasLevels) mSettings.levels = mCalibration->levels;
+            if (mCalibration->hasCenterCrop) {
+                mSettings.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
+                                       std::to_string(mCalibration->centerCrop[1]);
+                mSettings.options |= RENDER_OPT_CROPPING;
+            }
             spdlog::info("Loaded calibration for MCRAW: {}", calibPath.string());
         }
     }
@@ -529,10 +535,14 @@ void VirtualFileSystemImpl_MCRAW::init() {
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
     mFileInfo.dataType = vfs::getDisplayDataType(false, displayCfaSize);
+    const auto displayPlan = utils::planDngFrameProcessing(
+        mSettings, cameraFrameMetadata, mCalibration);
     mFileInfo.levelsInfo = vfs::getDisplayDataLevels(
         cameraFrameMetadata.dynamicWhiteLevel, cameraFrameMetadata.dynamicBlackLevel,
         cameraConfig.whiteLevel, cameraConfig.blackLevel,
-        mSettings.levels, logTransformModeToString(mSettings.logTransform),
+        mSettings.levels,
+        displayPlan.logTransform == LogTransformMode::Disabled
+            ? std::string() : logTransformModeToString(displayPlan.logTransform),
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
         mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
     // Video timestamps/frame mapping define clip duration. Audio capture can
@@ -673,6 +683,12 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
 
 void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
         std::vector<uint8_t>& dng, size_t frameIndex) const {
+    if (mSettings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
+        if (!DNGDecoder::replaceGainMaps(dng, 2, {}) ||
+            !DNGDecoder::replaceGainMaps(dng, 3, {}))
+            throw std::runtime_error("Could not exclude MCRAW gain maps");
+        return;
+    }
     if (!mSidecarMetadata.contains("dynamic") ||
         !mSidecarMetadata["dynamic"].contains("frames") ||
         frameIndex >= mSidecarMetadata["dynamic"]["frames"].size()) return;
@@ -697,6 +713,13 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
     }
     if (!DNGDecoder::canonicalizeGainMapOpcodes(dng))
         throw std::runtime_error("Could not canonicalize MCRAW sidecar gain maps");
+    if (!mSettings.cameraNativeStaging &&
+        mSettings.vignetteCorrection == VignetteCorrectionMode::Resample &&
+        mCalibration && mCalibration->hasFullSensorResolution &&
+        !DNGDecoder::cropGainMapsToFullSensor(
+            dng, mCalibration->fullSensorResolution[0],
+            mCalibration->fullSensorResolution[1]))
+        throw std::runtime_error("Could not resample MCRAW gain maps for crop");
 }
 
 int VirtualFileSystemImpl_MCRAW::readPriority(const Entry& entry) const {
@@ -717,6 +740,12 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     mCache.clear();
     vfs::loadSidecar(vfs::sidecarPath(mSrcPath), mSidecarMetadata, mCalibration, true);
+    if (mCalibration && mCalibration->hasLevels) mSettings.levels = mCalibration->levels;
+    if (mCalibration && mCalibration->hasCenterCrop) {
+        mSettings.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
+                               std::to_string(mCalibration->centerCrop[1]);
+        mSettings.options |= RENDER_OPT_CROPPING;
+    }
     init();
 }
 

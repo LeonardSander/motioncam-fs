@@ -84,7 +84,9 @@ private:
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void applySidecarGainMaps(std::vector<uint16_t>& rgbData, int frameNumber,
                               const PreparedSidecarGainMaps& prepared,
-                              int imageWidth = 0, int imageHeight = 0) const;
+                              int imageWidth = 0, int imageHeight = 0,
+                              int sourceLeft = 0, int sourceTop = 0,
+                              int sourceWidth = 0, int sourceHeight = 0) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
 

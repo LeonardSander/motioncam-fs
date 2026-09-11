@@ -1260,6 +1260,11 @@ std::shared_ptr<std::vector<char>> generateDng(
     cfa = cfaColorsFromPhase(sensorArrangement);
 
     CameraFrameMetadata gainMetadata = metadata;
+    if (settings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
+        gainMetadata.lensShadingMap.clear();
+        gainMetadata.lensShadingMapWidth = 0;
+        gainMetadata.lensShadingMapHeight = 0;
+    }
     float gainMapExposureOffset = 0.0f;
     std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
     if ((settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&

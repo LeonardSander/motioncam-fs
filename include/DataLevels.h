@@ -15,7 +15,8 @@ struct ResolvedDataLevels {
 inline ResolvedDataLevels resolveDataLevels(
     const std::string& selection,
     float dynamicWhite, const std::array<float, 4>& dynamicBlack,
-    float staticWhite, const std::array<float, 4>& staticBlack) {
+    float staticWhite, const std::array<float, 4>& staticBlack,
+    size_t blackChannels = 4) {
     ResolvedDataLevels result{dynamicWhite, dynamicBlack};
     const std::string value = selection.empty() ? "Dynamic" : selection;
 
@@ -41,13 +42,23 @@ inline ResolvedDataLevels resolveDataLevels(
             const float level = std::stof(black);
             result.black = {level, level, level, level};
         } else {
+            if (blackChannels != 3 && blackChannels != 4)
+                throw std::invalid_argument("Black level channel count must be three or four");
             std::stringstream values(black);
             std::string channelValue;
             size_t channel = 0;
-            while (channel < result.black.size() && std::getline(values, channelValue, ','))
+            while (channel < blackChannels && std::getline(values, channelValue, ','))
                 result.black[channel++] = std::stof(channelValue);
-            if (channel != result.black.size() || std::getline(values, channelValue, ','))
-                throw std::invalid_argument("Expected exactly four black levels");
+            if (channel != blackChannels || std::getline(values, channelValue, ','))
+                throw std::invalid_argument(blackChannels == 3
+                    ? "Expected exactly three RGB black levels"
+                    : "Expected exactly four CFA black levels");
+            if (blackChannels == 3) {
+                // RGB sources have one black level per interleaved channel.
+                // Preserve the four-slot representation used by CFA callers by
+                // repeating green in the unused fourth slot.
+                result.black[3] = result.black[1];
+            }
         }
     } catch (const std::exception&) {
         return {dynamicWhite, dynamicBlack};

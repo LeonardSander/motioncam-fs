@@ -207,6 +207,37 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             }
         }
 
+        if (j.contains("levels") && j["levels"].is_string()) {
+            data.levels = j["levels"].get<std::string>();
+            data.hasLevels = true;
+        }
+
+        auto parseDimensions = [&](const char* field, std::array<int, 2>& value,
+                                   bool& present) {
+            if (!j.contains(field)) return;
+            if (j[field].is_array()) {
+                value = parseArray<int, 2>(j[field]);
+            } else if (j[field].is_string()) {
+                std::string text = j[field].get<std::string>();
+                std::replace(text.begin(), text.end(), 'x', ',');
+                std::replace(text.begin(), text.end(), 'X', ',');
+                std::stringstream stream(text);
+                std::string width, height, extra;
+                if (!std::getline(stream, width, ',') || !std::getline(stream, height, ',') ||
+                    std::getline(stream, extra, ','))
+                    throw std::invalid_argument(std::string(field) + " must contain width,height");
+                value = {std::stoi(width), std::stoi(height)};
+            } else {
+                throw std::invalid_argument(std::string(field) + " must be an array or string");
+            }
+            if (value[0] <= 0 || value[1] <= 0)
+                throw std::invalid_argument(std::string(field) + " dimensions must be positive");
+            present = true;
+        };
+        parseDimensions("centerCrop", data.centerCrop, data.hasCenterCrop);
+        parseDimensions("leftTopCropStride", data.leftTopCropStride,
+                        data.hasLeftTopCropStride);
+
         if (j.contains("cfaSize")) {
             int size = 0;
             if (j["cfaSize"].is_number_integer()) {
@@ -293,7 +324,8 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 ||
             data.hasForwardMatrix1 || data.hasForwardMatrix2 ||
-            data.hasAsShotNeutral || data.hasDataLevels || data.hasCfaSize ||
+            data.hasAsShotNeutral || data.hasDataLevels || data.hasLevels ||
+            data.hasCenterCrop || data.hasLeftTopCropStride || data.hasCfaSize ||
             data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution || data.hasBadPixels ||
             data.hasOrientation || data.hasIgnoreForwardMat ||
             !data.cfaPhase.empty()) {
@@ -323,7 +355,11 @@ std::string CalibrationData::createExampleJson() {
   "_cfaPhase": "bggr",
   "_comment5": "DirectLog input levels: Auto uses video metadata; Full or Limited overrides it per clip",
   "_dataLevels": "Full",
-  "_comment6": "CFA repeat size: 2 for Bayer, 4/6/8 for quad bayer and higher CFA sensors",
+  "_comment6": "Raw white/black override; numeric RGB black levels may be written as white/r,g,b",
+  "_levels": "Dynamic",
+  "_centerCrop": "3840,2160",
+  "_leftTopCropStride": "4096x2304",
+  "_comment6b": "CFA repeat size: 2 for Bayer, 4/6/8 for quad bayer and higher CFA sensors",
   "_cfaSize": 2,
   "_comment7": "Fix gainmap cfa bayer phase mismatches",
   "_needGainMapOrderFixed": true,
