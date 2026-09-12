@@ -46,6 +46,11 @@ private:
         double shutterSpeed = 0.0;
         double baselineExposure = 0.0;
         std::optional<std::array<float, 3>> asShotNeutral;
+        uint16_t tiffOrientation = 0;
+        std::optional<std::array<float, 9>> colorMatrix1, colorMatrix2;
+        std::optional<std::array<float, 9>> forwardMatrix1, forwardMatrix2;
+        std::optional<std::array<float, 9>> cameraCalibration1, cameraCalibration2;
+        uint16_t calibrationIlluminant1 = 0, calibrationIlluminant2 = 0;
     };
 
     void init();
@@ -58,6 +63,8 @@ private:
                          double iso = 0.0, double shutterSpeed = 0.0,
                          double baselineExposure = 0.0,
                          const std::optional<std::array<float, 3>>& asShotNeutral = std::nullopt,
+                         uint16_t tiffOrientation = 0,
+                         const FrameMetadata* sourceMetadata = nullptr,
                          const std::vector<GainMap>& opcodeList2 = {},
                          const std::vector<GainMap>& opcodeList3 = {},
                          int decodedWidth = 0, int decodedHeight = 0,

@@ -25,6 +25,8 @@ struct CalibrationData {
     std::array<float, 9> colorMatrix2;
     std::array<float, 9> forwardMatrix1;
     std::array<float, 9> forwardMatrix2;
+    std::array<float, 9> cameraCalibration1;
+    std::array<float, 9> cameraCalibration2;
     std::array<float, 3> asShotNeutral;
     std::string cfaPhase;  // Bayer pattern: "bggr", "rggb", "grbg", "gbrg"
     std::string dataLevels = "Auto";  // DirectLog: "Auto", "Full", or "Limited"
@@ -39,6 +41,8 @@ struct CalibrationData {
     bool hasColorMatrix2 = false;
     bool hasForwardMatrix1 = false;
     bool hasForwardMatrix2 = false;
+    bool hasCameraCalibration1 = false;
+    bool hasCameraCalibration2 = false;
     bool hasAsShotNeutral = false;
     bool hasDataLevels = false;
     bool hasLevels = false;

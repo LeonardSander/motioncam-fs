@@ -613,6 +613,14 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
     return false;
 }
 
+void DirectLogDecoder::overrideTimestamps(const std::vector<Timestamp>& timestamps) {
+    if (timestamps.size() != mFrames.size()) return;
+    for (size_t i = 1; i < timestamps.size(); ++i)
+        if (timestamps[i] <= timestamps[i - 1]) return;
+    for (size_t i = 0; i < timestamps.size(); ++i)
+        mFrames[i].timestamp = timestamps[i];
+}
+
 bool DirectLogDecoder::initHardwareDecoder() {
     const AVHWDeviceType preferred[] = {
 #ifdef _WIN32

@@ -33,6 +33,14 @@ using motioncam::Timestamp;
 
 namespace {
 
+bool isIdentityMatrix(const std::array<float, 9>& matrix) {
+    for (size_t i = 0; i < matrix.size(); ++i) {
+        const float expected = (i % 4) == 0 ? 1.0f : 0.0f;
+        if (std::abs(matrix[i] - expected) > 1.0e-6f) return false;
+    }
+    return true;
+}
+
 motioncam::ResolvedDataLevels directLogDataLevels(
         const motioncam::RenderSettings& settings, float defaultWhite = 65535.0f) {
     const std::array<float, 4> black{0, 0, 0, 0};
@@ -215,6 +223,17 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     // Initialize DirectLogDecoder
     try {
         mDecoder = std::make_unique<DirectLogDecoder>(mSrcPath);
+        if (mSidecarMetadata.contains("dynamic") &&
+            mSidecarMetadata["dynamic"].contains("frames")) {
+            const auto& metadataFrames = mSidecarMetadata["dynamic"]["frames"];
+            std::vector<Timestamp> exactTimestamps;
+            exactTimestamps.reserve(metadataFrames.size());
+            for (const auto& metadata : metadataFrames) {
+                if (!metadata.contains("timestampNs")) { exactTimestamps.clear(); break; }
+                exactTimestamps.push_back(metadata["timestampNs"].get<Timestamp>());
+            }
+            mDecoder->overrideTimestamps(exactTimestamps);
+        }
         if (mCalibration && mCalibration->hasDataLevels) {
             if (mCalibration->dataLevels == "Full")
                 mDecoder->setFullRangeOverride(true);
@@ -294,6 +313,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
                             false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleMetadata.iso,
                             sampleMetadata.shutterSpeed, sampleMetadata.baselineExposure,
                             sampleMetadata.asShotNeutral,
+                            sampleMetadata.tiffOrientation,
+                            &sampleMetadata,
                             sampleGainMaps.opcodeList2, sampleGainMaps.opcodeList3)) {
             if (!DNGDecoder::setTimingMetadata(sampleDngData, mFps, 0))
                 throw std::runtime_error("Could not size DirectLog DNG timing metadata");
@@ -311,6 +332,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
                                      false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleMetadata.iso,
                                      sampleMetadata.shutterSpeed, sampleMetadata.baselineExposure,
                                      sampleMetadata.asShotNeutral,
+                                     sampleMetadata.tiffOrientation,
+                                     &sampleMetadata,
                                      sampleGainMaps.opcodeList2, sampleGainMaps.opcodeList3,
                                      mWidth, mHeight) ||
                     !DNGDecoder::setTimingMetadata(firstDngData, mFps, 0))
@@ -369,17 +392,13 @@ void VirtualFileSystemImpl_DirectLog::analyzeSidecarExposure() {
     std::vector<vfs::ExposureSample> samples;
     samples.reserve(std::min(metadataFrames.size(), sourceFrames.size()));
     for (size_t i = 0; i < metadataFrames.size() && i < sourceFrames.size(); ++i) {
-        const auto& metadata = metadataFrames[i];
+        const auto metadata = frameMetadata(static_cast<int>(i));
         vfs::ExposureSample sample;
         sample.timestamp = sourceFrames[i].timestamp;
-        sample.iso = metadata.value("iso", 0.0);
-        sample.exposureSeconds = metadata.value("shutterSpeedSeconds", 0.0);
-        sample.baselineExposure = metadata.value("baselineExposure", 0.0);
-        if (metadata.contains("asShotNeutral") && metadata["asShotNeutral"].is_array() &&
-            metadata["asShotNeutral"].size() >= 3) {
-            for (size_t c = 0; c < 3; ++c)
-                sample.asShotNeutral[c] = metadata["asShotNeutral"][c].get<float>();
-        }
+        sample.iso = metadata.iso;
+        sample.exposureSeconds = metadata.shutterSpeed;
+        sample.baselineExposure = metadata.baselineExposure;
+        if (metadata.asShotNeutral) sample.asShotNeutral = *metadata.asShotNeutral;
         samples.push_back(sample);
     }
     const auto analysis = vfs::analyzeExposureMetadata(
@@ -392,21 +411,42 @@ void VirtualFileSystemImpl_DirectLog::analyzeSidecarExposure() {
 VirtualFileSystemImpl_DirectLog::FrameMetadata
 VirtualFileSystemImpl_DirectLog::frameMetadata(int frameNumber) const {
     FrameMetadata result;
-    if (frameNumber < 0 || !mSidecarMetadata.contains("dynamic") ||
-        !mSidecarMetadata["dynamic"].contains("frames") ||
-        static_cast<size_t>(frameNumber) >= mSidecarMetadata["dynamic"]["frames"].size())
-        return result;
-    const auto& metadata = mSidecarMetadata["dynamic"]["frames"][frameNumber];
-    result.iso = metadata.value("iso", 0.0);
-    result.shutterSpeed = metadata.value("shutterSpeedSeconds", 0.0);
-    result.baselineExposure = metadata.value("baselineExposure", 0.0);
-    if (metadata.contains("asShotNeutral") && metadata["asShotNeutral"].is_array() &&
-        metadata["asShotNeutral"].size() >= 3) {
+    const nlohmann::json* dynamic = nullptr;
+    if (frameNumber >= 0 && mSidecarMetadata.contains("dynamic") &&
+        mSidecarMetadata["dynamic"].contains("frames") &&
+        static_cast<size_t>(frameNumber) < mSidecarMetadata["dynamic"]["frames"].size())
+        dynamic = &mSidecarMetadata["dynamic"]["frames"][frameNumber];
+    auto field = [&](const char* name) -> const nlohmann::json* {
+        if (dynamic && dynamic->contains(name)) return &dynamic->at(name);
+        if (mSidecarMetadata.contains(name)) return &mSidecarMetadata.at(name);
+        return nullptr;
+    };
+    if (const auto* value = field("iso")) result.iso = value->get<double>();
+    if (const auto* value = field("shutterSpeedSeconds")) result.shutterSpeed = value->get<double>();
+    if (const auto* value = field("baselineExposure")) result.baselineExposure = value->get<double>();
+    if (const auto* value = field("asShotNeutral"); value && value->is_array() && value->size() >= 3) {
         result.asShotNeutral = std::array<float, 3>{
-            metadata["asShotNeutral"][0].get<float>(),
-            metadata["asShotNeutral"][1].get<float>(),
-            metadata["asShotNeutral"][2].get<float>()};
+            (*value)[0].get<float>(), (*value)[1].get<float>(), (*value)[2].get<float>()};
     }
+    if (const auto* value = field("tiffOrientation"))
+        result.tiffOrientation = value->get<uint16_t>();
+    auto matrix = [&](const char* name) -> std::optional<std::array<float, 9>> {
+        const auto* value = field(name);
+        if (!value || !value->is_array() || value->size() != 9) return std::nullopt;
+        std::array<float, 9> out{};
+        for (size_t i = 0; i < out.size(); ++i) out[i] = (*value)[i].get<float>();
+        return out;
+    };
+    result.colorMatrix1 = matrix("colorMatrix1");
+    result.colorMatrix2 = matrix("colorMatrix2");
+    result.forwardMatrix1 = matrix("forwardMatrix1");
+    result.forwardMatrix2 = matrix("forwardMatrix2");
+    result.cameraCalibration1 = matrix("cameraCalibration1");
+    result.cameraCalibration2 = matrix("cameraCalibration2");
+    if (const auto* value = field("calibrationIlluminant1"))
+        result.calibrationIlluminant1 = value->get<uint16_t>();
+    if (const auto* value = field("calibrationIlluminant2"))
+        result.calibrationIlluminant2 = value->get<uint16_t>();
     return result;
 }
 
@@ -617,6 +657,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     const std::array<float, 3>& gainMapNeutralScale, double iso,
     double shutterSpeed, double baselineExposure,
     const std::optional<std::array<float, 3>>& asShotNeutral,
+    uint16_t tiffOrientation,
+    const FrameMetadata* sourceMetadata,
     const std::vector<GainMap>& opcodeList2Maps,
     const std::vector<GainMap>& opcodeList3Maps,
     int decodedWidth, int decodedHeight, bool inputLogEncoded) {
@@ -858,8 +900,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // Set camera/software metadata
         const auto identity = vfs::resolveCameraIdentity(
-            mConfig.cameraModel, "DirectLog Video");
-        dng.SetUniqueCameraModel(identity.uniqueModel);
+            mConfig.cameraModel, "");
+        if (!identity.uniqueModel.empty()) dng.SetUniqueCameraModel(identity.uniqueModel);
         if (!identity.make.empty()) dng.SetMake(identity.make);
         if (!identity.model.empty()) dng.SetCameraModelName(identity.model);
         dng.SetSoftware("MotionCam DirectLog Decoder");
@@ -888,7 +930,9 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             ? mCalibration->orientation
             : mConfig.orientation >= 0 ? mConfig.orientation
                                        : videoInfo.orientation;
-        if (orientation == 90) dng.SetOrientation(6);
+        if (!(mCalibration && mCalibration->hasOrientation) && tiffOrientation >= 1 &&
+            tiffOrientation <= 8) dng.SetOrientation(tiffOrientation);
+        else if (orientation == 90) dng.SetOrientation(6);
         else if (orientation == 180) dng.SetOrientation(3);
         else if (orientation == 270) dng.SetOrientation(8);
         else dng.SetOrientation(1);
@@ -937,24 +981,42 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // Apply calibration if available
         if (mCalibration.has_value()) {
-            if (mCalibration->hasColorMatrix1 || mCalibration->hasForwardMatrix1) {
-                dng.SetCalibrationIlluminant1(21); // D65
+            const auto color1 = sourceMetadata ? sourceMetadata->colorMatrix1 :
+                (mCalibration->hasColorMatrix1 ? std::optional{mCalibration->colorMatrix1} : std::nullopt);
+            const auto color2 = sourceMetadata ? sourceMetadata->colorMatrix2 :
+                (mCalibration->hasColorMatrix2 ? std::optional{mCalibration->colorMatrix2} : std::nullopt);
+            const auto forward1 = sourceMetadata ? sourceMetadata->forwardMatrix1 :
+                (mCalibration->hasForwardMatrix1 ? std::optional{mCalibration->forwardMatrix1} : std::nullopt);
+            const auto forward2 = sourceMetadata ? sourceMetadata->forwardMatrix2 :
+                (mCalibration->hasForwardMatrix2 ? std::optional{mCalibration->forwardMatrix2} : std::nullopt);
+            const auto camera1 = sourceMetadata ? sourceMetadata->cameraCalibration1 :
+                (mCalibration->hasCameraCalibration1 ? std::optional{mCalibration->cameraCalibration1} : std::nullopt);
+            const auto camera2 = sourceMetadata ? sourceMetadata->cameraCalibration2 :
+                (mCalibration->hasCameraCalibration2 ? std::optional{mCalibration->cameraCalibration2} : std::nullopt);
+            const bool includeCamera1 = camera1 &&
+                (!isIdentityMatrix(*camera1) || (camera2 && !isIdentityMatrix(*camera2)));
+            const bool includeCamera2 = camera2 &&
+                (!isIdentityMatrix(*camera2) || (camera1 && !isIdentityMatrix(*camera1)));
+            const bool hasMatrix1 = (color1 && !isIdentityMatrix(*color1)) ||
+                (forward1 && !isIdentityMatrix(*forward1)) || includeCamera1;
+            const bool hasMatrix2 = (color2 && !isIdentityMatrix(*color2)) ||
+                (forward2 && !isIdentityMatrix(*forward2)) || includeCamera2;
+            if (hasMatrix1) {
+                dng.SetCalibrationIlluminant1(sourceMetadata && sourceMetadata->calibrationIlluminant1
+                    ? sourceMetadata->calibrationIlluminant1
+                    : mSidecarMetadata.value("calibrationIlluminant1", 21));
             }
-            if (mCalibration->hasColorMatrix2 || mCalibration->hasForwardMatrix2) {
-                dng.SetCalibrationIlluminant2(17); // Standard Light A
+            if (hasMatrix2) {
+                dng.SetCalibrationIlluminant2(sourceMetadata && sourceMetadata->calibrationIlluminant2
+                    ? sourceMetadata->calibrationIlluminant2
+                    : mSidecarMetadata.value("calibrationIlluminant2", 17));
             }
-            if (mCalibration->hasColorMatrix1) {
-                dng.SetColorMatrix1(3, mCalibration->colorMatrix1.data());
-            }
-            if (mCalibration->hasColorMatrix2) {
-                dng.SetColorMatrix2(3, mCalibration->colorMatrix2.data());
-            }
-            if (mCalibration->hasForwardMatrix1) {
-                dng.SetForwardMatrix1(3, mCalibration->forwardMatrix1.data());
-            }
-            if (mCalibration->hasForwardMatrix2) {
-                dng.SetForwardMatrix2(3, mCalibration->forwardMatrix2.data());
-            }
+            if (color1 && !isIdentityMatrix(*color1)) dng.SetColorMatrix1(3, color1->data());
+            if (color2 && !isIdentityMatrix(*color2)) dng.SetColorMatrix2(3, color2->data());
+            if (forward1 && !isIdentityMatrix(*forward1)) dng.SetForwardMatrix1(3, forward1->data());
+            if (forward2 && !isIdentityMatrix(*forward2)) dng.SetForwardMatrix2(3, forward2->data());
+            if (includeCamera1) dng.SetCameraCalibration1(3, camera1->data());
+            if (includeCamera2) dng.SetCameraCalibration2(3, camera2->data());
         }
         auto outputNeutral = asShotNeutral;
         if (!outputNeutral && mCalibration && mCalibration->hasAsShotNeutral)
@@ -1207,6 +1269,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
                              processed.metadata.iso, processed.metadata.shutterSpeed,
                              processed.metadata.baselineExposure,
                              processed.metadata.asShotNeutral,
+                             processed.metadata.tiffOrientation,
+                             &processed.metadata,
                              processed.gainMaps.opcodeList2,
                              processed.gainMaps.opcodeList3,
                              processed.width, processed.height,

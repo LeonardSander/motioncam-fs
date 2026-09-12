@@ -21,10 +21,15 @@ struct DNGFrameMetadata {
     uint32_t whiteLevelCount = 0;
     uint32_t inputBitDepth = 0;
     int orientation = -1;
+    // Exact TIFF Orientation value (1..8). Unlike orientation, this retains
+    // reflection and transpose information for Camera Native round-trips.
+    uint16_t tiffOrientation = 0;
     std::array<float, 9> colorMatrix1{};
     std::array<float, 9> colorMatrix2{};
     std::array<float, 9> forwardMatrix1{};
     std::array<float, 9> forwardMatrix2{};
+    std::array<float, 9> cameraCalibration1{};
+    std::array<float, 9> cameraCalibration2{};
     uint16_t calibrationIlluminant1 = 0;
     uint16_t calibrationIlluminant2 = 0;
     bool hasExposure = false;
@@ -34,6 +39,8 @@ struct DNGFrameMetadata {
     bool hasColorMatrix2 = false;
     bool hasForwardMatrix1 = false;
     bool hasForwardMatrix2 = false;
+    bool hasCameraCalibration1 = false;
+    bool hasCameraCalibration2 = false;
 };
 
 struct PreviewFrame {

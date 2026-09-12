@@ -48,6 +48,7 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
         for (size_t i = 0; i < 6 && i < noiseArray.size(); ++i) {
             frame.noiseProfile[i] = noiseArray[i].get<double>();
         }
+        frame.hasNoiseProfile = noiseArray.size() >= frame.noiseProfile.size();
     }
 
 

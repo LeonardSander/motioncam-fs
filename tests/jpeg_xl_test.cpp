@@ -776,6 +776,11 @@ int main() {
     rgbLumaOpcodes.AddGainMap(rgbLumaGain);
     assert(rgbDng.SetOpcodeList3(rgbLumaOpcodes));
     auto rgbWithLuma = writeDng(rgbDng);
+    std::vector<motioncam::GainMap> parsedRgbLuma;
+    assert(motioncam::DNGDecoder::getGainMaps(rgbWithLuma, 3, parsedRgbLuma));
+    assert(parsedRgbLuma.size() == 1);
+    assert(parsedRgbLuma[0].coordinateWidth == rgbWidth);
+    assert(parsedRgbLuma[0].coordinateHeight == rgbHeight);
     const std::vector<uint16_t> mixedRgbBits{16, 12, 10};
     assert(tiffShortTagValues(rgbWithLuma, 258, &mixedRgbBits) == mixedRgbBits);
     assert(motioncam::DNGDecoder::bakeGainMaps(rgbWithLuma, false, false));
@@ -908,10 +913,18 @@ int main() {
     motioncam::DNGFrameMetadata orientedMetadata;
     assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
     assert(orientedMetadata.orientation == 90);
+    assert(orientedMetadata.tiffOrientation == 6);
     assert(motioncam::DNGDecoder::setOrientation(mountedRgb, 270));
     assert(tiffTagValue(mountedRgb, 274) == 8);
     assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
     assert(orientedMetadata.orientation == 270);
+    assert(orientedMetadata.tiffOrientation == 8);
+
+    assert(rgbDng.SetOrientation(2));
+    auto mirroredRgb = writeDng(rgbDng);
+    assert(motioncam::DNGDecoder::getColorMetadata(mirroredRgb, orientedMetadata));
+    assert(orientedMetadata.orientation == 0);
+    assert(orientedMetadata.tiffOrientation == 2);
 
     // Camera DNGs commonly put Orientation in an IFD0 preview while storing
     // the full raw in a following IFD. Resolve that tag deterministically and

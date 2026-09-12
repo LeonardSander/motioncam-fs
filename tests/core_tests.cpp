@@ -55,6 +55,12 @@ int main() {
     assert(sensorCalibration->hasFullSensorResolution);
     assert((sensorCalibration->fullSensorResolution == std::array<int, 2>{4000, 3008}));
 
+    const auto cameraCalibration = CalibrationData::parse(std::string(R"({
+        "cameraCalibration1":[1,0,0,0,0.9,0,0,0,1]
+    })"));
+    assert(cameraCalibration && cameraCalibration->hasCameraCalibration1);
+    assert(nearlyEqual(cameraCalibration->cameraCalibration1[4], 0.9f));
+
     const auto higherCfaCalibration = CalibrationData::parse(std::string(R"({"cfaSize":8})"));
     assert(higherCfaCalibration.has_value());
     assert(higherCfaCalibration->hasCfaSize);

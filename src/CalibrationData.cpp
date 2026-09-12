@@ -35,8 +35,9 @@ namespace {
     }
 
     std::string normalizeWhitespaceSeparatedArrays(std::string jsonText) {
-        static const std::array<const char*, 12> keys = {
+        static const std::array<const char*, 14> keys = {
             "colorMatrix1", "colorMatrix2", "forwardMatrix1", "forwardMatrix2",
+            "cameraCalibration1", "cameraCalibration2",
             "asShotNeutral", "fullSensorResolution", "_colorMatrix1", "_colorMatrix2",
             "_forwardMatrix1", "_forwardMatrix2", "_asShotNeutral", "_fullSensorResolution"
         };
@@ -166,6 +167,14 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
         if (j.contains("forwardMatrix2")) {
             data.forwardMatrix2 = parseArray<float, 9>(j["forwardMatrix2"]);
             data.hasForwardMatrix2 = true;
+        }
+        if (j.contains("cameraCalibration1")) {
+            data.cameraCalibration1 = parseArray<float, 9>(j["cameraCalibration1"]);
+            data.hasCameraCalibration1 = true;
+        }
+        if (j.contains("cameraCalibration2")) {
+            data.cameraCalibration2 = parseArray<float, 9>(j["cameraCalibration2"]);
+            data.hasCameraCalibration2 = true;
         }
         
         if (j.contains("asShotNeutral")) {
@@ -324,6 +333,7 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 ||
             data.hasForwardMatrix1 || data.hasForwardMatrix2 ||
+            data.hasCameraCalibration1 || data.hasCameraCalibration2 ||
             data.hasAsShotNeutral || data.hasDataLevels || data.hasLevels ||
             data.hasCenterCrop || data.hasLeftTopCropStride || data.hasCfaSize ||
             data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution || data.hasBadPixels ||

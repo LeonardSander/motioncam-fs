@@ -300,6 +300,14 @@ namespace {
         return getShadingMapValue(x, y, channel, lensShadingMap,
                                   lensShadingMapWidth, lensShadingMapHeight);
     }
+
+    bool isIdentityMatrix(const std::array<float, 9>& matrix) {
+        for (size_t i = 0; i < matrix.size(); ++i) {
+            const float expected = (i % 4) == 0 ? 1.0f : 0.0f;
+            if (std::abs(matrix[i] - expected) > 1.0e-6f) return false;
+        }
+        return true;
+    }
 }
 
 void encodeTo10Bit(
@@ -1603,9 +1611,12 @@ std::shared_ptr<std::vector<char>> generateDng(
                            auto cameraValue, std::array<float, 9> &destination,
                            bool &present) {
         if (calibration && (*calibration).*calibrationPresent) {
-          destination = (*calibration).*calibrationValue;
-          present = true;
-        } else if (!isZeroMatrix(cameraConfiguration.*cameraValue)) {
+          if (!isIdentityMatrix((*calibration).*calibrationValue)) {
+            destination = (*calibration).*calibrationValue;
+            present = true;
+          }
+        } else if (!isZeroMatrix(cameraConfiguration.*cameraValue) &&
+                   !isIdentityMatrix(cameraConfiguration.*cameraValue)) {
           destination = cameraConfiguration.*cameraValue;
           present = true;
         }
@@ -1626,6 +1637,24 @@ std::shared_ptr<std::vector<char>> generateDng(
                 &CalibrationData::forwardMatrix2,
                 &CameraConfiguration::forwardMatrix2, color.forwardMatrix2,
                 color.hasForwardMatrix2);
+      if (calibration) {
+        const bool includeCalibration1 = calibration->hasCameraCalibration1 &&
+            (!isIdentityMatrix(calibration->cameraCalibration1) ||
+             (calibration->hasCameraCalibration2 &&
+              !isIdentityMatrix(calibration->cameraCalibration2)));
+        const bool includeCalibration2 = calibration->hasCameraCalibration2 &&
+            (!isIdentityMatrix(calibration->cameraCalibration2) ||
+             (calibration->hasCameraCalibration1 &&
+              !isIdentityMatrix(calibration->cameraCalibration1)));
+        if (includeCalibration1) {
+          color.cameraCalibration1 = calibration->cameraCalibration1;
+          color.hasCameraCalibration1 = true;
+        }
+        if (includeCalibration2) {
+          color.cameraCalibration2 = calibration->cameraCalibration2;
+          color.hasCameraCalibration2 = true;
+        }
+      }
       color.calibrationIlluminant1 =
           getColorIlluminant(cameraConfiguration.colorIlluminant1);
       color.calibrationIlluminant2 =
@@ -1885,31 +1914,51 @@ std::shared_ptr<std::vector<char>> generateDng(
     // Apply calibration data to override, otherwise use camera configuration
     // Calibration only overrides fields that are explicitly set
     if (calibration.has_value() && calibration->hasColorMatrix1) {
-        dng.SetColorMatrix1(3, calibration->colorMatrix1.data());
-    } else if (!isZeroMatrix(cameraConfiguration.colorMatrix1)) {
+        if (!isIdentityMatrix(calibration->colorMatrix1))
+            dng.SetColorMatrix1(3, calibration->colorMatrix1.data());
+    } else if (!isZeroMatrix(cameraConfiguration.colorMatrix1) &&
+               !isIdentityMatrix(cameraConfiguration.colorMatrix1)) {
         dng.SetColorMatrix1(3, cameraConfiguration.colorMatrix1.data());
     }
 
     if (calibration.has_value() && calibration->hasColorMatrix2) {
-        dng.SetColorMatrix2(3, calibration->colorMatrix2.data());
-    } else if (!isZeroMatrix(cameraConfiguration.colorMatrix2)) {
+        if (!isIdentityMatrix(calibration->colorMatrix2))
+            dng.SetColorMatrix2(3, calibration->colorMatrix2.data());
+    } else if (!isZeroMatrix(cameraConfiguration.colorMatrix2) &&
+               !isIdentityMatrix(cameraConfiguration.colorMatrix2)) {
         dng.SetColorMatrix2(3, cameraConfiguration.colorMatrix2.data());
     }
 
     if (calibration.has_value() && calibration->hasForwardMatrix1) {
-        dng.SetForwardMatrix1(3, calibration->forwardMatrix1.data());
-    } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix1)) {
+        if (!isIdentityMatrix(calibration->forwardMatrix1))
+            dng.SetForwardMatrix1(3, calibration->forwardMatrix1.data());
+    } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix1) &&
+               !isIdentityMatrix(cameraConfiguration.forwardMatrix1)) {
         dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
     }
     
     if (calibration.has_value() && calibration->hasForwardMatrix2) {
-        dng.SetForwardMatrix2(3, calibration->forwardMatrix2.data());
-    } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix2)) {
+        if (!isIdentityMatrix(calibration->forwardMatrix2))
+            dng.SetForwardMatrix2(3, calibration->forwardMatrix2.data());
+    } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix2) &&
+               !isIdentityMatrix(cameraConfiguration.forwardMatrix2)) {
         dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
     }
 
-    dng.SetCameraCalibration1(3, IDENTITY_MATRIX);
-    dng.SetCameraCalibration2(3, IDENTITY_MATRIX);
+    if (calibration) {
+        const bool includeCalibration1 = calibration->hasCameraCalibration1 &&
+            (!isIdentityMatrix(calibration->cameraCalibration1) ||
+             (calibration->hasCameraCalibration2 &&
+              !isIdentityMatrix(calibration->cameraCalibration2)));
+        const bool includeCalibration2 = calibration->hasCameraCalibration2 &&
+            (!isIdentityMatrix(calibration->cameraCalibration2) ||
+             (calibration->hasCameraCalibration1 &&
+              !isIdentityMatrix(calibration->cameraCalibration1)));
+        if (includeCalibration1)
+            dng.SetCameraCalibration1(3, calibration->cameraCalibration1.data());
+        if (includeCalibration2)
+            dng.SetCameraCalibration2(3, calibration->cameraCalibration2.data());
+    }
 
     // Apply asShotNeutral from calibration if available, otherwise from metadata
     std::array<float, 3> outputNeutral = metadata.asShotNeutral;
@@ -1923,6 +1972,9 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     dng.SetCalibrationIlluminant1(getColorIlluminant(cameraConfiguration.colorIlluminant1));
     dng.SetCalibrationIlluminant2(getColorIlluminant(cameraConfiguration.colorIlluminant2));
+
+    if (metadata.hasNoiseProfile)
+        dng.SetNoiseProfile(metadata.noiseProfile.data());
 
     // Additional information
     const auto software = "MotionCam Tools";

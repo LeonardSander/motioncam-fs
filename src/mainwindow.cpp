@@ -3421,30 +3421,72 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         nlohmann::json dynamicFrames = nlohmann::json::array();
         nlohmann::json gainMapFormats = nlohmann::json::array();
         nlohmann::json gainMapPayloads = nlohmann::json::array();
+        std::optional<DNGFrameMetadata> nativeDefaults;
         std::unordered_map<std::string, size_t> gainMapFormatIds;
         std::unordered_map<std::string, size_t> gainMapPayloadIds;
+        auto identityMatrix = [](const std::array<float, 9>& matrix) {
+            for (size_t i = 0; i < matrix.size(); ++i) {
+                const float expected = (i % 4) == 0 ? 1.0f : 0.0f;
+                if (std::abs(matrix[i] - expected) > 1.0e-6f) return false;
+            }
+            return true;
+        };
         auto appendDynamicMetadata = [&](const NativeFrame& frame) {
             const auto& metadata = frame.colorMetadata;
+            if (!nativeDefaults) nativeDefaults = metadata;
+            const auto& defaults = *nativeDefaults;
             nlohmann::json item;
             item["timestampNs"] = frame.timestamp;
-            item["iso"] = metadata.iso;
-            item["shutterSpeedSeconds"] = metadata.exposureTime;
-            item["baselineExposure"] = metadata.baselineExposure;
-            item["asShotNeutral"] = metadata.asShotNeutral;
-            item["duplicateFrame"] = frame.duplicateFrame;
-            item["syntheticFrame"] = frame.syntheticFrame;
+            if (metadata.iso != defaults.iso) item["iso"] = metadata.iso;
+            if (metadata.exposureTime != defaults.exposureTime)
+                item["shutterSpeedSeconds"] = metadata.exposureTime;
+            if (metadata.baselineExposure != defaults.baselineExposure)
+                item["baselineExposure"] = metadata.baselineExposure;
+            if (metadata.asShotNeutral != defaults.asShotNeutral)
+                item["asShotNeutral"] = metadata.asShotNeutral;
+            if (frame.duplicateFrame) item["duplicateFrame"] = true;
+            if (frame.syntheticFrame) item["syntheticFrame"] = true;
+            if (metadata.tiffOrientation != defaults.tiffOrientation)
+                item["tiffOrientation"] = metadata.tiffOrientation;
+            auto emitMatrixOverride = [&](const char* name, bool present,
+                                          const std::array<float, 9>& value,
+                                          bool defaultPresent,
+                                          const std::array<float, 9>& defaultValue,
+                                          bool retainIdentity,
+                                          bool retainDefaultIdentity = false) {
+                const bool include = present && (retainIdentity || !identityMatrix(value));
+                const bool defaultInclude = defaultPresent &&
+                    (retainDefaultIdentity || !identityMatrix(defaultValue));
+                if (include != defaultInclude || (include && value != defaultValue))
+                    item[name] = include ? nlohmann::json(value) : nlohmann::json(nullptr);
+            };
+            emitMatrixOverride("colorMatrix1", metadata.hasColorMatrix1, metadata.colorMatrix1,
+                defaults.hasColorMatrix1, defaults.colorMatrix1, false);
+            emitMatrixOverride("colorMatrix2", metadata.hasColorMatrix2, metadata.colorMatrix2,
+                defaults.hasColorMatrix2, defaults.colorMatrix2, false);
+            emitMatrixOverride("forwardMatrix1", metadata.hasForwardMatrix1, metadata.forwardMatrix1,
+                defaults.hasForwardMatrix1, defaults.forwardMatrix1, false);
+            emitMatrixOverride("forwardMatrix2", metadata.hasForwardMatrix2, metadata.forwardMatrix2,
+                defaults.hasForwardMatrix2, defaults.forwardMatrix2, false);
+            const bool retainCamera1 = metadata.hasCameraCalibration2 &&
+                !identityMatrix(metadata.cameraCalibration2);
+            const bool retainCamera2 = metadata.hasCameraCalibration1 &&
+                !identityMatrix(metadata.cameraCalibration1);
+            const bool retainDefaultCamera1 = defaults.hasCameraCalibration2 &&
+                !identityMatrix(defaults.cameraCalibration2);
+            const bool retainDefaultCamera2 = defaults.hasCameraCalibration1 &&
+                !identityMatrix(defaults.cameraCalibration1);
+            emitMatrixOverride("cameraCalibration1", metadata.hasCameraCalibration1,
+                metadata.cameraCalibration1, defaults.hasCameraCalibration1,
+                defaults.cameraCalibration1, retainCamera1, retainDefaultCamera1);
+            emitMatrixOverride("cameraCalibration2", metadata.hasCameraCalibration2,
+                metadata.cameraCalibration2, defaults.hasCameraCalibration2,
+                defaults.cameraCalibration2, retainCamera2, retainDefaultCamera2);
+            if (metadata.calibrationIlluminant1 != defaults.calibrationIlluminant1)
+                item["calibrationIlluminant1"] = metadata.calibrationIlluminant1;
+            if (metadata.calibrationIlluminant2 != defaults.calibrationIlluminant2)
+                item["calibrationIlluminant2"] = metadata.calibrationIlluminant2;
 
-            const uint32_t channels = std::max<uint32_t>(1, metadata.blackLevelCount);
-            item["blackLevel"] = nlohmann::json::array();
-            item["whiteLevel"] = nlohmann::json::array();
-            for (uint32_t channel = 0; channel < channels; ++channel) {
-                const uint32_t black = metadata.blackLevelCount
-                    ? std::min(channel, metadata.blackLevelCount - 1) : 0;
-                item["blackLevel"].push_back(static_cast<double>(metadata.blackLevel[black]));
-                const uint32_t white = metadata.whiteLevelCount
-                    ? std::min(channel, metadata.whiteLevelCount - 1) : 0;
-                item["whiteLevel"].push_back(static_cast<double>(metadata.whiteLevel[white]));
-            }
             auto serializeGainMaps = [&](const std::vector<GainMap>& maps) {
                 nlohmann::json result = nlohmann::json::array();
                 for (const auto& map : maps) {
@@ -3475,10 +3517,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
                         // coordinate system. Camera-native RGB starts at the
                         // rectangle's top/left, so retain that coordinate
                         // extent for reconstruction during ingest.
-                        {"coordinateWidth", map.right - map.left == static_cast<uint32_t>(info->width)
-                            ? map.left + map.right : std::max(map.right, static_cast<uint32_t>(info->width))},
-                        {"coordinateHeight", map.bottom - map.top == static_cast<uint32_t>(info->height)
-                            ? map.top + map.bottom : std::max(map.bottom, static_cast<uint32_t>(info->height))},
+                        {"coordinateWidth", map.coordinateWidth},
+                        {"coordinateHeight", map.coordinateHeight},
                         {"spacingV", map.spacingV}, {"spacingH", map.spacingH},
                         {"originV", map.originV}, {"originH", map.originH}
                     };
@@ -3614,6 +3654,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
                 colorMetadata.forwardMatrix2 = sourceCalibration->forwardMatrix2;
                 colorMetadata.hasForwardMatrix2 = true;
             }
+            if (sourceCalibration->hasCameraCalibration1) {
+                colorMetadata.cameraCalibration1 = sourceCalibration->cameraCalibration1;
+                colorMetadata.hasCameraCalibration1 = true;
+            }
+            if (sourceCalibration->hasCameraCalibration2) {
+                colorMetadata.cameraCalibration2 = sourceCalibration->cameraCalibration2;
+                colorMetadata.hasCameraCalibration2 = true;
+            }
             if (sourceCalibration->hasAsShotNeutral) {
                 colorMetadata.asShotNeutral = sourceCalibration->asShotNeutral;
                 colorMetadata.hasAsShotNeutral = true;
@@ -3628,11 +3676,27 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
         sidecar["pixelFormat"] = pixelFormat.toStdString();
         if (hdrNoise) sidecar["noiseSynthesis"] = 8;
-        if (colorMetadata.hasColorMatrix1) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
-        if (colorMetadata.hasColorMatrix2) sidecar["colorMatrix2"] = colorMetadata.colorMatrix2;
-        if (colorMetadata.hasForwardMatrix1) sidecar["forwardMatrix1"] = colorMetadata.forwardMatrix1;
-        if (colorMetadata.hasForwardMatrix2) sidecar["forwardMatrix2"] = colorMetadata.forwardMatrix2;
+        if (colorMetadata.hasColorMatrix1 && !identityMatrix(colorMetadata.colorMatrix1)) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
+        if (colorMetadata.hasColorMatrix2 && !identityMatrix(colorMetadata.colorMatrix2)) sidecar["colorMatrix2"] = colorMetadata.colorMatrix2;
+        if (colorMetadata.hasForwardMatrix1 && !identityMatrix(colorMetadata.forwardMatrix1)) sidecar["forwardMatrix1"] = colorMetadata.forwardMatrix1;
+        if (colorMetadata.hasForwardMatrix2 && !identityMatrix(colorMetadata.forwardMatrix2)) sidecar["forwardMatrix2"] = colorMetadata.forwardMatrix2;
+        const bool includeCamera1 = colorMetadata.hasCameraCalibration1 &&
+            (!identityMatrix(colorMetadata.cameraCalibration1) ||
+             (colorMetadata.hasCameraCalibration2 && !identityMatrix(colorMetadata.cameraCalibration2)));
+        const bool includeCamera2 = colorMetadata.hasCameraCalibration2 &&
+            (!identityMatrix(colorMetadata.cameraCalibration2) ||
+             (colorMetadata.hasCameraCalibration1 && !identityMatrix(colorMetadata.cameraCalibration1)));
+        if (includeCamera1) sidecar["cameraCalibration1"] = colorMetadata.cameraCalibration1;
+        if (includeCamera2) sidecar["cameraCalibration2"] = colorMetadata.cameraCalibration2;
+        if (colorMetadata.calibrationIlluminant1) sidecar["calibrationIlluminant1"] = colorMetadata.calibrationIlluminant1;
+        if (colorMetadata.calibrationIlluminant2) sidecar["calibrationIlluminant2"] = colorMetadata.calibrationIlluminant2;
         if (colorMetadata.hasAsShotNeutral) sidecar["asShotNeutral"] = colorMetadata.asShotNeutral;
+        if (nativeDefaults) {
+            sidecar["iso"] = nativeDefaults->iso;
+            sidecar["shutterSpeedSeconds"] = nativeDefaults->exposureTime;
+            sidecar["baselineExposure"] = nativeDefaults->baselineExposure;
+            sidecar["tiffOrientation"] = nativeDefaults->tiffOrientation;
+        }
         sidecar["dynamic"] = {
             {"gainMapFormats", std::move(gainMapFormats)},
             {"gainMapPayloads", std::move(gainMapPayloads)},

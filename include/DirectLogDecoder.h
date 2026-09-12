@@ -52,6 +52,7 @@ public:
 
     const DirectLogVideoInfo& getVideoInfo() const { return mVideoInfo; }
     const std::vector<DirectLogFrameInfo>& getFrames() const { return mFrames; }
+    void overrideTimestamps(const std::vector<Timestamp>& timestamps);
     
     bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
                       int outputWidth = 0, int outputHeight = 0,

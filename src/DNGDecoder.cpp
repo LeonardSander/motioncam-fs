@@ -125,6 +125,8 @@ namespace {
     constexpr uint16_t TIFF_TAG_AS_SHOT_NEUTRAL = 50728;
     constexpr uint16_t TIFF_TAG_COLOR_MATRIX_1 = 50721;
     constexpr uint16_t TIFF_TAG_COLOR_MATRIX_2 = 50722;
+    constexpr uint16_t TIFF_TAG_CAMERA_CALIBRATION_1 = 50723;
+    constexpr uint16_t TIFF_TAG_CAMERA_CALIBRATION_2 = 50724;
     constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_1 = 50964;
     constexpr uint16_t TIFF_TAG_FORWARD_MATRIX_2 = 50965;
     constexpr uint16_t TIFF_TAG_CALIBRATION_ILLUMINANT_1 = 50778;
@@ -1914,6 +1916,8 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
     }
     if (const TiffEntry* entry = primaryOrientation ? primaryOrientation : rootOrientation) {
         const uint16_t orientation = read16(data.data() + entry->valueOffset, little);
+        if (orientation >= 1 && orientation <= 8)
+            metadata.tiffOrientation = orientation;
         if (orientation == 1 || orientation == 2) metadata.orientation = 0;
         else if (orientation == 3 || orientation == 4) metadata.orientation = 180;
         else if (orientation == 5 || orientation == 8) metadata.orientation = 270;
@@ -1997,6 +2001,10 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             readMatrix(entry, metadata.forwardMatrix1, metadata.hasForwardMatrix1);
         else if (entry.tag == TIFF_TAG_FORWARD_MATRIX_2)
             readMatrix(entry, metadata.forwardMatrix2, metadata.hasForwardMatrix2);
+        else if (entry.tag == TIFF_TAG_CAMERA_CALIBRATION_1)
+            readMatrix(entry, metadata.cameraCalibration1, metadata.hasCameraCalibration1);
+        else if (entry.tag == TIFF_TAG_CAMERA_CALIBRATION_2)
+            readMatrix(entry, metadata.cameraCalibration2, metadata.hasCameraCalibration2);
         else if (entry.tag == TIFF_TAG_CALIBRATION_ILLUMINANT_1 &&
                  entry.type == TIFF_TYPE_SHORT && entry.count)
             metadata.calibrationIlluminant1 = read16(data.data() + entry.valueOffset, little);
@@ -5261,6 +5269,22 @@ bool DNGDecoder::parseOpcodeGainMaps(const uint8_t* opcodeData, size_t opcodeSiz
             map.spacingV = readBEDouble(p + 40); map.spacingH = readBEDouble(p + 48);
             map.originV = readBEDouble(p + 56); map.originH = readBEDouble(p + 64);
             map.channels = readBE32(p + 72);
+            // Fuse-authored maps encode the uncropped sensor extent in the DNG
+            // normalized spacing. Recover it here so Camera Native can carry
+            // that coordinate system explicitly instead of guessing from the
+            // cropped opcode bounds during re-import.
+            const double coordinateWidth = map.spacingH *
+                static_cast<double>(map.right - map.left) *
+                static_cast<double>(map.width > 1 ? map.width - 1 : 1);
+            const double coordinateHeight = map.spacingV *
+                static_cast<double>(map.bottom - map.top) *
+                static_cast<double>(map.height > 1 ? map.height - 1 : 1);
+            if (std::isfinite(coordinateWidth) && coordinateWidth > 0.0)
+                map.coordinateWidth = static_cast<uint32_t>(std::llround(coordinateWidth));
+            if (std::isfinite(coordinateHeight) && coordinateHeight > 0.0)
+                map.coordinateHeight = static_cast<uint32_t>(std::llround(coordinateHeight));
+            if (!map.coordinateWidth) map.coordinateWidth = map.right;
+            if (!map.coordinateHeight) map.coordinateHeight = map.bottom;
             const uint64_t samples = static_cast<uint64_t>(map.width) * map.height * map.channels;
             if (!map.width || !map.height || !map.channels || samples > (bytes - 76) / 4)
                 return false;
