@@ -109,7 +109,10 @@ namespace {
     // DNG tag constants
     constexpr uint16_t TIFF_TAG_OPCODE_LIST_2 = 51009;
     constexpr uint16_t TIFF_TAG_OPCODE_LIST_3 = 51022;
+    constexpr uint32_t OPCODE_WARP_RECTILINEAR = 1;
+    constexpr uint32_t OPCODE_WARP_FISHEYE = 2;
     constexpr uint32_t OPCODE_GAIN_MAP = 9;
+    constexpr uint32_t OPCODE_WARP_RECTILINEAR_2 = 14;
     
     // TIFF header constants
     constexpr uint16_t TIFF_LITTLE_ENDIAN = 0x4949;
@@ -1865,6 +1868,117 @@ bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
     data.insert(data.end(), output.begin(), output.end());
     write32(data.data() + entry->entryOffset + 4, static_cast<uint32_t>(output.size()), little);
     write32(data.data() + entry->entryOffset + 8, offset, little);
+    return true;
+}
+
+bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
+                                const std::array<double, 4>& coefficients,
+                                double centerX, double centerY) {
+    if (!(centerX >= 0.0 && centerX <= 1.0 && centerY >= 0.0 && centerY <= 1.0))
+        return false;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* entry = nullptr;
+    for (const auto& candidate : entries)
+        if (candidate.tag == TIFF_TAG_OPCODE_LIST_3) { entry = &candidate; break; }
+
+    std::vector<uint8_t> output(4, 0);
+    uint32_t outputCount = 0;
+    if (entry && entry->count) {
+        const uint8_t* source = data.data() + entry->valueOffset;
+        if (entry->count < 4) return false;
+        const uint32_t count = readBE32(source);
+        size_t offset = 4;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (offset + 16 > entry->count) return false;
+            const uint32_t id = readBE32(source + offset);
+            const uint32_t bytes = readBE32(source + offset + 12);
+            if (bytes > entry->count - offset - 16) return false;
+            const size_t opcodeBytes = 16 + bytes;
+            if (id != OPCODE_WARP_RECTILINEAR && id != OPCODE_WARP_FISHEYE &&
+                id != OPCODE_WARP_RECTILINEAR_2) {
+                output.insert(output.end(), source + offset, source + offset + opcodeBytes);
+                ++outputCount;
+            }
+            offset += opcodeBytes;
+        }
+        if (offset != entry->count) return false;
+    }
+
+    appendBE32(output, OPCODE_WARP_FISHEYE);
+    appendBE32(output, 0x01030000);
+    appendBE32(output, 0);
+    appendBE32(output, 52);
+    appendBE32(output, 1);
+    for (double coefficient : coefficients) appendBEDouble(output, coefficient);
+    appendBEDouble(output, centerX);
+    appendBEDouble(output, centerY);
+    ++outputCount;
+    output[0] = static_cast<uint8_t>(outputCount >> 24);
+    output[1] = static_cast<uint8_t>(outputCount >> 16);
+    output[2] = static_cast<uint8_t>(outputCount >> 8);
+    output[3] = static_cast<uint8_t>(outputCount);
+
+    if (!entry) {
+        if (data.size() < 8) return false;
+        const uint32_t oldIfd = read32(data.data() + 4, little);
+        if (oldIfd + 2 > data.size()) return false;
+        const uint16_t oldCount = read16(data.data() + oldIfd, little);
+        const size_t oldEnd = static_cast<size_t>(oldIfd) + 2 +
+            static_cast<size_t>(oldCount) * 12;
+        if (oldEnd + 4 > data.size() || oldCount == std::numeric_limits<uint16_t>::max())
+            return false;
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t newIfd = static_cast<uint32_t>(data.size());
+        const uint16_t newCount = static_cast<uint16_t>(oldCount + 1);
+        data.resize(data.size() + 2 + static_cast<size_t>(newCount) * 12 + 4, 0);
+        std::vector<std::array<uint8_t, 12>> rebuilt;
+        rebuilt.reserve(newCount);
+        for (uint16_t i = 0; i < oldCount; ++i) {
+            std::array<uint8_t, 12> existing{};
+            std::memcpy(existing.data(), data.data() + oldIfd + 2 + static_cast<size_t>(i) * 12, 12);
+            rebuilt.push_back(existing);
+        }
+        std::array<uint8_t, 12> added{};
+        write16(added.data(), TIFF_TAG_OPCODE_LIST_3, little);
+        write16(added.data() + 2, TIFF_TYPE_UNDEFINED, little);
+        write32(added.data() + 4, static_cast<uint32_t>(output.size()), little);
+        const uint32_t payloadOffset = static_cast<uint32_t>(data.size());
+        write32(added.data() + 8, payloadOffset, little);
+        rebuilt.push_back(added);
+        std::sort(rebuilt.begin(), rebuilt.end(), [little](const auto& a, const auto& b) {
+            return read16(a.data(), little) < read16(b.data(), little);
+        });
+        write16(data.data() + newIfd, newCount, little);
+        size_t destination = static_cast<size_t>(newIfd) + 2;
+        for (const auto& rebuiltEntry : rebuilt) {
+            std::memcpy(data.data() + destination, rebuiltEntry.data(), rebuiltEntry.size());
+            destination += rebuiltEntry.size();
+        }
+        std::memcpy(data.data() + destination, data.data() + oldEnd, 4);
+        write32(data.data() + 4, newIfd, little);
+        data.insert(data.end(), output.begin(), output.end());
+    } else {
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t offset = static_cast<uint32_t>(data.size());
+        data.insert(data.end(), output.begin(), output.end());
+        write32(data.data() + entry->entryOffset + 4,
+                static_cast<uint32_t>(output.size()), little);
+        write32(data.data() + entry->entryOffset + 8, offset, little);
+    }
+
+    bool versionLittle = little;
+    for (const auto& candidate : findTiffEntries(data, versionLittle)) {
+        if (candidate.tag != TIFF_TAG_DNG_BACKWARD_VERSION ||
+            candidate.type != TIFF_TYPE_BYTE || candidate.count < 4) continue;
+        if (data[candidate.valueOffset] < 1 ||
+            (data[candidate.valueOffset] == 1 && data[candidate.valueOffset + 1] < 3)) {
+            data[candidate.valueOffset] = 1;
+            data[candidate.valueOffset + 1] = 3;
+            data[candidate.valueOffset + 2] = 0;
+            data[candidate.valueOffset + 3] = 0;
+        }
+    }
     return true;
 }
 

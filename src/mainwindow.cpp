@@ -3018,6 +3018,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     const QString calibrationPath = inputInfo.isDir()
         ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + ".json")
         : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + ".json";
+    const QString gyroflowPath = inputInfo.isDir()
+        ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + "_gyroflow.json")
+        : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + "_gyroflow.json";
     const auto sourceCalibration = QFile::exists(calibrationPath)
         ? CalibrationData::loadFromFile(calibrationPath.toStdString())
         : std::nullopt;
@@ -3109,7 +3112,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     const QDir outputDir(QFileInfo(mountPath).absolutePath());
     const QString outputPath = outputDir.absoluteFilePath(outputBase + containerExtension);
     const QString jsonPath = outputDir.absoluteFilePath(outputBase + ".json");
-    if ((QFile::exists(outputPath) || QFile::exists(jsonPath)) &&
+    const QString outputGyroflowPath = outputDir.absoluteFilePath(outputBase + "_gyroflow.json");
+    if ((QFile::exists(outputPath) || QFile::exists(jsonPath) ||
+         (QFile::exists(gyroflowPath) && QFile::exists(outputGyroflowPath))) &&
         QMessageBox::question(this, "Replace Camera Native output?",
             QString("Replace existing output for %1?").arg(outputBase),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
@@ -3310,6 +3315,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         // intermediate file.
         const QString partialPath = stageDir.absoluteFilePath(outputBase + containerExtension);
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
+        const QString partialGyroflowPath = stageDir.absoluteFilePath(outputBase + "_gyroflow.json");
+        if (QFile::exists(gyroflowPath) && !QFile::copy(gyroflowPath, partialGyroflowPath))
+            throw std::runtime_error("Could not stage the Gyroflow lens profile");
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
         QStringList args{"-hide_banner", "-y"};
@@ -3715,23 +3723,36 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         const QString backupId = ".camera-native-backup-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
         const QString mediaBackup = outputPath + backupId;
         const QString jsonBackup = jsonPath + backupId;
+        const QString gyroflowBackup = outputGyroflowPath + backupId;
         const bool hadMedia = QFile::exists(outputPath);
         const bool hadJson = QFile::exists(jsonPath);
+        const bool hadGyroflow = QFile::exists(outputGyroflowPath);
         if ((hadMedia && !QFile::rename(outputPath, mediaBackup)) ||
-            (hadJson && !QFile::rename(jsonPath, jsonBackup))) {
+            (hadJson && !QFile::rename(jsonPath, jsonBackup)) ||
+            (hadGyroflow && !QFile::rename(outputGyroflowPath, gyroflowBackup))) {
             if (QFile::exists(mediaBackup)) QFile::rename(mediaBackup, outputPath);
+            if (QFile::exists(jsonBackup)) QFile::rename(jsonBackup, jsonPath);
+            if (QFile::exists(gyroflowBackup))
+                QFile::rename(gyroflowBackup, outputGyroflowPath);
             throw std::runtime_error("Could not preserve the existing Camera Native output");
         }
         const bool mediaCommitted = QFile::rename(partialPath, outputPath);
         const bool jsonCommitted = mediaCommitted && QFile::rename(partialJsonPath, jsonPath);
-        if (!jsonCommitted) {
+        const bool gyroflowCommitted = jsonCommitted &&
+            (!QFile::exists(gyroflowPath) ||
+             QFile::rename(partialGyroflowPath, outputGyroflowPath));
+        if (!gyroflowCommitted) {
             if (mediaCommitted) QFile::remove(outputPath);
+            if (jsonCommitted) QFile::remove(jsonPath);
             if (QFile::exists(mediaBackup)) QFile::rename(mediaBackup, outputPath);
             if (QFile::exists(jsonBackup)) QFile::rename(jsonBackup, jsonPath);
+            if (QFile::exists(gyroflowBackup))
+                QFile::rename(gyroflowBackup, outputGyroflowPath);
             throw std::runtime_error("Could not commit the completed Camera Native video and JSON");
         }
         QFile::remove(mediaBackup);
         QFile::remove(jsonBackup);
+        QFile::remove(gyroflowBackup);
 
         progress.close();
         QMessageBox::information(this, "Camera Native finalization",

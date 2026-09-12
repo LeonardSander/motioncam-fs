@@ -352,6 +352,140 @@ boost::filesystem::path sidecarPath(const std::string& sourcePath) {
         : source.parent_path() / (source.stem().string() + ".json");
 }
 
+boost::filesystem::path gyroflowSidecarPath(const std::string& sourcePath) {
+    boost::filesystem::path source(sourcePath);
+    while (source.filename().empty() && source.has_parent_path())
+        source = source.parent_path();
+    return boost::filesystem::is_directory(source)
+        ? source / (source.filename().string() + "_gyroflow.json")
+        : source.parent_path() / (source.stem().string() + "_gyroflow.json");
+}
+
+namespace {
+std::array<double, 4> solveFour(double normal[4][5]) {
+    for (size_t column = 0; column < 4; ++column) {
+        size_t pivot = column;
+        for (size_t row = column + 1; row < 4; ++row)
+            if (std::abs(normal[row][column]) > std::abs(normal[pivot][column]))
+                pivot = row;
+        if (std::abs(normal[pivot][column]) < 1e-18)
+            throw std::runtime_error("Singular Gyroflow warp fit");
+        if (pivot != column)
+            for (size_t item = column; item < 5; ++item)
+                std::swap(normal[pivot][item], normal[column][item]);
+        const double scale = normal[column][column];
+        for (size_t item = column; item < 5; ++item) normal[column][item] /= scale;
+        for (size_t row = 0; row < 4; ++row) {
+            if (row == column) continue;
+            const double factor = normal[row][column];
+            for (size_t item = column; item < 5; ++item)
+                normal[row][item] -= factor * normal[column][item];
+        }
+    }
+    return {normal[0][4], normal[1][4], normal[2][4], normal[3][4]};
+}
+
+template <typename Basis>
+std::array<double, 4> fitWarp(const GyroflowLensProfile& profile, Basis basis,
+                              double& rms, double& maximum) {
+    constexpr size_t samples = 4097;
+    const double focal = 0.5 * (profile.fx + profile.fy);
+    const double maxDistance = std::max({
+        std::hypot(profile.cx, profile.cy),
+        std::hypot(profile.width - profile.cx, profile.cy),
+        std::hypot(profile.cx, profile.height - profile.cy),
+        std::hypot(profile.width - profile.cx, profile.height - profile.cy)});
+    double normal[4][5]{};
+    for (size_t sample = 1; sample < samples; ++sample) {
+        const double radius = static_cast<double>(sample) / (samples - 1);
+        const double theta = std::atan(radius * maxDistance / focal);
+        const double theta2 = theta * theta;
+        const auto& k = profile.distortion;
+        const double target = focal / maxDistance * theta *
+            (1.0 + theta2 * (k[0] + theta2 * (k[1] + theta2 * (k[2] + theta2 * k[3]))));
+        const auto terms = basis(radius);
+        for (size_t row = 0; row < 4; ++row) {
+            for (size_t column = 0; column < 4; ++column)
+                normal[row][column] += terms[row] * terms[column];
+            normal[row][4] += terms[row] * target;
+        }
+    }
+    const auto result = solveFour(normal);
+    double squared = 0.0;
+    maximum = 0.0;
+    for (size_t sample = 1; sample < samples; ++sample) {
+        const double radius = static_cast<double>(sample) / (samples - 1);
+        const double theta = std::atan(radius * maxDistance / focal);
+        const double theta2 = theta * theta;
+        const auto& k = profile.distortion;
+        const double target = focal / maxDistance * theta *
+            (1.0 + theta2 * (k[0] + theta2 * (k[1] + theta2 * (k[2] + theta2 * k[3]))));
+        const auto terms = basis(radius);
+        double fitted = 0.0;
+        for (size_t i = 0; i < 4; ++i) fitted += result[i] * terms[i];
+        const double error = (fitted - target) * maxDistance;
+        squared += error * error;
+        maximum = std::max(maximum, std::abs(error));
+    }
+    rms = std::sqrt(squared / (samples - 1));
+    return result;
+}
+} // namespace
+
+std::optional<GyroflowLensProfile> loadGyroflowLensProfile(
+        const boost::filesystem::path& path, bool) {
+    if (!boost::filesystem::is_regular_file(path)) return std::nullopt;
+    try {
+        const auto json = loadSidecarMetadataFile(path);
+        if (!json.is_object() || json.value("asymmetrical", false) ||
+            !json.contains("fisheye_params"))
+            throw std::runtime_error("only symmetrical OpenCV fisheye profiles are supported");
+        const auto& dimensions = json.at("calib_dimension");
+        const auto& fisheye = json.at("fisheye_params");
+        const auto& matrix = fisheye.at("camera_matrix");
+        const auto& coefficients = fisheye.at("distortion_coeffs");
+        GyroflowLensProfile profile;
+        profile.width = dimensions.at("w").get<int>();
+        profile.height = dimensions.at("h").get<int>();
+        profile.fx = matrix.at(0).at(0).get<double>();
+        profile.fy = matrix.at(1).at(1).get<double>();
+        profile.cx = matrix.at(0).at(2).get<double>();
+        profile.cy = matrix.at(1).at(2).get<double>();
+        if (profile.width <= 0 || profile.height <= 0 || profile.fx <= 0.0 ||
+            profile.fy <= 0.0 || coefficients.size() != 4 ||
+            profile.cx < 0.0 || profile.cx > profile.width ||
+            profile.cy < 0.0 || profile.cy > profile.height)
+            throw std::runtime_error("invalid dimensions, camera matrix, or coefficients");
+        for (size_t i = 0; i < 4; ++i)
+            profile.distortion[i] = coefficients.at(i).get<double>();
+        profile.dngFisheye = fitWarp(profile, [](double radius) {
+            const double theta = std::atan(radius), theta2 = theta * theta;
+            return std::array<double, 4>{theta, theta * theta2,
+                theta * theta2 * theta2, theta * theta2 * theta2 * theta2};
+        }, profile.fisheyeRmsPixels, profile.fisheyeMaxPixels);
+        profile.dngRectilinear = fitWarp(profile, [](double radius) {
+            const double radius2 = radius * radius;
+            return std::array<double, 4>{radius, radius * radius2,
+                radius * radius2 * radius2, radius * radius2 * radius2 * radius2};
+        }, profile.rectilinearRmsPixels, profile.rectilinearMaxPixels);
+        spdlog::info("Loaded Gyroflow profile {}: WarpFisheye RMS/max {:.3f}/{:.3f} px, "
+                     "WarpRectilinear RMS/max {:.3f}/{:.3f} px",
+                     path.string(), profile.fisheyeRmsPixels, profile.fisheyeMaxPixels,
+                     profile.rectilinearRmsPixels, profile.rectilinearMaxPixels);
+        return profile;
+    } catch (const std::exception& error) {
+        spdlog::warn("Ignoring invalid Gyroflow profile {}: {}", path.string(), error.what());
+        return std::nullopt;
+    }
+}
+
+void applyGyroflowLensProfile(
+        std::vector<uint8_t>& dng, const GyroflowLensProfile& profile) {
+    if (!DNGDecoder::setWarpFisheye(dng, profile.dngFisheye,
+            profile.cx / profile.width, profile.cy / profile.height))
+        throw std::runtime_error("Could not attach Gyroflow WarpFisheye opcode");
+}
+
 void loadSidecar(
         const boost::filesystem::path& path, nlohmann::json& metadata,
         std::optional<CalibrationData>& calibration, bool refresh) {

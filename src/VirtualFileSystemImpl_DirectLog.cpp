@@ -207,6 +207,8 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     
     // Load calibration JSON if it exists
     const auto calibPath = vfs::sidecarPath(mSrcPath);
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::gyroflowSidecarPath(mSrcPath));
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
@@ -1281,6 +1283,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
             entry, timestamp, frames.front().timestamp, mFps, converted);
         if (!DNGDecoder::setTimingMetadata(dngData, mFps, outputTimestamp))
             throw std::runtime_error("Could not write DirectLog DNG timing metadata");
+        if (mGyroflowLensProfile && !mConfig.cameraNativeStaging)
+            vfs::applyGyroflowLensProfile(dngData, *mGyroflowLensProfile);
         auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
@@ -1377,6 +1381,8 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
             spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
         }
     }
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::gyroflowSidecarPath(mSrcPath), true);
     analyzeSidecarExposure();
     mDecoder->setFullRangeOverride(std::nullopt);
     if (mCalibration && mCalibration->hasDataLevels) {

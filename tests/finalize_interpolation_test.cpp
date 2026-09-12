@@ -34,6 +34,21 @@ TagValue tagValue(const std::vector<uint8_t>& dng, uint16_t wanted) {
     return {};
 }
 
+std::pair<size_t, uint32_t> tagPayload(const std::vector<uint8_t>& dng, uint16_t wanted) {
+    auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
+    auto u32 = [&](size_t offset) { return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+        dng[offset + 2] << 16 | dng[offset + 3] << 24); };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t entries = u16(ifd);
+        for (uint16_t i = 0; i < entries; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) == wanted) return {u32(entry + 8), u32(entry + 4)};
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + entries * 12);
+    }
+    return {0, 0};
+}
+
 std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
                              float baseline, const std::array<float, 3>& neutral,
                              motioncam::Timestamp timestamp) {
@@ -200,6 +215,26 @@ int main() {
     const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
     fs::remove_all(root);
     fs::create_directories(root / "rife");
+    const auto gyroflowPath = root / "clip_gyroflow.json";
+    std::ofstream(gyroflowPath) << R"JSON({
+      "calib_dimension":{"w":4000,"h":3008}, "asymmetrical":false,
+      "fisheye_params":{"camera_matrix":[[2787.3322097799305,0,1989.3627594817033],
+      [0,2789.180091093196,1489.6929103453012],[0,0,1]],
+      "distortion_coeffs":[0.2527778305758484,0.9221266625169533,-1.8210242102121037,1.3375587148511772]}}
+    )JSON";
+    const auto gyroflow = motioncam::vfs::loadGyroflowLensProfile(
+        boost::filesystem::path(gyroflowPath.string()));
+    assert(gyroflow);
+    assert(gyroflow->fisheyeRmsPixels < gyroflow->rectilinearRmsPixels);
+    assert(gyroflow->fisheyeRmsPixels < 0.6 && gyroflow->fisheyeMaxPixels < 2.1);
+    auto warped = uncompressedA;
+    motioncam::vfs::applyGyroflowLensProfile(warped, *gyroflow);
+    const auto [opcodeOffset, opcodeBytes] = tagPayload(warped, 51022);
+    assert(opcodeOffset && opcodeBytes == 72);
+    auto be32 = [&](size_t offset) { return static_cast<uint32_t>(warped[offset] << 24 |
+        warped[offset + 1] << 16 | warped[offset + 2] << 8 | warped[offset + 3]); };
+    assert(be32(opcodeOffset) == 1 && be32(opcodeOffset + 4) == 2);
+    assert(be32(opcodeOffset + 8) == 0x01030000 && be32(opcodeOffset + 16) == 52);
     std::ofstream(root / "rife" / "inference_img.py") << "# protocol double\n";
     FakeFileSystem filesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),

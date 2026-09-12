@@ -72,6 +72,8 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
     // Load calibration JSON if it exists (for DNG folder)
     const auto calibPath = vfs::sidecarPath(mSrcPath);
     vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::gyroflowSidecarPath(mSrcPath));
     if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
@@ -684,6 +686,8 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         throw std::runtime_error("Could not update DNG timing metadata");
     if (!mConfig.cameraNativeStaging && !DNGDecoder::packUncompressedToWhiteLevel(bytes))
         throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
+    if (mGyroflowLensProfile && !mConfig.cameraNativeStaging)
+        vfs::applyGyroflowLensProfile(bytes, *mGyroflowLensProfile);
     logStage("log/timing/bit packing", bytes.size());
     if (jpegCompression) {
         const bool compressed = isLossyJpegDct(mConfig.jxlDistance)
@@ -749,7 +753,10 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     nlohmann::json sidecarMetadata;
     std::optional<CalibrationData> calibration;
     vfs::loadSidecar(calibPath, sidecarMetadata, calibration, true);
-    if (sameRenderSettings(mConfig, config) && sidecarMetadata == mSidecarMetadata)
+    auto gyroflow = vfs::loadGyroflowLensProfile(
+        vfs::gyroflowSidecarPath(mSrcPath), true);
+    if (sameRenderSettings(mConfig, config) && sidecarMetadata == mSidecarMetadata &&
+        !gyroflow && !mGyroflowLensProfile)
         return;
 
     mCache.clear();
@@ -757,6 +764,7 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     mConfig = config;
     mSidecarMetadata = std::move(sidecarMetadata);
     mCalibration = std::move(calibration);
+    mGyroflowLensProfile = std::move(gyroflow);
     if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +

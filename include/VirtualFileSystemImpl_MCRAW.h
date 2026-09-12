@@ -61,6 +61,7 @@ private:
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     std::optional<CalibrationData> mCalibration;
+    std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;
     mutable std::shared_mutex mRenderMutex;
 };

@@ -23,6 +23,22 @@ struct GainMap;
 struct CalibrationData;
 class LRUCache;
 
+struct GyroflowLensProfile {
+    int width = 0;
+    int height = 0;
+    double fx = 0.0;
+    double fy = 0.0;
+    double cx = 0.0;
+    double cy = 0.0;
+    std::array<double, 4> distortion{};
+    std::array<double, 4> dngFisheye{};
+    std::array<double, 4> dngRectilinear{};
+    double fisheyeRmsPixels = 0.0;
+    double fisheyeMaxPixels = 0.0;
+    double rectilinearRmsPixels = 0.0;
+    double rectilinearMaxPixels = 0.0;
+};
+
 // Owns the expensive, source-specific preview decoder and its private cache.
 // The renderer is reused while settings remain unchanged, so player seeks do
 // not repeatedly scan the source and rebuild timing/exposure analysis.
@@ -202,6 +218,14 @@ void replaceSidecarGainMapOpcodes(
 nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path);
 
 boost::filesystem::path sidecarPath(const std::string& sourcePath);
+
+boost::filesystem::path gyroflowSidecarPath(const std::string& sourcePath);
+
+std::optional<GyroflowLensProfile> loadGyroflowLensProfile(
+    const boost::filesystem::path& path, bool refresh = false);
+
+void applyGyroflowLensProfile(
+    std::vector<uint8_t>& dng, const GyroflowLensProfile& profile);
 
 void loadSidecar(
     const boost::filesystem::path& path,

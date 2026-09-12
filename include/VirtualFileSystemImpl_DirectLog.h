@@ -114,6 +114,7 @@ private:
     bool mIsHLG;
     std::unique_ptr<DirectLogDecoder> mDecoder;
     std::optional<CalibrationData> mCalibration;
+    std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::map<Timestamp, float> mNormalizedExposureOffsets;

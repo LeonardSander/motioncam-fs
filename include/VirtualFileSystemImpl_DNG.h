@@ -79,6 +79,7 @@ private:
     std::array<uint8_t, 4> mCfaPhase = {0, 1, 1, 2};
     std::unique_ptr<DNGDecoder> mDecoder;
     std::optional<CalibrationData> mCalibration;
+    std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;
     std::map<Timestamp, float> mNormalizedExposureOffsets;
     std::map<Timestamp, float> mSmoothedExposureOffsets;

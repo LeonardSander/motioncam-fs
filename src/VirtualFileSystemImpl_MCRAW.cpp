@@ -205,6 +205,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     
     // Load calibration JSON if it exists
     const auto calibPath = vfs::sidecarPath(mSrcPath);
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::gyroflowSidecarPath(mSrcPath));
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
@@ -630,6 +632,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         std::vector<uint8_t> timed(output->begin(), output->end());
         applySidecarGainMapOpcodes(
             timed, frameIt->second);
+        if (mGyroflowLensProfile && !mSettings.cameraNativeStaging)
+            vfs::applyGyroflowLensProfile(timed, *mGyroflowLensProfile);
         if (!DNGDecoder::setTimingMetadata(timed, mFps, outputTimestamp))
             throw std::runtime_error("Could not write DNG timing metadata");
         if (!jpegCompression && !mSettings.streamingPreview) {
@@ -740,6 +744,8 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     mCache.clear();
     vfs::loadSidecar(vfs::sidecarPath(mSrcPath), mSidecarMetadata, mCalibration, true);
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::gyroflowSidecarPath(mSrcPath), true);
     if (mCalibration && mCalibration->hasLevels) mSettings.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mSettings.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
