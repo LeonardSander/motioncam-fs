@@ -3909,7 +3909,11 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     if (maps.empty()) return true;
     if (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
         auto separation = separateGainMapLuminance(maps);
-        if (separation.valid) maps = std::move(maps);
+        // Never turn a requested color-only correction into a full gain-map
+        // bake. The mounted-DNG path rejects an unsupported separation too;
+        // returning false here lets the preview VFS use that shared transform
+        // path instead of displaying materially different processing.
+        if (!separation.valid) return false;
     }
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps},
@@ -5092,6 +5096,10 @@ bool DNGDecoder::repairGainMapCfaPhase(
     }
     const bool repair = sidecarOverride.value_or(affectedProducer);
     if (!repair || !opcode || opcode->count < 4) return true;
+    // Excluding gain maps retains the OpcodeList2 tag with a valid empty
+    // opcode list. There is no CFA phase to reconcile in that representation.
+    if (opcode->count == 4 &&
+        readBE32(data.data() + opcode->valueOffset) == 0) return true;
 
     int repeat = 0;
     std::array<uint8_t, 4> cfa{};

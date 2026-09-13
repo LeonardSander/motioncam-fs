@@ -533,6 +533,14 @@ DNGFrameMetadata VirtualFileSystemImpl_DNG::resolvedFrameMetadata(
         metadata.baselineExposure += vfs::configuredExposureOffset(mConfig) +
             (boost::icontains(metadata.uniqueCameraModel, "Panasonic") ? 2.0 : 0.0);
         metadata.hasBaselineExposure = true;
+    } else if (mConfig.streamingPreview) {
+        // Gallery/thumbnail decoding uses camera-native staging to preserve
+        // source pixel and gain-map geometry, but it is still a display path.
+        // previewRenderSettings() clears cameraModel, so this applies the
+        // selected exposure compensation without Camera Native's model-tag
+        // compensation leaking into the preview.
+        metadata.baselineExposure += vfs::configuredExposureOffset(mConfig);
+        metadata.hasBaselineExposure = true;
     }
     if ((mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)) {
         if (const auto neutral = mSmoothedAsShotNeutrals.find(timestamp);

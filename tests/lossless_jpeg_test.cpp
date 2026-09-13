@@ -675,11 +675,36 @@ int main() {
     assert(motioncam::DNGDecoder::getGainMaps(replacedGainMapDng, 2, replacedMaps));
     assert(replacedMaps.size() == replacementMaps.size());
     assert(replacedMaps.front().data == replacementMaps.front().data);
+    // A scalar spatial map cannot be separated into CFA color and luminance.
+    // Full preview baking may consume it, but color-only preview decoding must
+    // reject it so the VFS can use the mounted-DNG transform fallback instead
+    // of silently applying the complete vignette correction.
+    auto scalarSpatialMaps = originalMaps;
+    scalarSpatialMaps.front().channels = 1;
+    scalarSpatialMaps.front().data.resize(
+        static_cast<size_t>(scalarSpatialMaps.front().width) *
+        scalarSpatialMaps.front().height);
+    std::vector<uint8_t> scalarSpatialDng(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        scalarSpatialDng, 2, scalarSpatialMaps));
+    motioncam::RenderSettings fullPreviewSettings;
+    fullPreviewSettings.options = motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    motioncam::PreviewFrame fullPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        scalarSpatialDng, fullPreviewSettings, fullPreview, false));
+    auto colorPreviewSettings = fullPreviewSettings;
+    colorPreviewSettings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    motioncam::PreviewFrame colorPreview;
+    assert(!motioncam::DNGDecoder::decodePreview(
+        scalarSpatialDng, colorPreviewSettings, colorPreview, false));
     std::vector<uint8_t> clearedGainMapDng(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::replaceGainMaps(clearedGainMapDng, 2, {}));
     std::vector<motioncam::GainMap> clearedMaps;
     assert(!motioncam::DNGDecoder::getGainMaps(clearedGainMapDng, 2, clearedMaps));
     assert(clearedMaps.empty());
+    // Exclude leaves a valid zero-count OpcodeList2. Legacy MotionCam phase
+    // repair must accept it as a no-op instead of rejecting the mounted DNG.
+    assert(motioncam::DNGDecoder::repairGainMapCfaPhase(clearedGainMapDng, true));
     auto cleared16 = [&](size_t offset) {
         return static_cast<uint16_t>(clearedGainMapDng[offset] |
                                      clearedGainMapDng[offset + 1] << 8);
@@ -942,8 +967,17 @@ int main() {
         phaseMap.left = phase % 2;
         phaseMap.row_pitch = 2;
         phaseMap.col_pitch = 2;
+        // Exercise real-world phase-dependent inferred coordinate extents:
+        // the one-pixel Top/Left offsets round to adjacent dimensions even
+        // though all four opcodes describe the same gain-map grid.
+        phaseMap.bottom = 2448;
+        phaseMap.right = 3264;
+        phaseMap.map_points_v = 13;
+        phaseMap.map_points_h = 17;
+        phaseMap.map_spacing_v = 1.0 / 13.0;
+        phaseMap.map_spacing_h = 1.0 / 17.0;
         phaseMap.map_planes = 1;
-        phaseMap.gain_data.resize(4);
+        phaseMap.gain_data.resize(13 * 17);
         for (size_t point = 0; point < phaseMap.gain_data.size(); ++point)
             phaseMap.gain_data[point] = 1.0f + 0.1f * phase + 0.05f * point;
         fourGainOpcodes.AddGainMap(phaseMap);

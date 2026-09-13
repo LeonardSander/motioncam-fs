@@ -189,8 +189,6 @@ inline GainMapLuminanceSeparation<Map> separateGainMapLuminance(
             map.width == maps.front().width && map.height == maps.front().height &&
             map.bottom == maps.front().bottom && map.right == maps.front().right &&
             map.plane == maps.front().plane && map.planes == maps.front().planes &&
-            map.coordinateWidth == maps.front().coordinateWidth &&
-            map.coordinateHeight == maps.front().coordinateHeight &&
             map.spacingV == maps.front().spacingV && map.spacingH == maps.front().spacingH &&
             map.originV == maps.front().originV && map.originH == maps.front().originH &&
             map.top >= baseTop && map.top < baseTop + 2 &&
