@@ -44,7 +44,8 @@ private:
         staticMaterializer(const Entry& entry) override;
     void init();
 
-    void applySidecarGainMapOpcodes(std::vector<uint8_t>& dng, size_t frameIndex) const;
+    void attachSidecarGainMapOpcodes(
+        std::vector<uint8_t>& dng, size_t frameIndex) const;
 
 private:
     const std::string mSrcPath;

@@ -4,6 +4,7 @@
 #include "LRUCache.h"
 #include "CalibrationData.h"
 #include "GainMapBake.h"
+#include "Utils.h"
 #include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
@@ -20,11 +21,211 @@
 #include <spdlog/spdlog.h>
 #include <QByteArray>
 #include <nlohmann/json.hpp>
+#include <tinydng/tiny_dng_writer.h>
 #include <cstring>
 #include <BS_thread_pool.hpp>
 
 namespace motioncam {
 namespace vfs {
+
+DngRenderPlan planDngRender(
+        const Entry& entry, Timestamp sourceTimestamp,
+        Timestamp firstSourceTimestamp, const RenderSettings& settings,
+        float frameRate, bool finalizing, bool numberedSequence) {
+    DngRenderPlan plan;
+    plan.outputFrameNumber = outputFrameNumber(entry);
+    plan.scale = getScaleFromOptions(settings.options, settings.draftScale);
+    plan.nativeMetadataFrame = !finalizing && !settings.streamingPreview &&
+        numberedSequence && plan.outputFrameNumber == 0 && plan.scale > 1;
+    if (plan.nativeMetadataFrame) plan.scale = 1;
+    plan.outputTimestamp = outputTimestamp(
+        entry, sourceTimestamp, firstSourceTimestamp, frameRate,
+        settings.options & RENDER_OPT_FRAMERATE_CONVERSION);
+    return plan;
+}
+
+void processDngPixels(std::vector<uint8_t>& dng,
+        const RenderSettings& settings,
+        const DngPixelPipelineOptions& options) {
+    const std::string source = options.sourceName.empty()
+        ? std::string("frame") : std::string(options.sourceName);
+    // Level correction is tag-only for every source. It deliberately precedes
+    // any operation that consults the DNG's black/white metadata and never
+    // requantizes the stored samples.
+    if (!DNGDecoder::overrideDataLevels(dng, settings.levels))
+        throw std::runtime_error("Could not override data levels for " + source);
+    const auto demosaics = [](QuadBayerMode value) {
+        return value == QuadBayerMode::Demosaic ||
+            value == QuadBayerMode::DemosaicColor ||
+            value == QuadBayerMode::DemosaicOCL;
+    };
+    if (options.hasCfa && options.calibration &&
+        options.calibration->hasBadPixels &&
+        settings.badPixelTreatment != BadPixelTreatment::Disabled) {
+        DecodedDNGImage decoded;
+        if (!DNGDecoder::decodeImage(dng, decoded, false, false) ||
+            decoded.layout.pixels != DNGPixelLayout::CFA)
+            throw std::runtime_error("Could not decode CFA DNG for bad-pixel treatment: " +
+                                     source);
+        const float white = decoded.metadata.whiteLevelCount
+            ? decoded.metadata.whiteLevel[0] : 65535.0f;
+        const bool willDemosaic = demosaics(settings.quadBayerOption) &&
+            (options.cfaRepeatSize > 2 || settings.cameraNativeStaging ||
+             options.outputScale > 1);
+        const int originalWidth = options.calibration->hasFullSensorResolution
+            ? options.calibration->fullSensorResolution[0]
+            : static_cast<int>(decoded.layout.width);
+        const int originalHeight = options.calibration->hasFullSensorResolution
+            ? options.calibration->fullSensorResolution[1]
+            : static_cast<int>(decoded.layout.height);
+        const auto active = utils::applyCfaBadPixels(
+            decoded.samples.data(), decoded.layout.width, decoded.layout.height,
+            originalWidth, originalHeight, options.cfaRepeatSize, white,
+            decoded.metadata.blackLevel, options.iso, options.exposureTime,
+            *options.calibration, settings.badPixelTreatment, willDemosaic);
+        if (settings.badPixelTreatment == BadPixelTreatment::Bake || willDemosaic) {
+            if (!DNGDecoder::encodeImage(dng, decoded))
+                throw std::runtime_error("Could not encode corrected CFA DNG: " + source);
+        } else if (!active.empty()) {
+            tinydngwriter::FixBadPixelsParams params;
+            for (const auto& pixel : active)
+                params.bad_pixels.push_back({pixel.row, pixel.column});
+            std::string phaseName;
+            for (const uint8_t color : options.cfaPhase)
+                phaseName += color == 0 ? 'r' : color == 2 ? 'b' : 'g';
+            params.bayer_phase = phaseName == "rggb" ? 0
+                : phaseName == "grbg" ? 1 : phaseName == "gbrg" ? 2 : 3;
+            tinydngwriter::OpcodeList opcodes;
+            opcodes.AddFixBadPixelsList(params);
+            const auto payload = opcodes.Serialize();
+            if (!DNGDecoder::replaceOpcodeList(dng, 1,
+                    std::vector<uint8_t>(payload.begin(), payload.end())))
+                throw std::runtime_error("Could not write DNG bad-pixel opcodes: " + source);
+        }
+    }
+    if (settings.options & RENDER_OPT_CROPPING) {
+        uint32_t width = 0, height = 0, stride = 0;
+        utils::parseCropTarget(settings.cropTarget, width, height, stride);
+        if (width && height && !DNGDecoder::cropImage(dng, width, height))
+            throw std::runtime_error("Unsupported crop for " + source);
+    }
+    std::vector<GainMap> opcode2;
+    const bool hasOpcode2 = DNGDecoder::getGainMaps(dng, 2, opcode2) &&
+        !opcode2.empty();
+    std::vector<GainMap> opcode3;
+    const bool hasOpcode3Luma = DNGDecoder::hasOnlySinglePlaneGainMap(dng, 3) &&
+        DNGDecoder::getGainMaps(dng, 3, opcode3) && opcode3.size() == 1 &&
+        opcode3.front().channels == 1;
+    const bool colorOnly = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    const bool bakeGain = (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+        (hasOpcode2 || (hasOpcode3Luma && !colorOnly));
+    QuadBayerMode mode = settings.quadBayerOption;
+    if (settings.streamingPreview && options.outputScale == 1 &&
+        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) && demosaics(mode))
+        mode = QuadBayerMode::CorrectQBCFAMetadata;
+    const bool remosaic = settings.options & RENDER_OPT_REMOSAIC_TO_BAYER;
+    const bool topologyBeforeBake = bakeGain &&
+        (options.outputScale > 1 ||
+         (!options.hasCfa && remosaic));
+    if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
+            dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
+            options.outputScale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
+            false, true))
+        throw std::runtime_error("Unsupported pre-gain topology conversion for " + source);
+    if (hasOpcode2 && !bakeGain && colorOnly &&
+        !DNGDecoder::transformGainMaps(dng, false, true, false))
+        throw std::runtime_error("Unsupported gain-map color transform for " + source);
+    if (hasOpcode2 && !bakeGain &&
+        (settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
+        !DNGDecoder::transformGainMaps(dng, false, false, true))
+        throw std::runtime_error("Unsupported gain-map optimization for " + source);
+    if (bakeGain && !DNGDecoder::bakeGainMaps(
+            dng, settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP, colorOnly,
+            settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
+            settings.options & RENDER_OPT_DEBUG_SHADING_MAP,
+            topologyBeforeBake ? 2 : options.cfaRepeatSize, options.cfaPhase))
+        throw std::runtime_error("Unsupported gain-map bake for " + source);
+    if (!topologyBeforeBake &&
+        (options.cfaRepeatSize > 2 ||
+         (options.hasCfa && settings.cameraNativeStaging) ||
+         options.outputScale > 1 || remosaic) &&
+        !DNGDecoder::processHigherCFA(
+            dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
+            options.outputScale, settings.options & RENDER_OPT_HIGHER_CFA_HQ))
+        throw std::runtime_error("Unsupported CFA/RGB topology conversion for " + source);
+    if (topologyBeforeBake && options.hasCfa && options.outputScale > 1 &&
+        demosaics(mode) && !remosaic &&
+        !DNGDecoder::processHigherCFA(
+            dng, 2, options.cfaPhase, mode, false, 1, false))
+        throw std::runtime_error("Unsupported post-gain demosaic for " + source);
+    bool applyLog = settings.logTransform != LogTransformMode::KeepInput || bakeGain;
+    if (options.linearInputBitDepth) {
+        uint32_t outputBits = 1;
+        const uint32_t quantizationWhite = options.inputQuantizationWhite
+            ? options.inputQuantizationWhite : 65535;
+        while (outputBits < 16 && ((uint32_t{1} << outputBits) - 1) < quantizationWhite)
+            ++outputBits;
+        if (settings.logTransform == LogTransformMode::ReduceBy2Bit)
+            outputBits = std::max(1u, outputBits - 2);
+        else if (settings.logTransform == LogTransformMode::ReduceBy4Bit)
+            outputBits = std::max(1u, outputBits - 4);
+        else if (settings.logTransform == LogTransformMode::ReduceBy6Bit)
+            outputBits = std::max(1u, outputBits - 6);
+        else if (settings.logTransform == LogTransformMode::ReduceBy8Bit)
+            outputBits = std::max(1u, outputBits - 8);
+        applyLog = bakeGain || outputBits < options.linearInputBitDepth;
+    }
+    if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
+        !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+        applyLog &&
+        !DNGDecoder::applyLogTransform(
+            dng, settings.logTransform, options.inputQuantizationWhite))
+        throw std::runtime_error("Could not apply log transform to " + source);
+}
+
+bool decodeProcessedDngPreview(
+        const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview) {
+    if (!dng) return false;
+    std::vector<uint8_t> bytes(dng->begin(), dng->end());
+    // All requested processing is already baked or represented in the
+    // canonical frame. Decode without applying a second crop/proxy/gain pass.
+    return DNGDecoder::decodePreview(
+        std::move(bytes), RenderSettings{}, preview, false);
+}
+
+void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
+                 const DngFinalizeOptions& options) {
+    const std::string source = options.sourceName.empty()
+        ? std::string("frame") : std::string(options.sourceName);
+    const double exposureOffset = configuredExposureOffset(settings);
+    if (exposureOffset != 0.0) {
+        DNGFrameMetadata metadata;
+        if (!DNGDecoder::getColorMetadata(dng, metadata))
+            throw std::runtime_error("Could not read " + source + " exposure metadata");
+        const double baselineExposure = metadata.baselineExposure + exposureOffset;
+        if (!DNGDecoder::updateMetadata(dng, &baselineExposure, nullptr))
+            throw std::runtime_error("Could not update " + source + " exposure metadata");
+    }
+    if (options.isoOverlay &&
+        !DNGDecoder::bakeIsoOverlay(dng, *options.isoOverlay))
+        throw std::runtime_error("Could not bake ISO overlay into " + source + " DNG");
+    if (options.writeTiming &&
+        !DNGDecoder::setTimingMetadata(dng, options.frameRate, options.timestamp))
+        throw std::runtime_error("Could not update " + source + " DNG timing metadata");
+    if (options.packToWhiteLevel && !DNGDecoder::packUncompressedToWhiteLevel(dng))
+        throw std::runtime_error("Could not pack " + source + " DNG to its sensor bit depth");
+    if (options.gyroflowLensProfile)
+        applyGyroflowLensProfile(dng, *options.gyroflowLensProfile);
+    if (!options.compression) return;
+
+    const bool compressed = isLossyJpegDct(settings.jxlDistance)
+        ? DNGDecoder::compressLossyJPEG(dng)
+        : settings.jxlDistance < 0.0f
+            ? DNGDecoder::compressLosslessJPEG(dng)
+            : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance);
+    if (!compressed)
+        throw std::runtime_error("Could not compress " + source + " DNG");
+}
 
 namespace {
 std::vector<double> temporalSmooth(const std::vector<double>& values, int radius) {

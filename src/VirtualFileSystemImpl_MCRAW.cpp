@@ -594,10 +594,11 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
-        const int outputFrameNumber = vfs::outputFrameNumber(entry);
         RenderSettings frameSettings = mSettings;
-        if (!mSettings.streamingPreview && outputFrameNumber == 0 &&
-            vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1)
+        const auto renderPlan = vfs::planDngRender(
+            entry, timestamp, mSourceFrames.front(), frameSettings, mFps,
+            jpegCompression);
+        if (renderPlan.nativeMetadataFrame)
             frameSettings.options = static_cast<FileRenderOptions>(
                 frameSettings.options & ~RENDER_OPT_DRAFT);
         std::optional<float> exposureOverride;
@@ -616,46 +617,67 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
                 frameIt->second, "gainMaps"),
             cfaColorsFromPhase(effectiveCfaArrangement(
                 frameSettings, mCalibration, cameraConfig.sensorArrangement)));
-        const bool finalizeDeferredBake = jpegCompression &&
-            (frameSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-            !(frameSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
-            vfs::hasSidecarGainMaps(
-                mSidecarMetadata, frameIt->second, "deferredGainMaps") &&
-            !vfs::loadSidecarGainMaps(
-                mSidecarMetadata, frameIt->second, "deferredGainMaps").empty();
+        // The native adapter performs CFA-only bad-pixel treatment and emits
+        // an otherwise canonical, uncompressed CFA DNG.
+        // All source-independent pixel operations run below through the same
+        // DNG pipeline used by imported DNG and DirectLog frames.
+        RenderSettings generationSettings = frameSettings;
+        generationSettings.options = static_cast<FileRenderOptions>(
+            generationSettings.options &
+            ~(RENDER_OPT_CROPPING | RENDER_OPT_DRAFT |
+              RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+              RENDER_OPT_VIGNETTE_ONLY_COLOR | RENDER_OPT_NORMALIZE_SHADING_MAP |
+              RENDER_OPT_OPTIMIZE_GAIN_MAPS | RENDER_OPT_DEBUG_SHADING_MAP |
+              RENDER_OPT_LOG_TRANSFORM | RENDER_OPT_REMOSAIC_TO_BAYER |
+              RENDER_OPT_HIGHER_CFA_HQ | RENDER_OPT_BAKE_ISO));
+        generationSettings.quadBayerOption = QuadBayerMode::CorrectQBCFAMetadata;
+        generationSettings.cameraNativeStaging = false;
+        generationSettings.streamingPreview = false;
+        generationSettings.badPixelTreatment = BadPixelTreatment::Disabled;
         auto output = utils::generateDng(
             frameData,
             frameMetadata,
             cameraConfig,
             mFps,
-            outputFrameNumber,
+            renderPlan.outputFrameNumber,
             mBaselineExpValue,
-            frameSettings,
+            generationSettings,
             mCalibration,
-            jpegCompression && !finalizeDeferredBake,
+            false,
             exposureOverride,
             neutralOverride);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
-        const bool converted = mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION;
-        const Timestamp outputTimestamp = vfs::outputTimestamp(
-            entry, timestamp, mSourceFrames.front(), mFps, converted);
         std::vector<uint8_t> timed(output->begin(), output->end());
-        applySidecarGainMapOpcodes(
-            timed, frameIt->second);
-        if (finalizeDeferredBake) {
-            const bool compressed = isLossyJpegDct(frameSettings.jxlDistance)
-                ? DNGDecoder::compressLossyJPEG(timed)
-                : frameSettings.jxlDistance < 0.0f
-                    ? DNGDecoder::compressLosslessJPEG(timed)
-                    : DNGDecoder::compressJPEGXL(timed, frameSettings.jxlDistance);
-            if (!compressed)
-                throw std::runtime_error("Could not compress finalized MCRAW DNG");
-        }
-        if (mGyroflowLensProfile && !mSettings.cameraNativeStaging)
-            vfs::applyGyroflowLensProfile(timed, *mGyroflowLensProfile);
-        if (!DNGDecoder::setTimingMetadata(timed, mFps, outputTimestamp))
-            throw std::runtime_error("Could not write DNG timing metadata");
+        attachSidecarGainMapOpcodes(timed, frameIt->second);
+        const auto nativePlan = utils::planDngFrameProcessing(
+            frameSettings, frameMetadata, mCalibration);
+        vfs::DngPixelPipelineOptions pixels;
+        pixels.cfaRepeatSize = nativePlan.cfaRepeatSize;
+        pixels.cfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
+            frameSettings, mCalibration, cameraConfig.sensorArrangement));
+        pixels.hasCfa = true;
+        pixels.outputScale = renderPlan.scale;
+        const uint32_t inputBits = utils::bitsNeeded(static_cast<uint16_t>(
+            std::clamp(cameraConfig.whiteLevel, 1.0f, 65535.0f)));
+        pixels.inputQuantizationWhite = inputBits < 16
+            ? (uint32_t{1} << inputBits) - 1 : 65535;
+        pixels.calibration = mCalibration ? &*mCalibration : nullptr;
+        pixels.iso = frameMetadata.iso;
+        pixels.exposureTime = frameMetadata.exposureTime / 1.0e9;
+        pixels.sourceName = "MCRAW";
+        vfs::processDngPixels(timed, frameSettings, pixels);
+        vfs::DngFinalizeOptions finalize;
+        finalize.frameRate = mFps;
+        finalize.timestamp = renderPlan.outputTimestamp;
+        if (frameSettings.options & RENDER_OPT_BAKE_ISO)
+            finalize.isoOverlay = frameMetadata.iso;
+        finalize.packToWhiteLevel = !frameSettings.cameraNativeStaging;
+        finalize.compression = jpegCompression;
+        finalize.gyroflowLensProfile = mGyroflowLensProfile && !mSettings.cameraNativeStaging
+            ? &*mGyroflowLensProfile : nullptr;
+        finalize.sourceName = "MCRAW";
+        vfs::finalizeDng(timed, frameSettings, finalize);
         if (!jpegCompression && !mSettings.streamingPreview) {
             if (timed.size() > entry.size)
                 throw std::runtime_error(
@@ -669,45 +691,11 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
 
 bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview) {
-    std::shared_lock renderLock(mRenderMutex);
-    thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
-    auto& decoder = decoders[mSrcPath];
-    if (!decoder) decoder = std::make_unique<Decoder>(mSrcPath);
-    const auto timestamp = std::get<Timestamp>(entry.userData);
-    const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
-    if (frameIt == mFrameIndexByTimestamp.end()) return false;
-
-    std::vector<uint8_t> frameData;
-    nlohmann::json metadata;
-    uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
-    if (mSettings.options & RENDER_OPT_CROPPING)
-        utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
-    decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
-    auto frameMetadata = CameraFrameMetadata::parse(metadata);
-    auto cameraConfig = CameraConfiguration::parse(decoder->getContainerMetadata());
-    reorderNativeShadingMapToCfaPhases(
-        frameMetadata, effectiveCfaArrangement(mSettings, mCalibration,
-                                                cameraConfig.sensorArrangement));
-    utils::overrideLensShadingMap(frameMetadata,
-        vfs::loadSidecarGainMaps(mSidecarMetadata, frameIt->second, "gainMaps"),
-        cfaColorsFromPhase(effectiveCfaArrangement(
-            mSettings, mCalibration, cameraConfig.sensorArrangement)));
-    std::optional<float> exposureOverride;
-    if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
-        exposureOverride = mSmoothedExposureOffsets.at(timestamp);
-    std::optional<std::array<float, 3>> neutralOverride;
-    if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
-        neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
-    utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
-        vfs::outputFrameNumber(entry), mBaselineExpValue, mSettings, mCalibration,
-        false, exposureOverride, neutralOverride, &preview);
-    preview.timestamp = vfs::outputTimestamp(
-        entry, timestamp, mSourceFrames.front(), mFps,
-        mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
-    return !preview.rgb.empty();
+    try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
+    catch (const std::exception&) { return false; }
 }
 
-void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
+void VirtualFileSystemImpl_MCRAW::attachSidecarGainMapOpcodes(
         std::vector<uint8_t>& dng, size_t frameIndex) const {
     if (mSettings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
         if (!DNGDecoder::replaceGainMaps(dng, 2, {}) ||
@@ -715,37 +703,8 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
             throw std::runtime_error("Could not exclude MCRAW gain maps");
         return;
     }
-    const bool bake = mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    // OpcodeList2 was already built from the sidecar-overridden frame metadata
-    // by generateDng(). Only the independently stored deferred layer still
-    // needs to be attached here. Replacing and transforming list 2 again would
-    // run color reduction/optimization twice.
-    const bool colorOnly = mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
-    const bool hasDeferred = vfs::hasSidecarGainMaps(
-        mSidecarMetadata, frameIndex, "deferredGainMaps");
-    const bool bakeDeferred = bake && !colorOnly && hasDeferred &&
-        !vfs::loadSidecarGainMaps(
-            mSidecarMetadata, frameIndex, "deferredGainMaps").empty();
     vfs::replaceSidecarGainMapOpcodes(
-        dng, mSidecarMetadata, frameIndex, false,
-        !colorOnly);
-    if (bakeDeferred &&
-        !DNGDecoder::bakeGainMaps(
-            dng, mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-            false, mSettings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
-            mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP))
-        throw std::runtime_error("Could not bake MCRAW deferred gain-map override");
-    if (bake && colorOnly) {
-        const char* field = vfs::hasSidecarGainMaps(
-            mSidecarMetadata, frameIndex, "deferredGainMaps")
-            ? "deferredGainMaps" : "gainMaps";
-        if (vfs::hasSidecarGainMaps(mSidecarMetadata, frameIndex, field)) {
-            const auto maps = vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, field);
-            if (maps.size() == 1 && maps.front().channels == 1 &&
-                !DNGDecoder::replaceGainMaps(dng, 3, maps))
-                throw std::runtime_error("Could not apply MCRAW deferred gain-map override");
-        }
-    }
+        dng, mSidecarMetadata, frameIndex, false, true);
     if (!DNGDecoder::canonicalizeGainMapOpcodes(dng))
         throw std::runtime_error("Could not canonicalize MCRAW sidecar gain maps");
     if (!mSettings.cameraNativeStaging &&

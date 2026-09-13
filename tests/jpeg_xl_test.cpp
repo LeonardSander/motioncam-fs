@@ -764,6 +764,16 @@ int main() {
     assert(motioncam::DNGDecoder::decodeImage(mountedRgb, decodedRgb));
     assert(decodedRgb.layout.storage == motioncam::DNGStorageLayout::Strips);
     assert(decodedRgb.samples.size() == rgb.size());
+    auto croppedRgb = mountedRgb;
+    assert(motioncam::DNGDecoder::cropImage(croppedRgb, 32, 16));
+    motioncam::DecodedDNGImage decodedCrop;
+    assert(motioncam::DNGDecoder::decodeImage(croppedRgb, decodedCrop));
+    assert(decodedCrop.layout.width == 32 && decodedCrop.layout.height == 16);
+    assert(decodedCrop.samples.size() == 32 * 16 * 3);
+    const size_t sourceCropOrigin =
+        (static_cast<size_t>((rgbHeight - 16) / 2) * rgbWidth +
+         (rgbWidth - 32) / 2) * 3;
+    assert(decodedCrop.samples[0] == decodedRgb.samples[sourceCropOrigin]);
 
     tinydngwriter::DNGImage cfaGainRgbDng;
     cfaGainRgbDng.SetBigEndian(false);
@@ -825,6 +835,21 @@ int main() {
     assert(parsedRgbLuma.size() == 1);
     assert(parsedRgbLuma[0].coordinateWidth == rgbWidth);
     assert(parsedRgbLuma[0].coordinateHeight == rgbHeight);
+    auto croppedRgbWithLuma = rgbWithLuma;
+    assert(motioncam::DNGDecoder::cropImage(
+        croppedRgbWithLuma, rgbWidth / 2, rgbHeight / 2));
+    std::vector<motioncam::GainMap> croppedRgbLuma;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        croppedRgbWithLuma, 3, croppedRgbLuma));
+    assert(croppedRgbLuma.size() == 1);
+    // Normalized map geometry retains its source-sensor extent while opcode
+    // bounds are translated into the cropped image's pixel coordinates.
+    assert(croppedRgbLuma[0].coordinateWidth == rgbWidth);
+    assert(croppedRgbLuma[0].coordinateHeight == rgbHeight);
+    assert(croppedRgbLuma[0].right == rgbWidth / 2);
+    assert(croppedRgbLuma[0].bottom == rgbHeight / 2);
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        croppedRgbWithLuma, false, false));
     const std::vector<uint16_t> mixedRgbBits{16, 12, 10};
     assert(tiffShortTagValues(rgbWithLuma, 258, &mixedRgbBits) == mixedRgbBits);
     assert(motioncam::DNGDecoder::bakeGainMaps(rgbWithLuma, false, false));

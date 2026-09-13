@@ -24,9 +24,6 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
-#include <string_view>
-#include <thread>
-#include <tuple>
 #include <QByteArray>
 
 using motioncam::Timestamp;
@@ -48,12 +45,20 @@ motioncam::ResolvedDataLevels directLogDataLevels(
         settings.levels, defaultWhite, black, defaultWhite, black, 3);
 }
 
-int directLogLogBits(motioncam::LogTransformMode mode) {
-    if (mode == motioncam::LogTransformMode::ReduceBy2Bit) return 10;
-    if (mode == motioncam::LogTransformMode::ReduceBy4Bit) return 8;
-    if (mode == motioncam::LogTransformMode::ReduceBy6Bit) return 6;
-    if (mode == motioncam::LogTransformMode::ReduceBy8Bit) return 4;
-    return 12;
+int directLogBaseLogBits(const motioncam::RenderSettings& settings) {
+    const auto levels = directLogDataLevels(settings);
+    const int effectiveBits = motioncam::utils::bitsNeeded(static_cast<uint16_t>(
+        std::clamp(std::lround(levels.white), 1l, 65535l)));
+    return effectiveBits <= 10 ? effectiveBits : 12;
+}
+
+int directLogLogBits(motioncam::LogTransformMode mode, int baseBits = 12) {
+    int reduction = 0;
+    if (mode == motioncam::LogTransformMode::ReduceBy2Bit) reduction = 2;
+    else if (mode == motioncam::LogTransformMode::ReduceBy4Bit) reduction = 4;
+    else if (mode == motioncam::LogTransformMode::ReduceBy6Bit) reduction = 6;
+    else if (mode == motioncam::LogTransformMode::ReduceBy8Bit) reduction = 8;
+    return std::max(1, baseBits - reduction);
 }
 
 bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings) {
@@ -65,7 +70,15 @@ bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings) {
     const auto levels = directLogDataLevels(settings);
     const auto white = static_cast<uint16_t>(std::clamp(
         std::lround(levels.white), 1l, 65535l));
-    return directLogLogBits(settings.logTransform) < motioncam::utils::bitsNeeded(white);
+    return directLogLogBits(settings.logTransform, directLogBaseLogBits(settings)) <
+        motioncam::utils::bitsNeeded(white);
+}
+
+uint32_t directLogQuantizationWhite(const motioncam::RenderSettings& settings) {
+    const auto levels = directLogDataLevels(settings);
+    const auto white = static_cast<uint16_t>(std::clamp(
+        std::lround(levels.white), 1l, 65535l));
+    return motioncam::utils::bitsNeeded(white) <= 10 ? white : 4095;
 }
 
 bool directLogDiagnosticsEnabled() {
@@ -76,106 +89,22 @@ bool directLogDiagnosticsEnabled() {
     return enabled;
 }
 
+std::array<uint8_t, 4> directLogCfaPhase(
+        const motioncam::RenderSettings& settings,
+        const std::optional<motioncam::CalibrationData>& calibration) {
+    std::string phase = "bggr";
+    if (calibration && !calibration->cfaPhase.empty())
+        phase = calibration->cfaPhase;
+    else if (!settings.cfaPhase.empty() &&
+             settings.cfaPhase != "Don't override CFA")
+        phase = settings.cfaPhase;
+    std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
+    return motioncam::cfaColorsFromPhase(phase);
+}
+
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
-}
-
-std::pair<uint32_t, uint32_t> legacyGainMapCoordinateExtent(
-        uint32_t inputWidth, uint32_t inputHeight,
-        uint32_t mapRight, uint32_t mapBottom) {
-    // Camera Native sidecars written before coordinateWidth/coordinateHeight
-    // used one of these full-sensor coordinate spaces. Pick the smallest one
-    // that contains both the encoded video and the gain-map bounds.
-    constexpr std::array<std::pair<uint32_t, uint32_t>, 5> sensorExtents{{
-        {2048, 1536},
-        {4096, 3072},
-        {4608, 3456},
-        {8192, 6144},
-        {9248, 6944},
-    }};
-    const uint32_t requiredWidth = std::max(inputWidth, mapRight);
-    const uint32_t requiredHeight = std::max(inputHeight, mapBottom);
-    for (const auto& extent : sensorExtents)
-        if (extent.first >= requiredWidth && extent.second >= requiredHeight)
-            return extent;
-    throw std::runtime_error(
-        "DirectLog gain-map coordinates exceed the largest legacy sensor extent");
-}
-
-template<typename Function>
-void parallelRows(int rows, Function&& function) {
-    if (rows < 256) {
-        function(0, rows);
-        return;
-    }
-    const unsigned int workers = std::min(4u,
-        std::max(1u, std::thread::hardware_concurrency()));
-    std::vector<std::thread> threads;
-    threads.reserve(workers - 1);
-    for (unsigned int worker = 1; worker < workers; ++worker) {
-        const int begin = rows * static_cast<int>(worker) / static_cast<int>(workers);
-        const int end = rows * static_cast<int>(worker + 1) / static_cast<int>(workers);
-        threads.emplace_back([&, begin, end] { function(begin, end); });
-    }
-    function(0, rows / static_cast<int>(workers));
-    for (auto& thread : threads) thread.join();
-}
-
-std::vector<uint8_t> packSamples(
-    const std::vector<uint16_t>& samples,
-    size_t samplesPerRow,
-    unsigned int bitsPerSample) {
-    if (samplesPerRow == 0 || samples.size() % samplesPerRow != 0)
-        throw std::invalid_argument("Invalid dimensions for sample packing");
-    const size_t rows = samples.size() / samplesPerRow;
-    const size_t rowBytes =
-        (samplesPerRow * static_cast<size_t>(bitsPerSample) + 7) / 8;
-    std::vector<uint8_t> output(rows * rowBytes, 0);
-
-    // Eight-bit LOG output is by far the most common preview format. Its
-    // samples are already byte aligned, so avoid the generic per-bit writer
-    // (roughly 200 million loop iterations for one 4K RGB frame).
-    if (bitsPerSample == 8) {
-        std::transform(samples.begin(), samples.end(), output.begin(),
-                       [](uint16_t sample) { return static_cast<uint8_t>(sample); });
-        return output;
-    }
-
-    const uint16_t maximum = bitsPerSample == 16
-        ? 0xffffu
-        : static_cast<uint16_t>((1u << bitsPerSample) - 1u);
-
-    for (size_t row = 0; row < rows; ++row) {
-        size_t bitOffset = row * rowBytes * 8;
-        for (size_t column = 0; column < samplesPerRow; ++column) {
-            const uint16_t sample = std::min(samples[row * samplesPerRow + column], maximum);
-            for (int bit = static_cast<int>(bitsPerSample) - 1; bit >= 0; --bit) {
-                output[bitOffset / 8] |= static_cast<uint8_t>(
-                    ((sample >> bit) & 1u) << (7 - bitOffset % 8));
-                ++bitOffset;
-            }
-        }
-    }
-    return output;
-}
-
-const std::array<uint16_t, 65536>& log60EncodeLut(unsigned int bits) {
-    static std::array<std::array<uint16_t, 65536>, 17> luts{};
-    static std::array<std::once_flag, 17> initialized;
-    if (bits == 0 || bits >= luts.size())
-        throw std::invalid_argument("Invalid LOG60 output bit depth");
-    std::call_once(initialized[bits], [bits] {
-        const float whiteLevel = static_cast<float>((1u << bits) - 1u);
-        const float denominator = std::log2(61.0f);
-        for (size_t value = 0; value < luts[bits].size(); ++value) {
-            const float normalized = static_cast<float>(value) / 65535.0f;
-            const float encoded = std::log2(1.0f + 60.0f * normalized) / denominator;
-            luts[bits][value] = static_cast<uint16_t>(
-                std::clamp(std::round(encoded * whiteLevel), 0.0f, whiteLevel));
-        }
-    });
-    return luts[bits];
 }
 
 } // namespace
@@ -310,16 +239,41 @@ void VirtualFileSystemImpl_DirectLog::init() {
             static_cast<size_t>(mWidth) * mHeight * 3, 0);
         const auto sampleGainMaps = prepareSidecarGainMaps(0);
         const auto sampleMetadata = frameMetadata(0);
+        auto makeSizingDng = [&](int scale, std::vector<uint8_t>& output) {
+            if (!convertRGBToDNG(sampleRgbData, output, 0, frames[0].timestamp,
+                                 sampleMetadata.iso, sampleMetadata.shutterSpeed,
+                                 sampleMetadata.baselineExposure,
+                                 sampleMetadata.asShotNeutral,
+                                 sampleMetadata.tiffOrientation, &sampleMetadata,
+                                 sampleGainMaps.opcodeList2,
+                                 sampleGainMaps.opcodeList3))
+                return false;
+            if (mCalibration && mCalibration->hasLeftTopCropStride &&
+                !DNGDecoder::cropImage(output,
+                    mCalibration->leftTopCropStride[0],
+                    mCalibration->leftTopCropStride[1]))
+                return false;
+            vfs::DngPixelPipelineOptions pixels;
+            pixels.hasCfa = false;
+            pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+            pixels.outputScale = scale;
+            pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
+            pixels.linearInputBitDepth = utils::bitsNeeded(static_cast<uint16_t>(
+                std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
+            pixels.sourceName = "DirectLog sizing";
+            vfs::processDngPixels(output, mConfig, pixels);
+            vfs::DngFinalizeOptions finalize;
+            finalize.frameRate = mFps;
+            finalize.timestamp = 0;
+            finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
+            finalize.sourceName = "DirectLog sizing";
+            vfs::finalizeDng(output, mConfig, finalize);
+            return true;
+        };
         std::vector<uint8_t> sampleDngData;
-        if (convertRGBToDNG(sampleRgbData, sampleDngData, 0, frames[0].timestamp,
-                            false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleMetadata.iso,
-                            sampleMetadata.shutterSpeed, sampleMetadata.baselineExposure,
-                            sampleMetadata.asShotNeutral,
-                            sampleMetadata.tiffOrientation,
-                            &sampleMetadata,
-                            sampleGainMaps.opcodeList2, sampleGainMaps.opcodeList3)) {
-            if (!DNGDecoder::setTimingMetadata(sampleDngData, mFps, 0))
-                throw std::runtime_error("Could not size DirectLog DNG timing metadata");
+        const int proxyScale = vfs::getScaleFromOptions(
+            mConfig.options, mConfig.draftScale);
+        if (makeSizingDng(proxyScale, sampleDngData)) {
             mTypicalDngSize = sampleDngData.size();
             firstDngSize = mTypicalDngSize;
             spdlog::info("DirectLog DNG size determined from sample: {} bytes ({:.2f} MB)",
@@ -330,15 +284,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
             // not truncated to the proxy frame size.
             if (vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1) {
                 std::vector<uint8_t> firstDngData;
-                if (!convertRGBToDNG(sampleRgbData, firstDngData, 0, frames[0].timestamp,
-                                     false, 0.0f, {1.0f, 1.0f, 1.0f}, sampleMetadata.iso,
-                                     sampleMetadata.shutterSpeed, sampleMetadata.baselineExposure,
-                                     sampleMetadata.asShotNeutral,
-                                     sampleMetadata.tiffOrientation,
-                                     &sampleMetadata,
-                                     sampleGainMaps.opcodeList2, sampleGainMaps.opcodeList3,
-                                     mWidth, mHeight) ||
-                    !DNGDecoder::setTimingMetadata(firstDngData, mFps, 0))
+                if (!makeSizingDng(1, firstDngData))
                     throw std::runtime_error("Could not size native DirectLog metadata frame");
                 firstDngSize = firstDngData.size();
             }
@@ -463,41 +409,8 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     PreparedSidecarGainMaps prepared;
     if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude)
         return prepared;
-    auto gainMaps = loadSidecarGainMaps(frameNumber, "gainMaps");
-    auto deferredGainMaps = loadSidecarGainMaps(frameNumber, "deferredGainMaps");
-    std::string cfaPhase = "bggr";
-    if (mCalibration && !mCalibration->cfaPhase.empty())
-        cfaPhase = mCalibration->cfaPhase;
-    else if (!mConfig.cfaPhase.empty() && mConfig.cfaPhase != "Don't override CFA")
-        cfaPhase = mConfig.cfaPhase;
-    std::transform(cfaPhase.begin(), cfaPhase.end(), cfaPhase.begin(), ::tolower);
-    prepared.cfa = cfaColorsFromPhase(cfaPhase);
-    if (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) {
-        const auto adjustment = optimizeGainMapLayers<GainMap>(
-            std::array{&gainMaps, &deferredGainMaps}, prepared.cfa);
-        prepared.exposureOffset = static_cast<float>(adjustment.exposureOffset);
-        prepared.neutralScale = adjustment.neutralScale;
-    }
-    prepared.bakeList2 = gainMaps;
-    prepared.bakeList3 = deferredGainMaps;
-    const auto isLuminanceOnly = [&](const std::vector<GainMap>& maps) {
-        if (maps.size() != 1 || maps.front().channels != 1) return false;
-        const auto colors = gainMapAffectedColors(maps.front(), prepared.cfa);
-        return colors[0] && colors[1] && colors[2];
-    };
-    if ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-        (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
-        !isLuminanceOnly(prepared.bakeList2) &&
-        !reduceGainMapStackToColor(prepared.bakeList2))
-        throw std::runtime_error("DirectLog gain-map planes have mismatched dimensions");
-    if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
-        std::vector<std::vector<GainMap>*> layers{&prepared.bakeList2};
-        if (!(mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
-            layers.push_back(&prepared.bakeList3);
-        transformGainMapLayersForBake<GainMap>(layers,
-            mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-            mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
-    }
+    const auto gainMaps = loadSidecarGainMaps(frameNumber, "gainMaps");
+    const auto deferredGainMaps = loadSidecarGainMaps(frameNumber, "deferredGainMaps");
     auto classify = [&](const std::vector<GainMap>& maps) {
         if (maps.empty()) return;
         if (maps.size() == 4 || (maps.size() == 1 && maps.front().channels == 4))
@@ -507,164 +420,26 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
         else
             throw std::runtime_error("Unsupported DirectLog gain-map layout");
     };
-    if (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
-        if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
-            const bool supported = gainMaps.empty() ||
-                (gainMaps.size() == 1 &&
-                 (gainMaps.front().channels == 1 || gainMaps.front().channels == 4)) ||
-                (gainMaps.size() == 4 &&
-                 std::all_of(gainMaps.begin(), gainMaps.end(), [](const GainMap& map) {
-                     return map.channels == 1;
-                 }));
-            if (!supported || (!isLuminanceOnly(gainMaps) &&
-                               !reduceGainMapStackToColor(gainMaps)))
-                throw std::runtime_error("Unsupported DirectLog color gain-map layout");
-            if (!(gainMaps.size() == 1 && gainMaps.front().channels == 1))
-                prepared.opcodeList2 = std::move(gainMaps);
-            // Single-plane and deferred maps contain only luminance, which is
-            // intentionally discarded when correction is reduced to color.
-        } else {
-            classify(gainMaps);
-            classify(deferredGainMaps);
-        }
-    } else if (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
-        if (deferredGainMaps.size() == 1 && deferredGainMaps.front().channels == 1)
-            prepared.opcodeList3 = deferredGainMaps;
-        else if (!deferredGainMaps.empty())
-            throw std::runtime_error("Unsupported DirectLog deferred gain-map layout");
-        else if (gainMaps.size() == 1 && gainMaps.front().channels == 1)
-            prepared.opcodeList3 = gainMaps;
-    }
+    classify(gainMaps);
+    classify(deferredGainMaps);
     if (!canonicalizeCfaGainMaps(prepared.opcodeList2))
         throw std::runtime_error("Unsupported DirectLog OpcodeList2 gain-map layout");
     return prepared;
 }
 
-void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
-        std::vector<uint16_t>& rgbData, int frameNumber,
-        const PreparedSidecarGainMaps& prepared,
-        int imageWidth, int imageHeight,
-        int sourceLeft, int sourceTop, int sourceWidth, int sourceHeight) const {
-    const bool bakeCorrection =
-        (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) != 0;
-    const bool optimize = (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) != 0;
-    if ((!bakeCorrection && !optimize) ||
-        (prepared.bakeList2.empty() && prepared.bakeList3.empty())) return;
-    if (imageWidth <= 0) imageWidth = mWidth;
-    if (imageHeight <= 0) imageHeight = mHeight;
-    if (sourceWidth <= 0) sourceWidth = mWidth;
-    if (sourceHeight <= 0) sourceHeight = mHeight;
-    if (rgbData.size() < static_cast<size_t>(imageWidth) * imageHeight * 3)
-        throw std::runtime_error("DirectLog gain-map image dimensions do not match pixels");
-    const auto& cfa = prepared.cfa;
-    if (bakeCorrection && (mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP))
-        std::fill(rgbData.begin(), rgbData.end(), std::numeric_limits<uint16_t>::max());
-
-    const auto& gainMaps = prepared.bakeList2;
-    const auto& deferredGainMaps = prepared.bakeList3;
-    if (optimize) {
-        if (directLogDiagnosticsEnabled())
-            spdlog::info(
-                "DirectLog diagnostic: gain-map optimization exposure_offset={:.6f}",
-                prepared.exposureOffset);
-    }
-    std::vector<float> combinedGain(rgbData.size(), 1.0f);
-    auto apply = [&](const char* field, const std::vector<GainMap>& loadedMaps) {
-        if (loadedMaps.empty()) return;
-        if (!bakeCorrection ||
-            ((mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
-             std::string_view(field) == "deferredGainMaps"))
-            return;
-        const auto rgbMaps = collapseCfaGainMapsForRgb(loadedMaps, cfa);
-        for (const auto& preparedMap : rgbMaps) {
-            if (!validGainMap(preparedMap))
-                throw std::runtime_error("Invalid DirectLog gain-map dimensions");
-            const uint32_t channels = preparedMap.channels;
-            const uint32_t top = preparedMap.top;
-            const uint32_t left = preparedMap.left;
-            uint32_t coordinateWidth = preparedMap.coordinateWidth;
-            uint32_t coordinateHeight = preparedMap.coordinateHeight;
-            if (!coordinateWidth || !coordinateHeight)
-                std::tie(coordinateWidth, coordinateHeight) = legacyGainMapCoordinateExtent(
-                    static_cast<uint32_t>(mWidth), static_cast<uint32_t>(mHeight),
-                    preparedMap.right, preparedMap.bottom);
-            if (!coordinateWidth || !coordinateHeight)
-                throw std::runtime_error("Invalid DirectLog gain-map coordinate extent");
-            // Match the CFA opcode's row/column selection. Pitch-one maps apply
-            // to every CFA color (for example deferred luminance); pitch-two
-            // maps normally select one or two phases through top/left.
-            const auto affectedColors = gainMapAffectedColors(preparedMap, cfa);
-            // A single-channel map is the deferred luminance remainder from
-            // an earlier color-only bake. Reduce-to-color must leave it
-            // deferred; it contains no channel-relative correction to apply.
-            if ((mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) && channels == 1 &&
-                affectedColors[0] && affectedColors[1] && affectedColors[2])
-                continue;
-
-            const double sourcePerPixelX = static_cast<double>(sourceWidth) / imageWidth;
-            const double sourcePerPixelY = static_cast<double>(sourceHeight) / imageHeight;
-            const bool commonSinglePlane = channels == 1 &&
-                affectedColors[0] && affectedColors[1] && affectedColors[2];
-            const bool remosaicOutput =
-                (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
-            parallelRows(imageHeight, [&](int beginY, int endY) {
-                for (int y = beginY; y < endY; ++y) {
-                    const double sensorY = sourceTop + top +
-                        (y + 0.5) * sourcePerPixelY - 0.5;
-                    for (int x = 0; x < imageWidth; ++x) {
-                        const size_t pixel = (static_cast<size_t>(y) * imageWidth + x) * 3;
-                        auto interpolatedGain = [&](uint32_t color) {
-                            const double sensorX = sourceLeft + left +
-                                (x + 0.5) * sourcePerPixelX - 0.5;
-                            return sampleGainMapColorNormalized(
-                                preparedMap, sensorX / coordinateWidth,
-                                sensorY / coordinateHeight, color, cfa);
-                        };
-                        if (commonSinglePlane) {
-                            const float gain = interpolatedGain(0);
-                            const uint32_t firstColor = remosaicOutput
-                                ? cfa[((y & 1) << 1) | (x & 1)] : 0;
-                            const uint32_t endColor = remosaicOutput ? firstColor + 1 : 3;
-                            for (uint32_t color = firstColor; color < endColor; ++color)
-                                combinedGain[pixel + color] *= gain;
-                        } else {
-                            const uint32_t firstColor = remosaicOutput
-                                ? cfa[((y & 1) << 1) | (x & 1)] : 0;
-                            const uint32_t endColor = remosaicOutput ? firstColor + 1 : 3;
-                            for (uint32_t color = firstColor; color < endColor; ++color) {
-                                if (channels == 1 && !affectedColors[color]) continue;
-                                combinedGain[pixel + color] *= interpolatedGain(color);
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    };
-    apply("gainMaps", gainMaps);
-    apply("deferredGainMaps", deferredGainMaps);
-    if (bakeCorrection) {
-        for (size_t sample = 0; sample < rgbData.size(); ++sample)
-            rgbData[sample] = bakeLinearGainSample(
-                rgbData[sample], combinedGain[sample],
-                0.0, 65535.0, 0.0, 65535.0);
-    }
-}
-
 bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     std::vector<uint16_t> rgbData,
-    std::vector<uint8_t>& dngData, 
-    int frameNumber, 
+    std::vector<uint8_t>& dngData,
+    int frameNumber,
     Timestamp timestamp,
-    bool jpegCompression, float gainMapExposureOffset,
-    const std::array<float, 3>& gainMapNeutralScale, double iso,
+    double iso,
     double shutterSpeed, double baselineExposure,
     const std::optional<std::array<float, 3>>& asShotNeutral,
     uint16_t tiffOrientation,
     const FrameMetadata* sourceMetadata,
     const std::vector<GainMap>& opcodeList2Maps,
     const std::vector<GainMap>& opcodeList3Maps,
-    int decodedWidth, int decodedHeight, bool inputLogEncoded) {
+    int decodedWidth, int decodedHeight) {
 
     try {
         const bool diagnostics = directLogDiagnosticsEnabled();
@@ -673,174 +448,25 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         int width = decodedWidth > 0 ? decodedWidth : videoInfo.width;
         int height = decodedHeight > 0 ? decodedHeight : videoInfo.height;
         
-        // Determine if we should apply log curve and bit reduction
-        const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
-        int bitReduction = 0;
-        
-        if (applyLogCurve) {
-            // Parse bit reduction from logTransform option
-            if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) {
-                bitReduction = 2;
-            } else if (mConfig.logTransform == LogTransformMode::ReduceBy4Bit) {
-                bitReduction = 4;
-            } else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) {
-                bitReduction = 6;
-            } else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) {
-                bitReduction = 8;
-            } else if (mConfig.logTransform == LogTransformMode::KeepInput) {
-                bitReduction = 0;
-            }
-        }
-        
-        // Process RGB data: apply log curve to reduce to 12-bit, then apply additional bit reduction
-        // The frame materializer transfers ownership here, avoiding an
-        // initial full-resolution RGB copy in the playback path.
+        // This adapter emits one canonical, uncompressed 16-bit linear RGB
+        // DNG. Source-independent processing happens after construction.
         std::vector<uint16_t> processedRgbData = std::move(rgbData);
-        float dstWhiteLevel = 65535.0f;
-        int encodeBits = 16;
-        const bool lossyJpegDct = jpegCompression && isLossyJpegDct(mConfig.jxlDistance);
-        const bool shouldRemosaic =
-            (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) != 0;
-        std::string cfaPhase = "bggr";
-        if (mCalibration.has_value() && !mCalibration->cfaPhase.empty())
-            cfaPhase = mCalibration->cfaPhase;
-        else if (!mConfig.cfaPhase.empty() && mConfig.cfaPhase != "Don't override CFA")
-            cfaPhase = mConfig.cfaPhase;
-        std::transform(cfaPhase.begin(), cfaPhase.end(), cfaPhase.begin(), ::tolower);
-        const auto remosaicChannels = cfaColorsFromPhase(cfaPhase);
-        std::vector<uint8_t> directlyPackedSamples;
 
-        // Spatial reduction must happen while the decoded RGB values are
-        // still linear. Averaging LOG60 values would darken mixed blocks.
-        const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
-        if (proxyScale > 1 && decodedWidth <= 0) {
-            std::vector<uint16_t> reduced;
-            uint32_t reducedWidth = 0, reducedHeight = 0;
-            utils::reduceRGB(processedRgbData, reduced,
-                             static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-                             static_cast<uint32_t>(proxyScale),
-                             mConfig.options & RENDER_OPT_HIGHER_CFA_HQ,
-                             reducedWidth, reducedHeight);
-            if (reduced.empty())
-                throw std::runtime_error("Proxy scale is too large for the DirectLog image");
-            processedRgbData = std::move(reduced);
-            width = static_cast<int>(reducedWidth);
-            height = static_cast<int>(reducedHeight);
-        }
-        
-        if (applyLogCurve) {
-            // First reduce to 12-bit using log curve
-            int useBits = 12;
-            dstWhiteLevel = std::pow(2.0f, useBits) - 1.0f; // 4095 for 12-bit
-            
-            // Apply additional bit reduction if specified
-            if (bitReduction > 0) {
-                useBits = std::max(1, useBits - bitReduction);
-                dstWhiteLevel = std::pow(2.0f, useBits) - 1.0f;
-            }
-
-            encodeBits = useBits;
-            if (useBits == 8 && !jpegCompression) {
-                // Quantize directly into the final byte buffer. Remosaic only
-                // writes its selected CFA channel; RGB writes all channels.
-                const auto* logLut = inputLogEncoded
-                    ? nullptr : &log60EncodeLut(static_cast<unsigned int>(useBits));
-                auto quantize = [&](uint16_t sample) {
-                    return inputLogEncoded
-                        ? static_cast<uint8_t>((static_cast<uint32_t>(sample) * 255u + 32767u) / 65535u)
-                        : static_cast<uint8_t>((*logLut)[sample]);
-                };
-                if (shouldRemosaic) {
-                    const size_t pixels = static_cast<size_t>(width) * height;
-                    directlyPackedSamples.resize(pixels);
-                    for (int y = 0; y < height; ++y)
-                        for (int x = 0; x < width; ++x) {
-                            const size_t pixel = static_cast<size_t>(y) * width + x;
-                            directlyPackedSamples[pixel] = quantize(processedRgbData[
-                                pixel * 3 + remosaicChannels[((y & 1) << 1) | (x & 1)]]);
-                        }
-                } else {
-                    directlyPackedSamples.resize(processedRgbData.size());
-                    std::transform(processedRgbData.begin(), processedRgbData.end(),
-                                   directlyPackedSamples.begin(), quantize);
-                }
-                processedRgbData.clear();
-            } else if (inputLogEncoded) {
-                const uint32_t whiteLevel = (1u << useBits) - 1u;
-                std::transform(processedRgbData.begin(), processedRgbData.end(),
-                               processedRgbData.begin(), [whiteLevel](uint16_t sample) {
-                    return static_cast<uint16_t>(
-                        (static_cast<uint32_t>(sample) * whiteLevel + 32767u) / 65535u);
-                });
-            } else {
-                const auto& logLut = log60EncodeLut(static_cast<unsigned int>(useBits));
-                std::transform(processedRgbData.begin(), processedRgbData.end(),
-                               processedRgbData.begin(),
-                               [&logLut](uint16_t sample) { return logLut[sample]; });
-            }
-        }
-
-        const auto outputLevels = directLogDataLevels(
-            mConfig, applyLogCurve ? 65534.0f : 65535.0f);
-        // Numeric level overrides are metadata-only in the linear path. Keep
-        // all decoded and vignette-corrected samples in their 16-bit domain.
-
-        std::vector<uint16_t> imageSamples;
-        int samplesPerPixel = 3;
-        int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
-        
-        if (shouldRemosaic) {
-            if (directlyPackedSamples.empty()) {
-                // For non-8-bit output, compact RGB to Bayer in place.
-                const size_t pixels = static_cast<size_t>(width) * height;
-                for (int y = 0; y < height; ++y)
-                    for (int x = 0; x < width; ++x) {
-                        const size_t pixel = static_cast<size_t>(y) * width + x;
-                        const int channel = remosaicChannels[((y & 1) << 1) | (x & 1)];
-                        processedRgbData[pixel] = processedRgbData[pixel * 3 + channel];
-                    }
-                processedRgbData.resize(pixels);
-                imageSamples = std::move(processedRgbData);
-            }
-            
-            samplesPerPixel = 1; // Single channel for CFA
-            photometric = 32803; // CFA (Color Filter Array)
-        } else {
-            // Pack RGB data to actual bit depth
-            imageSamples = std::move(processedRgbData);
-        }
+        const auto outputLevels = directLogDataLevels(mConfig);
+        std::vector<uint16_t> imageSamples = std::move(processedRgbData);
+        constexpr int samplesPerPixel = 3;
+        constexpr int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
 
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} process_ms={:.3f} samples={} channels={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage),
-                         directlyPackedSamples.empty() ? imageSamples.size()
-                                                       : directlyPackedSamples.size(),
+                         imageSamples.size(),
                          samplesPerPixel);
             diagnosticStage = std::chrono::steady_clock::now();
         }
 
-        const bool writerCompression = jpegCompression && !lossyJpegDct;
-        const bool jpegXlCompression = writerCompression && mConfig.jxlDistance >= 0.0f;
-        std::vector<uint8_t> imageBytes;
-        const uint8_t* imageData = nullptr;
-        size_t imageDataSize = 0;
-        if (!directlyPackedSamples.empty()) {
-            imageBytes = std::move(directlyPackedSamples);
-            imageData = imageBytes.data();
-            imageDataSize = imageBytes.size();
-        } else if (writerCompression || lossyJpegDct || encodeBits == 16) {
-            // SetImageData consumes the input synchronously. Use the owned
-            // sample storage directly instead of duplicating a 16-bit frame.
-            imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
-            imageDataSize = imageSamples.size() * sizeof(uint16_t);
-        } else {
-            imageBytes = packSamples(
-                imageSamples,
-                static_cast<size_t>(width) * samplesPerPixel,
-                static_cast<unsigned int>(encodeBits));
-            imageData = imageBytes.data();
-            imageDataSize = imageBytes.size();
-        }
+        const uint8_t* imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
+        const size_t imageDataSize = imageSamples.size() * sizeof(uint16_t);
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} pack_ms={:.3f} image_bytes={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage), imageDataSize);
@@ -856,50 +482,21 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetSamplesPerPixel(samplesPerPixel);
         dng.SetRowsPerStrip(height);
         
-        unsigned short bitsPerSample[3] = {
-            static_cast<unsigned short>((jpegXlCompression || lossyJpegDct) ? 16 : encodeBits),
-            static_cast<unsigned short>((jpegXlCompression || lossyJpegDct) ? 16 : encodeBits),
-            static_cast<unsigned short>((jpegXlCompression || lossyJpegDct) ? 16 : encodeBits)
-        };
+        unsigned short bitsPerSample[3] = {16, 16, 16};
         dng.SetBitsPerSample(samplesPerPixel, bitsPerSample);
         
         // Photometric interpretation
         dng.SetPhotometric(photometric);
         dng.SetPlanarConfig(1); // Chunky
-        dng.SetCompression(writerCompression
-            ? (mConfig.jxlDistance < 0.0f ? tinydngwriter::COMPRESSION_JPEG
-                                         : tinydngwriter::COMPRESSION_JPEG_XL)
-            : tinydngwriter::COMPRESSION_NONE);
-        if (writerCompression && mConfig.jxlDistance >= 0.0f)
-            dng.SetJXLDistance(mConfig.jxlDistance);
+        dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
         
         unsigned short sampleFormat[3] = {1, 1, 1}; // Unsigned integer
         dng.SetSampleFormat(samplesPerPixel, sampleFormat);
         
-        // Set CFA pattern if remosaicing
-        if (shouldRemosaic) {
-            auto cfaPattern = cfaColorsFromPhase(cfaPhase);
-            dng.SetCFARepeatPatternDim(2, 2);
-            dng.SetCFAPattern(4, cfaPattern.data());
-            dng.SetCFALayout(1); // Rectangular (or square) layout
-            dng.SetBlackLevelRepeatDim(2, 2);
-            const unsigned int activeArea[4] = {
-                0, 0, static_cast<unsigned int>(height),
-                static_cast<unsigned int>(width)
-            };
-            dng.SetActiveArea(activeArea);
-        }
-        
         // Set DNG version
-        dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
+        dng.SetDNGVersion(1, 4, 0, 0);
         const bool hasStageOpcodes = !opcodeList2Maps.empty() || !opcodeList3Maps.empty();
-        if (jpegXlCompression) {
-            dng.SetDNGBackwardVersion(1, 7, 0, 0);
-        } else if (shouldRemosaic) {
-            dng.SetDNGBackwardVersion(1, hasStageOpcodes ? 3 : 1, 0, 0);
-        } else {
-            dng.SetDNGBackwardVersion(1, 4, 0, 0);
-        }
+        dng.SetDNGBackwardVersion(1, hasStageOpcodes ? 3 : 4, 0, 0);
         
         // Set camera/software metadata
         const auto identity = vfs::resolveCameraIdentity(
@@ -916,12 +513,6 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         desc << "Frame " << frameNumber << " from DirectLog video";
         if (mIsHLG) {
             desc << " (HLG to Linear)";
-        }
-        if (applyLogCurve) {
-            desc << " (Log " << encodeBits << "-bit)";
-        }
-        if (shouldRemosaic) {
-            desc << " (Remosaiced " << cfaPhase << ")";
         }
         dng.SetImageDescription(desc.str());
         
@@ -943,36 +534,20 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             dng.SetFrameRate(mFps);
         }
 
-        // Set baseline exposure with the optional gain offset
-        const float exposureOffset = vfs::configuredExposureOffset(mConfig);
-        dng.SetBaselineExposure(static_cast<float>(baselineExposure) +
-                                exposureOffset + gainMapExposureOffset);
+        // Source baseline only. Configured display compensation and gain-map
+        // optimization are appended later as shared metadata operations.
+        dng.SetBaselineExposure(static_cast<float>(baselineExposure));
         
         // Level overrides describe the already-linear 16-bit domain. They only
         // change metadata; decoded samples remain untouched.
         // Set white/black levels and linearization table
-        if (applyLogCurve) {
-            const auto linearizationTable = utils::makeLogLinearizationTable(
-                static_cast<unsigned int>(dstWhiteLevel));
-            if (linearizationTable.empty())
-                throw std::runtime_error("Invalid DirectLog log white level");
-            dng.SetLinearizationTable(static_cast<unsigned int>(linearizationTable.size()),
-                                      linearizationTable.data());
-        }
         dng.SetWhiteLevel(static_cast<unsigned int>(std::clamp(
             std::lround(outputLevels.white), 0l, 65535l)));
         unsigned short blackLevel[4]{};
-        if (shouldRemosaic) {
-            for (size_t phase = 0; phase < 4; ++phase)
-                blackLevel[phase] = static_cast<unsigned short>(std::clamp(
-                    std::lround(outputLevels.black[remosaicChannels[phase]]),
-                    0l, 65535l));
-        } else {
-            for (size_t channel = 0; channel < 3; ++channel)
-                blackLevel[channel] = static_cast<unsigned short>(std::clamp(
-                    std::lround(outputLevels.black[channel]), 0l, 65535l));
-        }
-        dng.SetBlackLevel(shouldRemosaic ? 4 : 3, blackLevel);
+        for (size_t channel = 0; channel < 3; ++channel)
+            blackLevel[channel] = static_cast<unsigned short>(std::clamp(
+                std::lround(outputLevels.black[channel]), 0l, 65535l));
+        dng.SetBlackLevel(3, blackLevel);
         
         diagnosticStage = std::chrono::steady_clock::now();
         if (!dng.SetImageData(imageData, imageDataSize)) {
@@ -1024,11 +599,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         auto outputNeutral = asShotNeutral;
         if (!outputNeutral && mCalibration && mCalibration->hasAsShotNeutral)
             outputNeutral = mCalibration->asShotNeutral;
-        if (outputNeutral) {
-            for (size_t color = 0; color < outputNeutral->size(); ++color)
-                (*outputNeutral)[color] *= gainMapNeutralScale[color];
+        if (outputNeutral)
             dng.SetAsShotNeutral(3, outputNeutral->data());
-        }
         auto makeOpcodeList = [&](const std::vector<GainMap>& maps, bool cfaPhases) {
             tinydngwriter::OpcodeList result;
             if (maps.empty()) return result;
@@ -1043,23 +615,23 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                     throw std::runtime_error("Invalid DirectLog opcode coordinate geometry");
                 tinydngwriter::GainMapParams params{};
                 params.top = map.top - cropTop; params.left = map.left - cropLeft;
-                params.bottom = std::min<uint32_t>(mHeight, map.bottom - cropTop);
-                params.right = std::min<uint32_t>(mWidth, map.right - cropLeft);
+                params.bottom = std::min<uint32_t>(height, map.bottom - cropTop);
+                params.right = std::min<uint32_t>(width, map.right - cropLeft);
                 params.plane = map.plane; params.planes = map.planes;
                 params.row_pitch = map.rowPitch; params.col_pitch = map.colPitch;
                 params.map_points_v = map.height; params.map_points_h = map.width;
-                params.map_spacing_v = map.spacingV * map.coordinateHeight / mHeight;
-                params.map_spacing_h = map.spacingH * map.coordinateWidth / mWidth;
+                params.map_spacing_v = map.spacingV * map.coordinateHeight / height;
+                params.map_spacing_h = map.spacingH * map.coordinateWidth / width;
                 params.map_origin_v =
-                    (map.originV * map.coordinateHeight - cropTop) / mHeight;
+                    (map.originV * map.coordinateHeight - cropTop) / height;
                 params.map_origin_h =
-                    (map.originH * map.coordinateWidth - cropLeft) / mWidth;
+                    (map.originH * map.coordinateWidth - cropLeft) / width;
                 params.map_planes = map.channels;
                 if (!cfaPhases && map.channels == 1) {
                     params.top = 0;
                     params.left = 0;
-                    params.bottom = mHeight;
-                    params.right = mWidth;
+                    params.bottom = height;
+                    params.right = width;
                     params.plane = 0;
                     params.planes = 3;
                     params.row_pitch = 1;
@@ -1112,8 +684,6 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 dngData, mCalibration->fullSensorResolution[0],
                 mCalibration->fullSensorResolution[1]))
             throw std::runtime_error("Could not resample DirectLog gain maps for crop");
-        if (lossyJpegDct && !DNGDecoder::compressLossyJPEG(dngData))
-            throw std::runtime_error("Failed to enable lossy JPEG DCT compression");
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} output_copy_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));
@@ -1127,7 +697,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 }
 
 VirtualFileSystemImpl_DirectLog::ProcessedFrame
-VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput) {
+VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
     ProcessedFrame result;
     result.timestamp = std::get<Timestamp>(entry.userData);
     const auto frameIt = mFrameIndexByTimestamp.find(result.timestamp);
@@ -1135,29 +705,14 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput
         throw std::runtime_error("DirectLog source frame not found");
     result.frameNumber = static_cast<int>(frameIt->second);
 
-    const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
-    const bool sequenceMetadataFrame = dngOutput && !mConfig.streamingPreview &&
-        vfs::outputFrameNumber(entry) == 0;
-    // Decode proxy frames at their final scale whenever HQ reduction is not
-    // requested. Cropping used to disable this fast path, forcing a full-size
-    // RGB allocation followed by a crop and a second reduction buffer. Crop
-    // coordinates are converted to proxy pixels below, so the source-space
-    // mapping used by gain-map sampling remains unchanged.
-    const bool directProxyDecode = proxyScale > 1 && !sequenceMetadataFrame &&
-        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ);
-    result.width = sequenceMetadataFrame && proxyScale > 1
-        ? mWidth : (directProxyDecode ? mWidth / proxyScale : 0);
-    result.height = sequenceMetadataFrame && proxyScale > 1
-        ? mHeight : (directProxyDecode ? mHeight / proxyScale : 0);
+    // Decode the canonical source geometry. The common DNG processor owns
+    // user crop and proxy/remosaic topology for every source.
+    result.width = 0;
+    result.height = 0;
 
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
-    const bool bakesGainMaps = !result.gainMaps.bakeList2.empty() ||
-                               !result.gainMaps.bakeList3.empty();
-    const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
-    result.inputLogEncoded = dngOutput && mDecoder->getVideoInfo().isLOG60 &&
-        applyLogCurve && !bakesGainMaps;
     if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
-                                result.height, result.inputLogEncoded))
+                                result.height, false))
         throw std::runtime_error("Could not decode DirectLog frame");
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;
@@ -1187,32 +742,41 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput
         result.height = targetHeight;
     };
     if (mCalibration && mCalibration->hasLeftTopCropStride)
-        cropRgb(std::max(1, mCalibration->leftTopCropStride[0] / proxyScale),
-                std::max(1, mCalibration->leftTopCropStride[1] / proxyScale), false);
-    if (mConfig.options & RENDER_OPT_CROPPING) {
-        uint32_t cropWidth = 0, cropHeight = 0, ignoredStride = 0;
-        utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, ignoredStride);
-        cropRgb(std::max(1, static_cast<int>(cropWidth) / proxyScale),
-                std::max(1, static_cast<int>(cropHeight) / proxyScale), true);
-    }
-    applySidecarGainMaps(result.rgb, result.frameNumber, result.gainMaps,
-                         result.width, result.height,
-                         sourceLeft, sourceTop, sourceWidth, sourceHeight);
-    if (proxyScale > 1 && !sequenceMetadataFrame && !directProxyDecode) {
-        std::vector<uint16_t> reduced;
-        uint32_t reducedWidth = 0, reducedHeight = 0;
-        utils::reduceRGB(result.rgb, reduced,
-                         static_cast<uint32_t>(result.width),
-                         static_cast<uint32_t>(result.height),
-                         static_cast<uint32_t>(proxyScale),
-                         mConfig.options & RENDER_OPT_HIGHER_CFA_HQ,
-                         reducedWidth, reducedHeight);
-        if (reduced.empty())
-            throw std::runtime_error("Proxy scale is too large for the DirectLog image");
-        result.rgb = std::move(reduced);
-        result.width = static_cast<int>(reducedWidth);
-        result.height = static_cast<int>(reducedHeight);
-    }
+        cropRgb(mCalibration->leftTopCropStride[0],
+                mCalibration->leftTopCropStride[1], false);
+    auto remap = [&](std::vector<GainMap>& maps) {
+        for (auto& map : maps) {
+            const double coordinateWidth = map.coordinateWidth
+                ? map.coordinateWidth : mWidth;
+            const double coordinateHeight = map.coordinateHeight
+                ? map.coordinateHeight : mHeight;
+            const double left = sourceLeft * coordinateWidth / mWidth;
+            const double top = sourceTop * coordinateHeight / mHeight;
+            const double extentWidth = sourceWidth * coordinateWidth / mWidth;
+            const double extentHeight = sourceHeight * coordinateHeight / mHeight;
+            if (!(extentWidth > 0.0) || !(extentHeight > 0.0)) continue;
+            map.originH = (map.originH * coordinateWidth - left) / extentWidth;
+            map.originV = (map.originV * coordinateHeight - top) / extentHeight;
+            map.spacingH *= coordinateWidth / extentWidth;
+            map.spacingV *= coordinateHeight / extentHeight;
+            auto x = [&](uint32_t value) {
+                return static_cast<uint32_t>(std::clamp(
+                    (static_cast<double>(value) - left) * result.width / extentWidth,
+                    0.0, static_cast<double>(result.width)));
+            };
+            auto y = [&](uint32_t value) {
+                return static_cast<uint32_t>(std::clamp(
+                    (static_cast<double>(value) - top) * result.height / extentHeight,
+                    0.0, static_cast<double>(result.height)));
+            };
+            map.left = x(map.left); map.right = x(map.right);
+            map.top = y(map.top); map.bottom = y(map.bottom);
+            map.coordinateWidth = result.width;
+            map.coordinateHeight = result.height;
+        }
+    };
+    remap(result.gainMaps.opcodeList2);
+    remap(result.gainMaps.opcodeList3);
 
     result.metadata = frameMetadata(result.frameNumber);
     const bool normalizeExposure = mConfig.options & RENDER_OPT_NORMALIZE_EXPOSURE;
@@ -1235,7 +799,9 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         const auto materializeStart = std::chrono::steady_clock::now();
         const auto& frames = mDecoder->getFrames();
-        auto processed = processFrame(entry, true);
+        // Native frame zero belongs to the mounted proxy contract only. A
+        // finalized sequence uses one consistent selected output resolution.
+        auto processed = processFrame(entry);
         const auto timestamp = processed.timestamp;
         const int frameNumber = processed.frameNumber;
         const bool diagnostics = directLogDiagnosticsEnabled();
@@ -1244,7 +810,10 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
             spdlog::info("DirectLog diagnostic: frame={} materialize begin name={}",
                          frameNumber, entry.name);
 
-        const int outputFrameNumber = vfs::outputFrameNumber(entry);
+        const auto renderPlan = vfs::planDngRender(
+            entry, timestamp, frames.front().timestamp, mConfig, mFps,
+            jpegCompression);
+        const int outputFrameNumber = renderPlan.outputFrameNumber;
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} metadata_ms={:.3f}; DNG construction begin",
                          frameNumber, elapsedMilliseconds(stageStart));
@@ -1269,9 +838,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
         } writerSlot(*this);
         std::vector<uint8_t> dngData;
         if (!convertRGBToDNG(std::move(processed.rgb), dngData, outputFrameNumber,
-                             timestamp, jpegCompression,
-                             processed.gainMaps.exposureOffset,
-                             processed.gainMaps.neutralScale,
+                             timestamp,
                              processed.metadata.iso, processed.metadata.shutterSpeed,
                              processed.metadata.baselineExposure,
                              processed.metadata.asShotNeutral,
@@ -1279,16 +846,28 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
                              &processed.metadata,
                              processed.gainMaps.opcodeList2,
                              processed.gainMaps.opcodeList3,
-                             processed.width, processed.height,
-                             processed.inputLogEncoded))
+                             processed.width, processed.height))
             throw std::runtime_error("Could not generate DirectLog DNG");
-        const bool converted = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
-        const Timestamp outputTimestamp = vfs::outputTimestamp(
-            entry, timestamp, frames.front().timestamp, mFps, converted);
-        if (!DNGDecoder::setTimingMetadata(dngData, mFps, outputTimestamp))
-            throw std::runtime_error("Could not write DirectLog DNG timing metadata");
-        if (mGyroflowLensProfile && !mConfig.cameraNativeStaging)
-            vfs::applyGyroflowLensProfile(dngData, *mGyroflowLensProfile);
+        vfs::DngPixelPipelineOptions pixels;
+        pixels.hasCfa = false;
+        pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+        pixels.outputScale = renderPlan.scale;
+        pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
+        pixels.linearInputBitDepth = utils::bitsNeeded(static_cast<uint16_t>(
+            std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
+        pixels.sourceName = "DirectLog";
+        vfs::processDngPixels(dngData, mConfig, pixels);
+        vfs::DngFinalizeOptions finalize;
+        finalize.frameRate = mFps;
+        finalize.timestamp = renderPlan.outputTimestamp;
+        if (mConfig.options & RENDER_OPT_BAKE_ISO)
+            finalize.isoOverlay = processed.metadata.iso;
+        finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
+        finalize.compression = jpegCompression;
+        finalize.gyroflowLensProfile = mGyroflowLensProfile && !mConfig.cameraNativeStaging
+            ? &*mGyroflowLensProfile : nullptr;
+        finalize.sourceName = "DirectLog";
+        vfs::finalizeDng(dngData, mConfig, finalize);
         auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
@@ -1300,62 +879,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
 
 bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview) {
-    std::shared_lock renderLock(mRenderMutex);
-    ProcessedFrame processed;
-    try { processed = processFrame(entry, false); }
+    try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
     catch (const std::exception&) { return false; }
-    auto& metadata = processed.metadata;
-    auto& gainMaps = processed.gainMaps;
-    preview.width = processed.width > 0 ? static_cast<uint32_t>(processed.width)
-                                     : static_cast<uint32_t>(mWidth);
-    preview.height = processed.height > 0 ? static_cast<uint32_t>(processed.height)
-                                       : static_cast<uint32_t>(mHeight);
-    const std::array<float, 4> defaultBlack{0, 0, 0, 0};
-    const auto previewLevels = resolveDataLevels(
-        mConfig.levels, 65535.0f, defaultBlack,
-        65535.0f, defaultBlack, 3);
-    if (!utils::normalizeRgb16Bytes(
-            processed.rgb, preview.rgb,
-            {previewLevels.black[0], previewLevels.black[1], previewLevels.black[2]},
-            {previewLevels.white, previewLevels.white, previewLevels.white}))
-        return false;
-    preview.timestamp = vfs::outputTimestamp(
-        entry, processed.timestamp, mDecoder->getFrames().front().timestamp, mFps,
-        mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-    preview.metadata.iso = metadata.iso;
-    preview.metadata.exposureTime = metadata.shutterSpeed;
-    preview.metadata.baselineExposure = metadata.baselineExposure +
-        vfs::configuredExposureOffset(mConfig) + gainMaps.exposureOffset;
-    preview.metadata.hasExposure = metadata.shutterSpeed > 0.0;
-    preview.metadata.hasBaselineExposure = true;
-    preview.metadata.whiteLevel.fill(previewLevels.white);
-    preview.metadata.whiteLevelCount = 3;
-    preview.metadata.blackLevel = previewLevels.black;
-    preview.metadata.blackLevelCount = 3;
-    auto neutral = metadata.asShotNeutral;
-    if (!neutral && mCalibration && mCalibration->hasAsShotNeutral)
-        neutral = mCalibration->asShotNeutral;
-    if (neutral) {
-        for (size_t channel = 0; channel < 3; ++channel)
-            (*neutral)[channel] *= gainMaps.neutralScale[channel];
-        preview.metadata.asShotNeutral = *neutral;
-        preview.metadata.hasAsShotNeutral = true;
-    }
-    if (mCalibration) {
-        preview.metadata.colorMatrix1 = mCalibration->colorMatrix1;
-        preview.metadata.colorMatrix2 = mCalibration->colorMatrix2;
-        preview.metadata.forwardMatrix1 = mCalibration->forwardMatrix1;
-        preview.metadata.forwardMatrix2 = mCalibration->forwardMatrix2;
-        preview.metadata.hasColorMatrix1 = mCalibration->hasColorMatrix1;
-        preview.metadata.hasColorMatrix2 = mCalibration->hasColorMatrix2;
-        preview.metadata.hasForwardMatrix1 = mCalibration->hasForwardMatrix1;
-        preview.metadata.hasForwardMatrix2 = mCalibration->hasForwardMatrix2;
-        if (mCalibration->hasColorMatrix1 || mCalibration->hasForwardMatrix1)
-            preview.metadata.calibrationIlluminant1 = 21;
-        if (mCalibration->hasColorMatrix2 || mCalibration->hasForwardMatrix2)
-            preview.metadata.calibrationIlluminant2 = 17;
-    }
-    return preview.rgb.size() == static_cast<size_t>(preview.width) * preview.height * 6;
 }
 
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
@@ -1452,7 +977,8 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.levelsInfo = std::to_string(static_cast<int>(displayLevels.white)) + "/" +
         std::to_string(static_cast<int>(displayLevels.black[0]));
     if (applyLogCurve) {
-        const int outputBits = directLogLogBits(mConfig.logTransform);
+        const int outputBits = directLogLogBits(
+            mConfig.logTransform, directLogBaseLogBits(mConfig));
         info.levelsInfo += " -> " +
             std::to_string((1 << outputBits) - 1) + "/0 " +
             std::to_string(outputBits) + "b log";

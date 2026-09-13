@@ -992,6 +992,16 @@ int main() {
     std::vector<uint8_t> fourGainBytes(fourGainDng.begin(), fourGainDng.end());
     assert(motioncam::DNGDecoder::repairGainMapCfaPhase(fourGainBytes, true));
     assert(motioncam::DNGDecoder::transformGainMaps(fourGainBytes, false, true, false));
+    std::vector<motioncam::GainMap> retainedColorMaps, retainedLuminanceMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        fourGainBytes, 2, retainedColorMaps));
+    assert(motioncam::DNGDecoder::getGainMaps(
+        fourGainBytes, 3, retainedLuminanceMaps));
+    assert(retainedColorMaps.size() == 4);
+    assert(retainedLuminanceMaps.size() == 1);
+    assert(retainedLuminanceMaps.front().channels == 1);
+    assert(retainedLuminanceMaps.front().plane == 0);
+    assert(retainedLuminanceMaps.front().planes == 3);
 
     const std::string softwarePlaceholder(32, 'X');
     assert(image.SetSoftware(softwarePlaceholder));

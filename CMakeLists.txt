@@ -56,6 +56,7 @@ set(PROJECT_SOURCES
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
         src/CalibrationData.cpp
+        src/CfaBadPixels.cpp
         src/AudioWriter.cpp
         src/Utils.cpp
         src/IsoOverlay.cpp
@@ -531,6 +532,7 @@ if(BUILD_TESTING)
         src/IsoOverlay.cpp
         src/VirtualFileSystemImpl.cpp
         src/CalibrationData.cpp
+        src/CfaBadPixels.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)

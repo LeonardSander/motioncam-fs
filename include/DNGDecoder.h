@@ -53,6 +53,8 @@ public:
                                           int opcodeList);
     static bool replaceGainMaps(std::vector<uint8_t>& dngData,
                                 int opcodeList, const std::vector<GainMap>& gainMaps);
+    static bool replaceOpcodeList(std::vector<uint8_t>& dngData, int opcodeList,
+                                  const std::vector<uint8_t>& payload);
     static bool setWarpFisheye(std::vector<uint8_t>& dngData,
                                const std::array<double, 4>& coefficients,
                                double centerX, double centerY);
@@ -74,6 +76,8 @@ public:
     static bool overrideDataLevels(std::vector<uint8_t>& dngData,
                                    const std::string& levels);
     static bool packUncompressedToWhiteLevel(std::vector<uint8_t>& dngData);
+    static bool cropImage(std::vector<uint8_t>& dngData,
+                          uint32_t targetWidth, uint32_t targetHeight);
     static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode,
                                   uint32_t quantizationWhite = 0);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);

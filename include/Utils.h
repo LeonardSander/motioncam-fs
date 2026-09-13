@@ -48,6 +48,14 @@ void overrideLensShadingMap(
 void parseCropTarget(const std::string& target, uint32_t& width,
                      uint32_t& height, uint32_t& stride);
 
+struct ActiveBadPixel { uint32_t row = 0; uint32_t column = 0; };
+std::vector<ActiveBadPixel> applyCfaBadPixels(
+    uint16_t* samples, uint32_t width, uint32_t height,
+    int originalWidth, int originalHeight, int cfaRepeatSize,
+    float whiteLevel, const std::array<float, 4>& blackLevel,
+    double iso, double exposureSeconds, const CalibrationData& calibration,
+    BadPixelTreatment treatment, bool bakeForDemosaic = false);
+
 // ============================================================================
 // Stream Utilities
 // ============================================================================

@@ -363,15 +363,9 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
         if (frameIt == mFrameIndexByTimestamp.end())
             throw std::runtime_error("DNG source frame not found");
-        const bool converted = mHasFrameNumberSequence &&
-            (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-        const Timestamp outputTimestamp = converted
-            ? vfs::outputTimestamp(entry, timestamp, frames.front().timestamp, mFps, true)
-            : timestamp - frames.front().timestamp;
-        const bool firstFrame = frameIt->second == 0;
-        const bool nativeResolution = !mConfig.streamingPreview &&
-            mHasFrameNumberSequence && firstFrame &&
-            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1;
+        const auto renderPlan = vfs::planDngRender(
+            entry, timestamp, frames.front().timestamp, mConfig, mFps,
+            jpegCompression, mHasFrameNumberSequence);
         DNGDecoder::beginForegroundWork();
         struct ForegroundGuard {
             ~ForegroundGuard() { DNGDecoder::endForegroundWork(); }
@@ -382,7 +376,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
         // paused through the foreground-work counter above.
         std::lock_guard<std::mutex> materializeLock(mMaterializeMutex);
         auto bytes = transformFrame(
-            frameIt->second, outputTimestamp, jpegCompression, nativeResolution);
+            frameIt->second, renderPlan.outputTimestamp, jpegCompression,
+            renderPlan.nativeMetadataFrame);
         const auto transformedAt = std::chrono::steady_clock::now();
         const size_t advertisedSize = entry.size;
         if (!jpegCompression && !mConfig.streamingPreview) {
@@ -408,54 +403,8 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
 
 bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview) {
-    std::shared_lock renderLock(mRenderMutex);
-    const auto timestamp = std::get<Timestamp>(entry.userData);
-    const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
-    if (frameIt == mFrameIndexByTimestamp.end()) return false;
-    const bool converted = mHasFrameNumberSequence &&
-        (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-    const Timestamp outputTimestamp = converted
-        ? vfs::outputTimestamp(entry, timestamp, mDecoder->getFrames().front().timestamp,
-                               mFps, true)
-        : timestamp - mDecoder->getFrames().front().timestamp;
-    DNGDecoder::beginForegroundWork();
-    struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
-    std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
-    // Gainmaps-only is a diagnostic flat-field view. Its grouped scalar-map
-    // and origin semantics must match the mounted bake path; the lightweight
-    // direct preview baker does not implement all of those DNG variants.
-    // Route this mode through the canonical bakeGainMaps implementation.
-    if (!(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP)) {
-        try {
-            // Preview decoding consumes the source storage layout directly;
-            // avoid first rebuilding the same samples as an uncompressed DNG.
-            auto prepared = prepareFrame(frameIt->second, false);
-            if (DNGDecoder::decodePreview(
-                    std::move(prepared.dng), mConfig, preview, true)) {
-                preview.timestamp = outputTimestamp;
-                if (mConfig.options & RENDER_OPT_BAKE_ISO) {
-                    const auto iso = mIsoValues.find(timestamp);
-                    const double value = iso != mIsoValues.end()
-                        ? iso->second : preview.metadata.iso;
-                    utils::bakeIsoOverlay(
-                        reinterpret_cast<uint16_t*>(preview.rgb.data()),
-                        preview.width, preview.height, 3, value, 0, 65535);
-                }
-                return true;
-            }
-        } catch (const std::exception& error) {
-            spdlog::warn("Decoded DNG preview preparation failed for {}: {}",
-                         entry.name, error.what());
-        }
-        spdlog::warn("Decoded DNG preview path failed for {}; using DNG transform fallback",
-                     entry.name);
-    }
-    materializeLock.unlock();
-    auto bytes = transformFrame(frameIt->second, outputTimestamp, false, false);
-    const bool transformedProxy = mConfig.streamingPreview &&
-        vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1;
-    return DNGDecoder::decodePreview(
-        std::move(bytes), mConfig, preview, !transformedProxy);
+    try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
+    catch (const std::exception&) { return false; }
 }
 
 VirtualFileSystemImpl_DNG::PreparedFrame
@@ -507,9 +456,6 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
             result.dng, mCalibration->fullSensorResolution[0],
             mCalibration->fullSensorResolution[1]))
         throw std::runtime_error("Could not crop full-sensor DNG gain maps");
-    if (!DNGDecoder::overrideDataLevels(result.dng, mConfig.levels))
-        throw std::runtime_error("Could not override source DNG data levels");
-
     const auto resolved = resolvedFrameMetadata(frameIndex, result.sourceMetadata);
     if (resolved.orientation != result.sourceMetadata.orientation &&
         !DNGDecoder::setOrientation(result.dng, resolved.orientation))
@@ -546,16 +492,8 @@ DNGFrameMetadata VirtualFileSystemImpl_DNG::resolvedFrameMetadata(
         metadata.hasBaselineExposure = true;
     }
     if (!mConfig.cameraNativeStaging) {
-        metadata.baselineExposure += vfs::configuredExposureOffset(mConfig) +
-            (boost::icontains(metadata.uniqueCameraModel, "Panasonic") ? 2.0 : 0.0);
-        metadata.hasBaselineExposure = true;
-    } else if (mConfig.streamingPreview) {
-        // Gallery/thumbnail decoding uses camera-native staging to preserve
-        // source pixel and gain-map geometry, but it is still a display path.
-        // previewRenderSettings() clears cameraModel, so this applies the
-        // selected exposure compensation without Camera Native's model-tag
-        // compensation leaking into the preview.
-        metadata.baselineExposure += vfs::configuredExposureOffset(mConfig);
+        metadata.baselineExposure +=
+            boost::icontains(metadata.uniqueCameraModel, "Panasonic") ? 2.0 : 0.0;
         metadata.hasBaselineExposure = true;
     }
     if ((mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)) {
@@ -603,21 +541,6 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     const bool frameHasCfa = prepared.hasCfa;
     logStage("source preparation", bytes.size());
 
-    std::vector<GainMap> effectiveGainMaps;
-    const bool hasOpcode2GainMap =
-        DNGDecoder::getGainMaps(bytes, 2, effectiveGainMaps) &&
-        !effectiveGainMaps.empty();
-    std::vector<GainMap> opcode3GainMaps;
-    const bool hasEligibleOpcode3Luma =
-        DNGDecoder::hasOnlySinglePlaneGainMap(bytes, 3) &&
-        DNGDecoder::getGainMaps(bytes, 3, opcode3GainMaps) &&
-        opcode3GainMaps.size() == 1 && opcode3GainMaps.front().channels == 1;
-    // A lone OpcodeList3 luma map is a valid bake input: the corresponding
-    // color component may already have been baked by an earlier color-only pass.
-    const bool hasGainMap = hasOpcode2GainMap || hasEligibleOpcode3Luma;
-    const bool colorOnlyGainMap = mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
-    const bool bakeGainMap = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-        (hasOpcode2GainMap || (hasEligibleOpcode3Luma && !colorOnlyGainMap));
     uint32_t inputQuantizationWhite = 0;
     const auto levelSeparator = mConfig.levels.find('/');
     const std::string selectedWhite = levelSeparator == std::string::npos
@@ -630,98 +553,32 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         if (inputBits > 0 && inputBits <= 16)
             inputQuantizationWhite = (uint32_t{1} << inputBits) - 1;
     }
-    const int outputScale = requestedScale;
-    QuadBayerMode processingMode = mConfig.quadBayerOption;
-    const bool selectedDemosaic = processingMode == QuadBayerMode::Demosaic ||
-                                  processingMode == QuadBayerMode::DemosaicColor ||
-                                  processingMode == QuadBayerMode::DemosaicOCL;
-    if (mConfig.streamingPreview && outputScale == 1 &&
-        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ) && selectedDemosaic)
-        processingMode = QuadBayerMode::CorrectQBCFAMetadata;
-    const bool remosaicRequested = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
-    const bool uniformRgbBlack =
-        sourceMetadata.blackLevel[0] == sourceMetadata.blackLevel[1] &&
-        sourceMetadata.blackLevel[1] == sourceMetadata.blackLevel[2];
-    const bool processingDemosaic =
-        processingMode == QuadBayerMode::Demosaic ||
-        processingMode == QuadBayerMode::DemosaicColor ||
-        processingMode == QuadBayerMode::DemosaicOCL;
-    // Proxy reduction and RGB remosaic define the stored samples and therefore
-    // precede gain-map baking. CFA proxy reduction preserves the mosaic; an
-    // explicitly selected demosaic is performed in a second pass afterwards.
-    const bool topologyBeforeBake = bakeGainMap &&
-        (outputScale > 1 ||
-         (!frameHasCfa && remosaicRequested && uniformRgbBlack));
-    if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
-            bytes, frameCfaSize, frameCfaPhase, processingMode,
-            remosaicRequested,
-            outputScale, mConfig.options & RENDER_OPT_HIGHER_CFA_HQ,
-            false, true))
-        throw std::runtime_error("Unsupported pre-vignette DNG topology conversion: " + frame.filePath);
-    if (hasOpcode2GainMap && !bakeGainMap &&
-        (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
-        !DNGDecoder::transformGainMaps(bytes, false, true, false))
-        throw std::runtime_error("Unsupported DNG gain-map color transform: " + frame.filePath);
-    if (hasOpcode2GainMap && !bakeGainMap &&
-        (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
-        !DNGDecoder::transformGainMaps(bytes, false, false, true))
-        throw std::runtime_error("Unsupported DNG gain-map optimization: " + frame.filePath);
-    if (bakeGainMap && !DNGDecoder::bakeGainMaps(
-            bytes, mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-            mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
-            mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
-            mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP,
-            topologyBeforeBake ? 2 : frameCfaSize, frameCfaPhase))
-        throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frame.filePath);
-    logStage("metadata and gain-map processing", bytes.size());
-
-    // A private, non-proxy gallery stream keeps its CFA so the display path
-    // can bin higher CFA to Bayer and choose nearest-neighbour when HQ is off.
-    // Mounted DNGs never set streamingPreview and retain their selected mode.
-    if (!topologyBeforeBake &&
-        (frameCfaSize > 2 || (frameHasCfa && mConfig.cameraNativeStaging) || outputScale > 1 ||
-         (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER)) &&
-        !DNGDecoder::processHigherCFA(
-            bytes, frameCfaSize, frameCfaPhase, processingMode,
-            remosaicRequested,
-            outputScale,
-            mConfig.options & RENDER_OPT_HIGHER_CFA_HQ))
-        throw std::runtime_error("Unsupported DNG layout for higher CFA processing: " + frame.filePath);
-    if (topologyBeforeBake && frameHasCfa && outputScale > 1 && processingDemosaic &&
-        !remosaicRequested &&
-        !DNGDecoder::processHigherCFA(
-            bytes, 2, frameCfaPhase, processingMode,
-            false, 1, false))
-        throw std::runtime_error("Unsupported post-vignette DNG demosaic: " + frame.filePath);
-    logStage("CFA/proxy processing", bytes.size());
-
-    if (mConfig.options & RENDER_OPT_BAKE_ISO) {
-        const auto iso = mIsoValues.find(timestamp);
-        if (iso != mIsoValues.end() && !DNGDecoder::bakeIsoOverlay(bytes, iso->second))
-            throw std::runtime_error("Unsupported DNG layout for ISO overlay: " + frame.filePath);
-    }
-    if ((mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
-        !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
-        (mConfig.logTransform != LogTransformMode::KeepInput || bakeGainMap) &&
-        !DNGDecoder::applyLogTransform(
-            bytes, mConfig.logTransform, inputQuantizationWhite))
-        throw std::runtime_error("Could not apply DNG log transform: " + frame.filePath);
-    if (!DNGDecoder::setTimingMetadata(bytes, mFps, outputTimestamp))
-        throw std::runtime_error("Could not update DNG timing metadata");
-    if (!mConfig.cameraNativeStaging && !DNGDecoder::packUncompressedToWhiteLevel(bytes))
-        throw std::runtime_error("Could not pack uncompressed DNG to its sensor bit depth");
-    if (mGyroflowLensProfile && !mConfig.cameraNativeStaging)
-        vfs::applyGyroflowLensProfile(bytes, *mGyroflowLensProfile);
-    logStage("log/timing/bit packing", bytes.size());
-    if (jpegCompression) {
-        const bool compressed = isLossyJpegDct(mConfig.jxlDistance)
-            ? DNGDecoder::compressLossyJPEG(bytes)
-            : mConfig.jxlDistance < 0.0f
-                ? DNGDecoder::compressLosslessJPEG(bytes)
-                : DNGDecoder::compressJPEGXL(bytes, mConfig.jxlDistance);
-        if (!compressed) throw std::runtime_error("Could not compress finalized DNG");
-        logStage("final compression", bytes.size());
-    }
+    vfs::DngPixelPipelineOptions pixels;
+    pixels.cfaRepeatSize = frameCfaSize;
+    pixels.cfaPhase = frameCfaPhase;
+    pixels.hasCfa = frameHasCfa;
+    pixels.outputScale = requestedScale;
+    pixels.inputQuantizationWhite = inputQuantizationWhite;
+    pixels.calibration = mCalibration ? &*mCalibration : nullptr;
+    const auto resolved = resolvedFrameMetadata(frameIndex, sourceMetadata);
+    pixels.iso = resolved.iso;
+    pixels.exposureTime = resolved.exposureTime;
+    pixels.sourceName = frame.filePath;
+    vfs::processDngPixels(bytes, mConfig, pixels);
+    logStage("topology/gain/log processing", bytes.size());
+    vfs::DngFinalizeOptions finalize;
+    finalize.frameRate = mFps;
+    finalize.timestamp = outputTimestamp;
+    if (mConfig.options & RENDER_OPT_BAKE_ISO)
+        finalize.isoOverlay = resolved.iso;
+    finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
+    finalize.compression = jpegCompression;
+    finalize.gyroflowLensProfile = mGyroflowLensProfile && !mConfig.cameraNativeStaging
+        ? &*mGyroflowLensProfile : nullptr;
+    finalize.sourceName = "source";
+    vfs::finalizeDng(bytes, mConfig, finalize);
+    logStage(jpegCompression ? "finalize and compression" : "log/timing/bit packing",
+             bytes.size());
     const auto completed = std::chrono::steady_clock::now();
     spdlog::info("DNG timing [{}]: transform total {:.1f} ms",
                  frame.filePath,

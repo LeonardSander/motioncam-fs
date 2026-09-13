@@ -1,6 +1,7 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "CalibrationData.h"
 #include "LRUCache.h"
 #include "VirtualFileSystemImpl.h"
 #include <BS_thread_pool.hpp>
@@ -210,12 +211,163 @@ int main() {
     motioncam::DNGFrameMetadata packedMetadata;
     assert(motioncam::DNGDecoder::getColorMetadata(uncompressedA, packedMetadata));
     assert(packedMetadata.inputBitDepth == 16);
+    // Configured exposure compensation is a metadata-only operation. Gallery
+    // applies BaselineExposure while color-transforming its decoded preview;
+    // the DNG sample payload itself must remain byte-for-byte equivalent.
+    auto exposureTagged = uncompressedA;
+    motioncam::RenderSettings taggedSettings;
+    taggedSettings.cameraModel.clear();
+    taggedSettings.exposureCompensation = "0.75";
+    motioncam::vfs::DngFinalizeOptions taggedFinalize;
+    taggedFinalize.writeTiming = false;
+    motioncam::vfs::finalizeDng(exposureTagged, taggedSettings, taggedFinalize);
+    motioncam::DNGFrameMetadata taggedMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(exposureTagged, taggedMetadata));
+    assert(std::abs(taggedMetadata.baselineExposure - 0.75) < 1e-5);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        exposureTagged, uncompressedA));
+    motioncam::CalibrationData badPixelCalibration;
+    badPixelCalibration.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel defect;
+    defect.x = 0;
+    defect.y = 0;
+    defect.action = motioncam::CalibrationData::BadPixelAction::Dampen;
+    defect.amount = 0.5f;
+    badPixelCalibration.badPixels.push_back(defect);
+    motioncam::RenderSettings badPixelSettings;
+    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
+    auto rgbIgnoresBadPixels = uncompressedA;
+    motioncam::vfs::DngPixelPipelineOptions rgbPipeline;
+    rgbPipeline.hasCfa = false;
+    rgbPipeline.calibration = &badPixelCalibration;
+    motioncam::vfs::processDngPixels(
+        rgbIgnoresBadPixels, badPixelSettings, rgbPipeline);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        rgbIgnoresBadPixels, uncompressedA));
+    auto correctedCfa = makeLogCfaDng(1023, 0);
+    motioncam::vfs::DngPixelPipelineOptions cfaPipeline;
+    cfaPipeline.hasCfa = true;
+    cfaPipeline.cfaRepeatSize = 2;
+    cfaPipeline.calibration = &badPixelCalibration;
+    cfaPipeline.iso = 100.0;
+    cfaPipeline.exposureTime = 0.01;
+    motioncam::vfs::processDngPixels(
+        correctedCfa, badPixelSettings, cfaPipeline);
+    motioncam::DecodedDNGImage correctedImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        correctedCfa, correctedImage, false, false));
+    assert(correctedImage.samples.front() == 512);
+    badPixelCalibration.badPixels.front().action =
+        motioncam::CalibrationData::BadPixelAction::Interpolate;
+    auto opcodeCfa = makeLogCfaDng(1023, 0);
+    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OpcodeOnly;
+    motioncam::vfs::processDngPixels(opcodeCfa, badPixelSettings, cfaPipeline);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        opcodeCfa, makeLogCfaDng(1023, 0)));
+    const auto [badPixelOpcodeOffset, badPixelOpcodeBytes] =
+        tagPayload(opcodeCfa, 51008);
+    assert(badPixelOpcodeOffset && badPixelOpcodeBytes > 4);
+    auto opcodeBe32 = [&](size_t offset) {
+        return static_cast<uint32_t>(opcodeCfa[offset] << 24 |
+            opcodeCfa[offset + 1] << 16 | opcodeCfa[offset + 2] << 8 |
+            opcodeCfa[offset + 3]);
+    };
+    assert(opcodeBe32(badPixelOpcodeOffset) == 1);
+    // The common topology pipeline must crop and reduce/remosaic before it
+    // consumes gain metadata. This is the ordering shared by DNG, MCRAW and
+    // DirectLog adapters.
+    auto orderedRgb = makeDng(
+        1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
+    motioncam::GainMap lumaMap{};
+    lumaMap.top = lumaMap.left = 0;
+    lumaMap.bottom = lumaMap.right = 8;
+    lumaMap.coordinateWidth = lumaMap.coordinateHeight = 8;
+    lumaMap.plane = 0;
+    lumaMap.planes = 3;
+    lumaMap.rowPitch = lumaMap.colPitch = 1;
+    lumaMap.width = lumaMap.height = 2;
+    lumaMap.channels = 1;
+    lumaMap.spacingV = lumaMap.spacingH = 1.0;
+    lumaMap.data.assign(4, 1.25f);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        orderedRgb, 3, {lumaMap}));
+    motioncam::RenderSettings orderedSettings;
+    orderedSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_CROPPING |
+        motioncam::RENDER_OPT_DRAFT |
+        motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+    orderedSettings.cropTarget = "4x4";
+    orderedSettings.draftScale = 2;
+    motioncam::vfs::DngPixelPipelineOptions orderedPipeline;
+    orderedPipeline.hasCfa = false;
+    orderedPipeline.outputScale = 2;
+    motioncam::vfs::processDngPixels(
+        orderedRgb, orderedSettings, orderedPipeline);
+    motioncam::DNGImageLayout orderedLayout;
+    assert(motioncam::DNGDecoder::getImageLayout(
+        orderedRgb, orderedLayout));
+    assert(orderedLayout.width == 2 && orderedLayout.height == 2);
+    assert(orderedLayout.pixels == motioncam::DNGPixelLayout::CFA);
+    std::vector<motioncam::GainMap> consumedOrderedMap;
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        orderedRgb, 3, consumedOrderedMap));
     motioncam::DNGFrameMetadata logMetadata;
     const auto logDng = makeLogCfaDng(1023, 0);
     assert(motioncam::DNGDecoder::getColorMetadata(logDng, logMetadata));
     // LinearizationTable has 1024 inputs, so it takes precedence over the
     // 16-bit container declared by BitsPerSample.
     assert(logMetadata.inputBitDepth == 10);
+    auto levelTaggedLog = logDng;
+    motioncam::RenderSettings levelSettings;
+    levelSettings.levels = "900/32";
+    motioncam::vfs::DngPixelPipelineOptions levelPipeline;
+    levelPipeline.hasCfa = true;
+    motioncam::vfs::processDngPixels(
+        levelTaggedLog, levelSettings, levelPipeline);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        levelTaggedLog, logDng));
+    assert(tagValue(levelTaggedLog, 50712).count == 1024);
+    assert(tagValue(levelTaggedLog, 50717).value == 900);
+    // DirectLog enters the shared pipeline as linear 16-bit RGB. KeepInput
+    // therefore targets 12-bit log unless a <=10-bit white-level override
+    // makes the effective input and output depth identical.
+    auto directLogDefault = makeDng(
+        1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
+    const auto directLogLinear = directLogDefault;
+    motioncam::RenderSettings directLogSettings;
+    directLogSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+    directLogSettings.logTransform = motioncam::LogTransformMode::KeepInput;
+    motioncam::vfs::DngPixelPipelineOptions directLogPipeline;
+    directLogPipeline.hasCfa = false;
+    directLogPipeline.inputQuantizationWhite = 4095;
+    directLogPipeline.linearInputBitDepth = 16;
+    motioncam::vfs::processDngPixels(
+        directLogDefault, directLogSettings, directLogPipeline);
+    assert(!motioncam::DNGDecoder::imagePayloadsEqual(
+        directLogDefault, directLogLinear));
+    motioncam::DNGFrameMetadata directLogMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        directLogDefault, directLogMetadata));
+    assert(directLogMetadata.inputBitDepth == 12);
+
+    auto directLogTwelveBit = directLogLinear;
+    directLogSettings.levels = "4095/Dynamic";
+    directLogPipeline.linearInputBitDepth = 12;
+    motioncam::vfs::processDngPixels(
+        directLogTwelveBit, directLogSettings, directLogPipeline);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        directLogTwelveBit, directLogLinear));
+    auto directLogReducedOverride = directLogLinear;
+    directLogSettings.levels = "1023/Dynamic";
+    directLogSettings.logTransform = motioncam::LogTransformMode::ReduceBy2Bit;
+    directLogPipeline.inputQuantizationWhite = 1023;
+    directLogPipeline.linearInputBitDepth = 10;
+    motioncam::vfs::processDngPixels(
+        directLogReducedOverride, directLogSettings, directLogPipeline);
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        directLogReducedOverride, directLogMetadata));
+    assert(directLogMetadata.inputBitDepth == 8);
     auto compressedA = uncompressedA, compressedB = uncompressedB;
     assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedA));
     assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedB));
@@ -408,6 +560,20 @@ int main() {
     assert(motioncam::vfs::outputFrameNumber(cadence[2]) == 2);
     assert(motioncam::vfs::outputTimestamp(
         cadence[2], 2000000000LL, 0, 1.0f, true) == 2000000000LL);
+
+    motioncam::RenderSettings proxySettings;
+    proxySettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_DRAFT);
+    proxySettings.draftScale = 4;
+    const auto mountedPlan = motioncam::vfs::planDngRender(
+        cadence[0], 0, 0, proxySettings, 24.0f, false, true);
+    assert(mountedPlan.nativeMetadataFrame && mountedPlan.scale == 1);
+    const auto finalizedPlan = motioncam::vfs::planDngRender(
+        cadence[0], 0, 0, proxySettings, 24.0f, true, true);
+    assert(!finalizedPlan.nativeMetadataFrame && finalizedPlan.scale == 4);
+    const auto stillPlan = motioncam::vfs::planDngRender(
+        cadence[0], 0, 0, proxySettings, 24.0f, false, false);
+    assert(!stillPlan.nativeMetadataFrame && stillPlan.scale == 4);
 
     // Source identity must not depend on timestamps being unique. Cameras can
     // emit repeated or repaired timestamps without making either frame a drop.

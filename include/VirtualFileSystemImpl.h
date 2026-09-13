@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cstdint>
 #include <functional>
@@ -178,6 +179,56 @@ void buildGalleryFrameMap(
 
 std::vector<Entry> filterEntries(
     const std::vector<Entry>& entries, const std::string& filter);
+
+// Common tail of every ingest path once it has produced a valid DNG. Keeping
+// container timing, sample packing, lens metadata and compression here avoids
+// each source subtly inventing its own output order.
+struct DngFinalizeOptions {
+    float frameRate = 0.0f;
+    Timestamp timestamp = 0;
+    bool writeTiming = true;
+    std::optional<double> isoOverlay;
+    bool packToWhiteLevel = false;
+    bool compression = false;
+    const GyroflowLensProfile* gyroflowLensProfile = nullptr;
+    std::string_view sourceName;
+};
+
+struct DngRenderPlan {
+    int outputFrameNumber = 0;
+    Timestamp outputTimestamp = 0;
+    int scale = 1;
+    bool nativeMetadataFrame = false;
+};
+
+DngRenderPlan planDngRender(const Entry& entry, Timestamp sourceTimestamp,
+                            Timestamp firstSourceTimestamp,
+                            const RenderSettings& settings, float frameRate,
+                            bool finalizing, bool numberedSequence = true);
+
+struct DngPixelPipelineOptions {
+    int cfaRepeatSize = 2;
+    std::array<uint8_t, 4> cfaPhase{0, 1, 1, 2};
+    bool hasCfa = false;
+    int outputScale = 1;
+    uint32_t inputQuantizationWhite = 0;
+    // Non-zero for sources which enter this pipeline as linear samples but
+    // use KeepInput as a source-specific log ceiling (DirectLog: 12 bits).
+    uint32_t linearInputBitDepth = 0;
+    const CalibrationData* calibration = nullptr;
+    double iso = 0.0;
+    double exposureTime = 0.0;
+    std::string_view sourceName;
+};
+
+void processDngPixels(std::vector<uint8_t>& dng,
+                      const RenderSettings& settings,
+                      const DngPixelPipelineOptions& options);
+bool decodeProcessedDngPreview(
+    const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview);
+
+void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
+                 const DngFinalizeOptions& options);
 
 std::optional<Entry> findEntry(
     const std::vector<Entry>& entries, const std::string& fullPath);

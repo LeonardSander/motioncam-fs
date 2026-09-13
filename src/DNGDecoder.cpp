@@ -107,6 +107,7 @@ namespace {
     }
 
     // DNG tag constants
+    constexpr uint16_t TIFF_TAG_OPCODE_LIST_1 = 51008;
     constexpr uint16_t TIFF_TAG_OPCODE_LIST_2 = 51009;
     constexpr uint16_t TIFF_TAG_OPCODE_LIST_3 = 51022;
     constexpr uint32_t OPCODE_WARP_RECTILINEAR = 1;
@@ -1871,6 +1872,98 @@ bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
     return true;
 }
 
+bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
+                                   const std::vector<uint8_t>& payload) {
+    if (opcodeList < 1 || opcodeList > 3 || payload.size() < 4) return false;
+    const uint16_t wanted = opcodeList == 1 ? TIFF_TAG_OPCODE_LIST_1
+        : opcodeList == 2 ? TIFF_TAG_OPCODE_LIST_2 : TIFF_TAG_OPCODE_LIST_3;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* entry = nullptr;
+    for (const auto& candidate : entries)
+        if (candidate.tag == wanted) { entry = &candidate; break; }
+    std::vector<uint8_t> output = payload;
+    if (entry && entry->count) {
+        if (entry->count < 4 || entry->valueOffset > data.size() ||
+            entry->count > data.size() - entry->valueOffset) return false;
+        const uint32_t oldCount = readBE32(data.data() + entry->valueOffset);
+        const uint32_t addedCount = readBE32(payload.data());
+        if (oldCount > std::numeric_limits<uint32_t>::max() - addedCount) return false;
+        output.assign(data.begin() + entry->valueOffset,
+                      data.begin() + entry->valueOffset + entry->count);
+        output.insert(output.end(), payload.begin() + 4, payload.end());
+        const uint32_t count = oldCount + addedCount;
+        output[0] = static_cast<uint8_t>(count >> 24);
+        output[1] = static_cast<uint8_t>(count >> 16);
+        output[2] = static_cast<uint8_t>(count >> 8);
+        output[3] = static_cast<uint8_t>(count);
+    }
+    auto requireOpcodeVersion = [&] {
+        bool versionLittle = little;
+        for (const auto& candidate : findTiffEntries(data, versionLittle)) {
+            if (candidate.tag != TIFF_TAG_DNG_BACKWARD_VERSION ||
+                candidate.type != TIFF_TYPE_BYTE || candidate.count < 4) continue;
+            if (data[candidate.valueOffset] < 1 ||
+                (data[candidate.valueOffset] == 1 &&
+                 data[candidate.valueOffset + 1] < 3)) {
+                data[candidate.valueOffset] = 1;
+                data[candidate.valueOffset + 1] = 3;
+                data[candidate.valueOffset + 2] = 0;
+                data[candidate.valueOffset + 3] = 0;
+            }
+        }
+        return true;
+    };
+    if (!entry) {
+        const uint32_t oldIfd = read32(data.data() + 4, little);
+        if (oldIfd + 2 > data.size()) return false;
+        const uint16_t oldCount = read16(data.data() + oldIfd, little);
+        const size_t oldEnd = static_cast<size_t>(oldIfd) + 2 +
+            static_cast<size_t>(oldCount) * 12;
+        if (oldEnd + 4 > data.size() ||
+            oldCount == std::numeric_limits<uint16_t>::max()) return false;
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t newIfd = static_cast<uint32_t>(data.size());
+        const uint16_t newCount = static_cast<uint16_t>(oldCount + 1);
+        data.resize(data.size() + 2 + static_cast<size_t>(newCount) * 12 + 4, 0);
+        std::vector<std::array<uint8_t, 12>> rebuilt;
+        rebuilt.reserve(newCount);
+        for (uint16_t i = 0; i < oldCount; ++i) {
+            std::array<uint8_t, 12> existing{};
+            std::memcpy(existing.data(), data.data() + oldIfd + 2 +
+                        static_cast<size_t>(i) * 12, 12);
+            rebuilt.push_back(existing);
+        }
+        std::array<uint8_t, 12> added{};
+        write16(added.data(), wanted, little);
+        write16(added.data() + 2, TIFF_TYPE_UNDEFINED, little);
+        write32(added.data() + 4, static_cast<uint32_t>(output.size()), little);
+        const uint32_t payloadOffset = static_cast<uint32_t>(data.size());
+        write32(added.data() + 8, payloadOffset, little);
+        rebuilt.push_back(added);
+        std::sort(rebuilt.begin(), rebuilt.end(), [little](const auto& a, const auto& b) {
+            return read16(a.data(), little) < read16(b.data(), little);
+        });
+        write16(data.data() + newIfd, newCount, little);
+        size_t destination = static_cast<size_t>(newIfd) + 2;
+        for (const auto& item : rebuilt) {
+            std::memcpy(data.data() + destination, item.data(), item.size());
+            destination += item.size();
+        }
+        std::memcpy(data.data() + destination, data.data() + oldEnd, 4);
+        write32(data.data() + 4, newIfd, little);
+        data.insert(data.end(), output.begin(), output.end());
+        return requireOpcodeVersion();
+    }
+    if (data.size() & 1u) data.push_back(0);
+    const uint32_t offset = static_cast<uint32_t>(data.size());
+    data.insert(data.end(), output.begin(), output.end());
+    write32(data.data() + entry->entryOffset + 4,
+            static_cast<uint32_t>(output.size()), little);
+    write32(data.data() + entry->entryOffset + 8, offset, little);
+    return requireOpcodeVersion();
+}
+
 bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
                                 const std::array<double, 4>& coefficients,
                                 double centerX, double centerY) {
@@ -2350,6 +2443,131 @@ bool DNGDecoder::repairExposureTime(std::vector<uint8_t>& data, double exposureT
         return true;
     }
     return false;
+}
+
+bool DNGDecoder::cropImage(std::vector<uint8_t>& data,
+                           uint32_t targetWidth, uint32_t targetHeight) {
+    if (!targetWidth || !targetHeight || !ensureUncompressed(data)) return false;
+    DecodedDNGImage decoded;
+    if (!decodeImage(data, decoded, false, false)) return false;
+    const uint32_t sourceWidth = decoded.layout.width;
+    const uint32_t sourceHeight = decoded.layout.height;
+    if (targetWidth > sourceWidth || targetHeight > sourceHeight) return false;
+    if (targetWidth == sourceWidth && targetHeight == sourceHeight) return true;
+    const uint32_t channels = decoded.layout.samplesPerPixel;
+    const uint32_t alignment = decoded.layout.pixels == DNGPixelLayout::CFA
+        ? static_cast<uint32_t>(std::max(2, decoded.layout.cfaRepeatSize)) : 1u;
+    targetWidth = (targetWidth / alignment) * alignment;
+    targetHeight = (targetHeight / alignment) * alignment;
+    if (!targetWidth || !targetHeight) return false;
+    uint32_t left = (sourceWidth - targetWidth) / 2;
+    uint32_t top = (sourceHeight - targetHeight) / 2;
+    left = (left / alignment) * alignment;
+    top = (top / alignment) * alignment;
+    std::vector<uint16_t> cropped(
+        static_cast<size_t>(targetWidth) * targetHeight * channels);
+    for (uint32_t y = 0; y < targetHeight; ++y)
+        std::copy_n(decoded.samples.begin() +
+                        (static_cast<size_t>(y + top) * sourceWidth + left) * channels,
+                    static_cast<size_t>(targetWidth) * channels,
+                    cropped.begin() + static_cast<size_t>(y) * targetWidth * channels);
+
+    auto translateMaps = [&](std::vector<GainMap>& maps) {
+        for (auto& map : maps) {
+            const double coordinateWidth = map.coordinateWidth
+                ? map.coordinateWidth : sourceWidth;
+            const double coordinateHeight = map.coordinateHeight
+                ? map.coordinateHeight : sourceHeight;
+            const double cropLeft = left * coordinateWidth / sourceWidth;
+            const double cropTop = top * coordinateHeight / sourceHeight;
+            const double cropWidth = targetWidth * coordinateWidth / sourceWidth;
+            const double cropHeight = targetHeight * coordinateHeight / sourceHeight;
+            map.originH = (map.originH * coordinateWidth - cropLeft) / cropWidth;
+            map.originV = (map.originV * coordinateHeight - cropTop) / cropHeight;
+            map.spacingH *= coordinateWidth / cropWidth;
+            map.spacingV *= coordinateHeight / cropHeight;
+            // Opcode bounds are image-pixel coordinates. Map spacing/origin
+            // use normalized sensor coordinates and therefore retain the
+            // independently recovered full-sensor extent above.
+            map.left = static_cast<uint32_t>(std::clamp(
+                static_cast<double>(map.left) - left, 0.0,
+                static_cast<double>(targetWidth)));
+            map.top = static_cast<uint32_t>(std::clamp(
+                static_cast<double>(map.top) - top, 0.0,
+                static_cast<double>(targetHeight)));
+            map.right = static_cast<uint32_t>(std::clamp(
+                static_cast<double>(map.right) - left, 0.0,
+                static_cast<double>(targetWidth)));
+            map.bottom = static_cast<uint32_t>(std::clamp(
+                static_cast<double>(map.bottom) - top, 0.0,
+                static_cast<double>(targetHeight)));
+        }
+        maps.erase(std::remove_if(maps.begin(), maps.end(), [](const GainMap& map) {
+            return map.left >= map.right || map.top >= map.bottom;
+        }), maps.end());
+    };
+    translateMaps(decoded.opcodeList2);
+    translateMaps(decoded.opcodeList3);
+
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const auto primary = primaryImageIfd(data, entries, little);
+    if (!primary) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == *primary && entry.tag == tag) return &entry;
+        return nullptr;
+    };
+    auto scalar = [&](const TiffEntry& entry) {
+        return entry.type == TIFF_TYPE_SHORT
+            ? static_cast<uint32_t>(read16(data.data() + entry.valueOffset, little))
+            : read32(data.data() + entry.valueOffset, little);
+    };
+    auto setScalar = [&](const TiffEntry& entry, uint32_t value) {
+        if (entry.type == TIFF_TYPE_SHORT)
+            write16(data.data() + entry.valueOffset, static_cast<uint16_t>(value), little);
+        else write32(data.data() + entry.valueOffset, value, little);
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto rowsE = find(TIFF_TAG_ROWS_PER_STRIP);
+    if (!widthE || !heightE || !offsetsE || !countsE || !rowsE ||
+        offsetsE->count != 1 || countsE->count != 1) return false;
+    const uint32_t stripOffset = scalar(*offsetsE);
+    const uint32_t stripBytes = scalar(*countsE);
+    std::vector<uint8_t> bytes(cropped.size() * sizeof(uint16_t));
+    for (size_t i = 0; i < cropped.size(); ++i) {
+        bytes[i * 2] = little ? cropped[i] & 0xff : cropped[i] >> 8;
+        bytes[i * 2 + 1] = little ? cropped[i] >> 8 : cropped[i] & 0xff;
+    }
+    setScalar(*widthE, targetWidth);
+    setScalar(*heightE, targetHeight);
+    setScalar(*rowsE, targetHeight);
+    setScalar(*countsE, static_cast<uint32_t>(bytes.size()));
+    auto setValues = [&](const TiffEntry* entry, std::initializer_list<double> values) {
+        if (!entry || entry->count < values.size()) return;
+        uint32_t index = 0;
+        for (const double value : values) {
+            if (entry->type == TIFF_TYPE_RATIONAL)
+                writeRational(data, *entry, index, value, little);
+            else {
+                const size_t size = entry->type == TIFF_TYPE_SHORT ? 2u : 4u;
+                const size_t at = entry->valueOffset + static_cast<size_t>(index) * size;
+                if (entry->type == TIFF_TYPE_SHORT)
+                    write16(data.data() + at, static_cast<uint16_t>(value), little);
+                else write32(data.data() + at, static_cast<uint32_t>(value), little);
+            }
+            ++index;
+        }
+    };
+    setValues(find(TIFF_TAG_ACTIVE_AREA), {0, 0,
+        static_cast<double>(targetHeight), static_cast<double>(targetWidth)});
+    setValues(find(TIFF_TAG_DEFAULT_CROP_ORIGIN), {0, 0});
+    setValues(find(TIFF_TAG_DEFAULT_CROP_SIZE), {
+        static_cast<double>(targetWidth), static_cast<double>(targetHeight)});
+    if (!replaceTiffStrip(data, stripOffset, stripBytes, bytes, little)) return false;
+    return replaceGainMaps(data, 2, decoded.opcodeList2) &&
+           replaceGainMaps(data, 3, decoded.opcodeList3);
 }
 
 bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
@@ -3533,17 +3751,6 @@ bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::strin
     const bool overridesBlack = !blackSelection.empty() &&
         blackSelection != "Dynamic" && blackSelection != "Static";
     if (overridesBlack && !black) return false;
-
-    // Numeric levels describe the linear domain. If the DNG stores a transfer
-    // table, consume it first so the override tags refer to the table's output.
-    // Keep every table output sample verbatim; unlike DirectLog, this path must
-    // not normalize or otherwise requantize the source DNG's linear values.
-    if ((overridesWhite || overridesBlack) && find(TIFF_TAG_LINEARIZATION_TABLE)) {
-        DecodedDNGImage image;
-        if (!decodeImage(data, image, false, true)) return false;
-        if (!encodeImage(data, image)) return false;
-        return overrideDataLevels(data, levels);
-    }
 
     auto writeLevel = [&](const TiffEntry& entry, uint32_t index, float value) {
         index = std::min(index, entry.count - 1);
@@ -5133,13 +5340,33 @@ bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGai
             neutral[color] *= adjustment.neutralScale[color];
         if (!updateMetadata(data, &baseline, &neutral)) return false;
     }
+    std::optional<GainMap> separatedLuminance;
     if (colorOnly) {
-        if (!reduceGainMapStackToColor(maps)) return false;
+        auto separation = separateGainMapLuminance(maps);
+        if (!separation.valid) return false;
+        separatedLuminance = std::move(separation.luminance);
+        DNGImageLayout layout;
+        if (!getImageLayout(data, layout)) return false;
+        separatedLuminance->top = 0;
+        separatedLuminance->left = 0;
+        separatedLuminance->bottom = layout.height;
+        separatedLuminance->right = layout.width;
+        separatedLuminance->plane = 0;
+        separatedLuminance->planes = 3;
+        separatedLuminance->rowPitch = 1;
+        separatedLuminance->colPitch = 1;
     }
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps}, normalizeGainMaps, false);
     if (!overwriteGainMapPayloads(data, opcode->valueOffset, payloads, maps)) return false;
-    return canonicalizeGainMapOpcodes(data);
+    if (!canonicalizeGainMapOpcodes(data)) return false;
+    if (separatedLuminance) {
+        std::vector<GainMap> luminanceMaps;
+        getGainMaps(data, 3, luminanceMaps);
+        luminanceMaps.push_back(std::move(*separatedLuminance));
+        if (!replaceGainMaps(data, 3, luminanceMaps)) return false;
+    }
+    return true;
 }
 
 bool DNGDecoder::repairGainMapCfaPhase(

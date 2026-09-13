@@ -57,9 +57,7 @@ private:
     
     bool isHLGVideo() const;
     void calculateFrameRateStats();
-    bool convertRGBToDNG(std::vector<uint16_t> rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp, bool jpegCompression = false,
-                         float gainMapExposureOffset = 0.0f,
-                         const std::array<float, 3>& gainMapNeutralScale = {1.0f, 1.0f, 1.0f},
+    bool convertRGBToDNG(std::vector<uint16_t> rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp,
                          double iso = 0.0, double shutterSpeed = 0.0,
                          double baselineExposure = 0.0,
                          const std::optional<std::array<float, 3>>& asShotNeutral = std::nullopt,
@@ -67,15 +65,10 @@ private:
                          const FrameMetadata* sourceMetadata = nullptr,
                          const std::vector<GainMap>& opcodeList2 = {},
                          const std::vector<GainMap>& opcodeList3 = {},
-                         int decodedWidth = 0, int decodedHeight = 0,
-                         bool inputLogEncoded = false);
+                         int decodedWidth = 0, int decodedHeight = 0);
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
     struct PreparedSidecarGainMaps {
-        std::vector<GainMap> bakeList2, bakeList3;
         std::vector<GainMap> opcodeList2, opcodeList3;
-        float exposureOffset = 0.0f;
-        std::array<float, 3> neutralScale{1.0f, 1.0f, 1.0f};
-        std::array<uint8_t, 4> cfa{2, 1, 1, 0};
     };
     struct ProcessedFrame {
         std::vector<uint16_t> rgb;
@@ -85,15 +78,9 @@ private:
         int frameNumber = 0;
         int width = 0;
         int height = 0;
-        bool inputLogEncoded = false;
     };
-    ProcessedFrame processFrame(const Entry& entry, bool dngOutput);
+    ProcessedFrame processFrame(const Entry& entry);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
-    void applySidecarGainMaps(std::vector<uint16_t>& rgbData, int frameNumber,
-                              const PreparedSidecarGainMaps& prepared,
-                              int imageWidth = 0, int imageHeight = 0,
-                              int sourceLeft = 0, int sourceTop = 0,
-                              int sourceWidth = 0, int sourceHeight = 0) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
 
