@@ -3889,7 +3889,10 @@ bool DNGDecoder::getImageLayout(const std::vector<uint8_t>& data,
 
 namespace {
 bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
-                                const RenderSettings& settings) {
+                                const RenderSettings& settings,
+                                uint32_t sourceWidth = 0,
+                                uint32_t sourceHeight = 0,
+                                uint32_t sourceScale = 1) {
     if (!(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) return true;
     std::vector<GainMap> opcode2 = image.opcodeList2;
     std::vector<GainMap> opcode3 = image.opcodeList3;
@@ -3926,20 +3929,33 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
         cfaPhase = cfaColorsFromPhase(settings.cfaPhase);
     if (rgb) maps = collapseCfaGainMapsForRgb(maps, cfaPhase);
     const uint32_t channels = rgb ? image.layout.samplesPerPixel : 1;
+    if (!sourceWidth) sourceWidth = image.layout.width;
+    if (!sourceHeight) sourceHeight = image.layout.height;
+    sourceScale = std::max(1u, sourceScale);
+    auto sourceCoordinate = [](uint32_t coordinate, uint32_t scale,
+                               uint32_t limit) {
+        // For an even proxy stride, retain the reduced pixel's CFA parity
+        // instead of using a fixed block center (which would select one phase
+        // for every output pixel).
+        return std::min(limit - 1, coordinate * scale +
+                        (scale > 1 ? (coordinate & 1u) : 0u));
+    };
     if (channels != 1 && channels != 3) return false;
     const uint32_t phaseGroup = static_cast<uint32_t>(
         std::max(1, image.layout.cfaRepeatSize / 2));
     auto gainAt = [&](const GainMap& map, uint32_t x, uint32_t y, uint32_t channel) {
-        if (!validGainMap(map) || x < map.left || x >= map.right ||
-            y < map.top || y >= map.bottom) return 1.0f;
-        if (map.channels == 1 && ((y - map.top) % map.rowPitch ||
-                                  (x - map.left) % map.colPitch)) return 1.0f;
+        const uint32_t sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
+        const uint32_t sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
+        if (!validGainMap(map) || sourceX < map.left || sourceX >= map.right ||
+            sourceY < map.top || sourceY >= map.bottom) return 1.0f;
+        if (map.channels == 1 && ((sourceY - map.top) % map.rowPitch ||
+                                  (sourceX - map.left) % map.colPitch)) return 1.0f;
         const uint32_t pixelPhase = static_cast<uint32_t>(gainMapPhaseChannel(
-            x, y, 0, 0, phaseGroup));
+            sourceX, sourceY, 0, 0, phaseGroup));
         const uint32_t pixelColor = cfaPhase[pixelPhase];
         return sampleGainMapNormalized(map,
-            (static_cast<double>(x) + 0.5) / image.layout.width,
-            (static_cast<double>(y) + 0.5) / image.layout.height,
+            (static_cast<double>(sourceX) + 0.5) / sourceWidth,
+            (static_cast<double>(sourceY) + 0.5) / sourceHeight,
             [&](uint32_t sx, uint32_t sy) {
                 if (rgb)
                     return gainMapColorValueAt(
@@ -3963,7 +3979,10 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                 float gain = 1.0f;
                 for (const auto& map : maps) gain *= gainAt(map, x, y, channel);
                 const size_t levelChannel = rgb ? channel :
-                    gainMapPhaseChannel(x, y, 0, 0, phaseGroup);
+                    gainMapPhaseChannel(
+                        sourceCoordinate(x, sourceScale, sourceWidth),
+                        sourceCoordinate(y, sourceScale, sourceHeight),
+                        0, 0, phaseGroup);
                 const double black = image.metadata.blackLevelCount
                     ? image.metadata.blackLevel[std::min<size_t>(
                           levelChannel, image.metadata.blackLevelCount - 1)] : 0.0;
@@ -3984,7 +4003,50 @@ bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
                                bool applyPreviewScale) {
     DecodedDNGImage image;
     if (!decodeImage(std::move(dngData), image)) return false;
-    if (!bakeDecodedPreviewGainMaps(image, settings)) return false;
+    const uint32_t requestedPreviewScale =
+        applyPreviewScale && (settings.options & RENDER_OPT_DRAFT)
+        ? static_cast<uint32_t>(std::max(1, settings.draftScale)) : 1u;
+    // Ordinary Bayer proxy previews do not need full-resolution demosaic or
+    // gain-map traversal. Decimate the CFA first, while retaining the source
+    // geometry for gain-map interpolation. Restrict this to the nearest/HQ
+    // independent path; quad-Bayer, crop, and remosaic layouts have topology
+    // requirements that are handled by the existing full-resolution path.
+    const bool hasCrop = !settings.cropTarget.empty() && settings.cropTarget != "0x0";
+    const bool fastCfaProxy = applyPreviewScale && requestedPreviewScale > 1 &&
+        (requestedPreviewScale % 2) == 0 &&
+        image.layout.pixels == DNGPixelLayout::CFA &&
+        image.layout.cfaRepeatSize <= 2 &&
+        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
+        !(settings.options & RENDER_OPT_REMOSAIC_TO_BAYER) && !hasCrop;
+    const uint32_t sourceWidth = image.layout.width;
+    const uint32_t sourceHeight = image.layout.height;
+    uint32_t gainMapSourceScale = 1;
+    if (fastCfaProxy) {
+        const uint32_t proxyWidth = (sourceWidth / requestedPreviewScale) & ~1u;
+        const uint32_t proxyHeight = (sourceHeight / requestedPreviewScale) & ~1u;
+        if (!proxyWidth || !proxyHeight) return false;
+        std::vector<uint16_t> reduced(
+            static_cast<size_t>(proxyWidth) * proxyHeight);
+        for (uint32_t y = 0; y < proxyHeight; ++y) {
+            // Keep the output pixel's Bayer parity. With an even stride,
+            // sampling a fixed center would select one CFA phase everywhere
+            // and produce a monochrome/pink demosaic.
+            const uint32_t sourceY = std::min(
+                sourceHeight - 1, y * requestedPreviewScale + (y & 1u));
+            for (uint32_t x = 0; x < proxyWidth; ++x) {
+                const uint32_t sourceX = std::min(
+                    sourceWidth - 1, x * requestedPreviewScale + (x & 1u));
+                reduced[static_cast<size_t>(y) * proxyWidth + x] =
+                    image.samples[static_cast<size_t>(sourceY) * sourceWidth + sourceX];
+            }
+        }
+        image.samples = std::move(reduced);
+        image.layout.width = proxyWidth;
+        image.layout.height = proxyHeight;
+        gainMapSourceScale = requestedPreviewScale;
+    }
+    if (!bakeDecodedPreviewGainMaps(
+            image, settings, sourceWidth, sourceHeight, gainMapSourceScale)) return false;
     frame.metadata = image.metadata;
     frame.timestamp = image.timestamp;
     uint32_t width = image.layout.width;
@@ -4073,8 +4135,9 @@ bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
         }
     }
 
-    const uint32_t previewScale = applyPreviewScale && (settings.options & RENDER_OPT_DRAFT)
-        ? static_cast<uint32_t>(std::max(1, settings.draftScale)) : 1u;
+    // The fast CFA path is already at the requested scale. Other layouts keep
+    // the established post-demosaic reduction behavior.
+    const uint32_t previewScale = fastCfaProxy ? 1u : requestedPreviewScale;
     if (previewScale > 1) {
         std::vector<uint16_t> reduced;
         uint32_t reducedWidth = 0, reducedHeight = 0;

@@ -2419,20 +2419,26 @@ void MainWindow::startGalleryPerformanceTest(
     state->playbackMs = std::max(250, playbackMilliseconds);
     for (const auto& file : mMountedFiles) state->mounts.push_back(file.mountId);
 
-    // Exercise full-resolution nearest-neighbour reconstruction so the HQ
-    // demosaic cannot hide gallery scheduling and presentation costs.
+    // Exercise full-resolution nearest-neighbour reconstruction by default so
+    // the HQ demosaic cannot hide gallery scheduling and presentation costs.
+    // A proxy-preserving diagnostic run can opt out for scale-specific tests.
+    const bool preserveGalleryProxy = qEnvironmentVariableIsSet(
+        "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY");
     for (const auto mountId : state->mounts) {
         auto settings = settingsForMount(mountId);
         settings.options = static_cast<motioncam::FileRenderOptions>(
             static_cast<unsigned int>(settings.options) &
-            ~(static_cast<unsigned int>(motioncam::RENDER_OPT_DRAFT) |
-              static_cast<unsigned int>(motioncam::RENDER_OPT_HIGHER_CFA_HQ)));
-        settings.draftScale = 1;
+            ~(static_cast<unsigned int>(preserveGalleryProxy
+                    ? motioncam::RENDER_OPT_HIGHER_CFA_HQ
+                    : (motioncam::RENDER_OPT_DRAFT |
+                       motioncam::RENDER_OPT_HIGHER_CFA_HQ))));
+        if (!preserveGalleryProxy) settings.draftScale = 1;
         mLocalSettings.insert(mountId, settings);
         mFuseFilesystem->updateOptions(mountId, settings);
     }
     spdlog::info(
-        "GALLERY_PERF event=gallery_mode resolution=full hq=false demosaic=nearest window=maximized");
+        "GALLERY_PERF event=gallery_mode resolution={} hq=false demosaic=nearest window=maximized",
+        preserveGalleryProxy ? "proxy" : "full");
 
     QElapsedTimer gallerySetupTimer;
     gallerySetupTimer.start();

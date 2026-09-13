@@ -301,7 +301,16 @@ void VirtualFileSystemImpl_DNG::init() {
             (static_cast<size_t>(width) * channels * storedBits + 7) / 8;
         const size_t metadataBytes = frameIndex < mSourceMetadataSizes.size()
             ? mSourceMetadataSizes[frameIndex] : transformedMetadataAllowance;
-        return rowBytes * height + metadataBytes + transformedMetadataAllowance;
+        // The packed estimate is normally tight, but gain-map baking,
+        // metadata repair, and writers that promote samples to 16-bit can
+        // produce a larger strip than the selected storage bit depth implies.
+        // Never advertise less than an uncompressed 16-bit payload plus room
+        // for transformed metadata; a projected mount must not truncate it.
+        const size_t uncompressedUpperBound =
+            static_cast<size_t>(width) * height * channels * sizeof(uint16_t);
+        return std::max(rowBytes * height,
+                        uncompressedUpperBound) + metadataBytes +
+               transformedMetadataAllowance;
     };
 
     std::vector<size_t> measuredDngSizes(frames.size());
@@ -412,7 +421,11 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     DNGDecoder::beginForegroundWork();
     struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
     std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
-    {
+    // Gainmaps-only is a diagnostic flat-field view. Its grouped scalar-map
+    // and origin semantics must match the mounted bake path; the lightweight
+    // direct preview baker does not implement all of those DNG variants.
+    // Route this mode through the canonical bakeGainMaps implementation.
+    if (!(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP)) {
         try {
             // Preview decoding consumes the source storage layout directly;
             // avoid first rebuilding the same samples as an uncompressed DNG.
@@ -439,7 +452,10 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     }
     materializeLock.unlock();
     auto bytes = transformFrame(frameIt->second, outputTimestamp, false, false);
-    return DNGDecoder::decodePreview(std::move(bytes), mConfig, preview);
+    const bool transformedProxy = mConfig.streamingPreview &&
+        vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1;
+    return DNGDecoder::decodePreview(
+        std::move(bytes), mConfig, preview, !transformedProxy);
 }
 
 VirtualFileSystemImpl_DNG::PreparedFrame

@@ -1138,11 +1138,13 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput
     const int proxyScale = vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale);
     const bool sequenceMetadataFrame = dngOutput && !mConfig.streamingPreview &&
         vfs::outputFrameNumber(entry) == 0;
-    const bool sourceCropRequested =
-        (mConfig.options & RENDER_OPT_CROPPING) ||
-        (mCalibration && mCalibration->hasLeftTopCropStride);
+    // Decode proxy frames at their final scale whenever HQ reduction is not
+    // requested. Cropping used to disable this fast path, forcing a full-size
+    // RGB allocation followed by a crop and a second reduction buffer. Crop
+    // coordinates are converted to proxy pixels below, so the source-space
+    // mapping used by gain-map sampling remains unchanged.
     const bool directProxyDecode = proxyScale > 1 && !sequenceMetadataFrame &&
-        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ) && !sourceCropRequested;
+        !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ);
     result.width = sequenceMetadataFrame && proxyScale > 1
         ? mWidth : (directProxyDecode ? mWidth / proxyScale : 0);
     result.height = sequenceMetadataFrame && proxyScale > 1
@@ -1185,12 +1187,13 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, bool dngOutput
         result.height = targetHeight;
     };
     if (mCalibration && mCalibration->hasLeftTopCropStride)
-        cropRgb(mCalibration->leftTopCropStride[0],
-                mCalibration->leftTopCropStride[1], false);
+        cropRgb(std::max(1, mCalibration->leftTopCropStride[0] / proxyScale),
+                std::max(1, mCalibration->leftTopCropStride[1] / proxyScale), false);
     if (mConfig.options & RENDER_OPT_CROPPING) {
         uint32_t cropWidth = 0, cropHeight = 0, ignoredStride = 0;
         utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, ignoredStride);
-        cropRgb(static_cast<int>(cropWidth), static_cast<int>(cropHeight), true);
+        cropRgb(std::max(1, static_cast<int>(cropWidth) / proxyScale),
+                std::max(1, static_cast<int>(cropHeight) / proxyScale), true);
     }
     applySidecarGainMaps(result.rgb, result.frameNumber, result.gainMaps,
                          result.width, result.height,
