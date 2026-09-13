@@ -211,6 +211,9 @@ std::optional<int> readDesktopIni(
 std::vector<GainMap> loadSidecarGainMaps(
     const nlohmann::json& sidecar, size_t frameNumber, const char* field);
 
+bool hasSidecarGainMaps(
+    const nlohmann::json& sidecar, size_t frameNumber, const char* field);
+
 void replaceSidecarGainMapOpcodes(
     std::vector<uint8_t>& dng, const nlohmann::json& sidecar,
     size_t frameNumber, bool replaceList2 = true, bool replaceList3 = true);

@@ -183,6 +183,15 @@ private:
 } // namespace
 
 int main() {
+    motioncam::RenderSettings exposureSettings;
+    exposureSettings.cameraModel.clear();
+    exposureSettings.exposureCompensation = "0.8";
+    assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) - 0.8f) < 1e-6f);
+    exposureSettings.exposureCompensation = " -1.25ev ";
+    assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) + 1.25f) < 1e-6f);
+    exposureSettings.exposureCompensation = "0.8invalid";
+    assert(motioncam::vfs::configuredExposureOffset(exposureSettings) == 0.0f);
+
     const std::array<float, 4> black{64.0f, 64.0f, 64.0f, 64.0f};
     assert(motioncam::vfs::getDisplayDataLevels(
         15408.0f, black, 15408.0f, black,

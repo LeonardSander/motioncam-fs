@@ -1,4 +1,6 @@
 #include "Utils.h"
+#include "GainMapBake.h"
+#include "DNGImage.h"
 
 #include <array>
 #include <cassert>
@@ -7,6 +9,80 @@
 #include <vector>
 
 int main() {
+    const auto rggb = motioncam::cfaColorsFromPhase("rggb");
+    assert(motioncam::cfaColorAt(rggb, 0, 0) == 0);
+    assert(motioncam::cfaColorAt(rggb, 1, 0) == 1);
+    assert(motioncam::cfaColorAt(rggb, 0, 1) == 1);
+    assert(motioncam::cfaColorAt(rggb, 1, 1) == 2);
+
+    std::vector<motioncam::GainMap> cfaMaps(4);
+    const std::array<float, 4> phaseGains{2.0f, 3.0f, 5.0f, 7.0f};
+    for (size_t phaseIndex = 0; phaseIndex < cfaMaps.size(); ++phaseIndex) {
+        auto& map = cfaMaps[phaseIndex];
+        map.top = phaseIndex / 2;
+        map.left = phaseIndex % 2;
+        map.bottom = 8;
+        map.right = 8;
+        map.coordinateWidth = 8;
+        map.coordinateHeight = 8;
+        map.plane = 0;
+        map.planes = 1;
+        map.rowPitch = map.colPitch = 2;
+        map.width = map.height = map.channels = 1;
+        map.spacingV = map.spacingH = 1.0;
+        map.originV = map.originH = 0.0;
+        map.data = {phaseGains[phaseIndex]};
+    }
+    motioncam::GainMap luminance = cfaMaps.front();
+    luminance.top = luminance.left = 0;
+    luminance.rowPitch = luminance.colPitch = 1;
+    luminance.data = {11.0f};
+    cfaMaps.push_back(luminance);
+    const auto rgbMaps = motioncam::collapseCfaGainMapsForRgb(cfaMaps, rggb);
+    assert(rgbMaps.size() == 2);
+    assert(rgbMaps[0].channels == 3);
+    assert((rgbMaps[0].data == std::vector<float>{2.0f, 4.0f, 7.0f}));
+    assert(rgbMaps[1].channels == 1 && rgbMaps[1].data[0] == 11.0f);
+
+    auto shiftedCfaMaps = std::vector<motioncam::GainMap>(cfaMaps.begin(), cfaMaps.begin() + 4);
+    shiftedCfaMaps[1].originH += shiftedCfaMaps[1].spacingH * 0.5;
+    shiftedCfaMaps[2].originV += shiftedCfaMaps[2].spacingV * 0.5;
+    shiftedCfaMaps[3].originH += shiftedCfaMaps[3].spacingH * 0.5;
+    shiftedCfaMaps[3].originV += shiftedCfaMaps[3].spacingV * 0.5;
+    const auto shiftedRgbMaps = motioncam::collapseCfaGainMapsForRgb(
+        shiftedCfaMaps, rggb);
+    assert(shiftedRgbMaps.size() == 1 && shiftedRgbMaps[0].channels == 3);
+    assert((shiftedRgbMaps[0].data == std::vector<float>{2.0f, 4.0f, 7.0f}));
+    assert(shiftedRgbMaps[0].originH == 0.0);
+    assert(shiftedRgbMaps[0].originV == 0.0);
+
+    motioncam::GainMap rgbMap = cfaMaps.front();
+    rgbMap.top = rgbMap.left = 0;
+    rgbMap.rowPitch = rgbMap.colPitch = 1;
+    rgbMap.channels = 3;
+    rgbMap.data = {2.0f, 4.0f, 7.0f};
+    const auto cfaRgbPlanes = motioncam::expandGainMapsForCfa(
+        std::vector<motioncam::GainMap>{rgbMap}, rggb);
+    assert(cfaRgbPlanes.size() == 4);
+    assert(cfaRgbPlanes[0][0] == 2.0f);
+    assert(cfaRgbPlanes[1][0] == 4.0f);
+    assert(cfaRgbPlanes[2][0] == 4.0f);
+    assert(cfaRgbPlanes[3][0] == 7.0f);
+    const auto cfaLumaPlanes = motioncam::expandGainMapsForCfa(
+        std::vector<motioncam::GainMap>{luminance}, rggb);
+    for (const auto& plane : cfaLumaPlanes)
+        assert(plane[0] == 11.0f);
+    motioncam::GainMap lonePhase = luminance;
+    lonePhase.top = 1;
+    lonePhase.left = 0;
+    lonePhase.rowPitch = lonePhase.colPitch = 2;
+    const auto lonePhasePlanes = motioncam::expandGainMapsForCfa(
+        std::vector<motioncam::GainMap>{lonePhase}, rggb);
+    assert(lonePhasePlanes[0][0] == 1.0f);
+    assert(lonePhasePlanes[1][0] == 1.0f);
+    assert(lonePhasePlanes[2][0] == 11.0f);
+    assert(lonePhasePlanes[3][0] == 1.0f);
+
     constexpr int width = 12;
     constexpr int height = 10;
     const std::array<uint8_t, 4> phase = {0, 1, 1, 2}; // RGGB

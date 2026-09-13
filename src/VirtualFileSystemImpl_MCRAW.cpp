@@ -328,7 +328,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
         cameraFrameMetadata, effectiveCfaArrangement(
             mSettings, mCalibration, cameraConfig.sensorArrangement));
     utils::overrideLensShadingMap(cameraFrameMetadata,
-        vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"));
+        vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"),
+        cfaColorsFromPhase(effectiveCfaArrangement(
+            mSettings, mCalibration, cameraConfig.sensorArrangement)));
 
     // Match DNG-sequence sizing by accounting for the metadata that will be
     // serialized alongside the pixels. JSON sidecars may store compressed gain
@@ -611,7 +613,16 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
                 frameSettings, mCalibration, cameraConfig.sensorArrangement));
         utils::overrideLensShadingMap(frameMetadata,
             vfs::loadSidecarGainMaps(mSidecarMetadata,
-                frameIt->second, "gainMaps"));
+                frameIt->second, "gainMaps"),
+            cfaColorsFromPhase(effectiveCfaArrangement(
+                frameSettings, mCalibration, cameraConfig.sensorArrangement)));
+        const bool finalizeDeferredBake = jpegCompression &&
+            (frameSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+            !(frameSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
+            vfs::hasSidecarGainMaps(
+                mSidecarMetadata, frameIt->second, "deferredGainMaps") &&
+            !vfs::loadSidecarGainMaps(
+                mSidecarMetadata, frameIt->second, "deferredGainMaps").empty();
         auto output = utils::generateDng(
             frameData,
             frameMetadata,
@@ -621,7 +632,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             mBaselineExpValue,
             frameSettings,
             mCalibration,
-            jpegCompression,
+            jpegCompression && !finalizeDeferredBake,
             exposureOverride,
             neutralOverride);
         if (!output)
@@ -632,6 +643,15 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         std::vector<uint8_t> timed(output->begin(), output->end());
         applySidecarGainMapOpcodes(
             timed, frameIt->second);
+        if (finalizeDeferredBake) {
+            const bool compressed = isLossyJpegDct(frameSettings.jxlDistance)
+                ? DNGDecoder::compressLossyJPEG(timed)
+                : frameSettings.jxlDistance < 0.0f
+                    ? DNGDecoder::compressLosslessJPEG(timed)
+                    : DNGDecoder::compressJPEGXL(timed, frameSettings.jxlDistance);
+            if (!compressed)
+                throw std::runtime_error("Could not compress finalized MCRAW DNG");
+        }
         if (mGyroflowLensProfile && !mSettings.cameraNativeStaging)
             vfs::applyGyroflowLensProfile(timed, *mGyroflowLensProfile);
         if (!DNGDecoder::setTimingMetadata(timed, mFps, outputTimestamp))
@@ -669,7 +689,9 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         frameMetadata, effectiveCfaArrangement(mSettings, mCalibration,
                                                 cameraConfig.sensorArrangement));
     utils::overrideLensShadingMap(frameMetadata,
-        vfs::loadSidecarGainMaps(mSidecarMetadata, frameIt->second, "gainMaps"));
+        vfs::loadSidecarGainMaps(mSidecarMetadata, frameIt->second, "gainMaps"),
+        cfaColorsFromPhase(effectiveCfaArrangement(
+            mSettings, mCalibration, cameraConfig.sensorArrangement)));
     std::optional<float> exposureOverride;
     if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
         exposureOverride = mSmoothedExposureOffsets.at(timestamp);
@@ -693,22 +715,31 @@ void VirtualFileSystemImpl_MCRAW::applySidecarGainMapOpcodes(
             throw std::runtime_error("Could not exclude MCRAW gain maps");
         return;
     }
-    if (!mSidecarMetadata.contains("dynamic") ||
-        !mSidecarMetadata["dynamic"].contains("frames") ||
-        frameIndex >= mSidecarMetadata["dynamic"]["frames"].size()) return;
-    const auto& frame = mSidecarMetadata["dynamic"]["frames"][frameIndex];
     const bool bake = mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     // OpcodeList2 was already built from the sidecar-overridden frame metadata
     // by generateDng(). Only the independently stored deferred layer still
     // needs to be attached here. Replacing and transforming list 2 again would
     // run color reduction/optimization twice.
+    const bool colorOnly = mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    const bool hasDeferred = vfs::hasSidecarGainMaps(
+        mSidecarMetadata, frameIndex, "deferredGainMaps");
+    const bool bakeDeferred = bake && !colorOnly && hasDeferred &&
+        !vfs::loadSidecarGainMaps(
+            mSidecarMetadata, frameIndex, "deferredGainMaps").empty();
     vfs::replaceSidecarGainMapOpcodes(
         dng, mSidecarMetadata, frameIndex, false,
-        !bake && !(mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR));
-    if (bake && (mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR)) {
-        const char* field = frame.contains("deferredGainMaps")
+        !colorOnly);
+    if (bakeDeferred &&
+        !DNGDecoder::bakeGainMaps(
+            dng, mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+            false, mSettings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
+            mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP))
+        throw std::runtime_error("Could not bake MCRAW deferred gain-map override");
+    if (bake && colorOnly) {
+        const char* field = vfs::hasSidecarGainMaps(
+            mSidecarMetadata, frameIndex, "deferredGainMaps")
             ? "deferredGainMaps" : "gainMaps";
-        if (frame.contains(field)) {
+        if (vfs::hasSidecarGainMaps(mSidecarMetadata, frameIndex, field)) {
             const auto maps = vfs::loadSidecarGainMaps(mSidecarMetadata, frameIndex, field);
             if (maps.size() == 1 && maps.front().channels == 1 &&
                 !DNGDecoder::replaceGainMaps(dng, 3, maps))

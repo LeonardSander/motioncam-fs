@@ -113,7 +113,8 @@ public:
                              bool colorOnly,
                              bool optimizeGainMaps = false,
                              bool debugGainMap = false,
-                             int cfaRepeatSizeOverride = 0);
+                             int cfaRepeatSizeOverride = 0,
+                             std::optional<std::array<uint8_t, 4>> cfaPhaseOverride = std::nullopt);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

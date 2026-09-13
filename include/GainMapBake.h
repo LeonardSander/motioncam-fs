@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,6 +21,11 @@ inline std::array<uint8_t, 4> cfaColorsFromPhase(std::string phase) {
     if (phase == "grbg") return {1, 0, 2, 1};
     if (phase == "gbrg") return {1, 2, 0, 1};
     return {2, 1, 1, 0};
+}
+
+constexpr uint8_t cfaColorAt(const std::array<uint8_t, 4>& cfa,
+                             uint32_t x, uint32_t y) {
+    return cfa[((y & 1u) << 1u) | (x & 1u)];
 }
 
 constexpr size_t gainMapPhaseChannel(uint32_t x, uint32_t y,
@@ -291,6 +297,156 @@ inline float gainMapColorValueAt(const Map& map, uint32_t x, uint32_t y,
             ++count;
         }
     return count ? sum / count : 1.0f;
+}
+
+// Convert complete groups of four scalar CFA phase maps into RGB maps. Red and
+// blue each come from one phase; the two green phases are averaged. Maps that
+// are already RGB, four-channel CFA, or scalar luminance are retained.
+template<typename Map>
+inline std::vector<Map> collapseCfaGainMapsForRgb(
+        const std::vector<Map>& maps, const std::array<uint8_t, 4>& cfa) {
+    std::vector<Map> result;
+    std::vector<bool> consumed(maps.size(), false);
+    auto compatible = [](const Map& a, const Map& b) {
+        const auto equivalentOrigin = [](double left, double right, double spacing) {
+            const double difference = std::abs(left - right);
+            return difference < 1e-9 ||
+                (spacing > 0.0 && std::abs(difference - spacing * 0.5) < 1e-9);
+        };
+        return a.channels == 1 && b.channels == 1 &&
+            a.rowPitch == 2 && b.rowPitch == 2 &&
+            a.colPitch == 2 && b.colPitch == 2 &&
+            a.width == b.width && a.height == b.height &&
+            a.bottom == b.bottom && a.right == b.right &&
+            a.plane == b.plane && a.planes == b.planes &&
+            a.spacingV == b.spacingV && a.spacingH == b.spacingH &&
+            equivalentOrigin(a.originV, b.originV, a.spacingV) &&
+            equivalentOrigin(a.originH, b.originH, a.spacingH);
+    };
+    for (size_t seed = 0; seed < maps.size(); ++seed) {
+        if (consumed[seed]) continue;
+        const auto& first = maps[seed];
+        if (first.channels != 1 || first.rowPitch != 2 || first.colPitch != 2) {
+            consumed[seed] = true;
+            result.push_back(first);
+            continue;
+        }
+        uint32_t baseTop = first.top, baseLeft = first.left;
+        for (size_t i = seed; i < maps.size(); ++i)
+            if (!consumed[i] && compatible(first, maps[i])) {
+                baseTop = std::min(baseTop, maps[i].top);
+                baseLeft = std::min(baseLeft, maps[i].left);
+            }
+        std::array<size_t, 4> phaseIndex{};
+        phaseIndex.fill(maps.size());
+        for (size_t i = seed; i < maps.size(); ++i) {
+            if (consumed[i] || !compatible(first, maps[i]) ||
+                maps[i].top < baseTop || maps[i].top >= baseTop + 2 ||
+                maps[i].left < baseLeft || maps[i].left >= baseLeft + 2)
+                continue;
+            const size_t phase = ((maps[i].top - baseTop) << 1u) |
+                                 (maps[i].left - baseLeft);
+            if (phaseIndex[phase] == maps.size()) phaseIndex[phase] = i;
+        }
+        if (std::any_of(phaseIndex.begin(), phaseIndex.end(), [&](size_t i) {
+                return i == maps.size();
+            })) {
+            consumed[seed] = true;
+            result.push_back(first);
+            continue;
+        }
+        Map rgb = first;
+        rgb.top = baseTop;
+        rgb.left = baseLeft;
+        rgb.rowPitch = 1;
+        rgb.colPitch = 1;
+        rgb.channels = 3;
+        for (const size_t index : phaseIndex) {
+            rgb.coordinateWidth = std::max(rgb.coordinateWidth, maps[index].coordinateWidth);
+            rgb.coordinateHeight = std::max(rgb.coordinateHeight, maps[index].coordinateHeight);
+            rgb.originH = std::min(rgb.originH, maps[index].originH);
+            rgb.originV = std::min(rgb.originV, maps[index].originV);
+        }
+        const size_t points = static_cast<size_t>(rgb.width) * rgb.height;
+        rgb.data.assign(points * 3, 0.0f);
+        std::array<uint32_t, 3> counts{};
+        for (const size_t index : phaseIndex) {
+            consumed[index] = true;
+            const auto& map = maps[index];
+            const size_t color = cfaColorAt(cfa, map.left, map.top);
+            ++counts[color];
+            for (size_t point = 0; point < points; ++point)
+                rgb.data[point * 3 + color] += map.data[point];
+        }
+        if (std::any_of(counts.begin(), counts.end(), [](uint32_t count) {
+                return count == 0;
+            })) {
+            for (const size_t index : phaseIndex) consumed[index] = false;
+            consumed[seed] = true;
+            result.push_back(first);
+            continue;
+        }
+        for (size_t point = 0; point < points; ++point)
+            for (size_t color = 0; color < 3; ++color)
+                rgb.data[point * 3 + color] /= counts[color];
+        result.push_back(std::move(rgb));
+    }
+    return result;
+}
+
+// Expand a gain-map layer for mosaiced pixels. RGB channels are duplicated to
+// both CFA green phases, and a scalar luminance map is duplicated to all four.
+template<typename Map>
+inline std::vector<std::vector<float>> expandGainMapsForCfa(
+        const std::vector<Map>& maps, const std::array<uint8_t, 4>& cfa) {
+    if (maps.empty()) return {};
+    const uint32_t width = maps.front().width;
+    const uint32_t height = maps.front().height;
+    if (!width || !height) throw std::invalid_argument("Invalid gain-map dimensions");
+    const size_t points = static_cast<size_t>(width) * height;
+    std::vector<std::vector<float>> planes(4, std::vector<float>(points, 1.0f));
+    if (maps.size() == 1) {
+        const auto& map = maps.front();
+        if (map.channels != 1 && map.channels != 3 && map.channels != 4)
+            throw std::invalid_argument("Gain map requires 1, 3, or 4 channels");
+        if (map.data.size() != points * map.channels)
+            throw std::invalid_argument("Invalid gain-map payload size");
+        for (size_t point = 0; point < points; ++point)
+            for (uint32_t phase = 0; phase < 4; ++phase) {
+                if (map.channels == 1) {
+                    const uint32_t phaseY = phase / 2;
+                    const uint32_t phaseX = phase % 2;
+                    if (!map.rowPitch || !map.colPitch ||
+                        (phaseY + map.rowPitch - map.top % map.rowPitch) % map.rowPitch ||
+                        (phaseX + map.colPitch - map.left % map.colPitch) % map.colPitch)
+                        continue;
+                    planes[phase][point] = map.data[point];
+                } else {
+                    const uint32_t channel = map.channels == 3 ? cfa[phase] : phase;
+                    planes[phase][point] = map.data[point * map.channels + channel];
+                }
+            }
+        return planes;
+    }
+    if (maps.size() != 4)
+        throw std::invalid_argument("Gain-map layer requires one map or four CFA phases");
+    uint32_t baseTop = maps.front().top, baseLeft = maps.front().left;
+    for (const auto& map : maps) {
+        baseTop = std::min(baseTop, map.top);
+        baseLeft = std::min(baseLeft, map.left);
+    }
+    std::array<bool, 4> populated{};
+    for (const auto& map : maps) {
+        if (map.width != width || map.height != height || map.channels != 1 ||
+            map.data.size() != points || map.top < baseTop || map.top >= baseTop + 2 ||
+            map.left < baseLeft || map.left >= baseLeft + 2)
+            throw std::invalid_argument("Gain-map CFA phases are incompatible");
+        const size_t phase = ((map.top - baseTop) << 1u) | (map.left - baseLeft);
+        if (populated[phase]) throw std::invalid_argument("Gain-map CFA phase is repeated");
+        populated[phase] = true;
+        planes[phase] = map.data;
+    }
+    return planes;
 }
 
 template<typename Map, typename ValueAt>

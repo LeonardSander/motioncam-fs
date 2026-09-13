@@ -3877,7 +3877,13 @@ bool DNGDecoder::getImageLayout(const std::vector<uint8_t>& data,
             layout.cfaRepeatSize = 2;
             layout.cfaPhase = {0, 1, 1, 2};
         }
-    } else if (layout.samplesPerPixel != 3) return false;
+    } else {
+        if (layout.samplesPerPixel != 3) return false;
+        if (!getCFAMetadata(data, layout.cfaRepeatSize, layout.cfaPhase)) {
+            layout.cfaRepeatSize = 2;
+            layout.cfaPhase = {0, 1, 1, 2};
+        }
+    }
     return true;
 }
 
@@ -3911,6 +3917,10 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
         settings.options & RENDER_OPT_DEBUG_SHADING_MAP);
 
     const bool rgb = image.layout.pixels != DNGPixelLayout::CFA;
+    auto cfaPhase = image.layout.cfaPhase;
+    if (!settings.cfaPhase.empty() && settings.cfaPhase != "Don't override CFA")
+        cfaPhase = cfaColorsFromPhase(settings.cfaPhase);
+    if (rgb) maps = collapseCfaGainMapsForRgb(maps, cfaPhase);
     const uint32_t channels = rgb ? image.layout.samplesPerPixel : 1;
     if (channels != 1 && channels != 3) return false;
     const uint32_t phaseGroup = static_cast<uint32_t>(
@@ -3920,18 +3930,23 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
             y < map.top || y >= map.bottom) return 1.0f;
         if (map.channels == 1 && ((y - map.top) % map.rowPitch ||
                                   (x - map.left) % map.colPitch)) return 1.0f;
-        const uint32_t mapChannel = rgb
-            ? std::min(channel, map.channels - 1)
-            : map.channels >= 4
-                ? static_cast<uint32_t>(gainMapPhaseChannel(
-                      x, y, map.left, map.top, phaseGroup))
-                : 0u;
+        const uint32_t pixelPhase = static_cast<uint32_t>(gainMapPhaseChannel(
+            x, y, 0, 0, phaseGroup));
+        const uint32_t pixelColor = cfaPhase[pixelPhase];
         return sampleGainMapNormalized(map,
             (static_cast<double>(x) + 0.5) / image.layout.width,
             (static_cast<double>(y) + 0.5) / image.layout.height,
             [&](uint32_t sx, uint32_t sy) {
+                if (rgb)
+                    return gainMapColorValueAt(
+                        map, sx, sy, channel, cfaPhase);
+                if (map.channels == 3)
+                    return gainMapColorValueAt(
+                        map, sx, sy, pixelColor, cfaPhase);
+                const uint32_t mapChannel = map.channels >= 4
+                    ? std::min<uint32_t>(map.channels - 1, pixelPhase) : 0u;
                 return map.data[(static_cast<size_t>(sy) * map.width + sx) *
-                                map.channels + std::min(mapChannel, map.channels - 1)];
+                                map.channels + mapChannel];
             });
     };
     const double fallbackWhite = static_cast<double>(
@@ -4585,7 +4600,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool colorOnly,
                               bool optimizeGainMaps,
                               bool debugGainMap,
-                              int cfaRepeatSizeOverride) {
+                              int cfaRepeatSizeOverride,
+                              std::optional<std::array<uint8_t, 4>> cfaPhaseOverride) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -4731,6 +4747,19 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps},
         normalizeGainMaps, false);
+
+    int detectedRepeat = 2;
+    std::array<uint8_t, 4> detectedPhase{0, 1, 1, 2};
+    const bool detectedCfa = getCFAMetadata(data, detectedRepeat, detectedPhase);
+    int cfaRepeatSize = cfaRepeatSizeOverride;
+    if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0)
+        cfaRepeatSize = detectedCfa && detectedRepeat >= 2 && (detectedRepeat % 2) == 0
+            ? detectedRepeat : 2;
+    const std::array<uint8_t, 4> cfaPhase = cfaPhaseOverride
+        ? *cfaPhaseOverride : detectedCfa ? detectedPhase
+                                         : std::array<uint8_t, 4>{0, 1, 1, 2};
+    if (sourceIsRgb) maps = collapseCfaGainMapsForRgb(maps, cfaPhase);
+
     DecodedDNGImage decodedImage;
     if (!decodeImage(data, decodedImage)) {
         spdlog::warn("Could not decode DNG image for gain-map bake");
@@ -4746,13 +4775,6 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         write16(data.data() + linearizationE->entryOffset,
                 TIFF_TAG_UNUSED_LINEARIZATION_TABLE, little);
 
-    int cfaRepeatSize = cfaRepeatSizeOverride;
-    std::array<uint8_t, 4> cfaPhase{};
-    if (cfaRepeatSize < 2 || (cfaRepeatSize % 2) != 0) {
-        if (!getCFAMetadata(data, cfaRepeatSize, cfaPhase) || cfaRepeatSize < 2 ||
-            (cfaRepeatSize % 2) != 0)
-            cfaRepeatSize = 2;
-    }
     const uint32_t phaseGroup = static_cast<uint32_t>(cfaRepeatSize / 2);
     const size_t scalarPhaseMapCount = std::count_if(
         maps.begin(), maps.end(), [](const GainMap& map) {
@@ -4846,14 +4868,19 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         const size_t mapIndex = static_cast<size_t>(&map - maps.data());
         const double originH = effectiveOrigins[mapIndex].first;
         const double originV = effectiveOrigins[mapIndex].second;
-        const size_t channel = sourceIsRgb
-            ? std::min<size_t>(map.channels - 1, targetChannel)
-            : (map.channels >= 4
-                ? std::min<size_t>(map.channels - 1,
-                    gainMapPhaseChannel(x, y, map.left, map.top, phaseGroup))
-                : 0);
+        const size_t pixelPhase = gainMapPhaseChannel(
+            x, y, 0, 0, phaseGroup);
+        const size_t pixelColor = cfaPhase[pixelPhase];
         return sampleGainMapNormalized(map, nx, ny,
             [&](uint32_t sx, uint32_t sy) {
+                if (sourceIsRgb)
+                    return gainMapColorValueAt(
+                        map, sx, sy, targetChannel, cfaPhase);
+                if (map.channels == 3)
+                    return gainMapColorValueAt(
+                        map, sx, sy, pixelColor, cfaPhase);
+                const size_t channel = map.channels >= 4
+                    ? std::min<size_t>(map.channels - 1, pixelPhase) : 0;
                 return map.data[(static_cast<size_t>(sy) * map.width + sx) *
                                 map.channels + channel];
             }, originH, originV);
@@ -5247,7 +5274,7 @@ bool DNGDecoder::canonicalizeGainMapOpcodes(std::vector<uint8_t>& data) {
             if (!parseOpcodeGainMaps(one.data(), one.size(), maps) || maps.size() != 1)
                 return false;
             const GainMap& map = maps.front();
-            if (map.channels == 1) {
+            if (map.channels == 1 || (cfaPhases && map.channels == 3)) {
                 output.insert(output.end(), source + offset, source + offset + opcodeSize);
                 ++outputCount;
             } else {

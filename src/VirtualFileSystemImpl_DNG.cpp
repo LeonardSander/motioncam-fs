@@ -647,7 +647,7 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
             mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR,
             mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
             mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP,
-            topologyBeforeBake ? 2 : frameCfaSize))
+            topologyBeforeBake ? 2 : frameCfaSize, frameCfaPhase))
         throw std::runtime_error("Unsupported DNG layout for vignette baking: " + frame.filePath);
     logStage("metadata and gain-map processing", bytes.size());
 

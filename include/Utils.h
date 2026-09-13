@@ -40,7 +40,8 @@ struct PreviewFrame;
 namespace utils {
 
 void overrideLensShadingMap(
-    CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps);
+    CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps,
+    const std::array<uint8_t, 4>& cfa);
 
 // Parse WIDTHxHEIGHT or WIDTHxHEIGHT_STRIDE. Returns zero values for invalid
 // components; STRIDE is a pixel count, not a byte count.

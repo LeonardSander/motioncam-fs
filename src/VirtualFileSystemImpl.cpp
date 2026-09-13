@@ -7,6 +7,7 @@
 #include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
+#include <charconv>
 #include <sstream>
 #include <iomanip>
 #include <array>
@@ -188,8 +189,25 @@ Timestamp outputTimestamp(
 float configuredExposureOffset(const RenderSettings& settings) {
     float result = settings.cameraModel == "Panasonic" ? -2.0f : 0.0f;
     if (!settings.exposureCompensation.empty()) {
-        try { result += std::stof(settings.exposureCompensation); }
-        catch (const std::exception&) {}
+        std::string_view input(settings.exposureCompensation);
+        while (!input.empty() && std::isspace(static_cast<unsigned char>(input.front())))
+            input.remove_prefix(1);
+        while (!input.empty() && std::isspace(static_cast<unsigned char>(input.back())))
+            input.remove_suffix(1);
+        float offset = 0.0f;
+        const auto parsed = std::from_chars(
+            input.data(), input.data() + input.size(), offset,
+            std::chars_format::general);
+        const char* end = parsed.ptr;
+        while (end != input.data() + input.size() &&
+               std::isspace(static_cast<unsigned char>(*end))) ++end;
+        if (input.data() + input.size() - end == 2 &&
+            std::tolower(static_cast<unsigned char>(end[0])) == 'e' &&
+            std::tolower(static_cast<unsigned char>(end[1])) == 'v')
+            end += 2;
+        if (parsed.ec == std::errc{} && end == input.data() + input.size() &&
+            std::isfinite(offset))
+            result += offset;
     }
     return result;
 }
@@ -236,21 +254,38 @@ std::optional<int> readDesktopIni(
 std::vector<GainMap> loadSidecarGainMaps(
         const nlohmann::json& sidecar, size_t frameNumber, const char* field) {
     std::vector<GainMap> maps;
-    if (!sidecar.contains("dynamic")) return maps;
-    const auto& dynamic = sidecar["dynamic"];
-    if (!dynamic.contains("frames") || !dynamic.contains("gainMapFormats") ||
-        !dynamic.contains("gainMapPayloads") || frameNumber >= dynamic["frames"].size())
-        return maps;
-    const auto& frame = dynamic["frames"][frameNumber];
-    if (!frame.contains(field) || !frame[field].is_array()) return maps;
-    for (const auto& reference : frame[field]) {
+    const nlohmann::json* references = nullptr;
+    const nlohmann::json* formats = nullptr;
+    const nlohmann::json* payloads = nullptr;
+    if (sidecar.contains("dynamic") && sidecar["dynamic"].is_object()) {
+        const auto& dynamic = sidecar["dynamic"];
+        if (dynamic.contains("frames") && dynamic["frames"].is_array() &&
+            frameNumber < dynamic["frames"].size()) {
+            const auto& frame = dynamic["frames"][frameNumber];
+            if (frame.contains(field) && frame[field].is_array()) {
+                references = &frame[field];
+                if (dynamic.contains("gainMapFormats")) formats = &dynamic["gainMapFormats"];
+                if (dynamic.contains("gainMapPayloads")) payloads = &dynamic["gainMapPayloads"];
+            }
+        }
+    }
+    // A top-level reference list is a static, clip-wide override. This keeps
+    // hand-authored sidecars compact while per-frame data, when present, wins.
+    if (!references && sidecar.contains(field) && sidecar[field].is_array()) {
+        references = &sidecar[field];
+        if (sidecar.contains("gainMapFormats")) formats = &sidecar["gainMapFormats"];
+        if (sidecar.contains("gainMapPayloads")) payloads = &sidecar["gainMapPayloads"];
+    }
+    if (!references) return maps;
+    if (!formats || !formats->is_array() || !payloads || !payloads->is_array())
+        throw std::runtime_error("Gain-map sidecar is missing formats or payloads");
+    for (const auto& reference : *references) {
         const size_t formatIndex = reference.at("format").get<size_t>();
         const size_t payloadIndex = reference.at("payload").get<size_t>();
-        if (formatIndex >= dynamic["gainMapFormats"].size() ||
-            payloadIndex >= dynamic["gainMapPayloads"].size())
+        if (formatIndex >= formats->size() || payloadIndex >= payloads->size())
             throw std::runtime_error("Invalid gain-map sidecar reference");
-        const auto& format = dynamic["gainMapFormats"][formatIndex];
-        const auto& payload = dynamic["gainMapPayloads"][payloadIndex];
+        const auto& format = (*formats)[formatIndex];
+        const auto& payload = (*payloads)[payloadIndex];
         const size_t count = payload.at("valueCount").get<size_t>();
         if (count > std::numeric_limits<uint32_t>::max() / sizeof(float))
             throw std::runtime_error("Gain-map sidecar payload is too large");
@@ -303,25 +338,35 @@ std::vector<GainMap> loadSidecarGainMaps(
     return maps;
 }
 
+bool hasSidecarGainMaps(
+        const nlohmann::json& sidecar, size_t frameNumber, const char* field) {
+    if (sidecar.contains("dynamic") && sidecar["dynamic"].is_object()) {
+        const auto& dynamic = sidecar["dynamic"];
+        if (dynamic.contains("frames") && dynamic["frames"].is_array() &&
+            frameNumber < dynamic["frames"].size()) {
+            const auto& frame = dynamic["frames"][frameNumber];
+            if (frame.contains(field) && frame[field].is_array()) return true;
+        }
+    }
+    return sidecar.contains(field) && sidecar[field].is_array();
+}
+
 void replaceSidecarGainMapOpcodes(
         std::vector<uint8_t>& dng, const nlohmann::json& sidecar,
         size_t frameNumber, bool replaceList2, bool replaceList3) {
-    if (!sidecar.contains("dynamic") ||
-        !sidecar["dynamic"].contains("frames") ||
-        frameNumber >= sidecar["dynamic"]["frames"].size()) return;
-    const auto& frame = sidecar["dynamic"]["frames"][frameNumber];
+    bool applied = false;
     auto replace = [&](const char* field, int opcodeList, bool enabled) {
-        if (enabled && frame.contains(field) &&
-            !DNGDecoder::replaceGainMaps(
+        if (!enabled || !hasSidecarGainMaps(sidecar, frameNumber, field)) return;
+        if (!DNGDecoder::replaceGainMaps(
                 dng, opcodeList, loadSidecarGainMaps(sidecar, frameNumber, field)))
             throw std::runtime_error(
                 "Could not apply sidecar OpcodeList" + std::to_string(opcodeList) +
                 " gain-map override");
+        applied = true;
     };
     replace("gainMaps", 2, replaceList2);
     replace("deferredGainMaps", 3, replaceList3);
-    if ((replaceList2 || replaceList3) &&
-        !DNGDecoder::canonicalizeGainMapOpcodes(dng))
+    if (applied && !DNGDecoder::canonicalizeGainMapOpcodes(dng))
         throw std::runtime_error("Could not canonicalize sidecar gain-map override");
 }
 

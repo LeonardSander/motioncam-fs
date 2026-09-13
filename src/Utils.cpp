@@ -54,35 +54,12 @@ void storeCanonicalGainMaps(const std::vector<GainMap>& maps,
 } // namespace
 
 void overrideLensShadingMap(
-        CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps) {
+        CameraFrameMetadata& metadata, const std::vector<GainMap>& gainMaps,
+        const std::array<uint8_t, 4>& cfa) {
     if (gainMaps.empty()) return;
-    const uint32_t width = gainMaps.front().width;
-    const uint32_t height = gainMaps.front().height;
-    if (!width || !height) throw std::invalid_argument("Invalid gain-map override dimensions");
-    std::vector<std::vector<float>> planes;
-    if (gainMaps.size() == 1) {
-        const auto& map = gainMaps.front();
-        if (map.channels != 1 && map.channels != 4)
-            throw std::invalid_argument("MCRAW gain-map override requires one or four channels");
-        planes.resize(map.channels);
-        const size_t points = static_cast<size_t>(width) * height;
-        for (auto& plane : planes) plane.resize(points);
-        for (size_t point = 0; point < points; ++point)
-            for (uint32_t channel = 0; channel < map.channels; ++channel)
-                planes[channel][point] = map.data[point * map.channels + channel];
-    } else if (gainMaps.size() == 4) {
-        planes.reserve(4);
-        for (const auto& map : gainMaps) {
-            if (map.width != width || map.height != height || map.channels != 1)
-                throw std::invalid_argument("MCRAW gain-map override planes must share dimensions");
-            planes.push_back(map.data);
-        }
-    } else {
-        throw std::invalid_argument("MCRAW gain-map override requires one map or four planes");
-    }
-    metadata.lensShadingMap = std::move(planes);
-    metadata.lensShadingMapWidth = static_cast<int>(width);
-    metadata.lensShadingMapHeight = static_cast<int>(height);
+    metadata.lensShadingMap = expandGainMapsForCfa(gainMaps, cfa);
+    metadata.lensShadingMapWidth = static_cast<int>(gainMaps.front().width);
+    metadata.lensShadingMapHeight = static_cast<int>(gainMaps.front().height);
 }
 
 std::vector<unsigned short> makeLogLinearizationTable(unsigned int storedWhiteLevel) {

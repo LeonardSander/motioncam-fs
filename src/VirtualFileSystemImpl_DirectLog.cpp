@@ -541,18 +541,14 @@ void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
     const bool bakeCorrection =
         (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) != 0;
     const bool optimize = (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) != 0;
-    if ((!bakeCorrection && !optimize) || !mSidecarMetadata.contains("dynamic")) return;
+    if ((!bakeCorrection && !optimize) ||
+        (prepared.bakeList2.empty() && prepared.bakeList3.empty())) return;
     if (imageWidth <= 0) imageWidth = mWidth;
     if (imageHeight <= 0) imageHeight = mHeight;
     if (sourceWidth <= 0) sourceWidth = mWidth;
     if (sourceHeight <= 0) sourceHeight = mHeight;
     if (rgbData.size() < static_cast<size_t>(imageWidth) * imageHeight * 3)
         throw std::runtime_error("DirectLog gain-map image dimensions do not match pixels");
-    const auto& dynamic = mSidecarMetadata["dynamic"];
-    if (!dynamic.contains("frames") || frameNumber < 0 ||
-        static_cast<size_t>(frameNumber) >= dynamic["frames"].size()) return;
-
-    const auto& frame = dynamic["frames"][frameNumber];
     const auto& cfa = prepared.cfa;
     if (bakeCorrection && (mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP))
         std::fill(rgbData.begin(), rgbData.end(), std::numeric_limits<uint16_t>::max());
@@ -567,15 +563,13 @@ void VirtualFileSystemImpl_DirectLog::applySidecarGainMaps(
     }
     std::vector<float> combinedGain(rgbData.size(), 1.0f);
     auto apply = [&](const char* field, const std::vector<GainMap>& loadedMaps) {
-        if (!frame.contains(field) || !frame[field].is_array()) return;
         if (loadedMaps.empty()) return;
         if (!bakeCorrection ||
             ((mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
              std::string_view(field) == "deferredGainMaps"))
             return;
-        if (frame[field].size() != loadedMaps.size())
-            throw std::runtime_error("DirectLog gain-map reference count mismatch");
-        for (const auto& preparedMap : loadedMaps) {
+        const auto rgbMaps = collapseCfaGainMapsForRgb(loadedMaps, cfa);
+        for (const auto& preparedMap : rgbMaps) {
             if (!validGainMap(preparedMap))
                 throw std::runtime_error("Invalid DirectLog gain-map dimensions");
             const uint32_t channels = preparedMap.channels;

@@ -1,6 +1,7 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "GainMapBake.h"
 
 #include <jxl/decode.h>
 
@@ -763,6 +764,49 @@ int main() {
     assert(motioncam::DNGDecoder::decodeImage(mountedRgb, decodedRgb));
     assert(decodedRgb.layout.storage == motioncam::DNGStorageLayout::Strips);
     assert(decodedRgb.samples.size() == rgb.size());
+
+    tinydngwriter::DNGImage cfaGainRgbDng;
+    cfaGainRgbDng.SetBigEndian(false);
+    assert(cfaGainRgbDng.SetImageWidth(2) && cfaGainRgbDng.SetImageLength(2));
+    assert(cfaGainRgbDng.SetRowsPerStrip(2) && cfaGainRgbDng.SetSamplesPerPixel(3));
+    assert(cfaGainRgbDng.SetBitsPerSample(3, rgbBits));
+    assert(cfaGainRgbDng.SetCompression(tinydngwriter::COMPRESSION_NONE));
+    assert(cfaGainRgbDng.SetPhotometric(tinydngwriter::PHOTOMETRIC_LINEARRAW));
+    assert(cfaGainRgbDng.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+    assert(cfaGainRgbDng.SetWhiteLevel(1023));
+    assert(cfaGainRgbDng.SetDNGVersion(1, 4, 0, 0));
+    assert(cfaGainRgbDng.SetDNGBackwardVersion(1, 3, 0, 0));
+    const std::vector<uint16_t> lowRgb(2 * 2 * 3, 10);
+    assert(cfaGainRgbDng.SetImageData(
+        reinterpret_cast<const unsigned char*>(lowRgb.data()),
+        lowRgb.size() * sizeof(uint16_t)));
+    tinydngwriter::OpcodeList cfaPhaseOpcodes;
+    const std::array<float, 4> cfaPhaseGains{2.0f, 3.0f, 5.0f, 7.0f};
+    for (size_t phaseIndex = 0; phaseIndex < cfaPhaseGains.size(); ++phaseIndex) {
+        tinydngwriter::GainMapParams phaseGain{};
+        phaseGain.top = phaseIndex / 2;
+        phaseGain.left = phaseIndex % 2;
+        phaseGain.bottom = phaseGain.right = 2;
+        phaseGain.plane = 0;
+        phaseGain.planes = 3;
+        phaseGain.row_pitch = phaseGain.col_pitch = 2;
+        phaseGain.map_points_v = phaseGain.map_points_h = 1;
+        phaseGain.map_spacing_v = phaseGain.map_spacing_h = 1.0;
+        phaseGain.map_planes = 1;
+        phaseGain.gain_data = {cfaPhaseGains[phaseIndex]};
+        cfaPhaseOpcodes.AddGainMap(phaseGain);
+    }
+    assert(cfaGainRgbDng.SetOpcodeList2(cfaPhaseOpcodes));
+    auto cfaGainRgbBytes = writeDng(cfaGainRgbDng);
+    assert(motioncam::DNGDecoder::bakeGainMaps(cfaGainRgbBytes, false, false));
+    motioncam::DecodedDNGImage bakedCfaGainRgb;
+    assert(motioncam::DNGDecoder::decodeImage(cfaGainRgbBytes, bakedCfaGainRgb));
+    // 10-bit source values are expanded to 12-bit while gains R=2, G=(3+5)/2,
+    // B=7 are applied. In particular green must be 4x, not 3x*5x.
+    assert(bakedCfaGainRgb.samples[0] == 80);
+    assert(bakedCfaGainRgb.samples[1] == 160);
+    assert(bakedCfaGainRgb.samples[2] == 280);
+
     tinydngwriter::GainMapParams rgbLumaGain{};
     rgbLumaGain.top = 0; rgbLumaGain.left = 0;
     rgbLumaGain.bottom = rgbHeight; rgbLumaGain.right = rgbWidth;
