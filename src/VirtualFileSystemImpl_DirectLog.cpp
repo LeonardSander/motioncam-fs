@@ -480,8 +480,14 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     }
     prepared.bakeList2 = gainMaps;
     prepared.bakeList3 = deferredGainMaps;
+    const auto isLuminanceOnly = [&](const std::vector<GainMap>& maps) {
+        if (maps.size() != 1 || maps.front().channels != 1) return false;
+        const auto colors = gainMapAffectedColors(maps.front(), prepared.cfa);
+        return colors[0] && colors[1] && colors[2];
+    };
     if ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
         (mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
+        !isLuminanceOnly(prepared.bakeList2) &&
         !reduceGainMapStackToColor(prepared.bakeList2))
         throw std::runtime_error("DirectLog gain-map planes have mismatched dimensions");
     if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
@@ -510,7 +516,8 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
                  std::all_of(gainMaps.begin(), gainMaps.end(), [](const GainMap& map) {
                      return map.channels == 1;
                  }));
-            if (!supported || !reduceGainMapStackToColor(gainMaps))
+            if (!supported || (!isLuminanceOnly(gainMaps) &&
+                               !reduceGainMapStackToColor(gainMaps)))
                 throw std::runtime_error("Unsupported DirectLog color gain-map layout");
             if (!(gainMaps.size() == 1 && gainMaps.front().channels == 1))
                 prepared.opcodeList2 = std::move(gainMaps);
