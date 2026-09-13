@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <utility>
 
 #include "Types.h"
 
@@ -61,6 +62,8 @@ public:
     
     static bool isHLGVideo(const std::string& filePath);
     static bool isLOG60Video(const std::string& filePath);
+    static std::pair<uintmax_t, size_t> timelineCacheUsage();
+    static void clearTimelineCache();
 
 private:
     void initFFmpeg();

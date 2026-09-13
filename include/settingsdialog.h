@@ -58,6 +58,7 @@ private slots:
     void onCachePolicyChanged(int index);
     void onCacheQuotaChanged(int index);
     void onCleanupIntervalChanged(int index);
+    void onClearDirectLogCache();
     void onResetPaths();
 
 private:
@@ -82,6 +83,10 @@ private:
     QLineEdit* mCacheQuotaCustomEdit;
     QComboBox* mCacheCleanupIntervalComboBox;
     QLineEdit* mCacheCleanupCustomEdit;
+    QLabel* mDirectLogCacheUsageLabel;
+    QPushButton* mClearDirectLogCacheButton;
+
+    void updateDirectLogCacheUsage();
 };
 
 #endif // SETTINGSDIALOG_H

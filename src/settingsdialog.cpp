@@ -1,4 +1,5 @@
 #include "settingsdialog.h"
+#include "DirectLogDecoder.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -13,6 +14,7 @@
 #include <QIntValidator>
 #include <QStorageInfo>
 #include <QCheckBox>
+#include <QLocale>
 
 SettingsDialog::SettingsDialog(QWidget *parent)
     : QDialog(parent)
@@ -168,6 +170,25 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     cacheManagementGroup->setVisible(false);
 #endif
 
+    auto* directLogCacheGroup = new QGroupBox("DirectLog Cache", this);
+    auto* directLogCacheLayout = new QVBoxLayout(directLogCacheGroup);
+    auto* directLogCacheUsageLayout = new QHBoxLayout();
+    auto* directLogCacheLabel = new QLabel("Timeline cache:", this);
+    mDirectLogCacheUsageLabel = new QLabel(this);
+    mClearDirectLogCacheButton = new QPushButton("Clear", this);
+    mClearDirectLogCacheButton->setMaximumWidth(100);
+    directLogCacheUsageLayout->addWidget(directLogCacheLabel);
+    directLogCacheUsageLayout->addWidget(mDirectLogCacheUsageLabel, 1);
+    directLogCacheUsageLayout->addWidget(mClearDirectLogCacheButton);
+    directLogCacheLayout->addLayout(directLogCacheUsageLayout);
+    auto* directLogCacheHelpLabel = new QLabel(
+        helpSpan("Stores video timestamps so previously imported DirectLog clips open faster. "
+                 "Cleared entries are rebuilt on the next import."),
+        this);
+    directLogCacheHelpLabel->setWordWrap(true);
+    directLogCacheLayout->addWidget(directLogCacheHelpLabel);
+    mainLayout->addWidget(directLogCacheGroup);
+
     // Player settings group
     auto* playerGroup = new QGroupBox("Video Player", this);
     auto* playerLayout = new QVBoxLayout(playerGroup);
@@ -291,6 +312,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     connect(mCacheQuotaComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCacheQuotaChanged);
     connect(mCacheCleanupIntervalComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCleanupIntervalChanged);
     connect(mResetPathsButton, &QPushButton::clicked, this, &SettingsDialog::onResetPaths);
+    connect(mClearDirectLogCacheButton, &QPushButton::clicked,
+            this, &SettingsDialog::onClearDirectLogCache);
     connect(mMatrixOverrideCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
         mMatrixProfileComboBox->setEnabled(checked);
     });
@@ -298,6 +321,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     onCachePolicyChanged(mCachePolicyComboBox->currentIndex());
     onCacheQuotaChanged(mCacheQuotaComboBox->currentIndex());
     onCleanupIntervalChanged(mCacheCleanupIntervalComboBox->currentIndex());
+    updateDirectLogCacheUsage();
 
     setLayout(mainLayout);
 }
@@ -603,4 +627,28 @@ void SettingsDialog::onResetPaths() {
     mPlayerPathEdit->clear();
     setCacheFolderWarning("");
 #endif
+}
+
+void SettingsDialog::updateDirectLogCacheUsage()
+{
+    const auto [bytes, files] = motioncam::DirectLogDecoder::timelineCacheUsage();
+    const QLocale locale;
+    QString size;
+    if (bytes < 1024)
+        size = tr("%1 B").arg(locale.toString(static_cast<qulonglong>(bytes)));
+    else if (bytes < 1024 * 1024)
+        size = tr("%1 KB").arg(locale.toString(bytes / 1024.0, 'f', 1));
+    else if (bytes < 1024ULL * 1024ULL * 1024ULL)
+        size = tr("%1 MB").arg(locale.toString(bytes / (1024.0 * 1024.0), 'f', 1));
+    else
+        size = tr("%1 GB").arg(locale.toString(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 2));
+    mDirectLogCacheUsageLabel->setText(
+        tr("%1 (%n file(s))", nullptr, static_cast<int>(files)).arg(size));
+    mClearDirectLogCacheButton->setEnabled(files > 0);
+}
+
+void SettingsDialog::onClearDirectLogCache()
+{
+    motioncam::DirectLogDecoder::clearTimelineCache();
+    updateDirectLogCacheUsage();
 }

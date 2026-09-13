@@ -35,7 +35,10 @@ struct CachedDirectLogTimeline {
 
 std::mutex directLogTimelineCacheMutex;
 std::unordered_map<std::string, CachedDirectLogTimeline> directLogTimelineCache;
-constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000003ULL;
+// Version 4 timelines are built from demuxed video access units rather than
+// decoded frames. Invalidate older persistent entries so key-frame flags and
+// timestamps always use the same construction path.
+constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000004ULL;
 
 std::string directLogTimelineCacheKey(const std::string& path) {
     std::error_code error;
@@ -415,43 +418,37 @@ void DirectLogDecoder::analyzeVideo() {
     
     mVideoInfo.duration = static_cast<double>(mFormatContext->duration) / AV_TIME_BASE;
     
-    // Decode frames to build the presentation timeline. Packet timestamps and
-    // packet counts are not guaranteed to map one-to-one to displayed frames.
+    // DirectLog inputs are frame-based video streams: each video packet is one
+    // encoded access unit. Building the timeline by decoding every frame made
+    // a cold import take approximately as long as decoding the entire clip.
+    // Demuxing preserves exact VFR presentation timestamps and key-frame flags
+    // without doing the expensive pixel decode.
     mFrames.clear();
-    auto appendDecodedFrames = [&]() {
-        while (avcodec_receive_frame(mCodecContext, mFrame) == 0) {
-            int64_t pts = mFrame->best_effort_timestamp;
-            if (pts == AV_NOPTS_VALUE) pts = mFrame->pts;
-            if (pts == AV_NOPTS_VALUE) continue;
-            DirectLogFrameInfo frameInfo;
-            frameInfo.frameNumber = 0;
-            frameInfo.pts = pts;
-            frameInfo.timestamp = static_cast<Timestamp>(
-                pts * av_q2d(mTimeBase) * 1000000000.0);
-            frameInfo.width = mFrame->width;
-            frameInfo.height = mFrame->height;
-            frameInfo.pixelFormat = mVideoInfo.pixelFormat;
-            frameInfo.timeBase = av_q2d(mTimeBase);
-            frameInfo.keyFrame = (mFrame->flags & AV_FRAME_FLAG_KEY) != 0;
-            mFrames.push_back(frameInfo);
-        }
-    };
     while (av_read_frame(mFormatContext, mPacket) >= 0) {
         if (mPacket->stream_index == mVideoStreamIndex) {
-            int sendResult = avcodec_send_packet(mCodecContext, mPacket);
-            if (sendResult == AVERROR(EAGAIN)) {
-                appendDecodedFrames();
-                sendResult = avcodec_send_packet(mCodecContext, mPacket);
+            int64_t pts = mPacket->pts;
+            // PTS should be present for MOV/MP4/MKV video. DTS is still a
+            // useful fallback for simple streams that omit presentation time.
+            if (pts == AV_NOPTS_VALUE) pts = mPacket->dts;
+            if (pts != AV_NOPTS_VALUE) {
+                DirectLogFrameInfo frameInfo;
+                frameInfo.frameNumber = 0;
+                frameInfo.pts = pts;
+                frameInfo.timestamp = static_cast<Timestamp>(
+                    pts * av_q2d(mTimeBase) * 1000000000.0);
+                frameInfo.width = mVideoInfo.width;
+                frameInfo.height = mVideoInfo.height;
+                frameInfo.pixelFormat = mVideoInfo.pixelFormat;
+                frameInfo.timeBase = av_q2d(mTimeBase);
+                frameInfo.keyFrame = (mPacket->flags & AV_PKT_FLAG_KEY) != 0;
+                mFrames.push_back(frameInfo);
             }
-            if (sendResult == 0) appendDecodedFrames();
         }
         av_packet_unref(mPacket);
     }
-    avcodec_send_packet(mCodecContext, nullptr);
-    appendDecodedFrames();
 
-    // Sort by PTS to obtain display order for decoders that emit frames in a
-    // different order, and discard duplicate timestamps defensively.
+    // Packets are stored in decode order when B-frames are present. Sort them
+    // into presentation order and discard duplicate timestamps defensively.
     std::sort(mFrames.begin(), mFrames.end(), [](const auto& a, const auto& b) {
         return a.pts < b.pts;
     });
@@ -847,6 +844,36 @@ void DirectLogDecoder::applyLOG60ToLinear(std::vector<uint16_t>& rgbData) {
 
 bool DirectLogDecoder::isLOG60Video(const std::string& filePath) {
     return boost::icontains(filePath, "LOG60_NATIVE");
+}
+
+std::pair<uintmax_t, size_t> DirectLogDecoder::timelineCacheUsage() {
+    std::lock_guard initializationLock(directLogInitializationMutex);
+    uintmax_t bytes = 0;
+    size_t files = 0;
+    std::error_code error;
+    const auto directory = directLogTimelineCachePath("").parent_path();
+    std::filesystem::directory_iterator entries(directory, error);
+    for (std::filesystem::directory_iterator end; !error && entries != end;
+         entries.increment(error)) {
+        if (!entries->is_regular_file(error)) continue;
+        const auto size = entries->file_size(error);
+        if (error) break;
+        bytes += size;
+        ++files;
+    }
+    return {bytes, files};
+}
+
+void DirectLogDecoder::clearTimelineCache() {
+    std::lock_guard initializationLock(directLogInitializationMutex);
+    {
+        std::lock_guard<std::mutex> cacheLock(directLogTimelineCacheMutex);
+        directLogTimelineCache.clear();
+    }
+    std::error_code error;
+    std::filesystem::remove_all(directLogTimelineCachePath("").parent_path(), error);
+    if (error)
+        spdlog::warn("Could not clear DirectLog timeline cache: {}", error.message());
 }
 
 void DirectLogDecoder::cleanup() {
