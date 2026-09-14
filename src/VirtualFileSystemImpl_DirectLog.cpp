@@ -136,6 +136,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     
     // Load calibration JSON if it exists
     const auto calibPath = vfs::sidecarPath(mSrcPath);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
         vfs::gyroflowSidecarPath(mSrcPath));
     if (boost::filesystem::exists(calibPath)) {
@@ -670,13 +671,24 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         diagnosticStage = std::chrono::steady_clock::now();
         std::string dngStr = std::move(oss).str();
         dngData.assign(dngStr.begin(), dngStr.end());
+        if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
+            !vfs::applyManualVignetteSidecar(dngData, mManualVignetteSidecars))
+            throw std::runtime_error("Could not apply manual DirectLog vignette sidecar");
+        if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude &&
+            (!DNGDecoder::replaceGainMaps(dngData, 2, {}) ||
+             !DNGDecoder::replaceGainMaps(dngData, 3, {})))
+            throw std::runtime_error("Could not exclude DirectLog gain maps");
         if (!mConfig.cameraNativeStaging &&
-            mConfig.vignetteCorrection == VignetteCorrectionMode::Resample &&
-            mCalibration && mCalibration->hasFullSensorResolution &&
-            !DNGDecoder::cropGainMapsToFullSensor(
-                dngData, mCalibration->fullSensorResolution[0],
-                mCalibration->fullSensorResolution[1]))
-            throw std::runtime_error("Could not resample DirectLog gain maps for crop");
+            mConfig.vignetteCorrection == VignetteCorrectionMode::Resample) {
+            const auto manualResolution =
+                vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
+            const auto sensorResolution = mCalibration && mCalibration->hasFullSensorResolution
+                ? mCalibration->fullSensorResolution : manualResolution;
+            if (sensorResolution[0] > 0 && sensorResolution[1] > 0 &&
+                !DNGDecoder::cropGainMapsToFullSensor(
+                    dngData, sensorResolution[0], sensorResolution[1]))
+                throw std::runtime_error("Could not resample DirectLog gain maps for crop");
+        }
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} output_copy_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));
@@ -905,6 +917,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     }
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
         vfs::gyroflowSidecarPath(mSrcPath), true);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
     analyzeSidecarExposure();
     mDecoder->setFullRangeOverride(std::nullopt);
     if (mCalibration && mCalibration->hasDataLevels) {

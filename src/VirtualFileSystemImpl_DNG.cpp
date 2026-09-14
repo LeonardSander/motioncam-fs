@@ -76,6 +76,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
     // Load calibration JSON if it exists (for DNG folder)
     const auto& calibPath = mSidecarPath;
     vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
         mGyroflowSidecarPath);
     if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
@@ -437,6 +438,9 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         result.cfaPhase = mCfaPhase;
 
     vfs::replaceSidecarGainMapOpcodes(result.dng, mSidecarMetadata, frameIndex);
+    if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
+        !vfs::applyManualVignetteSidecar(result.dng, mManualVignetteSidecars))
+        throw std::runtime_error("Could not apply manual DNG vignette sidecar");
     if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude) {
         if (!DNGDecoder::replaceGainMaps(result.dng, 2, {}) ||
             !DNGDecoder::replaceGainMaps(result.dng, 3, {}))
@@ -454,12 +458,16 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
     // performs its own sensor-aware processing. Resample therefore falls back
     // to Uncropped for its staging DNGs.
     if (!mConfig.cameraNativeStaging &&
-        mConfig.vignetteCorrection == VignetteCorrectionMode::Resample &&
-        mCalibration && mCalibration->hasFullSensorResolution &&
-        !DNGDecoder::cropGainMapsToFullSensor(
-            result.dng, mCalibration->fullSensorResolution[0],
-            mCalibration->fullSensorResolution[1]))
-        throw std::runtime_error("Could not crop full-sensor DNG gain maps");
+        mConfig.vignetteCorrection == VignetteCorrectionMode::Resample) {
+        const auto manualResolution =
+            vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
+        const auto sensorResolution = mCalibration && mCalibration->hasFullSensorResolution
+            ? mCalibration->fullSensorResolution : manualResolution;
+        if (sensorResolution[0] > 0 && sensorResolution[1] > 0 &&
+            !DNGDecoder::cropGainMapsToFullSensor(
+                result.dng, sensorResolution[0], sensorResolution[1]))
+            throw std::runtime_error("Could not crop full-sensor DNG gain maps");
+    }
     const auto resolved = resolvedFrameMetadata(frameIndex, result.sourceMetadata);
     if (resolved.orientation != result.sourceMetadata.orientation &&
         !DNGDecoder::setOrientation(result.dng, resolved.orientation))
@@ -638,10 +646,14 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     nlohmann::json sidecarMetadata;
     std::optional<CalibrationData> calibration;
     vfs::loadSidecar(calibPath, sidecarMetadata, calibration, true);
+    auto manualVignetteSidecars =
+        vfs::loadManualVignetteSidecars(mSrcPath);
     auto gyroflow = vfs::loadGyroflowLensProfile(
         mGyroflowSidecarPath, true);
     if (sameRenderSettings(mConfig, config) && sidecarMetadata == mSidecarMetadata &&
-        !gyroflow && !mGyroflowLensProfile)
+        !gyroflow && !mGyroflowLensProfile &&
+        manualVignetteSidecars.candidates.empty() &&
+        mManualVignetteSidecars.candidates.empty())
         return;
 
     mCache.clear();
@@ -649,6 +661,7 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     mConfig = config;
     mSidecarMetadata = std::move(sidecarMetadata);
     mCalibration = std::move(calibration);
+    mManualVignetteSidecars = std::move(manualVignetteSidecars);
     mGyroflowLensProfile = std::move(gyroflow);
     if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {

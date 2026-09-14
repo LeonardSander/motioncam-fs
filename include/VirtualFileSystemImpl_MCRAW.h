@@ -66,6 +66,7 @@ private:
     std::optional<CalibrationData> mCalibration;
     std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;
+    vfs::ManualVignetteSidecars mManualVignetteSidecars;
     mutable std::shared_mutex mRenderMutex;
 };
 

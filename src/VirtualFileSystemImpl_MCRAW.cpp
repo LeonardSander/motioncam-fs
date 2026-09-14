@@ -209,6 +209,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     
     // Load calibration JSON if it exists
     const auto& calibPath = mSidecarPath;
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
         mGyroflowSidecarPath);
     if (boost::filesystem::exists(calibPath)) {
@@ -612,6 +613,12 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        const auto manualSensorResolution =
+            vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
+        if (frameMetadata.originalWidth <= 0 && manualSensorResolution[0] > 0)
+            frameMetadata.originalWidth = manualSensorResolution[0];
+        if (frameMetadata.originalHeight <= 0 && manualSensorResolution[1] > 0)
+            frameMetadata.originalHeight = manualSensorResolution[1];
         auto cameraConfig = CameraConfiguration::parse(decoder->getContainerMetadata());
         reorderNativeShadingMapToCfaPhases(
             frameMetadata, effectiveCfaArrangement(
@@ -709,15 +716,21 @@ void VirtualFileSystemImpl_MCRAW::attachSidecarGainMapOpcodes(
     }
     vfs::replaceSidecarGainMapOpcodes(
         dng, mSidecarMetadata, frameIndex, false, true);
+    if (!vfs::applyManualVignetteSidecar(dng, mManualVignetteSidecars))
+        throw std::runtime_error("Could not apply manual MCRAW vignette sidecar");
     if (!DNGDecoder::canonicalizeGainMapOpcodes(dng))
         throw std::runtime_error("Could not canonicalize MCRAW sidecar gain maps");
     if (!mSettings.cameraNativeStaging &&
-        mSettings.vignetteCorrection == VignetteCorrectionMode::Resample &&
-        mCalibration && mCalibration->hasFullSensorResolution &&
-        !DNGDecoder::cropGainMapsToFullSensor(
-            dng, mCalibration->fullSensorResolution[0],
-            mCalibration->fullSensorResolution[1]))
-        throw std::runtime_error("Could not resample MCRAW gain maps for crop");
+        mSettings.vignetteCorrection == VignetteCorrectionMode::Resample) {
+        const auto manualResolution =
+            vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
+        const auto sensorResolution = mCalibration && mCalibration->hasFullSensorResolution
+            ? mCalibration->fullSensorResolution : manualResolution;
+        if (sensorResolution[0] > 0 && sensorResolution[1] > 0 &&
+            !DNGDecoder::cropGainMapsToFullSensor(
+                dng, sensorResolution[0], sensorResolution[1]))
+            throw std::runtime_error("Could not resample MCRAW gain maps for crop");
+    }
 }
 
 int VirtualFileSystemImpl_MCRAW::readPriority(const Entry& entry) const {
@@ -740,6 +753,7 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
     vfs::loadSidecar(mSidecarPath, mSidecarMetadata, mCalibration, true);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
         mGyroflowSidecarPath, true);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
     if (mCalibration && mCalibration->hasLevels) mSettings.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mSettings.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +

@@ -601,6 +601,274 @@ boost::filesystem::path sidecarPath(const std::string& sourcePath) {
         : source.parent_path() / (source.stem().string() + ".json");
 }
 
+namespace {
+std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::vector<const ManualVignetteSidecars::Candidate*> manualCandidateOrder(
+        const ManualVignetteSidecars& sidecars) {
+    std::vector<const ManualVignetteSidecars::Candidate*> ordered;
+    auto append = [&](bool d65, bool white) {
+        for (const auto& candidate : sidecars.candidates)
+            if ((lower(candidate.illuminant) == "d65") == d65 &&
+                candidate.whiteImage == white &&
+                (d65 || candidate.illuminant.empty()))
+                ordered.push_back(&candidate);
+    };
+    // D65 is the only named illuminant selected for now. Prefer a measured
+    // white flat and fall back to the gain-map DNG at the same illuminant.
+    append(true, true); append(true, false);
+    if (ordered.empty()) { append(false, true); append(false, false); }
+    return ordered;
+}
+
+std::vector<GainMap> gainMapsFromWhite(const DecodedDNGImage& white,
+                                       uint32_t mapWidth, uint32_t mapHeight,
+                                       bool sourceCfa,
+                                       const std::array<uint8_t, 4>& sourcePhase) {
+    if (!white.layout.width || !white.layout.height || !mapWidth || !mapHeight)
+        return {};
+    std::vector<uint16_t> rgb;
+    std::array<double, 3> black{};
+    std::array<double, 3> whiteLevel{65535.0, 65535.0, 65535.0};
+    if (white.layout.pixels == DNGPixelLayout::CFA) {
+        std::array<unsigned, 3> counts{};
+        std::array<unsigned, 3> whiteCounts{};
+        black.fill(0.0); whiteLevel.fill(0.0);
+        for (size_t p = 0; p < 4; ++p) {
+            const auto c = white.layout.cfaPhase[p];
+            if (c >= 3) continue;
+            const size_t blackIndex = std::min<size_t>(p,
+                white.metadata.blackLevelCount ? white.metadata.blackLevelCount - 1 : 0);
+            const size_t whiteIndex = std::min<size_t>(p,
+                white.metadata.whiteLevelCount ? white.metadata.whiteLevelCount - 1 : 0);
+            black[c] += white.metadata.blackLevel[blackIndex]; ++counts[c];
+            whiteLevel[c] += white.metadata.whiteLevelCount
+                ? white.metadata.whiteLevel[whiteIndex] : 65535.0;
+            ++whiteCounts[c];
+        }
+        std::array<float, 3> demosaicBlack{};
+        for (size_t c = 0; c < 3; ++c) {
+            if (counts[c]) black[c] /= counts[c];
+            if (whiteCounts[c]) whiteLevel[c] /= whiteCounts[c];
+            demosaicBlack[c] = static_cast<float>(black[c]);
+        }
+        utils::demosaicCfaForOutput(
+            white.samples, rgb, white.layout.width, white.layout.height,
+            std::max(2, white.layout.cfaRepeatSize), white.layout.cfaPhase,
+            QuadBayerMode::Demosaic, demosaicBlack, false);
+    } else if (white.layout.samplesPerPixel >= 3) {
+        rgb = white.samples;
+        for (size_t c = 0; c < 3; ++c) {
+            black[c] = white.metadata.blackLevel[std::min<size_t>(c,
+                white.metadata.blackLevelCount ? white.metadata.blackLevelCount - 1 : 0)];
+            if (white.metadata.whiteLevelCount)
+                whiteLevel[c] = white.metadata.whiteLevel[std::min<size_t>(
+                    c, white.metadata.whiteLevelCount - 1)];
+        }
+    }
+    if (rgb.size() < static_cast<size_t>(white.layout.width) * white.layout.height * 3)
+        return {};
+    const size_t points = static_cast<size_t>(mapWidth) * mapHeight;
+    std::vector<double> downsampled(points * 3, 0.0);
+    std::array<double, 3> maximum{};
+    for (uint32_t y = 0; y < mapHeight; ++y) {
+        const uint32_t y0 = static_cast<uint32_t>(
+            static_cast<uint64_t>(y) * white.layout.height / mapHeight);
+        const uint32_t y1 = std::max(y0 + 1, static_cast<uint32_t>(
+            static_cast<uint64_t>(y + 1) * white.layout.height / mapHeight));
+        for (uint32_t x = 0; x < mapWidth; ++x) {
+            const uint32_t x0 = static_cast<uint32_t>(
+                static_cast<uint64_t>(x) * white.layout.width / mapWidth);
+            const uint32_t x1 = std::max(x0 + 1, static_cast<uint32_t>(
+                static_cast<uint64_t>(x + 1) * white.layout.width / mapWidth));
+            const size_t point = static_cast<size_t>(y) * mapWidth + x;
+            for (size_t c = 0; c < 3; ++c) {
+                double sum = 0.0;
+                size_t count = 0;
+                for (uint32_t py = y0; py < std::min(y1, white.layout.height); ++py)
+                    for (uint32_t px = x0; px < std::min(x1, white.layout.width); ++px) {
+                        sum += rgb[(static_cast<size_t>(py) * white.layout.width + px) * 3 + c];
+                        ++count;
+                    }
+                const double value = count ? sum / count : 0.0;
+                downsampled[point * 3 + c] = value;
+                maximum[c] = std::max(maximum[c], value);
+            }
+        }
+    }
+    for (size_t c = 0; c < 3; ++c) {
+        // Judge clipping on the same spatially averaged samples used to form
+        // the gain map, so an isolated hot pixel does not reject the flat.
+        if (maximum[c] >= whiteLevel[c]) return {};
+    }
+    // One interleaved map carries four CFA phases or three RGB channels. The
+    // existing canonicalizer later expands CFA maps to scalar DNG opcodes.
+    std::vector<GainMap> maps(1);
+    auto& map = maps.front();
+    map.top = map.left = 0;
+    map.bottom = white.layout.height; map.right = white.layout.width;
+    map.coordinateWidth = white.layout.width;
+    map.coordinateHeight = white.layout.height;
+    map.plane = 0; map.planes = sourceCfa ? 1 : 3;
+    map.rowPitch = map.colPitch = 1;
+    map.width = mapWidth; map.height = mapHeight;
+    map.channels = sourceCfa ? 4 : 3;
+    map.spacingH = mapWidth > 1 ? 1.0 / (mapWidth - 1) : 1.0;
+    map.spacingV = mapHeight > 1 ? 1.0 / (mapHeight - 1) : 1.0;
+    map.originH = map.originV = 0.0;
+    map.data.resize(static_cast<size_t>(mapWidth) * mapHeight * map.channels, 1.0f);
+    for (uint32_t y = 0; y < mapHeight; ++y) {
+        for (uint32_t x = 0; x < mapWidth; ++x) {
+            const size_t point = static_cast<size_t>(y) * mapWidth + x;
+            for (size_t c = 0; c < 3; ++c) {
+                const double value = std::max(
+                    0.0, downsampled[point * 3 + c] - black[c]);
+                const float gain = value > 0.0 ? static_cast<float>(
+                    std::max(1.0, (maximum[c] - black[c]) / value)) : 1.0f;
+                if (sourceCfa) {
+                    for (size_t phase = 0; phase < 4; ++phase)
+                        if (sourcePhase[phase] == c)
+                            map.data[point * 4 + phase] = gain;
+                } else map.data[point * 3 + c] = gain;
+            }
+        }
+    }
+    return maps;
+}
+} // namespace
+
+ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath) {
+    ManualVignetteSidecars result;
+    boost::filesystem::path source(sourcePath);
+    while (source.filename().empty() && source.has_parent_path()) source = source.parent_path();
+    const bool directory = boost::filesystem::is_directory(source);
+    const auto parent = directory ? source : source.parent_path();
+    const std::string stem = lower(
+        directory ? source.filename().string() : source.stem().string());
+    if (!boost::filesystem::exists(parent)) return result;
+    for (boost::filesystem::directory_iterator it(parent), end; it != end; ++it) {
+        if (!boost::filesystem::is_regular_file(it->path()) ||
+            lower(it->path().extension().string()) != ".dng") continue;
+        const std::string candidateStem = lower(it->path().stem().string());
+        const std::string whitePrefix = stem + "_white";
+        const std::string mapPrefix = stem + "_gainmap";
+        const bool white = candidateStem.rfind(whitePrefix, 0) == 0;
+        const bool gainmap = candidateStem.rfind(mapPrefix, 0) == 0;
+        if (!white && !gainmap) continue;
+        const auto& prefix = white ? whitePrefix : mapPrefix;
+        if (candidateStem.size() > prefix.size() && candidateStem[prefix.size()] != '_')
+            continue;
+        std::ifstream input(it->path().string(), std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+        ManualVignetteSidecars::Candidate candidate;
+        candidate.path = it->path().string(); candidate.whiteImage = white;
+        if (candidateStem.size() > prefix.size() + 1)
+            candidate.illuminant = candidateStem.substr(prefix.size() + 1);
+        if (!bytes.empty() && DNGDecoder::decodeImage(bytes, candidate.image, false, false)) {
+            if (white && gainMapsFromWhite(candidate.image, 17, 13, true,
+                    candidate.image.layout.cfaPhase).empty()) {
+                spdlog::warn("Discarding clipped or invalid white image {}",
+                             candidate.path);
+            } else if (white || !candidate.image.opcodeList2.empty() ||
+                       !candidate.image.opcodeList3.empty()) {
+                // Gain-map DNG pixels have no role after their opcode and
+                // metadata have been decoded. Keep white pixels only because
+                // those are converted lazily for the requested target grid.
+                if (!white) {
+                    candidate.image.samples.clear();
+                    candidate.image.samples.shrink_to_fit();
+                }
+                result.candidates.push_back(std::move(candidate));
+            }
+        } else spdlog::warn("Could not decode manual vignette sidecar {}", it->path().string());
+    }
+    std::sort(result.candidates.begin(), result.candidates.end(),
+        [](const auto& a, const auto& b) { return a.path < b.path; });
+    if (!result.candidates.empty())
+        spdlog::info("Loaded {} manual vignette DNG sidecar(s) for {}",
+                     result.candidates.size(), sourcePath);
+    return result;
+}
+
+bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
+                                const ManualVignetteSidecars& sidecars) {
+    if (sidecars.candidates.empty()) return true;
+    DecodedDNGImage frame;
+    if (!DNGDecoder::decodeImage(dng, frame, false, false)) return false;
+    for (const auto* selected : manualCandidateOrder(sidecars)) {
+        std::vector<GainMap> maps = selected->image.opcodeList2;
+        if (selected->whiteImage) {
+            uint32_t width = 17, height = 13;
+            if (!frame.opcodeList2.empty()) {
+                width = frame.opcodeList2.front().width;
+                height = frame.opcodeList2.front().height;
+            } else if (!selected->image.opcodeList2.empty()) {
+                width = selected->image.opcodeList2.front().width;
+                height = selected->image.opcodeList2.front().height;
+            }
+            const bool sourceCfa = frame.layout.pixels == DNGPixelLayout::CFA;
+            std::ostringstream cacheKey;
+            cacheKey << selected->path << '|' << width << 'x' << height << '|'
+                     << sourceCfa;
+            if (sourceCfa)
+                for (const auto phase : frame.layout.cfaPhase)
+                    cacheKey << '|' << static_cast<unsigned>(phase);
+            const std::string key = cacheKey.str();
+            {
+                std::lock_guard<std::mutex> lock(sidecars.cache->mutex);
+                const auto cached = sidecars.cache->convertedWhiteMaps.find(key);
+                if (cached != sidecars.cache->convertedWhiteMaps.end())
+                    maps = cached->second;
+            }
+            if (maps.empty()) {
+                maps = gainMapsFromWhite(
+                    selected->image, width, height, sourceCfa,
+                    frame.layout.cfaPhase);
+                if (!maps.empty()) {
+                    std::lock_guard<std::mutex> lock(sidecars.cache->mutex);
+                    const auto [cached, inserted] =
+                        sidecars.cache->convertedWhiteMaps.emplace(key, maps);
+                    if (!inserted) maps = cached->second;
+                }
+            }
+            if (maps.empty()) continue;
+        }
+        bool applied = false;
+        if (!maps.empty()) {
+            if (!DNGDecoder::replaceGainMaps(dng, 2, maps)) return false;
+            applied = true;
+        }
+        // A white capture derives only OpcodeList2; gain-map DNGs may also
+        // override OpcodeList3 while preserving a missing destination layer.
+        if (!selected->whiteImage && !selected->image.opcodeList3.empty()) {
+            if (!DNGDecoder::replaceGainMaps(
+                    dng, 3, selected->image.opcodeList3)) return false;
+            applied = true;
+        }
+        if (applied) return true;
+    }
+    return true;
+}
+
+std::array<int, 2> manualVignetteSensorResolution(
+        const ManualVignetteSidecars& sidecars) {
+    const auto ordered = manualCandidateOrder(sidecars);
+    if (!ordered.empty()) {
+        const auto& candidate = *ordered.front();
+        if (candidate.image.layout.width && candidate.image.layout.height)
+            return {static_cast<int>(candidate.image.layout.width),
+                    static_cast<int>(candidate.image.layout.height)};
+        if (!candidate.image.opcodeList2.empty())
+            return {static_cast<int>(candidate.image.opcodeList2.front().coordinateWidth),
+                    static_cast<int>(candidate.image.opcodeList2.front().coordinateHeight)};
+    }
+    return {0, 0};
+}
+
 boost::filesystem::path gyroflowSidecarPath(const std::string& sourcePath) {
     boost::filesystem::path source(sourcePath);
     while (source.filename().empty() && source.has_parent_path())

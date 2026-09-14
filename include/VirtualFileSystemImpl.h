@@ -15,6 +15,7 @@
 
 namespace BS { class thread_pool; }
 #include "Types.h"
+#include "DNGImage.h"
 #include "IVirtualFileSystem.h"
 
 namespace motioncam {
@@ -220,6 +221,30 @@ struct DngPixelPipelineOptions {
     double exposureTime = 0.0;
     std::string_view sourceName;
 };
+
+// Manual flat-field DNGs discovered beside a clip.  The implementation keeps
+// the decoded flats in memory, but creates/replaces opcodes on the frame's
+// native geometry so all ordinary gain-map processing remains downstream.
+struct ManualVignetteSidecars {
+    struct Cache {
+        std::mutex mutex;
+        std::unordered_map<std::string, std::vector<GainMap>> convertedWhiteMaps;
+    };
+    struct Candidate {
+        std::string path;
+        std::string illuminant;
+        bool whiteImage = false;
+        DecodedDNGImage image;
+    };
+    std::vector<Candidate> candidates;
+    std::shared_ptr<Cache> cache = std::make_shared<Cache>();
+};
+
+ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath);
+bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
+                                const ManualVignetteSidecars& sidecars);
+std::array<int, 2> manualVignetteSensorResolution(
+    const ManualVignetteSidecars& sidecars);
 
 void processDngPixels(std::vector<uint8_t>& dng,
                       const RenderSettings& settings,

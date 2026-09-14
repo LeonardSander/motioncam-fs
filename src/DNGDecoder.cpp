@@ -1473,8 +1473,20 @@ void DNGDecoder::findDNGFiles() {
         if (!boost::filesystem::exists(basePath) || !boost::filesystem::is_directory(basePath))
             throw std::runtime_error("Invalid DNG sequence path: " + mSequenceInfo.basePath);
         boost::filesystem::directory_iterator end;
+        const std::string sequenceStem = boost::algorithm::to_lower_copy(
+            basePath.filename().string());
+        const std::string whitePrefix = sequenceStem + "_white";
+        const std::string gainMapPrefix = sequenceStem + "_gainmap";
         for (boost::filesystem::directory_iterator it(basePath); it != end; ++it) {
-            if (boost::iequals(it->path().extension().string(), ".dng"))
+            const std::string stem = boost::algorithm::to_lower_copy(
+                it->path().stem().string());
+            const auto manualSidecar = [&](const std::string& prefix) {
+                return stem == prefix || (stem.size() > prefix.size() &&
+                    stem.compare(0, prefix.size(), prefix) == 0 &&
+                    stem[prefix.size()] == '_');
+            };
+            if (boost::iequals(it->path().extension().string(), ".dng") &&
+                !manualSidecar(whitePrefix) && !manualSidecar(gainMapPrefix))
                 dngFiles.push_back(it->path().string());
         }
     }

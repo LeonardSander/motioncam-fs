@@ -103,6 +103,7 @@ private:
     std::optional<CalibrationData> mCalibration;
     std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;
+    vfs::ManualVignetteSidecars mManualVignetteSidecars;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::map<Timestamp, float> mNormalizedExposureOffsets;
     std::map<Timestamp, float> mSmoothedExposureOffsets;
