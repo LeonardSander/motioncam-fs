@@ -28,6 +28,7 @@ jobs:
           clang ninja-build pkg-config \
           libboost-filesystem-dev libboost-locale-dev libboost-regex-dev \
           libspdlog-dev libfmt-dev libfuse3-dev libjxl-dev libxcb-cursor0 \
+          libarchive-dev 7zip \
           libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
           libswscale-dev
 
@@ -79,6 +80,7 @@ jobs:
           AppDir/usr/share/applications/com.motioncam.fuse.desktop
         install -Dm644 assets/app_icon_linux.png \
           AppDir/usr/share/icons/hicolor/256x256/apps/motioncam-fuse.png
+        install -Dm755 "$(command -v 7zz)" AppDir/usr/bin/7zz
         curl -L --retry 3 -o linuxdeploy.AppImage \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
         curl -L --retry 3 -o linuxdeploy-plugin-qt.AppImage \
@@ -201,7 +203,7 @@ jobs:
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macOS build tools
       if: matrix.platform == 'macos'
-      run: brew install nasm
+      run: brew install nasm sevenzip
 
     - name: Install macFUSE (macOS)
       if: matrix.platform == 'macos'
@@ -307,6 +309,9 @@ jobs:
           fi
           echo "Running windeployqt on $exe"
           "${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}/bin/windeployqt.exe" "$exe" || echo "windeployqt failed"
+          sevenzip_dir="$(dirname "$(command -v 7z)")"
+          cp "$sevenzip_dir/7z.exe" .
+          if [ -f "$sevenzip_dir/7z.dll" ]; then cp "$sevenzip_dir/7z.dll" .; fi
           7z a ../../artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}.zip ./*
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
           cd "${{ matrix.build_dir }}"
@@ -316,6 +321,7 @@ jobs:
             exit 1
           fi
           echo "Packaging $app"
+          cp "$(command -v 7zz)" "$app/Contents/MacOS/7zz"
           bash "${{ github.workspace }}/scripts/package_macos_app.sh" "$app"
           ditto -c -k --sequesterRsrc --keepParent \
             "$app" "../artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}.zip"

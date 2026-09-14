@@ -9,6 +9,7 @@
 #include "DNGDecoder.h"
 #include "Utils.h"
 #include "VirtualFileSystemImpl.h"
+#include "ArchiveImport.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -508,6 +509,47 @@ namespace {
                trimmed.startsWith("ProRes ", Qt::CaseInsensitive) ||
                trimmed.startsWith("CineForm ", Qt::CaseInsensitive);
     }
+
+    bool isSevenZipFinalizeFormat(const QString& mode) {
+        return mode.trimmed().compare("7z LZMA2 Ultra", Qt::CaseInsensitive) == 0;
+    }
+
+    QString sevenZipExecutable() {
+        for (const QString& name : {QStringLiteral("7zz"), QStringLiteral("7z"), QStringLiteral("7za")}) {
+            const QString bundled = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(
+#ifdef _WIN32
+                name + ".exe");
+#else
+                name);
+#endif
+            if (QFileInfo(bundled).isExecutable()) return bundled;
+            const QString executable = QStandardPaths::findExecutable(name);
+            if (!executable.isEmpty()) return executable;
+        }
+        return {};
+    }
+
+    void copyFileAtomically(const QString& source, const QString& destination) {
+        if (!QFileInfo::exists(source) ||
+            QFileInfo(source).absoluteFilePath() == QFileInfo(destination).absoluteFilePath()) return;
+        QFile input(source);
+        QSaveFile output(destination);
+        if (!input.open(QIODevice::ReadOnly) || !output.open(QIODevice::WriteOnly))
+            throw std::runtime_error("Could not create output sidecar " + destination.toStdString());
+        while (!input.atEnd()) {
+            const QByteArray block = input.read(1024 * 1024);
+            if ((block.isEmpty() && input.error() != QFileDevice::NoError) ||
+                output.write(block) != block.size())
+                throw std::runtime_error("Could not copy output sidecar " + destination.toStdString());
+        }
+        if (!output.commit())
+            throw std::runtime_error("Could not finish output sidecar " + destination.toStdString());
+    }
+
+    struct RemoveFilesOnExit {
+        QStringList paths;
+        ~RemoveFilesOnExit() { for (const auto& path : paths) QFile::remove(path); }
+    };
 
     bool parseJxlDctDistance(const QString& mode, float& distance) {
         QString value = mode.trimmed();
@@ -1069,6 +1111,12 @@ MainWindow::~MainWindow() {
         mProcessingWatcher->waitForFinished();
     }
 
+    const auto archiveMounts = mArchiveTemporaryRoots.keys();
+    for (const auto mountId : archiveMounts) {
+        mFuseFilesystem->unmount(mountId);
+        cleanupArchiveMount(mountId);
+    }
+
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=window_shutdown_complete latency_ms={}",
                      shutdownTimer.elapsed());
@@ -1207,7 +1255,7 @@ void MainWindow::restoreSettings() {
             restoredNativeMode = true;
         }
     } else if (settings.value("cameraNativeFinalization", false).toBool()) {
-        compressionIndex = 4;
+        compressionIndex = ui->dngCompressionModeComboBox->findText("HEVC 420 slow 14");
         restoredNativeMode = true;
     }
     if (restoredNativeText.isEmpty())
@@ -1299,6 +1347,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 
                     // Accept MCRAW files, MOV/MP4 files with NATIVE suffix, or DNG files/directories
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                        filePath.endsWith(".7z", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
@@ -1323,6 +1372,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                 for (const auto& url : urls) {
                     auto filePath = url.toLocalFile();
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                        filePath.endsWith(".7z", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
@@ -1346,6 +1396,48 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void MainWindow::mountFile(const QString& filePath) {
+    if (filePath.endsWith(".7z", Qt::CaseInsensitive)) {
+        std::unique_ptr<QProgressDialog> progress;
+        if (!mImportBatchProgress) {
+            progress = std::make_unique<QProgressDialog>(
+                tr("Decompressing %1...").arg(QFileInfo(filePath).fileName()),
+                QString(), 0, 0, this);
+            progress->setWindowModality(Qt::WindowModal);
+            progress->setCancelButton(nullptr);
+            progress->setMinimumDuration(0);
+            progress->show();
+        }
+        try {
+            auto future = QtConcurrent::run([filePath] {
+                return motioncam::extractReviewArchive(filePath);
+            });
+            while (!future.isFinished()) {
+                QApplication::processEvents(QEventLoop::AllEvents, 20);
+                QThread::msleep(10);
+            }
+            const auto extracted = future.result();
+            if (progress) progress->close();
+            mountFileImpl(extracted.sourcePath, filePath, extracted.temporaryRoot,
+                          extracted.sidecarPath, extracted.gyroflowSidecarPath);
+        } catch (const motioncam::InsufficientArchiveSpace& error) {
+            if (progress) progress->close();
+            mCancelImportBatch = mImportBatchActive;
+            QMessageBox::critical(this, tr("Not enough temporary space"),
+                                  QString::fromUtf8(error.what()));
+        } catch (const std::exception& error) {
+            if (progress) progress->close();
+            QMessageBox::critical(this, tr("Archive import failed"),
+                                  QString::fromUtf8(error.what()));
+        }
+        return;
+    }
+    mountFileImpl(filePath, filePath);
+}
+
+void MainWindow::mountFileImpl(const QString& filePath, const QString& importPath,
+                               const QString& temporaryRoot,
+                               const QString& sidecarPath,
+                               const QString& gyroflowSidecarPath) {
     QElapsedTimer mountTimer;
     mountTimer.start();
     const int importIndex = mMountedFiles.size();
@@ -1353,20 +1445,26 @@ void MainWindow::mountFile(const QString& filePath) {
         spdlog::info("GALLERY_PERF event=clip_import_start clip={} path={}",
                      importIndex, filePath.toStdString());
     spdlog::info("Mount timing [{}]: request started", filePath.toStdString());
-    const QString normalizedPath = QFileInfo(filePath).absoluteFilePath();
+    const QString normalizedPath = QFileInfo(importPath).absoluteFilePath();
     for (const auto& mounted : mMountedFiles)
-        if (QFileInfo(mounted.srcFile).absoluteFilePath() == normalizedPath)
+        if (QFileInfo(mounted.importFile).absoluteFilePath() == normalizedPath) {
+            if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
             return;
+        }
     if (mMountInProgress) {
-        if (mMountPathInProgress == normalizedPath)
+        if (mMountPathInProgress == normalizedPath) {
+            if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
             return;
-        QTimer::singleShot(200, this, [this, filePath] { mountFile(filePath); });
+        }
+        QTimer::singleShot(200, this, [this, importPath] { mountFile(importPath); });
+        if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
         return;
     }
     mMountInProgress = true;
     mMountPathInProgress = normalizedPath;
     // Extract just the filename from the path
-    QFileInfo fileInfo(filePath);
+    QFileInfo fileInfo(importPath);
+    const QFileInfo stagedFileInfo(filePath);
     auto fileName = fileInfo.fileName();
     QString destinationRoot = mCacheRootFolder;
 #ifdef __APPLE__
@@ -1380,7 +1478,7 @@ void MainWindow::mountFile(const QString& filePath) {
 #endif
     // A sequence directory cannot be mounted onto itself: doing so hides the
     // source DNGs and makes every projected read recursively enter FUSE.
-    const QString mountName = fileInfo.isDir()
+    const QString mountName = stagedFileInfo.isDir()
         ? fileInfo.fileName() + "-mounted"
         : fileInfo.baseName();
     auto dstPath = destinationRoot + "/" + mountName;
@@ -1399,7 +1497,9 @@ void MainWindow::mountFile(const QString& filePath) {
         QApplication::processEvents();
     }
     QString mountError;
-    const auto settings = buildRenderSettings();
+    auto settings = buildRenderSettings();
+    settings.sourceSidecarPath = sidecarPath.toStdString();
+    settings.sourceGyroflowSidecarPath = gyroflowSidecarPath.toStdString();
 #ifdef __APPLE__
     cleanupStaleMacFuseMounts();
 #elif __linux__
@@ -1408,6 +1508,7 @@ void MainWindow::mountFile(const QString& filePath) {
         if (singleProgress) mountProgress->close();
         mMountInProgress = false;
         mMountPathInProgress.clear();
+        if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
         QMessageBox::critical(this, tr("Error"), mountError);
         return;
     }
@@ -1448,6 +1549,7 @@ void MainWindow::mountFile(const QString& filePath) {
     mMountInProgress = false;
     mMountPathInProgress.clear();
     if (mountId == motioncam::InvalidMountId) {
+        if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
         QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(mountError));
         return;
     }
@@ -1461,6 +1563,9 @@ void MainWindow::mountFile(const QString& filePath) {
 
     fileWidget->setFixedHeight(156);
     fileWidget->setProperty("filePath", filePath);
+    fileWidget->setProperty("importPath", importPath);
+    fileWidget->setProperty("sidecarPath", sidecarPath);
+    fileWidget->setProperty("gyroflowSidecarPath", gyroflowSidecarPath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
     fileWidget->setObjectName(QStringLiteral("clipCard"));
@@ -1837,7 +1942,8 @@ void MainWindow::mountFile(const QString& filePath) {
     });
 
     mMountedFiles.append(
-        motioncam::MountedFile(mountId, filePath));
+        motioncam::MountedFile(mountId, filePath, importPath));
+    if (!temporaryRoot.isEmpty()) mArchiveTemporaryRoots.insert(mountId, temporaryRoot);
     // Session loading writes the complete session after the batch. Rewriting
     // it for every imported clip adds quadratic JSON/file-system work and is
     // especially visible in automated multi-clip diagnostics.
@@ -1882,6 +1988,7 @@ void MainWindow::mountFiles(
         bar->setFormat(tr("0 / %1").arg(filePaths.size()));
     mImportBatchProgress = &progress;
     mImportBatchActive = true;
+    mCancelImportBatch = false;
     progress.show();
     QApplication::processEvents();
 
@@ -1897,10 +2004,12 @@ void MainWindow::mountFiles(
         if (auto* bar = progress.findChild<QProgressBar*>())
             bar->setFormat(tr("%1 / %2").arg(imported).arg(filePaths.size()));
         QApplication::processEvents();
+        if (mCancelImportBatch) break;
     }
 
     mImportBatchProgress.clear();
     mImportBatchActive = false;
+    mCancelImportBatch = false;
     progress.close();
     updateCalibrationButtonStates();
     if (!mGalleryPerformanceTestActive) autoSaveSession();
@@ -2139,7 +2248,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         if (!card || !info) continue;
         ClipPlayerDialog::Clip clip;
         clip.mountId = mounted.mountId;
-        clip.title = QFileInfo(mounted.srcFile).completeBaseName();
+        clip.title = QFileInfo(mounted.importFile).completeBaseName();
         clip.sourceFile = mounted.srcFile;
         // Independent DNGs form a still gallery, not a 24 fps video sequence.
         // Give each item a stable one-second viewing interval.
@@ -2684,6 +2793,7 @@ void MainWindow::removeFile(QWidget* fileWidget) {
             cancellation->store(true);
         if (auto* dialog = mTimingDialogs.value(mountId).data()) dialog->close();
         mFuseFilesystem->unmount(mountId);
+        cleanupArchiveMount(mountId);
         mSelectedMountIds.remove(mountId);
         mSelectedFrames.remove(mountId);
         mLocalSettings.remove(mountId);
@@ -2713,6 +2823,12 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     updateClipIndices();
     updateSelectionUi();
     autoSaveSession();
+}
+
+void MainWindow::cleanupArchiveMount(motioncam::MountId mountId) {
+    const QString root = mArchiveTemporaryRoots.take(mountId);
+    if (!root.isEmpty() && QDir(root).exists() && !QDir(root).removeRecursively())
+        spdlog::warn("Could not remove archive staging directory: {}", root.toStdString());
 }
 
 void MainWindow::keyPressEvent(QKeyEvent* event) {
@@ -2751,6 +2867,7 @@ void MainWindow::discardFile(QWidget* fileWidget) {
     auto mountId = fileWidget->property("mountId").toInt(&ok);
     if(ok) {
         mFuseFilesystem->unmount(mountId);
+        cleanupArchiveMount(mountId);
     }
 
     // Give Windows a moment to release file handles after unmounting
@@ -3039,10 +3156,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     }
 
     const QFileInfo inputInfo(srcFile);
-    const QString calibrationPath = inputInfo.isDir()
+    QString calibrationPath = fileWidget->property("sidecarPath").toString();
+    if (calibrationPath.isEmpty()) calibrationPath = inputInfo.isDir()
         ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + ".json")
         : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + ".json";
-    const QString gyroflowPath = inputInfo.isDir()
+    QString gyroflowPath = fileWidget->property("gyroflowSidecarPath").toString();
+    if (gyroflowPath.isEmpty()) gyroflowPath = inputInfo.isDir()
         ? QDir(srcFile).absoluteFilePath(inputInfo.fileName() + "_gyroflow.json")
         : inputInfo.absolutePath() + "/" + inputInfo.completeBaseName() + "_gyroflow.json";
     const auto sourceCalibration = QFile::exists(calibrationPath)
@@ -3793,13 +3912,18 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
 
 void MainWindow::finalizeFile(QWidget* fileWidget) {
     const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
+    const bool archiveDngs = ui->dngCompressionCheckBox->isChecked() &&
+        isSevenZipFinalizeFormat(compressionMode);
     if (ui->dngCompressionCheckBox->isChecked()) {
         if (isCameraNativeFormat(compressionMode)) {
             finalizeCameraNative(fileWidget, compressionMode);
             return;
         }
         const QString mode = compressionMode.trimmed();
-        if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
+        if (archiveDngs) {
+            // The outer LZMA2 stream compresses finalized DNG payloads; do not
+            // first apply JPEG/JPEG XL compression inside each DNG.
+        } else if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
             mRenderSettings.jxlDistance = -1.0f;
         } else if (mode.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
                    mode.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
@@ -3846,6 +3970,50 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         return;
     }
 
+    QString archivePath;
+    QString archiveSidecarPath;
+    QString archiveGyroflowPath;
+    QString sourceSidecarPath;
+    QString sourceGyroflowPath;
+    QString archiver;
+    if (archiveDngs) {
+        archivePath = mountPath + ".7z";
+        const QString importPath = fileWidget->property("importPath").toString();
+        if (importPath.endsWith(".7z", Qt::CaseInsensitive)) {
+            const QFileInfo sourceArchive(importPath);
+            archivePath = QDir(sourceArchive.absolutePath()).absoluteFilePath(
+                sourceArchive.completeBaseName() + "_finalized.7z");
+        }
+        const QFileInfo archiveInfo(archivePath);
+        const QString archiveBase = QDir(archiveInfo.absolutePath()).absoluteFilePath(
+            archiveInfo.completeBaseName());
+        archiveSidecarPath = archiveBase + ".json";
+        archiveGyroflowPath = archiveBase + "_gyroflow.json";
+        sourceSidecarPath = fileWidget->property("sidecarPath").toString();
+        sourceGyroflowPath = fileWidget->property("gyroflowSidecarPath").toString();
+        if (sourceSidecarPath.isEmpty())
+            sourceSidecarPath = QString::fromStdString(
+                motioncam::vfs::sidecarPath(srcFile.toStdString()).string());
+        if (sourceGyroflowPath.isEmpty())
+            sourceGyroflowPath = QString::fromStdString(
+                motioncam::vfs::gyroflowSidecarPath(srcFile.toStdString()).string());
+        archiver = sevenZipExecutable();
+        if (archiver.isEmpty()) {
+            QMessageBox::critical(this, tr("Finalize failed"),
+                tr("7-Zip was not found. Install 7-Zip (7zz, 7z, or 7za) and try again."));
+            return;
+        }
+        if ((QFileInfo::exists(archivePath) ||
+             (QFileInfo::exists(sourceSidecarPath) && QFileInfo::exists(archiveSidecarPath) &&
+              QFileInfo(sourceSidecarPath).absoluteFilePath() != QFileInfo(archiveSidecarPath).absoluteFilePath()) ||
+             (QFileInfo::exists(sourceGyroflowPath) && QFileInfo::exists(archiveGyroflowPath) &&
+              QFileInfo(sourceGyroflowPath).absoluteFilePath() != QFileInfo(archiveGyroflowPath).absoluteFilePath())) &&
+            QMessageBox::question(this, tr("Replace finalized archive?"),
+                tr("Replace the existing 7z output and sidecars for:\n%1").arg(archivePath),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+    }
+
     // Use a temporary directory to avoid ProjectedFS locks
     // We'll write to temp, then move files to the final location
     QString tempPath = mountPath + ".finalizing-" +
@@ -3884,7 +4052,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 
     // Get current render config
     auto settings = buildRenderSettings();
-    bool enableCompression = settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION;
+    bool enableCompression = !archiveDngs &&
+        (settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION);
     motioncam::FinalizeOptions finalizeOptions;
     finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
     finalizeOptions.detectDuplicateDngs = detectDuplicateDngs;
@@ -3921,11 +4090,122 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         if (!progress.wasCanceled()) {
             spdlog::info("Rendered {} frames to temp directory", totalFrames);
 
-            // Now move files from temp to final location
-            progress.setLabelText("Moving files to final location...");
-            QApplication::processEvents();
+            if (archiveDngs) {
+                progress.setRange(0, 0);
+                progress.setLabelText("Compressing uncompressed DNGs with 7z LZMA2 Ultra...");
+                QApplication::processEvents();
+                const QString transactionId = ".partial-" +
+                    QUuid::createUuid().toString(QUuid::WithoutBraces);
+                const QString partialArchive = archivePath + transactionId;
+                const QString partialSidecar = archiveSidecarPath + transactionId;
+                const QString partialGyroflow = archiveGyroflowPath + transactionId;
+                RemoveFilesOnExit partialFiles{{partialArchive, partialSidecar, partialGyroflow}};
+                QProcess compressor;
+                compressor.setWorkingDirectory(tempPath);
+                compressor.setProcessChannelMode(QProcess::MergedChannels);
+                compressor.start(archiver, {"a", "-t7z", "-m0=lzma2", "-mx=9",
+                    "-mmt=on", "-ms=on", "-sse", "-y", partialArchive, "*.dng"});
+                if (!compressor.waitForStarted())
+                    throw std::runtime_error("Could not start 7-Zip");
+                QByteArray diagnostic;
+                while (compressor.state() != QProcess::NotRunning) {
+                    compressor.waitForFinished(100);
+                    diagnostic += compressor.readAll();
+                    if (diagnostic.size() > 16000) diagnostic = diagnostic.right(8000);
+                    QApplication::processEvents();
+                    if (progress.wasCanceled()) {
+                        compressor.kill();
+                        compressor.waitForFinished();
+                        QFile::remove(partialArchive);
+                        throw std::runtime_error("Finalization cancelled");
+                    }
+                }
+                diagnostic += compressor.readAll();
+                if (compressor.exitStatus() != QProcess::NormalExit || compressor.exitCode() != 0) {
+                    QFile::remove(partialArchive);
+                    throw std::runtime_error(("7-Zip failed:\n" +
+                        QString::fromUtf8(diagnostic.right(8000))).toStdString());
+                }
+                if (!QFileInfo::exists(partialArchive))
+                    throw std::runtime_error("7-Zip did not create the output archive");
 
-            if (!mUnmountOnFinalize) {
+                copyFileAtomically(sourceSidecarPath, partialSidecar);
+                copyFileAtomically(sourceGyroflowPath, partialGyroflow);
+                const QString backupId = ".backup-" +
+                    QUuid::createUuid().toString(QUuid::WithoutBraces);
+                const QString archiveBackup = archivePath + backupId;
+                const QString sidecarBackup = archiveSidecarPath + backupId;
+                const QString gyroflowBackup = archiveGyroflowPath + backupId;
+                const bool stageSidecar = QFileInfo::exists(partialSidecar);
+                const bool stageGyroflow = QFileInfo::exists(partialGyroflow);
+                const bool hadArchive = QFileInfo::exists(archivePath);
+                // Existing companions belong to the archive being replaced.
+                // Preserve them even when this render has no replacement so a
+                // successful commit removes stale metadata, while a failed
+                // commit can still restore the complete previous output.
+                const bool hadSidecar = QFileInfo::exists(archiveSidecarPath);
+                const bool hadGyroflow = QFileInfo::exists(archiveGyroflowPath);
+                auto preserve = [](const QString& path, const QString& backup, bool exists) {
+                    return !exists || QFile::rename(path, backup);
+                };
+                if (!preserve(archivePath, archiveBackup, hadArchive) ||
+                    !preserve(archiveSidecarPath, sidecarBackup, hadSidecar) ||
+                    !preserve(archiveGyroflowPath, gyroflowBackup, hadGyroflow)) {
+                    if (QFileInfo::exists(archiveBackup)) QFile::rename(archiveBackup, archivePath);
+                    if (QFileInfo::exists(sidecarBackup)) QFile::rename(sidecarBackup, archiveSidecarPath);
+                    if (QFileInfo::exists(gyroflowBackup)) QFile::rename(gyroflowBackup, archiveGyroflowPath);
+                    throw std::runtime_error("Could not preserve existing 7z output files");
+                }
+                const bool archiveCommitted = QFile::rename(partialArchive, archivePath);
+                const bool sidecarCommitted = archiveCommitted &&
+                    (!stageSidecar || QFile::rename(partialSidecar, archiveSidecarPath));
+                const bool gyroflowCommitted = sidecarCommitted &&
+                    (!stageGyroflow || QFile::rename(partialGyroflow, archiveGyroflowPath));
+                if (!gyroflowCommitted) {
+                    if (archiveCommitted) QFile::remove(archivePath);
+                    if (sidecarCommitted && stageSidecar) QFile::remove(archiveSidecarPath);
+                    if (QFileInfo::exists(archiveBackup)) QFile::rename(archiveBackup, archivePath);
+                    if (QFileInfo::exists(sidecarBackup)) QFile::rename(sidecarBackup, archiveSidecarPath);
+                    if (QFileInfo::exists(gyroflowBackup)) QFile::rename(gyroflowBackup, archiveGyroflowPath);
+                    QFile::remove(partialArchive);
+                    QFile::remove(partialSidecar);
+                    QFile::remove(partialGyroflow);
+                    throw std::runtime_error("Could not commit the completed 7z archive and sidecars");
+                }
+                QFile::remove(archiveBackup);
+                QFile::remove(sidecarBackup);
+                QFile::remove(gyroflowBackup);
+                if (!tempDir.removeRecursively())
+                    spdlog::warn("Could not remove temporary DNG render: {}", tempPath.toStdString());
+
+                if (!mUnmountOnFinalize) {
+                    progress.close();
+                    QMessageBox::information(this, "Finalize complete",
+                        QString("The clip remains mounted. Finalized archive was created at:\n%1")
+                            .arg(archivePath));
+                    return;
+                }
+
+                mFuseFilesystem->unmount(mountId);
+                cleanupArchiveMount(mountId);
+                mountReleased = true;
+#ifdef _WIN32
+                QThread::msleep(150);
+#elif __APPLE__
+                if (!waitForMacFuseUnmount(mountPath, 10000))
+                    throw std::runtime_error("Timed out waiting for the macOS FUSE mount to close");
+#endif
+                QDir mountDir(mountPath);
+                if (mountDir.exists() && !mountDir.removeRecursively())
+                    throw std::runtime_error("Could not remove the unmounted output directory");
+                spdlog::info("Finalize complete: {} frames archived to {}",
+                             totalFrames, archivePath.toStdString());
+            } else {
+                // Now move files from temp to final location
+                progress.setLabelText("Moving files to final location...");
+                QApplication::processEvents();
+
+                if (!mUnmountOnFinalize) {
                 const QFileInfo retainedInfo(retainedOutputPath);
                 const bool removedExisting = !retainedInfo.exists() ||
                     (retainedInfo.isDir() ? QDir(retainedOutputPath).removeRecursively()
@@ -3942,11 +4222,12 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 spdlog::info("Finalize complete: {} frames rendered to {} without unmounting",
                              totalFrames, retainedOutputPath.toStdString());
                 return;
-            }
+                }
 
             // Keep the active mount intact until rendering has fully succeeded.
-            mFuseFilesystem->unmount(mountId);
-            mountReleased = true;
+                mFuseFilesystem->unmount(mountId);
+                cleanupArchiveMount(mountId);
+                mountReleased = true;
 #ifdef _WIN32
             QThread::msleep(150);
 #elif __APPLE__
@@ -3955,18 +4236,19 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             }
 #endif
 
-            QDir mountDir(mountPath);
-            if (mountDir.exists() && !mountDir.removeRecursively()) {
-                throw std::runtime_error("Could not remove the unmounted output directory");
-            }
+                QDir mountDir(mountPath);
+                if (mountDir.exists() && !mountDir.removeRecursively()) {
+                    throw std::runtime_error("Could not remove the unmounted output directory");
+                }
 
-            QDir parentDir(QFileInfo(mountPath).absolutePath());
-            if (!parentDir.rename(tempPath, mountPath)) {
-                throw std::runtime_error("Could not move the completed render into place");
-            }
+                QDir parentDir(QFileInfo(mountPath).absolutePath());
+                if (!parentDir.rename(tempPath, mountPath)) {
+                    throw std::runtime_error("Could not move the completed render into place");
+                }
 
-            spdlog::info("Finalize complete: {} frames rendered to {}",
-                         totalFrames, mountPath.toStdString());
+                spdlog::info("Finalize complete: {} frames rendered to {}",
+                             totalFrames, mountPath.toStdString());
+            }
         } else {
             spdlog::info("Finalize cancelled by user");
             tempDir.removeRecursively();
@@ -4371,7 +4653,8 @@ void MainWindow::updateSelectionUi() {
         : settings.draftScale == 4 ? 1 : settings.draftScale == 8 ? 2 : -1);
     // Camera Native modes are global finalization choices rather than fields
     // in RenderSettings. Preserve them while clip selection changes.
-    if (!isCameraNativeFormat(ui->dngCompressionModeComboBox->currentText())) {
+    if (!isCameraNativeFormat(ui->dngCompressionModeComboBox->currentText()) &&
+        !isSevenZipFinalizeFormat(ui->dngCompressionModeComboBox->currentText())) {
         if (motioncam::isLossyJpegDct(settings.jxlDistance))
             ui->dngCompressionModeComboBox->setCurrentIndex(1);
         else if (settings.jxlDistance < 0.0f)
@@ -4772,7 +5055,7 @@ void MainWindow::saveSessionToFile(const QString& path) {
     QJsonArray clips;
     for (const auto& file : mMountedFiles) {
         QJsonObject clip;
-        clip["path"] = file.srcFile;
+        clip["path"] = file.importFile;
         if (mLocalSettings.contains(file.mountId))
             clip["localSettings"] = encode(mLocalSettings.value(file.mountId));
         QJsonArray selectedFrames;
@@ -4800,7 +5083,9 @@ void MainWindow::clearSession() {
         auto* card = fileWidgetForMount(mMountedFiles.front().mountId);
         if (card) removeFile(card);
         else {
-            mFuseFilesystem->unmount(mMountedFiles.front().mountId);
+            const auto mountId = mMountedFiles.front().mountId;
+            mFuseFilesystem->unmount(mountId);
+            cleanupArchiveMount(mountId);
             mMountedFiles.removeFirst();
         }
     }
@@ -4860,7 +5145,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
     mountFiles(clipPaths, [this, &clipsByPath, &decode](
             const motioncam::MountedFile& mounted) {
         const auto clip = clipsByPath.value(
-            QFileInfo(mounted.srcFile).absoluteFilePath());
+            QFileInfo(mounted.importFile).absoluteFilePath());
         if (clip.contains("localSettings") && !mMountedFiles.isEmpty()) {
             const auto id = mounted.mountId;
             const auto local = decode(clip["localSettings"].toObject());
@@ -5071,7 +5356,8 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     }
 
     QFileInfo fileInfo(filePath);
-    QString jsonPath = fileInfo.isDir()
+    QString jsonPath = fileWidget->property("sidecarPath").toString();
+    if (jsonPath.isEmpty()) jsonPath = fileInfo.isDir()
         ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
         : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
 
@@ -5185,7 +5471,8 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
         selectedFileWidget = fileWidgetForMount(*mSelectedMountIds.constBegin());
         if (selectedFileWidget) {
             const QFileInfo selectedInfo(selectedFileWidget->property("filePath").toString());
-            const QString candidate = selectedInfo.isDir()
+            QString candidate = selectedFileWidget->property("sidecarPath").toString();
+            if (candidate.isEmpty()) candidate = selectedInfo.isDir()
                 ? selectedInfo.absoluteFilePath() + "/" + selectedInfo.fileName() + ".json"
                 : selectedInfo.absolutePath() + "/" + selectedInfo.completeBaseName() + ".json";
             if (QFile::exists(candidate)) {
@@ -5210,7 +5497,8 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
 
         auto filePath = fileWidget->property("filePath").toString();
         QFileInfo fileInfo(filePath);
-        QString jsonPath = fileInfo.isDir()
+        QString jsonPath = fileWidget->property("sidecarPath").toString();
+        if (jsonPath.isEmpty()) jsonPath = fileInfo.isDir()
             ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
             : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
 

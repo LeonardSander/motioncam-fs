@@ -28,17 +28,19 @@
 
 namespace motioncam {
     struct MountedFile {
-        MountedFile(MountId mountId, QString srcFile) :
-            mountId(mountId), srcFile(srcFile)
+        MountedFile(MountId mountId, QString srcFile, QString importFile = {}) :
+            mountId(mountId), srcFile(srcFile),
+            importFile(importFile.isEmpty() ? srcFile : std::move(importFile))
         {}
 
         // Copy constructor
         MountedFile(const MountedFile& other) :
-            mountId(other.mountId), srcFile(other.srcFile)
+            mountId(other.mountId), srcFile(other.srcFile), importFile(other.importFile)
         {}
 
         const MountId mountId;
         const QString srcFile;
+        const QString importFile;
 
         // Copy assignment operator
         MountedFile& operator=(const MountedFile& other) {
@@ -46,6 +48,7 @@ namespace motioncam {
                 // Use const_cast to modify const members
                 const_cast<MountId&>(mountId) = other.mountId;
                 const_cast<QString&>(srcFile) = other.srcFile;
+                const_cast<QString&>(importFile) = other.importFile;
             }
             return *this;
         }
@@ -56,6 +59,7 @@ namespace motioncam {
                 // Use const_cast to modify const members
                 const_cast<MountId&>(mountId) = std::move(other.mountId);
                 const_cast<QString&>(srcFile) = std::move(other.srcFile);
+                const_cast<QString&>(importFile) = std::move(other.importFile);
             }
             return *this;
         }
@@ -159,6 +163,11 @@ private:
     void mountFiles(
         const QStringList& filePaths,
         const std::function<void(const motioncam::MountedFile&)>& mounted = {});
+    void mountFileImpl(const QString& filePath, const QString& importPath,
+                       const QString& temporaryRoot = {},
+                       const QString& sidecarPath = {},
+                       const QString& gyroflowSidecarPath = {});
+    void cleanupArchiveMount(motioncam::MountId mountId);
     QWidget* fileWidgetForMount(motioncam::MountId mountId) const;
     void saveSessionToFile(const QString& path);
     void loadSessionFromFile(const QString& path);
@@ -197,6 +206,7 @@ private:
     QString mMountPathInProgress;
     QPointer<QProgressDialog> mImportBatchProgress;
     bool mImportBatchActive = false;
+    bool mCancelImportBatch = false;
     bool mDeleteOnUnmount = false;
     motioncam::CachePolicy mCachePolicy = motioncam::CachePolicy::Quota;
     std::uint64_t mCacheQuotaBytes = 30ULL * 1024 * 1024 * 1024;
@@ -205,6 +215,7 @@ private:
     QHash<motioncam::MountId, motioncam::RenderSettings> mLocalSettings;
     QSet<motioncam::MountId> mSelectedMountIds;
     QHash<motioncam::MountId, QSet<int>> mSelectedFrames;
+    QHash<motioncam::MountId, QString> mArchiveTemporaryRoots;
     QPushButton* mFinalizeSelectedFramesButton = nullptr;
     QPushButton* mClearSelectedFramesButton = nullptr;
     QPushButton* mApplySelectedButton = nullptr;

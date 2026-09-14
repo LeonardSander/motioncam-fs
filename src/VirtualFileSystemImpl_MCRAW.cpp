@@ -198,15 +198,19 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
         mBaseName(baseName),
+        mSidecarPath(settings.sourceSidecarPath.empty()
+            ? vfs::sidecarPath(file) : settings.sourceSidecarPath),
+        mGyroflowSidecarPath(settings.sourceGyroflowSidecarPath.empty()
+            ? vfs::gyroflowSidecarPath(file) : settings.sourceGyroflowSidecarPath),
         mSettings(settings) {
     const auto initializationStarted = std::chrono::steady_clock::now();
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     
     // Load calibration JSON if it exists
-    const auto calibPath = vfs::sidecarPath(mSrcPath);
+    const auto& calibPath = mSidecarPath;
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        vfs::gyroflowSidecarPath(mSrcPath));
+        mGyroflowSidecarPath);
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
@@ -510,7 +514,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo = vfs::makeFileInfo(
         mFrameRateInfo, mFps, static_cast<int>(frames.size()), droppedFrames,
         duplicatedFrames, outputWidth, outputHeight);
-    const auto sidecar = vfs::sidecarPath(mSrcPath);
+    const auto& sidecar = mSidecarPath;
     mFileInfo.sidecarState = !boost::filesystem::exists(sidecar)
         ? 0 : (mCalibration.has_value() ? 1 : 2);
     if (mCalibration && mCalibration->hasIgnoreForwardMat) {
@@ -733,9 +737,9 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     mCache.clear();
-    vfs::loadSidecar(vfs::sidecarPath(mSrcPath), mSidecarMetadata, mCalibration, true);
+    vfs::loadSidecar(mSidecarPath, mSidecarMetadata, mCalibration, true);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        vfs::gyroflowSidecarPath(mSrcPath), true);
+        mGyroflowSidecarPath, true);
     if (mCalibration && mCalibration->hasLevels) mSettings.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mSettings.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +

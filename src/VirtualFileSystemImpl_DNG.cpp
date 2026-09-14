@@ -61,6 +61,10 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
         mBaseName(baseName),
+        mSidecarPath(config.sourceSidecarPath.empty()
+            ? vfs::sidecarPath(file) : config.sourceSidecarPath),
+        mGyroflowSidecarPath(config.sourceGyroflowSidecarPath.empty()
+            ? vfs::gyroflowSidecarPath(file) : config.sourceGyroflowSidecarPath),
         mFps(0),
         mTotalFrames(0),
         mDroppedFrames(0),
@@ -70,10 +74,10 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mConfig(config) {
     
     // Load calibration JSON if it exists (for DNG folder)
-    const auto calibPath = vfs::sidecarPath(mSrcPath);
+    const auto& calibPath = mSidecarPath;
     vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        vfs::gyroflowSidecarPath(mSrcPath));
+        mGyroflowSidecarPath);
     if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
@@ -630,12 +634,12 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);
 
-    const auto calibPath = vfs::sidecarPath(mSrcPath);
+    const auto& calibPath = mSidecarPath;
     nlohmann::json sidecarMetadata;
     std::optional<CalibrationData> calibration;
     vfs::loadSidecar(calibPath, sidecarMetadata, calibration, true);
     auto gyroflow = vfs::loadGyroflowLensProfile(
-        vfs::gyroflowSidecarPath(mSrcPath), true);
+        mGyroflowSidecarPath, true);
     if (sameRenderSettings(mConfig, config) && sidecarMetadata == mSidecarMetadata &&
         !gyroflow && !mGyroflowLensProfile)
         return;

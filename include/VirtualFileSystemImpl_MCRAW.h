@@ -50,6 +50,8 @@ private:
 private:
     const std::string mSrcPath;
     const std::string mBaseName;
+    const boost::filesystem::path mSidecarPath;
+    const boost::filesystem::path mGyroflowSidecarPath;
     size_t mTypicalDngSize;
     std::vector<Timestamp> mSourceFrames;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;

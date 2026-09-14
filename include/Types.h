@@ -382,6 +382,10 @@ struct RenderSettings {
     // Internal gallery mode: materialized frames are consumed as a stream and
     // are not constrained by projected-file size estimates.
     bool streamingPreview;
+    // Internal source overrides used by temporary archive staging. These are
+    // intentionally not serialized with user render settings.
+    std::string sourceSidecarPath;
+    std::string sourceGyroflowSidecarPath;
 
     // Constructor with defaults
     RenderSettings()

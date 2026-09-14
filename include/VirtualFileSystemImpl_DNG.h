@@ -62,6 +62,8 @@ private:
 private:
     const std::string mSrcPath;
     const std::string mBaseName;
+    const boost::filesystem::path mSidecarPath;
+    const boost::filesystem::path mGyroflowSidecarPath;
     RenderSettings mConfig;
     float mFps;
     bool mHasFrameNumberSequence = false;

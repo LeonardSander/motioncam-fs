@@ -43,6 +43,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/ArchiveImport.cpp
         src/FrameTimingDialog.cpp
         src/ClipPlayerDialog.cpp
         src/settingsdialog.cpp
@@ -63,6 +64,7 @@ set(PROJECT_SOURCES
         src/HigherCFADemosaic.cpp
 
         include/mainwindow.h
+        include/ArchiveImport.h
         include/FrameTimingDialog.h
         include/ClipPlayerDialog.h
         include/settingsdialog.h
@@ -265,6 +267,7 @@ target_include_directories(motioncam-decoder
 # Find the packages using vcpkg
 find_package(spdlog CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)  # Explicitly find fmt as well
+find_package(LibArchive REQUIRED)
 
 if(APPLE)
   if(TARGET spdlog::spdlog_header_only)
@@ -427,6 +430,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   Boost::regex
   ${MOTIONCAM_SPDLOG_TARGET}
   ${MOTIONCAM_FMT_TARGET}
+  LibArchive::LibArchive
   motioncam-decoder
   JPEG::JPEG
   ${JXL_TARGET}
@@ -480,6 +484,14 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-archive-import-test
+        tests/archive_import_test.cpp
+        src/ArchiveImport.cpp)
+    target_include_directories(motioncam-archive-import-test PRIVATE include)
+    target_link_libraries(motioncam-archive-import-test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core LibArchive::LibArchive)
+    add_test(NAME motioncam-archive-import-test COMMAND motioncam-archive-import-test)
+
     add_executable(motioncam-demosaic-test
         tests/demosaic_test.cpp
         src/HigherCFADemosaic.cpp)
