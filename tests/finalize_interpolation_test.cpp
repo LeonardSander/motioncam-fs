@@ -190,6 +190,8 @@ int main() {
     assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) - 0.8f) < 1e-6f);
     exposureSettings.exposureCompensation = " -1.25ev ";
     assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) + 1.25f) < 1e-6f);
+    exposureSettings.exposureCompensation = "2.5 EV";
+    assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) - 2.5f) < 1e-6f);
     exposureSettings.exposureCompensation = "0.8invalid";
     assert(motioncam::vfs::configuredExposureOffset(exposureSettings) == 0.0f);
 

@@ -8,7 +8,7 @@
 #include <motioncam/Decoder.hpp>
 #include <algorithm>
 #include <cmath>
-#include <charconv>
+#include <locale>
 #include <sstream>
 #include <iomanip>
 #include <array>
@@ -397,18 +397,19 @@ float configuredExposureOffset(const RenderSettings& settings) {
             input.remove_prefix(1);
         while (!input.empty() && std::isspace(static_cast<unsigned char>(input.back())))
             input.remove_suffix(1);
+        if (input.size() >= 2 &&
+            std::tolower(static_cast<unsigned char>(input[input.size() - 2])) == 'e' &&
+            std::tolower(static_cast<unsigned char>(input[input.size() - 1])) == 'v') {
+            input.remove_suffix(2);
+            while (!input.empty() && std::isspace(static_cast<unsigned char>(input.back())))
+                input.remove_suffix(1);
+        }
+
         float offset = 0.0f;
-        const auto parsed = std::from_chars(
-            input.data(), input.data() + input.size(), offset,
-            std::chars_format::general);
-        const char* end = parsed.ptr;
-        while (end != input.data() + input.size() &&
-               std::isspace(static_cast<unsigned char>(*end))) ++end;
-        if (input.data() + input.size() - end == 2 &&
-            std::tolower(static_cast<unsigned char>(end[0])) == 'e' &&
-            std::tolower(static_cast<unsigned char>(end[1])) == 'v')
-            end += 2;
-        if (parsed.ec == std::errc{} && end == input.data() + input.size() &&
+        std::istringstream parser{std::string(input)};
+        parser.imbue(std::locale::classic());
+        parser >> std::noskipws >> offset;
+        if (parser && parser.peek() == std::char_traits<char>::eof() &&
             std::isfinite(offset))
             result += offset;
     }
