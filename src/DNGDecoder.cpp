@@ -72,7 +72,8 @@ std::string dngSequenceSignature(const std::string& path) {
         const auto modified = std::filesystem::last_write_time(file, error);
         if (error) return {};
         signature += file.string() + ':' + std::to_string(size) + ':' +
-            std::to_string(modified.time_since_epoch().count()) + ';';
+            std::to_string(static_cast<long long>(
+                modified.time_since_epoch().count())) + ';';
     }
     return signature;
 }
