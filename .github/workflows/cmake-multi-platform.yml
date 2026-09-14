@@ -80,7 +80,9 @@ jobs:
           AppDir/usr/share/applications/com.motioncam.fuse.desktop
         install -Dm644 assets/app_icon_linux.png \
           AppDir/usr/share/icons/hicolor/256x256/apps/motioncam-fuse.png
-        install -Dm755 "$(command -v 7zz)" AppDir/usr/bin/7zz
+        # Ubuntu's 7zip package exposes /usr/bin/7z as a wrapper around the
+        # real binary. Bundle the binary itself so it also works in the AppImage.
+        install -Dm755 /usr/lib/7zip/7z AppDir/usr/bin/7z
         curl -L --retry 3 -o linuxdeploy.AppImage \
           https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
         curl -L --retry 3 -o linuxdeploy-plugin-qt.AppImage \
