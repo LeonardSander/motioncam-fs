@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -56,6 +57,7 @@ std::string directLogTimelineCacheKey(const std::string& path) {
 // thumbnail while the mounted decoder is still alive; serialize initialization
 // so those peak allocations cannot stack during a long import.
 std::mutex directLogInitializationMutex;
+std::atomic_uint directLogHardwareDecoderCount{0};
 
 std::filesystem::path directLogTimelineCachePath(const std::string& key) {
     const char* cacheRoot = std::getenv("XDG_CACHE_HOME");
@@ -198,6 +200,8 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
       mSwsContext(nullptr),
       mHardwareDeviceContext(nullptr),
       mHardwarePixelFormat(AV_PIX_FMT_NONE),
+      mDecoderInitialized(false),
+      mHardwareDecoderActive(false),
       mVideoStreamIndex(-1),
       mLastDecodedFrame(-1) {
     
@@ -205,12 +209,18 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
     const auto initializationStarted = std::chrono::steady_clock::now();
     std::lock_guard initializationLock(directLogInitializationMutex);
     auto stageStarted = initializationStarted;
-    initFFmpeg();
-    if (directLogDiagnosticsEnabled())
-        spdlog::info("DirectLog diagnostic: decoder_init stage=ffmpeg_open latency_ms={:.3f}",
-                     elapsedMilliseconds(stageStarted));
-    stageStarted = std::chrono::steady_clock::now();
-    analyzeVideo();
+    try {
+        initFFmpeg();
+        if (directLogDiagnosticsEnabled())
+            spdlog::info(
+                "DirectLog diagnostic: decoder_init stage=demuxer_open latency_ms={:.3f}",
+                elapsedMilliseconds(stageStarted));
+        stageStarted = std::chrono::steady_clock::now();
+        analyzeVideo();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
     if (directLogDiagnosticsEnabled())
         spdlog::info(
             "DirectLog diagnostic: decoder_init stage=timeline latency_ms={:.3f} total_ms={:.3f}",
@@ -270,6 +280,15 @@ void DirectLogDecoder::initFFmpeg() {
             mCodec = nativeDecoder;
     }
     
+    mPacket = av_packet_alloc();
+    if (!mPacket) throw std::runtime_error("Could not allocate packet");
+    mTimeBase = mFormatContext->streams[mVideoStreamIndex]->time_base;
+}
+
+void DirectLogDecoder::initDecoder() {
+    if (mDecoderInitialized) return;
+    AVCodecParameters* codecpar = mFormatContext->streams[mVideoStreamIndex]->codecpar;
+
     // Allocate codec context
     mCodecContext = avcodec_alloc_context3(mCodec);
     if (!mCodecContext) {
@@ -333,13 +352,16 @@ void DirectLogDecoder::initFFmpeg() {
     // Allocate frames and packet
     mFrame = av_frame_alloc();
     mTransferFrame = av_frame_alloc();
-    mPacket = av_packet_alloc();
-
-    if (!mFrame || !mTransferFrame || !mPacket) {
-        throw std::runtime_error("Could not allocate frame or packet");
+    if (!mFrame || !mTransferFrame) {
+        throw std::runtime_error("Could not allocate frame");
     }
-    
-    mTimeBase = mFormatContext->streams[mVideoStreamIndex]->time_base;
+    mDecoderInitialized = true;
+    mHardwareDecoderActive = hardwareDecoder;
+    if (hardwareDecoder) {
+        const unsigned int active = directLogHardwareDecoderCount.fetch_add(1) + 1;
+        spdlog::info("DirectLogDecoder: hardware context opened active={} source={}",
+                     active, mFilePath);
+    }
 }
 
 void DirectLogDecoder::analyzeVideo() {
@@ -364,11 +386,13 @@ void DirectLogDecoder::analyzeVideo() {
             return;
         }
     }
-    mVideoInfo.width = mCodecContext->width;
-    mVideoInfo.height = mCodecContext->height;
+    const AVCodecParameters* codecpar =
+        mFormatContext->streams[mVideoStreamIndex]->codecpar;
+    mVideoInfo.width = codecpar->width;
+    mVideoInfo.height = codecpar->height;
     
     // Determine pixel format
-    switch (mCodecContext->pix_fmt) {
+    switch (static_cast<AVPixelFormat>(codecpar->format)) {
         case AV_PIX_FMT_YUV420P:
             mVideoInfo.pixelFormat = "yuv420p";
             break;
@@ -461,9 +485,6 @@ void DirectLogDecoder::analyzeVideo() {
     
     // Seek back to beginning
     av_seek_frame(mFormatContext, mVideoStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
-    if (mCodecContext) {
-        avcodec_flush_buffers(mCodecContext);
-    }
     {
         std::lock_guard<std::mutex> lock(directLogTimelineCacheMutex);
         CachedDirectLogTimeline cached{mVideoInfo, mFrames};
@@ -484,10 +505,11 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
     std::lock_guard<std::mutex> lock(mMutex);
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto extractStart = std::chrono::steady_clock::now();
-    
+
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) {
         return false;
     }
+    initDecoder();
     
     const DirectLogFrameInfo& frameInfo = mFrames[frameNumber];
     
@@ -897,6 +919,12 @@ void DirectLogDecoder::cleanup() {
     }
     if (mHardwareDeviceContext) {
         av_buffer_unref(&mHardwareDeviceContext);
+    }
+    if (mHardwareDecoderActive) {
+        const unsigned int active = directLogHardwareDecoderCount.fetch_sub(1) - 1;
+        spdlog::info("DirectLogDecoder: hardware context closed active={} source={}",
+                     active, mFilePath);
+        mHardwareDecoderActive = false;
     }
     
     if (mFormatContext) {

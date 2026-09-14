@@ -67,6 +67,7 @@ public:
 
 private:
     void initFFmpeg();
+    void initDecoder();
     bool initHardwareDecoder();
     void analyzeVideo();
     void cleanup();
@@ -92,6 +93,8 @@ private:
     SwsContext* mSwsContext;
     AVBufferRef* mHardwareDeviceContext;
     AVPixelFormat mHardwarePixelFormat;
+    bool mDecoderInitialized;
+    bool mHardwareDecoderActive;
     
     int mVideoStreamIndex;
     AVRational mTimeBase;
