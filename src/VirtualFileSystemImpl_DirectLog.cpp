@@ -604,28 +604,21 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         auto makeOpcodeList = [&](const std::vector<GainMap>& maps, bool cfaPhases) {
             tinydngwriter::OpcodeList result;
             if (maps.empty()) return result;
-            const uint32_t cropLeft = std::min_element(maps.begin(), maps.end(),
-                [](const GainMap& a, const GainMap& b) { return a.left < b.left; })->left;
-            const uint32_t cropTop = std::min_element(maps.begin(), maps.end(),
-                [](const GainMap& a, const GainMap& b) { return a.top < b.top; })->top;
             for (const auto& map : maps) {
                 if (!map.coordinateWidth || !map.coordinateHeight ||
-                    map.left < cropLeft || map.top < cropTop ||
-                    map.right <= cropLeft || map.bottom <= cropTop)
+                    map.left >= map.right || map.top >= map.bottom)
                     throw std::runtime_error("Invalid DirectLog opcode coordinate geometry");
                 tinydngwriter::GainMapParams params{};
-                params.top = map.top - cropTop; params.left = map.left - cropLeft;
-                params.bottom = std::min<uint32_t>(height, map.bottom - cropTop);
-                params.right = std::min<uint32_t>(width, map.right - cropLeft);
+                params.top = map.top; params.left = map.left;
+                params.bottom = std::min<uint32_t>(height, map.bottom);
+                params.right = std::min<uint32_t>(width, map.right);
                 params.plane = map.plane; params.planes = map.planes;
                 params.row_pitch = map.rowPitch; params.col_pitch = map.colPitch;
                 params.map_points_v = map.height; params.map_points_h = map.width;
                 params.map_spacing_v = map.spacingV * map.coordinateHeight / height;
                 params.map_spacing_h = map.spacingH * map.coordinateWidth / width;
-                params.map_origin_v =
-                    (map.originV * map.coordinateHeight - cropTop) / height;
-                params.map_origin_h =
-                    (map.originH * map.coordinateWidth - cropLeft) / width;
+                params.map_origin_v = map.originV * map.coordinateHeight / height;
+                params.map_origin_h = map.originH * map.coordinateWidth / width;
                 params.map_planes = map.channels;
                 if (!cfaPhases && map.channels == 1) {
                     params.top = 0;

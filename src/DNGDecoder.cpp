@@ -4116,6 +4116,10 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     if (!(settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
         opcode3.size() == 1 && opcode3.front().channels == 1)
         maps.insert(maps.end(), opcode3.begin(), opcode3.end());
+    const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
+    if (debugGainMap)
+        std::fill(image.samples.begin(), image.samples.end(),
+                  std::numeric_limits<uint16_t>::max());
     if (maps.empty()) return true;
     if (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
         auto separation = separateGainMapLuminance(maps);
@@ -4128,7 +4132,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps},
         settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-        settings.options & RENDER_OPT_DEBUG_SHADING_MAP);
+        debugGainMap);
 
     const bool rgb = image.layout.pixels != DNGPixelLayout::CFA;
     auto cfaPhase = image.layout.cfaPhase;
@@ -4198,7 +4202,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                           levelChannel, image.metadata.whiteLevelCount - 1)] : fallbackWhite;
                 image.samples[index] = bakeLinearGainSample(
                     image.samples[index], gain, black, white, black, white,
-                    settings.options & RENDER_OPT_DEBUG_SHADING_MAP);
+                    debugGainMap);
             }
     return true;
 }
@@ -4908,7 +4912,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const auto opcode3E = find(TIFF_TAG_OPCODE_LIST_3);
     const auto samplesPerPixelE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
     if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE ||
-        (!opcodeE && !opcode3E) || !samplesPerPixelE ||
+        (!debugGainMap && !opcodeE && !opcode3E) || !samplesPerPixelE ||
         offsetsE->count != 1 || countsE->count != 1)
         return false;
     const auto linearizationE = find(TIFF_TAG_LINEARIZATION_TABLE);
@@ -4940,7 +4944,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const bool eligibleOpcode3 = hasOnlySinglePlaneGainMap(data, 3) &&
         opcode3Maps.size() == 1 && opcode3Maps.front().channels == 1;
     if (!colorOnly) consumeOpcode3 = eligibleOpcode3;
-    if (opcode2Maps.empty() && !consumeOpcode3) return colorOnly && eligibleOpcode3;
+    if (opcode2Maps.empty() && !consumeOpcode3 && !debugGainMap)
+        return colorOnly && eligibleOpcode3;
 
     std::optional<double> updatedBaseline;
     std::optional<std::array<float, 3>> updatedNeutral;
@@ -5261,7 +5266,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             writeScalar(*blackE, static_cast<uint32_t>(std::lround(
                 destinationBlack[std::min<uint32_t>(i, levelChannels - 1)])), i);
     }
-    if (colorOnly) {
+    if (colorOnly && !maps.empty()) {
         if (opcode3E) {
             if (!replaceGainMaps(data, 3, opcode3Maps) ||
                 !replaceGainMaps(data, 2, {})) return false;

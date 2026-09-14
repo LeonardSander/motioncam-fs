@@ -117,11 +117,13 @@ void processDngPixels(std::vector<uint8_t>& dng,
         DNGDecoder::getGainMaps(dng, 3, opcode3) && opcode3.size() == 1 &&
         opcode3.front().channels == 1;
     const bool colorOnly = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     const bool bakeGain = (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-        (hasOpcode2 || (hasOpcode3Luma && !colorOnly));
+        (hasOpcode2 || (hasOpcode3Luma && !colorOnly) || debugGainMap);
     QuadBayerMode mode = settings.quadBayerOption;
     if (settings.streamingPreview && options.outputScale == 1 &&
-        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) && demosaics(mode))
+        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) && !debugGainMap &&
+        demosaics(mode))
         mode = QuadBayerMode::CorrectQBCFAMetadata;
     const bool remosaic = settings.options & RENDER_OPT_REMOSAIC_TO_BAYER;
     const bool topologyBeforeBake = bakeGain &&
@@ -142,7 +144,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     if (bakeGain && !DNGDecoder::bakeGainMaps(
             dng, settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP, colorOnly,
             settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
-            settings.options & RENDER_OPT_DEBUG_SHADING_MAP,
+            debugGainMap,
             topologyBeforeBake ? 2 : options.cfaRepeatSize, options.cfaPhase))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     if (!topologyBeforeBake &&

@@ -160,7 +160,8 @@ namespace {
 
     void applyGalleryColorTransform(std::vector<uint8_t>& bytes,
                                     const motioncam::DNGFrameMetadata& metadata,
-                                    bool ignoreForwardMat) {
+                                    bool ignoreForwardMat,
+                                    bool gainMapOnlyDebug) {
         if (bytes.size() % 6 != 0) return;
         auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
         const size_t pixelCount = bytes.size() / 6;
@@ -178,9 +179,12 @@ namespace {
         }();
         const float exposure = std::exp2(static_cast<float>(metadata.baselineExposure));
         const std::array<float,3> gains{
-            exposure / std::max(0.001f, metadata.asShotNeutral[0]),
-            exposure / std::max(0.001f, metadata.asShotNeutral[1]),
-            exposure / std::max(0.001f, metadata.asShotNeutral[2])};
+            gainMapOnlyDebug ? exposure
+                : exposure / std::max(0.001f, metadata.asShotNeutral[0]),
+            gainMapOnlyDebug ? exposure
+                : exposure / std::max(0.001f, metadata.asShotNeutral[1]),
+            gainMapOnlyDebug ? exposure
+                : exposure / std::max(0.001f, metadata.asShotNeutral[2])};
         // ForwardMatrix maps white-balanced camera RGB to XYZ D50. Convert
         // that to linear sRGB (D65); without it, retain thumbnail-compatible
         // white balance and exposure handling.
@@ -217,7 +221,10 @@ namespace {
             std::array<float, 9> inverted{};
             const std::array<float, 9>* matrix = &sourceMatrix;
             if (ignoreForwardMat) {
-                if (!colorMatrixToD50(metadata, inverted)) {
+                auto transformMetadata = metadata;
+                if (gainMapOnlyDebug)
+                    transformMetadata.asShotNeutral = {1.0f, 1.0f, 1.0f};
+                if (!colorMatrixToD50(transformMetadata, inverted)) {
                     spdlog::warn("Preview ColorMatrix transform is invalid; using neutral display transform");
                     matrix = nullptr;
                 } else matrix = &inverted;
@@ -250,9 +257,10 @@ namespace {
                     const size_t offset = pixel * 3;
                     const int clippedChannels = (pixels[offset] == 65535) +
                         (pixels[offset + 1] == 65535) + (pixels[offset + 2] == 65535);
-                    const bool sourceClipped = clippedChannels > 0;
-                    const float neutralWeight = neutralHighlightWeight(
-                        pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+                    const bool sourceClipped = !gainMapOnlyDebug && clippedChannels > 0;
+                    const float neutralWeight = gainMapOnlyDebug ? 0.0f
+                        : neutralHighlightWeight(
+                            pixels[offset], pixels[offset + 1], pixels[offset + 2]);
                     if (!sourceClipped && neutralWeight == 0.0f) {
                         for (int channel = 0; channel < 3; ++channel)
                             pixels[offset + channel] =
@@ -278,9 +286,10 @@ namespace {
                 const size_t offset = pixel * 3;
                 const int clippedChannels = (pixels[offset] == 65535) +
                     (pixels[offset + 1] == 65535) + (pixels[offset + 2] == 65535);
-                const bool sourceClipped = clippedChannels > 0;
-                const float neutralWeight = neutralHighlightWeight(
-                    pixels[offset], pixels[offset + 1], pixels[offset + 2]);
+                const bool sourceClipped = !gainMapOnlyDebug && clippedChannels > 0;
+                const float neutralWeight = gainMapOnlyDebug ? 0.0f
+                    : neutralHighlightWeight(
+                        pixels[offset], pixels[offset + 1], pixels[offset + 2]);
                 const float camera[3]{pixels[offset] * normalize,
                                       pixels[offset + 1] * normalize,
                                       pixels[offset + 2] * normalize};
@@ -328,6 +337,11 @@ namespace {
         settings.cameraNativeStaging = true;
         settings.streamingPreview = true;
         return settings;
+    }
+
+    bool gainMapOnlyDebug(const motioncam::RenderSettings& settings) {
+        return settings.vignetteCorrection == motioncam::VignetteCorrectionMode::Bake &&
+            (settings.options & motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
     }
 
     int normalizedGalleryOrientation(int orientation) {
@@ -1998,7 +2012,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     if (mGalleryGeneration.load() != generation) return;
                     const auto decodeStarted = std::chrono::steady_clock::now();
                     applyGalleryColorTransform(
-                        preview.rgb, preview.metadata, settings.ignoreForwardMat);
+                        preview.rgb, preview.metadata, settings.ignoreForwardMat,
+                        gainMapOnlyDebug(settings));
                     auto& rgb = preview.rgb;
                     const uint32_t width = preview.width, height = preview.height;
                     displayDecodeMs += std::chrono::duration<double, std::milli>(
@@ -2198,7 +2213,9 @@ void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sour
                 [this,generation](size_t,size_t,const std::string&){return mGalleryGeneration.load()==generation;},
                 [this,generation,player,mountId,sourceFrame,&delivered,settings](motioncam::PreviewFrame&& preview){
                     if(delivered||mGalleryGeneration.load()!=generation)return;
-                    applyGalleryColorTransform(preview.rgb,preview.metadata,settings.ignoreForwardMat);
+                    applyGalleryColorTransform(preview.rgb, preview.metadata,
+                                               settings.ignoreForwardMat,
+                                               gainMapOnlyDebug(settings));
                     auto& rgb=preview.rgb;const uint32_t width=preview.width,height=preview.height;
                     delivered=true;
                     const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),static_cast<qsizetype>(rgb.size()));
@@ -2387,7 +2404,8 @@ void MainWindow::startGalleryPerformanceTest(
                 std::move(dng), previewSettings, preview, false);
             if (decoded)
                 applyGalleryColorTransform(
-                    preview.rgb, preview.metadata, previewSettings.ignoreForwardMat);
+                    preview.rgb, preview.metadata, previewSettings.ignoreForwardMat,
+                    gainMapOnlyDebug(previewSettings));
             const qint64 decodeMs = timer.elapsed();
             ++mountedSamples;
             if (!decoded) ++mountedFailures;
@@ -4538,7 +4556,8 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
                 [&](motioncam::PreviewFrame&& preview) {
                     if (cancelled->load() || !image.isNull()) return;
                     applyGalleryColorTransform(
-                        preview.rgb, preview.metadata, settings.ignoreForwardMat);
+                        preview.rgb, preview.metadata, settings.ignoreForwardMat,
+                        gainMapOnlyDebug(settings));
                     const int orientation = settings.orientation >= 0
                         ? settings.orientation : preview.metadata.orientation;
                     image = previewImage(preview.rgb, preview.width, preview.height,
