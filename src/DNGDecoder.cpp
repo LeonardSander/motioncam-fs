@@ -34,6 +34,49 @@ namespace motioncam {
 namespace {
 std::atomic_uint32_t foregroundDngWork{0};
 
+struct CachedDngSequence {
+    DNGSequenceInfo info;
+    std::vector<DNGFrameInfo> frames;
+};
+
+std::mutex sequenceCacheMutex;
+std::unordered_map<std::string, CachedDngSequence> sequenceCache;
+std::mutex dngMetadataCacheMutex;
+std::unordered_map<std::string, DNGFrameMetadata> dngMetadataCache;
+
+struct CachedCfaMetadata {
+    int repeatSize = 0;
+    std::array<uint8_t, 4> phase{};
+};
+std::unordered_map<std::string, CachedCfaMetadata> dngCfaCache;
+
+std::string dngSequenceSignature(const std::string& path) {
+    std::error_code error;
+    std::filesystem::path source(path);
+    std::vector<std::filesystem::path> files;
+    if (std::filesystem::is_regular_file(source, error)) {
+        files.push_back(source);
+    } else if (!error && std::filesystem::is_directory(source, error)) {
+        for (std::filesystem::directory_iterator it(source, error), end;
+             !error && it != end; it.increment(error)) {
+            if (boost::iequals(it->path().extension().string(), ".dng"))
+                files.push_back(it->path());
+        }
+    }
+    if (error || files.empty()) return {};
+    std::sort(files.begin(), files.end());
+    std::string signature;
+    for (const auto& file : files) {
+        const auto size = std::filesystem::file_size(file, error);
+        if (error) return {};
+        const auto modified = std::filesystem::last_write_time(file, error);
+        if (error) return {};
+        signature += file.string() + ':' + std::to_string(size) + ':' +
+            std::to_string(modified.time_since_epoch().count()) + ';';
+    }
+    return signature;
+}
+
 static_assert(gainMapPhaseChannel(1, 1, 0, 0, 2) == 0); // 4x4 CFA
 static_assert(gainMapPhaseChannel(2, 2, 0, 0, 2) == 3);
 static_assert(gainMapPhaseChannel(2, 2, 0, 0, 3) == 0); // 6x6 CFA
@@ -53,6 +96,28 @@ void DNGDecoder::beginForegroundWork() {
 
 void DNGDecoder::endForegroundWork() {
     foregroundDngWork.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+std::pair<uintmax_t, size_t> DNGDecoder::analysisCacheUsage() {
+    std::scoped_lock lock(sequenceCacheMutex, dngMetadataCacheMutex);
+    uintmax_t bytes = 0;
+    for (const auto& [key, cached] : sequenceCache) {
+        bytes += key.capacity() + sizeof(cached.info);
+        bytes += cached.frames.capacity() * sizeof(DNGFrameInfo);
+        for (const auto& frame : cached.frames) bytes += frame.filePath.capacity();
+    }
+    for (const auto& [key, metadata] : dngMetadataCache)
+        bytes += key.capacity() + sizeof(metadata);
+    for (const auto& [key, metadata] : dngCfaCache)
+        bytes += key.capacity() + sizeof(metadata);
+    return {bytes, sequenceCache.size()};
+}
+
+void DNGDecoder::clearAnalysisCache() {
+    std::scoped_lock lock(sequenceCacheMutex, dngMetadataCacheMutex);
+    sequenceCache.clear();
+    dngMetadataCache.clear();
+    dngCfaCache.clear();
 }
 
 namespace {
@@ -1438,6 +1503,22 @@ void DNGDecoder::analyzeSequence() {
         mSequenceInfo.basePath = sequencePath.parent_path().string();
     }
     
+    // Preview renderers are rebuilt when gallery settings change. Reuse the
+    // immutable sequence scan performed by the thumbnail renderer instead of
+    // rereading every (potentially 100+ MP) DNG before the first gallery
+    // frame. File size and write time make the cache self-invalidating.
+    const std::string sequenceSignature = dngSequenceSignature(mSequencePath);
+    if (!sequenceSignature.empty()) {
+        std::lock_guard lock(sequenceCacheMutex);
+        if (const auto cached = sequenceCache.find(sequenceSignature);
+            cached != sequenceCache.end()) {
+            mSequenceInfo = cached->second.info;
+            mFrames = cached->second.frames;
+            spdlog::info("DNGDecoder: reused cached sequence analysis for {} ({} frames)",
+                         mSequencePath, mFrames.size());
+            return;
+        }
+    }
     findDNGFiles();
     extractTimestampsFromFilenames();
     
@@ -1457,8 +1538,13 @@ void DNGDecoder::analyzeSequence() {
         }
     }
     
-    spdlog::info("DNGDecoder: Found {} DNG files, {}x{} @ {:.2f}fps", 
+    spdlog::info("DNGDecoder: Found {} DNG files, {}x{} @ {:.2f}fps",
                  mSequenceInfo.totalFrames, mSequenceInfo.width, mSequenceInfo.height, mSequenceInfo.fps);
+
+    if (!sequenceSignature.empty()) {
+        std::lock_guard lock(sequenceCacheMutex);
+        sequenceCache[sequenceSignature] = {mSequenceInfo, mFrames};
+    }
 }
 
 void DNGDecoder::findDNGFiles() {
@@ -1490,7 +1576,6 @@ void DNGDecoder::findDNGFiles() {
                 dngFiles.push_back(it->path().string());
         }
     }
-    
     if (dngFiles.empty()) {
         throw std::runtime_error("No DNG files found in: " + mSequenceInfo.basePath);
     }
@@ -2088,10 +2173,24 @@ bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
 }
 
 bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
+    if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) return false;
+    const std::string signature = dngSequenceSignature(mFrames[frameNumber].filePath);
+    if (!signature.empty()) {
+        std::lock_guard lock(dngMetadataCacheMutex);
+        if (const auto cached = dngMetadataCache.find(signature);
+            cached != dngMetadataCache.end()) {
+            metadata = cached->second;
+            return true;
+        }
+    }
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
     if (!getColorMetadata(data, metadata)) return false;
     metadata.hasExposure = metadata.iso > 0.0 && metadata.exposureTime > 0.0;
+    if (!signature.empty()) {
+        std::lock_guard lock(dngMetadataCacheMutex);
+        dngMetadataCache[signature] = metadata;
+    }
     return true;
 }
 
@@ -2289,9 +2388,24 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
 
 bool DNGDecoder::getCFAMetadata(int frameNumber, int& repeatSize,
                                 std::array<uint8_t, 4>& phase) {
+    if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) return false;
+    const std::string signature = dngSequenceSignature(mFrames[frameNumber].filePath);
+    if (!signature.empty()) {
+        std::lock_guard lock(dngMetadataCacheMutex);
+        if (const auto cached = dngCfaCache.find(signature); cached != dngCfaCache.end()) {
+            repeatSize = cached->second.repeatSize;
+            phase = cached->second.phase;
+            return true;
+        }
+    }
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
-    return getCFAMetadata(data, repeatSize, phase);
+    if (!getCFAMetadata(data, repeatSize, phase)) return false;
+    if (!signature.empty()) {
+        std::lock_guard lock(dngMetadataCacheMutex);
+        dngCfaCache[signature] = {repeatSize, phase};
+    }
+    return true;
 }
 
 bool DNGDecoder::getCFAMetadata(const std::vector<uint8_t>& data, int& repeatSize,
@@ -4226,27 +4340,61 @@ bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
                                bool applyPreviewScale) {
     DecodedDNGImage image;
     if (!decodeImage(std::move(dngData), image)) return false;
+    return decodePreview(std::move(image), settings, frame, applyPreviewScale);
+}
+
+bool DNGDecoder::decodePreview(DecodedDNGImage image,
+                               const RenderSettings& settings,
+                               PreviewFrame& frame,
+                               bool applyPreviewScale) {
     const uint32_t requestedPreviewScale =
         applyPreviewScale && (settings.options & RENDER_OPT_DRAFT)
         ? static_cast<uint32_t>(std::max(1, settings.draftScale)) : 1u;
+    const uint32_t sourceWidth = image.layout.width;
+    const uint32_t sourceHeight = image.layout.height;
+    uint32_t gainMapSourceScale = 1;
+    uint32_t remainingPreviewScale = requestedPreviewScale;
+    const bool hasCrop = !settings.cropTarget.empty() && settings.cropTarget != "0x0";
+    // HQ-off higher-CFA output first combines each same-colour sensor block
+    // into ordinary Bayer. Do that before gain-map traversal and demosaic so a
+    // 108 MP Quad Bayer frame does not run either operation at 108 MP. The
+    // source scale keeps gain-map sampling in original sensor coordinates.
+    if (applyPreviewScale && !hasCrop &&
+        image.layout.pixels == DNGPixelLayout::CFA &&
+        image.layout.cfaRepeatSize > 2 &&
+        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
+        !(settings.options & RENDER_OPT_REMOSAIC_TO_BAYER)) {
+        const uint32_t topologyScale = static_cast<uint32_t>(
+            std::max(1, image.layout.cfaRepeatSize / 2));
+        std::vector<uint16_t> binned;
+        uint32_t binnedWidth = 0, binnedHeight = 0;
+        utils::binHigherCFA(image.samples, binned,
+                            image.layout.width, image.layout.height,
+                            topologyScale, binnedWidth, binnedHeight, 0);
+        if (binned.empty()) return false;
+        image.samples = std::move(binned);
+        image.layout.width = binnedWidth;
+        image.layout.height = binnedHeight;
+        image.layout.cfaRepeatSize = 2;
+        gainMapSourceScale = topologyScale;
+        if (remainingPreviewScale > 1)
+            remainingPreviewScale = std::max(1u,
+                remainingPreviewScale / topologyScale);
+    }
     // Ordinary Bayer proxy previews do not need full-resolution demosaic or
     // gain-map traversal. Decimate the CFA first, while retaining the source
     // geometry for gain-map interpolation. Restrict this to the nearest/HQ
     // independent path; quad-Bayer, crop, and remosaic layouts have topology
     // requirements that are handled by the existing full-resolution path.
-    const bool hasCrop = !settings.cropTarget.empty() && settings.cropTarget != "0x0";
-    const bool fastCfaProxy = applyPreviewScale && requestedPreviewScale > 1 &&
-        (requestedPreviewScale % 2) == 0 &&
+    const bool fastCfaProxy = applyPreviewScale && remainingPreviewScale > 1 &&
+        (remainingPreviewScale % 2) == 0 &&
         image.layout.pixels == DNGPixelLayout::CFA &&
         image.layout.cfaRepeatSize <= 2 &&
         !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
         !(settings.options & RENDER_OPT_REMOSAIC_TO_BAYER) && !hasCrop;
-    const uint32_t sourceWidth = image.layout.width;
-    const uint32_t sourceHeight = image.layout.height;
-    uint32_t gainMapSourceScale = 1;
     if (fastCfaProxy) {
-        const uint32_t proxyWidth = (sourceWidth / requestedPreviewScale) & ~1u;
-        const uint32_t proxyHeight = (sourceHeight / requestedPreviewScale) & ~1u;
+        const uint32_t proxyWidth = (image.layout.width / remainingPreviewScale) & ~1u;
+        const uint32_t proxyHeight = (image.layout.height / remainingPreviewScale) & ~1u;
         if (!proxyWidth || !proxyHeight) return false;
         std::vector<uint16_t> reduced(
             static_cast<size_t>(proxyWidth) * proxyHeight);
@@ -4255,18 +4403,18 @@ bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
             // sampling a fixed center would select one CFA phase everywhere
             // and produce a monochrome/pink demosaic.
             const uint32_t sourceY = std::min(
-                sourceHeight - 1, y * requestedPreviewScale + (y & 1u));
+                image.layout.height - 1, y * remainingPreviewScale + (y & 1u));
             for (uint32_t x = 0; x < proxyWidth; ++x) {
                 const uint32_t sourceX = std::min(
-                    sourceWidth - 1, x * requestedPreviewScale + (x & 1u));
+                    image.layout.width - 1, x * remainingPreviewScale + (x & 1u));
                 reduced[static_cast<size_t>(y) * proxyWidth + x] =
-                    image.samples[static_cast<size_t>(sourceY) * sourceWidth + sourceX];
+                    image.samples[static_cast<size_t>(sourceY) * image.layout.width + sourceX];
             }
         }
         image.samples = std::move(reduced);
         image.layout.width = proxyWidth;
         image.layout.height = proxyHeight;
-        gainMapSourceScale = requestedPreviewScale;
+        gainMapSourceScale *= remainingPreviewScale;
     }
     if (!bakeDecodedPreviewGainMaps(
             image, settings, sourceWidth, sourceHeight, gainMapSourceScale)) return false;
@@ -4360,7 +4508,7 @@ bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
 
     // The fast CFA path is already at the requested scale. Other layouts keep
     // the established post-demosaic reduction behavior.
-    const uint32_t previewScale = fastCfaProxy ? 1u : requestedPreviewScale;
+    const uint32_t previewScale = fastCfaProxy ? 1u : remainingPreviewScale;
     if (previewScale > 1) {
         std::vector<uint16_t> reduced;
         uint32_t reducedWidth = 0, reducedHeight = 0;
@@ -4382,14 +4530,23 @@ bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
             ? image.metadata.whiteLevel[std::min<size_t>(
                   channel, image.metadata.whiteLevelCount - 1)]
             : 65535.0;
+    uint16_t encodedWhite = 65535;
+    const bool encodePreviewLog =
+        applyPreviewScale && (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
+        settings.logTransform != LogTransformMode::Disabled &&
+        settings.logTransform != LogTransformMode::KeepInput;
+    if (!encodePreviewLog) {
+        // Normal gallery output can be normalized directly into the byte
+        // buffer. Avoid a second full-size uint16 RGB allocation and the
+        // subsequent copy (155 MiB each for a 27 MP Quad Bayer preview).
+        return utils::normalizeRgb16Bytes(
+            rgb, frame.rgb, outputBlack, outputWhite);
+    }
     std::vector<uint16_t> normalizedSamples;
     if (!utils::normalizeRgb16(rgb, normalizedSamples, outputBlack, outputWhite))
         return false;
     frame.rgb.resize(normalizedSamples.size() * sizeof(uint16_t));
-    uint16_t encodedWhite = 65535;
-    if (applyPreviewScale && (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
-        settings.logTransform != LogTransformMode::Disabled &&
-        settings.logTransform != LogTransformMode::KeepInput) {
+    if (encodePreviewLog) {
         int reduction = 0;
         if (settings.logTransform == LogTransformMode::ReduceBy2Bit) reduction = 2;
         else if (settings.logTransform == LogTransformMode::ReduceBy4Bit) reduction = 4;

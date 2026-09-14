@@ -751,7 +751,12 @@ ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath)
         directory ? source.filename().string() : source.stem().string());
     if (!boost::filesystem::exists(parent)) return result;
     for (boost::filesystem::directory_iterator it(parent), end; it != end; ++it) {
-        if (!boost::filesystem::is_regular_file(it->path()) ||
+        boost::system::error_code statusError;
+        const auto candidateStatus = it->status(statusError);
+        // A dead sibling FUSE endpoint reports ENOTCONN when followed. It is
+        // unrelated to sidecar discovery and must not abort mounting a valid
+        // source in the same directory.
+        if (statusError || !boost::filesystem::is_regular_file(candidateStatus) ||
             lower(it->path().extension().string()) != ".dng") continue;
         const std::string candidateStem = lower(it->path().stem().string());
         const std::string whitePrefix = stem + "_white";

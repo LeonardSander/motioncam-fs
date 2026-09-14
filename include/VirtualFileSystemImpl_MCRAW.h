@@ -32,6 +32,9 @@ public:
 
     ~VirtualFileSystemImpl_MCRAW();
 
+    static std::pair<uintmax_t, size_t> analysisCacheUsage();
+    static void clearAnalysisCache();
+
     void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const override;
     std::shared_ptr<std::vector<char>> materializeFile(

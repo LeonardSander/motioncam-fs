@@ -577,6 +577,33 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo.timingUsesCfrMapping = applyCFRConversion;
 }
 
+std::pair<uintmax_t, size_t> VirtualFileSystemImpl_MCRAW::analysisCacheUsage() {
+    std::lock_guard lock(mcrawAnalysisCacheMutex);
+    uintmax_t bytes = 0;
+    size_t files = 0;
+    std::error_code error;
+    const auto directory = mcrawAnalysisCachePath("").parent_path();
+    std::filesystem::directory_iterator entries(directory, error);
+    for (std::filesystem::directory_iterator end; !error && entries != end;
+         entries.increment(error)) {
+        if (!entries->is_regular_file(error)) continue;
+        const auto size = entries->file_size(error);
+        if (error) break;
+        bytes += size;
+        ++files;
+    }
+    return {bytes, files};
+}
+
+void VirtualFileSystemImpl_MCRAW::clearAnalysisCache() {
+    std::lock_guard lock(mcrawAnalysisCacheMutex);
+    mcrawAnalysisCache.clear();
+    std::error_code error;
+    std::filesystem::remove_all(mcrawAnalysisCachePath("").parent_path(), error);
+    if (error)
+        spdlog::warn("Could not clear MCRAW analysis cache: {}", error.message());
+}
+
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
@@ -701,9 +728,73 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
 }
 
 bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
-        const Entry& entry, PreviewFrame& preview) {
-    try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
-    catch (const std::exception&) { return false; }
+    const Entry& entry, PreviewFrame& preview) {
+    std::shared_lock renderLock(mRenderMutex);
+    try {
+        const auto timestamp = std::get<Timestamp>(entry.userData);
+        const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
+        if (frameIt == mFrameIndexByTimestamp.end())
+            return false;
+        // The direct CameraFrameMetadata path can carry the normal Android lens
+        // shading map, but not a deferred OpcodeList3 map or a manual
+        // white/gain DNG. Preserve exact finalized ordering for those uncommon
+        // overrides.
+        if (!mManualVignetteSidecars.candidates.empty() ||
+            vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
+                                    "deferredGainMaps")) {
+            renderLock.unlock();
+            try {
+                return vfs::decodeProcessedDngPreview(
+                    materializeFile(entry, false), preview);
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
+        thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
+        auto& decoder = decoders[mSrcPath];
+        if (!decoder)
+            decoder = std::make_unique<Decoder>(mSrcPath);
+
+        std::vector<uint8_t> frameData;
+        nlohmann::json metadata;
+        uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
+        if (mSettings.options & RENDER_OPT_CROPPING)
+            utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight,
+                                   strideOverride);
+        decoder->loadFrame(timestamp, frameData, metadata,
+                           static_cast<int>(strideOverride));
+        auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        auto cameraConfig =
+            CameraConfiguration::parse(decoder->getContainerMetadata());
+        reorderNativeShadingMapToCfaPhases(
+            frameMetadata,
+            effectiveCfaArrangement(mSettings, mCalibration,
+                                    cameraConfig.sensorArrangement));
+        utils::overrideLensShadingMap(
+            frameMetadata,
+            vfs::loadSidecarGainMaps(mSidecarMetadata, frameIt->second,
+                                     "gainMaps"),
+            cfaColorsFromPhase(effectiveCfaArrangement(
+                mSettings, mCalibration, cameraConfig.sensorArrangement)));
+        std::optional<float> exposureOverride;
+        if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
+            exposureOverride = mSmoothedExposureOffsets.at(timestamp);
+        std::optional<std::array<float, 3>> neutralOverride;
+        if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
+            neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
+        utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
+                           vfs::outputFrameNumber(entry), mBaselineExpValue,
+                           mSettings, mCalibration, false, exposureOverride,
+                           neutralOverride, &preview);
+        preview.timestamp = vfs::outputTimestamp(
+            entry, timestamp, mSourceFrames.front(), mFps,
+            mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
+        return !preview.rgb.empty();
+    } catch (const std::exception& error) {
+        spdlog::warn("Direct MCRAW preview preparation failed for {}: {}",
+                     entry.name, error.what());
+        return false;
+    }
 }
 
 void VirtualFileSystemImpl_MCRAW::attachSidecarGainMapOpcodes(

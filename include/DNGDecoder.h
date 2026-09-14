@@ -96,6 +96,13 @@ public:
                               const RenderSettings& settings,
                               PreviewFrame& frame,
                               bool applyPreviewScale = false);
+    // Render an already decoded canonical frame. Source adapters use this for
+    // gallery playback so shared preprocessing does not require a DNG
+    // serialize/parse round trip.
+    static bool decodePreview(DecodedDNGImage image,
+                              const RenderSettings& settings,
+                              PreviewFrame& frame,
+                              bool applyPreviewScale = false);
     static bool replaceNormalizedRGB16(std::vector<uint8_t>& dngData,
                                        const std::vector<uint8_t>& rgbData,
                                        uint32_t width, uint32_t height);
@@ -140,6 +147,8 @@ public:
                                  bool topologyOnly = false);
     
     static bool isDNGSequence(const std::string& path);
+    static std::pair<uintmax_t, size_t> analysisCacheUsage();
+    static void clearAnalysisCache();
     static bool imagePayloadsEqual(const std::vector<uint8_t>& left,
                                    const std::vector<uint8_t>& right);
     static bool imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash);

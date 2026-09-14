@@ -1,5 +1,7 @@
 #include "settingsdialog.h"
 #include "DirectLogDecoder.h"
+#include "DNGDecoder.h"
+#include "VirtualFileSystemImpl_MCRAW.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -170,10 +172,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     cacheManagementGroup->setVisible(false);
 #endif
 
-    auto* directLogCacheGroup = new QGroupBox("DirectLog Cache", this);
+    auto* directLogCacheGroup = new QGroupBox("Indexing Cache", this);
     auto* directLogCacheLayout = new QVBoxLayout(directLogCacheGroup);
     auto* directLogCacheUsageLayout = new QHBoxLayout();
-    auto* directLogCacheLabel = new QLabel("Timeline cache:", this);
+    auto* directLogCacheLabel = new QLabel("Cached index data:", this);
     mDirectLogCacheUsageLabel = new QLabel(this);
     mClearDirectLogCacheButton = new QPushButton("Clear", this);
     mClearDirectLogCacheButton->setMaximumWidth(100);
@@ -182,8 +184,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     directLogCacheUsageLayout->addWidget(mClearDirectLogCacheButton);
     directLogCacheLayout->addLayout(directLogCacheUsageLayout);
     auto* directLogCacheHelpLabel = new QLabel(
-        helpSpan("Stores video timestamps so previously imported DirectLog clips open faster. "
-                 "Cleared entries are rebuilt on the next import."),
+        helpSpan("Stores DirectLog timelines, MCRAW indexes, and DNG sequence analysis so "
+                 "previously imported clips open faster. Cleared entries are rebuilt on "
+                 "the next import."),
         this);
     directLogCacheHelpLabel->setWordWrap(true);
     directLogCacheLayout->addWidget(directLogCacheHelpLabel);
@@ -631,7 +634,13 @@ void SettingsDialog::onResetPaths() {
 
 void SettingsDialog::updateDirectLogCacheUsage()
 {
-    const auto [bytes, files] = motioncam::DirectLogDecoder::timelineCacheUsage();
+    const auto [timelineBytes, timelineFiles] =
+        motioncam::DirectLogDecoder::timelineCacheUsage();
+    const auto [mcrawBytes, mcrawFiles] =
+        motioncam::VirtualFileSystemImpl_MCRAW::analysisCacheUsage();
+    const auto [dngBytes, dngSequences] = motioncam::DNGDecoder::analysisCacheUsage();
+    const uintmax_t bytes = timelineBytes + mcrawBytes + dngBytes;
+    const size_t files = timelineFiles + mcrawFiles + dngSequences;
     const QLocale locale;
     QString size;
     if (bytes < 1024)
@@ -650,5 +659,7 @@ void SettingsDialog::updateDirectLogCacheUsage()
 void SettingsDialog::onClearDirectLogCache()
 {
     motioncam::DirectLogDecoder::clearTimelineCache();
+    motioncam::VirtualFileSystemImpl_MCRAW::clearAnalysisCache();
+    motioncam::DNGDecoder::clearAnalysisCache();
     updateDirectLogCacheUsage();
 }

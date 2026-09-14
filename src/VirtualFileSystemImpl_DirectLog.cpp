@@ -619,18 +619,24 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // Apply calibration if available
         if (mCalibration.has_value()) {
-            const auto color1 = sourceMetadata ? sourceMetadata->colorMatrix1 :
-                (mCalibration->hasColorMatrix1 ? std::optional{mCalibration->colorMatrix1} : std::nullopt);
-            const auto color2 = sourceMetadata ? sourceMetadata->colorMatrix2 :
-                (mCalibration->hasColorMatrix2 ? std::optional{mCalibration->colorMatrix2} : std::nullopt);
-            const auto forward1 = sourceMetadata ? sourceMetadata->forwardMatrix1 :
-                (mCalibration->hasForwardMatrix1 ? std::optional{mCalibration->forwardMatrix1} : std::nullopt);
-            const auto forward2 = sourceMetadata ? sourceMetadata->forwardMatrix2 :
-                (mCalibration->hasForwardMatrix2 ? std::optional{mCalibration->forwardMatrix2} : std::nullopt);
-            const auto camera1 = sourceMetadata ? sourceMetadata->cameraCalibration1 :
-                (mCalibration->hasCameraCalibration1 ? std::optional{mCalibration->cameraCalibration1} : std::nullopt);
-            const auto camera2 = sourceMetadata ? sourceMetadata->cameraCalibration2 :
-                (mCalibration->hasCameraCalibration2 ? std::optional{mCalibration->cameraCalibration2} : std::nullopt);
+            const auto color1 = mCalibration->hasColorMatrix1
+                ? std::optional{mCalibration->colorMatrix1}
+                : sourceMetadata ? sourceMetadata->colorMatrix1 : std::nullopt;
+            const auto color2 = mCalibration->hasColorMatrix2
+                ? std::optional{mCalibration->colorMatrix2}
+                : sourceMetadata ? sourceMetadata->colorMatrix2 : std::nullopt;
+            const auto forward1 = mCalibration->hasForwardMatrix1
+                ? std::optional{mCalibration->forwardMatrix1}
+                : sourceMetadata ? sourceMetadata->forwardMatrix1 : std::nullopt;
+            const auto forward2 = mCalibration->hasForwardMatrix2
+                ? std::optional{mCalibration->forwardMatrix2}
+                : sourceMetadata ? sourceMetadata->forwardMatrix2 : std::nullopt;
+            const auto camera1 = mCalibration->hasCameraCalibration1
+                ? std::optional{mCalibration->cameraCalibration1}
+                : sourceMetadata ? sourceMetadata->cameraCalibration1 : std::nullopt;
+            const auto camera2 = mCalibration->hasCameraCalibration2
+                ? std::optional{mCalibration->cameraCalibration2}
+                : sourceMetadata ? sourceMetadata->cameraCalibration2 : std::nullopt;
             const bool includeCamera1 = camera1 &&
                 (!isIdentityMatrix(*camera1) || (camera2 && !isIdentityMatrix(*camera2)));
             const bool includeCamera2 = camera2 &&
@@ -656,9 +662,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             if (includeCamera1) dng.SetCameraCalibration1(3, camera1->data());
             if (includeCamera2) dng.SetCameraCalibration2(3, camera2->data());
         }
-        auto outputNeutral = asShotNeutral;
-        if (!outputNeutral && mCalibration && mCalibration->hasAsShotNeutral)
-            outputNeutral = mCalibration->asShotNeutral;
+        auto outputNeutral = mCalibration && mCalibration->hasAsShotNeutral
+            ? std::optional{mCalibration->asShotNeutral} : asShotNeutral;
         if (outputNeutral)
             dng.SetAsShotNeutral(3, outputNeutral->data());
         auto makeOpcodeList = [&](const std::vector<GainMap>& maps, bool cfaPhases) {
@@ -943,8 +948,106 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
 
 bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview) {
-    try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
-    catch (const std::exception&) { return false; }
+    std::shared_lock renderLock(mRenderMutex);
+    try {
+        // Manual flat-field DNGs still require opcode construction. Keep the
+        // canonical fallback for that uncommon path until white-image maps
+        // can be supplied directly as DecodedDNGImage gain maps.
+        if (!mManualVignetteSidecars.candidates.empty()) {
+            renderLock.unlock();
+            return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview);
+        }
+
+        auto processed = processFrame(entry);
+        DecodedDNGImage image;
+        image.samples = std::move(processed.rgb);
+        image.layout.width = static_cast<uint32_t>(processed.width);
+        image.layout.height = static_cast<uint32_t>(processed.height);
+        image.layout.bitsPerSample = 16;
+        image.layout.samplesPerPixel = 3;
+        image.layout.pixels = DNGPixelLayout::LinearRGB;
+        image.layout.cfaRepeatSize = 2;
+        image.layout.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+        image.opcodeList2 = std::move(processed.gainMaps.opcodeList2);
+        image.opcodeList3 = std::move(processed.gainMaps.opcodeList3);
+
+        const auto levels = directLogDataLevels(mConfig);
+        image.metadata.blackLevel = levels.black;
+        image.metadata.blackLevelCount = 3;
+        image.metadata.whiteLevel.fill(levels.white);
+        image.metadata.whiteLevelCount = 3;
+        image.metadata.inputBitDepth = utils::bitsNeeded(static_cast<uint16_t>(
+            std::clamp(std::lround(levels.white), 1l, 65535l)));
+        image.metadata.iso = processed.metadata.iso;
+        image.metadata.exposureTime = processed.metadata.shutterSpeed;
+        image.metadata.hasExposure = processed.metadata.shutterSpeed > 0.0;
+        image.metadata.baselineExposure = processed.metadata.baselineExposure +
+            vfs::configuredExposureOffset(mConfig);
+        image.metadata.hasBaselineExposure = true;
+        if (mCalibration && mCalibration->hasAsShotNeutral) {
+            image.metadata.asShotNeutral = mCalibration->asShotNeutral;
+            image.metadata.hasAsShotNeutral = true;
+        } else if (processed.metadata.asShotNeutral) {
+            image.metadata.asShotNeutral = *processed.metadata.asShotNeutral;
+            image.metadata.hasAsShotNeutral = true;
+        }
+        auto copyMatrix = [](const auto& source, auto& destination, bool& present) {
+            if (source) { destination = *source; present = true; }
+        };
+        copyMatrix(processed.metadata.colorMatrix1, image.metadata.colorMatrix1,
+                   image.metadata.hasColorMatrix1);
+        copyMatrix(processed.metadata.colorMatrix2, image.metadata.colorMatrix2,
+                   image.metadata.hasColorMatrix2);
+        copyMatrix(processed.metadata.forwardMatrix1, image.metadata.forwardMatrix1,
+                   image.metadata.hasForwardMatrix1);
+        copyMatrix(processed.metadata.forwardMatrix2, image.metadata.forwardMatrix2,
+                   image.metadata.hasForwardMatrix2);
+        copyMatrix(processed.metadata.cameraCalibration1,
+                   image.metadata.cameraCalibration1,
+                   image.metadata.hasCameraCalibration1);
+        copyMatrix(processed.metadata.cameraCalibration2,
+                   image.metadata.cameraCalibration2,
+                   image.metadata.hasCameraCalibration2);
+        if (mCalibration) {
+            if (mCalibration->hasColorMatrix1) {
+                image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
+                image.metadata.hasColorMatrix1 = true;
+            }
+            if (mCalibration->hasColorMatrix2) {
+                image.metadata.colorMatrix2 = mCalibration->colorMatrix2;
+                image.metadata.hasColorMatrix2 = true;
+            }
+            if (mCalibration->hasForwardMatrix1) {
+                image.metadata.forwardMatrix1 = mCalibration->forwardMatrix1;
+                image.metadata.hasForwardMatrix1 = true;
+            }
+            if (mCalibration->hasForwardMatrix2) {
+                image.metadata.forwardMatrix2 = mCalibration->forwardMatrix2;
+                image.metadata.hasForwardMatrix2 = true;
+            }
+            if (mCalibration->hasCameraCalibration1) {
+                image.metadata.cameraCalibration1 = mCalibration->cameraCalibration1;
+                image.metadata.hasCameraCalibration1 = true;
+            }
+            if (mCalibration->hasCameraCalibration2) {
+                image.metadata.cameraCalibration2 = mCalibration->cameraCalibration2;
+                image.metadata.hasCameraCalibration2 = true;
+            }
+        }
+        image.metadata.calibrationIlluminant1 =
+            processed.metadata.calibrationIlluminant1;
+        image.metadata.calibrationIlluminant2 =
+            processed.metadata.calibrationIlluminant2;
+        if ((mConfig.options & RENDER_OPT_BAKE_ISO) && image.metadata.iso > 0.0)
+            utils::bakeIsoOverlay(image.samples.data(), image.layout.width,
+                image.layout.height, 3, image.metadata.iso,
+                static_cast<uint16_t>(std::clamp(std::lround(levels.black[0]), 0l, 65535l)),
+                static_cast<uint16_t>(std::clamp(std::lround(levels.white), 0l, 65535l)));
+        image.timestamp = vfs::outputTimestamp(
+            entry, processed.timestamp, mDecoder->getFrames().front().timestamp,
+            mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
+        return DNGDecoder::decodePreview(std::move(image), mConfig, preview, true);
+    } catch (const std::exception&) { return false; }
 }
 
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {

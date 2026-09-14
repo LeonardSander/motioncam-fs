@@ -408,6 +408,84 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
 
 bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview) {
+    std::shared_lock renderLock(mRenderMutex);
+    const auto timestamp = std::get<Timestamp>(entry.userData);
+    const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
+    if (frameIt == mFrameIndexByTimestamp.end()) return false;
+    const bool converted = mHasFrameNumberSequence &&
+        (mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
+    const Timestamp outputTimestamp = converted
+        ? vfs::outputTimestamp(entry, timestamp, mDecoder->getFrames().front().timestamp,
+                               mFps, true)
+        : timestamp - mDecoder->getFrames().front().timestamp;
+    DNGDecoder::beginForegroundWork();
+    struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
+    std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
+    // Decode the source container once and run the shared in-memory preview
+    // processor. Gain-map-only retains the canonical fallback because its
+    // grouped scalar-map semantics intentionally match mounted DNG output.
+    if (!(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP)) {
+        try {
+            auto prepared = prepareFrame(frameIt->second, false);
+            DecodedDNGImage image;
+            if (!DNGDecoder::decodeImage(std::move(prepared.dng), image))
+                throw std::runtime_error("Could not decode source DNG preview");
+            // Sequence calibration can declare higher-CFA topology which the
+            // individual DNG tags intentionally describe only as a Bayer
+            // phase. Carry the resolved sequence topology into the shared
+            // in-memory processor instead of losing it at the DNG boundary.
+            image.layout.cfaRepeatSize = prepared.cfaSize;
+            image.layout.cfaPhase = prepared.cfaPhase;
+            if (mCalibration) {
+                if (mCalibration->hasColorMatrix1) {
+                    image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
+                    image.metadata.hasColorMatrix1 = true;
+                }
+                if (mCalibration->hasColorMatrix2) {
+                    image.metadata.colorMatrix2 = mCalibration->colorMatrix2;
+                    image.metadata.hasColorMatrix2 = true;
+                }
+                if (mCalibration->hasForwardMatrix1) {
+                    image.metadata.forwardMatrix1 = mCalibration->forwardMatrix1;
+                    image.metadata.hasForwardMatrix1 = true;
+                }
+                if (mCalibration->hasForwardMatrix2) {
+                    image.metadata.forwardMatrix2 = mCalibration->forwardMatrix2;
+                    image.metadata.hasForwardMatrix2 = true;
+                }
+                if (mCalibration->hasCameraCalibration1) {
+                    image.metadata.cameraCalibration1 = mCalibration->cameraCalibration1;
+                    image.metadata.hasCameraCalibration1 = true;
+                }
+                if (mCalibration->hasCameraCalibration2) {
+                    image.metadata.cameraCalibration2 = mCalibration->cameraCalibration2;
+                    image.metadata.hasCameraCalibration2 = true;
+                }
+                if (mCalibration->hasAsShotNeutral) {
+                    image.metadata.asShotNeutral = mCalibration->asShotNeutral;
+                    image.metadata.hasAsShotNeutral = true;
+                }
+            }
+            if (DNGDecoder::decodePreview(
+                    std::move(image), mConfig, preview, true)) {
+                preview.timestamp = outputTimestamp;
+                if (mConfig.options & RENDER_OPT_BAKE_ISO) {
+                    const auto iso = mIsoValues.find(timestamp);
+                    const double value = iso != mIsoValues.end()
+                        ? iso->second : preview.metadata.iso;
+                    utils::bakeIsoOverlay(
+                        reinterpret_cast<uint16_t*>(preview.rgb.data()),
+                        preview.width, preview.height, 3, value, 0, 65535);
+                }
+                return true;
+            }
+        } catch (const std::exception& error) {
+            spdlog::warn("Decoded DNG preview preparation failed for {}: {}",
+                         entry.name, error.what());
+        }
+    }
+    materializeLock.unlock();
+    renderLock.unlock();
     try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
     catch (const std::exception&) { return false; }
 }
@@ -677,6 +755,16 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
         mCfaSize = mCalibration->cfaSize;
         mHasCfa = mCfaSize >= 2;
+    }
+    if (mCalibration && !mCalibration->cfaPhase.empty()) {
+        const std::string phase =
+            boost::algorithm::to_lower_copy(mCalibration->cfaPhase);
+        if (phase == "rggb") mCfaPhase = {0, 1, 1, 2};
+        else if (phase == "grbg") mCfaPhase = {1, 0, 2, 1};
+        else if (phase == "gbrg") mCfaPhase = {1, 2, 0, 1};
+        else if (phase == "bggr") mCfaPhase = {2, 1, 1, 0};
+        else spdlog::warn("Ignoring invalid sidecar CFA phase '{}'",
+                          mCalibration->cfaPhase);
     }
 
     init();

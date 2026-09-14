@@ -4,9 +4,27 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <thread>
 
 namespace motioncam {
 namespace utils {
+
+namespace {
+template <typename Function>
+void parallelRows(uint32_t rows, Function&& function) {
+    constexpr uint32_t minimumRowsPerWorker = 128;
+    const uint32_t workers = std::min<uint32_t>(8, std::max<uint32_t>(1,
+        std::min<uint32_t>(std::thread::hardware_concurrency(),
+            (rows + minimumRowsPerWorker - 1) / minimumRowsPerWorker)));
+    std::vector<std::thread> threads;
+    threads.reserve(workers - 1);
+    for (uint32_t worker = 1; worker < workers; ++worker)
+        threads.emplace_back(function, rows * worker / workers,
+                             rows * (worker + 1) / workers);
+    function(0, rows / workers);
+    for (auto& thread : threads) thread.join();
+}
+}
 
 void demosaicCfaForOutput(
         const std::vector<uint16_t>& cfaData, std::vector<uint16_t>& rgbData,
@@ -54,8 +72,9 @@ void demosaicCfaForOutput(
             }
 
     rgbData.assign(static_cast<size_t>(width) * height * 3, 0);
-    for (int y = 0; y < height; ++y)
-        for (int x = 0; x < width; ++x)
+    parallelRows(static_cast<uint32_t>(height), [&](uint32_t begin, uint32_t end) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y)
+          for (int x = 0; x < width; ++x)
             for (int channel = 0; channel < 3; ++channel) {
                 const auto& candidates = offsets[
                     (static_cast<size_t>(y % cfaRepeatSize) * cfaRepeatSize +
@@ -69,6 +88,7 @@ void demosaicCfaForOutput(
                     break;
                 }
             }
+    });
 }
 
 bool normalizeRgb16(const std::vector<uint16_t>& input,
@@ -79,14 +99,17 @@ bool normalizeRgb16(const std::vector<uint16_t>& input,
     for (size_t channel = 0; channel < 3; ++channel)
         if (!(white[channel] > black[channel])) return false;
     output.resize(input.size());
-    for (size_t index = 0; index < input.size(); ++index) {
-        const size_t channel = index % 3;
-        const uint16_t normalized = static_cast<uint16_t>(std::clamp(std::lround(
-            (input[index] - black[channel]) /
-                (white[channel] - black[channel]) * 65535.0),
-            0l, 65535l));
-        output[index] = normalized;
-    }
+    const size_t pixels = input.size() / 3;
+    parallelRows(static_cast<uint32_t>(pixels), [&](uint32_t begin, uint32_t end) {
+        for (size_t pixel = begin; pixel < end; ++pixel)
+            for (size_t channel = 0; channel < 3; ++channel) {
+                const size_t index = pixel * 3 + channel;
+                output[index] = static_cast<uint16_t>(std::clamp(std::lround(
+                    (input[index] - black[channel]) /
+                        (white[channel] - black[channel]) * 65535.0),
+                    0l, 65535l));
+            }
+    });
     return true;
 }
 
@@ -99,13 +122,17 @@ bool normalizeRgb16Bytes(const std::vector<uint16_t>& input,
         if (!(white[channel] > black[channel])) return false;
     output.resize(input.size() * sizeof(uint16_t));
     auto* normalized = reinterpret_cast<uint16_t*>(output.data());
-    for (size_t index = 0; index < input.size(); ++index) {
-        const size_t channel = index % 3;
-        normalized[index] = static_cast<uint16_t>(std::clamp(std::lround(
-            (input[index] - black[channel]) /
-                (white[channel] - black[channel]) * 65535.0),
-            0l, 65535l));
-    }
+    const size_t pixels = input.size() / 3;
+    parallelRows(static_cast<uint32_t>(pixels), [&](uint32_t begin, uint32_t end) {
+        for (size_t pixel = begin; pixel < end; ++pixel)
+            for (size_t channel = 0; channel < 3; ++channel) {
+                const size_t index = pixel * 3 + channel;
+                normalized[index] = static_cast<uint16_t>(std::clamp(std::lround(
+                    (input[index] - black[channel]) /
+                        (white[channel] - black[channel]) * 65535.0),
+                    0l, 65535l));
+            }
+    });
     return true;
 }
 
@@ -554,7 +581,8 @@ void reduceRGB(const std::vector<uint16_t>& input, std::vector<uint16_t>& output
     }
     output.resize(static_cast<size_t>(outputWidth) * outputHeight * 3);
     const uint32_t sample = (scale - 1) / 2;
-    for (uint32_t y = 0; y < outputHeight; ++y) {
+    parallelRows(outputHeight, [&](uint32_t begin, uint32_t end) {
+      for (uint32_t y = begin; y < end; ++y) {
         for (uint32_t x = 0; x < outputWidth; ++x) {
             for (uint32_t channel = 0; channel < 3; ++channel) {
                 uint64_t value = 0;
@@ -590,7 +618,8 @@ void reduceRGB(const std::vector<uint16_t>& input, std::vector<uint16_t>& output
                     static_cast<uint16_t>(value);
             }
         }
-    }
+      }
+    });
 }
 
 void binQuadBayer(const std::vector<uint16_t>& input, std::vector<uint16_t>& output,
