@@ -33,6 +33,15 @@ int main() {
         map.originV = map.originH = 0.0;
         map.data = {phaseGains[phaseIndex]};
     }
+    auto roundTrippedCfaMaps = cfaMaps;
+    roundTrippedCfaMaps[2].originV += 2e-17;
+    roundTrippedCfaMaps[3].originV += 2e-17;
+    roundTrippedCfaMaps[2].spacingV += 2e-17;
+    roundTrippedCfaMaps[3].spacingV += 2e-17;
+    const auto roundTrippedSeparation =
+        motioncam::separateGainMapLuminance(roundTrippedCfaMaps);
+    assert(roundTrippedSeparation.valid);
+
     motioncam::GainMap luminance = cfaMaps.front();
     luminance.top = luminance.left = 0;
     luminance.rowPitch = luminance.colPitch = 1;

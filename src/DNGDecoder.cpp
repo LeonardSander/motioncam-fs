@@ -4998,7 +4998,19 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     bool gridColorSeparated = false;
     if (colorOnly && !maps.empty()) {
         auto separation = separateGainMapLuminance(maps);
-        if (!separation.valid) return false;
+        if (!separation.valid) {
+            for (size_t index = 0; index < maps.size(); ++index) {
+                const auto& map = maps[index];
+                spdlog::warn(
+                    "Gain-map color separation rejected map {}: bounds={},{},{},{} "
+                    "pitch={}x{} grid={}x{} channels={} plane={}/{} origin={},{} spacing={},{}",
+                    index, map.top, map.left, map.bottom, map.right,
+                    map.rowPitch, map.colPitch, map.width, map.height, map.channels,
+                    map.plane, map.planes, map.originV, map.originH,
+                    map.spacingV, map.spacingH);
+            }
+            return false;
+        }
         GainMap luminance = std::move(separation.luminance);
         luminance.top = 0; luminance.left = 0;
         luminance.bottom = height; luminance.right = width;

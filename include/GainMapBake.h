@@ -185,12 +185,18 @@ inline GainMapLuminanceSeparation<Map> separateGainMapLuminance(
         baseLeft = std::min(baseLeft, map.left);
     }
     for (const auto& map : maps) {
+        const auto equivalent = [](double left, double right) {
+            return std::abs(left - right) <= 1e-12 *
+                std::max({1.0, std::abs(left), std::abs(right)});
+        };
         scalarCfa &= map.channels == 1 && map.rowPitch == 2 && map.colPitch == 2 &&
             map.width == maps.front().width && map.height == maps.front().height &&
             map.bottom == maps.front().bottom && map.right == maps.front().right &&
             map.plane == maps.front().plane && map.planes == maps.front().planes &&
-            map.spacingV == maps.front().spacingV && map.spacingH == maps.front().spacingH &&
-            map.originV == maps.front().originV && map.originH == maps.front().originH &&
+            equivalent(map.spacingV, maps.front().spacingV) &&
+            equivalent(map.spacingH, maps.front().spacingH) &&
+            equivalent(map.originV, maps.front().originV) &&
+            equivalent(map.originH, maps.front().originH) &&
             map.top >= baseTop && map.top < baseTop + 2 &&
             map.left >= baseLeft && map.left < baseLeft + 2;
         if (scalarCfa) {

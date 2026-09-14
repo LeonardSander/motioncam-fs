@@ -425,6 +425,65 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     classify(deferredGainMaps);
     if (!canonicalizeCfaGainMaps(prepared.opcodeList2))
         throw std::runtime_error("Unsupported DirectLog OpcodeList2 gain-map layout");
+
+    // JSON gain maps finalized for the requested output crop need to pass
+    // through the shared pipeline in the uncropped DirectLog staging DNG.
+    // Lift them into staging coordinates here; cropImage() will then bring
+    // them back to their original geometry together with the pixels. This
+    // also preserves the distinct Top/Left values of the four CFA phases.
+    uint32_t cropWidth = static_cast<uint32_t>(mWidth);
+    uint32_t cropHeight = static_cast<uint32_t>(mHeight);
+    bool hasCropWindow = false;
+    if (mCalibration && mCalibration->hasLeftTopCropStride &&
+        mCalibration->leftTopCropStride[0] > 0 &&
+        mCalibration->leftTopCropStride[1] > 0 &&
+        mCalibration->leftTopCropStride[0] <= mWidth &&
+        mCalibration->leftTopCropStride[1] <= mHeight) {
+        cropWidth = std::min(cropWidth,
+            static_cast<uint32_t>(mCalibration->leftTopCropStride[0]));
+        cropHeight = std::min(cropHeight,
+            static_cast<uint32_t>(mCalibration->leftTopCropStride[1]));
+        hasCropWindow = true;
+    }
+    if (mConfig.options & RENDER_OPT_CROPPING) {
+        uint32_t centeredWidth = 0, centeredHeight = 0, ignoredStride = 0;
+        utils::parseCropTarget(
+            mConfig.cropTarget, centeredWidth, centeredHeight, ignoredStride);
+        if (centeredWidth && centeredHeight &&
+            centeredWidth <= static_cast<uint32_t>(mWidth) &&
+            centeredHeight <= static_cast<uint32_t>(mHeight)) {
+            cropWidth = std::min(cropWidth, centeredWidth);
+            cropHeight = std::min(cropHeight, centeredHeight);
+            hasCropWindow = true;
+        }
+    }
+    if (hasCropWindow) {
+        // Both crop declarations constrain the same centered gain-map window.
+        // Lift the smaller window into the original image coordinate space.
+        const uint32_t cropLeft = (static_cast<uint32_t>(mWidth) - cropWidth) / 2;
+        const uint32_t cropTop = (static_cast<uint32_t>(mHeight) - cropHeight) / 2;
+        auto liftToStaging = [&](std::vector<GainMap>& maps) {
+            for (auto& map : maps) {
+                const uint32_t coordinateWidth = map.coordinateWidth
+                    ? map.coordinateWidth : map.right;
+                const uint32_t coordinateHeight = map.coordinateHeight
+                    ? map.coordinateHeight : map.bottom;
+                if (coordinateWidth != cropWidth || coordinateHeight != cropHeight ||
+                    map.right > cropWidth || map.bottom > cropHeight)
+                    continue;
+                map.left += cropLeft; map.right += cropLeft;
+                map.top += cropTop; map.bottom += cropTop;
+                map.originH = (map.originH * cropWidth + cropLeft) / mWidth;
+                map.originV = (map.originV * cropHeight + cropTop) / mHeight;
+                map.spacingH *= static_cast<double>(cropWidth) / mWidth;
+                map.spacingV *= static_cast<double>(cropHeight) / mHeight;
+                map.coordinateWidth = mWidth;
+                map.coordinateHeight = mHeight;
+            }
+        };
+        liftToStaging(prepared.opcodeList2);
+        liftToStaging(prepared.opcodeList3);
+    }
     return prepared;
 }
 
