@@ -4281,56 +4281,85 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     if (channels != 1 && channels != 3) return false;
     const uint32_t phaseGroup = static_cast<uint32_t>(
         std::max(1, image.layout.cfaRepeatSize / 2));
-    auto gainAt = [&](const GainMap& map, uint32_t x, uint32_t y, uint32_t channel) {
-        const uint32_t sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
-        const uint32_t sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
+    auto gainsAt = [&](const GainMap& map, uint32_t sourceX, uint32_t sourceY) {
+        std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
         if (!validGainMap(map) || sourceX < map.left || sourceX >= map.right ||
-            sourceY < map.top || sourceY >= map.bottom) return 1.0f;
+            sourceY < map.top || sourceY >= map.bottom) return gains;
         if (map.channels == 1 && ((sourceY - map.top) % map.rowPitch ||
-                                  (sourceX - map.left) % map.colPitch)) return 1.0f;
+                                  (sourceX - map.left) % map.colPitch)) return gains;
         const uint32_t pixelPhase = static_cast<uint32_t>(gainMapPhaseChannel(
             sourceX, sourceY, 0, 0, phaseGroup));
         const uint32_t pixelColor = cfaPhase[pixelPhase];
-        return sampleGainMapNormalized(map,
-            (static_cast<double>(sourceX) + 0.5) / sourceWidth,
-            (static_cast<double>(sourceY) + 0.5) / sourceHeight,
-            [&](uint32_t sx, uint32_t sy) {
+        const double normalizedX = (static_cast<double>(sourceX) + 0.5) / sourceWidth;
+        const double normalizedY = (static_cast<double>(sourceY) + 0.5) / sourceHeight;
+        const double gridX = map.spacingH > 0.0
+            ? (normalizedX - map.originH) / map.spacingH : 0.0;
+        const double gridY = map.spacingV > 0.0
+            ? (normalizedY - map.originV) / map.spacingV : 0.0;
+        const auto sx = sampleGainMapAxis(gridX, map.width);
+        const auto sy = sampleGainMapAxis(gridY, map.height);
+        const uint32_t sampledChannels = rgb ? channels : 1u;
+        for (uint32_t channel = 0; channel < sampledChannels; ++channel) {
+            gains[channel] = sampleGainMapBilinear(sx, sy,
+                [&](uint32_t mapX, uint32_t mapY) {
                 if (rgb)
                     return gainMapColorValueAt(
-                        map, sx, sy, channel, cfaPhase);
+                        map, mapX, mapY, channel, cfaPhase);
                 if (map.channels == 3)
                     return gainMapColorValueAt(
-                        map, sx, sy, pixelColor, cfaPhase);
+                        map, mapX, mapY, pixelColor, cfaPhase);
                 const uint32_t mapChannel = map.channels >= 4
                     ? std::min<uint32_t>(map.channels - 1, pixelPhase) : 0u;
-                return map.data[(static_cast<size_t>(sy) * map.width + sx) *
+                return map.data[(static_cast<size_t>(mapY) * map.width + mapX) *
                                 map.channels + mapChannel];
             });
+        }
+        return gains;
     };
     const double fallbackWhite = static_cast<double>(
         (uint32_t{1} << std::min(16u, image.layout.bitsPerSample)) - 1);
-    for (uint32_t y = 0; y < image.layout.height; ++y)
-        for (uint32_t x = 0; x < image.layout.width; ++x)
-            for (uint32_t channel = 0; channel < channels; ++channel) {
-                const size_t index = (static_cast<size_t>(y) * image.layout.width + x) *
-                                     channels + channel;
-                float gain = 1.0f;
-                for (const auto& map : maps) gain *= gainAt(map, x, y, channel);
-                const size_t levelChannel = rgb ? channel :
-                    gainMapPhaseChannel(
-                        sourceCoordinate(x, sourceScale, sourceWidth),
-                        sourceCoordinate(y, sourceScale, sourceHeight),
-                        0, 0, phaseGroup);
-                const double black = image.metadata.blackLevelCount
-                    ? image.metadata.blackLevel[std::min<size_t>(
-                          levelChannel, image.metadata.blackLevelCount - 1)] : 0.0;
-                const double white = image.metadata.whiteLevelCount
-                    ? image.metadata.whiteLevel[std::min<size_t>(
-                          levelChannel, image.metadata.whiteLevelCount - 1)] : fallbackWhite;
-                image.samples[index] = bakeLinearGainSample(
-                    image.samples[index], gain, black, white, 0.0, 65535.0,
-                    debugGainMap);
+    auto bakeRows = [&](uint32_t beginY, uint32_t endY) {
+        for (uint32_t y = beginY; y < endY; ++y) {
+            const uint32_t sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
+            for (uint32_t x = 0; x < image.layout.width; ++x) {
+                const uint32_t sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
+                std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
+                for (const auto& map : maps) {
+                    const auto sampled = gainsAt(map, sourceX, sourceY);
+                    for (uint32_t channel = 0; channel < channels; ++channel)
+                        gains[channel] *= sampled[channel];
+                }
+                const size_t cfaLevelChannel = rgb ? 0 : gainMapPhaseChannel(
+                    sourceX, sourceY, 0, 0, phaseGroup);
+                for (uint32_t channel = 0; channel < channels; ++channel) {
+                    const size_t index =
+                        (static_cast<size_t>(y) * image.layout.width + x) * channels + channel;
+                    const size_t levelChannel = rgb ? channel : cfaLevelChannel;
+                    const double black = image.metadata.blackLevelCount
+                        ? image.metadata.blackLevel[std::min<size_t>(
+                              levelChannel, image.metadata.blackLevelCount - 1)] : 0.0;
+                    const double white = image.metadata.whiteLevelCount
+                        ? image.metadata.whiteLevel[std::min<size_t>(
+                              levelChannel, image.metadata.whiteLevelCount - 1)] : fallbackWhite;
+                    image.samples[index] = bakeLinearGainSample(
+                        image.samples[index], gains[channel], black, white, 0.0, 65535.0,
+                        debugGainMap);
+                }
             }
+        }
+    };
+    constexpr uint32_t minimumRowsPerWorker = 128;
+    const uint32_t workerCount = std::min<uint32_t>(8, std::max<uint32_t>(1,
+        (image.layout.height + minimumRowsPerWorker - 1) / minimumRowsPerWorker));
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount - 1);
+    for (uint32_t worker = 1; worker < workerCount; ++worker) {
+        const uint32_t beginY = image.layout.height * worker / workerCount;
+        const uint32_t endY = image.layout.height * (worker + 1) / workerCount;
+        workers.emplace_back(bakeRows, beginY, endY);
+    }
+    bakeRows(0, image.layout.height / workerCount);
+    for (auto& worker : workers) worker.join();
     image.metadata.blackLevel.fill(0.0f);
     image.metadata.whiteLevel.fill(65535.0f);
     image.metadata.blackLevelCount = channels;
