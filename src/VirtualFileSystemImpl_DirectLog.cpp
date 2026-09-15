@@ -426,6 +426,40 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     if (!canonicalizeCfaGainMaps(prepared.opcodeList2))
         throw std::runtime_error("Unsupported DirectLog OpcodeList2 gain-map layout");
 
+    // Some DirectLog sidecars retain full-sensor gain-map coordinates even
+    // though the encoded video already contains only the map's active window.
+    // Rebase that exact-size window onto the video instead of applying the map
+    // only to an incorrectly offset center rectangle.
+    auto rebaseEncodedWindow = [&](std::vector<GainMap>& maps) {
+        for (auto& map : maps) {
+            const uint32_t coordinateWidth = map.coordinateWidth
+                ? map.coordinateWidth : map.right;
+            const uint32_t coordinateHeight = map.coordinateHeight
+                ? map.coordinateHeight : map.bottom;
+            if (map.right - map.left != static_cast<uint32_t>(mWidth) ||
+                map.bottom - map.top != static_cast<uint32_t>(mHeight) ||
+                (coordinateWidth == static_cast<uint32_t>(mWidth) &&
+                 coordinateHeight == static_cast<uint32_t>(mHeight)))
+                continue;
+            const uint32_t encodedLeft = map.left;
+            const uint32_t encodedTop = map.top;
+            map.originH = (map.originH * coordinateWidth - map.left) / mWidth;
+            map.originV = (map.originV * coordinateHeight - map.top) / mHeight;
+            map.spacingH *= static_cast<double>(coordinateWidth) / mWidth;
+            map.spacingV *= static_cast<double>(coordinateHeight) / mHeight;
+            map.left = 0; map.top = 0;
+            map.right = mWidth; map.bottom = mHeight;
+            map.coordinateWidth = mWidth;
+            map.coordinateHeight = mHeight;
+            if (directLogDiagnosticsEnabled())
+                spdlog::info(
+                    "DirectLog diagnostic: rebased gain map sensor={}x{} offset={},{} video={}x{}",
+                    coordinateWidth, coordinateHeight, encodedLeft, encodedTop, mWidth, mHeight);
+        }
+    };
+    rebaseEncodedWindow(prepared.opcodeList2);
+    rebaseEncodedWindow(prepared.opcodeList3);
+
     // JSON gain maps finalized for the requested output crop need to pass
     // through the shared pipeline in the uncropped DirectLog staging DNG.
     // Lift them into staging coordinates here; cropImage() will then bring
@@ -954,8 +988,11 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         // canonical fallback for that uncommon path until white-image maps
         // can be supplied directly as DecodedDNGImage gain maps.
         if (!mManualVignetteSidecars.candidates.empty()) {
+            const bool gainMapApplied =
+                (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
             renderLock.unlock();
-            return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview);
+            return vfs::decodeProcessedDngPreview(
+                materializeFile(entry, false), preview, gainMapApplied);
         }
 
         auto processed = processFrame(entry);

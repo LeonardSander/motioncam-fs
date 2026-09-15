@@ -121,6 +121,11 @@ bool normalizeRgb16Bytes(const std::vector<uint16_t>& input,
     for (size_t channel = 0; channel < 3; ++channel)
         if (!(white[channel] > black[channel])) return false;
     output.resize(input.size() * sizeof(uint16_t));
+    if (black == std::array<double, 3>{0.0, 0.0, 0.0} &&
+        white == std::array<double, 3>{65535.0, 65535.0, 65535.0}) {
+        std::memcpy(output.data(), input.data(), output.size());
+        return true;
+    }
     auto* normalized = reinterpret_cast<uint16_t*>(output.data());
     const size_t pixels = input.size() / 3;
     parallelRows(static_cast<uint32_t>(pixels), [&](uint32_t begin, uint32_t end) {

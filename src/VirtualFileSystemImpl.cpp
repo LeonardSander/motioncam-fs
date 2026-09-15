@@ -186,13 +186,16 @@ void processDngPixels(std::vector<uint8_t>& dng,
 }
 
 bool decodeProcessedDngPreview(
-        const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview) {
+        const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview,
+        bool gainMapApplied) {
     if (!dng) return false;
     std::vector<uint8_t> bytes(dng->begin(), dng->end());
     // All requested processing is already baked or represented in the
     // canonical frame. Decode without applying a second crop/proxy/gain pass.
-    return DNGDecoder::decodePreview(
+    const bool decoded = DNGDecoder::decodePreview(
         std::move(bytes), RenderSettings{}, preview, false);
+    preview.gainMapApplied = decoded && gainMapApplied;
+    return decoded;
 }
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,

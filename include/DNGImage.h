@@ -49,6 +49,7 @@ struct PreviewFrame {
     uint32_t height = 0;
     DNGFrameMetadata metadata;
     Timestamp timestamp = 0;
+    bool gainMapApplied = false;
 };
 
 enum class DNGPixelLayout { CFA, LinearRGB, RGB };

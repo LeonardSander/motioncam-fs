@@ -421,15 +421,22 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     DNGDecoder::beginForegroundWork();
     struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
     std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
+    bool fallbackGainMapApplied = false;
     // Decode the source container once and run the shared in-memory preview
-    // processor. Gain-map-only retains the canonical fallback because its
-    // grouped scalar-map semantics intentionally match mounted DNG output.
-    if (!(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP)) {
+    // processor, including gain-map-only rendering.
+    {
         try {
             auto prepared = prepareFrame(frameIt->second, false);
             DecodedDNGImage image;
             if (!DNGDecoder::decodeImage(std::move(prepared.dng), image))
                 throw std::runtime_error("Could not decode source DNG preview");
+            if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
+                fallbackGainMapApplied = !image.opcodeList2.empty();
+                if (!(mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
+                    fallbackGainMapApplied = fallbackGainMapApplied ||
+                        (image.opcodeList3.size() == 1 &&
+                         image.opcodeList3.front().channels == 1);
+            }
             // Sequence calibration can declare higher-CFA topology which the
             // individual DNG tags intentionally describe only as a Bayer
             // phase. Carry the resolved sequence topology into the shared
@@ -486,7 +493,8 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     }
     materializeLock.unlock();
     renderLock.unlock();
-    try { return vfs::decodeProcessedDngPreview(materializeFile(entry, false), preview); }
+    try { return vfs::decodeProcessedDngPreview(
+        materializeFile(entry, false), preview, fallbackGainMapApplied); }
     catch (const std::exception&) { return false; }
 }
 

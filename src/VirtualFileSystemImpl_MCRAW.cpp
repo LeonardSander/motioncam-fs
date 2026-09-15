@@ -742,10 +742,23 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         if (!mManualVignetteSidecars.candidates.empty() ||
             vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
                                     "deferredGainMaps")) {
+            bool gainMapApplied = !mManualVignetteSidecars.candidates.empty();
+            if (!gainMapApplied) {
+                const auto deferred = vfs::loadSidecarGainMaps(
+                    mSidecarMetadata, frameIt->second, "deferredGainMaps");
+                const bool opcode2 = deferred.size() == 4 ||
+                    (deferred.size() == 1 && deferred.front().channels == 4);
+                const bool opcode3 = deferred.size() == 1 &&
+                    deferred.front().channels == 1;
+                gainMapApplied = opcode2 ||
+                    (opcode3 && !(mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR));
+            }
+            gainMapApplied = gainMapApplied &&
+                (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
             renderLock.unlock();
             try {
                 return vfs::decodeProcessedDngPreview(
-                    materializeFile(entry, false), preview);
+                    materializeFile(entry, false), preview, gainMapApplied);
             } catch (const std::exception&) {
                 return false;
             }
@@ -786,6 +799,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
                            mSettings, mCalibration, false, exposureOverride,
                            neutralOverride, &preview);
+        preview.gainMapApplied =
+            (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+            (mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+            !frameMetadata.lensShadingMap.empty();
         preview.timestamp = vfs::outputTimestamp(
             entry, timestamp, mSourceFrames.front(), mFps,
             mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);

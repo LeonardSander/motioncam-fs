@@ -675,6 +675,16 @@ int main() {
     assert(motioncam::DNGDecoder::getGainMaps(replacedGainMapDng, 2, replacedMaps));
     assert(replacedMaps.size() == replacementMaps.size());
     assert(replacedMaps.front().data == replacementMaps.front().data);
+    motioncam::RenderSettings gainOnlySettings;
+    gainOnlySettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
+    motioncam::PreviewFrame gainOnlyPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        replacedGainMapDng, gainOnlySettings, gainOnlyPreview, false));
+    assert(gainOnlyPreview.gainMapApplied);
+    assert(std::any_of(gainOnlyPreview.rgb.begin(), gainOnlyPreview.rgb.end(),
+                       [](uint8_t value) { return value != 0xff; }));
     // A scalar spatial map cannot be separated into CFA color and luminance.
     // Full preview baking may consume it, but color-only preview decoding must
     // reject it so the VFS can use the mounted-DNG transform fallback instead
@@ -695,13 +705,27 @@ int main() {
     auto colorPreviewSettings = fullPreviewSettings;
     colorPreviewSettings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
     motioncam::PreviewFrame colorPreview;
-    assert(!motioncam::DNGDecoder::decodePreview(
+    assert(motioncam::DNGDecoder::decodePreview(
         scalarSpatialDng, colorPreviewSettings, colorPreview, false));
+    assert(!colorPreview.gainMapApplied);
+    motioncam::PreviewFrame scalarUnprocessedPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        scalarSpatialDng, motioncam::RenderSettings{}, scalarUnprocessedPreview, false));
+    assert(colorPreview.rgb == scalarUnprocessedPreview.rgb);
     std::vector<uint8_t> clearedGainMapDng(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::replaceGainMaps(clearedGainMapDng, 2, {}));
     std::vector<motioncam::GainMap> clearedMaps;
     assert(!motioncam::DNGDecoder::getGainMaps(clearedGainMapDng, 2, clearedMaps));
     assert(clearedMaps.empty());
+    const auto clearedBeforeDebugBake = clearedGainMapDng;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        clearedGainMapDng, false, false, false, true));
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        clearedGainMapDng, clearedBeforeDebugBake));
+    motioncam::PreviewFrame noGainOnlyPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        clearedGainMapDng, gainOnlySettings, noGainOnlyPreview, false));
+    assert(!noGainOnlyPreview.gainMapApplied);
     // Exclude leaves a valid zero-count OpcodeList2. Legacy MotionCam phase
     // repair must accept it as a no-op instead of rejecting the mounted DNG.
     assert(motioncam::DNGDecoder::repairGainMapCfaPhase(clearedGainMapDng, true));

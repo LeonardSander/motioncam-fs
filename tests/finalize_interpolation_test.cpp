@@ -314,6 +314,15 @@ int main() {
     std::vector<motioncam::GainMap> consumedOrderedMap;
     assert(!motioncam::DNGDecoder::getGainMaps(
         orderedRgb, 3, consumedOrderedMap));
+    auto processedPreviewDng = std::make_shared<std::vector<char>>(
+        orderedRgb.begin(), orderedRgb.end());
+    motioncam::PreviewFrame processedPreview;
+    assert(motioncam::vfs::decodeProcessedDngPreview(
+        processedPreviewDng, processedPreview, true));
+    assert(processedPreview.gainMapApplied);
+    assert(motioncam::vfs::decodeProcessedDngPreview(
+        processedPreviewDng, processedPreview, false));
+    assert(!processedPreview.gainMapApplied);
     motioncam::DNGFrameMetadata logMetadata;
     const auto logDng = makeLogCfaDng(1023, 0);
     assert(motioncam::DNGDecoder::getColorMetadata(logDng, logMetadata));

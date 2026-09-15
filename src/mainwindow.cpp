@@ -2122,7 +2122,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     const auto decodeStarted = std::chrono::steady_clock::now();
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
-                        gainMapOnlyDebug(settings));
+                        gainMapOnlyDebug(settings) && preview.gainMapApplied);
                     auto& rgb = preview.rgb;
                     const uint32_t width = preview.width, height = preview.height;
                     displayDecodeMs += std::chrono::duration<double, std::milli>(
@@ -2324,7 +2324,7 @@ void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sour
                     if(delivered||mGalleryGeneration.load()!=generation)return;
                     applyGalleryColorTransform(preview.rgb, preview.metadata,
                                                settings.ignoreForwardMat,
-                                               gainMapOnlyDebug(settings));
+                                               gainMapOnlyDebug(settings) && preview.gainMapApplied);
                     auto& rgb=preview.rgb;const uint32_t width=preview.width,height=preview.height;
                     delivered=true;
                     const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),static_cast<qsizetype>(rgb.size()));
@@ -2514,7 +2514,7 @@ void MainWindow::startGalleryPerformanceTest(
             if (decoded)
                 applyGalleryColorTransform(
                     preview.rgb, preview.metadata, previewSettings.ignoreForwardMat,
-                    gainMapOnlyDebug(previewSettings));
+                    gainMapOnlyDebug(previewSettings) && preview.gainMapApplied);
             const qint64 decodeMs = timer.elapsed();
             ++mountedSamples;
             if (!decoded) ++mountedFailures;
@@ -4840,7 +4840,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
                     if (cancelled->load() || !image.isNull()) return;
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
-                        gainMapOnlyDebug(settings));
+                        gainMapOnlyDebug(settings) && preview.gainMapApplied);
                     const int orientation = settings.orientation >= 0
                         ? settings.orientation : preview.metadata.orientation;
                     image = previewImage(preview.rgb, preview.width, preview.height,

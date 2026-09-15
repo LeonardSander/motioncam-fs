@@ -951,6 +951,14 @@ int main() {
         const int wanted = replacement[i] | replacement[i + 1] << 8;
         assert(std::abs(actual - wanted) <= 33);
     }
+    motioncam::RenderSettings missingGainMapDebug;
+    missingGainMapDebug.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
+    motioncam::PreviewFrame missingGainMapFrame;
+    assert(motioncam::DNGDecoder::decodePreview(
+        syntheticRgb, missingGainMapDebug, missingGainMapFrame, false));
+    assert(missingGainMapFrame.rgb == replacedFrame.rgb);
     assert(motioncam::DNGDecoder::markDuplicateFrame(syntheticRgb));
     assert(motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
     assert(!motioncam::DNGDecoder::isSyntheticFrame(syntheticRgb));

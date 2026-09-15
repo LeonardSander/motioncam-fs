@@ -4226,40 +4226,40 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                                 const RenderSettings& settings,
                                 uint32_t sourceWidth = 0,
                                 uint32_t sourceHeight = 0,
-                                uint32_t sourceScale = 1) {
+                                uint32_t sourceScale = 1,
+                                bool* gainMapApplied = nullptr) {
+    if (gainMapApplied) *gainMapApplied = false;
     if (!(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) return true;
     std::vector<GainMap> opcode2 = image.opcodeList2;
     std::vector<GainMap> opcode3 = image.opcodeList3;
-    if (settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) {
-        std::vector<std::vector<GainMap>*> layers{&opcode2};
-        if (!opcode3.empty()) layers.push_back(&opcode3);
-        const auto adjustment = optimizeGainMapLayers<GainMap>(
-            layers, image.layout.cfaPhase);
-        image.metadata.baselineExposure += adjustment.exposureOffset;
-        for (size_t color = 0; color < 3; ++color)
-            image.metadata.asShotNeutral[color] *= adjustment.neutralScale[color];
-    }
     std::vector<GainMap> maps = opcode2;
     if (!(settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
         opcode3.size() == 1 && opcode3.front().channels == 1)
         maps.insert(maps.end(), opcode3.begin(), opcode3.end());
+    if (maps.empty()) return true;
+    if (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
+        auto separation = separateGainMapLuminance(maps);
+        // A scalar/luminance-only map has no color component. Treat reduction
+        // to color as a successful vignette no-op instead of falling back to
+        // a path that bakes the original image.
+        if (!separation.valid) return true;
+    }
+    if (settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) {
+        const auto adjustment = optimizeGainMapLayers<GainMap>(
+            std::array<std::vector<GainMap>*, 1>{&maps}, image.layout.cfaPhase);
+        image.metadata.baselineExposure += adjustment.exposureOffset;
+        for (size_t color = 0; color < 3; ++color)
+            image.metadata.asShotNeutral[color] *= adjustment.neutralScale[color];
+    }
+    if (gainMapApplied) *gainMapApplied = true;
     const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     if (debugGainMap)
         std::fill(image.samples.begin(), image.samples.end(),
                   std::numeric_limits<uint16_t>::max());
-    if (maps.empty()) return true;
-    if (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
-        auto separation = separateGainMapLuminance(maps);
-        // Never turn a requested color-only correction into a full gain-map
-        // bake. The mounted-DNG path rejects an unsupported separation too;
-        // returning false here lets the preview VFS use that shared transform
-        // path instead of displaying materially different processing.
-        if (!separation.valid) return false;
-    }
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps},
         settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-        debugGainMap);
+        false);
 
     const bool rgb = image.layout.pixels != DNGPixelLayout::CFA;
     auto cfaPhase = image.layout.cfaPhase;
@@ -4328,9 +4328,13 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                     ? image.metadata.whiteLevel[std::min<size_t>(
                           levelChannel, image.metadata.whiteLevelCount - 1)] : fallbackWhite;
                 image.samples[index] = bakeLinearGainSample(
-                    image.samples[index], gain, black, white, black, white,
+                    image.samples[index], gain, black, white, 0.0, 65535.0,
                     debugGainMap);
             }
+    image.metadata.blackLevel.fill(0.0f);
+    image.metadata.whiteLevel.fill(65535.0f);
+    image.metadata.blackLevelCount = channels;
+    image.metadata.whiteLevelCount = channels;
     return true;
 }
 }
@@ -4418,7 +4422,8 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         gainMapSourceScale *= remainingPreviewScale;
     }
     if (!bakeDecodedPreviewGainMaps(
-            image, settings, sourceWidth, sourceHeight, gainMapSourceScale)) return false;
+            image, settings, sourceWidth, sourceHeight, gainMapSourceScale,
+            &frame.gainMapApplied)) return false;
     frame.metadata = image.metadata;
     frame.timestamp = image.timestamp;
     uint32_t width = image.layout.width;
@@ -5114,8 +5119,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const bool eligibleOpcode3 = hasOnlySinglePlaneGainMap(data, 3) &&
         opcode3Maps.size() == 1 && opcode3Maps.front().channels == 1;
     if (!colorOnly) consumeOpcode3 = eligibleOpcode3;
-    if (opcode2Maps.empty() && !consumeOpcode3 && !debugGainMap)
-        return colorOnly && eligibleOpcode3;
+    if (opcode2Maps.empty() && !consumeOpcode3) return true;
 
     std::optional<double> updatedBaseline;
     std::optional<std::array<float, 3>> updatedNeutral;
