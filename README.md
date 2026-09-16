@@ -2,7 +2,7 @@
 
 > **Work in Progress**
 
-**MotionCam Fuse** allows mounting MCRAW files (proprietary MotionCam Raw Capture Format) as projected folders containing DNG sequences. This enables a convenient raw video editing workflow—preferably in **Davinci Resolve**.
+**MotionCam Fuse** allows opening raw image and video files, such as MCRAW. These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options. 
 
 ---
 
@@ -10,33 +10,27 @@
 
 ---
 
-Upon mounting of the MCRAW files, their corresponding folders will appear in the same directory as the MCRAWs if not defined otherwise. For Windows the Output Folder needs to be defined on a NTFS drive and in general only use Fuse with SSD storage. 
+When clips are mounted, folders containing respective frames will appear in their source directory if not defined otherwise under Settings > Preferences. As soon as the individual frames are accessed, their image contents are processed and cached.
 
-At first these DNG files are only projected and do not consume storage space. As soon as the individual files are accessed, their corresponding frames are read from MCRAW, potentially preprocessed and written to storage. To cache all files without manually accessing each one use [this script](https://discord.com/channels/980884979955421255/1377309561219973121/1423424334185234574). Keep in mind that the cached files will be overriden dynamically with projected ones again if Fuse settings are altered.
-
-These cached files will remain in storage for now when unmounting MCRAW or closing Fuse. If Fuse is not active, projected files remain visible in the File Explorer and will appear empty if opened. To access these files just open Fuse again for the previously saved session to be restored. The cache can be manually cleared by closing Fuse, deleting folder contents and folders afterwards. These will appear again when Fuse is opened once again and the session gets restored.
+For Windows builds the output directory needs to be on a NTFS drive. Also on Windows cached files are written into the projected folder structure and may remain along empty projected files when Fuse is closed irregularly or if Discard on Unmount is disabled under Preferences. These files will be properly accessible again when Fuse is opened again and the session is resumed. The cache can be manually cleared by closing Fuse, deleting folder contents first and folders afterwards.
 
 ---
 
 ### Features
 
-[Showcase Video](https://youtu.be/knACG5jy-rk)
+[Showcase video](https://youtu.be/knACG5jy-rk)
 
-- **Improved Framerate Handling**
+- **Constant frame rate conversion**
 
-  Since the underlying raw video streams captured in MCRAW files often feature a non-standard and possibly variable frame rate, a conversion to a constant standard frame rate becomes necessary for delivery with real time playback. Fuse chooses a suitable target delivery frame rate based on the median frame rate of a given MCRAW clip. For non-real time playback or gyroflow usage the median frame rate can be chosen as target as well.  
+To account for non-standard or variable frame rates (VFR), a conversion to a suitable standard constant frame rate (CFR) is implemented. Based on the target frame rate, derived from a clip's median frame rate, captured frames are dynamically duplicated or dropped. This conversion ensures real time playback avoiding desync in a CFR editing timeline like Davinci Resolve. For non-real time playback a clip's median frame rate can be chosen as target as well. The per frame timing deviation from timestamps of the target CFR can be graphed for mounted clips and duplicated / dropped frames are indicated in the Gallery. 
 
-CFR holds can optionally be replaced during DNG or Camera Native finalization with motion-interpolated frames from [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). On first use, Fuse downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment; Python 3 must be available for this one-time setup. The model is loaded once per finalization and processes one dropped-frame run at a time so only its two endpoint tensors are resident. CFA DNGs are converted to 16-bit RGB for inference; CFA output modes are remosaiced afterward. Exposure time, ISO, baseline exposure, and white balance are interpolated with the pixels. CFR hold DNGs carry `rpt:DuplicateFrame='true'`; interpolated DNGs carry `rpt:SyntheticFrame='true'` and set the duplicate flag to false. Camera Native JSON sidecars preserve both states per frame as `duplicateFrame` and `syntheticFrame`.
+- **Quad bayer demosaic**
 
-Camera Native finalization can encode LOG60 as HEVC/MOV, AV1/MP4, ProRes LT/Standard/HQ in 10-bit YUV 4:2:2, or CineForm in 10-bit YUV 4:2:2 or 12-bit RGB. The RGB CineForm path does not perform an RGB-to-YUV conversion. These modes also accept DirectLog inputs. MP4 is used for AV1 because FFmpeg does not support AV1 in QuickTime MOV; its 1 MHz video track time scale retains sub-millisecond VFR presentation timestamps. The standard AV1 profile uses `libsvtav1` at CRF 7 and preset 3. The AV1 HDR + Noise profile uses CRF 12, preset 2, and the ABI-compatible SVT-AV1-HDR fork's film-grain tune and generated noise table; it requires an FFmpeg executable built against SVT-AV1-HDR.
+DNGs of unbinned captures without prior remosaic are still incompatible with most raw image editors. This refers to sensors with color filter arrays (CFA) where each color filter is subdivided by 4, 9 or 16 photosites, while just one used to be standard. Active demosaic outputs raw RGB images with options to counter OCL shading or color aliasing since unbinned output varies considerably across different sensors. Further remosaic is optional. Also binning can be performed by averaging pixel values to compare binned resolution and SNR to unbinned. There is also an option to mislable higher CFA clips as usual 2x2 bayer if they wont open with untouched CFA in a chosen editor.
 
-- **Exposure Normalization**
+- **Exposure normalization & smoothing**
    
-  Exposure changes between frames are compensated for to eliminate exposure transitions in the video. This functionality relies on the per-frame **Baseline Exposure** DNG tag, which is recognized by Davinci Resolve. A suitable exposure compensation value per frame is determined by the shutter speed and ISO settings utilized per frame in a MCRAW clip. Additionally a static exposure compensation can be chosen in the corresponding combobox (Blackmagic Camera Model will stop it from working in DaVinci Resolve).
-
-- **Override Data Levels**
-  
-  White and Black Levels used in Fuse will default to their dynamic tags stored in MCRAW. Static tags are also available as a fallback (choose that to apply the levels override from calibration.json). White and black sources can be mixed independently, for example `Static/Dynamic`, `Dynamic/Static`, `1023/Dynamic`, or `Static/64`. DNG levels can also be overridden; for DNG inputs, both Dynamic and Static refer to the levels stored in each individual DNG. DirectLog uses its separate input-level handling.
+Exposure changes between frames caused by changes in exposure settings like ISO and shutter speed are neutralised by a per frame gain, relying on the per-frame **Baseline Exposure** DNG tag, recognized by Davinci Resolve and the integrated Gallery. Additionally a static exposure offset can be typed. Exposure transitions based on the same exposure settings can also be smoothed, making jumpy auto exposure or rough manual adjustments less distracting. Smoothing is also available for white balance. 
 
 ---
 
@@ -44,7 +38,7 @@ Camera Native finalization can encode LOG60 as HEVC/MOV, AV1/MP4, ProRes LT/Stan
 
 - **Baking Vignette Correction**
   
-  Apply gainmap vignette correction metadata contained in MCRAW per frame to pixel values. Alongside compensating for vignetting, color correction will be performed in image corners by applying different gainmaps per color channel. This phenomenon is visible as color casting in a radial gradient similar to the vignetting and varies per lens. Saving the gainmaps as Opcode metadata in DNGs instead of applying them to pixel values is not usable yet.
+Apply gainmap vignette correction metadata contained in MCRAW per frame to pixel values. Alongside compensating for vignetting, color correction will be performed in image corners by applying different gainmaps per color channel. This phenomenon is visible as color casting in a radial gradient similar to the vignetting and varies per lens. Saving the gainmaps as Opcode metadata in DNGs instead of applying them to pixel values is not usable yet.
 
 - **Reduce to Color Correction**
   
@@ -145,3 +139,16 @@ sudo apt install clang ninja-build pkg-config libfuse3-dev libboost-filesystem-d
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build --parallel
 ```
+
+
+
+
+CFR holds can optionally be replaced during DNG or Camera Native finalization with motion-interpolated frames from [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). On first use, Fuse downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment; Python 3 must be available for this one-time setup. The model is loaded once per finalization and processes one dropped-frame run at a time so only its two endpoint tensors are resident. CFA DNGs are converted to 16-bit RGB for inference; CFA output modes are remosaiced afterward. Exposure time, ISO, baseline exposure, and white balance are interpolated with the pixels. CFR hold DNGs carry `rpt:DuplicateFrame='true'`; interpolated DNGs carry `rpt:SyntheticFrame='true'` and set the duplicate flag to false. Camera Native JSON sidecars preserve both states per frame as `duplicateFrame` and `syntheticFrame`.
+
+Camera Native finalization can encode LOG60 as HEVC/MOV, AV1/MP4, ProRes LT/Standard/HQ in 10-bit YUV 4:2:2, or CineForm in 10-bit YUV 4:2:2 or 12-bit RGB. The RGB CineForm path does not perform an RGB-to-YUV conversion. These modes also accept DirectLog inputs. MP4 is used for AV1 because FFmpeg does not support AV1 in QuickTime MOV; its 1 MHz video track time scale retains sub-millisecond VFR presentation timestamps. The standard AV1 profile uses `libsvtav1` at CRF 7 and preset 3. The AV1 HDR + Noise profile uses CRF 12, preset 2, and the ABI-compatible SVT-AV1-HDR fork's film-grain tune and generated noise table; it requires an FFmpeg executable built against SVT-AV1-HDR.
+
+
+- **Override Data Levels**
+  
+  White and Black Levels used in Fuse will default to their dynamic tags stored in MCRAW. Static tags are also available as a fallback (choose that to apply the levels override from calibration.json). White and black sources can be mixed independently, for example `Static/Dynamic`, `Dynamic/Static`, `1023/Dynamic`, or `Static/64`. DNG levels can also be overridden; for DNG inputs, both Dynamic and Static refer to the levels stored in each individual DNG. DirectLog uses its separate input-level handling.
+
