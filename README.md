@@ -64,7 +64,7 @@ To remove unwanted global offsets in gainmaps, global minimal per color channel 
 
 ### Calibration
 
-JSON sidecars per mounted clips were introduced to persistently store calibration overrides and other metadata without altering original source files. Color, forward, and calibration matrices as well as asShotNeutral, cfaPhase, and orientation can be overridden along with some more options.
+JSON sidecars per mounted clips were introduced to persistently store calibration overrides and other metadata without altering original source files. Color, forward, and calibration matrices as well as asShotNeutral, cfaPhase, and orientation can be overridden along with some more options. On Create JSON an example JSON file is written in source clip directory sharing its file name. Uncomment _ prefix on example fields to enable overrides and for calibration to load.
 
 - **Define quad bayer CFA**
 
@@ -106,11 +106,15 @@ Input resolution is being reduced by discarding pixel values to increase playbac
 
 ### Finalization
 
-To store processed clips persistently many compression options are available. For DNG output there is lossless JPEG92, lossy 12b JPEG DCT (Davinci only), lossless and lossy JPEG-XL. Video compression options are available as well namely HEVC, AV1, ProRes and CineForm, relying on a RGB to YUV pixel format conversion assuming Rec.2020. JSON sidecars containing otherwise lost metadata are written automatically and resulting files can be imported again in Fuse. When specific frames from mounted clips are selected in Gallery, these can be finalized by themselves instead of the entire sequence.
+To store processed clips persistently many compression options are available. For DNG output there are lossless JPEG 92, lossy 12b JPEG DCT (Davinci only), lossless and lossy JPEG-XL options. Video compression options are available as well namely HEVC, AV1, CineForm and ProRes, relying on a RGB to YUV pixel format conversion assuming Rec.2020. JSON sidecars containing otherwise lost metadata are written automatically and resulting files can be imported again in Fuse. When specific frames from mounted clips are selected in Gallery, these can be finalized by themselves instead of the entire sequence.
 
 - **Duplicated frame interpolation**
 
 Duplicated frames introduced by CFR conversion can be replaced by motion-interpolated frames using [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). On first use, Fuse downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment. Python 3 must be available for this one-time setup. Synthetic and duplicated frames are indicated as such in frame metadata. Beyond that duplicated frames are still detectable in DNG sequences to properly interpolate DNG sequences with poor CFR conversion.
+
+- **MCRAW archival**
+
+MCRAW clips can be compressed using 7z LZMA2 Ultra and opened again in Fuse by decompressing to a temporary MCRAW on import.
 
 ---
 
