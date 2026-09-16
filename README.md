@@ -14,6 +14,8 @@ When clips are mounted, folders containing respective frames will appear in thei
 
 For Windows builds the output directory needs to be on a NTFS drive. Also on Windows cached files are written into the projected folder structure and may remain along empty projected files when Fuse is closed irregularly or if Discard on Unmount is disabled under Preferences. These files will be properly accessible again when Fuse is opened again and the session is resumed. The cache can be manually cleared by closing Fuse, deleting folder contents first and folders afterwards.
 
+For now nightly builds are available under GitHub Actions Artifacts. 
+
 ---
 
 ### Features
