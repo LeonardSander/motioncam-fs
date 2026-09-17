@@ -157,11 +157,21 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
 cmake --build build --parallel
 ```
 
-## Docs
+---
+
+### Docs
 
 See `HELP.md` for usage, preferences, and feature details.
 
+---
 
+### MotionCam DirectLog Camera Native Guide
+
+Camera Native captures omit color transforms and white balance during image processing before video encode. With required metadata supplied frames retain white balance invariance with possible highlight reconstruction. MotionCam Fuse writes necessary metadata for its processing options to a JSON Sidecar when finalizing with Native options. However for now on MotionCam Native captures auto white balance, dynamic vignette correction, and exposure normalisation are not possible since metadata is not captured. 
+
+Use Camera Native color space option and HLG transfer curve at 1,5 EV gain, all tonemapping disabled, variable frame rate, full data levels. Linear transfer curve is default for Camera Native but its inefficient value distribution make it useless for capture. Vignette correction and highlight reconstruction is disabled for Native but these restrictions are ignored on MCRAW video export.
+
+Before or after Native capture, capture DNG / MCRAW to use contained matrices, white balance and vignette correctoin like mentioned at DNG sidecars above. Further JSON parameters are useful for DirectLog captures like centeredCrop for encoder overscan, dataLevels (currently 8bit full level encodes are mislabled as such, while levels are limited), and levels that apply to normalized value range of 65535/0 for DirectLog sources after dataLevels (useful if capture used an incorrect gain resulting in lowered clipping point).
 
 
 
