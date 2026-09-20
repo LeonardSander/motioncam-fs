@@ -408,6 +408,31 @@ int main() {
     assert(insertedMatrices.hasColorMatrix1);
     assert(std::abs(insertedMatrices.colorMatrix1[0] - 1.2f) < 0.0001f);
 
+    motioncam::vfs::ManualVignetteSidecars manualMetadataSidecar;
+    motioncam::vfs::ManualVignetteSidecars::Candidate manualMetadataCandidate;
+    manualMetadataCandidate.image.metadata.colorMatrix1 = matrixOverrides.colorMatrix1;
+    manualMetadataCandidate.image.metadata.hasColorMatrix1 = true;
+    manualMetadataCandidate.image.metadata.forwardMatrix2 = matrixOverrides.forwardMatrix2;
+    manualMetadataCandidate.image.metadata.hasForwardMatrix2 = true;
+    manualMetadataCandidate.image.metadata.asShotNeutral = {0.5f, 1.0f, 0.75f};
+    manualMetadataCandidate.image.metadata.hasAsShotNeutral = true;
+    manualMetadataCandidate.image.metadata.calibrationIlluminant1 = 23;
+    manualMetadataCandidate.image.metadata.calibrationIlluminant2 = 17;
+    manualMetadataSidecar.candidates.push_back(std::move(manualMetadataCandidate));
+    motioncam::DNGFrameMetadata previewMetadata;
+    motioncam::vfs::mergeManualDngMetadata(
+        previewMetadata, manualMetadataSidecar, nullptr);
+    assert(previewMetadata.hasColorMatrix1 && previewMetadata.hasForwardMatrix2);
+    assert(previewMetadata.hasAsShotNeutral);
+    assert(std::abs(previewMetadata.asShotNeutral[2] - 0.75f) < 0.0001f);
+    assert(previewMetadata.calibrationIlluminant1 == 23);
+    assert(previewMetadata.calibrationIlluminant2 == 17);
+    previewMetadata.colorMatrix1[0] = 3.0f;
+    previewMetadata.hasColorMatrix1 = true;
+    motioncam::vfs::mergeManualDngMetadata(
+        previewMetadata, manualMetadataSidecar, nullptr);
+    assert(std::abs(previewMetadata.colorMatrix1[0] - 3.0f) < 0.0001f);
+
     auto directLogTwelveBit = directLogLinear;
     directLogSettings.levels = "4095/Dynamic";
     directLogPipeline.linearInputBitDepth = 12;

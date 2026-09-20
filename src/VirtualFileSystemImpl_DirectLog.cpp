@@ -236,67 +236,56 @@ void VirtualFileSystemImpl_DirectLog::init() {
         mTypicalDngSize = 1;
         firstDngSize = 1;
     } else if (!frames.empty()) {
-        // Uncompressed DNG size is independent of sample values. Avoid decoding
-        // and color-converting frame zero whenever the mount settings change.
-        std::vector<uint16_t> sampleRgbData(
-            static_cast<size_t>(mWidth) * mHeight * 3, 0);
-        const auto sampleGainMaps = prepareSidecarGainMaps(0);
-        const auto sampleMetadata = frameMetadata(0);
-        auto makeSizingDng = [&](int scale, std::vector<uint8_t>& output) {
-            if (!convertRGBToDNG(sampleRgbData, output, 0, frames[0].timestamp,
-                                 sampleMetadata.iso, sampleMetadata.shutterSpeed,
-                                 sampleMetadata.baselineExposure,
-                                 sampleMetadata.asShotNeutral,
-                                 sampleMetadata.tiffOrientation, &sampleMetadata,
-                                 sampleGainMaps.opcodeList2,
-                                 sampleGainMaps.opcodeList3))
-                return false;
-            if (mCalibration && mCalibration->hasLeftTopCropStride &&
-                !DNGDecoder::cropImage(output,
-                    mCalibration->leftTopCropStride[0],
-                    mCalibration->leftTopCropStride[1]))
-                return false;
-            vfs::DngPixelPipelineOptions pixels;
-            pixels.hasCfa = false;
-            pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
-            pixels.outputScale = scale;
-            pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
-            pixels.linearInputBitDepth = utils::bitsNeeded(static_cast<uint16_t>(
-                std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
-            pixels.sourceName = "DirectLog sizing";
-            vfs::processDngPixels(output, mConfig, pixels);
-            vfs::DngFinalizeOptions finalize;
-            finalize.frameRate = mFps;
-            finalize.timestamp = 0;
-            finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
-            finalize.sourceName = "DirectLog sizing";
-            vfs::finalizeDng(output, mConfig, finalize);
-            return true;
-        };
-        std::vector<uint8_t> sampleDngData;
-        const int proxyScale = vfs::getScaleFromOptions(
-            mConfig.options, mConfig.draftScale);
-        if (makeSizingDng(proxyScale, sampleDngData)) {
-            mTypicalDngSize = sampleDngData.size();
-            firstDngSize = mTypicalDngSize;
-            spdlog::info("DirectLog DNG size determined from sample: {} bytes ({:.2f} MB)",
-                        mTypicalDngSize, mTypicalDngSize / (1024.0 * 1024.0));
-
-            // Draft sequences intentionally expose frame 000000 at native
-            // resolution. Calculate its distinct size so the mounted file is
-            // not truncated to the proxy frame size.
-            if (vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale) > 1) {
-                std::vector<uint8_t> firstDngData;
-                if (!makeSizingDng(1, firstDngData))
-                    throw std::runtime_error("Could not size native DirectLog metadata frame");
-                firstDngSize = firstDngData.size();
-            }
-        } else {
-            // Fallback to calculated estimate if conversion fails
-            const auto& videoInfo = mDecoder->getVideoInfo();
-            mTypicalDngSize = static_cast<size_t>(videoInfo.width) * videoInfo.height * 3 * 2 + (1024 * 1024);
-            spdlog::warn("Failed to generate sample DNG, using estimated size: {} bytes", mTypicalDngSize);
+        // FUSE only needs a safe projected size for directory metadata; reads
+        // stop at the materialized buffer's actual EOF. Avoid constructing and
+        // gain-baking a 75 MB sample DNG solely to obtain this projection.
+        uint32_t width = static_cast<uint32_t>(mWidth);
+        uint32_t height = static_cast<uint32_t>(mHeight);
+        if (mCalibration && mCalibration->hasLeftTopCropStride) {
+            width = std::min(width, static_cast<uint32_t>(
+                std::max(1, mCalibration->leftTopCropStride[0])));
+            height = std::min(height, static_cast<uint32_t>(
+                std::max(1, mCalibration->leftTopCropStride[1])));
         }
+        if (mConfig.options & RENDER_OPT_CROPPING) {
+            uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
+            utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, stride);
+            if (cropWidth && cropHeight) {
+                width = std::min(width, cropWidth);
+                height = std::min(height, cropHeight);
+            }
+        }
+        constexpr size_t transformedMetadataAllowance = 256 * 1024;
+        size_t measuredMetadataBytes =
+            vfs::projectedSidecarMetadataSize(mSidecarMetadata);
+        size_t largestManualSidecarBytes = 0;
+        for (const auto& candidate : mManualVignetteSidecars.candidates) {
+            size_t candidateBytes = 0;
+            for (const auto& entry : candidate.metadata)
+                candidateBytes += entry.value.size();
+            candidateBytes += vfs::projectedGainMapMetadataSize(
+                candidate.image.opcodeList2);
+            candidateBytes += vfs::projectedGainMapMetadataSize(
+                candidate.image.opcodeList3);
+            largestManualSidecarBytes = std::max(
+                largestManualSidecarBytes, candidateBytes);
+        }
+        measuredMetadataBytes += largestManualSidecarBytes;
+        const auto projectedSize = [&](uint32_t projectedWidth,
+                                       uint32_t projectedHeight) {
+            return vfs::projectedDngSize(
+                projectedWidth, projectedHeight, 3, 16,
+                measuredMetadataBytes, transformedMetadataAllowance);
+        };
+        const uint32_t proxyScale = static_cast<uint32_t>(std::max(
+            1, vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale)));
+        mTypicalDngSize = projectedSize(
+            (width + proxyScale - 1) / proxyScale,
+            (height + proxyScale - 1) / proxyScale);
+        firstDngSize = proxyScale > 1
+            ? projectedSize(width, height) : mTypicalDngSize;
+        spdlog::info("DirectLog projected DNG size: {} bytes ({:.2f} MB)",
+                     mTypicalDngSize, mTypicalDngSize / (1024.0 * 1024.0));
     }
     std::vector<Entry> sourceEntries;
     std::vector<Timestamp> timestamps;
@@ -819,6 +808,25 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
     result.height = 0;
 
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
+    if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude) {
+        DNGImageLayout manualTarget;
+        manualTarget.width = static_cast<uint32_t>(mWidth);
+        manualTarget.height = static_cast<uint32_t>(mHeight);
+        manualTarget.bitsPerSample = 16;
+        manualTarget.samplesPerPixel = 3;
+        manualTarget.pixels = DNGPixelLayout::LinearRGB;
+        manualTarget.cfaRepeatSize = 2;
+        manualTarget.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+        std::vector<GainMap> manualOpcode2, manualOpcode3;
+        if (!vfs::manualVignetteSidecarGainMaps(
+                mManualVignetteSidecars, manualTarget,
+                manualOpcode2, manualOpcode3))
+            throw std::runtime_error("Could not prepare manual DirectLog vignette sidecar");
+        if (!manualOpcode2.empty())
+            result.gainMaps.opcodeList2 = std::move(manualOpcode2);
+        if (!manualOpcode3.empty())
+            result.gainMaps.opcodeList3 = std::move(manualOpcode3);
+    }
     if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
                                 result.height, false))
         throw std::runtime_error("Could not decode DirectLog frame");
@@ -976,6 +984,12 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "DirectLog";
         vfs::finalizeDng(dngData, mConfig, finalize);
+        if (!jpegCompression && !mConfig.streamingPreview) {
+            if (dngData.size() > entry.size)
+                throw std::runtime_error(
+                    "Generated DirectLog DNG exceeds advertised mounted size");
+            dngData.resize(entry.size, 0);
+        }
         auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
@@ -989,17 +1003,6 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview) {
     std::shared_lock renderLock(mRenderMutex);
     try {
-        // Manual flat-field DNGs still require opcode construction. Keep the
-        // canonical fallback for that uncommon path until white-image maps
-        // can be supplied directly as DecodedDNGImage gain maps.
-        if (!mManualVignetteSidecars.candidates.empty()) {
-            const bool gainMapApplied =
-                (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
-            renderLock.unlock();
-            return vfs::decodeProcessedDngPreview(
-                materializeFile(entry, false), preview, gainMapApplied);
-        }
-
         auto processed = processFrame(entry);
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
@@ -1050,6 +1053,13 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         copyMatrix(processed.metadata.cameraCalibration2,
                    image.metadata.cameraCalibration2,
                    image.metadata.hasCameraCalibration2);
+        image.metadata.calibrationIlluminant1 =
+            processed.metadata.calibrationIlluminant1;
+        image.metadata.calibrationIlluminant2 =
+            processed.metadata.calibrationIlluminant2;
+        vfs::mergeManualDngMetadata(
+            image.metadata, mManualVignetteSidecars,
+            mCalibration ? &*mCalibration : nullptr);
         if (mCalibration) {
             if (mCalibration->hasColorMatrix1) {
                 image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
@@ -1076,10 +1086,10 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 image.metadata.hasCameraCalibration2 = true;
             }
         }
-        image.metadata.calibrationIlluminant1 =
-            processed.metadata.calibrationIlluminant1;
-        image.metadata.calibrationIlluminant2 =
-            processed.metadata.calibrationIlluminant2;
+        if (!image.metadata.calibrationIlluminant1)
+            image.metadata.calibrationIlluminant1 = 21;
+        if (!image.metadata.calibrationIlluminant2)
+            image.metadata.calibrationIlluminant2 = 17;
         if ((mConfig.options & RENDER_OPT_BAKE_ISO) && image.metadata.iso > 0.0)
             utils::bakeIsoOverlay(image.samples.data(), image.layout.width,
                 image.layout.height, 3, image.metadata.iso,

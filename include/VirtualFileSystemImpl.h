@@ -222,6 +222,12 @@ struct DngPixelPipelineOptions {
     std::string_view sourceName;
 };
 
+size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,
+                        uint32_t storedBits, size_t measuredMetadataBytes,
+                        size_t transformedMetadataAllowance = 256 * 1024);
+size_t projectedGainMapMetadataSize(const std::vector<GainMap>& maps);
+size_t projectedSidecarMetadataSize(const nlohmann::json& sidecar);
+
 // Manual flat-field DNGs discovered beside a clip.  The implementation keeps
 // the decoded flats in memory, but creates/replaces opcodes on the frame's
 // native geometry so all ordinary gain-map processing remains downstream.
@@ -246,7 +252,13 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     const boost::filesystem::path* sidecarFile = nullptr);
 bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                                 const ManualVignetteSidecars& sidecars);
+bool manualVignetteSidecarGainMaps(
+    const ManualVignetteSidecars& sidecars, const DNGImageLayout& targetLayout,
+    std::vector<GainMap>& opcodeList2, std::vector<GainMap>& opcodeList3);
 bool applyManualDngMetadata(std::vector<uint8_t>& dng,
+                            const ManualVignetteSidecars& sidecars,
+                            const CalibrationData* jsonOverride);
+void mergeManualDngMetadata(DNGFrameMetadata& metadata,
                             const ManualVignetteSidecars& sidecars,
                             const CalibrationData* jsonOverride);
 std::array<int, 2> manualVignetteSensorResolution(

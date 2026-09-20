@@ -44,6 +44,43 @@ DngRenderPlan planDngRender(
     return plan;
 }
 
+size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,
+                        uint32_t storedBits, size_t measuredMetadataBytes,
+                        size_t transformedMetadataAllowance) {
+    const size_t rowBytes =
+        (static_cast<size_t>(width) * channels * storedBits + 7) / 8;
+    const size_t uncompressedBytes =
+        static_cast<size_t>(width) * height * channels * sizeof(uint16_t);
+    return std::max(rowBytes * height, uncompressedBytes) +
+        measuredMetadataBytes + transformedMetadataAllowance;
+}
+
+size_t projectedGainMapMetadataSize(const std::vector<GainMap>& maps) {
+    size_t bytes = 0;
+    for (const auto& map : maps)
+        bytes += map.data.size() * sizeof(float);
+    return bytes;
+}
+
+size_t projectedSidecarMetadataSize(const nlohmann::json& sidecar) {
+    auto staticMetadata = sidecar;
+    if (staticMetadata.is_object()) staticMetadata.erase("dynamic");
+    size_t bytes = staticMetadata.dump().size();
+    if (!sidecar.contains("dynamic") ||
+        !sidecar["dynamic"].contains("frames"))
+        return bytes;
+    size_t largestDynamicFrameBytes = 0;
+    const auto& frames = sidecar["dynamic"]["frames"];
+    for (size_t frame = 0; frame < frames.size(); ++frame) {
+        size_t frameBytes = frames[frame].dump().size();
+        for (const char* field : {"gainMaps", "deferredGainMaps"})
+            frameBytes += projectedGainMapMetadataSize(
+                loadSidecarGainMaps(sidecar, frame, field));
+        largestDynamicFrameBytes = std::max(largestDynamicFrameBytes, frameBytes);
+    }
+    return bytes + largestDynamicFrameBytes;
+}
+
 void processDngPixels(std::vector<uint8_t>& dng,
         const RenderSettings& settings,
         const DngPixelPipelineOptions& options) {
@@ -882,11 +919,11 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     return result;
 }
 
-bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
-                                const ManualVignetteSidecars& sidecars) {
-    if (sidecars.candidates.empty()) return true;
-    DNGImageLayout frameLayout;
-    if (!DNGDecoder::getImageLayout(dng, frameLayout)) return false;
+bool manualVignetteSidecarGainMaps(
+        const ManualVignetteSidecars& sidecars, const DNGImageLayout& targetLayout,
+        std::vector<GainMap>& opcodeList2, std::vector<GainMap>& opcodeList3) {
+    opcodeList2.clear();
+    opcodeList3.clear();
     for (const auto* selected : manualCandidateOrder(sidecars)) {
         // A file named _white is a flat-field capture, irrespective of any
         // stale OpcodeList2 it happens to contain.  Always derive its map from
@@ -895,12 +932,12 @@ bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
             ? std::vector<GainMap>{} : selected->image.opcodeList2;
         if (selected->whiteImage) {
             constexpr uint32_t width = 17, height = 13;
-            const bool sourceCfa = frameLayout.pixels == DNGPixelLayout::CFA;
+            const bool sourceCfa = targetLayout.pixels == DNGPixelLayout::CFA;
             std::ostringstream cacheKey;
             cacheKey << selected->path << '|' << width << 'x' << height << '|'
                      << sourceCfa;
             if (sourceCfa)
-                for (const auto phase : frameLayout.cfaPhase)
+                for (const auto phase : targetLayout.cfaPhase)
                     cacheKey << '|' << static_cast<unsigned>(phase);
             const std::string key = cacheKey.str();
             {
@@ -911,21 +948,26 @@ bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
             }
             if (maps.empty()) continue;
         }
-        bool applied = false;
-        if (!maps.empty()) {
-            if (!DNGDecoder::replaceGainMaps(dng, 2, maps)) return false;
-            applied = true;
-        }
+        if (!maps.empty()) opcodeList2 = std::move(maps);
         // A white capture derives only OpcodeList2; gain-map DNGs may also
         // override OpcodeList3 while preserving a missing destination layer.
-        if (!selected->whiteImage && !selected->image.opcodeList3.empty()) {
-            if (!DNGDecoder::replaceGainMaps(
-                    dng, 3, selected->image.opcodeList3)) return false;
-            applied = true;
-        }
-        if (applied) return true;
+        if (!selected->whiteImage && !selected->image.opcodeList3.empty())
+            opcodeList3 = selected->image.opcodeList3;
+        if (!opcodeList2.empty() || !opcodeList3.empty()) return true;
     }
     return true;
+}
+
+bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
+                                const ManualVignetteSidecars& sidecars) {
+    if (sidecars.candidates.empty()) return true;
+    DNGImageLayout frameLayout;
+    if (!DNGDecoder::getImageLayout(dng, frameLayout)) return false;
+    std::vector<GainMap> opcodeList2, opcodeList3;
+    if (!manualVignetteSidecarGainMaps(
+            sidecars, frameLayout, opcodeList2, opcodeList3)) return false;
+    return (opcodeList2.empty() || DNGDecoder::replaceGainMaps(dng, 2, opcodeList2)) &&
+        (opcodeList3.empty() || DNGDecoder::replaceGainMaps(dng, 3, opcodeList3));
 }
 
 bool applyManualDngMetadata(std::vector<uint8_t>& dng,
@@ -945,6 +987,51 @@ bool applyManualDngMetadata(std::vector<uint8_t>& dng,
     }
     return DNGDecoder::fillMissingSidecarMetadata(
         dng, ordered.front()->metadata, excluded);
+}
+
+void mergeManualDngMetadata(DNGFrameMetadata& metadata,
+                            const ManualVignetteSidecars& sidecars,
+                            const CalibrationData* jsonOverride) {
+    const auto ordered = manualCandidateOrder(sidecars);
+    if (ordered.empty()) return;
+    const auto& sidecar = ordered.front()->image.metadata;
+    auto copyMatrix = [](const auto& source, bool sourcePresent,
+                         auto& destination, bool& destinationPresent,
+                         bool jsonOwned) {
+        if (!jsonOwned && !destinationPresent && sourcePresent) {
+            destination = source;
+            destinationPresent = true;
+        }
+    };
+    copyMatrix(sidecar.colorMatrix1, sidecar.hasColorMatrix1,
+               metadata.colorMatrix1, metadata.hasColorMatrix1,
+               jsonOverride && jsonOverride->hasColorMatrix1);
+    copyMatrix(sidecar.colorMatrix2, sidecar.hasColorMatrix2,
+               metadata.colorMatrix2, metadata.hasColorMatrix2,
+               jsonOverride && jsonOverride->hasColorMatrix2);
+    copyMatrix(sidecar.forwardMatrix1, sidecar.hasForwardMatrix1,
+               metadata.forwardMatrix1, metadata.hasForwardMatrix1,
+               jsonOverride && jsonOverride->hasForwardMatrix1);
+    copyMatrix(sidecar.forwardMatrix2, sidecar.hasForwardMatrix2,
+               metadata.forwardMatrix2, metadata.hasForwardMatrix2,
+               jsonOverride && jsonOverride->hasForwardMatrix2);
+    copyMatrix(sidecar.cameraCalibration1, sidecar.hasCameraCalibration1,
+               metadata.cameraCalibration1, metadata.hasCameraCalibration1,
+               jsonOverride && jsonOverride->hasCameraCalibration1);
+    copyMatrix(sidecar.cameraCalibration2, sidecar.hasCameraCalibration2,
+               metadata.cameraCalibration2, metadata.hasCameraCalibration2,
+               jsonOverride && jsonOverride->hasCameraCalibration2);
+    if (!(jsonOverride && jsonOverride->hasAsShotNeutral) &&
+        !metadata.hasAsShotNeutral && sidecar.hasAsShotNeutral) {
+        metadata.asShotNeutral = sidecar.asShotNeutral;
+        metadata.hasAsShotNeutral = true;
+    }
+    if (!metadata.calibrationIlluminant1)
+        metadata.calibrationIlluminant1 = sidecar.calibrationIlluminant1;
+    if (!metadata.calibrationIlluminant2)
+        metadata.calibrationIlluminant2 = sidecar.calibrationIlluminant2;
+    if (metadata.uniqueCameraModel.empty())
+        metadata.uniqueCameraModel = sidecar.uniqueCameraModel;
 }
 
 std::array<int, 2> manualVignetteSensorResolution(

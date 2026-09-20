@@ -344,11 +344,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
     // maps, whereas DNG opcodes contain their expanded float samples, so include
     // both the serialized documents and the expanded native/sidecar map data.
     constexpr size_t transformedMetadataAllowance = 256 * 1024;
-    auto staticSidecarMetadata = mSidecarMetadata;
-    if (staticSidecarMetadata.is_object())
-        staticSidecarMetadata.erase("dynamic");
     size_t serializedMetadataBytes = metadata.dump().size() +
-        staticSidecarMetadata.dump().size();
+        vfs::projectedSidecarMetadataSize(mSidecarMetadata);
     if (cameraFrameMetadata.lensShadingMapWidth > 0 &&
         cameraFrameMetadata.lensShadingMapHeight > 0) {
         const size_t gainMapPlanes = std::min<size_t>(
@@ -359,24 +356,6 @@ void VirtualFileSystemImpl_MCRAW::init() {
             gainMapPlanes;
         serializedMetadataBytes += gainMapSamples * sizeof(float);
     }
-    if (mSidecarMetadata.contains("dynamic") &&
-        mSidecarMetadata["dynamic"].contains("frames")) {
-        const auto& dynamicFrames = mSidecarMetadata["dynamic"]["frames"];
-        size_t largestDynamicFrameBytes = 0;
-        for (size_t frame = 0; frame < dynamicFrames.size(); ++frame) {
-            size_t dynamicFrameBytes = dynamicFrames[frame].dump().size();
-            for (const char* field : {"gainMaps", "deferredGainMaps"}) {
-                const auto maps = vfs::loadSidecarGainMaps(
-                    mSidecarMetadata, frame, field);
-                for (const auto& map : maps)
-                    dynamicFrameBytes += map.data.size() * sizeof(float);
-            }
-            largestDynamicFrameBytes = std::max(
-                largestDynamicFrameBytes, dynamicFrameBytes);
-        }
-        serializedMetadataBytes += largestDynamicFrameBytes;
-    }
-
     // Mounted-file sizes only need a safe upper bound. Rendering frame zero to
     // measure it made higher-CFA imports perform a full demosaic before the
     // user had requested any frame. Use the same conservative uncompressed
@@ -432,10 +411,9 @@ void VirtualFileSystemImpl_MCRAW::init() {
         const uint32_t storedBits = utils::dngPackedBits(
             static_cast<uint16_t>(storedWhite), channels == 3,
             mSettings.cameraNativeStaging);
-        const size_t rowBytes =
-            (static_cast<size_t>(width) * channels * storedBits + 7) / 8;
-        return rowBytes * height +
-               serializedMetadataBytes + transformedMetadataAllowance;
+        return vfs::projectedDngSize(
+            width, height, channels, storedBits, serializedMetadataBytes,
+            transformedMetadataAllowance);
     };
     mTypicalDngSize = mSettings.streamingPreview ? 1 : estimatedDngSize(false);
     const bool nativeFirstFrame = !mSettings.streamingPreview &&

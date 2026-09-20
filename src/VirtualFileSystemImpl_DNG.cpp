@@ -304,8 +304,6 @@ void VirtualFileSystemImpl_DNG::init() {
             else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits - 6);
             else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) storedBits = std::max(1u, storedBits - 8);
         }
-        const size_t rowBytes =
-            (static_cast<size_t>(width) * channels * storedBits + 7) / 8;
         const size_t metadataBytes = frameIndex < mSourceMetadataSizes.size()
             ? mSourceMetadataSizes[frameIndex] : transformedMetadataAllowance;
         // The packed estimate is normally tight, but gain-map baking,
@@ -313,11 +311,9 @@ void VirtualFileSystemImpl_DNG::init() {
         // produce a larger strip than the selected storage bit depth implies.
         // Never advertise less than an uncompressed 16-bit payload plus room
         // for transformed metadata; a projected mount must not truncate it.
-        const size_t uncompressedUpperBound =
-            static_cast<size_t>(width) * height * channels * sizeof(uint16_t);
-        return std::max(rowBytes * height,
-                        uncompressedUpperBound) + metadataBytes +
-               transformedMetadataAllowance;
+        return vfs::projectedDngSize(width, height, channels, storedBits,
+                                     metadataBytes,
+                                     transformedMetadataAllowance);
     };
 
     std::vector<size_t> measuredDngSizes(frames.size());
@@ -445,6 +441,9 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             // in-memory processor instead of losing it at the DNG boundary.
             image.layout.cfaRepeatSize = prepared.cfaSize;
             image.layout.cfaPhase = prepared.cfaPhase;
+            vfs::mergeManualDngMetadata(
+                image.metadata, mManualVignetteSidecars,
+                mCalibration ? &*mCalibration : nullptr);
             if (mCalibration) {
                 if (mCalibration->hasColorMatrix1) {
                     image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
