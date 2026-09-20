@@ -1961,12 +1961,22 @@ bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
         data.insert(data.end(), output.begin(), output.end());
         return true;
     }
-    if (output.size() <= 4) {
-        write32(data.data() + entry->entryOffset + 4,
-                static_cast<uint32_t>(output.size()), little);
-        std::fill(data.begin() + entry->entryOffset + 8,
-                  data.begin() + entry->entryOffset + 12, 0);
-        std::copy(output.begin(), output.end(), data.begin() + entry->entryOffset + 8);
+    if (outputCount == 0) {
+        const uint32_t ifd = entry->ifdOffset;
+        if (ifd + 2 > data.size()) return false;
+        const uint16_t count = read16(data.data() + ifd, little);
+        const size_t firstEntry = static_cast<size_t>(ifd) + 2;
+        const size_t entriesEnd = firstEntry + static_cast<size_t>(count) * 12;
+        if (entriesEnd + 4 > data.size() || entry->entryOffset < firstEntry ||
+            entry->entryOffset + 12 > entriesEnd || count == 0)
+            return false;
+        // Remove the tag itself instead of retaining a four-byte, zero-count
+        // opcode list. The payload can remain unreferenced at the end of the
+        // file; keeping offsets stable avoids rewriting the rest of the TIFF.
+        std::memmove(data.data() + entry->entryOffset,
+                     data.data() + entry->entryOffset + 12,
+                     entriesEnd + 4 - (entry->entryOffset + 12));
+        write16(data.data() + ifd, static_cast<uint16_t>(count - 1), little);
         return true;
     }
     if (data.size() & 1u) data.push_back(0);
@@ -5775,14 +5785,9 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 data[entry.valueOffset + 3] = 0;
             }
         }
-    } else if (opcodeE) {
-        // Keep a valid OpcodeList2 tag, but make its list empty to prevent double application.
-        write32(data.data() + opcodeE->entryOffset + 4, 4, little);
-        write32(data.data() + opcodeE->entryOffset + 8, 0, false);
-    }
+    } else if (opcodeE && !replaceGainMaps(data, 2, {})) return false;
     if (consumeOpcode3 && opcode3E) {
-        write32(data.data() + opcode3E->entryOffset + 4, 4, little);
-        write32(data.data() + opcode3E->entryOffset + 8, 0, false);
+        if (!replaceGainMaps(data, 3, {})) return false;
     }
     if (updatedBaseline.has_value() &&
         !updateMetadata(data, &*updatedBaseline,
@@ -5872,8 +5877,8 @@ bool DNGDecoder::repairGainMapCfaPhase(
     }
     const bool repair = sidecarOverride.value_or(affectedProducer);
     if (!repair || !opcode || opcode->count < 4) return true;
-    // Excluding gain maps retains the OpcodeList2 tag with a valid empty
-    // opcode list. There is no CFA phase to reconcile in that representation.
+    // Accept legacy files that retained an empty OpcodeList2 when excluding
+    // gain maps. Newly generated files omit the tag instead.
     if (opcode->count == 4 &&
         readBE32(data.data() + opcode->valueOffset) == 0) return true;
 

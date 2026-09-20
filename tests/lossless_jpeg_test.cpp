@@ -726,8 +726,8 @@ int main() {
     assert(motioncam::DNGDecoder::decodePreview(
         clearedGainMapDng, gainOnlySettings, noGainOnlyPreview, false));
     assert(!noGainOnlyPreview.gainMapApplied);
-    // Exclude leaves a valid zero-count OpcodeList2. Legacy MotionCam phase
-    // repair must accept it as a no-op instead of rejecting the mounted DNG.
+    // Excluding all gain maps removes OpcodeList2 instead of leaving a
+    // four-byte zero-count list behind.
     assert(motioncam::DNGDecoder::repairGainMapCfaPhase(clearedGainMapDng, true));
     auto cleared16 = [&](size_t offset) {
         return static_cast<uint16_t>(clearedGainMapDng[offset] |
@@ -743,11 +743,9 @@ int main() {
     for (uint16_t i = 0; i < cleared16(clearedIfd); ++i) {
         const size_t entry = static_cast<size_t>(clearedIfd) + 2 + i * 12;
         if (cleared16(entry) != 51009) continue;
-        assert(cleared32(entry + 4) == 4);
-        assert(cleared32(entry + 8) == 0);
         foundClearedOpcodeList = true;
     }
-    assert(foundClearedOpcodeList);
+    assert(!foundClearedOpcodeList);
     std::vector<uint8_t> addedGainMapDng(gainMapDng.begin(), gainMapDng.end());
     auto read16le = [&](size_t offset) {
         return static_cast<uint16_t>(addedGainMapDng[offset] |
