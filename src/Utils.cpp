@@ -1273,6 +1273,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool normalizeShadingMap = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     bool debugShadingMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = settings.options & RENDER_OPT_NORMALIZE_EXPOSURE;
+    const BadPixelTreatment badPixelTreatment = debugShadingMap
+        ? BadPixelTreatment::Disabled : settings.badPixelTreatment;
     const auto processingPlan = planDngFrameProcessing(settings, metadata, calibration);
     const int draftScale = processingPlan.draftScale;
     const auto effectiveLogTransform = processingPlan.logTransform;
@@ -1300,7 +1302,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     const uint32_t badPixelSourceWidth = width;
     const uint32_t badPixelSourceHeight = height;
     if (calibration && calibration->hasBadPixels &&
-        settings.badPixelTreatment != BadPixelTreatment::Disabled) {
+        badPixelTreatment != BadPixelTreatment::Disabled) {
         const auto levelsForDefects = resolveDataLevels(
             settings.levels, metadata.dynamicWhiteLevel, metadata.dynamicBlackLevel,
             cameraConfiguration.whiteLevel, cameraConfiguration.blackLevel);
@@ -1309,7 +1311,7 @@ std::shared_ptr<std::vector<char>> generateDng(
             metadata.originalWidth, metadata.originalHeight, cfaRepeatSize,
             levelsForDefects.white, levelsForDefects.black, metadata.iso,
             metadata.exposureTime / 1.0e9, *calibration,
-            settings.badPixelTreatment, demosaic);
+            badPixelTreatment, demosaic);
     }
 
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
@@ -1462,7 +1464,7 @@ std::shared_ptr<std::vector<char>> generateDng(
                        *std::min_element(dstBlackLevel.begin(), dstBlackLevel.end()),
                        dstWhiteLevel);
     }
-    if (settings.badPixelTreatment == BadPixelTreatment::MarkPixels && demosaic) {
+    if (badPixelTreatment == BadPixelTreatment::MarkPixels && demosaic) {
         uint32_t markCropWidth = 0, markCropHeight = 0, markStride = 0;
         parseCropTarget(cropTarget, markCropWidth, markCropHeight, markStride);
         auto* marked = reinterpret_cast<uint16_t*>(processedData.data());
@@ -1684,7 +1686,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetBigEndian(false);
     dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
     tinydngwriter::OpcodeList opcodeList1;
-    if (settings.badPixelTreatment == BadPixelTreatment::OpcodeOnly && !demosaic &&
+    if (badPixelTreatment == BadPixelTreatment::OpcodeOnly && !demosaic &&
         preprocessScale == 1 && cropTarget == "0x0" && !activeBadPixels.empty()) {
         if (cfaRepeatSize != 2)
             spdlog::warn("FixBadPixelsList is Bayer-specific; compatibility depends on the DNG reader for {}x{} CFA data",

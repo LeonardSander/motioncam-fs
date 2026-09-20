@@ -85,6 +85,55 @@ static_assert(gainMapPhaseChannel(3, 3, 0, 0, 3) == 3);
 static_assert(gainMapPhaseChannel(3, 3, 0, 0, 4) == 0); // 8x8 CFA
 static_assert(gainMapPhaseChannel(4, 4, 0, 0, 4) == 3);
 
+bool equivalentGainMapValue(double left, double right) {
+    return std::abs(left - right) <= 1e-12 *
+        std::max({1.0, std::abs(left), std::abs(right)});
+}
+
+bool compatibleScalarCfaGeometry(const GainMap& map, const GainMap& candidate) {
+    if (candidate.channels != 1 || candidate.rowPitch != 2 ||
+        candidate.colPitch != 2 || candidate.right != map.right ||
+        candidate.bottom != map.bottom || candidate.width != map.width ||
+        candidate.height != map.height || candidate.plane != map.plane ||
+        candidate.planes != map.planes ||
+        !equivalentGainMapValue(candidate.spacingH, map.spacingH) ||
+        !equivalentGainMapValue(candidate.spacingV, map.spacingV))
+        return false;
+    auto compatibleOrigin = [](double left, double right, double spacing) {
+        const double difference = std::abs(left - right);
+        return equivalentGainMapValue(left, right) ||
+            (spacing > 0.0 && equivalentGainMapValue(difference, spacing * 0.5));
+    };
+    return compatibleOrigin(candidate.originH, map.originH, map.spacingH) &&
+           compatibleOrigin(candidate.originV, map.originV, map.spacingV);
+}
+
+std::optional<std::pair<uint32_t, uint32_t>> scalarCfaGroupOrigin(
+        const GainMap& map, const std::vector<GainMap>& maps) {
+    if (map.channels != 1 || map.rowPitch != 2 || map.colPitch != 2)
+        return std::nullopt;
+    for (uint32_t phaseY = 0; phaseY < 2; ++phaseY) {
+        if (map.top < phaseY) continue;
+        const uint32_t groupTop = map.top - phaseY;
+        for (uint32_t phaseX = 0; phaseX < 2; ++phaseX) {
+            if (map.left < phaseX) continue;
+            const uint32_t groupLeft = map.left - phaseX;
+            std::array<bool, 4> phases{};
+            for (const auto& candidate : maps) {
+                if (!compatibleScalarCfaGeometry(map, candidate) ||
+                    candidate.top < groupTop || candidate.top >= groupTop + 2 ||
+                    candidate.left < groupLeft || candidate.left >= groupLeft + 2)
+                    continue;
+                phases[(candidate.top - groupTop) * 2 + candidate.left - groupLeft] = true;
+            }
+            if (std::all_of(phases.begin(), phases.end(),
+                    [](bool present) { return present; }))
+                return std::pair{groupTop, groupLeft};
+        }
+    }
+    return std::nullopt;
+}
+
 void yieldToForegroundDngWork() {
     while (foregroundDngWork.load(std::memory_order_acquire) != 0)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -4557,12 +4606,29 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     if (channels != 1 && channels != 3) return false;
     const uint32_t phaseGroup = static_cast<uint32_t>(
         std::max(1, image.layout.cfaRepeatSize / 2));
+    std::vector<std::optional<std::pair<uint32_t, uint32_t>>> scalarPhaseGroups;
+    scalarPhaseGroups.reserve(maps.size());
+    for (const auto& map : maps)
+        scalarPhaseGroups.push_back(phaseGroup > 1
+            ? scalarCfaGroupOrigin(map, maps) : std::nullopt);
     auto gainsAt = [&](const GainMap& map, uint32_t sourceX, uint32_t sourceY) {
         std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
         if (!validGainMap(map) || sourceX < map.left || sourceX >= map.right ||
             sourceY < map.top || sourceY >= map.bottom) return gains;
-        if (map.channels == 1 && ((sourceY - map.top) % map.rowPitch ||
-                                  (sourceX - map.left) % map.colPitch)) return gains;
+        if (map.channels == 1) {
+            const size_t mapIndex = static_cast<size_t>(&map - maps.data());
+            if (scalarPhaseGroups[mapIndex]) {
+                const auto [groupTop, groupLeft] = *scalarPhaseGroups[mapIndex];
+                const size_t mapPhase = ((map.top - groupTop) & 1u) * 2u +
+                                        ((map.left - groupLeft) & 1u);
+                if (gainMapPhaseChannel(sourceX, sourceY, groupLeft, groupTop,
+                                        phaseGroup) != mapPhase)
+                    return gains;
+            } else if ((sourceY - map.top) % map.rowPitch ||
+                       (sourceX - map.left) % map.colPitch) {
+                return gains;
+            }
+        }
         const uint32_t pixelPhase = static_cast<uint32_t>(gainMapPhaseChannel(
             sourceX, sourceY, 0, 0, phaseGroup));
         const uint32_t pixelColor = cfaPhase[pixelPhase];
@@ -5546,15 +5612,14 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 TIFF_TAG_UNUSED_LINEARIZATION_TABLE, little);
 
     const uint32_t phaseGroup = static_cast<uint32_t>(cfaRepeatSize / 2);
-    const size_t scalarPhaseMapCount = std::count_if(
-        maps.begin(), maps.end(), [](const GainMap& map) {
-            return map.channels == 1 && map.rowPitch == 2 && map.colPitch == 2;
-        });
     // DNG writers use either one four-plane GainMap or complete groups of four
     // scalar GainMaps (sometimes one group per image region). Multi-plane maps
     // are handled directly below; expand every complete scalar group too.
-    const bool groupedScalarPhaseMaps = phaseGroup > 1 &&
-        scalarPhaseMapCount >= 4 && (scalarPhaseMapCount % 4) == 0;
+    std::vector<std::optional<std::pair<uint32_t, uint32_t>>> scalarPhaseGroups;
+    scalarPhaseGroups.reserve(maps.size());
+    for (const auto& map : maps)
+        scalarPhaseGroups.push_back(phaseGroup > 1
+            ? scalarCfaGroupOrigin(map, maps) : std::nullopt);
 
     auto sharedScalarOrigin = [&](const GainMap& map, bool horizontal) {
         double origin = horizontal ? map.originH : map.originV;
@@ -5600,23 +5665,13 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         // complete pixel grid; applying the scalar pitch test to them leaves
         // only one corrected pixel in every 2x2 block.
         if (map.channels == 1) {
-            if (groupedScalarPhaseMaps && map.rowPitch == 2 && map.colPitch == 2) {
+            const size_t mapIndex = static_cast<size_t>(&map - maps.data());
+            if (scalarPhaseGroups[mapIndex]) {
                 // Canonical scalar phase maps offset top/left from the original
                 // GainMap bounds. Determine phase relative to that group origin,
                 // not absolute image parity: a cropped map may start on an odd
                 // sensor row or column.
-                uint32_t groupTop = map.top, groupLeft = map.left;
-                for (const auto& candidate : maps) {
-                    if (candidate.channels == 1 && candidate.rowPitch == 2 &&
-                        candidate.colPitch == 2 && candidate.right == map.right &&
-                        candidate.bottom == map.bottom && candidate.width == map.width &&
-                        candidate.height == map.height && candidate.originH == map.originH &&
-                        candidate.originV == map.originV && candidate.spacingH == map.spacingH &&
-                        candidate.spacingV == map.spacingV) {
-                        groupTop = std::min(groupTop, candidate.top);
-                        groupLeft = std::min(groupLeft, candidate.left);
-                    }
-                }
+                const auto [groupTop, groupLeft] = *scalarPhaseGroups[mapIndex];
                 const uint32_t mapPhase = ((map.top - groupTop) & 1u) * 2u +
                                           ((map.left - groupLeft) & 1u);
                 const uint32_t mapPhaseY = mapPhase / 2u;

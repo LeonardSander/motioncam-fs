@@ -278,6 +278,57 @@ int main() {
     assert(motioncam::DNGDecoder::decodeImage(
         correctedCfa, correctedImage, false, false));
     assert(correctedImage.samples.front() == 512);
+    // Gain-map-only output is a synthetic flat field. Bad-pixel policy must
+    // behave as Disabled, including suppressing FixBadPixelsList metadata.
+    auto debugGainOnly = makeLogCfaDng(1023, 0);
+    motioncam::RenderSettings debugBadPixelSettings;
+    debugBadPixelSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
+    debugBadPixelSettings.badPixelTreatment =
+        motioncam::BadPixelTreatment::OpcodeOnly;
+    motioncam::vfs::processDngPixels(
+        debugGainOnly, debugBadPixelSettings, cfaPipeline);
+    const auto [debugBadPixelOffset, debugBadPixelBytes] =
+        tagPayload(debugGainOnly, 51008);
+    assert(!debugBadPixelOffset && !debugBadPixelBytes);
+    auto debugRgb = makeLogCfaDng(1023, 0);
+    std::vector<motioncam::GainMap> constantPhaseMaps(4);
+    for (size_t phaseIndex = 0; phaseIndex < constantPhaseMaps.size(); ++phaseIndex) {
+        auto& map = constantPhaseMaps[phaseIndex];
+        map.top = static_cast<uint32_t>(phaseIndex / 2);
+        map.left = static_cast<uint32_t>(phaseIndex % 2);
+        map.bottom = map.right = 32;
+        map.coordinateWidth = map.coordinateHeight = 32;
+        map.plane = 0;
+        map.planes = 1;
+        map.rowPitch = map.colPitch = 2;
+        map.width = map.height = map.channels = 1;
+        map.spacingV = map.spacingH = 1.0;
+        map.data = {1.25f + static_cast<float>(phaseIndex) * 0.25f};
+    }
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        debugRgb, 2, constantPhaseMaps));
+    auto debugRgbSettings = debugBadPixelSettings;
+    debugRgbSettings.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
+    auto debugRgbPipeline = cfaPipeline;
+    debugRgbPipeline.calibration = nullptr;
+    debugRgbPipeline.cfaRepeatSize = 4;
+    motioncam::vfs::processDngPixels(
+        debugRgb, debugRgbSettings, debugRgbPipeline);
+    motioncam::DecodedDNGImage debugRgbImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        debugRgb, debugRgbImage, false, false));
+    assert(debugRgbImage.layout.pixels == motioncam::DNGPixelLayout::LinearRGB);
+    const auto rgbPixel = [&](uint32_t x, uint32_t y) {
+        const size_t offset = (static_cast<size_t>(y) * debugRgbImage.layout.width + x) * 3;
+        return std::array<uint16_t, 3>{debugRgbImage.samples[offset],
+            debugRgbImage.samples[offset + 1], debugRgbImage.samples[offset + 2]};
+    };
+    assert(rgbPixel(0, 0) == rgbPixel(1, 1));
+    assert(rgbPixel(31, 0) == rgbPixel(30, 1));
+    assert(rgbPixel(0, 31) == rgbPixel(1, 30));
+    assert(rgbPixel(31, 31) == rgbPixel(30, 30));
     badPixelCalibration.badPixels.front().action =
         motioncam::CalibrationData::BadPixelAction::Interpolate;
     auto opcodeCfa = makeLogCfaDng(1023, 0);

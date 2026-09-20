@@ -33,6 +33,13 @@ int main() {
         map.originV = map.originH = 0.0;
         map.data = {phaseGains[phaseIndex]};
     }
+    // Scalar DNG gain-map opcodes retain a 2x2 encoded pitch even when a
+    // sidecar identifies the sensor as Quad Bayer. Their four phase maps must
+    // select 2x2 photosite blocks, rather than alternating at every pixel.
+    for (uint32_t y = 0; y < 8; ++y) for (uint32_t x = 0; x < 8; ++x) {
+        const size_t quadPhase = motioncam::gainMapPhaseChannel(x, y, 0, 0, 2);
+        assert(quadPhase == ((y / 2) & 1u) * 2u + ((x / 2) & 1u));
+    }
     auto roundTrippedCfaMaps = cfaMaps;
     roundTrippedCfaMaps[2].originV += 2e-17;
     roundTrippedCfaMaps[3].originV += 2e-17;

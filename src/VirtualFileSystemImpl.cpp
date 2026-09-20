@@ -133,6 +133,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
         const DngPixelPipelineOptions& options) {
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
+    const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
+    const BadPixelTreatment badPixelTreatment = debugGainMap
+        ? BadPixelTreatment::Disabled : settings.badPixelTreatment;
     // Level correction is tag-only for every source. It deliberately precedes
     // any operation that consults the DNG's black/white metadata and never
     // requantizes the stored samples.
@@ -148,7 +151,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     bool badPixelsWillDemosaic = false;
     if (options.hasCfa && options.calibration &&
         options.calibration->hasBadPixels &&
-        settings.badPixelTreatment != BadPixelTreatment::Disabled) {
+        badPixelTreatment != BadPixelTreatment::Disabled) {
         DecodedDNGImage decoded;
         if (!DNGDecoder::decodeImage(dng, decoded, false, false) ||
             decoded.layout.pixels != DNGPixelLayout::CFA)
@@ -177,11 +180,11 @@ void processDngPixels(std::vector<uint8_t>& dng,
             decoded.samples.data(), decoded.layout.width, decoded.layout.height,
             originalWidth, originalHeight, options.cfaRepeatSize, white,
             decoded.metadata.blackLevel, options.iso, options.exposureTime,
-            *options.calibration, settings.badPixelTreatment, willDemosaic);
-        if (settings.badPixelTreatment == BadPixelTreatment::MarkPixels)
+            *options.calibration, badPixelTreatment, willDemosaic);
+        if (badPixelTreatment == BadPixelTreatment::MarkPixels)
             markedPixels = active;
-        if (settings.badPixelTreatment == BadPixelTreatment::Bake ||
-            settings.badPixelTreatment == BadPixelTreatment::MarkPixels || willDemosaic) {
+        if (badPixelTreatment == BadPixelTreatment::Bake ||
+            badPixelTreatment == BadPixelTreatment::MarkPixels || willDemosaic) {
             if (!DNGDecoder::encodeImage(dng, decoded))
                 throw std::runtime_error("Could not encode corrected CFA DNG: " + source);
         } else if (!active.empty()) {
@@ -215,7 +218,6 @@ void processDngPixels(std::vector<uint8_t>& dng,
         DNGDecoder::getGainMaps(dng, 3, opcode3) && opcode3.size() == 1 &&
         opcode3.front().channels == 1;
     const bool colorOnly = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
-    const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     const bool bakeGain = (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
         (hasOpcode2 || (hasOpcode3Luma && !colorOnly) || debugGainMap);
     QuadBayerMode mode = settings.quadBayerOption;
@@ -226,7 +228,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
     const bool remosaic = settings.options & RENDER_OPT_REMOSAIC_TO_BAYER;
     const bool topologyBeforeBake = bakeGain &&
         (options.outputScale > 1 ||
-         (!options.hasCfa && remosaic));
+         (!options.hasCfa && remosaic) ||
+         (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
     if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
             dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
             options.outputScale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
@@ -281,7 +284,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !DNGDecoder::applyLogTransform(
             dng, settings.logTransform, options.inputQuantizationWhite))
         throw std::runtime_error("Could not apply log transform to " + source);
-    if (settings.badPixelTreatment == BadPixelTreatment::MarkPixels &&
+    if (badPixelTreatment == BadPixelTreatment::MarkPixels &&
         badPixelsWillDemosaic && !markedPixels.empty()) {
         DecodedDNGImage marked;
         if (!DNGDecoder::decodeImage(dng, marked, false, false))
