@@ -235,14 +235,20 @@ struct ManualVignetteSidecars {
         std::string illuminant;
         bool whiteImage = false;
         DecodedDNGImage image;
+        std::vector<DNGSidecarMetadataEntry> metadata;
     };
     std::vector<Candidate> candidates;
     std::shared_ptr<Cache> cache = std::make_shared<Cache>();
 };
 
-ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath);
+ManualVignetteSidecars loadManualVignetteSidecars(
+    const std::string& sourcePath, const nlohmann::json* sidecar = nullptr,
+    const boost::filesystem::path* sidecarFile = nullptr);
 bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                                 const ManualVignetteSidecars& sidecars);
+bool applyManualDngMetadata(std::vector<uint8_t>& dng,
+                            const ManualVignetteSidecars& sidecars,
+                            const CalibrationData* jsonOverride);
 std::array<int, 2> manualVignetteSensorResolution(
     const ManualVignetteSidecars& sidecars);
 
@@ -300,6 +306,12 @@ nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path);
 boost::filesystem::path sidecarPath(const std::string& sourcePath);
 
 boost::filesystem::path gyroflowSidecarPath(const std::string& sourcePath);
+
+boost::filesystem::path referencedSidecarPath(
+    const boost::filesystem::path& discoveredPath,
+    const nlohmann::json& sidecar,
+    const boost::filesystem::path& sidecarFile,
+    const char* field);
 
 std::optional<GyroflowLensProfile> loadGyroflowLensProfile(
     const boost::filesystem::path& path, bool refresh = false);

@@ -136,9 +136,6 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     
     // Load calibration JSON if it exists
     const auto calibPath = vfs::sidecarPath(mSrcPath);
-    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
-    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        vfs::gyroflowSidecarPath(mSrcPath));
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
@@ -151,7 +148,12 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
             spdlog::info("Loaded calibration for DirectLog: {}", calibPath.string());
         }
     }
-    
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(
+        mSrcPath, &mSidecarMetadata, &calibPath);
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::referencedSidecarPath(vfs::gyroflowSidecarPath(mSrcPath),
+            mSidecarMetadata, calibPath, "gyroflow"));
+
     // Initialize DirectLogDecoder
     try {
         mDecoder = std::make_unique<DirectLogDecoder>(mSrcPath);
@@ -296,7 +298,6 @@ void VirtualFileSystemImpl_DirectLog::init() {
             spdlog::warn("Failed to generate sample DNG, using estimated size: {} bytes", mTypicalDngSize);
         }
     }
-    
     std::vector<Entry> sourceEntries;
     std::vector<Timestamp> timestamps;
     sourceEntries.reserve(frames.size());
@@ -772,6 +773,10 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
             !vfs::applyManualVignetteSidecar(dngData, mManualVignetteSidecars))
             throw std::runtime_error("Could not apply manual DirectLog vignette sidecar");
+        if (!vfs::applyManualDngMetadata(
+                dngData, mManualVignetteSidecars,
+                mCalibration ? &*mCalibration : nullptr))
+            throw std::runtime_error("Could not apply manual DirectLog metadata sidecar");
         if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude &&
             (!DNGDecoder::replaceGainMaps(dngData, 2, {}) ||
              !DNGDecoder::replaceGainMaps(dngData, 3, {})))
@@ -1115,8 +1120,10 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
         }
     }
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        vfs::gyroflowSidecarPath(mSrcPath), true);
-    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
+        vfs::referencedSidecarPath(vfs::gyroflowSidecarPath(mSrcPath),
+            mSidecarMetadata, calibPath, "gyroflow"), true);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(
+        mSrcPath, &mSidecarMetadata, &calibPath);
     analyzeSidecarExposure();
     mDecoder->setFullRangeOverride(std::nullopt);
     if (mCalibration && mCalibration->hasDataLevels) {

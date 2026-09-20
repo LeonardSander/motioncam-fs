@@ -209,9 +209,6 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
     
     // Load calibration JSON if it exists
     const auto& calibPath = mSidecarPath;
-    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
-    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        mGyroflowSidecarPath);
     if (boost::filesystem::exists(calibPath)) {
         vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
         if (mCalibration.has_value()) {
@@ -248,6 +245,11 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
             }
         }
     }
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(
+        mSrcPath, &mSidecarMetadata, &calibPath);
+    mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
+        vfs::referencedSidecarPath(
+            mGyroflowSidecarPath, mSidecarMetadata, calibPath, "gyroflow"));
     if (!reusedAnalysis) {
         Decoder decoder(mSrcPath);
         auto frames = decoder.getFrames();
@@ -816,6 +818,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
 
 void VirtualFileSystemImpl_MCRAW::attachSidecarGainMapOpcodes(
         std::vector<uint8_t>& dng, size_t frameIndex) const {
+    if (!vfs::applyManualDngMetadata(
+            dng, mManualVignetteSidecars,
+            mCalibration ? &*mCalibration : nullptr))
+        throw std::runtime_error("Could not apply manual MCRAW metadata sidecar");
     if (mSettings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
         if (!DNGDecoder::replaceGainMaps(dng, 2, {}) ||
             !DNGDecoder::replaceGainMaps(dng, 3, {}))
@@ -860,8 +866,10 @@ void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) 
     mCache.clear();
     vfs::loadSidecar(mSidecarPath, mSidecarMetadata, mCalibration, true);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        mGyroflowSidecarPath, true);
-    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
+        vfs::referencedSidecarPath(
+            mGyroflowSidecarPath, mSidecarMetadata, mSidecarPath, "gyroflow"), true);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(
+        mSrcPath, &mSidecarMetadata, &mSidecarPath);
     if (mCalibration && mCalibration->hasLevels) mSettings.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mSettings.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +

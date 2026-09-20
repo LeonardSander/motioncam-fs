@@ -360,6 +360,7 @@ std::string CalibrationData::createExampleJson() {
   "_colorMatrix2": [0.9329, -0.3914, -0.0326, -0.5806, 1.4092, 0.1827, -0.0913, 0.1761, 0.5872],
   "_forwardMatrix1": [0.6484, 0.2734, 0.0469, 0.2344, 0.8984, -0.1328, 0.0469, -0.1797, 0.9609],
   "_forwardMatrix2": [0.6875, 0.1563, 0.125, 0.2734, 0.7578, -0.0313, 0.0859, -0.4688, 1.2109],
+  "_ignoreForwardMat": false,
   "_asShotNeutral": [0.5, 1.0, 0.5],
   "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
   "_cfaPhase": "bggr",
@@ -375,6 +376,10 @@ std::string CalibrationData::createExampleJson() {
   "_needGainMapOrderFixed": true,
   "_comment8": "Specify uncropped resolution to prevent gainmaps to be scaled to fit.",
   "_fullSensorResolution": [4096, 3072],
+  "_comment8b": "Optional absolute paths, or paths relative to this JSON; conventionally named sibling files take priority",
+  "_dng_white": "calibration/flat-field.dng",
+  "_dng_gainmap": "calibration/gain-map.dng",
+  "_gyroflow": "calibration/lens-profile.json",
   "_comment9": "Bad/PDAF pixels use normalized thresholds (0=black, 1=white); repeat defines a periodic tile",
   "_badPixels": [
     {"x": 123, "y": 456, "treatment": "interpolate", "threshold": {"above": "50%"}},

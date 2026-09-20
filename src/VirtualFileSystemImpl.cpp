@@ -604,6 +604,22 @@ boost::filesystem::path sidecarPath(const std::string& sourcePath) {
         : source.parent_path() / (source.stem().string() + ".json");
 }
 
+boost::filesystem::path referencedSidecarPath(
+        const boost::filesystem::path& discoveredPath,
+        const nlohmann::json& sidecar,
+        const boost::filesystem::path& sidecarFile,
+        const char* field) {
+    // A conventionally named sibling is authoritative. JSON is an alternative
+    // only when that file is absent.
+    if (boost::filesystem::is_regular_file(discoveredPath)) return discoveredPath;
+    const auto value = sidecar.find(field);
+    if (value == sidecar.end() || !value->is_string() || value->get<std::string>().empty())
+        return discoveredPath;
+    boost::filesystem::path referenced(value->get<std::string>());
+    if (referenced.is_relative()) referenced = sidecarFile.parent_path() / referenced;
+    return boost::filesystem::absolute(referenced).lexically_normal();
+}
+
 namespace {
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -744,7 +760,9 @@ std::vector<GainMap> gainMapsFromWhite(const DecodedDNGImage& white,
 }
 } // namespace
 
-ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath) {
+ManualVignetteSidecars loadManualVignetteSidecars(
+        const std::string& sourcePath, const nlohmann::json* sidecar,
+        const boost::filesystem::path* sidecarFile) {
     ManualVignetteSidecars result;
     boost::filesystem::path source(sourcePath);
     while (source.filename().empty() && source.has_parent_path()) source = source.parent_path();
@@ -752,7 +770,65 @@ ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath)
     const auto parent = directory ? source : source.parent_path();
     const std::string stem = lower(
         directory ? source.filename().string() : source.stem().string());
-    if (!boost::filesystem::exists(parent)) return result;
+    auto loadCandidate = [&](const boost::filesystem::path& path, bool white,
+                             std::string illuminant = {}) {
+        std::ifstream input(path.string(), std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+        ManualVignetteSidecars::Candidate candidate;
+        candidate.path = path.string();
+        candidate.whiteImage = white;
+        candidate.illuminant = std::move(illuminant);
+        if (bytes.empty() || !DNGDecoder::decodeImage(bytes, candidate.image, false, false)) {
+            spdlog::warn("Could not decode manual vignette sidecar {}", path.string());
+            return false;
+        }
+        if (!DNGDecoder::extractSidecarMetadata(bytes, candidate.metadata)) {
+            spdlog::warn("Could not cache metadata from manual vignette sidecar {}",
+                         path.string());
+            return false;
+        }
+        std::vector<GainMap> defaultRgbMaps;
+        std::vector<std::pair<std::array<uint8_t, 4>, std::vector<GainMap>>> defaultCfaMaps;
+        if (white) {
+            defaultRgbMaps = gainMapsFromWhite(
+                candidate.image, 17, 13, false, candidate.image.layout.cfaPhase);
+            for (const auto& phase : std::array<std::array<uint8_t, 4>, 4>{{
+                     {0, 1, 1, 2}, {1, 0, 2, 1}, {1, 2, 0, 1}, {2, 1, 1, 0}}})
+                defaultCfaMaps.emplace_back(
+                    phase, gainMapsFromWhite(candidate.image, 17, 13, true, phase));
+            if (defaultRgbMaps.empty() || std::any_of(
+                    defaultCfaMaps.begin(), defaultCfaMaps.end(),
+                    [](const auto& item) { return item.second.empty(); })) {
+                spdlog::warn("Discarding clipped or invalid white image {}", candidate.path);
+                return false;
+            }
+        } else if (candidate.image.opcodeList2.empty() &&
+                   candidate.image.opcodeList3.empty()) {
+            spdlog::warn("Discarding gain-map sidecar without gain-map opcodes {}",
+                         candidate.path);
+            return false;
+        }
+        candidate.image.samples.clear();
+        candidate.image.samples.shrink_to_fit();
+        if (white) {
+            const std::string prefix = candidate.path + "|17x13|";
+            result.cache->convertedWhiteMaps.emplace(
+                prefix + "0", std::move(defaultRgbMaps));
+            for (auto& [phase, maps] : defaultCfaMaps) {
+                std::ostringstream cfaKey;
+                cfaKey << prefix << '1';
+                for (const auto color : phase)
+                    cfaKey << '|' << static_cast<unsigned>(color);
+                result.cache->convertedWhiteMaps.emplace(
+                    cfaKey.str(), std::move(maps));
+            }
+        }
+        result.candidates.push_back(std::move(candidate));
+        return true;
+    };
+    bool discoveredWhite = false;
+    bool discoveredGainMap = false;
+    if (boost::filesystem::exists(parent))
     for (boost::filesystem::directory_iterator it(parent), end; it != end; ++it) {
         boost::system::error_code statusError;
         const auto candidateStatus = it->status(statusError);
@@ -770,29 +846,33 @@ ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath)
         const auto& prefix = white ? whitePrefix : mapPrefix;
         if (candidateStem.size() > prefix.size() && candidateStem[prefix.size()] != '_')
             continue;
-        std::ifstream input(it->path().string(), std::ios::binary);
-        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-        ManualVignetteSidecars::Candidate candidate;
-        candidate.path = it->path().string(); candidate.whiteImage = white;
+        std::string illuminant;
         if (candidateStem.size() > prefix.size() + 1)
-            candidate.illuminant = candidateStem.substr(prefix.size() + 1);
-        if (!bytes.empty() && DNGDecoder::decodeImage(bytes, candidate.image, false, false)) {
-            if (white && gainMapsFromWhite(candidate.image, 17, 13, true,
-                    candidate.image.layout.cfaPhase).empty()) {
-                spdlog::warn("Discarding clipped or invalid white image {}",
-                             candidate.path);
-            } else if (white || !candidate.image.opcodeList2.empty() ||
-                       !candidate.image.opcodeList3.empty()) {
-                // Gain-map DNG pixels have no role after their opcode and
-                // metadata have been decoded. Keep white pixels only because
-                // those are converted lazily for the requested target grid.
-                if (!white) {
-                    candidate.image.samples.clear();
-                    candidate.image.samples.shrink_to_fit();
-                }
-                result.candidates.push_back(std::move(candidate));
+            illuminant = candidateStem.substr(prefix.size() + 1);
+        // Presence, rather than successful decoding, establishes precedence:
+        // a broken conventional sidecar must be reported, not silently masked
+        // by a different JSON-referenced calibration.
+        discoveredWhite |= white;
+        discoveredGainMap |= gainmap;
+        loadCandidate(it->path(), white, std::move(illuminant));
+    }
+    if (sidecar && sidecarFile) {
+        auto loadReferenced = [&](const char* field, bool white, bool discovered) {
+            if (discovered) return;
+            const auto value = sidecar->find(field);
+            if (value == sidecar->end() || !value->is_string() || value->get<std::string>().empty())
+                return;
+            boost::filesystem::path path(value->get<std::string>());
+            if (path.is_relative()) path = sidecarFile->parent_path() / path;
+            path = boost::filesystem::absolute(path).lexically_normal();
+            if (!boost::filesystem::is_regular_file(path)) {
+                spdlog::warn("JSON {} sidecar does not exist: {}", field, path.string());
+                return;
             }
-        } else spdlog::warn("Could not decode manual vignette sidecar {}", it->path().string());
+            loadCandidate(path, white);
+        };
+        loadReferenced("dng_white", true, discoveredWhite);
+        loadReferenced("dng_gainmap", false, discoveredGainMap);
     }
     std::sort(result.candidates.begin(), result.candidates.end(),
         [](const auto& a, const auto& b) { return a.path < b.path; });
@@ -805,25 +885,22 @@ ManualVignetteSidecars loadManualVignetteSidecars(const std::string& sourcePath)
 bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                                 const ManualVignetteSidecars& sidecars) {
     if (sidecars.candidates.empty()) return true;
-    DecodedDNGImage frame;
-    if (!DNGDecoder::decodeImage(dng, frame, false, false)) return false;
+    DNGImageLayout frameLayout;
+    if (!DNGDecoder::getImageLayout(dng, frameLayout)) return false;
     for (const auto* selected : manualCandidateOrder(sidecars)) {
-        std::vector<GainMap> maps = selected->image.opcodeList2;
+        // A file named _white is a flat-field capture, irrespective of any
+        // stale OpcodeList2 it happens to contain.  Always derive its map from
+        // the captured pixels; only _gainmap sidecars consume embedded maps.
+        std::vector<GainMap> maps = selected->whiteImage
+            ? std::vector<GainMap>{} : selected->image.opcodeList2;
         if (selected->whiteImage) {
-            uint32_t width = 17, height = 13;
-            if (!frame.opcodeList2.empty()) {
-                width = frame.opcodeList2.front().width;
-                height = frame.opcodeList2.front().height;
-            } else if (!selected->image.opcodeList2.empty()) {
-                width = selected->image.opcodeList2.front().width;
-                height = selected->image.opcodeList2.front().height;
-            }
-            const bool sourceCfa = frame.layout.pixels == DNGPixelLayout::CFA;
+            constexpr uint32_t width = 17, height = 13;
+            const bool sourceCfa = frameLayout.pixels == DNGPixelLayout::CFA;
             std::ostringstream cacheKey;
             cacheKey << selected->path << '|' << width << 'x' << height << '|'
                      << sourceCfa;
             if (sourceCfa)
-                for (const auto phase : frame.layout.cfaPhase)
+                for (const auto phase : frameLayout.cfaPhase)
                     cacheKey << '|' << static_cast<unsigned>(phase);
             const std::string key = cacheKey.str();
             {
@@ -831,17 +908,6 @@ bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                 const auto cached = sidecars.cache->convertedWhiteMaps.find(key);
                 if (cached != sidecars.cache->convertedWhiteMaps.end())
                     maps = cached->second;
-            }
-            if (maps.empty()) {
-                maps = gainMapsFromWhite(
-                    selected->image, width, height, sourceCfa,
-                    frame.layout.cfaPhase);
-                if (!maps.empty()) {
-                    std::lock_guard<std::mutex> lock(sidecars.cache->mutex);
-                    const auto [cached, inserted] =
-                        sidecars.cache->convertedWhiteMaps.emplace(key, maps);
-                    if (!inserted) maps = cached->second;
-                }
             }
             if (maps.empty()) continue;
         }
@@ -860,6 +926,25 @@ bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
         if (applied) return true;
     }
     return true;
+}
+
+bool applyManualDngMetadata(std::vector<uint8_t>& dng,
+                            const ManualVignetteSidecars& sidecars,
+                            const CalibrationData* jsonOverride) {
+    const auto ordered = manualCandidateOrder(sidecars);
+    if (ordered.empty()) return true;
+    std::vector<uint16_t> excluded;
+    if (jsonOverride) {
+        if (jsonOverride->hasColorMatrix1) excluded.push_back(50721);
+        if (jsonOverride->hasColorMatrix2) excluded.push_back(50722);
+        if (jsonOverride->hasCameraCalibration1) excluded.push_back(50723);
+        if (jsonOverride->hasCameraCalibration2) excluded.push_back(50724);
+        if (jsonOverride->hasAsShotNeutral) excluded.push_back(50728);
+        if (jsonOverride->hasForwardMatrix1) excluded.push_back(50964);
+        if (jsonOverride->hasForwardMatrix2) excluded.push_back(50965);
+    }
+    return DNGDecoder::fillMissingSidecarMetadata(
+        dng, ordered.front()->metadata, excluded);
 }
 
 std::array<int, 2> manualVignetteSensorResolution(

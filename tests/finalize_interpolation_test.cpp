@@ -35,6 +35,24 @@ TagValue tagValue(const std::vector<uint8_t>& dng, uint16_t wanted) {
     return {};
 }
 
+bool setTagType(std::vector<uint8_t>& dng, uint16_t wanted, uint16_t type) {
+    auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
+    auto u32 = [&](size_t offset) { return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+        dng[offset + 2] << 16 | dng[offset + 3] << 24); };
+    for (uint32_t ifd = u32(4); ifd;) {
+        const uint16_t entries = u16(ifd);
+        for (uint16_t i = 0; i < entries; ++i) {
+            const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
+            if (u16(entry) != wanted) continue;
+            dng[entry + 2] = static_cast<uint8_t>(type);
+            dng[entry + 3] = static_cast<uint8_t>(type >> 8);
+            return true;
+        }
+        ifd = u32(static_cast<size_t>(ifd) + 2 + entries * 12);
+    }
+    return false;
+}
+
 std::pair<size_t, uint32_t> tagPayload(const std::vector<uint8_t>& dng, uint16_t wanted) {
     auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
     auto u32 = [&](size_t offset) { return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
@@ -362,6 +380,34 @@ int main() {
         directLogDefault, directLogMetadata));
     assert(directLogMetadata.inputBitDepth == 12);
 
+    auto matrixOverrideDng = directLogLinear;
+    motioncam::DNGFrameMetadata matrixOverrides;
+    matrixOverrides.colorMatrix1 = {1.1f, -0.1f, 0.0f,
+                                    0.0f, 1.0f, 0.0f,
+                                    0.0f, 0.0f, 0.9f};
+    matrixOverrides.forwardMatrix2 = {0.9f, 0.1f, 0.0f,
+                                      0.0f, 1.0f, 0.0f,
+                                      0.0f, 0.1f, 0.9f};
+    matrixOverrides.hasColorMatrix1 = true;
+    matrixOverrides.hasForwardMatrix2 = true;
+    assert(motioncam::DNGDecoder::updateColorMatrices(
+        matrixOverrideDng, matrixOverrides));
+    motioncam::DNGFrameMetadata insertedMatrices;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        matrixOverrideDng, insertedMatrices));
+    assert(insertedMatrices.hasColorMatrix1 && insertedMatrices.hasForwardMatrix2);
+    assert(std::abs(insertedMatrices.colorMatrix1[0] - 1.1f) < 0.0001f);
+    assert(std::abs(insertedMatrices.forwardMatrix2[7] - 0.1f) < 0.0001f);
+    assert(setTagType(matrixOverrideDng, 50721, 5));
+    matrixOverrides.colorMatrix1[0] = 1.2f;
+    matrixOverrides.hasForwardMatrix2 = false;
+    assert(motioncam::DNGDecoder::updateColorMatrices(
+        matrixOverrideDng, matrixOverrides));
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        matrixOverrideDng, insertedMatrices));
+    assert(insertedMatrices.hasColorMatrix1);
+    assert(std::abs(insertedMatrices.colorMatrix1[0] - 1.2f) < 0.0001f);
+
     auto directLogTwelveBit = directLogLinear;
     directLogSettings.levels = "4095/Dynamic";
     directLogPipeline.linearInputBitDepth = 12;
@@ -387,6 +433,17 @@ int main() {
     const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
     fs::remove_all(root);
     fs::create_directories(root / "rife");
+    fs::create_directories(root / "calibration");
+    std::ofstream(root / "calibration" / "profile.json") << "{}";
+    const nlohmann::json referencedFiles{{"gyroflow", "calibration/profile.json"}};
+    const boost::filesystem::path calibrationJson((root / "clip.json").string());
+    const boost::filesystem::path conventional((root / "clip_gyroflow.json").string());
+    assert(motioncam::vfs::referencedSidecarPath(
+        conventional, referencedFiles, calibrationJson, "gyroflow") ==
+        boost::filesystem::path((root / "calibration" / "profile.json").string()));
+    std::ofstream(root / "clip_gyroflow.json") << "{}";
+    assert(motioncam::vfs::referencedSidecarPath(
+        conventional, referencedFiles, calibrationJson, "gyroflow") == conventional);
     const auto gyroflowPath = root / "clip_gyroflow.json";
     std::ofstream(gyroflowPath) << R"JSON({
       "calib_dimension":{"w":4000,"h":3008}, "asymmetrical":false,

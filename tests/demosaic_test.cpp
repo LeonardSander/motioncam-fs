@@ -70,6 +70,13 @@ int main() {
     rgbMap.rowPitch = rgbMap.colPitch = 1;
     rgbMap.channels = 3;
     rgbMap.data = {2.0f, 4.0f, 7.0f};
+    auto separatedRgbMaps = std::vector<motioncam::GainMap>{rgbMap};
+    const auto rgbSeparation =
+        motioncam::separateGainMapLuminance(separatedRgbMaps);
+    assert(rgbSeparation.valid && rgbSeparation.colorSeparated);
+    assert(rgbSeparation.luminance.channels == 1);
+    assert(rgbSeparation.luminance.data[0] == 2.0f);
+    assert((separatedRgbMaps[0].data == std::vector<float>{1.0f, 2.0f, 3.5f}));
     const auto cfaRgbPlanes = motioncam::expandGainMapsForCfa(
         std::vector<motioncam::GainMap>{rgbMap}, rggb);
     assert(cfaRgbPlanes.size() == 4);

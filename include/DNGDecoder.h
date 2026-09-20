@@ -62,6 +62,18 @@ public:
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,
                                const std::array<float, 3>* asShotNeutral);
+    // Copy the supported camera/color/lens metadata from a calibration DNG,
+    // but never replace a tag already present in the destination. Tags named
+    // in excludedTags are owned by a higher-priority JSON sidecar.
+    static bool extractSidecarMetadata(
+        const std::vector<uint8_t>& sidecarDng,
+        std::vector<DNGSidecarMetadataEntry>& metadata);
+    static bool fillMissingSidecarMetadata(
+        std::vector<uint8_t>& dngData,
+        const std::vector<DNGSidecarMetadataEntry>& sidecarMetadata,
+        const std::vector<uint16_t>& excludedTags = {});
+    static bool updateColorMatrices(std::vector<uint8_t>& dngData,
+                                    const DNGFrameMetadata& overrides);
     static bool setTimingMetadata(std::vector<uint8_t>& dngData,
                                   double frameRate,
                                   Timestamp timestampNs);

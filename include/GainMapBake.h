@@ -171,10 +171,11 @@ inline GainMapLuminanceSeparation<Map> separateGainMapLuminance(
         std::vector<Map>& maps) {
     GainMapLuminanceSeparation<Map> result;
     if (maps.empty() || !maps.front().width || !maps.front().height) return result;
-    // Color/luminance separation is defined only when the samples represent
-    // the four CFA phases of one grid.  Arbitrary scalar maps may instead be
-    // independent spatial regions or processing layers and must not be
-    // combined by matching their array indices.
+    // Color/luminance separation is defined when one grid directly stores RGB
+    // channels, or when samples represent the four CFA phases of one grid.
+    // Arbitrary scalar maps may instead be independent spatial regions or
+    // processing layers and must not be combined by matching array indices.
+    const bool interleavedRgb = maps.size() == 1 && maps.front().channels == 3;
     const bool interleavedCfa = maps.size() == 1 && maps.front().channels == 4;
     bool scalarCfa = maps.size() == 4;
     std::array<bool, 4> phases{};
@@ -205,7 +206,7 @@ inline GainMapLuminanceSeparation<Map> separateGainMapLuminance(
             else phases[phase] = true;
         }
     }
-    if (!interleavedCfa && (!scalarCfa ||
+    if (!interleavedRgb && !interleavedCfa && (!scalarCfa ||
         !std::all_of(phases.begin(), phases.end(), [](bool present) { return present; })))
         return result;
     const size_t expectedPoints = static_cast<size_t>(maps.front().width) *

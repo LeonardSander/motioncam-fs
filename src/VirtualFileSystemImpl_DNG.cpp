@@ -76,9 +76,11 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
     // Load calibration JSON if it exists (for DNG folder)
     const auto& calibPath = mSidecarPath;
     vfs::loadSidecar(calibPath, mSidecarMetadata, mCalibration);
-    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(mSrcPath);
+    mManualVignetteSidecars = vfs::loadManualVignetteSidecars(
+        mSrcPath, &mSidecarMetadata, &calibPath);
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
-        mGyroflowSidecarPath);
+        vfs::referencedSidecarPath(
+            mGyroflowSidecarPath, mSidecarMetadata, calibPath, "gyroflow"));
     if (mCalibration && mCalibration->hasLevels) mConfig.levels = mCalibration->levels;
     if (mCalibration && mCalibration->hasCenterCrop) {
         mConfig.cropTarget = std::to_string(mCalibration->centerCrop[0]) + "x" +
@@ -527,6 +529,30 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
     if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
         !vfs::applyManualVignetteSidecar(result.dng, mManualVignetteSidecars))
         throw std::runtime_error("Could not apply manual DNG vignette sidecar");
+    if (!vfs::applyManualDngMetadata(
+            result.dng, mManualVignetteSidecars,
+            mCalibration ? &*mCalibration : nullptr))
+        throw std::runtime_error("Could not apply manual DNG metadata sidecar");
+    if (mCalibration) {
+        DNGFrameMetadata overrides;
+        overrides.colorMatrix1 = mCalibration->colorMatrix1;
+        overrides.colorMatrix2 = mCalibration->colorMatrix2;
+        overrides.forwardMatrix1 = mCalibration->forwardMatrix1;
+        overrides.forwardMatrix2 = mCalibration->forwardMatrix2;
+        overrides.cameraCalibration1 = mCalibration->cameraCalibration1;
+        overrides.cameraCalibration2 = mCalibration->cameraCalibration2;
+        overrides.hasColorMatrix1 = mCalibration->hasColorMatrix1;
+        overrides.hasColorMatrix2 = mCalibration->hasColorMatrix2;
+        overrides.hasForwardMatrix1 = mCalibration->hasForwardMatrix1;
+        overrides.hasForwardMatrix2 = mCalibration->hasForwardMatrix2;
+        overrides.hasCameraCalibration1 = mCalibration->hasCameraCalibration1;
+        overrides.hasCameraCalibration2 = mCalibration->hasCameraCalibration2;
+        if (!DNGDecoder::updateColorMatrices(result.dng, overrides))
+            throw std::runtime_error("Could not apply JSON color-matrix override");
+        if (mCalibration->hasAsShotNeutral && !DNGDecoder::updateMetadata(
+                result.dng, nullptr, &mCalibration->asShotNeutral))
+            throw std::runtime_error("Could not apply JSON white-balance override");
+    }
     if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude) {
         if (!DNGDecoder::replaceGainMaps(result.dng, 2, {}) ||
             !DNGDecoder::replaceGainMaps(result.dng, 3, {}))
@@ -732,10 +758,11 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
     nlohmann::json sidecarMetadata;
     std::optional<CalibrationData> calibration;
     vfs::loadSidecar(calibPath, sidecarMetadata, calibration, true);
-    auto manualVignetteSidecars =
-        vfs::loadManualVignetteSidecars(mSrcPath);
+    auto manualVignetteSidecars = vfs::loadManualVignetteSidecars(
+        mSrcPath, &sidecarMetadata, &calibPath);
     auto gyroflow = vfs::loadGyroflowLensProfile(
-        mGyroflowSidecarPath, true);
+        vfs::referencedSidecarPath(
+            mGyroflowSidecarPath, sidecarMetadata, calibPath, "gyroflow"), true);
     if (sameRenderSettings(mConfig, config) && sidecarMetadata == mSidecarMetadata &&
         !gyroflow && !mGyroflowLensProfile &&
         manualVignetteSidecars.candidates.empty() &&

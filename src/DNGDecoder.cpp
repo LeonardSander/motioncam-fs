@@ -207,6 +207,13 @@ namespace {
     constexpr uint16_t TIFF_TAG_XMP = 700;
     constexpr uint16_t TIFF_TAG_SOFTWARE = 305;
     constexpr uint16_t TIFF_TAG_UNIQUE_CAMERA_MODEL = 50708;
+    constexpr uint16_t TIFF_TAG_MAKE = 271;
+    constexpr uint16_t TIFF_TAG_MODEL = 272;
+    constexpr uint16_t TIFF_TAG_F_NUMBER = 33437;
+    constexpr uint16_t TIFF_TAG_APERTURE_VALUE = 37378;
+    constexpr uint16_t TIFF_TAG_FOCAL_LENGTH = 37386;
+    constexpr uint16_t TIFF_TAG_FOCAL_LENGTH_35MM = 41989;
+    constexpr uint16_t TIFF_TAG_NOISE_PROFILE = 51041;
     constexpr uint16_t TIFF_TYPE_BYTE = 1;
     constexpr uint16_t TIFF_TYPE_SHORT = 3;
     constexpr uint16_t TIFF_TYPE_LONG = 4;
@@ -2468,6 +2475,265 @@ bool DNGDecoder::updateMetadata(std::vector<uint8_t>& data,
         }
     }
     return baselineWritten && neutralWritten;
+}
+
+bool DNGDecoder::extractSidecarMetadata(
+        const std::vector<uint8_t>& sidecar,
+        std::vector<DNGSidecarMetadataEntry>& metadata) {
+    metadata.clear();
+    bool little = true;
+    const auto entries = findTiffEntries(sidecar, little);
+    if (entries.empty()) return false;
+    const std::array<uint16_t, 17> transferable = {
+        TIFF_TAG_MAKE, TIFF_TAG_MODEL, TIFF_TAG_F_NUMBER,
+        TIFF_TAG_APERTURE_VALUE, TIFF_TAG_FOCAL_LENGTH,
+        TIFF_TAG_FOCAL_LENGTH_35MM, TIFF_TAG_UNIQUE_CAMERA_MODEL,
+        TIFF_TAG_NOISE_PROFILE, TIFF_TAG_COLOR_MATRIX_1,
+        TIFF_TAG_COLOR_MATRIX_2, TIFF_TAG_CAMERA_CALIBRATION_1,
+        TIFF_TAG_CAMERA_CALIBRATION_2, TIFF_TAG_FORWARD_MATRIX_1,
+        TIFF_TAG_FORWARD_MATRIX_2, TIFF_TAG_AS_SHOT_NEUTRAL,
+        TIFF_TAG_CALIBRATION_ILLUMINANT_1,
+        TIFF_TAG_CALIBRATION_ILLUMINANT_2};
+    auto toLittleEndian = [&](const TiffEntry& entry, std::vector<uint8_t>& value) {
+        const size_t unit = tiffTypeSize(entry.type);
+        const size_t bytes = unit * entry.count;
+        value.resize(bytes);
+        const uint8_t* input = sidecar.data() + entry.valueOffset;
+        if (little || unit == 1) {
+            std::memcpy(value.data(), input, bytes);
+            return;
+        }
+        for (uint32_t i = 0; i < entry.count; ++i) {
+            const uint8_t* item = input + static_cast<size_t>(i) * unit;
+            uint8_t* output = value.data() + static_cast<size_t>(i) * unit;
+            if (entry.type == TIFF_TYPE_RATIONAL || entry.type == TIFF_TYPE_SRATIONAL) {
+                for (size_t half = 0; half < 2; ++half)
+                    std::reverse_copy(item + half * 4, item + half * 4 + 4,
+                                      output + half * 4);
+            } else std::reverse_copy(item, item + unit, output);
+        }
+    };
+    std::set<uint16_t> added;
+    for (const auto& entry : entries) {
+        if (std::find(transferable.begin(), transferable.end(), entry.tag) == transferable.end() ||
+            added.count(entry.tag)) continue;
+        const size_t unit = tiffTypeSize(entry.type);
+        if (!unit || entry.count > std::numeric_limits<size_t>::max() / unit ||
+            entry.valueOffset > sidecar.size() || unit * entry.count > sidecar.size() - entry.valueOffset)
+            continue;
+        DNGSidecarMetadataEntry cached;
+        cached.tag = entry.tag;
+        cached.type = entry.type;
+        cached.count = entry.count;
+        cached.exif = entry.tag == TIFF_TAG_F_NUMBER ||
+            entry.tag == TIFF_TAG_APERTURE_VALUE ||
+            entry.tag == TIFF_TAG_FOCAL_LENGTH ||
+            entry.tag == TIFF_TAG_FOCAL_LENGTH_35MM;
+        toLittleEndian(entry, cached.value);
+        metadata.push_back(std::move(cached));
+        added.insert(entry.tag);
+    }
+    return true;
+}
+
+bool DNGDecoder::fillMissingSidecarMetadata(
+        std::vector<uint8_t>& data,
+        const std::vector<DNGSidecarMetadataEntry>& sidecarMetadata,
+        const std::vector<uint16_t>& excludedTags) {
+    bool little = true;
+    auto destinationEntries = findTiffEntries(data, little);
+    if (destinationEntries.empty()) return false;
+    std::set<uint16_t> present;
+    for (const auto& entry : destinationEntries) present.insert(entry.tag);
+    std::array<std::vector<const DNGSidecarMetadataEntry*>, 2> additions;
+    for (const auto& entry : sidecarMetadata) {
+        if (present.count(entry.tag) ||
+            std::find(excludedTags.begin(), excludedTags.end(), entry.tag) != excludedTags.end())
+            continue;
+        additions[entry.exif ? 1 : 0].push_back(&entry);
+        present.insert(entry.tag);
+    }
+    auto append = [&](bool exif,
+                      const std::vector<const DNGSidecarMetadataEntry*>& values) {
+        if (values.empty()) return true;
+        destinationEntries = findTiffEntries(data, little);
+        uint32_t targetIfd = exif ? 0 : read32(data.data() + 4, little);
+        TiffEntry exifPointer{};
+        bool hasExifPointer = false;
+        if (exif) {
+            for (const auto& entry : destinationEntries)
+                if (entry.tag == TIFF_TAG_EXIF_IFD && entry.type == TIFF_TYPE_LONG && entry.count) {
+                    exifPointer = entry;
+                    hasExifPointer = true;
+                    targetIfd = read32(data.data() + entry.valueOffset, little);
+                    break;
+                }
+            if (!hasExifPointer) {
+                const uint32_t root = read32(data.data() + 4, little);
+                if (!insertTiffScalarEntry(data, root, TIFF_TAG_EXIF_IFD,
+                                           TIFF_TYPE_LONG, 0, little)) return false;
+                destinationEntries = findTiffEntries(data, little);
+                for (const auto& entry : destinationEntries)
+                    if (entry.tag == TIFF_TAG_EXIF_IFD && entry.type == TIFF_TYPE_LONG && entry.count) {
+                        exifPointer = entry;
+                        hasExifPointer = true;
+                        break;
+                    }
+                targetIfd = 0;
+            }
+        }
+        uint16_t oldCount = 0;
+        size_t oldEnd = 0;
+        uint32_t oldNext = 0;
+        if (targetIfd) {
+            if (targetIfd + 2 > data.size()) return false;
+            oldCount = read16(data.data() + targetIfd, little);
+            oldEnd = static_cast<size_t>(targetIfd) + 2 + static_cast<size_t>(oldCount) * 12;
+            if (oldEnd + 4 > data.size()) return false;
+            oldNext = read32(data.data() + oldEnd, little);
+        }
+        if (values.size() > 65535u - oldCount) return false;
+        if (data.size() & 1u) data.push_back(0);
+        const uint32_t newIfd = static_cast<uint32_t>(data.size());
+        const uint16_t newCount = static_cast<uint16_t>(oldCount + values.size());
+        const size_t tableBytes = 2 + static_cast<size_t>(newCount) * 12 + 4;
+        size_t externalBytes = 0;
+        for (const auto* value : values) {
+            const size_t bytes = value->value.size();
+            if (bytes > 4) externalBytes = (externalBytes + 1u) & ~size_t{1};
+            if (bytes > 4) externalBytes += bytes;
+        }
+        if (data.size() > std::numeric_limits<uint32_t>::max() - tableBytes - externalBytes)
+            return false;
+        data.resize(data.size() + tableBytes + externalBytes, 0);
+        std::vector<std::array<uint8_t, 12>> rebuilt;
+        rebuilt.reserve(newCount);
+        for (uint16_t i = 0; i < oldCount; ++i) {
+            std::array<uint8_t, 12> entry{};
+            std::memcpy(entry.data(), data.data() + targetIfd + 2 + static_cast<size_t>(i) * 12, 12);
+            rebuilt.push_back(entry);
+        }
+        size_t payloadAt = static_cast<size_t>(newIfd) + tableBytes;
+        for (const auto* source : values) {
+            std::vector<uint8_t> encoded = source->value;
+            const size_t unit = tiffTypeSize(source->type);
+            if (!little && unit > 1) {
+                for (uint32_t i = 0; i < source->count; ++i) {
+                    uint8_t* item = encoded.data() + static_cast<size_t>(i) * unit;
+                    if (source->type == TIFF_TYPE_RATIONAL || source->type == TIFF_TYPE_SRATIONAL) {
+                        std::reverse(item, item + 4);
+                        std::reverse(item + 4, item + 8);
+                    } else std::reverse(item, item + unit);
+                }
+            }
+        std::array<uint8_t, 12> entry{};
+        write16(entry.data(), source->tag, little);
+        write16(entry.data() + 2, source->type, little);
+        write32(entry.data() + 4, source->count, little);
+            if (encoded.size() <= 4)
+                std::memcpy(entry.data() + 8, encoded.data(), encoded.size());
+        else {
+            payloadAt = (payloadAt + 1u) & ~size_t{1};
+            write32(entry.data() + 8, static_cast<uint32_t>(payloadAt), little);
+                std::memcpy(data.data() + payloadAt, encoded.data(), encoded.size());
+                payloadAt += encoded.size();
+        }
+        rebuilt.push_back(entry);
+        }
+        std::sort(rebuilt.begin(), rebuilt.end(), [little](const auto& a, const auto& b) {
+            return read16(a.data(), little) < read16(b.data(), little);
+        });
+        write16(data.data() + newIfd, newCount, little);
+        size_t entryAt = static_cast<size_t>(newIfd) + 2;
+        for (const auto& entry : rebuilt) {
+            std::memcpy(data.data() + entryAt, entry.data(), entry.size());
+            entryAt += entry.size();
+        }
+        write32(data.data() + entryAt, oldNext, little);
+        if (exif) {
+            if (!hasExifPointer) return false;
+            write32(data.data() + exifPointer.valueOffset, newIfd, little);
+        } else write32(data.data() + 4, newIfd, little);
+        return true;
+    };
+    return append(false, additions[0]) && append(true, additions[1]);
+}
+
+bool DNGDecoder::updateColorMatrices(std::vector<uint8_t>& data,
+                                     const DNGFrameMetadata& overrides) {
+    struct MatrixUpdate {
+        uint16_t tag;
+        const std::array<float, 9>* value;
+        bool enabled;
+    };
+    const std::array<MatrixUpdate, 6> updates{{
+        {TIFF_TAG_COLOR_MATRIX_1, &overrides.colorMatrix1, overrides.hasColorMatrix1},
+        {TIFF_TAG_COLOR_MATRIX_2, &overrides.colorMatrix2, overrides.hasColorMatrix2},
+        {TIFF_TAG_CAMERA_CALIBRATION_1, &overrides.cameraCalibration1,
+         overrides.hasCameraCalibration1},
+        {TIFF_TAG_CAMERA_CALIBRATION_2, &overrides.cameraCalibration2,
+         overrides.hasCameraCalibration2},
+        {TIFF_TAG_FORWARD_MATRIX_1, &overrides.forwardMatrix1, overrides.hasForwardMatrix1},
+        {TIFF_TAG_FORWARD_MATRIX_2, &overrides.forwardMatrix2, overrides.hasForwardMatrix2}}};
+    std::vector<DNGSidecarMetadataEntry> missing;
+    bool little = true;
+    auto entries = findTiffEntries(data, little);
+    for (const auto& update : updates) {
+        if (!update.enabled) continue;
+        const bool present = std::any_of(entries.begin(), entries.end(), [&](const auto& entry) {
+            return entry.tag == update.tag && entry.type == TIFF_TYPE_SRATIONAL &&
+                   entry.count >= update.value->size();
+        });
+        if (present) continue;
+        // Retire malformed instances so the valid JSON-owned replacement can
+        // be inserted. Tag zero is reserved by TIFF and safely ignored.
+        std::set<uint32_t> affectedIfds;
+        for (const auto& existing : entries)
+            if (existing.tag == update.tag) {
+                write16(data.data() + existing.entryOffset, 0, little);
+                affectedIfds.insert(existing.ifdOffset);
+            }
+        for (const uint32_t ifd : affectedIfds)
+            if (!sortTiffIfdEntries(data, ifd, little)) return false;
+        if (!affectedIfds.empty()) entries = findTiffEntries(data, little);
+        DNGSidecarMetadataEntry entry;
+        entry.tag = update.tag;
+        entry.type = TIFF_TYPE_SRATIONAL;
+        entry.count = static_cast<uint32_t>(update.value->size());
+        entry.value.resize(entry.count * 8u);
+        constexpr int64_t denominator = 1000000;
+        for (size_t i = 0; i < update.value->size(); ++i) {
+            const auto numerator = static_cast<int32_t>(std::clamp<int64_t>(
+                std::llround(static_cast<double>((*update.value)[i]) * denominator),
+                std::numeric_limits<int32_t>::min(),
+                std::numeric_limits<int32_t>::max()));
+            write32(entry.value.data() + i * 8u,
+                    static_cast<uint32_t>(numerator), true);
+            write32(entry.value.data() + i * 8u + 4u,
+                    static_cast<uint32_t>(denominator), true);
+        }
+        missing.push_back(std::move(entry));
+    }
+    if (!missing.empty() && !fillMissingSidecarMetadata(data, missing)) return false;
+    entries = findTiffEntries(data, little);
+    for (const auto& update : updates) {
+        if (!update.enabled) continue;
+        size_t written = 0;
+        for (const auto& entry : entries) {
+            if (entry.tag != update.tag || entry.type != TIFF_TYPE_SRATIONAL ||
+                entry.count < update.value->size()) continue;
+            for (uint32_t i = 0; i < update.value->size(); ++i)
+                writeRational(data, entry, i, (*update.value)[i], little);
+            ++written;
+        }
+        // removeThumbnails() strips image payload tags but deliberately keeps
+        // the surrounding IFD metadata. A matrix may therefore occur both in
+        // the retained raw IFD and in a former preview IFD. JSON owns an
+        // enabled override, so keep every valid occurrence consistent rather
+        // than stopping after whichever IFD findTiffEntries() returned first.
+        if (written == 0) return false;
+    }
+    return true;
 }
 
 bool DNGDecoder::setTimingMetadata(std::vector<uint8_t>& data,

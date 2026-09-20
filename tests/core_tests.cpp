@@ -30,6 +30,10 @@ int main() {
     assert(exampleCalibration.contains("_cfaSize"));
     assert(exampleCalibration.contains("_needGainMapOrderFixed"));
     assert(exampleCalibration.contains("_fullSensorResolution"));
+    assert(exampleCalibration.contains("_dng_white"));
+    assert(exampleCalibration.contains("_dng_gainmap"));
+    assert(exampleCalibration.contains("_gyroflow"));
+    assert(exampleCalibration.value("_ignoreForwardMat", true) == false);
 
     const auto renderOverrides = CalibrationData::parse(std::string(R"({
         "levels":"4095/64,65,66",

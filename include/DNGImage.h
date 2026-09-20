@@ -78,6 +78,16 @@ struct GainMap {
     std::vector<float> data;
 };
 
+// Compact TIFF value extracted from a DNG sidecar. Values use little-endian
+// element encoding so the source file itself need not remain resident.
+struct DNGSidecarMetadataEntry {
+    uint16_t tag = 0;
+    uint16_t type = 0;
+    uint32_t count = 0;
+    bool exif = false;
+    std::vector<uint8_t> value;
+};
+
 // Storage-independent, unpacked image samples shared by DNG decoding,
 // source processing, preview rendering, and DNG serialization.
 struct DecodedDNGImage {
