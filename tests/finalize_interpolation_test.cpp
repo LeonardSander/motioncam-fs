@@ -4,6 +4,7 @@
 #include "CalibrationData.h"
 #include "LRUCache.h"
 #include "VirtualFileSystemImpl.h"
+#include "Utils.h"
 #include <BS_thread_pool.hpp>
 
 #include <algorithm>
@@ -280,6 +281,11 @@ int main() {
     badPixelCalibration.badPixels.front().action =
         motioncam::CalibrationData::BadPixelAction::Interpolate;
     auto opcodeCfa = makeLogCfaDng(1023, 0);
+    assert(motioncam::DNGDecoder::setWarpFisheye(
+        opcodeCfa, {0.01, 0.0, 0.0, 0.0}, 0.5, 0.5));
+    const auto [existingOpcode3Offset, existingOpcode3Bytes] =
+        tagPayload(opcodeCfa, 51022);
+    assert(existingOpcode3Offset && existingOpcode3Bytes > 4);
     badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OpcodeOnly;
     motioncam::vfs::processDngPixels(opcodeCfa, badPixelSettings, cfaPipeline);
     assert(motioncam::DNGDecoder::imagePayloadsEqual(
@@ -293,6 +299,166 @@ int main() {
             opcodeCfa[offset + 3]);
     };
     assert(opcodeBe32(badPixelOpcodeOffset) == 1);
+    assert(opcodeBe32(badPixelOpcodeOffset + 4) == 5);
+    const auto [preservedOpcode3Offset, preservedOpcode3Bytes] =
+        tagPayload(opcodeCfa, 51022);
+    assert(preservedOpcode3Offset && preservedOpcode3Bytes == existingOpcode3Bytes);
+    auto appendedOpcodeCfa = opcodeCfa;
+    motioncam::vfs::processDngPixels(
+        appendedOpcodeCfa, badPixelSettings, cfaPipeline);
+    const auto [appendedOpcodeOffset, appendedOpcodeBytes] =
+        tagPayload(appendedOpcodeCfa, 51008);
+    auto appendedOpcodeBe32 = [&](size_t offset) {
+        return static_cast<uint32_t>(appendedOpcodeCfa[offset] << 24 |
+            appendedOpcodeCfa[offset + 1] << 16 |
+            appendedOpcodeCfa[offset + 2] << 8 |
+            appendedOpcodeCfa[offset + 3]);
+    };
+    assert(appendedOpcodeBytes > badPixelOpcodeBytes);
+    assert(appendedOpcodeBe32(appendedOpcodeOffset) == 2);
+    assert(appendedOpcodeBe32(appendedOpcodeOffset + 4) == 5);
+    const size_t secondOpcode = appendedOpcodeOffset + 20 +
+        appendedOpcodeBe32(appendedOpcodeOffset + 16);
+    assert(appendedOpcodeBe32(secondOpcode) == 5);
+    auto finalizedOpcodeCfa = opcodeCfa;
+    motioncam::vfs::DngFinalizeOptions opcodeFinalize;
+    opcodeFinalize.frameRate = 24.0f;
+    opcodeFinalize.packToWhiteLevel = true;
+    motioncam::vfs::finalizeDng(
+        finalizedOpcodeCfa, badPixelSettings, opcodeFinalize);
+    const auto [finalOpcodeOffset, finalOpcodeBytes] =
+        tagPayload(finalizedOpcodeCfa, 51008);
+    assert(finalOpcodeBytes > 20);
+    auto finalOpcodeBe32 = [&](size_t offset) {
+        return static_cast<uint32_t>(finalizedOpcodeCfa[offset] << 24 |
+            finalizedOpcodeCfa[offset + 1] << 16 |
+            finalizedOpcodeCfa[offset + 2] << 8 |
+            finalizedOpcodeCfa[offset + 3]);
+    };
+    assert(finalOpcodeBe32(finalOpcodeOffset) == 1);
+    assert(finalOpcodeBe32(finalOpcodeOffset + 4) == 5);
+    motioncam::CalibrationData boundedPattern;
+    boundedPattern.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel lattice;
+    lattice.x = 1;
+    lattice.y = 1;
+    lattice.repeatX = lattice.repeatY = 2;
+    lattice.endX = lattice.endY = 3;
+    boundedPattern.badPixels.push_back(lattice);
+    std::vector<uint16_t> marked(8 * 8, 1000);
+    const auto markedPixels = motioncam::utils::applyCfaBadPixels(
+        marked.data(), 8, 8, 8, 8, 2, 1023.0f, {0, 0, 0, 0},
+        100.0, 0.01, boundedPattern,
+        motioncam::BadPixelTreatment::MarkPixels);
+    assert(markedPixels.size() == 4);
+    assert(marked[1 * 8 + 1] == 0 && marked[1 * 8 + 3] == 0 &&
+           marked[3 * 8 + 1] == 0 && marked[3 * 8 + 3] == 0);
+    assert(marked[5 * 8 + 5] == 1000);
+    motioncam::CalibrationData dampenPattern;
+    dampenPattern.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel dampenedPixel;
+    dampenedPixel.x = dampenedPixel.y = 1;
+    dampenedPixel.action =
+        motioncam::CalibrationData::BadPixelAction::Dampen;
+    dampenedPixel.amount = 0.25f;
+    dampenPattern.badPixels.push_back(dampenedPixel);
+    std::vector<uint16_t> preDemosaicMarked(8 * 8, 1000);
+    const auto preDemosaicMarkedPixels = motioncam::utils::applyCfaBadPixels(
+        preDemosaicMarked.data(), 8, 8, 8, 8, 2, 1023.0f,
+        {0, 0, 0, 0}, 100.0, 0.01, dampenPattern,
+        motioncam::BadPixelTreatment::MarkPixels, true);
+    assert(preDemosaicMarkedPixels.size() == 1);
+    assert(preDemosaicMarked[1 * 8 + 1] == 750);
+    motioncam::CalibrationData interpolateOne;
+    interpolateOne.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel interpolatedPixel;
+    interpolatedPixel.x = interpolatedPixel.y = 1;
+    interpolateOne.badPixels.push_back(interpolatedPixel);
+    std::vector<uint16_t> quadInterpolation(8 * 8, 200);
+    quadInterpolation[0] = 100;
+    quadInterpolation[1] = 110;
+    quadInterpolation[8] = 120;
+    quadInterpolation[9] = 65535;
+    motioncam::utils::applyCfaBadPixels(
+        quadInterpolation.data(), 8, 8, 8, 8, 4, 65535.0f,
+        {0, 0, 0, 0}, 100.0, 0.01, interpolateOne,
+        motioncam::BadPixelTreatment::Bake);
+    // The three valid samples in this 2x2 Quad Bayer group dominate the
+    // surrounding same-colour groups: (median(100,110,120) * 4 + 200) / 5.
+    assert(quadInterpolation[9] == 128);
+    std::vector<uint16_t> bayerInterpolation(8 * 8, 200);
+    bayerInterpolation[9] = 65535;
+    bayerInterpolation[1 * 8 + 3] = 400;
+    bayerInterpolation[3 * 8 + 1] = 400;
+    bayerInterpolation[3 * 8 + 3] = 400;
+    motioncam::utils::applyCfaBadPixels(
+        bayerInterpolation.data(), 8, 8, 8, 8, 2, 65535.0f,
+        {0, 0, 0, 0}, 100.0, 0.01, interpolateOne,
+        motioncam::BadPixelTreatment::Bake);
+    assert(bayerInterpolation[9] == 400);
+    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+        boundedPattern, 8, 8) == 32 + 4 * 8);
+    motioncam::CalibrationData fullSensorPattern;
+    fullSensorPattern.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel fullSensorPixel;
+    fullSensorPixel.x = 5000;
+    fullSensorPixel.y = 100;
+    fullSensorPattern.badPixels.push_back(fullSensorPixel);
+    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+        fullSensorPattern, 4000, 3000) == 32);
+    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+        fullSensorPattern, 8000, 6000) == 32 + 8);
+    motioncam::CalibrationData overflowingPattern;
+    overflowingPattern.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel overflowingLattice;
+    overflowingLattice.repeatX = overflowingLattice.repeatY = 1;
+    overflowingLattice.endX = overflowingLattice.endY =
+        std::numeric_limits<int>::max();
+    overflowingPattern.badPixels.push_back(overflowingLattice);
+    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+        overflowingPattern, 1, 1) == std::numeric_limits<size_t>::max());
+    assert(motioncam::vfs::projectedDngSize(
+        1, 1, 1, 16, std::numeric_limits<size_t>::max(), 1) ==
+        std::numeric_limits<size_t>::max());
+    std::vector<uint16_t> markedRgb(8 * 8 * 3, 1000);
+    motioncam::utils::markBadPixelsRgb(
+        markedRgb.data(), 8, 8, 8, 8, 0, 0, markedPixels);
+    const size_t markedRgbOffset = (1 * 8 + 1) * 3;
+    assert(markedRgb[markedRgbOffset] == 0 &&
+           markedRgb[markedRgbOffset + 1] == 0 &&
+           markedRgb[markedRgbOffset + 2] == 0);
+    auto streamingMarked = makeLogCfaDng(1023, 0);
+    motioncam::RenderSettings streamingMarkSettings;
+    streamingMarkSettings.badPixelTreatment =
+        motioncam::BadPixelTreatment::MarkPixels;
+    streamingMarkSettings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+    streamingMarkSettings.streamingPreview = true;
+    auto quadPipeline = cfaPipeline;
+    quadPipeline.cfaRepeatSize = 4;
+    quadPipeline.calibration = &boundedPattern;
+    motioncam::vfs::processDngPixels(
+        streamingMarked, streamingMarkSettings, quadPipeline);
+    motioncam::DecodedDNGImage streamingMarkedImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        streamingMarked, streamingMarkedImage, false, false));
+    assert(streamingMarkedImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(streamingMarkedImage.samples[1 * streamingMarkedImage.layout.width + 1] == 0);
+
+    auto remosaicedMarked = makeLogCfaDng(1023, 0);
+    motioncam::RenderSettings remosaicMarkSettings;
+    remosaicMarkSettings.badPixelTreatment =
+        motioncam::BadPixelTreatment::MarkPixels;
+    remosaicMarkSettings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+    remosaicMarkSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
+    motioncam::vfs::processDngPixels(
+        remosaicedMarked, remosaicMarkSettings, quadPipeline);
+    motioncam::DecodedDNGImage remosaicedMarkedImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        remosaicedMarked, remosaicedMarkedImage, false, false));
+    assert(remosaicedMarkedImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(remosaicedMarkedImage.samples[
+        1 * remosaicedMarkedImage.layout.width + 1] == 0);
     // The common topology pipeline must crop and reduce/remosaic before it
     // consumes gain metadata. This is the ordering shared by DNG, MCRAW and
     // DirectLog adapters.

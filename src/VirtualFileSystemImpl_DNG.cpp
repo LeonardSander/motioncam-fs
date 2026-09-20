@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 #ifdef __linux__
 #include <sys/resource.h>
@@ -304,8 +305,22 @@ void VirtualFileSystemImpl_DNG::init() {
             else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits - 6);
             else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) storedBits = std::max(1u, storedBits - 8);
         }
-        const size_t metadataBytes = frameIndex < mSourceMetadataSizes.size()
+        size_t metadataBytes = frameIndex < mSourceMetadataSizes.size()
             ? mSourceMetadataSizes[frameIndex] : transformedMetadataAllowance;
+        if (mCalibration && mConfig.badPixelTreatment == BadPixelTreatment::OpcodeOnly &&
+            channels == 1) {
+            const uint32_t sensorWidth = mCalibration->hasFullSensorResolution
+                ? static_cast<uint32_t>(mCalibration->fullSensorResolution[0])
+                : static_cast<uint32_t>(mWidth);
+            const uint32_t sensorHeight = mCalibration->hasFullSensorResolution
+                ? static_cast<uint32_t>(mCalibration->fullSensorResolution[1])
+                : static_cast<uint32_t>(mHeight);
+            const size_t opcodeBytes = vfs::projectedBadPixelOpcodeSize(
+                *mCalibration, sensorWidth, sensorHeight);
+            metadataBytes = opcodeBytes > std::numeric_limits<size_t>::max() - metadataBytes
+                ? std::numeric_limits<size_t>::max()
+                : metadataBytes + opcodeBytes;
+        }
         // The packed estimate is normally tight, but gain-map baking,
         // metadata repair, and writers that promote samples to 16-bit can
         // produce a larger strip than the selected storage bit depth implies.
@@ -441,6 +456,29 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             // in-memory processor instead of losing it at the DNG boundary.
             image.layout.cfaRepeatSize = prepared.cfaSize;
             image.layout.cfaPhase = prepared.cfaPhase;
+            std::vector<utils::ActiveBadPixel> markedPixels;
+            const uint32_t markedSourceWidth = image.layout.width;
+            const uint32_t markedSourceHeight = image.layout.height;
+            if (mCalibration && mCalibration->hasBadPixels &&
+                mConfig.badPixelTreatment != BadPixelTreatment::Disabled &&
+                image.layout.pixels == DNGPixelLayout::CFA) {
+                const int originalWidth = mCalibration->hasFullSensorResolution
+                    ? mCalibration->fullSensorResolution[0]
+                    : static_cast<int>(image.layout.width);
+                const int originalHeight = mCalibration->hasFullSensorResolution
+                    ? mCalibration->fullSensorResolution[1]
+                    : static_cast<int>(image.layout.height);
+                const float white = image.metadata.whiteLevelCount
+                    ? image.metadata.whiteLevel[0] : 65535.0f;
+                // Gallery always consumes RGB, so Opcode Only has the same
+                // required pre-demosaic bake fallback as finalized RGB DNGs.
+                markedPixels = utils::applyCfaBadPixels(
+                    image.samples.data(), image.layout.width, image.layout.height,
+                    originalWidth, originalHeight, prepared.cfaSize, white,
+                    image.metadata.blackLevel, image.metadata.iso,
+                    image.metadata.exposureTime, *mCalibration,
+                    mConfig.badPixelTreatment, true);
+            }
             vfs::mergeManualDngMetadata(
                 image.metadata, mManualVignetteSidecars,
                 mCalibration ? &*mCalibration : nullptr);
@@ -484,6 +522,15 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     utils::bakeIsoOverlay(
                         reinterpret_cast<uint16_t*>(preview.rgb.data()),
                         preview.width, preview.height, 3, value, 0, 65535);
+                }
+                if (mConfig.badPixelTreatment == BadPixelTreatment::MarkPixels) {
+                    uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
+                    if (mConfig.options & RENDER_OPT_CROPPING)
+                        utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, stride);
+                    utils::markBadPixelsRgb(
+                        reinterpret_cast<uint16_t*>(preview.rgb.data()),
+                        preview.width, preview.height, markedSourceWidth,
+                        markedSourceHeight, cropWidth, cropHeight, markedPixels);
                 }
                 return true;
             }

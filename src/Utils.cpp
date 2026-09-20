@@ -1297,6 +1297,8 @@ std::shared_ptr<std::vector<char>> generateDng(
         cropTarget = "0x0";
 
     std::vector<ActiveBadPixel> activeBadPixels;
+    const uint32_t badPixelSourceWidth = width;
+    const uint32_t badPixelSourceHeight = height;
     if (calibration && calibration->hasBadPixels &&
         settings.badPixelTreatment != BadPixelTreatment::Disabled) {
         const auto levelsForDefects = resolveDataLevels(
@@ -1459,6 +1461,19 @@ std::shared_ptr<std::vector<char>> generateDng(
                        overlayChannels, metadata.iso,
                        *std::min_element(dstBlackLevel.begin(), dstBlackLevel.end()),
                        dstWhiteLevel);
+    }
+    if (settings.badPixelTreatment == BadPixelTreatment::MarkPixels && demosaic) {
+        uint32_t markCropWidth = 0, markCropHeight = 0, markStride = 0;
+        parseCropTarget(cropTarget, markCropWidth, markCropHeight, markStride);
+        auto* marked = reinterpret_cast<uint16_t*>(processedData.data());
+        if (remosaic)
+            markBadPixelsCfa(marked, width, height,
+                badPixelSourceWidth, badPixelSourceHeight,
+                markCropWidth, markCropHeight, activeBadPixels);
+        else
+            markBadPixelsRgb(marked, width, height,
+                badPixelSourceWidth, badPixelSourceHeight,
+                markCropWidth, markCropHeight, activeBadPixels);
     }
 
     if (previewFrame) {

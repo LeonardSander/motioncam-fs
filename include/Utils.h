@@ -55,6 +55,14 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
     float whiteLevel, const std::array<float, 4>& blackLevel,
     double iso, double exposureSeconds, const CalibrationData& calibration,
     BadPixelTreatment treatment, bool bakeForDemosaic = false);
+void markBadPixelsRgb(uint16_t* samples, uint32_t outputWidth,
+    uint32_t outputHeight, uint32_t sourceWidth, uint32_t sourceHeight,
+    uint32_t cropWidth, uint32_t cropHeight,
+    const std::vector<ActiveBadPixel>& pixels);
+void markBadPixelsCfa(uint16_t* samples, uint32_t outputWidth,
+    uint32_t outputHeight, uint32_t sourceWidth, uint32_t sourceHeight,
+    uint32_t cropWidth, uint32_t cropHeight,
+    const std::vector<ActiveBadPixel>& pixels);
 
 // ============================================================================
 // Stream Utilities

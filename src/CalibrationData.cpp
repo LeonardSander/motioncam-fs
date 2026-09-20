@@ -111,6 +111,14 @@ namespace {
         
         return result;
     }
+
+    std::array<int, 2> parseCoordinate(const json& value, const char* name) {
+        if (!value.is_array() || value.size() != 2 ||
+            !value[0].is_number_integer() || !value[1].is_number_integer())
+            throw std::invalid_argument(std::string(name) +
+                                        " must contain exactly two integers");
+        return {value[0].get<int>(), value[1].get<int>()};
+    }
 }
 
 std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& filePath) {
@@ -148,60 +156,72 @@ nlohmann::json CalibrationData::parseSidecarJson(const std::string& jsonString) 
 std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
     try {
         CalibrationData data;
+        auto parseField = [&](const char* name, auto&& parser) {
+            if (!j.contains(name)) return;
+            try {
+                parser(j[name]);
+            } catch (const std::exception& error) {
+                spdlog::warn("Ignoring invalid calibration field '{}': {}", name, error.what());
+            }
+        };
         
-        if (j.contains("colorMatrix1")) {
-            data.colorMatrix1 = parseArray<float, 9>(j["colorMatrix1"]);
+        parseField("colorMatrix1", [&](const auto& value) {
+            data.colorMatrix1 = parseArray<float, 9>(value);
             data.hasColorMatrix1 = true;
-        }
+        });
         
-        if (j.contains("colorMatrix2")) {
-            data.colorMatrix2 = parseArray<float, 9>(j["colorMatrix2"]);
+        parseField("colorMatrix2", [&](const auto& value) {
+            data.colorMatrix2 = parseArray<float, 9>(value);
             data.hasColorMatrix2 = true;
-        }
+        });
         
-        if (j.contains("forwardMatrix1")) {
-            data.forwardMatrix1 = parseArray<float, 9>(j["forwardMatrix1"]);
+        parseField("forwardMatrix1", [&](const auto& value) {
+            data.forwardMatrix1 = parseArray<float, 9>(value);
             data.hasForwardMatrix1 = true;
-        }
+        });
         
-        if (j.contains("forwardMatrix2")) {
-            data.forwardMatrix2 = parseArray<float, 9>(j["forwardMatrix2"]);
+        parseField("forwardMatrix2", [&](const auto& value) {
+            data.forwardMatrix2 = parseArray<float, 9>(value);
             data.hasForwardMatrix2 = true;
-        }
-        if (j.contains("cameraCalibration1")) {
-            data.cameraCalibration1 = parseArray<float, 9>(j["cameraCalibration1"]);
+        });
+        parseField("cameraCalibration1", [&](const auto& value) {
+            data.cameraCalibration1 = parseArray<float, 9>(value);
             data.hasCameraCalibration1 = true;
-        }
-        if (j.contains("cameraCalibration2")) {
-            data.cameraCalibration2 = parseArray<float, 9>(j["cameraCalibration2"]);
+        });
+        parseField("cameraCalibration2", [&](const auto& value) {
+            data.cameraCalibration2 = parseArray<float, 9>(value);
             data.hasCameraCalibration2 = true;
-        }
+        });
         
-        if (j.contains("asShotNeutral")) {
-            data.asShotNeutral = parseArray<float, 3>(j["asShotNeutral"]);
+        parseField("asShotNeutral", [&](const auto& value) {
+            data.asShotNeutral = parseArray<float, 3>(value);
             data.hasAsShotNeutral = true;
-        }
+        });
 
-        if (j.contains("orientation") && j["orientation"].is_number_integer()) {
-            const int orientation = j["orientation"].get<int>();
+        parseField("orientation", [&](const auto& value) {
+            if (!value.is_number_integer())
+                throw std::invalid_argument("orientation must be an integer");
+            const int orientation = value.template get<int>();
             if (orientation == 0 || orientation == 90 || orientation == 180 || orientation == 270) {
                 data.orientation = orientation;
                 data.hasOrientation = true;
             } else {
                 spdlog::warn("Ignoring invalid orientation override: {}", orientation);
             }
-        }
-        if (j.contains("ignoreForwardMat") && j["ignoreForwardMat"].is_boolean()) {
-            data.ignoreForwardMat = j["ignoreForwardMat"].get<bool>();
+        });
+        parseField("ignoreForwardMat", [&](const auto& value) {
+            if (!value.is_boolean())
+                throw std::invalid_argument("ignoreForwardMat must be a boolean");
+            data.ignoreForwardMat = value.template get<bool>();
             data.hasIgnoreForwardMat = true;
-        }
+        });
         
-        if (j.contains("cfaPhase")) {
-            data.cfaPhase = j["cfaPhase"].get<std::string>();
-        }
+        parseField("cfaPhase", [&](const auto& value) {
+            data.cfaPhase = value.template get<std::string>();
+        });
 
-        if (j.contains("dataLevels")) {
-            const std::string levels = j["dataLevels"].get<std::string>();
+        parseField("dataLevels", [&](const auto& value) {
+            const std::string levels = value.template get<std::string>();
             std::string normalized = levels;
             std::transform(normalized.begin(), normalized.end(), normalized.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -214,7 +234,7 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
                     "Ignoring invalid dataLevels '{}'; expected Auto, Full, or Limited",
                     levels);
             }
-        }
+        });
 
         if (j.contains("levels") && j["levels"].is_string()) {
             data.levels = j["levels"].get<std::string>();
@@ -243,16 +263,18 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
                 throw std::invalid_argument(std::string(field) + " dimensions must be positive");
             present = true;
         };
-        parseDimensions("centerCrop", data.centerCrop, data.hasCenterCrop);
-        parseDimensions("leftTopCropStride", data.leftTopCropStride,
-                        data.hasLeftTopCropStride);
+        try { parseDimensions("centerCrop", data.centerCrop, data.hasCenterCrop); }
+        catch (const std::exception& error) { spdlog::warn("Ignoring invalid calibration field 'centerCrop': {}", error.what()); }
+        try { parseDimensions("leftTopCropStride", data.leftTopCropStride,
+                              data.hasLeftTopCropStride); }
+        catch (const std::exception& error) { spdlog::warn("Ignoring invalid calibration field 'leftTopCropStride': {}", error.what()); }
 
-        if (j.contains("cfaSize")) {
+        parseField("cfaSize", [&](const auto& cfaSize) {
             int size = 0;
-            if (j["cfaSize"].is_number_integer()) {
-                size = j["cfaSize"].get<int>();
-            } else if (j["cfaSize"].is_string()) {
-                const std::string value = j["cfaSize"].get<std::string>();
+            if (cfaSize.is_number_integer()) {
+                size = cfaSize.template get<int>();
+            } else if (cfaSize.is_string()) {
+                const std::string value = cfaSize.template get<std::string>();
                 size_t consumed = 0;
                 size = std::stoi(value, &consumed);
                 if (consumed != value.size())
@@ -266,42 +288,57 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             } else {
                 spdlog::warn("Ignoring invalid cfaSize {}; expected an even integer >= 2", size);
             }
-        }
+        });
 
-        if (j.contains("needGainMapOrderFixed")) {
-            if (!j["needGainMapOrderFixed"].is_boolean())
+        parseField("needGainMapOrderFixed", [&](const auto& value) {
+            if (!value.is_boolean())
                 throw std::invalid_argument("needGainMapOrderFixed must be a boolean");
-            data.needGainMapOrderFixed = j["needGainMapOrderFixed"].get<bool>();
+            data.needGainMapOrderFixed = value.template get<bool>();
             data.hasNeedGainMapOrderFixed = true;
-        }
+        });
 
-        if (j.contains("fullSensorResolution")) {
-            data.fullSensorResolution = parseArray<int, 2>(j["fullSensorResolution"]);
+        parseField("fullSensorResolution", [&](const auto& value) {
+            data.fullSensorResolution = parseArray<int, 2>(value);
             if (data.fullSensorResolution[0] > 0 && data.fullSensorResolution[1] > 0) {
                 data.hasFullSensorResolution = true;
             } else {
                 throw std::invalid_argument(
                     "fullSensorResolution must contain positive width and height");
             }
-        }
+        });
 
-        if (j.contains("badPixels")) {
-            if (!j["badPixels"].is_array())
+        parseField("badPixels", [&](const auto& badPixels) {
+            if (!badPixels.is_array())
                 throw std::invalid_argument("badPixels must be an array");
-            for (const auto& item : j["badPixels"]) {
+            for (size_t index = 0; index < badPixels.size(); ++index) {
+              try {
+                const auto& item = badPixels[index];
                 CalibrationData::BadPixel pixel;
-                pixel.x = item.at("x").get<int>();
-                pixel.y = item.at("y").get<int>();
+                const auto start = parseCoordinate(item.at("start"), "start");
+                pixel.x = start[0];
+                pixel.y = start[1];
+                if (pixel.x < 0 || pixel.y < 0)
+                    throw std::invalid_argument("x/y must not be negative");
                 if (item.contains("repeat")) {
                     const auto repeat = parseArray<int, 2>(item["repeat"]);
                     if (repeat[0] <= 0 || repeat[1] <= 0)
-                        throw std::invalid_argument("badPixels repeat values must be positive");
+                        throw std::invalid_argument("repeat values must be positive");
                     pixel.repeatX = repeat[0];
                     pixel.repeatY = repeat[1];
-                    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= pixel.repeatX || pixel.y >= pixel.repeatY)
-                        throw std::invalid_argument("repeating badPixels x/y must lie inside the repeat tile");
-                } else if (pixel.x < 0 || pixel.y < 0) {
-                    throw std::invalid_argument("badPixels x/y must not be negative");
+                    if (item.contains("end")) {
+                        const auto end = parseCoordinate(item["end"], "end");
+                        pixel.endX = end[0];
+                        pixel.endY = end[1];
+                    }
+                    if (item.contains("endX"))
+                        pixel.endX = item["endX"].template get<int>();
+                    if (item.contains("endY"))
+                        pixel.endY = item["endY"].template get<int>();
+                    if (pixel.endX.has_value() != pixel.endY.has_value())
+                        throw std::invalid_argument("repeat bounds require both end coordinates");
+                    if ((pixel.endX && *pixel.endX < pixel.x) ||
+                        (pixel.endY && *pixel.endY < pixel.y))
+                        throw std::invalid_argument("end coordinates must not precede x/y");
                 }
                 const std::string treatment = item.value("treatment", "interpolate");
                 if (treatment == "brighten") pixel.action = CalibrationData::BadPixelAction::Brighten;
@@ -326,9 +363,12 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
                     (pixel.thresholdBelow && !valid(*pixel.thresholdBelow)))
                     throw std::invalid_argument("badPixels amount and thresholds must be between 0 and 1");
                 data.badPixels.push_back(pixel);
+              } catch (const std::exception& error) {
+                spdlog::warn("Ignoring invalid badPixels entry {}: {}", index, error.what());
+              }
             }
             data.hasBadPixels = !data.badPixels.empty();
-        }
+        });
 
         // Return data only if at least one field was parsed
         if (data.hasColorMatrix1 || data.hasColorMatrix2 ||
@@ -380,10 +420,10 @@ std::string CalibrationData::createExampleJson() {
   "_dng_white": "calibration/flat-field.dng",
   "_dng_gainmap": "calibration/gain-map.dng",
   "_gyroflow": "calibration/lens-profile.json",
-  "_comment9": "Bad/PDAF pixels use normalized thresholds (0=black, 1=white); repeat defines a periodic tile",
+  "_comment9": "Bad/PDAF start/end are full-sensor coordinates; repeat defines lattice spacing",
   "_badPixels": [
-    {"x": 123, "y": 456, "treatment": "interpolate", "threshold": {"above": "50%"}},
-    {"x": 3, "y": 5, "repeat": [16, 16], "treatment": "brighten", "amount": "12%", "threshold": {"below": "75%"}}
+    {"start": [123, 456], "treatment": "interpolate", "threshold": {"above": "50%"}},
+    {"start": [13, 48], "end": [4095, 3071], "repeat": [16, 16], "treatment": "interpolate"}
   ]
 })";
 }

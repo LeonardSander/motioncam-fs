@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <tuple>
 
@@ -346,6 +347,15 @@ void VirtualFileSystemImpl_MCRAW::init() {
     constexpr size_t transformedMetadataAllowance = 256 * 1024;
     size_t serializedMetadataBytes = metadata.dump().size() +
         vfs::projectedSidecarMetadataSize(mSidecarMetadata);
+    if (mCalibration && mSettings.badPixelTreatment == BadPixelTreatment::OpcodeOnly) {
+        const size_t opcodeBytes = vfs::projectedBadPixelOpcodeSize(
+            *mCalibration, static_cast<uint32_t>(cameraFrameMetadata.originalWidth),
+            static_cast<uint32_t>(cameraFrameMetadata.originalHeight));
+        serializedMetadataBytes = opcodeBytes >
+                std::numeric_limits<size_t>::max() - serializedMetadataBytes
+            ? std::numeric_limits<size_t>::max()
+            : serializedMetadataBytes + opcodeBytes;
+    }
     if (cameraFrameMetadata.lensShadingMapWidth > 0 &&
         cameraFrameMetadata.lensShadingMapHeight > 0) {
         const size_t gainMapPlanes = std::min<size_t>(
@@ -354,7 +364,14 @@ void VirtualFileSystemImpl_MCRAW::init() {
             static_cast<size_t>(cameraFrameMetadata.lensShadingMapWidth) *
             static_cast<size_t>(cameraFrameMetadata.lensShadingMapHeight) *
             gainMapPlanes;
-        serializedMetadataBytes += gainMapSamples * sizeof(float);
+        const size_t gainMapBytes = gainMapSamples >
+                std::numeric_limits<size_t>::max() / sizeof(float)
+            ? std::numeric_limits<size_t>::max()
+            : gainMapSamples * sizeof(float);
+        serializedMetadataBytes = gainMapBytes >
+                std::numeric_limits<size_t>::max() - serializedMetadataBytes
+            ? std::numeric_limits<size_t>::max()
+            : serializedMetadataBytes + gainMapBytes;
     }
     // Mounted-file sizes only need a safe upper bound. Rendering frame zero to
     // measure it made higher-CFA imports perform a full demosaic before the

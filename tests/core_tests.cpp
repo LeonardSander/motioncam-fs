@@ -77,8 +77,8 @@ int main() {
 
     const auto badPixelCalibration = CalibrationData::parse(std::string(R"({
         "badPixels":[
-            {"x":12,"y":34,"treatment":"dampen","amount":"20%","threshold":{"above":"50%"},"minIso":800,"minExposure":"1/30"},
-            {"x":3,"y":5,"repeat":[16,16],"treatment":"interpolate","thresholdBelow":0.1}
+            {"start":[12,34],"treatment":"dampen","amount":"20%","threshold":{"above":"50%"},"minIso":800,"minExposure":"1/30"},
+            {"start":[3,5],"repeat":[16,16],"treatment":"interpolate","thresholdBelow":0.1}
         ]})"));
     assert(badPixelCalibration.has_value() && badPixelCalibration->hasBadPixels);
     assert(badPixelCalibration->badPixels.size() == 2);
@@ -86,6 +86,44 @@ int main() {
     assert(nearlyEqual(*badPixelCalibration->badPixels[0].thresholdAbove, 0.5f));
     assert(std::abs(badPixelCalibration->badPixels[0].minExposureSeconds - 1.0 / 30.0) < 0.0001);
     assert(badPixelCalibration->badPixels[1].repeatX == 16);
+
+    const auto pdafCalibration = CalibrationData::parse(std::string(R"({
+        "cfaSize":4,
+        "badPixels":[
+            {"start":[13,48],"repeat":[16,16],"end":[301,512]},
+            {"start":["broken",2],"repeat":[16,16]},
+            {"start":[1,56],"repeat":[16,16]}
+        ]
+    })"));
+    assert(pdafCalibration && pdafCalibration->hasCfaSize &&
+           pdafCalibration->cfaSize == 4);
+    assert(pdafCalibration->hasBadPixels && pdafCalibration->badPixels.size() == 2);
+    assert(pdafCalibration->badPixels[0].x == 13 &&
+           pdafCalibration->badPixels[0].y == 48);
+    assert(pdafCalibration->badPixels[0].endX == 301 &&
+           pdafCalibration->badPixels[0].endY == 512);
+    const auto incompleteCoordinates = CalibrationData::parse(std::string(R"({
+        "cfaSize":4,
+        "badPixels":[
+            {"start":[13],"repeat":[16,16]},
+            {"start":[1,2],"repeat":[16,16],"end":[100]}
+        ]
+    })"));
+    assert(incompleteCoordinates && incompleteCoordinates->hasCfaSize);
+    assert(!incompleteCoordinates->hasBadPixels);
+    assert(stringToBadPixelTreatment("Mark Pixels") == BadPixelTreatment::MarkPixels);
+    assert(badPixelTreatmentToString(BadPixelTreatment::MarkPixels) == "Mark Pixels");
+
+    const auto partialCalibration = CalibrationData::parse(std::string(R"({
+        "colorMatrix1":["invalid"],
+        "cfaSize":4,
+        "needGainMapOrderFixed":"invalid",
+        "fullSensorResolution":[4096,3072]
+    })"));
+    assert(partialCalibration && partialCalibration->hasCfaSize &&
+           partialCalibration->hasFullSensorResolution);
+    assert(!partialCalibration->hasColorMatrix1 &&
+           !partialCalibration->hasNeedGainMapOrderFixed);
 
     const auto invalidLevelsCalibration = CalibrationData::parse(std::string(R"({"dataLevels":"Video"})"));
     assert(!invalidLevelsCalibration.has_value());

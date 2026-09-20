@@ -1130,6 +1130,7 @@
             <property name="minimumSize"><size><width>120</width><height>30</height></size></property>
             <item><property name="text"><string>Bake</string></property></item>
             <item><property name="text"><string>Opcode Only</string></property></item>
+            <item><property name="text"><string>Mark Pixels</string></property></item>
             <item><property name="text"><string>Disabled</string></property></item>
            </widget></item>
           </layout>

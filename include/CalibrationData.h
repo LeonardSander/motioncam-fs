@@ -13,6 +13,9 @@ struct CalibrationData {
     struct BadPixel {
         int x = 0, y = 0;
         int repeatX = 0, repeatY = 0;
+        // Inclusive full-sensor limit for a repeating lattice.
+        std::optional<int> endX;
+        std::optional<int> endY;
         BadPixelAction action = BadPixelAction::Interpolate;
         float amount = 0.0f;
         std::optional<float> thresholdAbove;

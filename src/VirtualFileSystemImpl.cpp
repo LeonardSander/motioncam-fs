@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <locale>
+#include <limits>
 #include <sstream>
 #include <iomanip>
 #include <array>
@@ -27,6 +28,18 @@
 
 namespace motioncam {
 namespace vfs {
+
+namespace {
+size_t saturatingAdd(size_t left, size_t right) {
+    return right > std::numeric_limits<size_t>::max() - left
+        ? std::numeric_limits<size_t>::max() : left + right;
+}
+
+size_t saturatingMultiply(size_t left, size_t right) {
+    return left && right > std::numeric_limits<size_t>::max() / left
+        ? std::numeric_limits<size_t>::max() : left * right;
+}
+} // namespace
 
 DngRenderPlan planDngRender(
         const Entry& entry, Timestamp sourceTimestamp,
@@ -47,12 +60,18 @@ DngRenderPlan planDngRender(
 size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,
                         uint32_t storedBits, size_t measuredMetadataBytes,
                         size_t transformedMetadataAllowance) {
-    const size_t rowBytes =
-        (static_cast<size_t>(width) * channels * storedBits + 7) / 8;
-    const size_t uncompressedBytes =
-        static_cast<size_t>(width) * height * channels * sizeof(uint16_t);
-    return std::max(rowBytes * height, uncompressedBytes) +
-        measuredMetadataBytes + transformedMetadataAllowance;
+    const size_t rowBits = saturatingMultiply(
+        saturatingMultiply(width, channels), storedBits);
+    const size_t rowBytes = rowBits == std::numeric_limits<size_t>::max()
+        ? rowBits : saturatingAdd(rowBits, 7) / 8;
+    const size_t packedBytes = saturatingMultiply(rowBytes, height);
+    const size_t uncompressedBytes = saturatingMultiply(
+        saturatingMultiply(saturatingMultiply(width, height), channels),
+        sizeof(uint16_t));
+    return saturatingAdd(
+        saturatingAdd(std::max(packedBytes, uncompressedBytes),
+                      measuredMetadataBytes),
+        transformedMetadataAllowance);
 }
 
 size_t projectedGainMapMetadataSize(const std::vector<GainMap>& maps) {
@@ -81,6 +100,34 @@ size_t projectedSidecarMetadataSize(const nlohmann::json& sidecar) {
     return bytes + largestDynamicFrameBytes;
 }
 
+size_t projectedBadPixelOpcodeSize(const CalibrationData& calibration,
+                                   uint32_t sensorWidth, uint32_t sensorHeight) {
+    if (!calibration.hasBadPixels) return 0;
+    constexpr size_t headerBytes = 32;
+    constexpr size_t bytesPerPoint = 8;
+    constexpr size_t maxPoints =
+        (std::numeric_limits<size_t>::max() - headerBytes) / bytesPerPoint;
+    size_t points = 0;
+    for (const auto& defect : calibration.badPixels) {
+        const int limitX = defect.endX.value_or(static_cast<int>(sensorWidth) - 1);
+        const int limitY = defect.endY.value_or(static_cast<int>(sensorHeight) - 1);
+        if (defect.x < 0 || defect.y < 0 || defect.x > limitX || defect.y > limitY)
+            continue;
+        const size_t columns = defect.repeatX
+            ? static_cast<size_t>((limitX - defect.x) / defect.repeatX + 1) : 1;
+        const size_t rows = defect.repeatY
+            ? static_cast<size_t>((limitY - defect.y) / defect.repeatY + 1) : 1;
+        if (columns > maxPoints / rows)
+            return std::numeric_limits<size_t>::max();
+        const size_t defectPoints = columns * rows;
+        if (points > maxPoints - defectPoints)
+            return std::numeric_limits<size_t>::max();
+        points += defectPoints;
+    }
+    // List count + opcode header + FixBadPixelsList header + row/column pairs.
+    return headerBytes + points * bytesPerPoint;
+}
+
 void processDngPixels(std::vector<uint8_t>& dng,
         const RenderSettings& settings,
         const DngPixelPipelineOptions& options) {
@@ -96,6 +143,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
             value == QuadBayerMode::DemosaicColor ||
             value == QuadBayerMode::DemosaicOCL;
     };
+    std::vector<utils::ActiveBadPixel> markedPixels;
+    uint32_t markedSourceWidth = 0, markedSourceHeight = 0;
+    bool badPixelsWillDemosaic = false;
     if (options.hasCfa && options.calibration &&
         options.calibration->hasBadPixels &&
         settings.badPixelTreatment != BadPixelTreatment::Disabled) {
@@ -106,9 +156,17 @@ void processDngPixels(std::vector<uint8_t>& dng,
                                      source);
         const float white = decoded.metadata.whiteLevelCount
             ? decoded.metadata.whiteLevel[0] : 65535.0f;
+        const bool streamingKeepsCfa = settings.streamingPreview &&
+            options.outputScale == 1 &&
+            !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
+            !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP);
         const bool willDemosaic = demosaics(settings.quadBayerOption) &&
+            !streamingKeepsCfa &&
             (options.cfaRepeatSize > 2 || settings.cameraNativeStaging ||
              options.outputScale > 1);
+        badPixelsWillDemosaic = willDemosaic;
+        markedSourceWidth = decoded.layout.width;
+        markedSourceHeight = decoded.layout.height;
         const int originalWidth = options.calibration->hasFullSensorResolution
             ? options.calibration->fullSensorResolution[0]
             : static_cast<int>(decoded.layout.width);
@@ -120,7 +178,10 @@ void processDngPixels(std::vector<uint8_t>& dng,
             originalWidth, originalHeight, options.cfaRepeatSize, white,
             decoded.metadata.blackLevel, options.iso, options.exposureTime,
             *options.calibration, settings.badPixelTreatment, willDemosaic);
-        if (settings.badPixelTreatment == BadPixelTreatment::Bake || willDemosaic) {
+        if (settings.badPixelTreatment == BadPixelTreatment::MarkPixels)
+            markedPixels = active;
+        if (settings.badPixelTreatment == BadPixelTreatment::Bake ||
+            settings.badPixelTreatment == BadPixelTreatment::MarkPixels || willDemosaic) {
             if (!DNGDecoder::encodeImage(dng, decoded))
                 throw std::runtime_error("Could not encode corrected CFA DNG: " + source);
         } else if (!active.empty()) {
@@ -220,6 +281,28 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !DNGDecoder::applyLogTransform(
             dng, settings.logTransform, options.inputQuantizationWhite))
         throw std::runtime_error("Could not apply log transform to " + source);
+    if (settings.badPixelTreatment == BadPixelTreatment::MarkPixels &&
+        badPixelsWillDemosaic && !markedPixels.empty()) {
+        DecodedDNGImage marked;
+        if (!DNGDecoder::decodeImage(dng, marked, false, false))
+            throw std::runtime_error("Could not decode transformed DNG for pixel marking: " + source);
+        uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
+        if (settings.options & RENDER_OPT_CROPPING)
+            utils::parseCropTarget(settings.cropTarget, cropWidth, cropHeight, stride);
+        if (marked.layout.pixels == DNGPixelLayout::LinearRGB) {
+            utils::markBadPixelsRgb(marked.samples.data(), marked.layout.width,
+                marked.layout.height, markedSourceWidth, markedSourceHeight,
+                cropWidth, cropHeight, markedPixels);
+        } else if (remosaic && marked.layout.pixels == DNGPixelLayout::CFA) {
+            utils::markBadPixelsCfa(marked.samples.data(), marked.layout.width,
+                marked.layout.height, markedSourceWidth, markedSourceHeight,
+                cropWidth, cropHeight, markedPixels);
+        } else {
+            throw std::runtime_error("Unexpected DNG layout for pixel marking: " + source);
+        }
+        if (!DNGDecoder::encodeImage(dng, marked))
+            throw std::runtime_error("Could not encode marked DNG: " + source);
+    }
 }
 
 bool decodeProcessedDngPreview(

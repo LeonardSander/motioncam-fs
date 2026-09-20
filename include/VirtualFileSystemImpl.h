@@ -227,6 +227,8 @@ size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,
                         size_t transformedMetadataAllowance = 256 * 1024);
 size_t projectedGainMapMetadataSize(const std::vector<GainMap>& maps);
 size_t projectedSidecarMetadataSize(const nlohmann::json& sidecar);
+size_t projectedBadPixelOpcodeSize(const CalibrationData& calibration,
+                                   uint32_t sensorWidth, uint32_t sensorHeight);
 
 // Manual flat-field DNGs discovered beside a clip.  The implementation keeps
 // the decoded flats in memory, but creates/replaces opcodes on the frame's

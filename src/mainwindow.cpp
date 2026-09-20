@@ -475,6 +475,10 @@ namespace {
         settings.options = static_cast<motioncam::FileRenderOptions>(
             settings.options & ~motioncam::RENDER_OPT_HIGHER_CFA_HQ);
         settings.draftScale = std::max(16, settings.draftScale);
+        // Marking thousands of PDAF coordinates on a tiny proxy can cover the
+        // entire card. Thumbnails are navigation aids, not diagnostics.
+        if (settings.badPixelTreatment == motioncam::BadPixelTreatment::MarkPixels)
+            settings.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
         return settings;
     }
 

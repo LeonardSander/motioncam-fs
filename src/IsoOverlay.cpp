@@ -37,6 +37,8 @@ void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
     auto paint = [&](int x, int y, uint16_t value) {
         if (x < 0 || y < 0 || x >= static_cast<int>(width) || y >= static_cast<int>(height)) return;
         const size_t first = (static_cast<size_t>(y) * width + x) * channels;
+        if (std::all_of(samples + first, samples + first + channels,
+                        [](uint16_t sample) { return sample == 0; })) return;
         for (uint32_t c = 0; c < channels; ++c) samples[first + c] = value;
     };
     for (int pass = 0; pass < 2; ++pass) {

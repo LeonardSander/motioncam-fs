@@ -211,7 +211,7 @@ enum class QuadBayerMode {
     WrongCFAMetadata
 };
 
-enum class BadPixelTreatment { Bake, OpcodeOnly, Disabled };
+enum class BadPixelTreatment { Bake, OpcodeOnly, MarkPixels, Disabled };
 
 enum class VignetteCorrectionMode { Bake, Resample, Uncropped, Exclude };
 
@@ -231,12 +231,14 @@ inline VignetteCorrectionMode stringToVignetteCorrectionMode(const std::string& 
 
 inline std::string badPixelTreatmentToString(BadPixelTreatment value) {
     if (value == BadPixelTreatment::OpcodeOnly) return "Opcode Only";
+    if (value == BadPixelTreatment::MarkPixels) return "Mark Pixels";
     if (value == BadPixelTreatment::Disabled) return "Disabled";
     return "Bake";
 }
 
 inline BadPixelTreatment stringToBadPixelTreatment(const std::string& value) {
     if (value == "Opcode Only") return BadPixelTreatment::OpcodeOnly;
+    if (value == "Mark Pixels") return BadPixelTreatment::MarkPixels;
     if (value == "Disabled" || value == "Disable Fully") return BadPixelTreatment::Disabled;
     return BadPixelTreatment::Bake;
 }
