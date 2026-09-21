@@ -49,6 +49,10 @@ public:
     static bool setOrientation(std::vector<uint8_t>& dngData, int clockwiseDegrees);
     static bool getGainMaps(const std::vector<uint8_t>& dngData,
                             int opcodeList, std::vector<GainMap>& gainMaps);
+    // Remove OpcodeList2/3 gain-map layers which are wholly neutral. A list is
+    // retained intact when any sample differs from 1 so CFA map groups cannot
+    // be made incomplete by filtering a single neutral plane.
+    static bool discardNeutralGainMaps(std::vector<uint8_t>& dngData);
     static bool hasOnlySinglePlaneGainMap(const std::vector<uint8_t>& dngData,
                                           int opcodeList);
     static bool replaceGainMaps(std::vector<uint8_t>& dngData,

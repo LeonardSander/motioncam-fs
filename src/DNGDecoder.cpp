@@ -1930,6 +1930,21 @@ bool DNGDecoder::getGainMaps(const std::vector<uint8_t>& data, int opcodeList,
     return false;
 }
 
+bool DNGDecoder::discardNeutralGainMaps(std::vector<uint8_t>& data) {
+    for (const int opcodeList : {2, 3}) {
+        std::vector<GainMap> maps;
+        if (!getGainMaps(data, opcodeList, maps)) continue;
+        const bool neutral = !maps.empty() &&
+            std::all_of(maps.begin(), maps.end(), [](const GainMap& map) {
+                return !map.data.empty() &&
+                    std::all_of(map.data.begin(), map.data.end(),
+                                [](float gain) { return gain == 1.0f; });
+            });
+        if (neutral && !replaceGainMaps(data, opcodeList, {})) return false;
+    }
+    return true;
+}
+
 bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
                                  const std::vector<GainMap>& gainMaps) {
     const uint16_t wanted = opcodeList == 3 ? TIFF_TAG_OPCODE_LIST_3 : TIFF_TAG_OPCODE_LIST_2;

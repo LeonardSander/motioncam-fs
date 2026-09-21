@@ -529,6 +529,27 @@ int main() {
     lumaMap.data.assign(4, 1.25f);
     assert(motioncam::DNGDecoder::replaceGainMaps(
         orderedRgb, 3, {lumaMap}));
+    auto neutralGainDng = orderedRgb;
+    auto neutralMap = lumaMap;
+    neutralMap.data.assign(neutralMap.data.size(), 1.0f);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        neutralGainDng, 2, {neutralMap}));
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        neutralGainDng, 3, {neutralMap}));
+    motioncam::RenderSettings neutralSettings;
+    motioncam::vfs::DngPixelPipelineOptions neutralPipeline;
+    neutralPipeline.hasCfa = false;
+    motioncam::vfs::processDngPixels(
+        neutralGainDng, neutralSettings, neutralPipeline);
+    std::vector<motioncam::GainMap> neutralMaps;
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        neutralGainDng, 2, neutralMaps));
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        neutralGainDng, 3, neutralMaps));
+    std::vector<motioncam::GainMap> retainedMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        orderedRgb, 3, retainedMaps));
+    assert(retainedMaps.size() == 1 && retainedMaps.front().data[0] == 1.25f);
     motioncam::RenderSettings orderedSettings;
     orderedSettings.options = static_cast<motioncam::FileRenderOptions>(
         motioncam::RENDER_OPT_CROPPING |

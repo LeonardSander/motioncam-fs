@@ -133,6 +133,10 @@ void processDngPixels(std::vector<uint8_t>& dng,
         const DngPixelPipelineOptions& options) {
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
+    // All three source adapters converge here after native and sidecar maps
+    // have been attached. Do not carry no-op gain metadata into output DNGs.
+    if (!DNGDecoder::discardNeutralGainMaps(dng))
+        throw std::runtime_error("Could not discard neutral gain maps for " + source);
     const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     const BadPixelTreatment badPixelTreatment = debugGainMap
         ? BadPixelTreatment::Disabled : settings.badPixelTreatment;
