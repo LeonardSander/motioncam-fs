@@ -96,6 +96,8 @@ private:
     void adoptRenderedDimensions(int width, int height);
     QPointF effectivePanForZoom(const QPointF& pan, double zoomPercent) const;
     QPointF surfaceScaleForZoom(double zoomPercent) const;
+    void updateTitle();
+    void updateMouseSourcePosition(const QPointF& globalPosition);
     void updateDisplayedImage();
     double fitScale() const;
     void updateFrameTimerInterval();
@@ -166,6 +168,7 @@ private:
     QPointF mDecoderSurfaceViewportPan;
     bool mPanning=false;
     bool mWaitingForFirstFrame=false;
+    QPoint mMouseSourcePosition{-1,-1};
     QPointF mPanSourcePixels, mLastPanGlobal;
     std::shared_ptr<std::atomic_bool> mAudioLoadCancelled=
         std::make_shared<std::atomic_bool>(false);

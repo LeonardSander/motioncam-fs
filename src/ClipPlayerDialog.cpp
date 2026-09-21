@@ -391,10 +391,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     if(mThumbnailScroll->isVisible())rebuildThumbnailStrip();
     mPlaybackFailed=false;mPaused=preservePausedNavigation;
     mPlayPause->setEnabled(true);updateButtonIcons();
-    const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
-    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[index].title)
-        .arg(index+1).arg(mClips.size()).arg(mZoomPercent>0.0
-            ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit")));
+    mMouseSourcePosition=QPoint(-1,-1);updateTitle();
     mWaitingForFirstFrame=!mLastPresentedImage.isNull();
     if(!mWaitingForFirstFrame)mVideo->setText(tr("Preparing playback…"));
     if(!mViewportRefreshPending)configureAudio();
@@ -708,6 +705,7 @@ void ClipPlayerDialog::setZoomAnimationTarget(double target){
     if(std::abs(effectiveTarget-current)<0.01){
         mZoomPercent=target;mZoomAnimationTimer.stop();return;
     }
+    mMouseSourcePosition=QPoint(-1,-1);updateTitle();
     mSurfaceUpdateTimer.stop();
     const bool wasAnimating=mZoomAnimationTimer.isActive();
     mZoomAnimationTarget=target;
@@ -753,10 +751,7 @@ void ClipPlayerDialog::advanceZoomAnimation(){
     if(mZoomPercent<=0.0)mPanSourcePixels=QPointF();
     else clampPanToZoom();
     updateDisplayedImage();
-    const double shown=mZoomPercent>0.0?mZoomPercent:minimum;
-    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[mIndex].title)
-        .arg(mIndex+1).arg(mClips.size()).arg(mZoomPercent>0.0
-            ?tr("Zoom %1%").arg(shown,0,'f',1):tr("Scale to fit")));
+    updateTitle();
     if(finished){
         mZoomAnimationTimer.stop();mZoomAnimationStartupDelay=false;
         const QPointF desiredScale=surfaceScaleForZoom(mZoomPercent);
@@ -828,10 +823,110 @@ void ClipPlayerDialog::adoptRenderedDimensions(int width,int height){
     rebaseZoom(mZoomAnimationTarget);
     clip.width=width;clip.height=height;
     clampPanToZoom();
+    updateTitle();
+}
+
+void ClipPlayerDialog::updateTitle(){
+    if(!mTitle||mIndex<0||mIndex>=mClips.size())return;
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
-    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(clip.title)
-        .arg(mIndex+1).arg(mClips.size()).arg(mZoomPercent>0.0
-            ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit")));
+    QString view=mZoomPercent>0.0
+        ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit");
+    if(mMouseSourcePosition.x()>=0&&mMouseSourcePosition.y()>=0)
+        view+=tr(" — x %1, y %2").arg(mMouseSourcePosition.x())
+            .arg(mMouseSourcePosition.y());
+    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[mIndex].title)
+        .arg(mIndex+1).arg(mClips.size()).arg(view));
+}
+
+void ClipPlayerDialog::updateMouseSourcePosition(const QPointF& globalPosition){
+    QPoint next(-1,-1);
+    if(mVideo&&mIndex>=0&&mIndex<mClips.size()){
+        const auto& clip=mClips[mIndex];
+        const int width=clip.width,height=clip.height;
+        if(width>0&&height>0){
+            const QPointF position=mVideo->mapFromGlobal(globalPosition.toPoint());
+            const bool swap=clip.orientation==90||clip.orientation==270;
+            const int displayWidth=swap?height:width;
+            const int displayHeight=swap?width:height;
+            int x=-1,y=-1;
+            if(mZoomPercent>0.0&&!mLastImageIsSource){
+                // Mirror the decoder's integer crop, scale and pad geometry.
+                // At nearest-neighbour zoom, using the ideal full-image
+                // transform can be one displayed pixel out because FFmpeg
+                // first rounds the crop origin to a source-pixel boundary.
+                const double zoom=mZoomPercent/100.0;
+                const int targetPreWidth=swap?mHeight:mWidth;
+                const int targetPreHeight=swap?mWidth:mHeight;
+                const int cropWidth=std::max(1,std::min(width,qCeil(targetPreWidth/zoom)));
+                const int cropHeight=std::max(1,std::min(height,qCeil(targetPreHeight/zoom)));
+                const int cropX=qRound((width-cropWidth)/2.0+mPanSourcePixels.x());
+                const int cropY=qRound((height-cropHeight)/2.0+mPanSourcePixels.y());
+                const int scaledWidth=std::min(targetPreWidth,qRound(cropWidth*zoom));
+                const int scaledHeight=std::min(targetPreHeight,qRound(cropHeight*zoom));
+                const int outputWidth=swap?scaledHeight:scaledWidth;
+                const int outputHeight=swap?scaledWidth:scaledHeight;
+                const int outputX=(mVideo->width()-outputWidth)/2;
+                const int outputY=(mVideo->height()-outputHeight)/2;
+                const int px=static_cast<int>(std::floor(position.x()))-outputX;
+                const int py=static_cast<int>(std::floor(position.y()))-outputY;
+                if(px>=0&&px<outputWidth&&py>=0&&py<outputHeight){
+                    const int orientedCropWidth=swap?cropHeight:cropWidth;
+                    const int orientedCropHeight=swap?cropWidth:cropHeight;
+                    const int dx=std::min(orientedCropWidth-1,
+                        px*orientedCropWidth/outputWidth);
+                    const int dy=std::min(orientedCropHeight-1,
+                        py*orientedCropHeight/outputHeight);
+                    x=dx;y=dy;
+                    if(clip.orientation==90){x=dy;y=cropHeight-1-dx;}
+                    else if(clip.orientation==180){x=cropWidth-1-dx;y=cropHeight-1-dy;}
+                    else if(clip.orientation==270){x=cropWidth-1-dy;y=dx;}
+                    x+=cropX;y+=cropY;
+                }
+            }else{
+                int outputWidth=0,outputHeight=0,outputX=0,outputY=0;
+                if(mZoomPercent>0.0){
+                    const double zoom=mZoomPercent/100.0;
+                    QPointF displayPan=mPanSourcePixels;
+                    if(clip.orientation==90)
+                        displayPan=QPointF(-displayPan.y(),displayPan.x());
+                    else if(clip.orientation==180)displayPan=-displayPan;
+                    else if(clip.orientation==270)
+                        displayPan=QPointF(displayPan.y(),-displayPan.x());
+                    outputWidth=std::max(1,qRound(displayWidth*zoom));
+                    outputHeight=std::max(1,qRound(displayHeight*zoom));
+                    outputX=(mVideo->width()-outputWidth)/2-
+                        qRound(displayPan.x()*zoom);
+                    outputY=(mVideo->height()-outputHeight)/2-
+                        qRound(displayPan.y()*zoom);
+                }else{
+                    const QPointF scale=surfaceScaleForZoom(mZoomPercent);
+                    outputWidth=std::max(1,qRound(displayWidth*scale.x()));
+                    outputHeight=std::max(1,qRound(displayHeight*scale.y()));
+                    outputX=(mVideo->width()-outputWidth)/2;
+                    outputY=(mVideo->height()-outputHeight)/2;
+                }
+                const int px=static_cast<int>(std::floor(position.x()))-outputX;
+                const int py=static_cast<int>(std::floor(position.y()))-outputY;
+                if(px>=0&&px<outputWidth&&py>=0&&py<outputHeight){
+                    const int dx=std::min(displayWidth-1,px*displayWidth/outputWidth);
+                    const int dy=std::min(displayHeight-1,py*displayHeight/outputHeight);
+                    x=dx;y=dy;
+                    if(clip.orientation==90){x=dy;y=height-1-dx;}
+                    else if(clip.orientation==180){x=width-1-dx;y=height-1-dy;}
+                    else if(clip.orientation==270){x=width-1-dy;y=dx;}
+                }
+            }
+            if(x>=0&&y>=0){
+                const int nativeWidth=clip.nativeWidth>0?clip.nativeWidth:width;
+                const int nativeHeight=clip.nativeHeight>0?clip.nativeHeight:height;
+                x=std::clamp(static_cast<int>(std::floor((x+0.5)*nativeWidth/width)),0,nativeWidth-1);
+                y=std::clamp(static_cast<int>(std::floor((y+0.5)*nativeHeight/height)),0,nativeHeight-1);
+                next=QPoint(x,y);
+            }
+        }
+    }
+    if(next==mMouseSourcePosition)return;
+    mMouseSourcePosition=next;updateTitle();
 }
 
 QPointF ClipPlayerDialog::effectivePanForZoom(const QPointF& pan,double zoomPercent)const{
@@ -1380,6 +1475,15 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
                          event->type()==QEvent::MouseButtonPress||
                          event->type()==QEvent::Enter))
         revealOverlay();
+    if(belongsToPlayer&&event->type()==QEvent::MouseMove&&!mPanning&&
+       !mZoomAnimationTimer.isActive()){
+        const auto* mouse=static_cast<QMouseEvent*>(event);
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+        updateMouseSourcePosition(mouse->globalPosition());
+#else
+        updateMouseSourcePosition(mouse->globalPos());
+#endif
+    }
     if(belongsToPlayer&&event->type()==QEvent::Wheel){
         revealOverlay();
         const auto* wheel=static_cast<QWheelEvent*>(event);
@@ -1411,6 +1515,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
             event->type()==QEvent::MouseButtonRelease?static_cast<QMouseEvent*>(event):nullptr;
         if(mouse&&event->type()==QEvent::MouseButtonPress&&mouse->button()==Qt::LeftButton){
             mSurfaceUpdateTimer.stop();mPanning=true;
+            mMouseSourcePosition=QPoint(-1,-1);updateTitle();
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
             mLastPanGlobal=mouse->globalPosition();
 #else
