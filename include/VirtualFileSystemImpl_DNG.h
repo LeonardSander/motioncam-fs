@@ -49,6 +49,8 @@ private:
         bool hasCfa = false;
     };
     int readPriority(const Entry& entry) const override;
+    std::function<std::shared_ptr<std::vector<char>>()>
+        staticMaterializer(const Entry& entry) override;
     void init();
     
     void calculateFrameRateStats();
@@ -98,6 +100,7 @@ private:
     std::vector<float> mSourceWhiteLevels;
     std::vector<uint32_t> mSourceInputBitDepths;
     uint32_t mSourceInputBitDepth = 16;
+    std::shared_ptr<const std::vector<uint8_t>> mAudioWav;
 };
 
 } // namespace motioncam

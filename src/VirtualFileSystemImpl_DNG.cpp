@@ -19,6 +19,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <thread>
 #ifdef __linux__
@@ -186,6 +188,27 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         spdlog::info("DNG sequence loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames",
                      mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate,
                      mFrameRateInfo.medianFrameRate, mTotalFrames);
+
+        // Finalized DNG sequences store their audio beside the frames. Carry
+        // that file into the projected sequence just like native MCRAW audio.
+        // Preview-only filesystems do not need to retain the complete track.
+        if (mHasFrameNumberSequence && !mConfig.streamingPreview) {
+            const boost::filesystem::path source(mSrcPath);
+            const auto sourceDirectory = boost::filesystem::is_directory(source)
+                ? source : source.parent_path();
+            const auto audioPath = sourceDirectory / "audio.wav";
+            if (boost::filesystem::is_regular_file(audioPath)) {
+                std::ifstream audio(audioPath.string(), std::ios::binary);
+                std::vector<uint8_t> bytes(
+                    std::istreambuf_iterator<char>(audio), {});
+                if (!audio.eof() && audio.fail())
+                    throw std::runtime_error("Could not read DNG sequence audio: " +
+                                             audioPath.string());
+                if (!bytes.empty())
+                    mAudioWav = std::make_shared<const std::vector<uint8_t>>(
+                        std::move(bytes));
+            }
+        }
     }
     catch (const std::exception& e) {
         spdlog::error("Failed to initialize DNGDecoder: {}", e.what());
@@ -218,6 +241,14 @@ void VirtualFileSystemImpl_DNG::init() {
     }
 
     vfs::appendDesktopIni(mFiles);
+
+    if (mAudioWav) {
+        Entry audioEntry;
+        audioEntry.type = EntryType::FILE_ENTRY;
+        audioEntry.size = mAudioWav->size();
+        audioEntry.name = "audio.wav";
+        mFiles.emplace_back(std::move(audioEntry));
+    }
 
     const auto& frames = mDecoder->getFrames();
     if (frames.empty()) {
@@ -366,12 +397,22 @@ void VirtualFileSystemImpl_DNG::init() {
 }
 
 int VirtualFileSystemImpl_DNG::readPriority(const Entry& entry) const {
-    return mHasFrameNumberSequence ? vfs::outputFrameNumber(entry) : 0;
+    return mHasFrameNumberSequence && boost::ends_with(entry.name, ".dng")
+        ? vfs::outputFrameNumber(entry) : 0;
+}
+
+std::function<std::shared_ptr<std::vector<char>>()>
+VirtualFileSystemImpl_DNG::staticMaterializer(const Entry& entry) {
+    if (entry.name != "audio.wav") return {};
+    return [this, entry] { return materializeFile(entry, false); };
 }
 
 std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
+    if (entry.name == "audio.wav" && mAudioWav)
+        return std::make_shared<std::vector<char>>(mAudioWav->begin(), mAudioWav->end());
+
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         const auto materializeStarted = std::chrono::steady_clock::now();
         spdlog::info("DNG timing [{}]: materialize cache miss started (advertised {:.2f} MiB)",
@@ -856,6 +897,7 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
     info.isSequence = mHasFrameNumberSequence;
+    info.audioWav = mAudioWav;
     if (!mDecoder->getFrames().empty()) {
         DNGFrameMetadata metadata;
         if (mDecoder->getFrameMetadata(0, metadata)) info.orientation = metadata.orientation;
