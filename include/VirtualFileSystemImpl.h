@@ -268,7 +268,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
                       const DngPixelPipelineOptions& options);
 bool decodeProcessedDngPreview(
     const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview,
-    bool gainMapApplied = false);
+    bool gainMapApplied = false, bool retainSourceSamples = false);
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
                  const DngFinalizeOptions& options);

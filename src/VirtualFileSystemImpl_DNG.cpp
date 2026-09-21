@@ -461,7 +461,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
 }
 
 bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
-        const Entry& entry, PreviewFrame& preview) {
+        const Entry& entry, PreviewFrame& preview, bool retainSourceSamples) {
     std::shared_lock renderLock(mRenderMutex);
     const auto timestamp = std::get<Timestamp>(entry.userData);
     const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
@@ -476,6 +476,8 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
     std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
     bool fallbackGainMapApplied = false;
+    preview.rawSamples.reset();
+    preview.rawWidth = preview.rawHeight = preview.rawChannels = 0;
     // Decode the source container once and run the shared in-memory preview
     // processor, including gain-map-only rendering.
     {
@@ -497,6 +499,14 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             // in-memory processor instead of losing it at the DNG boundary.
             image.layout.cfaRepeatSize = prepared.cfaSize;
             image.layout.cfaPhase = prepared.cfaPhase;
+            std::shared_ptr<const std::vector<uint16_t>> sourceSamples;
+            const uint32_t sourceWidth = image.layout.width;
+            const uint32_t sourceHeight = image.layout.height;
+            const uint32_t sourceChannels =
+                image.layout.pixels == DNGPixelLayout::CFA ? 1u : 3u;
+            if (retainSourceSamples)
+                sourceSamples =
+                    std::make_shared<const std::vector<uint16_t>>(image.samples);
             std::vector<utils::ActiveBadPixel> markedPixels;
             const uint32_t markedSourceWidth = image.layout.width;
             const uint32_t markedSourceHeight = image.layout.height;
@@ -558,7 +568,13 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     image.metadata.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
             }
             if (DNGDecoder::decodePreview(
-                    std::move(image), mConfig, preview, true)) {
+                    std::move(image), mConfig, preview, true, false)) {
+                if (retainSourceSamples) {
+                    preview.rawSamples = std::move(sourceSamples);
+                    preview.rawWidth = sourceWidth;
+                    preview.rawHeight = sourceHeight;
+                    preview.rawChannels = sourceChannels;
+                }
                 preview.timestamp = outputTimestamp;
                 if (mConfig.options & RENDER_OPT_BAKE_ISO) {
                     const auto iso = mIsoValues.find(timestamp);
@@ -587,7 +603,8 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     materializeLock.unlock();
     renderLock.unlock();
     try { return vfs::decodeProcessedDngPreview(
-        materializeFile(entry, false), preview, fallbackGainMapApplied); }
+        materializeFile(entry, false), preview, fallbackGainMapApplied,
+        retainSourceSamples); }
     catch (const std::exception&) { return false; }
 }
 

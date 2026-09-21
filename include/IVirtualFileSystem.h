@@ -36,7 +36,8 @@ public:
     virtual std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry,
         bool jpegCompression = false) = 0;
-    virtual bool materializePreviewFrame(const Entry&, PreviewFrame&) = 0;
+    virtual bool materializePreviewFrame(const Entry&, PreviewFrame&,
+                                         bool retainSourceSamples = false) = 0;
 
     virtual void updateOptions(const RenderSettings& settings) = 0;
     virtual FileInfo getFileInfo() const = 0;

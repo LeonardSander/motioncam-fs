@@ -494,6 +494,9 @@ struct FinalizeOptions {
 struct PreviewOptions {
     size_t firstFrame = 0;
     std::function<bool(size_t)> skipFrame;
+    // Preserve unpacked source samples for interactive pixel inspection.
+    // Disabled by default because a source-sized plane can be very large.
+    bool retainSourceSamples = false;
 };
 
 } // namespace

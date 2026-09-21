@@ -2102,6 +2102,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
         try {
             motioncam::PreviewOptions options;
             options.firstFrame = firstFrame;
+            options.retainSourceSamples = !backfillThumbnails;
             options.skipFrame = [playbackTarget,incomingFrame,backfillThumbnails](size_t frame) {
                 if(backfillThumbnails){
                     incomingFrame->store(static_cast<int>(frame));return false;
@@ -2164,7 +2165,10 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         QMetaObject::invokeMethod(this, [&, width, height] {
                             if (mGalleryGeneration.load() != generation) return;
                             if (player) player->presentRgb48Frame(
-                                bytes, static_cast<int>(width), static_cast<int>(height));
+                                bytes, static_cast<int>(width), static_cast<int>(height),
+                                preview.rawSamples, static_cast<int>(preview.rawWidth),
+                                static_cast<int>(preview.rawHeight),
+                                static_cast<int>(preview.rawChannels));
                         }, Qt::BlockingQueuedConnection);
                         presentedFirstFrame = true;
                         if (diagnostics)
@@ -2183,7 +2187,10 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             if (mGalleryGeneration.load() != generation)
                                 pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                             else if (player) pushResult = player->pushRgb48Frame(
-                                bytes, static_cast<int>(width), static_cast<int>(height));
+                                bytes, static_cast<int>(width), static_cast<int>(height),
+                                preview.rawSamples, static_cast<int>(preview.rawWidth),
+                                static_cast<int>(preview.rawHeight),
+                                static_cast<int>(preview.rawChannels));
                             else pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                         }, Qt::BlockingQueuedConnection);
                         if (pushResult == ClipPlayerDialog::FramePushResult::Retry)

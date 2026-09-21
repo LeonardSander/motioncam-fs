@@ -4757,16 +4757,29 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
 bool DNGDecoder::decodePreview(std::vector<uint8_t> dngData,
                                const RenderSettings& settings,
                                PreviewFrame& frame,
-                               bool applyPreviewScale) {
+                               bool applyPreviewScale,
+                               bool retainSourceSamples) {
     DecodedDNGImage image;
     if (!decodeImage(std::move(dngData), image)) return false;
-    return decodePreview(std::move(image), settings, frame, applyPreviewScale);
+    return decodePreview(std::move(image), settings, frame, applyPreviewScale,
+                         retainSourceSamples);
 }
 
 bool DNGDecoder::decodePreview(DecodedDNGImage image,
                                const RenderSettings& settings,
                                PreviewFrame& frame,
-                               bool applyPreviewScale) {
+                               bool applyPreviewScale,
+                               bool retainSourceSamples) {
+    frame.rawSamples.reset();
+    frame.rawWidth = 0;
+    frame.rawHeight = 0;
+    frame.rawChannels = 0;
+    if (retainSourceSamples) {
+        frame.rawWidth = image.layout.width;
+        frame.rawHeight = image.layout.height;
+        frame.rawChannels = image.layout.pixels == DNGPixelLayout::CFA ? 1u : 3u;
+        frame.rawSamples = std::make_shared<const std::vector<uint16_t>>(image.samples);
+    }
     const uint32_t requestedPreviewScale =
         applyPreviewScale && (settings.options & RENDER_OPT_DRAFT)
         ? static_cast<uint32_t>(std::max(1, settings.draftScale)) : 1u;

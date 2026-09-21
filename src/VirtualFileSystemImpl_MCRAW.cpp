@@ -725,13 +725,17 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
 }
 
 bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
-    const Entry& entry, PreviewFrame& preview) {
+    const Entry& entry, PreviewFrame& preview, bool retainSourceSamples) {
     std::shared_lock renderLock(mRenderMutex);
     try {
         const auto timestamp = std::get<Timestamp>(entry.userData);
         const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
         if (frameIt == mFrameIndexByTimestamp.end())
             return false;
+        thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
+        auto& decoder = decoders[mSrcPath];
+        if (!decoder)
+            decoder = std::make_unique<Decoder>(mSrcPath);
         // The direct CameraFrameMetadata path can carry the normal Android lens
         // shading map, but not a deferred OpcodeList3 map or a manual
         // white/gain DNG. Preserve exact finalized ordering for those uncommon
@@ -752,19 +756,47 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
             }
             gainMapApplied = gainMapApplied &&
                 (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+            std::shared_ptr<const std::vector<uint16_t>> sourceSamples;
+            uint32_t sourceWidth = 0, sourceHeight = 0;
+            if (retainSourceSamples) {
+                std::vector<uint8_t> sourceData;
+                nlohmann::json sourceMetadataJson;
+                uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
+                if (mSettings.options & RENDER_OPT_CROPPING)
+                    utils::parseCropTarget(mSettings.cropTarget, cropWidth,
+                                           cropHeight, strideOverride);
+                decoder->loadFrame(timestamp, sourceData, sourceMetadataJson,
+                                   static_cast<int>(strideOverride));
+                const auto sourceMetadata =
+                    CameraFrameMetadata::parse(sourceMetadataJson);
+                const size_t sampleCount =
+                    static_cast<size_t>(sourceMetadata.width) * sourceMetadata.height;
+                if (sourceData.size() >= sampleCount * sizeof(uint16_t)) {
+                    auto samples =
+                        std::make_shared<std::vector<uint16_t>>(sampleCount);
+                    std::memcpy(samples->data(), sourceData.data(),
+                                sampleCount * sizeof(uint16_t));
+                    sourceSamples = std::move(samples);
+                    sourceWidth = sourceMetadata.width;
+                    sourceHeight = sourceMetadata.height;
+                }
+            }
             renderLock.unlock();
             try {
-                return vfs::decodeProcessedDngPreview(
-                    materializeFile(entry, false), preview, gainMapApplied);
+                const bool decoded = vfs::decodeProcessedDngPreview(
+                    materializeFile(entry, false), preview, gainMapApplied,
+                    false);
+                if (decoded && sourceSamples) {
+                    preview.rawSamples = std::move(sourceSamples);
+                    preview.rawWidth = sourceWidth;
+                    preview.rawHeight = sourceHeight;
+                    preview.rawChannels = 1;
+                }
+                return decoded;
             } catch (const std::exception&) {
                 return false;
             }
         }
-        thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
-        auto& decoder = decoders[mSrcPath];
-        if (!decoder)
-            decoder = std::make_unique<Decoder>(mSrcPath);
-
         std::vector<uint8_t> frameData;
         nlohmann::json metadata;
         uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
@@ -795,7 +827,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
                            mSettings, mCalibration, false, exposureOverride,
-                           neutralOverride, &preview);
+                           neutralOverride, &preview, retainSourceSamples);
         preview.gainMapApplied =
             (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
             (mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&

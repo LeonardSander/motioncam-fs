@@ -1212,12 +1212,24 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool compressionEnabled,
     const std::optional<float>& baselineExposureOverride,
     const std::optional<std::array<float, 3>>& asShotNeutralOverride,
-    PreviewFrame* previewFrame)
+    PreviewFrame* previewFrame,
+    bool retainSourceSamples)
 {
     Measure m("generateDng");
 
     unsigned int width = metadata.width;
     unsigned int height = metadata.height;
+
+    if (previewFrame && retainSourceSamples &&
+        data.size() >= static_cast<size_t>(width) * height * sizeof(uint16_t)) {
+        auto samples = std::make_shared<std::vector<uint16_t>>(
+            static_cast<size_t>(width) * height);
+        std::memcpy(samples->data(), data.data(), samples->size() * sizeof(uint16_t));
+        previewFrame->rawSamples = std::move(samples);
+        previewFrame->rawWidth = width;
+        previewFrame->rawHeight = height;
+        previewFrame->rawChannels = 1;
+    }
 
     std::array<uint8_t, 4> cfa;
 

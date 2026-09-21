@@ -181,7 +181,8 @@ public:
         assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
         return std::make_shared<std::vector<char>>(timed.begin(), timed.end());
     }
-    bool materializePreviewFrame(const motioncam::Entry&, motioncam::PreviewFrame&) override {
+    bool materializePreviewFrame(const motioncam::Entry&, motioncam::PreviewFrame&,
+                                 bool = false) override {
         return false;
     }
     bool sourceImagePayloadsEqual(const motioncam::Entry& left,
@@ -798,7 +799,12 @@ int main() {
     std::vector<uint8_t> dng{std::istreambuf_iterator<char>(stream), {}};
     motioncam::PreviewFrame preview;
     assert(motioncam::DNGDecoder::decodePreview(
-        dng, motioncam::RenderSettings{}, preview, false));
+        dng, motioncam::RenderSettings{}, preview, false, true));
+    assert(preview.rawSamples && preview.rawWidth > 0 && preview.rawHeight > 0);
+    assert(motioncam::DNGDecoder::decodePreview(
+        dng, motioncam::RenderSettings{}, preview, false, false));
+    assert(!preview.rawSamples && preview.rawWidth == 0 &&
+           preview.rawHeight == 0 && preview.rawChannels == 0);
     assert(preview.rgb[0] == 0 && preview.rgb[1] == 128);
     motioncam::DNGFrameMetadata metadata;
     assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));

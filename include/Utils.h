@@ -203,7 +203,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool compressionEnabled = false,
     const std::optional<float>& baselineExposureOverride = std::nullopt,
     const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt,
-    PreviewFrame* previewFrame = nullptr);
+    PreviewFrame* previewFrame = nullptr,
+    bool retainSourceSamples = false);
 
 // Draws a centered, outlined ISO label into unpacked 16-bit image samples.
 void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,

@@ -38,7 +38,8 @@ public:
     FileInfo getFileInfo() const override;
     std::shared_ptr<std::vector<char>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
-    bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame) override;
+    bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame,
+                                 bool retainSourceSamples = false) override;
 
 private:
     struct FrameMetadata {

@@ -107,11 +107,13 @@ void PreviewRenderer::render(
             continue;
         }
         PreviewFrame frame;
-        if (!state->filesystem->materializePreviewFrame(entries[index], frame)) {
+        if (!state->filesystem->materializePreviewFrame(
+                entries[index], frame, options.retainSourceSamples)) {
             auto bytes = state->filesystem->materializeFile(entries[index], false);
             if (!bytes) throw std::runtime_error("Failed to render " + entries[index].name);
             std::vector<uint8_t> dng(bytes->begin(), bytes->end());
-            if (!DNGDecoder::decodePreview(std::move(dng), settings, frame))
+            if (!DNGDecoder::decodePreview(std::move(dng), settings, frame, false,
+                                           options.retainSourceSamples))
                 throw std::runtime_error("Could not decode preview " + entries[index].name);
         }
         frameReady(std::move(frame));

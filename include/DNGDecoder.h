@@ -114,14 +114,16 @@ public:
     static bool decodePreview(std::vector<uint8_t> dngData,
                               const RenderSettings& settings,
                               PreviewFrame& frame,
-                              bool applyPreviewScale = false);
+                              bool applyPreviewScale = false,
+                              bool retainSourceSamples = false);
     // Render an already decoded canonical frame. Source adapters use this for
     // gallery playback so shared preprocessing does not require a DNG
     // serialize/parse round trip.
     static bool decodePreview(DecodedDNGImage image,
                               const RenderSettings& settings,
                               PreviewFrame& frame,
-                              bool applyPreviewScale = false);
+                              bool applyPreviewScale = false,
+                              bool retainSourceSamples = false);
     static bool replaceNormalizedRGB16(std::vector<uint8_t>& dngData,
                                        const std::vector<uint8_t>& rgbData,
                                        uint32_t width, uint32_t height);

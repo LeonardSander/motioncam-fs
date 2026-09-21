@@ -1004,7 +1004,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
 }
 
 bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
-        const Entry& entry, PreviewFrame& preview) {
+        const Entry& entry, PreviewFrame& preview, bool retainSourceSamples) {
     std::shared_lock renderLock(mRenderMutex);
     try {
         auto processed = processFrame(entry);
@@ -1106,7 +1106,8 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.timestamp = vfs::outputTimestamp(
             entry, processed.timestamp, mDecoder->getFrames().front().timestamp,
             mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-        return DNGDecoder::decodePreview(std::move(image), mConfig, preview, true);
+        return DNGDecoder::decodePreview(std::move(image), mConfig, preview, true,
+                                         retainSourceSamples);
     } catch (const std::exception&) { return false; }
 }
 

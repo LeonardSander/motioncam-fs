@@ -378,6 +378,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mPlaybackTarget->store(requestedFrame);mIncomingFrame->store(requestedFrame);
     emit currentClipChanged(requestedClip.mountId,requestedSeconds);
     stopDecoder();mBytes.clear();mBytesOffset=0;mFrames.clear();mSubmittedFrames.clear();
+    mPresentedRawFrame={};
     mAudioLoadCancelled->store(true);
     mAudioLoadCancelled=std::make_shared<std::atomic_bool>(false);
     ++mAudioLoadGeneration;mAudioLoading=false;
@@ -851,9 +852,27 @@ void ClipPlayerDialog::updateTitle(){
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     QString view=mZoomPercent>0.0
         ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit");
-    if(mMouseSourcePosition.x()>=0&&mMouseSourcePosition.y()>=0)
+    if(mMouseSourcePosition.x()>=0&&mMouseSourcePosition.y()>=0){
         view+=tr(" — x %1, y %2").arg(mMouseSourcePosition.x())
             .arg(mMouseSourcePosition.y());
+        const auto& raw=mPresentedRawFrame;
+        if(raw.samples&&raw.width>0&&raw.height>0&&
+           (raw.channels==1||raw.channels==3)){
+            const auto& clip=mClips[mIndex];
+            const int nativeWidth=clip.nativeWidth>0?clip.nativeWidth:raw.width;
+            const int nativeHeight=clip.nativeHeight>0?clip.nativeHeight:raw.height;
+            const int x=std::clamp(static_cast<int>(std::floor(
+                (mMouseSourcePosition.x()+0.5)*raw.width/nativeWidth)),0,raw.width-1);
+            const int y=std::clamp(static_cast<int>(std::floor(
+                (mMouseSourcePosition.y()+0.5)*raw.height/nativeHeight)),0,raw.height-1);
+            const size_t offset=(static_cast<size_t>(y)*raw.width+x)*raw.channels;
+            if(offset+raw.channels<=raw.samples->size()){
+                view+=tr(" — intensity %1").arg((*raw.samples)[offset]);
+                for(int channel=1;channel<raw.channels;++channel)
+                    view+=QStringLiteral(", %1").arg((*raw.samples)[offset+channel]);
+            }
+        }
+    }
     mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[mIndex].title)
         .arg(mIndex+1).arg(mClips.size()).arg(view));
 }
@@ -1308,8 +1327,8 @@ void ClipPlayerDialog::consumeOutput(){
           static_cast<int>(mFrames.size())<queueFrames&&!mSubmittedFrames.empty()){
         QImage view(reinterpret_cast<const uchar*>(mBytes.constData()+mBytesOffset),
                     mWidth,mHeight,mWidth*4,QImage::Format_RGBA8888);
-        const int sourceFrame=mSubmittedFrames.front();mSubmittedFrames.pop_front();
-        mFrames.push_back({view.copy(),sourceFrame});
+        SubmittedFrame submitted=std::move(mSubmittedFrames.front());mSubmittedFrames.pop_front();
+        mFrames.push_back({view.copy(),submitted.sourceFrame,std::move(submitted.raw)});
         mBytesOffset+=mFrameBytes;
     }
     if(mBytesOffset==mBytes.size()){mBytes.clear();mBytesOffset=0;}
@@ -1351,12 +1370,14 @@ void ClipPlayerDialog::showNextFrame(){
         }
         const QueuedFrame queued=std::move(mFrames.front());mFrames.pop_front();
         mLastPresentedImage=queued.image;
+        mPresentedRawFrame=queued.raw;
         mWaitingForFirstFrame=false;
         mLastImageIsSource=false;
         mLastSurfaceScale=mDecoderSurfaceScale;
         mLastSurfacePan=mDecoderSurfacePan;
         mLastSurfaceViewportPan=mDecoderSurfaceViewportPan;
         updateDisplayedImage();
+        updateTitle();
         if(!mFirstFrameReady){
             mFirstFrameReady=true;
             emit firstFramePresented(currentMountId());
@@ -1651,7 +1672,9 @@ QImage ClipPlayerDialog::rgb48Thumbnail(const QByteArray& frame,int width,int he
     return image;
 }
 ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
-        const QByteArray& frame,int width,int height){
+        const QByteArray& frame,int width,int height,
+        std::shared_ptr<const std::vector<uint16_t>> rawSamples,
+        int rawWidth,int rawHeight,int rawChannels){
     // Stills are presented directly from the processed RGB48 callback. Feeding
     // them through a timed FFmpeg graph would display the same image twice and
     // can apply the video surface's output aspect ratio to the second copy.
@@ -1665,13 +1688,16 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     // Bound frames accepted by the complete transform pipeline, including
     // data FFmpeg has already consumed from QProcess but not returned yet.
     // bytesToWrite() alone cannot observe that internal backlog.
-    if(mSubmittedFrames.size()>=6)return FramePushResult::Retry;
+    const size_t maximumPending=rawSamples?2u:6u;
+    if(mSubmittedFrames.size()+mFrames.size()>=maximumPending)
+        return FramePushResult::Retry;
     if(mDecoder.bytesToWrite()>qint64(mInputFrameBytes)*2)return FramePushResult::Retry;
     if(mClips[mIndex].isSequence){
         if(width!=mClips[mIndex].width||height!=mClips[mIndex].height||
            frame.size()!=qint64(width)*height*6)return FramePushResult::Stopped;
         if(mDecoder.write(frame)!=frame.size())return FramePushResult::Retry;
-        mSubmittedFrames.push_back(mNextInputFrame);
+        mSubmittedFrames.push_back({mNextInputFrame,
+            {std::move(rawSamples),rawWidth,rawHeight,rawChannels}});
         ++mNextInputFrame;return FramePushResult::Accepted;
     }
     const QImage source=rgb48Image(frame,width,height);if(source.isNull())return FramePushResult::Stopped;
@@ -1680,10 +1706,13 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     QPainter painter(&canvas);painter.drawImage((mWidth-scaled.width())/2,(mHeight-scaled.height())/2,scaled);painter.end();
     const QByteArray bytes(reinterpret_cast<const char*>(canvas.constBits()),canvas.sizeInBytes());
     if(mDecoder.write(bytes)!=bytes.size())return FramePushResult::Retry;
-    mSubmittedFrames.push_back(mNextInputFrame);
+    mSubmittedFrames.push_back({mNextInputFrame,
+        {std::move(rawSamples),rawWidth,rawHeight,rawChannels}});
     ++mNextInputFrame;return FramePushResult::Accepted;
 }
-void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int height){
+void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int height,
+        std::shared_ptr<const std::vector<uint16_t>> rawSamples,
+        int rawWidth,int rawHeight,int rawChannels){
     const bool dimensionsChanged=mIndex>=0&&
         (mClips[mIndex].width!=width||mClips[mIndex].height!=height);
     if(dimensionsChanged&&mClips[mIndex].sourceFrames>1&&mClips[mIndex].isSequence){
@@ -1701,10 +1730,12 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
     if(mIndex>=0&&mClips[mIndex].sourceFrames>1)return;
     const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
     mLastPresentedImage=image;mLastImageIsSource=true;
+    mPresentedRawFrame={std::move(rawSamples),rawWidth,rawHeight,rawChannels};
     mWaitingForFirstFrame=false;
     setDroppedCursorVisible(false);
     setDuplicateCursorVisible(false);
     updateDisplayedImage();
+    updateTitle();
     setCurrentThumbnailFrame(0);
     mFirstFrameReady=true;
     emit firstFramePresented(currentMountId());

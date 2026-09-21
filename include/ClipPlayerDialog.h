@@ -49,8 +49,12 @@ public:
                         std::shared_ptr<const std::vector<bool>> duplicateFrames,
                         std::shared_ptr<const std::vector<int>> sourceFrameToOutput,
                         std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated);
-    FramePushResult pushRgb48Frame(const QByteArray& frame, int width, int height);
-    void presentRgb48Frame(const QByteArray& frame, int width, int height);
+    FramePushResult pushRgb48Frame(const QByteArray& frame, int width, int height,
+        std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
+        int rawWidth = 0, int rawHeight = 0, int rawChannels = 0);
+    void presentRgb48Frame(const QByteArray& frame, int width, int height,
+        std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
+        int rawWidth = 0, int rawHeight = 0, int rawChannels = 0);
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
@@ -71,7 +75,12 @@ protected:
     void keyPressEvent(QKeyEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 private:
-    struct QueuedFrame { QImage image; int sourceFrame=0; };
+    struct RawFrame {
+        std::shared_ptr<const std::vector<uint16_t>> samples;
+        int width=0,height=0,channels=0;
+    };
+    struct SubmittedFrame { int sourceFrame=0; RawFrame raw; };
+    struct QueuedFrame { QImage image; int sourceFrame=0; RawFrame raw; };
     void openClip(int, double startSeconds=0.0); void startDecoder();
     void stopDecoder();
     void decoderFinished(int, QProcess::ExitStatus); void consumeOutput();
@@ -145,7 +154,8 @@ private:
     QByteArray mAudioPcm; QElapsedTimer mAudioClock;
     qint64 mAudioClockBaseMs=0; int mAudioBytesPerSecond=0, mAudioBlockAlign=1;
     QByteArray mBytes; qsizetype mBytesOffset=0;
-    std::deque<QueuedFrame> mFrames; std::deque<int> mSubmittedFrames;
+    std::deque<QueuedFrame> mFrames; std::deque<SubmittedFrame> mSubmittedFrames;
+    RawFrame mPresentedRawFrame;
     QImage mLastPresentedImage;
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
     int mNextInputFrame=0;

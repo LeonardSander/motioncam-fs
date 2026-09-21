@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace motioncam {
@@ -45,6 +46,12 @@ struct DNGFrameMetadata {
 
 struct PreviewFrame {
     std::vector<uint8_t> rgb;
+    // Unmodified unpacked source samples captured before preview scaling,
+    // gain-map application, demosaic, normalization, and colour transforms.
+    std::shared_ptr<const std::vector<uint16_t>> rawSamples;
+    uint32_t rawWidth = 0;
+    uint32_t rawHeight = 0;
+    uint32_t rawChannels = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     DNGFrameMetadata metadata;
