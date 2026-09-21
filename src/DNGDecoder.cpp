@@ -1935,9 +1935,14 @@ bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
     const uint16_t wanted = opcodeList == 3 ? TIFF_TAG_OPCODE_LIST_3 : TIFF_TAG_OPCODE_LIST_2;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
+    const auto primaryIfd = primaryImageIfd(data, entries, little);
+    if (!primaryIfd) return false;
     const TiffEntry* entry = nullptr;
     for (const auto& candidate : entries)
-        if (candidate.tag == wanted) { entry = &candidate; break; }
+        if (candidate.ifdOffset == *primaryIfd && candidate.tag == wanted) {
+            entry = &candidate;
+            break;
+        }
     std::vector<uint8_t> output(4, 0);
     uint32_t outputCount = 0;
     if (entry && entry->count) {
@@ -2043,9 +2048,15 @@ bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
         : opcodeList == 2 ? TIFF_TAG_OPCODE_LIST_2 : TIFF_TAG_OPCODE_LIST_3;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
+    const auto primaryIfd = primaryImageIfd(data, entries, little);
+    if (!primaryIfd) return false;
     const TiffEntry* entry = nullptr;
     for (const auto& candidate : entries)
-        if (candidate.tag == wanted) { entry = &candidate; break; }
+        if (candidate.ifdOffset == *primaryIfd && candidate.tag == wanted) {
+            entry = &candidate;
+            break;
+        }
+    size_t targetEntryOffset = entry ? entry->entryOffset : 0;
     std::vector<uint8_t> output = payload;
     if (entry && entry->count) {
         if (entry->count < 4 || entry->valueOffset > data.size() ||
@@ -2079,52 +2090,26 @@ bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
         return true;
     };
     if (!entry) {
-        const uint32_t oldIfd = read32(data.data() + 4, little);
-        if (oldIfd + 2 > data.size()) return false;
-        const uint16_t oldCount = read16(data.data() + oldIfd, little);
-        const size_t oldEnd = static_cast<size_t>(oldIfd) + 2 +
-            static_cast<size_t>(oldCount) * 12;
-        if (oldEnd + 4 > data.size() ||
-            oldCount == std::numeric_limits<uint16_t>::max()) return false;
-        if (data.size() & 1u) data.push_back(0);
-        const uint32_t newIfd = static_cast<uint32_t>(data.size());
-        const uint16_t newCount = static_cast<uint16_t>(oldCount + 1);
-        data.resize(data.size() + 2 + static_cast<size_t>(newCount) * 12 + 4, 0);
-        std::vector<std::array<uint8_t, 12>> rebuilt;
-        rebuilt.reserve(newCount);
-        for (uint16_t i = 0; i < oldCount; ++i) {
-            std::array<uint8_t, 12> existing{};
-            std::memcpy(existing.data(), data.data() + oldIfd + 2 +
-                        static_cast<size_t>(i) * 12, 12);
-            rebuilt.push_back(existing);
-        }
-        std::array<uint8_t, 12> added{};
-        write16(added.data(), wanted, little);
-        write16(added.data() + 2, TIFF_TYPE_UNDEFINED, little);
-        write32(added.data() + 4, static_cast<uint32_t>(output.size()), little);
-        const uint32_t payloadOffset = static_cast<uint32_t>(data.size());
-        write32(added.data() + 8, payloadOffset, little);
-        rebuilt.push_back(added);
-        std::sort(rebuilt.begin(), rebuilt.end(), [little](const auto& a, const auto& b) {
-            return read16(a.data(), little) < read16(b.data(), little);
-        });
-        write16(data.data() + newIfd, newCount, little);
-        size_t destination = static_cast<size_t>(newIfd) + 2;
-        for (const auto& item : rebuilt) {
-            std::memcpy(data.data() + destination, item.data(), item.size());
-            destination += item.size();
-        }
-        std::memcpy(data.data() + destination, data.data() + oldEnd, 4);
-        write32(data.data() + 4, newIfd, little);
-        data.insert(data.end(), output.begin(), output.end());
-        return requireOpcodeVersion();
+        if (!insertTiffScalarEntry(
+                data, *primaryIfd, wanted, TIFF_TYPE_LONG, 0, little))
+            return false;
+        const auto updatedEntries = findTiffEntries(data, little);
+        const auto updatedPrimary = primaryImageIfd(data, updatedEntries, little);
+        if (!updatedPrimary) return false;
+        for (const auto& candidate : updatedEntries)
+            if (candidate.ifdOffset == *updatedPrimary && candidate.tag == wanted) {
+                targetEntryOffset = candidate.entryOffset;
+                break;
+            }
+        if (!targetEntryOffset) return false;
     }
     if (data.size() & 1u) data.push_back(0);
     const uint32_t offset = static_cast<uint32_t>(data.size());
     data.insert(data.end(), output.begin(), output.end());
-    write32(data.data() + entry->entryOffset + 4,
+    write16(data.data() + targetEntryOffset + 2, TIFF_TYPE_UNDEFINED, little);
+    write32(data.data() + targetEntryOffset + 4,
             static_cast<uint32_t>(output.size()), little);
-    write32(data.data() + entry->entryOffset + 8, offset, little);
+    write32(data.data() + targetEntryOffset + 8, offset, little);
     return requireOpcodeVersion();
 }
 

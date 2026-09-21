@@ -375,6 +375,7 @@ int main() {
     motioncam::vfs::DngFinalizeOptions opcodeFinalize;
     opcodeFinalize.frameRate = 24.0f;
     opcodeFinalize.packToWhiteLevel = true;
+    opcodeFinalize.compression = true;
     motioncam::vfs::finalizeDng(
         finalizedOpcodeCfa, badPixelSettings, opcodeFinalize);
     const auto [finalOpcodeOffset, finalOpcodeBytes] =
