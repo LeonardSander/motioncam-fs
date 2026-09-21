@@ -1583,7 +1583,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     auto* thumbnailContainer = new QWidget(fileWidget);
     thumbnailContainer->setObjectName(QStringLiteral("thumbnailContainer"));
-    thumbnailContainer->setFixedSize(176, 112);
+    thumbnailContainer->setFixedSize(176, 140);
     thumbnailContainer->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     auto* thumbnailLayout = new QHBoxLayout(thumbnailContainer);
     thumbnailLayout->setContentsMargins(0, 0, 0, 0);
@@ -1591,7 +1591,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     auto* thumbnailLabel = new QLabel(tr("Loading..."), thumbnailContainer);
     thumbnailLabel->setObjectName(QStringLiteral("thumbnailLabel"));
-    thumbnailLabel->setFixedSize(176, 112);
+    thumbnailLabel->setFixedSize(176, 140);
     thumbnailLabel->setAlignment(Qt::AlignCenter);
     thumbnailLabel->setStyleSheet("background:#1a1a1a; border:1px solid #333;");
     thumbnailLayout->addWidget(thumbnailLabel);
@@ -4869,7 +4869,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
             if (!guardedLabel) return;
             if (!image.isNull()) {
                 const QPixmap preview = QPixmap::fromImage(image).scaled(
-                    QSize(176, 112), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+                    QSize(176, 140), Qt::KeepAspectRatio, Qt::SmoothTransformation);
                 guardedLabel->setFixedSize(preview.size());
                 guardedLabel->setPixmap(preview);
                 guardedLabel->setProperty("hasThumbnail", true);

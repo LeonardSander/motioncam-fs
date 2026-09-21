@@ -105,6 +105,14 @@ protected:
         QLabel::mousePressEvent(event);
     }
 };
+
+QSize frameThumbnailSize(int width,int height,int orientation){
+    if(width<=0||height<=0)return {176,112};
+    if(orientation==90||orientation==270)std::swap(width,height);
+    const double scale=std::min(176.0/width,112.0/height);
+    return {std::max(1,static_cast<int>(std::floor(width*scale))),
+            std::max(1,static_cast<int>(std::floor(height*scale)))};
+}
 }
 
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
@@ -423,8 +431,10 @@ void ClipPlayerDialog::rebuildThumbnailStrip(){
     const auto& clip=mClips[mIndex];
     const int sourceCount=clip.sourceFrameToOutput
         ?static_cast<int>(clip.sourceFrameToOutput->size()):clip.sourceFrames;
-    constexpr int itemStride=192;
-    mThumbnailContent->setFixedSize(16+sourceCount*itemStride,156);
+    const QSize thumbnailSize=frameThumbnailSize(clip.width,clip.height,clip.orientation);
+    const int itemStride=thumbnailSize.width()+16;
+    mThumbnailContent->setFixedSize(16+sourceCount*itemStride,thumbnailSize.height()+44);
+    mThumbnailScroll->setFixedHeight(thumbnailSize.height()+58);
     updateVisibleThumbnailWidgets();
     QTimer::singleShot(0,this,[this]{centerCurrentThumbnail();});
 }
@@ -432,8 +442,9 @@ void ClipPlayerDialog::rebuildThumbnailStrip(){
 void ClipPlayerDialog::updateVisibleThumbnailWidgets(){
     if(!mThumbnailContent||!mThumbnailScroll||!mThumbnailScroll->isVisible()||
        mIndex<0||mIndex>=mClips.size())return;
-    constexpr int itemStride=192;
     const auto& clip=mClips[mIndex];
+    const QSize thumbnailSize=frameThumbnailSize(clip.width,clip.height,clip.orientation);
+    const int itemStride=thumbnailSize.width()+16;
     const int sourceCount=clip.sourceFrameToOutput
         ?static_cast<int>(clip.sourceFrameToOutput->size()):clip.sourceFrames;
     const int scroll=mThumbnailScroll->horizontalScrollBar()->value();
@@ -451,13 +462,15 @@ void ClipPlayerDialog::updateVisibleThumbnailWidgets(){
             ?(*clip.sourceFrameToOutput)[source]:source;
         const bool dropped=output<0;
         const bool duplicated=clip.sourceFrameDuplicated&&source<static_cast<int>(clip.sourceFrameDuplicated->size())&&(*clip.sourceFrameDuplicated)[source];
-        auto* item=new QWidget(mThumbnailContent);item->setGeometry(8+source*itemStride,7,184,142);
+        auto* item=new QWidget(mThumbnailContent);item->setGeometry(
+            8+source*itemStride,7,thumbnailSize.width()+8,thumbnailSize.height()+30);
         auto* column=new QVBoxLayout(item);column->setContentsMargins(0,0,0,0);column->setSpacing(2);
-        auto* frameBackground=new QWidget(item);frameBackground->setFixedSize(184,120);
+        auto* frameBackground=new QWidget(item);frameBackground->setFixedSize(
+            thumbnailSize.width()+8,thumbnailSize.height()+8);
         frameBackground->setProperty("frameStatusColor",dropped?QColor(235,190,35,60):
             duplicated?QColor(225,45,45,60):QColor(Qt::transparent));
         auto* frameLayout=new QHBoxLayout(frameBackground);frameLayout->setContentsMargins(4,4,4,4);
-        auto* label=new FrameThumbnailLabel(frameBackground);label->setFixedSize(176,112);label->setAlignment(Qt::AlignCenter);
+        auto* label=new FrameThumbnailLabel(frameBackground);label->setFixedSize(thumbnailSize);label->setAlignment(Qt::AlignCenter);
         label->setCursor(Qt::PointingHandCursor);label->setText(dropped?QString():tr("Loading…"));
         const QString color=dropped?QStringLiteral("transparent"):QStringLiteral("rgba(20,20,20,120)");
         label->setStyleSheet(QString("background:%1;border:0;").arg(color));
@@ -499,7 +512,10 @@ void ClipPlayerDialog::refreshThumbnailLabel(int sourceFrame){
         if(!cached.isNull())cacheThumbnail(currentMountId(),sourceFrame,cached,false);
     }
     if(cached.isNull()){label->setPixmap(QPixmap());return;}
-    label->setPixmap(QPixmap::fromImage(cached));label->setText(QString());
+    const QSize insetSize(std::max(1,label->width()-2),std::max(1,label->height()-2));
+    label->setPixmap(QPixmap::fromImage(cached).scaled(
+        insetSize,Qt::KeepAspectRatio,Qt::SmoothTransformation));
+    label->setText(QString());
 }
 
 void ClipPlayerDialog::setCurrentThumbnailFrame(int outputFrame){
@@ -529,7 +545,11 @@ void ClipPlayerDialog::updateCursorStyle(){
 void ClipPlayerDialog::centerCurrentThumbnail(){
     if(!mThumbnailScroll||!mThumbnailScroll->isVisible())return;
     auto* bar=mThumbnailScroll->horizontalScrollBar();
-    const int center=8+mCurrentThumbnailSource*192+92;
+    if(mIndex<0||mIndex>=mClips.size())return;
+    const auto& clip=mClips[mIndex];
+    const int thumbnailWidth=frameThumbnailSize(clip.width,clip.height,clip.orientation).width();
+    const int itemStride=thumbnailWidth+16;
+    const int center=8+mCurrentThumbnailSource*itemStride+(thumbnailWidth+8)/2;
     bar->setValue(std::clamp(center-mThumbnailScroll->viewport()->width()/2,
         bar->minimum(),bar->maximum()));
     updateVisibleThumbnailWidgets();
@@ -1609,9 +1629,8 @@ QImage ClipPlayerDialog::rgb48Thumbnail(const QByteArray& frame,int width,int he
     const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
     const bool swap=orientation==90||orientation==270;
     const int orientedWidth=swap?height:width,orientedHeight=swap?width:height;
-    const double scale=std::min(176.0/orientedWidth,112.0/orientedHeight);
-    const int outputWidth=std::max(1,static_cast<int>(std::floor(orientedWidth*scale)));
-    const int outputHeight=std::max(1,static_cast<int>(std::floor(orientedHeight*scale)));
+    const QSize outputSize=frameThumbnailSize(width,height,orientation);
+    const int outputWidth=outputSize.width(),outputHeight=outputSize.height();
     QImage image(outputWidth,outputHeight,QImage::Format_RGB888);
     const auto* source=reinterpret_cast<const uchar*>(frame.constData());
     for(int y=0;y<outputHeight;++y){
