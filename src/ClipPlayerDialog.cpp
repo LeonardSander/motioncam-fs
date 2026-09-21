@@ -666,6 +666,9 @@ void ClipPlayerDialog::startDecoder(){
     mDecoderSurfaceScale=surfaceScaleForZoom(mZoomPercent);
     mDecoderSurfacePan=mZoomPercent>0.0
         ?effectivePanForZoom(mPanSourcePixels,mZoomPercent):QPointF();
+    // Preserve the requested center independently of the integer source crop.
+    // This is the coordinate used to position retained frames in the viewport.
+    mDecoderSurfaceViewportPan=mZoomPercent>0.0?mPanSourcePixels:QPointF();
     a<<"-an"<<"-vf"<<f<<"-pix_fmt"<<"rgba"<<"-f"<<"rawvideo"<<"pipe:1";mDecoder.setProcessChannelMode(QProcess::SeparateChannels);mDecoder.start(exe,a,QIODevice::ReadWrite);
     updateFrameTimerInterval();mFrameTimer.start();
 }
@@ -807,8 +810,12 @@ void ClipPlayerDialog::adoptRenderedDimensions(int width,int height){
                              mPanSourcePixels.y()*sourceScaleY);
     mLastSurfacePan=QPointF(mLastSurfacePan.x()*sourceScaleX,
                             mLastSurfacePan.y()*sourceScaleY);
+    mLastSurfaceViewportPan=QPointF(mLastSurfaceViewportPan.x()*sourceScaleX,
+                                    mLastSurfaceViewportPan.y()*sourceScaleY);
     mDecoderSurfacePan=QPointF(mDecoderSurfacePan.x()*sourceScaleX,
                                mDecoderSurfacePan.y()*sourceScaleY);
+    mDecoderSurfaceViewportPan=QPointF(mDecoderSurfaceViewportPan.x()*sourceScaleX,
+                                       mDecoderSurfaceViewportPan.y()*sourceScaleY);
     mLastSurfaceScale=QPointF(mLastSurfaceScale.x()/sourceScaleX,
                               mLastSurfaceScale.y()/sourceScaleY);
     mDecoderSurfaceScale=QPointF(mDecoderSurfaceScale.x()/sourceScaleX,
@@ -914,9 +921,8 @@ void ClipPlayerDialog::updateDisplayedImage(){
         const QPointF desiredScale=surfaceScaleForZoom(mZoomPercent);
         const QPointF ratio(desiredScale.x()/std::max(0.0001,mLastSurfaceScale.x()),
                             desiredScale.y()/std::max(0.0001,mLastSurfaceScale.y()));
-        QPointF oldDisplayPan=mLastSurfacePan;
-        QPointF newDisplayPan=mZoomPercent>0.0
-            ?effectivePanForZoom(mPanSourcePixels,mZoomPercent):QPointF();
+        QPointF oldDisplayPan=mLastSurfaceViewportPan;
+        QPointF newDisplayPan=mZoomPercent>0.0?mPanSourcePixels:QPointF();
         const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
         auto orientPan=[orientation](const QPointF& pan){
             if(orientation==90)return QPointF(-pan.y(),pan.x());
@@ -925,17 +931,21 @@ void ClipPlayerDialog::updateDisplayedImage(){
             return pan;
         };
         oldDisplayPan=orientPan(oldDisplayPan);newDisplayPan=orientPan(newDisplayPan);
-        const QSizeF sourceSize(mLastPresentedImage.width()/ratio.x(),
-                                mLastPresentedImage.height()/ratio.y());
-        const QPointF center(mLastPresentedImage.width()/2.0+
-                (newDisplayPan.x()-oldDisplayPan.x())*mLastSurfaceScale.x(),
-            mLastPresentedImage.height()/2.0+
-                (newDisplayPan.y()-oldDisplayPan.y())*mLastSurfaceScale.y());
-        const QRectF source(center.x()-sourceSize.width()/2.0,
-            center.y()-sourceSize.height()/2.0,sourceSize.width(),sourceSize.height());
         QImage canvas(mVideo->size(),QImage::Format_RGB888);canvas.fill(QColor(96,96,96));
+        // Describe the retained frame in viewport pixels instead of deriving a
+        // fractional crop in the frame's original coordinates. Both its size
+        // and placement are integral, so QPainter performs only the intended
+        // frame scaling and cannot add a changing subpixel translation phase.
+        const int frameWidth=std::max(1,qRound(mLastPresentedImage.width()*ratio.x()));
+        const int frameHeight=std::max(1,qRound(mLastPresentedImage.height()*ratio.y()));
+        const QPointF panDelta=newDisplayPan-oldDisplayPan;
+        const int frameX=(canvas.width()-frameWidth)/2-
+            qRound(panDelta.x()*desiredScale.x());
+        const int frameY=(canvas.height()-frameHeight)/2-
+            qRound(panDelta.y()*desiredScale.y());
+        const QRect frameRect(frameX,frameY,frameWidth,frameHeight);
         QPainter painter(&canvas);painter.setRenderHint(QPainter::SmoothPixmapTransform,
-            mZoomPercent<400.0);painter.drawImage(QRectF(canvas.rect()),mLastPresentedImage,source);
+            mZoomPercent<400.0);painter.drawImage(frameRect,mLastPresentedImage);
         painter.end();mVideo->setPixmap(QPixmap::fromImage(canvas));return;
     }
     if(mZoomPercent<=0.0){
@@ -948,18 +958,20 @@ void ClipPlayerDialog::updateDisplayedImage(){
     if(orientation==90)displayPan=QPointF(-mPanSourcePixels.y(),mPanSourcePixels.x());
     else if(orientation==180)displayPan=-mPanSourcePixels;
     else if(orientation==270)displayPan=QPointF(mPanSourcePixels.y(),-mPanSourcePixels.x());
-    const int cropWidth=std::max(1,std::min(mLastPresentedImage.width(),qCeil(mVideo->width()/zoom)));
-    const int cropHeight=std::max(1,std::min(mLastPresentedImage.height(),qCeil(mVideo->height()/zoom)));
-    const int cropX=std::clamp(qRound((mLastPresentedImage.width()-cropWidth)/2.0+displayPan.x()),0,mLastPresentedImage.width()-cropWidth);
-    const int cropY=std::clamp(qRound((mLastPresentedImage.height()-cropHeight)/2.0+displayPan.y()),0,mLastPresentedImage.height()-cropHeight);
     const bool nearest=mZoomPercent>=400.0||
         std::abs(mZoomPercent/100.0-std::round(mZoomPercent/100.0))<0.0001;
     QImage canvas(mVideo->size(),QImage::Format_RGB888);canvas.fill(QColor(96,96,96));
-    const QSizeF scaledSize(cropWidth*zoom,cropHeight*zoom);
-    const QRectF target((canvas.width()-scaledSize.width())/2.0,
-        (canvas.height()-scaledSize.height())/2.0,scaledSize.width(),scaledSize.height());
+    // Stills/source previews use the same viewport-space model as retained
+    // decoder surfaces. Do not quantize a moving crop in source coordinates;
+    // scale the complete frame to an integer viewport extent and move that
+    // extent by an integer number of viewport pixels.
+    const int frameWidth=std::max(1,qRound(mLastPresentedImage.width()*zoom));
+    const int frameHeight=std::max(1,qRound(mLastPresentedImage.height()*zoom));
+    const int frameX=(canvas.width()-frameWidth)/2-qRound(displayPan.x()*zoom);
+    const int frameY=(canvas.height()-frameHeight)/2-qRound(displayPan.y()*zoom);
+    const QRect frameRect(frameX,frameY,frameWidth,frameHeight);
     QPainter painter(&canvas);painter.setRenderHint(QPainter::SmoothPixmapTransform,!nearest);
-    painter.drawImage(target,mLastPresentedImage,QRectF(cropX,cropY,cropWidth,cropHeight));painter.end();
+    painter.drawImage(frameRect,mLastPresentedImage);painter.end();
     mVideo->setPixmap(QPixmap::fromImage(canvas));
 }
 
@@ -1228,6 +1240,7 @@ void ClipPlayerDialog::showNextFrame(){
         mLastImageIsSource=false;
         mLastSurfaceScale=mDecoderSurfaceScale;
         mLastSurfacePan=mDecoderSurfacePan;
+        mLastSurfaceViewportPan=mDecoderSurfaceViewportPan;
         updateDisplayedImage();
         if(!mFirstFrameReady){
             mFirstFrameReady=true;

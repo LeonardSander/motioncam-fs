@@ -160,8 +160,10 @@ private:
     bool mLastImageIsSource=false;
     QPointF mLastSurfaceScale{1.0,1.0};
     QPointF mLastSurfacePan;
+    QPointF mLastSurfaceViewportPan;
     QPointF mDecoderSurfaceScale{1.0,1.0};
     QPointF mDecoderSurfacePan;
+    QPointF mDecoderSurfaceViewportPan;
     bool mPanning=false;
     bool mWaitingForFirstFrame=false;
     QPointF mPanSourcePixels, mLastPanGlobal;
