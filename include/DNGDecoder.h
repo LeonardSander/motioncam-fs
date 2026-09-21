@@ -62,6 +62,9 @@ public:
     static bool setWarpFisheye(std::vector<uint8_t>& dngData,
                                const std::array<double, 4>& coefficients,
                                double centerX, double centerY);
+    static bool setWarpRectilinear(std::vector<uint8_t>& dngData,
+                                   const std::array<double, 4>& coefficients,
+                                   double centerX, double centerY);
     bool getCFAMetadata(int frameNumber, int& repeatSize, std::array<uint8_t, 4>& phase);
     static bool updateMetadata(std::vector<uint8_t>& dngData,
                                const double* baselineExposure,

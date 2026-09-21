@@ -1181,11 +1181,16 @@ std::array<double, 4> fitWarp(const GyroflowLensProfile& profile, Basis basis,
                               double& rms, double& maximum) {
     constexpr size_t samples = 4097;
     const double focal = 0.5 * (profile.fx + profile.fy);
+    // DNG defines the warp bounds in pixel coordinates, from the first pixel
+    // at zero through the last pixel at dimension - 1.  The normalized radius
+    // and optical centre must use those same inclusive bounds.
+    const double lastX = static_cast<double>(profile.width - 1);
+    const double lastY = static_cast<double>(profile.height - 1);
     const double maxDistance = std::max({
         std::hypot(profile.cx, profile.cy),
-        std::hypot(profile.width - profile.cx, profile.cy),
-        std::hypot(profile.cx, profile.height - profile.cy),
-        std::hypot(profile.width - profile.cx, profile.height - profile.cy)});
+        std::hypot(lastX - profile.cx, profile.cy),
+        std::hypot(profile.cx, lastY - profile.cy),
+        std::hypot(lastX - profile.cx, lastY - profile.cy)});
     double normal[4][5]{};
     for (size_t sample = 1; sample < samples; ++sample) {
         const double radius = static_cast<double>(sample) / (samples - 1);
@@ -1242,26 +1247,20 @@ std::optional<GyroflowLensProfile> loadGyroflowLensProfile(
         profile.fy = matrix.at(1).at(1).get<double>();
         profile.cx = matrix.at(0).at(2).get<double>();
         profile.cy = matrix.at(1).at(2).get<double>();
-        if (profile.width <= 0 || profile.height <= 0 || profile.fx <= 0.0 ||
+        if (profile.width <= 1 || profile.height <= 1 || profile.fx <= 0.0 ||
             profile.fy <= 0.0 || coefficients.size() != 4 ||
-            profile.cx < 0.0 || profile.cx > profile.width ||
-            profile.cy < 0.0 || profile.cy > profile.height)
+            profile.cx < 0.0 || profile.cx > profile.width - 1.0 ||
+            profile.cy < 0.0 || profile.cy > profile.height - 1.0)
             throw std::runtime_error("invalid dimensions, camera matrix, or coefficients");
         for (size_t i = 0; i < 4; ++i)
             profile.distortion[i] = coefficients.at(i).get<double>();
-        profile.dngFisheye = fitWarp(profile, [](double radius) {
-            const double theta = std::atan(radius), theta2 = theta * theta;
-            return std::array<double, 4>{theta, theta * theta2,
-                theta * theta2 * theta2, theta * theta2 * theta2 * theta2};
-        }, profile.fisheyeRmsPixels, profile.fisheyeMaxPixels);
         profile.dngRectilinear = fitWarp(profile, [](double radius) {
             const double radius2 = radius * radius;
             return std::array<double, 4>{radius, radius * radius2,
                 radius * radius2 * radius2, radius * radius2 * radius2 * radius2};
         }, profile.rectilinearRmsPixels, profile.rectilinearMaxPixels);
-        spdlog::info("Loaded Gyroflow profile {}: WarpFisheye RMS/max {:.3f}/{:.3f} px, "
-                     "WarpRectilinear RMS/max {:.3f}/{:.3f} px",
-                     path.string(), profile.fisheyeRmsPixels, profile.fisheyeMaxPixels,
+        spdlog::info("Loaded Gyroflow profile {}: WarpRectilinear RMS/max {:.3f}/{:.3f} px",
+                     path.string(),
                      profile.rectilinearRmsPixels, profile.rectilinearMaxPixels);
         return profile;
     } catch (const std::exception& error) {
@@ -1272,9 +1271,10 @@ std::optional<GyroflowLensProfile> loadGyroflowLensProfile(
 
 void applyGyroflowLensProfile(
         std::vector<uint8_t>& dng, const GyroflowLensProfile& profile) {
-    if (!DNGDecoder::setWarpFisheye(dng, profile.dngFisheye,
-            profile.cx / profile.width, profile.cy / profile.height))
-        throw std::runtime_error("Could not attach Gyroflow WarpFisheye opcode");
+    if (!DNGDecoder::setWarpRectilinear(dng, profile.dngRectilinear,
+            profile.cx / (profile.width - 1.0),
+            profile.cy / (profile.height - 1.0)))
+        throw std::runtime_error("Could not attach Gyroflow WarpRectilinear opcode");
 }
 
 void loadSidecar(

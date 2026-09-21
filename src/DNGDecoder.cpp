@@ -2128,9 +2128,12 @@ bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
     return requireOpcodeVersion();
 }
 
-bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
-                                const std::array<double, 4>& coefficients,
-                                double centerX, double centerY) {
+namespace {
+bool setWarpOpcode(std::vector<uint8_t>& data,
+                   const std::array<double, 4>& coefficients,
+                   double centerX, double centerY, uint32_t opcode) {
+    if (opcode != OPCODE_WARP_RECTILINEAR && opcode != OPCODE_WARP_FISHEYE)
+        return false;
     if (!(centerX >= 0.0 && centerX <= 1.0 && centerY >= 0.0 && centerY <= 1.0))
         return false;
     bool little = true;
@@ -2162,12 +2165,17 @@ bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
         if (offset != entry->count) return false;
     }
 
-    appendBE32(output, OPCODE_WARP_FISHEYE);
+    appendBE32(output, opcode);
     appendBE32(output, 0x01030000);
     appendBE32(output, 0);
-    appendBE32(output, 52);
+    const uint32_t parameterBytes = opcode == OPCODE_WARP_RECTILINEAR ? 68 : 52;
+    appendBE32(output, parameterBytes);
     appendBE32(output, 1);
     for (double coefficient : coefficients) appendBEDouble(output, coefficient);
+    if (opcode == OPCODE_WARP_RECTILINEAR) {
+        appendBEDouble(output, 0.0); // Tangential coefficient k_t0.
+        appendBEDouble(output, 0.0); // Tangential coefficient k_t1.
+    }
     appendBEDouble(output, centerX);
     appendBEDouble(output, centerY);
     ++outputCount;
@@ -2237,6 +2245,21 @@ bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
         }
     }
     return true;
+}
+} // namespace
+
+bool DNGDecoder::setWarpFisheye(std::vector<uint8_t>& data,
+                                const std::array<double, 4>& coefficients,
+                                double centerX, double centerY) {
+    return setWarpOpcode(
+        data, coefficients, centerX, centerY, OPCODE_WARP_FISHEYE);
+}
+
+bool DNGDecoder::setWarpRectilinear(std::vector<uint8_t>& data,
+                                    const std::array<double, 4>& coefficients,
+                                    double centerX, double centerY) {
+    return setWarpOpcode(
+        data, coefficients, centerX, centerY, OPCODE_WARP_RECTILINEAR);
 }
 
 bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {

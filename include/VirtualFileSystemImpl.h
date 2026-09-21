@@ -33,10 +33,7 @@ struct GyroflowLensProfile {
     double cx = 0.0;
     double cy = 0.0;
     std::array<double, 4> distortion{};
-    std::array<double, 4> dngFisheye{};
     std::array<double, 4> dngRectilinear{};
-    double fisheyeRmsPixels = 0.0;
-    double fisheyeMaxPixels = 0.0;
     double rectilinearRmsPixels = 0.0;
     double rectilinearMaxPixels = 0.0;
 };

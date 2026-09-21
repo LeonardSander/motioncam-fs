@@ -722,16 +722,46 @@ int main() {
     const auto gyroflow = motioncam::vfs::loadGyroflowLensProfile(
         boost::filesystem::path(gyroflowPath.string()));
     assert(gyroflow);
-    assert(gyroflow->fisheyeRmsPixels < gyroflow->rectilinearRmsPixels);
-    assert(gyroflow->fisheyeRmsPixels < 0.6 && gyroflow->fisheyeMaxPixels < 2.1);
+    assert(gyroflow->rectilinearRmsPixels < 0.8 &&
+        gyroflow->rectilinearMaxPixels < 2.1);
     auto warped = uncompressedA;
     motioncam::vfs::applyGyroflowLensProfile(warped, *gyroflow);
     const auto [opcodeOffset, opcodeBytes] = tagPayload(warped, 51022);
-    assert(opcodeOffset && opcodeBytes == 72);
+    assert(opcodeOffset && opcodeBytes == 88);
     auto be32 = [&](size_t offset) { return static_cast<uint32_t>(warped[offset] << 24 |
         warped[offset + 1] << 16 | warped[offset + 2] << 8 | warped[offset + 3]); };
-    assert(be32(opcodeOffset) == 1 && be32(opcodeOffset + 4) == 2);
-    assert(be32(opcodeOffset + 8) == 0x01030000 && be32(opcodeOffset + 16) == 52);
+    auto beDouble = [&](size_t offset) {
+        uint64_t bits = 0;
+        for (size_t i = 0; i < 8; ++i) bits = bits << 8 | warped[offset + i];
+        double value = 0.0;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    };
+    assert(be32(opcodeOffset) == 1 && be32(opcodeOffset + 4) == 1);
+    assert(be32(opcodeOffset + 8) == 0x01030000 && be32(opcodeOffset + 16) == 68);
+    assert(be32(opcodeOffset + 20) == 1);
+    for (size_t i = 0; i < gyroflow->dngRectilinear.size(); ++i)
+        assert(std::abs(beDouble(opcodeOffset + 24 + i * 8) -
+            gyroflow->dngRectilinear[i]) < 1e-15);
+    assert(beDouble(opcodeOffset + 56) == 0.0);
+    assert(beDouble(opcodeOffset + 64) == 0.0);
+    assert(std::abs(beDouble(opcodeOffset + 72) -
+        gyroflow->cx / (gyroflow->width - 1.0)) < 1e-15);
+    assert(std::abs(beDouble(opcodeOffset + 80) -
+        gyroflow->cy / (gyroflow->height - 1.0)) < 1e-15);
+    auto fisheyeWarped = uncompressedA;
+    assert(motioncam::DNGDecoder::setWarpFisheye(fisheyeWarped,
+        {1.0, 0.1, -0.01, 0.001}, gyroflow->cx / (gyroflow->width - 1.0),
+        gyroflow->cy / (gyroflow->height - 1.0)));
+    const auto [fisheyeOffset, fisheyeBytes] = tagPayload(fisheyeWarped, 51022);
+    assert(fisheyeOffset && fisheyeBytes == 72);
+    auto fisheyeBe32 = [&](size_t offset) {
+        return static_cast<uint32_t>(fisheyeWarped[offset] << 24 |
+            fisheyeWarped[offset + 1] << 16 | fisheyeWarped[offset + 2] << 8 |
+            fisheyeWarped[offset + 3]);
+    };
+    assert(fisheyeBe32(fisheyeOffset) == 1 && fisheyeBe32(fisheyeOffset + 4) == 2);
+    assert(fisheyeBe32(fisheyeOffset + 16) == 52);
     std::ofstream(root / "rife" / "inference_img.py") << "# protocol double\n";
     FakeFileSystem filesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
