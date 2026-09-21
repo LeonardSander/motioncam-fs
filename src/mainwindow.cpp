@@ -5378,7 +5378,6 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
                         .arg(sourcePath, jsonPath));
                 return;
             }
-            updateCalibrationButtonStates();
             reloadCalibration(fileWidget);
             return;
         }
@@ -5441,8 +5440,6 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     outFile << jsonContent;
     outFile.close();
 
-    // Update button states
-    updateCalibrationButtonStates();
     // Reload the newly-created sidecar for any already-mounted clip.
     reloadCalibration(fileWidget);
 }
@@ -5457,8 +5454,30 @@ void MainWindow::reloadCalibration(QWidget* fileWidget) {
     // create a local settings override for the currently selected clip.
     mFuseFilesystem->updateOptions(
         mountId, mLocalSettings.value(mountId, mGlobalRenderSettings));
+
+    // FileInfo (including sidecar validity) is rebuilt by updateOptions.  Read
+    // it only after the reload so Create JSON and the clickable Loaded/Ignored
+    // status immediately reflect the file that was just written or edited.
+    updateCalibrationButtonStates();
     updateThumbnail(mountId);
     updateFpsLabels();
+
+    // A settings change reaches onProcessingFinished(), which refreshes an
+    // open per-clip player.  Sidecar-only changes must do the same even though
+    // the RenderSettings themselves did not change.
+    if (mClipPlayer && mGalleryMountId == mountId) {
+        if (const auto info = mFuseFilesystem->getFileInfo(mountId)) {
+            const double fps = info->isSequence && info->fps > 0.0f ? info->fps : 1.0;
+            const int frames = std::max(1, info->totalFrames - info->droppedFrames +
+                info->duplicatedFrames);
+            const double duration = info->runtimeSeconds > 0.0f
+                ? info->runtimeSeconds : frames / fps;
+            mClipPlayer->updateClipInfo(mountId, fps, duration, frames,
+                info->width, info->height, info->duplicateFrameMask,
+                info->sourceFrameToOutput, info->sourceFrameDuplicated);
+        }
+        mClipPlayer->reloadCurrentClip();
+    }
 }
 
 void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
