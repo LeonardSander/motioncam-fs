@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 #include <array>
+#include <cstdint>
 #include <string>
 #include <optional>
 #include <vector>
@@ -30,6 +31,8 @@ struct CalibrationData {
     std::array<float, 9> forwardMatrix2;
     std::array<float, 9> cameraCalibration1;
     std::array<float, 9> cameraCalibration2;
+    uint16_t calibrationIlluminant1 = 0;
+    uint16_t calibrationIlluminant2 = 0;
     std::array<float, 3> asShotNeutral;
     std::string cfaPhase;  // Bayer pattern: "bggr", "rggb", "grbg", "gbrg"
     std::string dataLevels = "Auto";  // DirectLog: "Auto", "Full", or "Limited"
@@ -46,6 +49,8 @@ struct CalibrationData {
     bool hasForwardMatrix2 = false;
     bool hasCameraCalibration1 = false;
     bool hasCameraCalibration2 = false;
+    bool hasCalibrationIlluminant1 = false;
+    bool hasCalibrationIlluminant2 = false;
     bool hasAsShotNeutral = false;
     bool hasDataLevels = false;
     bool hasLevels = false;

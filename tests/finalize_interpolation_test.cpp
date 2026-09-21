@@ -608,6 +608,8 @@ int main() {
                                       0.0f, 0.1f, 0.9f};
     matrixOverrides.hasColorMatrix1 = true;
     matrixOverrides.hasForwardMatrix2 = true;
+    matrixOverrides.calibrationIlluminant1 = 23;
+    matrixOverrides.calibrationIlluminant2 = 17;
     assert(motioncam::DNGDecoder::updateColorMatrices(
         matrixOverrideDng, matrixOverrides));
     motioncam::DNGFrameMetadata insertedMatrices;
@@ -616,6 +618,8 @@ int main() {
     assert(insertedMatrices.hasColorMatrix1 && insertedMatrices.hasForwardMatrix2);
     assert(std::abs(insertedMatrices.colorMatrix1[0] - 1.1f) < 0.0001f);
     assert(std::abs(insertedMatrices.forwardMatrix2[7] - 0.1f) < 0.0001f);
+    assert(insertedMatrices.calibrationIlluminant1 == 23);
+    assert(insertedMatrices.calibrationIlluminant2 == 17);
     assert(setTagType(matrixOverrideDng, 50721, 5));
     matrixOverrides.colorMatrix1[0] = 1.2f;
     matrixOverrides.hasForwardMatrix2 = false;

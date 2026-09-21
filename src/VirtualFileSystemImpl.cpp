@@ -1067,6 +1067,8 @@ bool applyManualDngMetadata(std::vector<uint8_t>& dng,
         if (jsonOverride->hasColorMatrix2) excluded.push_back(50722);
         if (jsonOverride->hasCameraCalibration1) excluded.push_back(50723);
         if (jsonOverride->hasCameraCalibration2) excluded.push_back(50724);
+        if (jsonOverride->hasCalibrationIlluminant1) excluded.push_back(50778);
+        if (jsonOverride->hasCalibrationIlluminant2) excluded.push_back(50779);
         if (jsonOverride->hasAsShotNeutral) excluded.push_back(50728);
         if (jsonOverride->hasForwardMatrix1) excluded.push_back(50964);
         if (jsonOverride->hasForwardMatrix2) excluded.push_back(50965);
@@ -1112,9 +1114,11 @@ void mergeManualDngMetadata(DNGFrameMetadata& metadata,
         metadata.asShotNeutral = sidecar.asShotNeutral;
         metadata.hasAsShotNeutral = true;
     }
-    if (!metadata.calibrationIlluminant1)
+    if (!(jsonOverride && jsonOverride->hasCalibrationIlluminant1) &&
+        !metadata.calibrationIlluminant1)
         metadata.calibrationIlluminant1 = sidecar.calibrationIlluminant1;
-    if (!metadata.calibrationIlluminant2)
+    if (!(jsonOverride && jsonOverride->hasCalibrationIlluminant2) &&
+        !metadata.calibrationIlluminant2)
         metadata.calibrationIlluminant2 = sidecar.calibrationIlluminant2;
     if (metadata.uniqueCameraModel.empty())
         metadata.uniqueCameraModel = sidecar.uniqueCameraModel;

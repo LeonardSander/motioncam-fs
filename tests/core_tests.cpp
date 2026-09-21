@@ -34,6 +34,21 @@ int main() {
     assert(exampleCalibration.contains("_dng_gainmap"));
     assert(exampleCalibration.contains("_gyroflow"));
     assert(exampleCalibration.value("_ignoreForwardMat", true) == false);
+    assert(exampleCalibration.value("_orientation", -1) == 0);
+    assert(exampleCalibration.value("_calibrationIlluminant1", 0) == 21);
+    assert(exampleCalibration.value("_calibrationIlluminant2", 0) == 17);
+
+    const auto metadataOverrides = CalibrationData::parse(std::string(R"({
+        "orientation":270,
+        "calibrationIlluminant1":23,
+        "calibrationIlluminant2":17
+    })"));
+    assert(metadataOverrides && metadataOverrides->hasOrientation &&
+           metadataOverrides->orientation == 270);
+    assert(metadataOverrides->hasCalibrationIlluminant1 &&
+           metadataOverrides->calibrationIlluminant1 == 23);
+    assert(metadataOverrides->hasCalibrationIlluminant2 &&
+           metadataOverrides->calibrationIlluminant2 == 17);
 
     const auto renderOverrides = CalibrationData::parse(std::string(R"({
         "levels":"4095/64,65,66",

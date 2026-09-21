@@ -552,6 +552,10 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     image.metadata.asShotNeutral = mCalibration->asShotNeutral;
                     image.metadata.hasAsShotNeutral = true;
                 }
+                if (mCalibration->hasCalibrationIlluminant1)
+                    image.metadata.calibrationIlluminant1 = mCalibration->calibrationIlluminant1;
+                if (mCalibration->hasCalibrationIlluminant2)
+                    image.metadata.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
             }
             if (DNGDecoder::decodePreview(
                     std::move(image), mConfig, preview, true)) {
@@ -634,6 +638,10 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         overrides.hasForwardMatrix2 = mCalibration->hasForwardMatrix2;
         overrides.hasCameraCalibration1 = mCalibration->hasCameraCalibration1;
         overrides.hasCameraCalibration2 = mCalibration->hasCameraCalibration2;
+        if (mCalibration->hasCalibrationIlluminant1)
+            overrides.calibrationIlluminant1 = mCalibration->calibrationIlluminant1;
+        if (mCalibration->hasCalibrationIlluminant2)
+            overrides.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
         if (!DNGDecoder::updateColorMatrices(result.dng, overrides))
             throw std::runtime_error("Could not apply JSON color-matrix override");
         if (mCalibration->hasAsShotNeutral && !DNGDecoder::updateMetadata(

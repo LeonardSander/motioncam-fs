@@ -1591,9 +1591,13 @@ std::shared_ptr<std::vector<char>> generateDng(
         }
       }
       color.calibrationIlluminant1 =
-          getColorIlluminant(cameraConfiguration.colorIlluminant1);
+          calibration && calibration->hasCalibrationIlluminant1
+              ? calibration->calibrationIlluminant1
+              : getColorIlluminant(cameraConfiguration.colorIlluminant1);
       color.calibrationIlluminant2 =
-          getColorIlluminant(cameraConfiguration.colorIlluminant2);
+          calibration && calibration->hasCalibrationIlluminant2
+              ? calibration->calibrationIlluminant2
+              : getColorIlluminant(cameraConfiguration.colorIlluminant2);
       auto sourceOrientation = [&]() {
         switch (metadata.orientation) {
         case ScreenOrientation::PORTRAIT:
@@ -1903,8 +1907,12 @@ std::shared_ptr<std::vector<char>> generateDng(
         outputNeutral[color] *= gainMapNeutralScale[color];
     dng.SetAsShotNeutral(3, outputNeutral.data());
 
-    dng.SetCalibrationIlluminant1(getColorIlluminant(cameraConfiguration.colorIlluminant1));
-    dng.SetCalibrationIlluminant2(getColorIlluminant(cameraConfiguration.colorIlluminant2));
+    dng.SetCalibrationIlluminant1(calibration && calibration->hasCalibrationIlluminant1
+        ? calibration->calibrationIlluminant1
+        : getColorIlluminant(cameraConfiguration.colorIlluminant1));
+    dng.SetCalibrationIlluminant2(calibration && calibration->hasCalibrationIlluminant2
+        ? calibration->calibrationIlluminant2
+        : getColorIlluminant(cameraConfiguration.colorIlluminant2));
 
     if (metadata.hasNoiseProfile)
         dng.SetNoiseProfile(metadata.noiseProfile.data());

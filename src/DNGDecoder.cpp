@@ -2777,6 +2777,27 @@ bool DNGDecoder::updateColorMatrices(std::vector<uint8_t>& data,
         // than stopping after whichever IFD findTiffEntries() returned first.
         if (written == 0) return false;
     }
+    const std::array<std::pair<uint16_t, uint16_t>, 2> illuminants{{
+        {TIFF_TAG_CALIBRATION_ILLUMINANT_1, overrides.calibrationIlluminant1},
+        {TIFF_TAG_CALIBRATION_ILLUMINANT_2, overrides.calibrationIlluminant2}}};
+    for (const auto& [tag, value] : illuminants) {
+        if (!value) continue;
+        bool written = false;
+        for (const auto& entry : entries) {
+            if (entry.tag != tag || entry.type != TIFF_TYPE_SHORT || !entry.count) continue;
+            write16(data.data() + entry.valueOffset, value, little);
+            written = true;
+        }
+        if (written) continue;
+        DNGSidecarMetadataEntry entry;
+        entry.tag = tag;
+        entry.type = TIFF_TYPE_SHORT;
+        entry.count = 1;
+        entry.value.resize(2);
+        write16(entry.value.data(), value, true);
+        if (!fillMissingSidecarMetadata(data, {entry})) return false;
+        entries = findTiffEntries(data, little);
+    }
     return true;
 }
 

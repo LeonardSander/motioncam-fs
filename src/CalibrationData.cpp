@@ -1,6 +1,7 @@
 #include "CalibrationData.h"
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <cctype>
 #include <spdlog/spdlog.h>
@@ -192,6 +193,21 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
             data.cameraCalibration2 = parseArray<float, 9>(value);
             data.hasCameraCalibration2 = true;
         });
+        auto parseIlluminant = [&](const char* name, uint16_t& illuminant, bool& present) {
+            parseField(name, [&](const auto& value) {
+                if (!value.is_number_integer())
+                    throw std::invalid_argument(std::string(name) + " must be an integer");
+                const int parsed = value.template get<int>();
+                if (parsed <= 0 || parsed > std::numeric_limits<uint16_t>::max())
+                    throw std::invalid_argument(std::string(name) + " must be between 1 and 65535");
+                illuminant = static_cast<uint16_t>(parsed);
+                present = true;
+            });
+        };
+        parseIlluminant("calibrationIlluminant1", data.calibrationIlluminant1,
+                        data.hasCalibrationIlluminant1);
+        parseIlluminant("calibrationIlluminant2", data.calibrationIlluminant2,
+                        data.hasCalibrationIlluminant2);
         
         parseField("asShotNeutral", [&](const auto& value) {
             data.asShotNeutral = parseArray<float, 3>(value);
@@ -374,6 +390,7 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
         if (data.hasColorMatrix1 || data.hasColorMatrix2 ||
             data.hasForwardMatrix1 || data.hasForwardMatrix2 ||
             data.hasCameraCalibration1 || data.hasCameraCalibration2 ||
+            data.hasCalibrationIlluminant1 || data.hasCalibrationIlluminant2 ||
             data.hasAsShotNeutral || data.hasDataLevels || data.hasLevels ||
             data.hasCenterCrop || data.hasLeftTopCropStride || data.hasCfaSize ||
             data.hasNeedGainMapOrderFixed || data.hasFullSensorResolution || data.hasBadPixels ||
@@ -400,8 +417,11 @@ std::string CalibrationData::createExampleJson() {
   "_colorMatrix2": [0.9329, -0.3914, -0.0326, -0.5806, 1.4092, 0.1827, -0.0913, 0.1761, 0.5872],
   "_forwardMatrix1": [0.6484, 0.2734, 0.0469, 0.2344, 0.8984, -0.1328, 0.0469, -0.1797, 0.9609],
   "_forwardMatrix2": [0.6875, 0.1563, 0.125, 0.2734, 0.7578, -0.0313, 0.0859, -0.4688, 1.2109],
+  "_calibrationIlluminant1": 21,
+  "_calibrationIlluminant2": 17,
   "_ignoreForwardMat": false,
   "_asShotNeutral": [0.5, 1.0, 0.5],
+  "_orientation": 0,
   "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
   "_cfaPhase": "bggr",
   "_comment5": "DirectLog input levels: Auto uses video metadata; Full or Limited overrides it per clip",

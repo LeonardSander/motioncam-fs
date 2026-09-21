@@ -670,12 +670,16 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             const bool hasMatrix2 = (color2 && !isIdentityMatrix(*color2)) ||
                 (forward2 && !isIdentityMatrix(*forward2)) || includeCamera2;
             if (hasMatrix1) {
-                dng.SetCalibrationIlluminant1(sourceMetadata && sourceMetadata->calibrationIlluminant1
+                dng.SetCalibrationIlluminant1(mCalibration->hasCalibrationIlluminant1
+                    ? mCalibration->calibrationIlluminant1
+                    : sourceMetadata && sourceMetadata->calibrationIlluminant1
                     ? sourceMetadata->calibrationIlluminant1
                     : mSidecarMetadata.value("calibrationIlluminant1", 21));
             }
             if (hasMatrix2) {
-                dng.SetCalibrationIlluminant2(sourceMetadata && sourceMetadata->calibrationIlluminant2
+                dng.SetCalibrationIlluminant2(mCalibration->hasCalibrationIlluminant2
+                    ? mCalibration->calibrationIlluminant2
+                    : sourceMetadata && sourceMetadata->calibrationIlluminant2
                     ? sourceMetadata->calibrationIlluminant2
                     : mSidecarMetadata.value("calibrationIlluminant2", 17));
             }
@@ -1061,6 +1065,10 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             image.metadata, mManualVignetteSidecars,
             mCalibration ? &*mCalibration : nullptr);
         if (mCalibration) {
+            if (mCalibration->hasCalibrationIlluminant1)
+                image.metadata.calibrationIlluminant1 = mCalibration->calibrationIlluminant1;
+            if (mCalibration->hasCalibrationIlluminant2)
+                image.metadata.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
             if (mCalibration->hasColorMatrix1) {
                 image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
                 image.metadata.hasColorMatrix1 = true;
