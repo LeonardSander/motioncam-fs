@@ -658,6 +658,20 @@ int main() {
         motioncam::QuadBayerMode::Demosaic, false, 1, false, true));
     assert(tiffTagValue(binned, 262) == 34892);
     assert(tiffTagValue(binned, 277) == 3);
+
+    // Gallery binning is an explicit image operation. A draft proxy must be
+    // applied in addition to it, rather than treating the bin as satisfying
+    // the requested proxy scale.
+    motioncam::RenderSettings binnedGallerySettings;
+    binnedGallerySettings.options = motioncam::RENDER_OPT_DRAFT;
+    binnedGallerySettings.draftScale = 2;
+    binnedGallerySettings.quadBayerOption = motioncam::QuadBayerMode::Binning;
+    motioncam::PreviewFrame binnedGalleryFrame;
+    assert(motioncam::DNGDecoder::decodePreview(
+        processBytes, binnedGallerySettings, binnedGalleryFrame, true));
+    assert(binnedGalleryFrame.width == higherWidth / 4);
+    assert(binnedGalleryFrame.height == higherHeight / 4);
+
     auto partialEightBin = processBytes;
     assert(motioncam::DNGDecoder::processHigherCFA(
         partialEightBin, 8, phase, motioncam::QuadBayerMode::Bin8x8To4x4,
@@ -666,6 +680,18 @@ int main() {
     assert(tiffTagValue(partialEightBin, 257) == higherHeight / 2);
     assert(tiffTagValue(partialEightBin, 262) == 32803);
     assert(tiffTagValue(partialEightBin, 33421) == 4);
+    auto galleryEightSource = processBytes;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        galleryEightSource, 8, phase,
+        motioncam::QuadBayerMode::CorrectQBCFAMetadata, false, 1, false));
+    motioncam::RenderSettings partialBinGallerySettings;
+    partialBinGallerySettings.quadBayerOption =
+        motioncam::QuadBayerMode::Bin8x8To4x4;
+    motioncam::PreviewFrame partialBinGalleryFrame;
+    assert(motioncam::DNGDecoder::decodePreview(
+        galleryEightSource, partialBinGallerySettings, partialBinGalleryFrame, true));
+    assert(partialBinGalleryFrame.width == higherWidth / 2);
+    assert(partialBinGalleryFrame.height == higherHeight / 2);
     auto hqRemosaic = processBytes;
     assert(motioncam::DNGDecoder::processHigherCFA(
         hqRemosaic, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,

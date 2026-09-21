@@ -4716,6 +4716,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     uint32_t gainMapSourceScale = 1;
     uint32_t remainingPreviewScale = requestedPreviewScale;
     const bool hasCrop = !settings.cropTarget.empty() && settings.cropTarget != "0x0";
+    const bool explicitBinning =
+        settings.quadBayerOption == QuadBayerMode::Binning ||
+        settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
     // HQ-off higher-CFA output first combines each same-colour sensor block
     // into ordinary Bayer. Do that before gain-map traversal and demosaic so a
     // 108 MP Quad Bayer frame does not run either operation at 108 MP. The
@@ -4723,10 +4726,14 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (applyPreviewScale && !hasCrop &&
         image.layout.pixels == DNGPixelLayout::CFA &&
         image.layout.cfaRepeatSize > 2 &&
-        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
+        (!(settings.options & RENDER_OPT_HIGHER_CFA_HQ) || explicitBinning) &&
         !(settings.options & RENDER_OPT_REMOSAIC_TO_BAYER)) {
-        const uint32_t topologyScale = static_cast<uint32_t>(
-            std::max(1, image.layout.cfaRepeatSize / 2));
+        const uint32_t topologyScale =
+            settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+                    image.layout.cfaRepeatSize == 8
+                ? 2u
+                : static_cast<uint32_t>(
+                    std::max(1, image.layout.cfaRepeatSize / 2));
         std::vector<uint16_t> binned;
         uint32_t binnedWidth = 0, binnedHeight = 0;
         utils::binHigherCFA(image.samples, binned,
@@ -4736,9 +4743,12 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         image.samples = std::move(binned);
         image.layout.width = binnedWidth;
         image.layout.height = binnedHeight;
-        image.layout.cfaRepeatSize = 2;
+        image.layout.cfaRepeatSize /= static_cast<int>(topologyScale);
         gainMapSourceScale = topologyScale;
-        if (remainingPreviewScale > 1)
+        // A selected binning mode is part of the requested gallery rendering,
+        // not a substitute for its proxy scale. Only the implicit fast
+        // higher-CFA topology reduction contributes toward that scale.
+        if (!explicitBinning && remainingPreviewScale > 1)
             remainingPreviewScale = std::max(1u,
                 remainingPreviewScale / topologyScale);
     }
@@ -4789,7 +4799,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (image.layout.pixels == DNGPixelLayout::CFA) {
         int repeatSize = image.layout.cfaRepeatSize;
         const bool highQuality = settings.options & RENDER_OPT_HIGHER_CFA_HQ;
-        if (!highQuality && repeatSize > 2) {
+        if (!highQuality && !explicitBinning && repeatSize > 2) {
             std::vector<uint16_t> binned;
             uint32_t binnedWidth = 0, binnedHeight = 0;
             utils::binHigherCFA(image.samples, binned, width, height,
