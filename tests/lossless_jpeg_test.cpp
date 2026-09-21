@@ -938,6 +938,34 @@ int main() {
     assert(scalarLuminanceMaps.size() == 1);
     assert(scalarLuminanceMaps.front().data == luminanceMaps.front().data);
 
+    // With color reduction, normalize the baked color correction and the
+    // deferred luminance correction independently.
+    std::vector<uint8_t> normalizedColorBaked(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        normalizedColorBaked, true, true));
+    std::vector<motioncam::GainMap> normalizedBakedLuminance;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        normalizedColorBaked, 3, normalizedBakedLuminance));
+    float normalizedBakedLuminanceMaximum = 0.0f;
+    for (const float gain : normalizedBakedLuminance.front().data)
+        normalizedBakedLuminanceMaximum = std::max(
+            normalizedBakedLuminanceMaximum, gain);
+    assert(std::abs(normalizedBakedLuminanceMaximum - 1.0f) < 1e-6f);
+
+    // A previously reduced DNG can contain only deferred luminance. It must
+    // still honor normalization when no OpcodeList2 color maps remain.
+    std::vector<uint8_t> normalizedLuminanceOnly = colorBaked;
+    assert(motioncam::DNGDecoder::transformGainMaps(
+        normalizedLuminanceOnly, true, true, false));
+    std::vector<motioncam::GainMap> normalizedLuminanceOnlyMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        normalizedLuminanceOnly, 3, normalizedLuminanceOnlyMaps));
+    float normalizedLuminanceOnlyMaximum = 0.0f;
+    for (const float gain : normalizedLuminanceOnlyMaps.front().data)
+        normalizedLuminanceOnlyMaximum = std::max(
+            normalizedLuminanceOnlyMaximum, gain);
+    assert(std::abs(normalizedLuminanceOnlyMaximum - 1.0f) < 1e-6f);
+
     // Color-only baking must leave an already deferred luminance map alone.
     const auto colorOnlyLuminance = colorBaked;
     std::vector<uint8_t> colorOnlyAgain = colorOnlyLuminance;
@@ -1013,6 +1041,50 @@ int main() {
     const std::string fourGainDng = fourGainOutput.str();
     std::vector<uint8_t> fourGainBytes(fourGainDng.begin(), fourGainDng.end());
     assert(motioncam::DNGDecoder::repairGainMapCfaPhase(fourGainBytes, true));
+    std::vector<uint8_t> normalizedOutputGainMaps = fourGainBytes;
+    assert(motioncam::DNGDecoder::transformGainMaps(
+        normalizedOutputGainMaps, true, false, false));
+    std::vector<motioncam::GainMap> normalizedMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        normalizedOutputGainMaps, 2, normalizedMaps));
+    float normalizedMaximum = 0.0f;
+    for (const auto& map : normalizedMaps)
+        for (const float gain : map.data)
+            normalizedMaximum = std::max(normalizedMaximum, gain);
+    assert(std::abs(normalizedMaximum - 1.0f) < 1e-6f);
+
+    std::vector<uint8_t> normalizedReducedOutputGainMaps = fourGainBytes;
+    assert(motioncam::DNGDecoder::transformGainMaps(
+        normalizedReducedOutputGainMaps, true, true, false));
+    std::vector<motioncam::GainMap> normalizedOutputColor;
+    std::vector<motioncam::GainMap> normalizedOutputLuminance;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        normalizedReducedOutputGainMaps, 2, normalizedOutputColor));
+    assert(motioncam::DNGDecoder::getGainMaps(
+        normalizedReducedOutputGainMaps, 3, normalizedOutputLuminance));
+    auto maximumGain = [](const std::vector<motioncam::GainMap>& maps) {
+        float maximum = 0.0f;
+        for (const auto& map : maps)
+            for (const float gain : map.data)
+                maximum = std::max(maximum, gain);
+        return maximum;
+    };
+    assert(std::abs(maximumGain(normalizedOutputColor) - 1.0f) < 1e-6f);
+    assert(std::abs(maximumGain(normalizedOutputLuminance) - 1.0f) < 1e-6f);
+
+    // Existing deferred luminance and newly separated luminance represent one
+    // multiplicative correction. Merge them before normalizing the result.
+    std::vector<uint8_t> normalizedCombinedOutput = fourGainBytes;
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        normalizedCombinedOutput, 3, {existingLuminance}));
+    assert(motioncam::DNGDecoder::transformGainMaps(
+        normalizedCombinedOutput, true, true, false));
+    std::vector<motioncam::GainMap> normalizedCombinedLuminance;
+    assert(motioncam::DNGDecoder::getGainMaps(
+        normalizedCombinedOutput, 3, normalizedCombinedLuminance));
+    assert(normalizedCombinedLuminance.size() == 1);
+    assert(std::abs(maximumGain(normalizedCombinedLuminance) - 1.0f) < 1e-6f);
+
     assert(motioncam::DNGDecoder::transformGainMaps(fourGainBytes, false, true, false));
     std::vector<motioncam::GainMap> retainedColorMaps, retainedLuminanceMaps;
     assert(motioncam::DNGDecoder::getGainMaps(

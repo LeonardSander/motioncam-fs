@@ -239,16 +239,15 @@ void processDngPixels(std::vector<uint8_t>& dng,
             options.outputScale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
             false, true))
         throw std::runtime_error("Unsupported pre-gain topology conversion for " + source);
-    if (hasOpcode2 && !bakeGain && colorOnly &&
-        !DNGDecoder::transformGainMaps(dng, false, true, false))
-        throw std::runtime_error("Unsupported gain-map color transform for " + source);
-    if (hasOpcode2 && !bakeGain &&
-        (settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
-        !DNGDecoder::transformGainMaps(dng, false, false, true))
-        throw std::runtime_error("Unsupported gain-map optimization for " + source);
+    const bool normalizeGainMaps = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
+    const bool optimizeGainMaps = settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
+    if ((hasOpcode2 || (normalizeGainMaps && hasOpcode3Luma)) && !bakeGain &&
+        (normalizeGainMaps || colorOnly || optimizeGainMaps) &&
+        !DNGDecoder::transformGainMaps(
+            dng, normalizeGainMaps, colorOnly, optimizeGainMaps))
+        throw std::runtime_error("Unsupported gain-map transform for " + source);
     if (bakeGain && !DNGDecoder::bakeGainMaps(
-            dng, settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP, colorOnly,
-            settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS,
+            dng, normalizeGainMaps, colorOnly, optimizeGainMaps,
             debugGainMap,
             topologyBeforeBake ? 2 : options.cfaRepeatSize, options.cfaPhase))
         throw std::runtime_error("Unsupported gain-map bake for " + source);

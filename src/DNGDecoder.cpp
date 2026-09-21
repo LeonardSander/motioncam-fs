@@ -5633,10 +5633,14 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         opcode3Maps.push_back(std::move(luminance));
     }
     // Normalization is a gain-map preprocessing operation after color/luma
-    // separation, matching MCRAW. Do not normalize the sampled pixel product.
+    // separation, matching MCRAW. Reduced color and deferred luminance are
+    // independent corrections, so normalize each component on its own. Do not
+    // normalize their sampled pixel product.
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps},
         normalizeGainMaps, false);
+    if (normalizeGainMaps && colorOnly)
+        normalizeGainMapStack(opcode3Maps);
 
     int detectedRepeat = 2;
     std::array<uint8_t, 4> detectedPhase{0, 1, 1, 2};
@@ -5912,7 +5916,13 @@ bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGai
     const TiffEntry* opcode = nullptr;
     for (const auto& entry : entries)
         if (entry.tag == TIFF_TAG_OPCODE_LIST_2) { opcode = &entry; break; }
-    if (!opcode || !opcode->count) return false;
+    std::vector<GainMap> luminanceMaps;
+    getGainMaps(data, 3, luminanceMaps);
+    if (!opcode || !opcode->count) {
+        if (!normalizeGainMaps || luminanceMaps.empty()) return false;
+        normalizeGainMapStack(luminanceMaps);
+        return replaceGainMaps(data, 3, luminanceMaps);
+    }
     std::vector<GainMap> maps;
     if (!parseOpcodeGainMaps(data.data() + opcode->valueOffset, opcode->count, maps))
         return false;
@@ -5961,9 +5971,34 @@ bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGai
     if (!overwriteGainMapPayloads(data, opcode->valueOffset, payloads, maps)) return false;
     if (!canonicalizeGainMapOpcodes(data)) return false;
     if (separatedLuminance) {
-        std::vector<GainMap> luminanceMaps;
-        getGainMaps(data, 3, luminanceMaps);
+        if (!luminanceMaps.empty()) {
+            if (luminanceMaps.size() != 1 || luminanceMaps.front().channels != 1)
+                return false;
+            const GainMap existing = luminanceMaps.front();
+            GainMap& luminance = *separatedLuminance;
+            for (uint32_t y = 0; y < luminance.height; ++y) {
+                const double normalizedY = luminance.originV + y * luminance.spacingV;
+                const auto sy = sampleGainMapAxis(
+                    existing.spacingV > 0.0
+                        ? (normalizedY - existing.originV) / existing.spacingV : 0.0,
+                    existing.height);
+                for (uint32_t x = 0; x < luminance.width; ++x) {
+                    const double normalizedX = luminance.originH + x * luminance.spacingH;
+                    const auto sx = sampleGainMapAxis(
+                        existing.spacingH > 0.0
+                            ? (normalizedX - existing.originH) / existing.spacingH : 0.0,
+                        existing.width);
+                    luminance.data[static_cast<size_t>(y) * luminance.width + x] *=
+                        sampleGainMapBilinear(sx, sy, [&](uint32_t px, uint32_t py) {
+                            return existing.data[static_cast<size_t>(py) * existing.width + px];
+                        });
+                }
+            }
+            luminanceMaps.clear();
+        }
         luminanceMaps.push_back(std::move(*separatedLuminance));
+        if (normalizeGainMaps)
+            normalizeGainMapStack(luminanceMaps);
         if (!replaceGainMaps(data, 3, luminanceMaps)) return false;
     }
     return true;

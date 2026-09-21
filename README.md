@@ -57,7 +57,7 @@ If separate gainmaps per color channel are present, their local minimal gain det
 To remove unwanted global offsets in gainmaps, global minimal per color channel are determined. The resulting RGB vector is isolated into color and intensity to offset white balance and BaselineExposure respectively per DNG.  
 
 - **Debug Views**  
-  - Formerly known as 'Don't clip highlights' the Scale data option allows to inspect clipping in the image by applying the vignette correction in a normalized state with clipped highlights showing pink.
+  - Formerly known as 'Don't clip highlights', Normalize gainmaps scales retained or baked gainmaps to a normalized state. With baking, clipped highlights appear pink for inspection.
   - Gainmaps only will apply the vignette correction to a white image. This allows to inspect the impact of the vignette correction on the underlying image data. The resulting flat field DNGs can even be used in RawTherapee for manual vignette correction.
  
 ---

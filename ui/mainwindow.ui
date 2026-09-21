@@ -805,9 +805,9 @@
             <number>8</number>
            </property>
            <item>
-            <widget class="QCheckBox" name="scaleRawCheckBox">
+            <widget class="QCheckBox" name="normalizeGainMapsCheckBox">
              <property name="text">
-              <string>Scale data</string>
+              <string>Normalize gainmaps</string>
              </property>
             </widget>
            </item>
@@ -821,9 +821,9 @@
           </layout>
          </item>
          <item>
-          <widget class="QLabel" name="scaleRawLabel">
+          <widget class="QLabel" name="normalizeGainMapsLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Debug views: examine clipping in pink highlights or draw flat-field images based on vignette correction.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Normalize baked or output gainmaps. When baking, examine clipping in pink highlights or draw flat-field images with Gainmaps only.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

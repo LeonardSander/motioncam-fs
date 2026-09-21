@@ -788,7 +788,7 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     if(ui->optimizeGainMapsCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
 
-    if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked)
+    if(ui->normalizeGainMapsCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
 
     if(ui->debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
@@ -911,7 +911,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
     connect(ui->vignetteCorrectionComboBox, &QComboBox::currentTextChanged, this,
             [this](const QString&) { onRenderSettingsChanged(Qt::CheckState::Unchecked); });
-    connect(ui->scaleRawCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->normalizeGainMapsCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->debugVignetteCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->vignetteOnlyColorCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->optimizeGainMapsCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -1141,7 +1141,7 @@ void MainWindow::saveSettings() {
     settings.setValue("draftMode", ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteCorrection", QString::fromStdString(
         vignetteCorrectionModeToString(mRenderSettings.vignetteCorrection)));
-    settings.setValue("scaleRaw", ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("normalizeGainMaps", ui->normalizeGainMapsCheckBox->isChecked());
     settings.setValue("vignetteOnlyColor", ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("optimizeGainMaps", ui->optimizeGainMapsCheckBox->isChecked());
     settings.setValue("normalizeExposure", ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked);
@@ -1194,8 +1194,10 @@ void MainWindow::restoreSettings() {
     mRenderSettings.vignetteCorrection = stringToVignetteCorrectionMode(vignetteMode.toStdString());
     ui->vignetteCorrectionComboBox->setCurrentText(vignetteMode);
 
-    ui->scaleRawCheckBox->setCheckState(
-        settings.value("scaleRaw").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
+    const bool normalizeGainMaps = settings.contains("normalizeGainMaps")
+        ? settings.value("normalizeGainMaps").toBool()
+        : settings.value("scaleRaw", false).toBool();
+    ui->normalizeGainMapsCheckBox->setChecked(normalizeGainMaps);
 
     ui->vignetteOnlyColorCheckBox->setCheckState(
         !settings.contains("vignetteOnlyColor") ? Qt::CheckState::Checked :
@@ -4352,19 +4354,16 @@ void MainWindow::updateUi() {
         ui->logTransformComboBox->setEnabled(false);
     }
 
-    // Pixel normalization is bake-only; reduce-to-color can also transform a
-    // deferred OpcodeList2 gain map.
+    // Normalization applies to both baked pixels and retained output gain maps.
+    // The flat-field diagnostic is meaningful only when gain maps are baked.
     if(ui->vignetteCorrectionComboBox->currentText() == "Bake") {
-        ui->scaleRawCheckBox->setEnabled(true);
-        if(ui->scaleRawCheckBox->checkState() == Qt::CheckState::Checked) {
+        if(ui->normalizeGainMapsCheckBox->isChecked()) {
             ui->debugVignetteCheckBox->setEnabled(false);
             ui->debugVignetteCheckBox->setChecked(false);
         } else {
             ui->debugVignetteCheckBox->setEnabled(true);
         }
     } else {
-        ui->scaleRawCheckBox->setEnabled(false);
-        ui->scaleRawCheckBox->setChecked(false);
         ui->debugVignetteCheckBox->setEnabled(false);
         ui->debugVignetteCheckBox->setChecked(false);
     }
@@ -4585,7 +4584,7 @@ void MainWindow::updateSelectionUi() {
     mRenderSettings = settings;
     const QSignalBlocker b1(ui->draftModeCheckBox), b2(ui->vignetteCorrectionComboBox),
         b3(ui->vignetteOnlyColorCheckBox), b4(ui->optimizeGainMapsCheckBox),
-        b5(ui->scaleRawCheckBox), b6(ui->debugVignetteCheckBox),
+        b5(ui->normalizeGainMapsCheckBox), b6(ui->debugVignetteCheckBox),
         b7(ui->normalizeExposureCheckBox), b8(ui->smoothExposureCheckBox),
         b9(ui->smoothWhiteBalanceCheckBox), b10(ui->bakeIsoCheckBox),
         b11(ui->cfrConversionCheckBox), b12(ui->cropEnableCheckBox),
@@ -4599,7 +4598,7 @@ void MainWindow::updateSelectionUi() {
         b27(ui->dngCompressionModeComboBox), b28(ui->badPixelTreatmentComboBox);
     for (auto* box : {ui->draftModeCheckBox,
                       ui->vignetteOnlyColorCheckBox, ui->optimizeGainMapsCheckBox,
-                      ui->scaleRawCheckBox, ui->debugVignetteCheckBox,
+                      ui->normalizeGainMapsCheckBox, ui->debugVignetteCheckBox,
                       ui->normalizeExposureCheckBox, ui->smoothExposureCheckBox,
                       ui->smoothWhiteBalanceCheckBox, ui->bakeIsoCheckBox,
                       ui->cfrConversionCheckBox, ui->cropEnableCheckBox,
@@ -4630,7 +4629,7 @@ void MainWindow::updateSelectionUi() {
         vignetteCorrectionModeToString(settings.vignetteCorrection)));
     ui->vignetteOnlyColorCheckBox->setChecked(checked(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
     ui->optimizeGainMapsCheckBox->setChecked(checked(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
-    ui->scaleRawCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
+    ui->normalizeGainMapsCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
     ui->debugVignetteCheckBox->setChecked(checked(motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
     ui->normalizeExposureCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_EXPOSURE));
     ui->smoothExposureCheckBox->setChecked(checked(motioncam::RENDER_OPT_SMOOTH_EXPOSURE));
@@ -4690,7 +4689,7 @@ void MainWindow::updateSelectionUi() {
         markCheck(ui->draftModeCheckBox, mixedFlag(motioncam::RENDER_OPT_DRAFT));
         markCheck(ui->vignetteOnlyColorCheckBox, mixedFlag(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
         markCheck(ui->optimizeGainMapsCheckBox, mixedFlag(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
-        markCheck(ui->scaleRawCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
+        markCheck(ui->normalizeGainMapsCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
         markCheck(ui->debugVignetteCheckBox, mixedFlag(motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
         markCheck(ui->normalizeExposureCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_EXPOSURE));
         markCheck(ui->smoothExposureCheckBox, mixedFlag(motioncam::RENDER_OPT_SMOOTH_EXPOSURE));
@@ -4746,7 +4745,7 @@ void MainWindow::onApplySelected() {
         preserveMixedFlag(ui->draftModeCheckBox, motioncam::RENDER_OPT_DRAFT);
         preserveMixedFlag(ui->vignetteOnlyColorCheckBox, motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR);
         preserveMixedFlag(ui->optimizeGainMapsCheckBox, motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS);
-        preserveMixedFlag(ui->scaleRawCheckBox, motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP);
+        preserveMixedFlag(ui->normalizeGainMapsCheckBox, motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP);
         preserveMixedFlag(ui->debugVignetteCheckBox, motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
         preserveMixedFlag(ui->normalizeExposureCheckBox, motioncam::RENDER_OPT_NORMALIZE_EXPOSURE);
         preserveMixedFlag(ui->smoothExposureCheckBox, motioncam::RENDER_OPT_SMOOTH_EXPOSURE);
@@ -5311,7 +5310,7 @@ void MainWindow::onSaveSessionAs() {
 void MainWindow::onSetDefaultSettings(bool checked) {
     ui->draftModeCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->vignetteCorrectionComboBox->setCurrentText("Bake");
-    ui->scaleRawCheckBox->setCheckState(Qt::CheckState::Unchecked);
+    ui->normalizeGainMapsCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->debugVignetteCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->vignetteOnlyColorCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->optimizeGainMapsCheckBox->setCheckState(Qt::CheckState::Unchecked);
