@@ -2264,6 +2264,8 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
             info->duplicatedFrames);
         clip.width = info->width;
         clip.height = info->height;
+        clip.nativeWidth = info->width;
+        clip.nativeHeight = info->height;
         const int orientationOverride = settingsForMount(mounted.mountId).orientation;
         clip.orientation = orientationOverride >= 0 ? orientationOverride : info->orientation;
         clip.isSequence = info->isSequence;

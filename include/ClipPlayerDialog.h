@@ -28,7 +28,7 @@ class ClipPlayerDialog final : public QDialog {
     Q_OBJECT
 public:
     enum class FramePushResult { Accepted, Retry, Stopped };
-    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; QSet<int> selectedSourceFrames; };
+    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int nativeWidth=0; int nativeHeight=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; QSet<int> selectedSourceFrames; };
     explicit ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent=nullptr);
     ~ClipPlayerDialog() override;
     int currentMountId() const;
@@ -93,6 +93,7 @@ private:
     void advanceZoomAnimation();
     void setZoomAnimationTarget(double target);
     void clampPanToZoom();
+    void adoptRenderedDimensions(int width, int height);
     QPointF effectivePanForZoom(const QPointF& pan, double zoomPercent) const;
     QPointF surfaceScaleForZoom(double zoomPercent) const;
     void updateDisplayedImage();

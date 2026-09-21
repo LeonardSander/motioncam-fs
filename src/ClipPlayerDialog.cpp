@@ -301,7 +301,15 @@ void ClipPlayerDialog::updateClipInfo(int mountId,double fps,double durationSeco
         std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated){
     for(auto& clip:mClips)if(clip.mountId==mountId){
         clip.fps=std::max(1.0,fps);clip.durationSeconds=std::max(0.0,durationSeconds);
-        clip.sourceFrames=std::max(1,sourceFrames);clip.width=width;clip.height=height;
+        clip.sourceFrames=std::max(1,sourceFrames);
+        clip.nativeWidth=width;clip.nativeHeight=height;
+        // width/height describe the active gallery stream. Keep them until
+        // the first replacement frame reports its real dimensions; writing
+        // FileInfo's native size here makes reduced previews render as a small
+        // centered image and changes the zoom coordinate system mid-refresh.
+        if(clip.width<=0||clip.height<=0){
+            clip.width=clip.nativeWidth;clip.height=clip.nativeHeight;
+        }
         clip.duplicateFrames=std::move(duplicateFrames);
         clip.sourceFrameToOutput=std::move(sourceFrameToOutput);
         clip.sourceFrameDuplicated=std::move(sourceFrameDuplicated);break;
@@ -779,6 +787,44 @@ void ClipPlayerDialog::clampPanToZoom(){
     const double maxPanY=std::max(0.0,(clip.height-cropHeight)/2.0);
     mPanSourcePixels.setX(std::clamp(mPanSourcePixels.x(),-maxPanX,maxPanX));
     mPanSourcePixels.setY(std::clamp(mPanSourcePixels.y(),-maxPanY,maxPanY));
+}
+
+void ClipPlayerDialog::adoptRenderedDimensions(int width,int height){
+    if(mIndex<0||mIndex>=mClips.size()||width<=0||height<=0)return;
+    auto& clip=mClips[mIndex];
+    if(clip.width==width&&clip.height==height)return;
+    const int oldWidth=std::max(1,clip.width);
+    const int oldHeight=std::max(1,clip.height);
+    const double sourceScaleX=double(width)/oldWidth;
+    const double sourceScaleY=double(height)/oldHeight;
+    const double zoomScale=std::sqrt((double(oldWidth)/width)*
+                                     (double(oldHeight)/height));
+
+    // Pan is stored in pixels of the active preview. Rebase it, along with
+    // the retained FFmpeg surface description, so the same normalized source
+    // point remains under the viewport when proxy/binning/HQ changes size.
+    mPanSourcePixels=QPointF(mPanSourcePixels.x()*sourceScaleX,
+                             mPanSourcePixels.y()*sourceScaleY);
+    mLastSurfacePan=QPointF(mLastSurfacePan.x()*sourceScaleX,
+                            mLastSurfacePan.y()*sourceScaleY);
+    mDecoderSurfacePan=QPointF(mDecoderSurfacePan.x()*sourceScaleX,
+                               mDecoderSurfacePan.y()*sourceScaleY);
+    mLastSurfaceScale=QPointF(mLastSurfaceScale.x()/sourceScaleX,
+                              mLastSurfaceScale.y()/sourceScaleY);
+    mDecoderSurfaceScale=QPointF(mDecoderSurfaceScale.x()/sourceScaleX,
+                                 mDecoderSurfaceScale.y()/sourceScaleY);
+    auto rebaseZoom=[zoomScale](double& value){
+        if(value>0.0)value=std::clamp(value*zoomScale,0.01,3200.0);
+    };
+    rebaseZoom(mZoomPercent);
+    rebaseZoom(mRequestedZoomPercent);
+    rebaseZoom(mZoomAnimationTarget);
+    clip.width=width;clip.height=height;
+    clampPanToZoom();
+    const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
+    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(clip.title)
+        .arg(mIndex+1).arg(mClips.size()).arg(mZoomPercent>0.0
+            ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit")));
 }
 
 QPointF ClipPlayerDialog::effectivePanForZoom(const QPointF& pan,double zoomPercent)const{
@@ -1501,16 +1547,16 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     ++mNextInputFrame;return FramePushResult::Accepted;
 }
 void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int height){
-    if(mIndex>=0&&mClips[mIndex].sourceFrames>1&&mClips[mIndex].isSequence&&
-       (mClips[mIndex].width!=width||mClips[mIndex].height!=height)){
+    const bool dimensionsChanged=mIndex>=0&&
+        (mClips[mIndex].width!=width||mClips[mIndex].height!=height);
+    if(dimensionsChanged&&mClips[mIndex].sourceFrames>1&&mClips[mIndex].isSequence){
         // Draft and other preprocessing modes may change the RGB staging
         // dimensions relative to FileInfo. Configure rawvideo from the first
         // actual frame so the producer can never retry a permanent mismatch.
         stopDecoder();
-        mClips[mIndex].width=width;
-        mClips[mIndex].height=height;
+        adoptRenderedDimensions(width,height);
         startDecoder();
-    }
+    }else if(dimensionsChanged)adoptRenderedDimensions(width,height);
     // Video must become visible only after FFmpeg has produced the final
     // viewport-sized surface. Showing this source preview during a seek or
     // resize releases the held frame too early and briefly scales it using
