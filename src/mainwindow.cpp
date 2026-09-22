@@ -32,6 +32,7 @@ using namespace motioncam;
 #include <QMenuBar>
 #include <QFileInfo>
 #include <QProcess>
+#include <QUrl>
 #include <QPointer>
 #include <QMessageBox>
 #include <QFileDialog>
@@ -607,21 +608,44 @@ namespace {
 #endif
 
 #ifdef __linux__
-    bool cleanupStaleLinuxFuseMount(const QString& mountPath, QString& errorMessage) {
-        const QByteArray nativePath = QFile::encodeName(QDir::cleanPath(mountPath));
-        struct stat pathStat {};
-        if (::lstat(nativePath.constData(), &pathStat) == 0 || errno != ENOTCONN) {
-            return true;
+    QByteArray decodeLinuxMountInfoPath(QByteArray path) {
+        path.replace("\\040", " ");
+        path.replace("\\011", "\t");
+        path.replace("\\012", "\n");
+        path.replace("\\134", "\\");
+        return path;
+    }
+
+    bool isLinuxMountPoint(const QString& path) {
+        QFile mountInfo(QStringLiteral("/proc/self/mountinfo"));
+        if (!mountInfo.open(QIODevice::ReadOnly)) return false;
+        const QByteArray expected = QFile::encodeName(QDir::cleanPath(path));
+        while (!mountInfo.atEnd()) {
+            const auto fields = mountInfo.readLine().trimmed().split(' ');
+            if (fields.size() > 4 && decodeLinuxMountInfoPath(fields.at(4)) == expected)
+                return true;
         }
+        return false;
+    }
+
+    bool cleanupStaleLinuxFuseMount(const QString& mountPath, QString& errorMessage) {
+        const QString cleanPath = QDir::cleanPath(mountPath);
+        // Never stat a possibly stale FUSE path: if its userspace server is
+        // alive but unresponsive, the lookup itself can block indefinitely.
+        if (!isLinuxMountPoint(cleanPath)) return true;
 
         QProcess fusermount;
-        fusermount.start("fusermount3", {"-u", QDir::cleanPath(mountPath)});
+        fusermount.start("fusermount3", {"-u", "-z", cleanPath});
         if (!fusermount.waitForStarted() || !fusermount.waitForFinished(10000) ||
             fusermount.exitStatus() != QProcess::NormalExit || fusermount.exitCode() != 0) {
+            if (fusermount.state() != QProcess::NotRunning) {
+                fusermount.kill();
+                fusermount.waitForFinished(1000);
+            }
             const QString details =
                 QString::fromLocal8Bit(fusermount.readAllStandardError()).trimmed();
             errorMessage = QString("A stale FUSE mount exists at %1 and could not be detached%2.")
-                               .arg(QDir::cleanPath(mountPath),
+                               .arg(cleanPath,
                                     details.isEmpty() ? QString() : QString(": %1").arg(details));
             return false;
         }
@@ -1327,6 +1351,11 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (watched->property("sourceJsonStatus").toBool() &&
+        event->type() == QEvent::MouseButtonDblClick) {
+        revealSourceJson(watched->property("sourceJsonPath").toString());
+        return true;
+    }
     if (auto* card = qobject_cast<QWidget*>(watched);
         card && card->property("clipCard").toBool() &&
         event->type() == QEvent::MouseButtonDblClick) {
@@ -1787,8 +1816,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     refreshButton->setStyleSheet("background: transparent; border: none;");
     refreshButton->setCursor(Qt::PointingHandCursor);
     refreshButton->setProperty("refreshButton", true);
+    refreshButton->setProperty("sourceJsonStatus", true);
+    refreshButton->setProperty("sourceJsonPath", sidecarPath);
+    refreshButton->installEventFilter(this);
     refreshButton->setVisible(false);
-    refreshButton->setToolTip("Refresh Calibration");
+    refreshButton->setToolTip(tr("Click to refresh calibration; double-click to show the source JSON"));
 
     buttonLayout->addWidget(statusContainer);
 
@@ -2783,6 +2815,58 @@ void MainWindow::openMountedDirectory(QWidget* fileWidget) {
 
     if (!success)
         QMessageBox::warning(this, "Error", QString("Failed to open directory: %1").arg(mountPath));
+}
+
+void MainWindow::revealSourceJson(const QString& jsonPath) {
+    const QFileInfo jsonInfo(jsonPath);
+    if (jsonPath.isEmpty() || !jsonInfo.exists()) {
+        QMessageBox::warning(this, tr("Error"), tr("Source JSON file not found: %1").arg(jsonPath));
+        return;
+    }
+
+    bool success = false;
+#ifdef _WIN32
+    success = QProcess::startDetached(
+        "explorer", QStringList() << "/select," << QDir::toNativeSeparators(jsonInfo.absoluteFilePath()));
+#elif __APPLE__
+    success = QProcess::startDetached("/usr/bin/open", QStringList() << "-R" << jsonInfo.absoluteFilePath());
+#elif __linux__
+    // FileManager1 is implemented by the major Linux file managers and asks
+    // them to reveal/select the item rather than merely opening its parent.
+    // Fall back to xdg-open when the desktop does not expose that interface.
+    auto* revealProcess = new QProcess(this);
+    const QString directory = jsonInfo.absolutePath();
+    const auto openDirectory = [this, directory] {
+        if (!QProcess::startDetached("xdg-open", QStringList() << directory))
+            QMessageBox::warning(this, tr("Error"),
+                                 tr("Failed to open source JSON directory: %1").arg(directory));
+    };
+    connect(revealProcess, &QProcess::finished, this,
+            [revealProcess, openDirectory](int exitCode, QProcess::ExitStatus exitStatus) {
+        if (exitStatus != QProcess::NormalExit || exitCode != 0) openDirectory();
+        revealProcess->deleteLater();
+    });
+    connect(revealProcess, &QProcess::errorOccurred, this,
+            [revealProcess, openDirectory](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            openDirectory();
+            revealProcess->deleteLater();
+        }
+    });
+    revealProcess->start("dbus-send", QStringList()
+        << "--session"
+        << "--print-reply"
+        << "--dest=org.freedesktop.FileManager1"
+        << "/org/freedesktop/FileManager1"
+        << "org.freedesktop.FileManager1.ShowItems"
+        << QString("array:string:%1").arg(QUrl::fromLocalFile(jsonInfo.absoluteFilePath()).toString())
+        << "string:");
+    return;
+#endif
+
+    if (!success)
+        QMessageBox::warning(this, tr("Error"),
+                             tr("Failed to open source JSON directory: %1").arg(jsonInfo.absolutePath()));
 }
 
 void MainWindow::removeFile(QWidget* fileWidget) {
@@ -5564,6 +5648,8 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
         if (!actualCalibButton || !actualStatusLabel || !actualRefreshButton || !statusContainer) {
             continue;
         }
+
+        actualRefreshButton->setProperty("sourceJsonPath", jsonPath);
 
         const bool canCopySelectedJson = !selectedJsonPath.isEmpty() &&
                                          fileWidget != selectedFileWidget;

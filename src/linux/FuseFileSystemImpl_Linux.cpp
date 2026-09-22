@@ -30,9 +30,11 @@
 #include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <fcntl.h>
 #include <iostream>
 #include <pwd.h>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
@@ -49,24 +51,43 @@ constexpr auto IO_THREADS = 4;
 constexpr auto MAX_READ = 1024 * 1024;
 
 void recoverStaleMount(const std::string& path) {
-    struct stat statBuffer {};
-    if (::stat(path.c_str(), &statBuffer) == 0 || errno != ENOTCONN)
-        return;
+    std::ifstream mountInfo("/proc/self/mountinfo");
+    const auto decodeMountPath = [](std::string value) {
+        const std::pair<const char*, const char*> escapes[] = {
+            {"\\040", " "}, {"\\011", "\t"}, {"\\012", "\n"}, {"\\134", "\\"}};
+        for (const auto& [encoded, decoded] : escapes) {
+            for (std::size_t offset = 0; (offset = value.find(encoded, offset)) != std::string::npos;)
+                value.replace(offset, 4, decoded);
+        }
+        return value;
+    };
+    const auto expected = std::filesystem::path(path).lexically_normal().string();
+    bool mounted = false;
+    for (std::string line; std::getline(mountInfo, line);) {
+        std::istringstream fields(line);
+        std::string field;
+        for (int index = 0; index <= 4 && fields >> field; ++index) {
+            if (index == 4 && decodeMountPath(field) == expected) mounted = true;
+        }
+        if (mounted) break;
+    }
+    if (!mounted) return;
 
     spdlog::warn("Recovering stale FUSE mount at {}", path);
-    const int result = QProcess::execute(
-        QStringLiteral("fusermount3"),
-        {QStringLiteral("-u"), QStringLiteral("-z"),
-         QString::fromStdString(path)});
-    if (result != 0) {
+    QProcess fusermount;
+    fusermount.start(QStringLiteral("fusermount3"),
+                     {QStringLiteral("-u"), QStringLiteral("-z"),
+                      QString::fromStdString(path)});
+    const bool finished = fusermount.waitForStarted(1000) && fusermount.waitForFinished(10000);
+    if (!finished && fusermount.state() != QProcess::NotRunning) {
+        fusermount.kill();
+        fusermount.waitForFinished(1000);
+    }
+    if (!finished || fusermount.exitStatus() != QProcess::NormalExit || fusermount.exitCode() != 0) {
         throw std::runtime_error(
             "Failed to unmount stale FUSE mount " + path +
-            " (fusermount3 exit code " + std::to_string(result) + ")");
+            " (fusermount3 exit code " + std::to_string(fusermount.exitCode()) + ")");
     }
-
-    errno = 0;
-    if (::stat(path.c_str(), &statBuffer) != 0 && errno == ENOTCONN)
-        throw std::runtime_error("Stale FUSE mount remains at " + path);
 }
 
 void setupLogging() {

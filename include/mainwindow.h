@@ -137,6 +137,7 @@ private slots:
                             bool backfillThumbnails = false);
     motioncam::RenderSettings settingsForMount(motioncam::MountId mountId) const;
     void openMountedDirectory(QWidget* fileWidget);
+    void revealSourceJson(const QString& jsonPath);
     void removeFile(QWidget* fileWidget);
 #ifdef _WIN32
     void discardFile(QWidget* fileWidget);
