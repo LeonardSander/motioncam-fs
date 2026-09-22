@@ -271,10 +271,12 @@ void VirtualFileSystemImpl_DirectLog::init() {
                 largestManualSidecarBytes, candidateBytes);
         }
         measuredMetadataBytes += largestManualSidecarBytes;
+        const uint32_t projectedChannels =
+            (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? 1u : 3u;
         const auto projectedSize = [&](uint32_t projectedWidth,
                                        uint32_t projectedHeight) {
             return vfs::projectedDngSize(
-                projectedWidth, projectedHeight, 3, 16,
+                projectedWidth, projectedHeight, projectedChannels, 16,
                 measuredMetadataBytes, transformedMetadataAllowance);
         };
         const uint32_t proxyScale = static_cast<uint32_t>(std::max(
@@ -831,8 +833,13 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
         if (!manualOpcode3.empty())
             result.gainMaps.opcodeList3 = std::move(manualOpcode3);
     }
+    // Interpolated chroma reconstruction softens colour detail before RGB is
+    // sampled back into a Bayer mosaic. Preserve the decoded chroma samples
+    // for remosaiced DNG output; RGB output and previews retain smoothing.
+    const bool smoothChroma =
+        !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) || mConfig.streamingPreview;
     if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
-                                result.height, false))
+                                result.height, false, smoothChroma))
         throw std::runtime_error("Could not decode DirectLog frame");
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;

@@ -57,7 +57,8 @@ public:
     
     bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
                       int outputWidth = 0, int outputHeight = 0,
-                      bool preserveLogEncoded = false);
+                      bool preserveLogEncoded = false,
+                      bool smoothChroma = true);
     void setFullRangeOverride(std::optional<bool> fullRange);
     
     static bool isHLGVideo(const std::string& filePath);
@@ -72,7 +73,8 @@ private:
     void analyzeVideo();
     void cleanup();
     bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData,
-                         int outputWidth, int outputHeight, bool preserveLogEncoded);
+                         int outputWidth, int outputHeight, bool preserveLogEncoded,
+                         bool smoothChroma);
     void applyHLGToLinear(std::vector<uint16_t>& rgbData);
     void applyLOG60ToLinear(std::vector<uint16_t>& rgbData);
     AVFrame* transferableFrame(AVFrame* frame);

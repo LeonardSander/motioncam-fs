@@ -501,7 +501,7 @@ void DirectLogDecoder::analyzeVideo() {
 
 bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
                                     int outputWidth, int outputHeight,
-                                    bool preserveLogEncoded) {
+                                    bool preserveLogEncoded, bool smoothChroma) {
     std::lock_guard<std::mutex> lock(mMutex);
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto extractStart = std::chrono::steady_clock::now();
@@ -561,7 +561,7 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
                 AVFrame* conversionFrame = transferableFrame(mFrame);
                 if (!conversionFrame || !convertYUVToRGB(
                         conversionFrame, rgbData, outputWidth, outputHeight,
-                        preserveLogEncoded)) return -1;
+                        preserveLogEncoded, smoothChroma)) return -1;
                 mLastDecodedFrame = frameNumber;
                 if (diagnostics)
                     spdlog::info("DirectLog diagnostic: frame={} conversion_ms={:.3f} decoder_total_ms={:.3f}",
@@ -617,7 +617,7 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
             AVFrame* conversionFrame = transferableFrame(mFrame);
             if (!conversionFrame || !convertYUVToRGB(
                     conversionFrame, rgbData, outputWidth, outputHeight,
-                    preserveLogEncoded)) break;
+                    preserveLogEncoded, smoothChroma)) break;
             mLastDecodedFrame = frameNumber;
             if (diagnostics)
                 spdlog::info("DirectLog diagnostic: frame={} EOF-drain conversion_ms={:.3f} packets={} decoded_frames={} total_ms={:.3f}",
@@ -720,7 +720,7 @@ void DirectLogDecoder::setFullRangeOverride(std::optional<bool> fullRange) {
 
 bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData,
                                        int outputWidth, int outputHeight,
-                                       bool preserveLogEncoded) {
+                                       bool preserveLogEncoded, bool smoothChroma) {
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto conversionStart = std::chrono::steady_clock::now();
     const int width = mVideoInfo.width;
@@ -744,7 +744,8 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     mSwsContext = sws_getCachedContext(
         mSwsContext, width, height, static_cast<AVPixelFormat>(yuvFrame->format),
         outputWidth, outputHeight, AV_PIX_FMT_RGB48LE,
-        outputWidth == width && outputHeight == height ? SWS_BILINEAR : SWS_POINT,
+        smoothChroma && outputWidth == width && outputHeight == height
+            ? SWS_BICUBIC : SWS_POINT,
         nullptr, nullptr, nullptr);
     if (!mSwsContext) return false;
 
