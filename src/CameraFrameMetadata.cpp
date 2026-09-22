@@ -45,11 +45,25 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
 
     if (j.contains("noiseProfile") && j["noiseProfile"].is_array()) {
         auto noiseArray = j["noiseProfile"];
-        for (size_t i = 0; i < 6 && i < noiseArray.size(); ++i) {
-            frame.noiseProfile[i] = noiseArray[i].get<double>();
-        }
-        frame.hasNoiseProfile = noiseArray.size() >= frame.noiseProfile.size();
+        frame.noiseProfile.reserve(noiseArray.size());
+        for (const auto& value : noiseArray)
+            frame.noiseProfile.push_back(value.get<double>());
+        frame.hasNoiseProfile = frame.noiseProfile.size() >= 6;
     }
+
+    const auto matrix = [&](const char* key, std::array<float, 9>& output,
+                            bool& present) {
+        if (!j.contains(key) || !j[key].is_array() || j[key].size() < output.size())
+            return;
+        for (size_t i = 0; i < output.size(); ++i) output[i] = j[key][i].get<float>();
+        present = true;
+    };
+    matrix("colorMatrix1", frame.colorMatrix1, frame.hasColorMatrix1);
+    matrix("colorMatrix2", frame.colorMatrix2, frame.hasColorMatrix2);
+    matrix("forwardMatrix1", frame.forwardMatrix1, frame.hasForwardMatrix1);
+    matrix("forwardMatrix2", frame.forwardMatrix2, frame.hasForwardMatrix2);
+    matrix("calibrationMatrix1", frame.calibrationMatrix1, frame.hasCalibrationMatrix1);
+    matrix("calibrationMatrix2", frame.calibrationMatrix2, frame.hasCalibrationMatrix2);
 
 
     // Parse simple fields with safe defaults
@@ -58,6 +72,7 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     frame.exposureCompensation = j.value("exposureCompensation", 0);
     frame.exposureTime = j.value("exposureTime", 0.0);
     frame.filename = j.value("filename", "");
+    frame.focusDistance = j.value("focusDistance", 0.0f);
     frame.height = j.value("height", 0);
     frame.isBinned = j.value("isBinned", false);
     frame.isCompressed = j.value("isCompressed", false);

@@ -237,6 +237,7 @@ namespace {
 
     constexpr uint16_t TIFF_TAG_EXPOSURE_TIME = 33434;
     constexpr uint16_t TIFF_TAG_EXIF_IFD = 34665;
+    constexpr uint16_t TIFF_TAG_GPS_IFD = 34853;
     constexpr uint16_t TIFF_TAG_ISO = 34855;
     constexpr uint16_t TIFF_TAG_SUB_IFDS = 330;
     constexpr uint16_t TIFF_TAG_JPEG_OFFSET = 513;
@@ -789,7 +790,8 @@ namespace {
                 const size_t valueOffset = bytes <= 4 ? pos + 8 : rawOffset;
                 if (valueOffset <= data.size() && bytes <= data.size() - valueOffset)
                     result.push_back({tag, type, itemCount, valueOffset, ifd, pos});
-                if (tag == TIFF_TAG_EXIF_IFD && type == TIFF_TYPE_LONG && itemCount == 1)
+                if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD) &&
+                    type == TIFF_TYPE_LONG && itemCount == 1)
                     pending.push_back(rawOffset);
                 if (tag == TIFF_TAG_SUB_IFDS && (type == TIFF_TYPE_LONG)) {
                     for (uint32_t j = 0; j < itemCount && valueOffset + j * 4 + 4 <= data.size(); ++j)
@@ -880,7 +882,8 @@ namespace {
             if (typeSize * static_cast<size_t>(entry.count) > 4)
                 externalPointers.push_back({entry.entryOffset,
                     read32(data.data() + entry.entryOffset + 8, little)});
-            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_SUB_IFDS) &&
+            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_GPS_IFD ||
+                 entry.tag == TIFF_TAG_SUB_IFDS) &&
                 entry.type == TIFF_TYPE_LONG) {
                 const uint32_t rawOffset = read32(data.data() + entry.entryOffset + 8, little);
                 if (entry.count == 1)
@@ -986,7 +989,8 @@ namespace {
             if (typeSize * static_cast<size_t>(entry.count) > 4)
                 externalPointers.push_back({entry.entryOffset,
                     read32(data.data() + entry.entryOffset + 8, little)});
-            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_SUB_IFDS) &&
+            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_GPS_IFD ||
+                 entry.tag == TIFF_TAG_SUB_IFDS) &&
                 entry.type == TIFF_TYPE_LONG) {
                 const uint32_t rawOffset = read32(data.data() + entry.entryOffset + 8, little);
                 if (entry.count == 1) inlineIfdPointers.push_back({entry.entryOffset, rawOffset});
@@ -1108,7 +1112,8 @@ namespace {
             const uint32_t raw = read32(data.data() + entry.entryOffset + 8, little);
             if (entry.count && typeSize > 4u / entry.count)
                 externalPointers.push_back({static_cast<uint32_t>(entry.entryOffset), raw});
-            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_SUB_IFDS) &&
+            if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_GPS_IFD ||
+                 entry.tag == TIFF_TAG_SUB_IFDS) &&
                 entry.type == TIFF_TYPE_LONG) {
                 if (entry.count == 1) {
                     inlineIfdPointers.push_back({static_cast<uint32_t>(entry.entryOffset), raw});
@@ -2627,38 +2632,40 @@ bool DNGDecoder::fillMissingSidecarMetadata(
     if (destinationEntries.empty()) return false;
     std::set<uint16_t> present;
     for (const auto& entry : destinationEntries) present.insert(entry.tag);
-    std::array<std::vector<const DNGSidecarMetadataEntry*>, 2> additions;
+    std::array<std::vector<const DNGSidecarMetadataEntry*>, 3> additions;
     for (const auto& entry : sidecarMetadata) {
         if (present.count(entry.tag) ||
             std::find(excludedTags.begin(), excludedTags.end(), entry.tag) != excludedTags.end())
             continue;
-        additions[entry.exif ? 1 : 0].push_back(&entry);
+        additions[entry.gps ? 2 : entry.exif ? 1 : 0].push_back(&entry);
         present.insert(entry.tag);
     }
-    auto append = [&](bool exif,
+    auto append = [&](int targetKind,
                       const std::vector<const DNGSidecarMetadataEntry*>& values) {
         if (values.empty()) return true;
         destinationEntries = findTiffEntries(data, little);
-        uint32_t targetIfd = exif ? 0 : read32(data.data() + 4, little);
-        TiffEntry exifPointer{};
-        bool hasExifPointer = false;
-        if (exif) {
+        const bool nested = targetKind != 0;
+        const uint16_t pointerTag = targetKind == 2 ? TIFF_TAG_GPS_IFD : TIFF_TAG_EXIF_IFD;
+        uint32_t targetIfd = nested ? 0 : read32(data.data() + 4, little);
+        TiffEntry nestedPointer{};
+        bool hasNestedPointer = false;
+        if (nested) {
             for (const auto& entry : destinationEntries)
-                if (entry.tag == TIFF_TAG_EXIF_IFD && entry.type == TIFF_TYPE_LONG && entry.count) {
-                    exifPointer = entry;
-                    hasExifPointer = true;
+                if (entry.tag == pointerTag && entry.type == TIFF_TYPE_LONG && entry.count) {
+                    nestedPointer = entry;
+                    hasNestedPointer = true;
                     targetIfd = read32(data.data() + entry.valueOffset, little);
                     break;
                 }
-            if (!hasExifPointer) {
+            if (!hasNestedPointer) {
                 const uint32_t root = read32(data.data() + 4, little);
-                if (!insertTiffScalarEntry(data, root, TIFF_TAG_EXIF_IFD,
+                if (!insertTiffScalarEntry(data, root, pointerTag,
                                            TIFF_TYPE_LONG, 0, little)) return false;
                 destinationEntries = findTiffEntries(data, little);
                 for (const auto& entry : destinationEntries)
-                    if (entry.tag == TIFF_TAG_EXIF_IFD && entry.type == TIFF_TYPE_LONG && entry.count) {
-                        exifPointer = entry;
-                        hasExifPointer = true;
+                    if (entry.tag == pointerTag && entry.type == TIFF_TYPE_LONG && entry.count) {
+                        nestedPointer = entry;
+                        hasNestedPointer = true;
                         break;
                     }
                 targetIfd = 0;
@@ -2732,13 +2739,14 @@ bool DNGDecoder::fillMissingSidecarMetadata(
             entryAt += entry.size();
         }
         write32(data.data() + entryAt, oldNext, little);
-        if (exif) {
-            if (!hasExifPointer) return false;
-            write32(data.data() + exifPointer.valueOffset, newIfd, little);
+        if (nested) {
+            if (!hasNestedPointer) return false;
+            write32(data.data() + nestedPointer.valueOffset, newIfd, little);
         } else write32(data.data() + 4, newIfd, little);
         return true;
     };
-    return append(false, additions[0]) && append(true, additions[1]);
+    return append(0, additions[0]) && append(1, additions[1]) &&
+           append(2, additions[2]);
 }
 
 bool DNGDecoder::updateColorMatrices(std::vector<uint8_t>& data,

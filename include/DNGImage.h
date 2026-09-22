@@ -92,6 +92,7 @@ struct DNGSidecarMetadataEntry {
     uint16_t type = 0;
     uint32_t count = 0;
     bool exif = false;
+    bool gps = false;
     std::vector<uint8_t> value;
 };
 

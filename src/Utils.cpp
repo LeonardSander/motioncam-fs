@@ -10,7 +10,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <ctime>
+#include <iomanip>
 #include <numeric>
+#include <sstream>
 
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/back_inserter.hpp>
@@ -24,6 +27,249 @@ namespace utils {
 
 
 namespace {
+
+std::string xmlAttribute(std::string value) {
+    const std::array<std::pair<std::string, std::string>, 5> replacements{{
+        {"&", "&amp;"}, {"\"", "&quot;"}, {"'", "&apos;"},
+        {"<", "&lt;"}, {">", "&gt;"}}};
+    for (const auto& [from, to] : replacements) {
+        size_t at = 0;
+        while ((at = value.find(from, at)) != std::string::npos) {
+            value.replace(at, from.size(), to);
+            at += to.size();
+        }
+    }
+    return value;
+}
+
+std::string gpsCoordinate(double value, char positive, char negative) {
+    const char reference = value < 0.0 ? negative : positive;
+    value = std::abs(value);
+    const int degrees = static_cast<int>(std::floor(value));
+    const double minutes = (value - degrees) * 60.0;
+    std::ostringstream result;
+    result << degrees << ',' << std::fixed << std::setprecision(7)
+           << minutes << reference;
+    return result.str();
+}
+
+bool validGpsCoordinates(double latitude, double longitude) {
+    return std::isfinite(latitude) && std::isfinite(longitude) &&
+        latitude >= -90.0 && latitude <= 90.0 &&
+        longitude >= -180.0 && longitude <= 180.0 &&
+        (latitude != 0.0 || longitude != 0.0);
+}
+
+bool gpsUtcTime(const std::string& source, std::tm& utc, int& millisecondsPart) {
+    try {
+        size_t consumed = 0;
+        const int64_t milliseconds = std::stoll(source, &consumed);
+        if (consumed != source.size() || milliseconds <= 0) return false;
+        const std::time_t seconds = static_cast<std::time_t>(milliseconds / 1000);
+#ifdef _WIN32
+        if (gmtime_s(&utc, &seconds) != 0) return false;
+#else
+        if (!gmtime_r(&seconds, &utc)) return false;
+#endif
+        millisecondsPart = static_cast<int>(milliseconds % 1000);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::string gpsTimestamp(const std::string& source) {
+    std::tm utc{};
+    int milliseconds = 0;
+    if (gpsUtcTime(source, utc, milliseconds)) {
+        std::ostringstream result;
+        result << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.'
+               << std::setw(3) << std::setfill('0') << milliseconds << 'Z';
+        return result.str();
+    }
+    return source;
+}
+
+std::string mcrawCaptureXmp(const CameraConfiguration& camera,
+                            const CameraFrameMetadata& frame) {
+    const auto& post = camera.extraData.postProcessSettings;
+    const auto& build = post.metadata;
+    std::ostringstream attributes;
+    if (validGpsCoordinates(post.gpsLatitude, post.gpsLongitude)) {
+        const auto altitudeMillimeters = static_cast<int64_t>(
+            std::llround(std::abs(post.gpsAltitude) * 1000.0));
+        attributes << " exif:GPSLatitude='" << gpsCoordinate(post.gpsLatitude, 'N', 'S')
+                   << "' exif:GPSLongitude='" << gpsCoordinate(post.gpsLongitude, 'E', 'W')
+                   << "' exif:GPSAltitude='" << altitudeMillimeters << "/1000"
+                   << "' exif:GPSAltitudeRef='"
+                   << (post.gpsAltitude < 0.0f ? 1 : 0) << "'";
+        if (!post.gpsTime.empty())
+            attributes << " exif:GPSTimeStamp='" << xmlAttribute(gpsTimestamp(post.gpsTime))
+                       << "' mc:GPSTimeRaw='" << xmlAttribute(post.gpsTime) << "'";
+    }
+    const auto add = [&](const char* name, const std::string& value) {
+        if (!value.empty())
+            attributes << " mc:" << name << "='" << xmlAttribute(value) << "'";
+    };
+    add("DeviceModel", camera.deviceSpecificProfile.deviceModel);
+    add("CameraId", camera.deviceSpecificProfile.cameraId);
+    add("BuildBrand", build.buildBrand);
+    add("BuildDevice", build.buildDevice);
+    add("BuildManufacturer", build.buildManufacturer);
+    add("BuildModel", build.buildModel);
+    add("BuildName", build.buildName);
+    add("VersionBuild", build.versionBuild);
+    add("VersionMajor", build.versionMajor);
+    add("VersionMinor", build.versionMinor);
+    add("PackageName", camera.extraData.packageName);
+    if (camera.hasBaselineExposure)
+        attributes << " mc:SourceBaselineExposure='" << camera.baselineExposure << "'";
+    if (std::isfinite(frame.focusDistance))
+        attributes << " mc:FocusDistanceDiopters='" << std::setprecision(9)
+                   << frame.focusDistance << "'";
+    if (!camera.focalLengths.empty() && std::isfinite(camera.focalLengths.front()))
+        attributes << " mc:FocalLength35mmExact='" << std::setprecision(9)
+                   << camera.focalLengths.front() << "'";
+    if (!frame.noiseProfile.empty()) {
+        std::ostringstream profile;
+        profile << std::setprecision(17);
+        for (size_t i = 0; i < frame.noiseProfile.size(); ++i) {
+            if (i) profile << ',';
+            profile << frame.noiseProfile[i];
+        }
+        attributes << " mc:NoiseProfile='" << profile.str() << "'";
+    }
+    if (frame.exposureCompensation != 0) {
+        attributes << " mc:ExposureCompensationSteps='"
+                   << frame.exposureCompensation << "'";
+        if (camera.hasExposureCompensationStep)
+            attributes << " mc:ExposureCompensationStepEV='"
+                       << std::setprecision(9) << camera.exposureCompensationStep << "'";
+    }
+    if (attributes.str().empty()) return {};
+    return "<?xpacket begin=''?><x:xmpmeta xmlns:x='adobe:ns:meta/'>"
+           "<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>"
+           "<rdf:Description xmlns:exif='http://ns.adobe.com/exif/1.0/' "
+           "xmlns:mc='https://github.com/motioncam-app/motioncam-fs/metadata'" +
+           attributes.str() + "/></rdf:RDF></x:xmpmeta><?xpacket end='w'?>";
+}
+
+DNGSidecarMetadataEntry rationalMetadata(uint16_t tag, double value, bool signedValue) {
+    constexpr int64_t scale = 1000000;
+    int64_t numerator = static_cast<int64_t>(std::llround(value * scale));
+    int64_t denominator = scale;
+    int64_t a = std::abs(numerator), b = denominator;
+    while (b) { const int64_t remainder = a % b; a = b; b = remainder; }
+    if (a) { numerator /= a; denominator /= a; }
+    DNGSidecarMetadataEntry result;
+    result.tag = tag;
+    result.type = signedValue ? 10 : 5; // SRATIONAL / RATIONAL
+    result.count = 1;
+    result.exif = true;
+    result.value.resize(8);
+    const uint32_t encodedNumerator = static_cast<uint32_t>(
+        static_cast<int32_t>(numerator));
+    const uint32_t encodedDenominator = static_cast<uint32_t>(denominator);
+    for (size_t byte = 0; byte < 4; ++byte) {
+        result.value[byte] = static_cast<uint8_t>(encodedNumerator >> (byte * 8));
+        result.value[4 + byte] = static_cast<uint8_t>(encodedDenominator >> (byte * 8));
+    }
+    return result;
+}
+
+DNGSidecarMetadataEntry asciiMetadata(uint16_t tag, const std::string& value,
+                                      bool exif = false) {
+    DNGSidecarMetadataEntry result;
+    result.tag = tag;
+    result.type = 2; // ASCII
+    result.count = static_cast<uint32_t>(value.size() + 1);
+    result.exif = exif;
+    result.value.assign(value.begin(), value.end());
+    result.value.push_back(0);
+    return result;
+}
+
+DNGSidecarMetadataEntry shortMetadata(uint16_t tag, uint16_t value,
+                                      bool exif = false) {
+    DNGSidecarMetadataEntry result;
+    result.tag = tag;
+    result.type = 3; // SHORT
+    result.count = 1;
+    result.exif = exif;
+    result.value = {static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8)};
+    return result;
+}
+
+DNGSidecarMetadataEntry gpsBytes(uint16_t tag, std::vector<uint8_t> value,
+                                 uint16_t type = 1) {
+    DNGSidecarMetadataEntry result;
+    result.tag = tag;
+    result.type = type;
+    result.count = static_cast<uint32_t>(value.size());
+    result.gps = true;
+    result.value = std::move(value);
+    return result;
+}
+
+DNGSidecarMetadataEntry gpsAscii(uint16_t tag, const std::string& value) {
+    auto result = asciiMetadata(tag, value);
+    result.gps = true;
+    return result;
+}
+
+DNGSidecarMetadataEntry gpsRationals(
+        uint16_t tag, const std::vector<std::pair<uint32_t, uint32_t>>& values) {
+    DNGSidecarMetadataEntry result;
+    result.tag = tag;
+    result.type = 5; // RATIONAL
+    result.count = static_cast<uint32_t>(values.size());
+    result.gps = true;
+    result.value.resize(values.size() * 8);
+    for (size_t i = 0; i < values.size(); ++i) {
+        for (size_t byte = 0; byte < 4; ++byte) {
+            result.value[i * 8 + byte] = static_cast<uint8_t>(values[i].first >> (byte * 8));
+            result.value[i * 8 + 4 + byte] =
+                static_cast<uint8_t>(values[i].second >> (byte * 8));
+        }
+    }
+    return result;
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> gpsCoordinateRationals(double value) {
+    constexpr uint64_t million = 1000000;
+    constexpr uint64_t degreeUnits = 3600 * million;
+    constexpr uint64_t minuteUnits = 60 * million;
+    const uint64_t total = static_cast<uint64_t>(
+        std::llround(std::abs(value) * static_cast<double>(degreeUnits)));
+    const uint32_t degrees = static_cast<uint32_t>(total / degreeUnits);
+    const uint64_t afterDegrees = total % degreeUnits;
+    const uint32_t minutes = static_cast<uint32_t>(afterDegrees / minuteUnits);
+    const uint32_t secondsMillionths = static_cast<uint32_t>(afterDegrees % minuteUnits);
+    return {{degrees, 1}, {minutes, 1}, {secondsMillionths, 1000000}};
+}
+
+std::array<double, 6> dngNoiseProfile(
+        const std::vector<double>& source, const std::array<uint8_t, 4>& cfa) {
+    std::array<double, 6> result{};
+    if (source.size() >= 8) {
+        std::array<unsigned int, 3> counts{};
+        for (size_t phase = 0; phase < 4; ++phase) {
+            const size_t color = std::min<size_t>(cfa[phase], 2);
+            result[color * 2] += source[phase * 2];
+            result[color * 2 + 1] += source[phase * 2 + 1];
+            ++counts[color];
+        }
+        for (size_t color = 0; color < 3; ++color) {
+            if (!counts[color]) continue;
+            result[color * 2] /= counts[color];
+            result[color * 2 + 1] /= counts[color];
+        }
+    } else {
+        std::copy_n(source.begin(), std::min<size_t>(source.size(), result.size()),
+                    result.begin());
+    }
+    return result;
+}
 
 std::vector<GainMap> canonicalGainMaps(
         const std::vector<std::vector<float>>& planes, uint32_t width,
@@ -1752,9 +1998,6 @@ std::shared_ptr<std::vector<char>> generateDng(
         dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
     }
 
-    dng.SetIso(metadata.iso);
-    dng.SetExposureTime(metadata.exposureTime / 1e9);
-
     float normalizedExposureOffset = 0.0f;
     if (baselineExposureOverride.has_value()) {
         normalizedExposureOffset = *baselineExposureOverride;
@@ -1865,6 +2108,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (calibration.has_value() && calibration->hasColorMatrix1) {
         if (!isIdentityMatrix(calibration->colorMatrix1))
             dng.SetColorMatrix1(3, calibration->colorMatrix1.data());
+    } else if (metadata.hasColorMatrix1 && !isZeroMatrix(metadata.colorMatrix1) &&
+               !isIdentityMatrix(metadata.colorMatrix1)) {
+        dng.SetColorMatrix1(3, metadata.colorMatrix1.data());
     } else if (!isZeroMatrix(cameraConfiguration.colorMatrix1) &&
                !isIdentityMatrix(cameraConfiguration.colorMatrix1)) {
         dng.SetColorMatrix1(3, cameraConfiguration.colorMatrix1.data());
@@ -1873,6 +2119,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (calibration.has_value() && calibration->hasColorMatrix2) {
         if (!isIdentityMatrix(calibration->colorMatrix2))
             dng.SetColorMatrix2(3, calibration->colorMatrix2.data());
+    } else if (metadata.hasColorMatrix2 && !isZeroMatrix(metadata.colorMatrix2) &&
+               !isIdentityMatrix(metadata.colorMatrix2)) {
+        dng.SetColorMatrix2(3, metadata.colorMatrix2.data());
     } else if (!isZeroMatrix(cameraConfiguration.colorMatrix2) &&
                !isIdentityMatrix(cameraConfiguration.colorMatrix2)) {
         dng.SetColorMatrix2(3, cameraConfiguration.colorMatrix2.data());
@@ -1881,6 +2130,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (calibration.has_value() && calibration->hasForwardMatrix1) {
         if (!isIdentityMatrix(calibration->forwardMatrix1))
             dng.SetForwardMatrix1(3, calibration->forwardMatrix1.data());
+    } else if (metadata.hasForwardMatrix1 && !isZeroMatrix(metadata.forwardMatrix1) &&
+               !isIdentityMatrix(metadata.forwardMatrix1)) {
+        dng.SetForwardMatrix1(3, metadata.forwardMatrix1.data());
     } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix1) &&
                !isIdentityMatrix(cameraConfiguration.forwardMatrix1)) {
         dng.SetForwardMatrix1(3, cameraConfiguration.forwardMatrix1.data());
@@ -1889,6 +2141,9 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (calibration.has_value() && calibration->hasForwardMatrix2) {
         if (!isIdentityMatrix(calibration->forwardMatrix2))
             dng.SetForwardMatrix2(3, calibration->forwardMatrix2.data());
+    } else if (metadata.hasForwardMatrix2 && !isZeroMatrix(metadata.forwardMatrix2) &&
+               !isIdentityMatrix(metadata.forwardMatrix2)) {
+        dng.SetForwardMatrix2(3, metadata.forwardMatrix2.data());
     } else if (!isZeroMatrix(cameraConfiguration.forwardMatrix2) &&
                !isIdentityMatrix(cameraConfiguration.forwardMatrix2)) {
         dng.SetForwardMatrix2(3, cameraConfiguration.forwardMatrix2.data());
@@ -1907,6 +2162,35 @@ std::shared_ptr<std::vector<char>> generateDng(
             dng.SetCameraCalibration1(3, calibration->cameraCalibration1.data());
         if (includeCalibration2)
             dng.SetCameraCalibration2(3, calibration->cameraCalibration2.data());
+        if (!calibration->hasCameraCalibration1 && metadata.hasCalibrationMatrix1 &&
+            !isZeroMatrix(metadata.calibrationMatrix1) &&
+            !isIdentityMatrix(metadata.calibrationMatrix1))
+            dng.SetCameraCalibration1(3, metadata.calibrationMatrix1.data());
+        else if (!calibration->hasCameraCalibration1 &&
+            !isZeroMatrix(cameraConfiguration.calibrationMatrix1) &&
+            !isIdentityMatrix(cameraConfiguration.calibrationMatrix1))
+            dng.SetCameraCalibration1(3, cameraConfiguration.calibrationMatrix1.data());
+        if (!calibration->hasCameraCalibration2 && metadata.hasCalibrationMatrix2 &&
+            !isZeroMatrix(metadata.calibrationMatrix2) &&
+            !isIdentityMatrix(metadata.calibrationMatrix2))
+            dng.SetCameraCalibration2(3, metadata.calibrationMatrix2.data());
+        else if (!calibration->hasCameraCalibration2 &&
+            !isZeroMatrix(cameraConfiguration.calibrationMatrix2) &&
+            !isIdentityMatrix(cameraConfiguration.calibrationMatrix2))
+            dng.SetCameraCalibration2(3, cameraConfiguration.calibrationMatrix2.data());
+    } else {
+        if (metadata.hasCalibrationMatrix1 && !isZeroMatrix(metadata.calibrationMatrix1) &&
+            !isIdentityMatrix(metadata.calibrationMatrix1))
+            dng.SetCameraCalibration1(3, metadata.calibrationMatrix1.data());
+        else if (!isZeroMatrix(cameraConfiguration.calibrationMatrix1) &&
+            !isIdentityMatrix(cameraConfiguration.calibrationMatrix1))
+            dng.SetCameraCalibration1(3, cameraConfiguration.calibrationMatrix1.data());
+        if (metadata.hasCalibrationMatrix2 && !isZeroMatrix(metadata.calibrationMatrix2) &&
+            !isIdentityMatrix(metadata.calibrationMatrix2))
+            dng.SetCameraCalibration2(3, metadata.calibrationMatrix2.data());
+        else if (!isZeroMatrix(cameraConfiguration.calibrationMatrix2) &&
+            !isIdentityMatrix(cameraConfiguration.calibrationMatrix2))
+            dng.SetCameraCalibration2(3, cameraConfiguration.calibrationMatrix2.data());
     }
 
     // Apply asShotNeutral from calibration if available, otherwise from metadata
@@ -1926,8 +2210,10 @@ std::shared_ptr<std::vector<char>> generateDng(
         ? calibration->calibrationIlluminant2
         : getColorIlluminant(cameraConfiguration.colorIlluminant2));
 
-    if (metadata.hasNoiseProfile)
-        dng.SetNoiseProfile(metadata.noiseProfile.data());
+    if (metadata.hasNoiseProfile) {
+        const auto profile = dngNoiseProfile(metadata.noiseProfile, cfa);
+        dng.SetNoiseProfile(profile.data());
+    }
 
     // Additional information
     const auto software = "MotionCam Tools";
@@ -1935,11 +2221,26 @@ std::shared_ptr<std::vector<char>> generateDng(
     dng.SetSoftware(software);
 
 
-    const auto identity = vfs::resolveCameraIdentity(settings.cameraModel,
-        cameraConfiguration.extraData.postProcessSettings.metadata.buildModel);
+    const bool identityOverride = settings.options & RENDER_OPT_CAMMODEL_OVERRIDE;
+    const std::string capturedUniqueModel = !cameraConfiguration.uniqueCameraModel.empty()
+        ? cameraConfiguration.uniqueCameraModel
+        : (!cameraConfiguration.extraData.postProcessSettings.metadata.buildModel.empty()
+            ? cameraConfiguration.extraData.postProcessSettings.metadata.buildModel
+            : cameraConfiguration.deviceSpecificProfile.deviceModel);
+    const auto identity = vfs::resolveCameraIdentity(
+        identityOverride ? settings.cameraModel : std::string(), capturedUniqueModel);
     dng.SetUniqueCameraModel(identity.uniqueModel);
-    if (!identity.make.empty()) dng.SetMake(identity.make);
-    if (!identity.model.empty()) dng.SetCameraModelName(identity.model);
+    const auto& build = cameraConfiguration.extraData.postProcessSettings.metadata;
+    const std::string captureMake = !build.buildManufacturer.empty()
+        ? build.buildManufacturer : build.buildBrand;
+    const std::string captureModel = !cameraConfiguration.deviceSpecificProfile.deviceModel.empty()
+        ? cameraConfiguration.deviceSpecificProfile.deviceModel : build.buildModel;
+    const std::string make = identityOverride && !identity.make.empty()
+        ? identity.make : (!captureMake.empty() ? captureMake : identity.make);
+    const std::string model = identityOverride && !identity.model.empty()
+        ? identity.model : (!captureModel.empty() ? captureModel : identity.model);
+    if (!make.empty()) dng.SetMake(make);
+    if (!model.empty()) dng.SetCameraModelName(model);
 
     if (!opcodeList1.IsEmpty()) {
         dng.SetOpcodeList1(opcodeList1);
@@ -2011,6 +2312,85 @@ std::shared_ptr<std::vector<char>> generateDng(
     utils::vector_ostream stream(*output);
 
     writer.WriteToFile(stream, &err);
+
+    std::vector<DNGSidecarMetadataEntry> captureMetadata;
+    // TinyDNG writes these EXIF-defined fields into IFD0. Attach them after
+    // serialization instead so they live in the ExifIFD required by EXIF.
+    if (metadata.exposureTime > 0)
+        captureMetadata.push_back(rationalMetadata(
+            33434, metadata.exposureTime / 1.0e9, false)); // ExposureTime
+    if (metadata.iso > 0)
+        captureMetadata.push_back(shortMetadata(
+            34855, static_cast<uint16_t>(std::clamp<long>(
+                std::lround(metadata.iso), 1, 65535)), true)); // ISOSpeedRatings
+    const auto& capturePost = cameraConfiguration.extraData.postProcessSettings;
+    if (validGpsCoordinates(capturePost.gpsLatitude,
+                            capturePost.gpsLongitude)) {
+        captureMetadata.push_back(gpsBytes(0, {2, 3, 0, 0})); // GPSVersionID
+        captureMetadata.push_back(gpsAscii(
+            1, capturePost.gpsLatitude < 0.0f ? "S" : "N"));
+        captureMetadata.push_back(gpsRationals(
+            2, gpsCoordinateRationals(capturePost.gpsLatitude)));
+        captureMetadata.push_back(gpsAscii(
+            3, capturePost.gpsLongitude < 0.0f ? "W" : "E"));
+        captureMetadata.push_back(gpsRationals(
+            4, gpsCoordinateRationals(capturePost.gpsLongitude)));
+        captureMetadata.push_back(gpsBytes(
+            5, {static_cast<uint8_t>(capturePost.gpsAltitude < 0.0f ? 1 : 0)}));
+        captureMetadata.push_back(gpsRationals(6, {{static_cast<uint32_t>(
+            std::llround(std::abs(capturePost.gpsAltitude) * 1000.0)), 1000}}));
+        std::tm utc{};
+        int milliseconds = 0;
+        if (gpsUtcTime(capturePost.gpsTime, utc, milliseconds)) {
+            captureMetadata.push_back(gpsRationals(7, {
+                {static_cast<uint32_t>(utc.tm_hour), 1},
+                {static_cast<uint32_t>(utc.tm_min), 1},
+                {static_cast<uint32_t>(utc.tm_sec * 1000 + milliseconds), 1000}}));
+            std::ostringstream date;
+            date << std::put_time(&utc, "%Y:%m:%d");
+            captureMetadata.push_back(gpsAscii(29, date.str()));
+        }
+    }
+    if (!cameraConfiguration.apertures.empty() &&
+        cameraConfiguration.apertures.front() > 0.0f) {
+        const double aperture = cameraConfiguration.apertures.front();
+        captureMetadata.push_back(rationalMetadata(33437, aperture, false)); // FNumber
+        captureMetadata.push_back(rationalMetadata(
+            37378, 2.0 * std::log2(aperture), false)); // ApertureValue
+    }
+    if (!cameraConfiguration.focalLengths.empty() &&
+        cameraConfiguration.focalLengths.front() > 0.0f)
+        captureMetadata.push_back(shortMetadata(
+            41989, static_cast<uint16_t>(std::clamp<long>(
+                std::lround(cameraConfiguration.focalLengths.front()), 1, 65535)),
+            true)); // FocalLengthIn35mmFilm
+    if (metadata.exposureCompensation != 0 &&
+        cameraConfiguration.hasExposureCompensationStep) {
+        const double step = cameraConfiguration.exposureCompensationStep;
+        captureMetadata.push_back(rationalMetadata(
+            37380, metadata.exposureCompensation * step, true)); // ExposureBiasValue
+    }
+    if (metadata.focusDistance > 0.0f && std::isfinite(metadata.focusDistance))
+        captureMetadata.push_back(rationalMetadata(
+            37382, 1.0 / metadata.focusDistance, false)); // diopters -> SubjectDistance metres
+    if (!metadata.filename.empty())
+        captureMetadata.push_back(asciiMetadata(
+            50827, metadata.filename)); // OriginalRawFileName
+    const auto captureXmp = mcrawCaptureXmp(cameraConfiguration, metadata);
+    if (!captureXmp.empty()) {
+        DNGSidecarMetadataEntry xmp;
+        xmp.tag = 700; // XMP
+        xmp.type = 1;  // BYTE
+        xmp.count = static_cast<uint32_t>(captureXmp.size());
+        xmp.value.assign(captureXmp.begin(), captureXmp.end());
+        captureMetadata.push_back(std::move(xmp));
+    }
+    if (!captureMetadata.empty()) {
+        std::vector<uint8_t> bytes(output->begin(), output->end());
+        if (!DNGDecoder::fillMissingSidecarMetadata(bytes, captureMetadata))
+            throw std::runtime_error("Failed to attach MCRAW capture metadata");
+        output->assign(bytes.begin(), bytes.end());
+    }
 
     if (lossyJpegDct) {
         std::vector<uint8_t> bytes(output->begin(), output->end());

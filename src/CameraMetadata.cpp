@@ -1,5 +1,7 @@
 #include "CameraMetadata.h"
 
+#include <cmath>
+
 using namespace nlohmann;
 
 namespace motioncam {
@@ -31,11 +33,12 @@ std::vector<T> jsonArrayToVector(const json& jsonArray) {
 
 Metadata parseMetadata(const json& j) {
     Metadata metadata;
-    metadata.buildBrand = j.value("build.brand", "");
-    metadata.buildDevice = j.value("build.device", "");
-    metadata.buildManufacturer = j.value("build.manufacturer", "");
-    metadata.buildModel = j.value("build.model", "");
-    metadata.buildName = j.value("build.name", "");
+    metadata.buildBrand = j.value("build.brand", j.value("buildBrand", ""));
+    metadata.buildDevice = j.value("build.device", j.value("buildDevice", ""));
+    metadata.buildManufacturer = j.value(
+        "build.manufacturer", j.value("buildManufacturer", ""));
+    metadata.buildModel = j.value("build.model", j.value("buildModel", ""));
+    metadata.buildName = j.value("build.name", j.value("buildName", ""));
     metadata.versionBuild = j.value("version.build", "");
     metadata.versionMajor = j.value("version.major", "");
     metadata.versionMinor = j.value("version.minor", "");
@@ -116,7 +119,7 @@ CameraConfiguration CameraConfiguration::parse(const std::string& jsonString) {
 }
 
 CameraConfiguration CameraConfiguration::parse(const nlohmann::json& j) {
-    CameraConfiguration config;
+    CameraConfiguration config{};
 
     // Parse arrays and matrices
     if (j.contains("apertures") && j["apertures"].is_array()) {
@@ -146,6 +149,34 @@ CameraConfiguration CameraConfiguration::parse(const nlohmann::json& j) {
     if (j.contains("focalLengths") && j["focalLengths"].is_array()) {
         config.focalLengths = jsonArrayToVector<float>(j["focalLengths"]);
     }
+
+    const auto parseCompensationStep = [&](const char* key) {
+        if (!j.contains(key)) return false;
+        const auto& value = j[key];
+        if (value.is_number()) {
+            config.exposureCompensationStep = value.get<float>();
+        } else if (value.is_object()) {
+            const double numerator = value.value("numerator", value.value("num", 0.0));
+            const double denominator = value.value("denominator", value.value("den", 0.0));
+            if (denominator == 0.0) return false;
+            config.exposureCompensationStep = static_cast<float>(numerator / denominator);
+        } else if (value.is_array() && value.size() >= 2 &&
+                   value[1].is_number() && value[1].get<double>() != 0.0) {
+            config.exposureCompensationStep = static_cast<float>(
+                value[0].get<double>() / value[1].get<double>());
+        } else return false;
+        config.hasExposureCompensationStep =
+            std::isfinite(config.exposureCompensationStep) &&
+            config.exposureCompensationStep > 0.0f;
+        return config.hasExposureCompensationStep;
+    };
+    if (!parseCompensationStep("exposureCompensationStep"))
+        parseCompensationStep("aeCompensationStep");
+    if (j.contains("baselineExposure") && j["baselineExposure"].is_number()) {
+        config.baselineExposure = j["baselineExposure"].get<float>();
+        config.hasBaselineExposure = std::isfinite(config.baselineExposure);
+    }
+    config.uniqueCameraModel = j.value("uniqueCameraModel", "");
 
     if (j.contains("forwardMatrix1") && j["forwardMatrix1"].is_array()) {
         config.forwardMatrix1 = jsonArrayToStdArray<float, 9>(j["forwardMatrix1"]);

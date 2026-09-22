@@ -637,6 +637,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
         const auto manualSensorResolution =
             vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
         if (frameMetadata.originalWidth <= 0 && manualSensorResolution[0] > 0)
@@ -806,6 +807,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         decoder->loadFrame(timestamp, frameData, metadata,
                            static_cast<int>(strideOverride));
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
+        frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
         auto cameraConfig =
             CameraConfiguration::parse(decoder->getContainerMetadata());
         reorderNativeShadingMapToCfaPhases(

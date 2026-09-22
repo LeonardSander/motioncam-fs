@@ -78,6 +78,12 @@ struct CameraConfiguration {
     DeviceSpecificProfile deviceSpecificProfile;
     ExtraData extraData;
     std::vector<float> focalLengths;
+    // Android CONTROL_AE_COMPENSATION_STEP in EV per integer capture step.
+    float exposureCompensationStep = 0.0f;
+    bool hasExposureCompensationStep = false;
+    float baselineExposure = 0.0f;
+    bool hasBaselineExposure = false;
+    std::string uniqueCameraModel;
     std::array<float, 9> forwardMatrix1;
     std::array<float, 9> forwardMatrix2;
     int numSegments;

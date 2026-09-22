@@ -36,6 +36,25 @@ TagValue tagValue(const std::vector<uint8_t>& dng, uint16_t wanted) {
     return {};
 }
 
+bool nestedIfdHasTag(const std::vector<uint8_t>& dng, uint16_t pointerTag,
+                     uint16_t wanted) {
+    auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
+    auto u32 = [&](size_t offset) { return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
+        dng[offset + 2] << 16 | dng[offset + 3] << 24); };
+    const uint32_t root = u32(4);
+    const uint16_t rootCount = u16(root);
+    uint32_t nested = 0;
+    for (uint16_t i = 0; i < rootCount; ++i) {
+        const size_t entry = static_cast<size_t>(root) + 2 + i * 12;
+        if (u16(entry) == pointerTag) { nested = u32(entry + 8); break; }
+    }
+    if (!nested || nested + 2 > dng.size()) return false;
+    const uint16_t count = u16(nested);
+    for (uint16_t i = 0; i < count; ++i)
+        if (u16(static_cast<size_t>(nested) + 2 + i * 12) == wanted) return true;
+    return false;
+}
+
 bool setTagType(std::vector<uint8_t>& dng, uint16_t wanted, uint16_t type) {
     auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
     auto u32 = [&](size_t offset) { return static_cast<uint32_t>(dng[offset] | dng[offset + 1] << 8 |
@@ -239,6 +258,26 @@ int main() {
         1234, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 1000000000);
     const auto uncompressedDifferent = makeDng(
         1235, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 1000000000);
+    auto gpsDng = uncompressedA;
+    motioncam::DNGSidecarMetadataEntry gpsVersion;
+    gpsVersion.tag = 0;
+    gpsVersion.type = 1;
+    gpsVersion.count = 4;
+    gpsVersion.gps = true;
+    gpsVersion.value = {2, 3, 0, 0};
+    motioncam::DNGSidecarMetadataEntry gpsLatitudeRef;
+    gpsLatitudeRef.tag = 1;
+    gpsLatitudeRef.type = 2;
+    gpsLatitudeRef.count = 2;
+    gpsLatitudeRef.gps = true;
+    gpsLatitudeRef.value = {'N', 0};
+    assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(
+        gpsDng, {gpsVersion, gpsLatitudeRef}));
+    assert(nestedIfdHasTag(gpsDng, 34853, 0));
+    assert(nestedIfdHasTag(gpsDng, 34853, 1));
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(gpsDng));
+    assert(nestedIfdHasTag(gpsDng, 34853, 0));
+    assert(nestedIfdHasTag(gpsDng, 34853, 1));
     assert(motioncam::DNGDecoder::imagePayloadsEqual(uncompressedA, uncompressedB));
     assert(!motioncam::DNGDecoder::imagePayloadsEqual(
         uncompressedA, uncompressedDifferent));

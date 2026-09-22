@@ -23,6 +23,7 @@ struct CameraFrameMetadata {
     int exposureCompensation;
     double exposureTime;
     std::string filename;
+    float focusDistance;
     int height;
     bool isBinned;
     bool isCompressed;
@@ -42,8 +43,20 @@ struct CameraFrameMetadata {
     std::string timestamp;
     std::string type;
     int width;
-    std::array<double, 6> noiseProfile;
+    std::vector<double> noiseProfile;
     bool hasNoiseProfile = false;
+    std::array<float, 9> colorMatrix1{};
+    std::array<float, 9> colorMatrix2{};
+    std::array<float, 9> forwardMatrix1{};
+    std::array<float, 9> forwardMatrix2{};
+    std::array<float, 9> calibrationMatrix1{};
+    std::array<float, 9> calibrationMatrix2{};
+    bool hasColorMatrix1 = false;
+    bool hasColorMatrix2 = false;
+    bool hasForwardMatrix1 = false;
+    bool hasForwardMatrix2 = false;
+    bool hasCalibrationMatrix1 = false;
+    bool hasCalibrationMatrix2 = false;
 
     static CameraFrameMetadata parse(const std::string& jsonString);
     static CameraFrameMetadata parse(const nlohmann::json& j);
