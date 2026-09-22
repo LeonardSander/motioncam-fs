@@ -36,10 +36,10 @@ struct CachedDirectLogTimeline {
 
 std::mutex directLogTimelineCacheMutex;
 std::unordered_map<std::string, CachedDirectLogTimeline> directLogTimelineCache;
-// Version 4 timelines are built from demuxed video access units rather than
-// decoded frames. Invalidate older persistent entries so key-frame flags and
-// timestamps always use the same construction path.
-constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000004ULL;
+// Version 5 timelines omit packets marked for discard. Some cameras append a
+// final, timestamped HEVC access unit which the decoder intentionally emits no
+// frame for; retaining it creates a phantom still at the end of the clip.
+constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000005ULL;
 
 std::string directLogTimelineCacheKey(const std::string& path) {
     std::error_code error;
@@ -396,11 +396,20 @@ void DirectLogDecoder::analyzeVideo() {
         case AV_PIX_FMT_YUV420P:
             mVideoInfo.pixelFormat = "yuv420p";
             break;
+        case AV_PIX_FMT_YUVJ420P:
+            mVideoInfo.pixelFormat = "yuvj420p";
+            break;
         case AV_PIX_FMT_YUV422P:
             mVideoInfo.pixelFormat = "yuv422p";
             break;
+        case AV_PIX_FMT_YUVJ422P:
+            mVideoInfo.pixelFormat = "yuvj422p";
+            break;
         case AV_PIX_FMT_YUV444P:
             mVideoInfo.pixelFormat = "yuv444p";
+            break;
+        case AV_PIX_FMT_YUVJ444P:
+            mVideoInfo.pixelFormat = "yuvj444p";
             break;
         case AV_PIX_FMT_YUV420P10LE:
             mVideoInfo.pixelFormat = "yuv420p10le";
@@ -449,7 +458,8 @@ void DirectLogDecoder::analyzeVideo() {
     // without doing the expensive pixel decode.
     mFrames.clear();
     while (av_read_frame(mFormatContext, mPacket) >= 0) {
-        if (mPacket->stream_index == mVideoStreamIndex) {
+        if (mPacket->stream_index == mVideoStreamIndex &&
+            !(mPacket->flags & AV_PKT_FLAG_DISCARD)) {
             int64_t pts = mPacket->pts;
             // PTS should be present for MOV/MP4/MKV video. DTS is still a
             // useful fallback for simple streams that omit presentation time.
