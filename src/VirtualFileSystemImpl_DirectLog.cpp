@@ -267,6 +267,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
                 candidate.image.opcodeList2);
             candidateBytes += vfs::projectedGainMapMetadataSize(
                 candidate.image.opcodeList3);
+            for (const auto& opcodeList : candidate.nonGainMapOpcodes)
+                candidateBytes += opcodeList.size();
             largestManualSidecarBytes = std::max(
                 largestManualSidecarBytes, candidateBytes);
         }
@@ -765,6 +767,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         diagnosticStage = std::chrono::steady_clock::now();
         std::string dngStr = std::move(oss).str();
         dngData.assign(dngStr.begin(), dngStr.end());
+        if (!vfs::applyManualOpcodeSidecar(dngData, mManualVignetteSidecars))
+            throw std::runtime_error("Could not apply DirectLog opcode sidecar");
         if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
             !vfs::applyManualVignetteSidecar(dngData, mManualVignetteSidecars))
             throw std::runtime_error("Could not apply manual DirectLog vignette sidecar");

@@ -31,7 +31,7 @@ int main() {
     assert(exampleCalibration.contains("_needGainMapOrderFixed"));
     assert(exampleCalibration.contains("_fullSensorResolution"));
     assert(exampleCalibration.contains("_dng_white"));
-    assert(exampleCalibration.contains("_dng_gainmap"));
+    assert(exampleCalibration.contains("_dng_opcode"));
     assert(exampleCalibration.contains("_gyroflow"));
     assert(exampleCalibration.value("_ignoreForwardMat", true) == false);
     assert(exampleCalibration.value("_orientation", -1) == 0);

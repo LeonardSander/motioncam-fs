@@ -897,12 +897,13 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     const std::string stem = lower(
         directory ? source.filename().string() : source.stem().string());
     auto loadCandidate = [&](const boost::filesystem::path& path, bool white,
-                             std::string illuminant = {}) {
+                             std::string illuminant = {}, bool legacyGainMapName = false) {
         std::ifstream input(path.string(), std::ios::binary);
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
         ManualVignetteSidecars::Candidate candidate;
         candidate.path = path.string();
         candidate.whiteImage = white;
+        candidate.legacyGainMapName = legacyGainMapName;
         candidate.illuminant = std::move(illuminant);
         if (bytes.empty() || !DNGDecoder::decodeImage(bytes, candidate.image, false, false)) {
             spdlog::warn("Could not decode manual vignette sidecar {}", path.string());
@@ -911,6 +912,11 @@ ManualVignetteSidecars loadManualVignetteSidecars(
         if (!DNGDecoder::extractSidecarMetadata(bytes, candidate.metadata)) {
             spdlog::warn("Could not cache metadata from manual vignette sidecar {}",
                          path.string());
+            return false;
+        }
+        if (!white && !DNGDecoder::extractNonGainMapOpcodes(
+                bytes, candidate.nonGainMapOpcodes)) {
+            spdlog::warn("Could not cache opcodes from DNG sidecar {}", path.string());
             return false;
         }
         std::vector<GainMap> defaultRgbMaps;
@@ -929,8 +935,11 @@ ManualVignetteSidecars loadManualVignetteSidecars(
                 return false;
             }
         } else if (candidate.image.opcodeList2.empty() &&
-                   candidate.image.opcodeList3.empty()) {
-            spdlog::warn("Discarding gain-map sidecar without gain-map opcodes {}",
+                   candidate.image.opcodeList3.empty() &&
+                   std::all_of(candidate.nonGainMapOpcodes.begin(),
+                               candidate.nonGainMapOpcodes.end(),
+                               [](const auto& payload) { return payload.empty(); })) {
+            spdlog::warn("Discarding opcode sidecar without opcodes {}",
                          candidate.path);
             return false;
         }
@@ -953,7 +962,7 @@ ManualVignetteSidecars loadManualVignetteSidecars(
         return true;
     };
     bool discoveredWhite = false;
-    bool discoveredGainMap = false;
+    bool discoveredOpcode = false;
     if (boost::filesystem::exists(parent))
     for (boost::filesystem::directory_iterator it(parent), end; it != end; ++it) {
         boost::system::error_code statusError;
@@ -965,11 +974,13 @@ ManualVignetteSidecars loadManualVignetteSidecars(
             lower(it->path().extension().string()) != ".dng") continue;
         const std::string candidateStem = lower(it->path().stem().string());
         const std::string whitePrefix = stem + "_white";
+        const std::string opcodePrefix = stem + "_opcode";
         const std::string mapPrefix = stem + "_gainmap";
         const bool white = candidateStem.rfind(whitePrefix, 0) == 0;
+        const bool opcode = candidateStem.rfind(opcodePrefix, 0) == 0;
         const bool gainmap = candidateStem.rfind(mapPrefix, 0) == 0;
-        if (!white && !gainmap) continue;
-        const auto& prefix = white ? whitePrefix : mapPrefix;
+        if (!white && !opcode && !gainmap) continue;
+        const auto& prefix = white ? whitePrefix : opcode ? opcodePrefix : mapPrefix;
         if (candidateStem.size() > prefix.size() && candidateStem[prefix.size()] != '_')
             continue;
         std::string illuminant;
@@ -979,8 +990,8 @@ ManualVignetteSidecars loadManualVignetteSidecars(
         // a broken conventional sidecar must be reported, not silently masked
         // by a different JSON-referenced calibration.
         discoveredWhite |= white;
-        discoveredGainMap |= gainmap;
-        loadCandidate(it->path(), white, std::move(illuminant));
+        discoveredOpcode |= opcode || gainmap;
+        loadCandidate(it->path(), white, std::move(illuminant), gainmap);
     }
     if (sidecar && sidecarFile) {
         auto loadReferenced = [&](const char* field, bool white, bool discovered) {
@@ -998,10 +1009,22 @@ ManualVignetteSidecars loadManualVignetteSidecars(
             loadCandidate(path, white);
         };
         loadReferenced("dng_white", true, discoveredWhite);
-        loadReferenced("dng_gainmap", false, discoveredGainMap);
+        if (!discoveredOpcode) {
+            const auto opcode = sidecar->find("dng_opcode");
+            if (opcode != sidecar->end() && opcode->is_string() &&
+                !opcode->get<std::string>().empty())
+                loadReferenced("dng_opcode", false, false);
+            else
+                loadReferenced("dng_gainmap", false, false);
+        }
     }
     std::sort(result.candidates.begin(), result.candidates.end(),
-        [](const auto& a, const auto& b) { return a.path < b.path; });
+        [](const auto& a, const auto& b) {
+            if (a.whiteImage != b.whiteImage) return a.whiteImage > b.whiteImage;
+            if (a.legacyGainMapName != b.legacyGainMapName)
+                return a.legacyGainMapName < b.legacyGainMapName;
+            return a.path < b.path;
+        });
     if (!result.candidates.empty())
         spdlog::info("Loaded {} manual vignette DNG sidecar(s) for {}",
                      result.candidates.size(), sourcePath);
@@ -1057,6 +1080,24 @@ bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
             sidecars, frameLayout, opcodeList2, opcodeList3)) return false;
     return (opcodeList2.empty() || DNGDecoder::replaceGainMaps(dng, 2, opcodeList2)) &&
         (opcodeList3.empty() || DNGDecoder::replaceGainMaps(dng, 3, opcodeList3));
+}
+
+bool applyManualOpcodeSidecar(std::vector<uint8_t>& dng,
+                              const ManualVignetteSidecars& sidecars) {
+    auto select = [&](bool d65) {
+        for (const auto& candidate : sidecars.candidates) {
+            if (candidate.whiteImage ||
+                (lower(candidate.illuminant) == "d65") != d65 ||
+                (!d65 && !candidate.illuminant.empty()))
+                continue;
+            return &candidate;
+        }
+        return static_cast<const ManualVignetteSidecars::Candidate*>(nullptr);
+    };
+    const auto* selected = select(true);
+    if (!selected) selected = select(false);
+    return !selected || DNGDecoder::mergeNonGainMapOpcodes(
+        dng, selected->nonGainMapOpcodes);
 }
 
 bool applyManualDngMetadata(std::vector<uint8_t>& dng,

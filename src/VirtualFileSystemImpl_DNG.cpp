@@ -634,6 +634,8 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         result.cfaPhase = mCfaPhase;
 
     vfs::replaceSidecarGainMapOpcodes(result.dng, mSidecarMetadata, frameIndex);
+    if (!vfs::applyManualOpcodeSidecar(result.dng, mManualVignetteSidecars))
+        throw std::runtime_error("Could not apply DNG opcode sidecar");
     if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
         !vfs::applyManualVignetteSidecar(result.dng, mManualVignetteSidecars))
         throw std::runtime_error("Could not apply manual DNG vignette sidecar");

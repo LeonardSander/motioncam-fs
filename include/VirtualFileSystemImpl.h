@@ -239,8 +239,10 @@ struct ManualVignetteSidecars {
         std::string path;
         std::string illuminant;
         bool whiteImage = false;
+        bool legacyGainMapName = false;
         DecodedDNGImage image;
         std::vector<DNGSidecarMetadataEntry> metadata;
+        std::array<std::vector<uint8_t>, 3> nonGainMapOpcodes;
     };
     std::vector<Candidate> candidates;
     std::shared_ptr<Cache> cache = std::make_shared<Cache>();
@@ -251,6 +253,8 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     const boost::filesystem::path* sidecarFile = nullptr);
 bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                                 const ManualVignetteSidecars& sidecars);
+bool applyManualOpcodeSidecar(std::vector<uint8_t>& dng,
+                              const ManualVignetteSidecars& sidecars);
 bool manualVignetteSidecarGainMaps(
     const ManualVignetteSidecars& sidecars, const DNGImageLayout& targetLayout,
     std::vector<GainMap>& opcodeList2, std::vector<GainMap>& opcodeList3);

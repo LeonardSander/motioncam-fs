@@ -88,7 +88,7 @@ There is the option to ignore forward matrices, so Gallery falls back to chromat
 
 - **DNG sidecars**
 
-To apply manual vignette correction by supplying a suitable white image measurement, DNG sidecars named <source_name>_white.dng are ingested per clip to be converted to gainmaps for the output DNG with usual processing all available. A sidecar named <source_name>_gainmap.dng instead copies included gainmaps as well as matrices and asShotNeutral.
+To apply manual vignette correction by supplying a suitable white image measurement, DNG sidecars named <source_name>_white.dng are ingested per clip to be converted to gainmaps for the output DNG with usual processing all available. A sidecar named <source_name>_opcode.dng copies its opcode lists (including gain maps and lens distortion), matrices, and asShotNeutral.
 
 ---
 

@@ -851,6 +851,8 @@ void VirtualFileSystemImpl_MCRAW::attachSidecarGainMapOpcodes(
             dng, mManualVignetteSidecars,
             mCalibration ? &*mCalibration : nullptr))
         throw std::runtime_error("Could not apply manual MCRAW metadata sidecar");
+    if (!vfs::applyManualOpcodeSidecar(dng, mManualVignetteSidecars))
+        throw std::runtime_error("Could not apply MCRAW opcode sidecar");
     if (mSettings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
         if (!DNGDecoder::replaceGainMaps(dng, 2, {}) ||
             !DNGDecoder::replaceGainMaps(dng, 3, {}))

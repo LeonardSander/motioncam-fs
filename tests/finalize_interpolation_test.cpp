@@ -814,6 +814,71 @@ int main() {
     };
     assert(fisheyeBe32(fisheyeOffset) == 1 && fisheyeBe32(fisheyeOffset + 4) == 2);
     assert(fisheyeBe32(fisheyeOffset + 16) == 52);
+    std::array<std::vector<uint8_t>, 3> cachedSidecarOpcodes;
+    assert(motioncam::DNGDecoder::extractNonGainMapOpcodes(
+        fisheyeWarped, cachedSidecarOpcodes));
+    motioncam::vfs::ManualVignetteSidecars mixedIlluminantSidecars;
+    motioncam::vfs::ManualVignetteSidecars::Candidate d65White;
+    d65White.whiteImage = true;
+    d65White.illuminant = "d65";
+    mixedIlluminantSidecars.candidates.push_back(std::move(d65White));
+    motioncam::vfs::ManualVignetteSidecars::Candidate defaultOpcodes;
+    defaultOpcodes.nonGainMapOpcodes = cachedSidecarOpcodes;
+    mixedIlluminantSidecars.candidates.push_back(std::move(defaultOpcodes));
+    auto mixedIlluminantOpcodes = uncompressedA;
+    assert(motioncam::vfs::applyManualOpcodeSidecar(
+        mixedIlluminantOpcodes, mixedIlluminantSidecars));
+    const auto [mixedWarpOffset, mixedWarpBytes] =
+        tagPayload(mixedIlluminantOpcodes, 51022);
+    assert(mixedWarpOffset && mixedWarpBytes == fisheyeBytes);
+    auto mergedOpcodes = opcodeCfa;
+    assert(motioncam::DNGDecoder::mergeNonGainMapOpcodes(
+        mergedOpcodes, cachedSidecarOpcodes));
+    const auto [mergedList1Offset, mergedList1Bytes] =
+        tagPayload(mergedOpcodes, 51008);
+    assert(mergedList1Offset && mergedList1Bytes == badPixelOpcodeBytes);
+    auto mergedBe32 = [&](size_t offset) {
+        return static_cast<uint32_t>(mergedOpcodes[offset] << 24 |
+            mergedOpcodes[offset + 1] << 16 | mergedOpcodes[offset + 2] << 8 |
+            mergedOpcodes[offset + 3]);
+    };
+    const auto [mergedWarpOffset, mergedWarpBytes] = tagPayload(mergedOpcodes, 51022);
+    assert(mergedWarpOffset && mergedWarpBytes == fisheyeBytes);
+    assert(mergedBe32(mergedWarpOffset) == 1 && mergedBe32(mergedWarpOffset + 4) == 2);
+    motioncam::vfs::applyGyroflowLensProfile(mergedOpcodes, *gyroflow);
+    const auto [gyroOverrideOffset, gyroOverrideBytes] = tagPayload(mergedOpcodes, 51022);
+    assert(gyroOverrideOffset && gyroOverrideBytes == 88);
+    assert(mergedBe32(gyroOverrideOffset) == 1 &&
+           mergedBe32(gyroOverrideOffset + 4) == 1);
+    auto writeDng = [](const fs::path& path, const std::vector<uint8_t>& bytes) {
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+    };
+    writeDng(root / "legacy_gainmap.dng", fisheyeWarped);
+    auto legacySidecar = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "legacy.dng").string());
+    assert(legacySidecar.candidates.size() == 1);
+    writeDng(root / "legacy_opcode.dng", warped);
+    auto preferredOpcodeSidecar = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "legacy.dng").string());
+    auto discoveredOpcodes = uncompressedA;
+    assert(motioncam::vfs::applyManualOpcodeSidecar(
+        discoveredOpcodes, preferredOpcodeSidecar));
+    const auto [discoveredWarpOffset, discoveredWarpBytes] =
+        tagPayload(discoveredOpcodes, 51022);
+    assert(discoveredWarpOffset && discoveredWarpBytes == 88);
+    auto discoveredBe32 = [&](size_t offset) {
+        return static_cast<uint32_t>(discoveredOpcodes[offset] << 24 |
+            discoveredOpcodes[offset + 1] << 16 |
+            discoveredOpcodes[offset + 2] << 8 | discoveredOpcodes[offset + 3]);
+    };
+    assert(discoveredBe32(discoveredWarpOffset + 4) == 1);
+    const nlohmann::json referencedOpcode{{"dng_opcode", "legacy_opcode.dng"}};
+    const boost::filesystem::path referencedJson((root / "referenced.json").string());
+    auto jsonOpcodeSidecar = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "referenced.dng").string(), &referencedOpcode, &referencedJson);
+    assert(jsonOpcodeSidecar.candidates.size() == 1);
     std::ofstream(root / "rife" / "inference_img.py") << "# protocol double\n";
     FakeFileSystem filesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),

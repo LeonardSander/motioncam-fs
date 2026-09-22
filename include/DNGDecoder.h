@@ -58,7 +58,20 @@ public:
     static bool replaceGainMaps(std::vector<uint8_t>& dngData,
                                 int opcodeList, const std::vector<GainMap>& gainMaps);
     static bool replaceOpcodeList(std::vector<uint8_t>& dngData, int opcodeList,
-                                  const std::vector<uint8_t>& payload);
+                                  const std::vector<uint8_t>& payload,
+                                  bool append = true);
+    // Cache every non-GainMap operation from OpcodeList1/2/3 for use by a
+    // per-clip opcode DNG. Empty payloads mean that the source had no such
+    // operations in that list.
+    static bool extractNonGainMapOpcodes(
+        const std::vector<uint8_t>& dngData,
+        std::array<std::vector<uint8_t>, 3>& opcodeLists);
+    // Merge cached sidecar operations into a frame. GainMap operations remain
+    // owned by replaceGainMaps(); operations with the same ID are replaced so
+    // sidecar distortion data supersedes distortion embedded in the frame.
+    static bool mergeNonGainMapOpcodes(
+        std::vector<uint8_t>& dngData,
+        const std::array<std::vector<uint8_t>, 3>& opcodeLists);
     static bool setWarpFisheye(std::vector<uint8_t>& dngData,
                                const std::array<double, 4>& coefficients,
                                double centerX, double centerY);

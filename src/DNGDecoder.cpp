@@ -1624,6 +1624,7 @@ void DNGDecoder::findDNGFiles() {
         const std::string sequenceStem = boost::algorithm::to_lower_copy(
             basePath.filename().string());
         const std::string whitePrefix = sequenceStem + "_white";
+        const std::string opcodePrefix = sequenceStem + "_opcode";
         const std::string gainMapPrefix = sequenceStem + "_gainmap";
         for (boost::filesystem::directory_iterator it(basePath); it != end; ++it) {
             const std::string stem = boost::algorithm::to_lower_copy(
@@ -1634,7 +1635,8 @@ void DNGDecoder::findDNGFiles() {
                     stem[prefix.size()] == '_');
             };
             if (boost::iequals(it->path().extension().string(), ".dng") &&
-                !manualSidecar(whitePrefix) && !manualSidecar(gainMapPrefix))
+                !manualSidecar(whitePrefix) && !manualSidecar(opcodePrefix) &&
+                !manualSidecar(gainMapPrefix))
                 dngFiles.push_back(it->path().string());
         }
     }
@@ -2062,7 +2064,7 @@ bool DNGDecoder::replaceGainMaps(std::vector<uint8_t>& data, int opcodeList,
 }
 
 bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
-                                   const std::vector<uint8_t>& payload) {
+                                   const std::vector<uint8_t>& payload, bool append) {
     if (opcodeList < 1 || opcodeList > 3 || payload.size() < 4) return false;
     const uint16_t wanted = opcodeList == 1 ? TIFF_TAG_OPCODE_LIST_1
         : opcodeList == 2 ? TIFF_TAG_OPCODE_LIST_2 : TIFF_TAG_OPCODE_LIST_3;
@@ -2078,7 +2080,7 @@ bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
         }
     size_t targetEntryOffset = entry ? entry->entryOffset : 0;
     std::vector<uint8_t> output = payload;
-    if (entry && entry->count) {
+    if (append && entry && entry->count) {
         if (entry->count < 4 || entry->valueOffset > data.size() ||
             entry->count > data.size() - entry->valueOffset) return false;
         const uint32_t oldCount = readBE32(data.data() + entry->valueOffset);
@@ -2131,6 +2133,108 @@ bool DNGDecoder::replaceOpcodeList(std::vector<uint8_t>& data, int opcodeList,
             static_cast<uint32_t>(output.size()), little);
     write32(data.data() + targetEntryOffset + 8, offset, little);
     return requireOpcodeVersion();
+}
+
+namespace {
+bool filterOpcodePayload(const uint8_t* source, size_t size,
+                         const std::set<uint32_t>& excluded,
+                         std::vector<uint8_t>& output,
+                         std::set<uint32_t>* included = nullptr) {
+    output.assign(4, 0);
+    if (size < 4) return false;
+    const uint32_t count = readBE32(source);
+    uint32_t outputCount = 0;
+    size_t offset = 4;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (offset + 16 > size) return false;
+        const uint32_t id = readBE32(source + offset);
+        const uint32_t bytes = readBE32(source + offset + 12);
+        if (bytes > size - offset - 16) return false;
+        const size_t opcodeBytes = 16 + bytes;
+        if (!excluded.count(id)) {
+            output.insert(output.end(), source + offset, source + offset + opcodeBytes);
+            if (included) included->insert(id);
+            ++outputCount;
+        }
+        offset += opcodeBytes;
+    }
+    if (offset != size) return false;
+    output[0] = static_cast<uint8_t>(outputCount >> 24);
+    output[1] = static_cast<uint8_t>(outputCount >> 16);
+    output[2] = static_cast<uint8_t>(outputCount >> 8);
+    output[3] = static_cast<uint8_t>(outputCount);
+    return true;
+}
+} // namespace
+
+bool DNGDecoder::extractNonGainMapOpcodes(
+        const std::vector<uint8_t>& data,
+        std::array<std::vector<uint8_t>, 3>& opcodeLists) {
+    for (auto& payload : opcodeLists) payload.clear();
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const auto primaryIfd = primaryImageIfd(data, entries, little);
+    if (!primaryIfd) return false;
+    const std::array<uint16_t, 3> tags{
+        TIFF_TAG_OPCODE_LIST_1, TIFF_TAG_OPCODE_LIST_2, TIFF_TAG_OPCODE_LIST_3};
+    for (const auto& entry : entries) {
+        const auto tag = std::find(tags.begin(), tags.end(), entry.tag);
+        if (entry.ifdOffset != *primaryIfd || tag == tags.end() || !entry.count) continue;
+        const size_t index = static_cast<size_t>(std::distance(tags.begin(), tag));
+        if (entry.valueOffset > data.size() || entry.count > data.size() - entry.valueOffset ||
+            !filterOpcodePayload(data.data() + entry.valueOffset, entry.count,
+                                 {OPCODE_GAIN_MAP}, opcodeLists[index]))
+            return false;
+        if (readBE32(opcodeLists[index].data()) == 0) opcodeLists[index].clear();
+    }
+    return true;
+}
+
+bool DNGDecoder::mergeNonGainMapOpcodes(
+        std::vector<uint8_t>& data,
+        const std::array<std::vector<uint8_t>, 3>& opcodeLists) {
+    for (size_t index = 0; index < opcodeLists.size(); ++index) {
+        const auto& sidecar = opcodeLists[index];
+        if (sidecar.empty()) continue;
+        std::set<uint32_t> sidecarIds;
+        std::vector<uint8_t> checked;
+        if (!filterOpcodePayload(sidecar.data(), sidecar.size(), {}, checked, &sidecarIds))
+            return false;
+        if (sidecarIds.count(OPCODE_WARP_RECTILINEAR) ||
+            sidecarIds.count(OPCODE_WARP_FISHEYE) ||
+            sidecarIds.count(OPCODE_WARP_RECTILINEAR_2)) {
+            sidecarIds.insert(OPCODE_WARP_RECTILINEAR);
+            sidecarIds.insert(OPCODE_WARP_FISHEYE);
+            sidecarIds.insert(OPCODE_WARP_RECTILINEAR_2);
+        }
+        bool little = true;
+        const auto entries = findTiffEntries(data, little);
+        const auto primaryIfd = primaryImageIfd(data, entries, little);
+        if (!primaryIfd) return false;
+        const std::array<uint16_t, 3> tags{
+            TIFF_TAG_OPCODE_LIST_1, TIFF_TAG_OPCODE_LIST_2, TIFF_TAG_OPCODE_LIST_3};
+        const uint16_t wanted = tags[index];
+        std::vector<uint8_t> merged(4, 0);
+        for (const auto& entry : entries) {
+            if (entry.ifdOffset != *primaryIfd || entry.tag != wanted || !entry.count) continue;
+            if (entry.valueOffset > data.size() || entry.count > data.size() - entry.valueOffset ||
+                !filterOpcodePayload(data.data() + entry.valueOffset, entry.count,
+                                     sidecarIds, merged))
+                return false;
+            break;
+        }
+        const uint32_t retained = readBE32(merged.data());
+        const uint32_t added = readBE32(sidecar.data());
+        if (retained > std::numeric_limits<uint32_t>::max() - added) return false;
+        merged.insert(merged.end(), sidecar.begin() + 4, sidecar.end());
+        const uint32_t count = retained + added;
+        merged[0] = static_cast<uint8_t>(count >> 24);
+        merged[1] = static_cast<uint8_t>(count >> 16);
+        merged[2] = static_cast<uint8_t>(count >> 8);
+        merged[3] = static_cast<uint8_t>(count);
+        if (!replaceOpcodeList(data, static_cast<int>(index + 1), merged, false)) return false;
+    }
+    return true;
 }
 
 namespace {
