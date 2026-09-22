@@ -596,7 +596,7 @@
          <item>
           <widget class="QLabel" name="compressionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Save DNG sequences using JPEG/JPEG XL, archive uncompressed DNGs using multithreaded 7z LZMA2 Ultra, or save as Camera Native. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Save DNG sequences using JPEG/JPEG XL, archive original MCRAW source clips using multithreaded 7z LZMA2 Ultra, or save as Camera Native. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

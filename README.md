@@ -114,7 +114,7 @@ Duplicated frames introduced by CFR conversion can be replaced by motion-interpo
 
 - **MCRAW archival**
 
-MCRAW clips can be compressed using 7z LZMA2 Ultra and opened again in Fuse by decompressing to a temporary MCRAW on import.
+Original MCRAW source files can be compressed without processing using 7z LZMA2 Ultra and opened again in Fuse by decompressing to a temporary MCRAW on import. DNG sequences and DirectLog sources are not supported by this archival format.
 
 ---
 

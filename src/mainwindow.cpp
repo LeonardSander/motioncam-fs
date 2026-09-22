@@ -4020,8 +4020,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         }
         const QString mode = compressionMode.trimmed();
         if (archiveDngs) {
-            // The outer LZMA2 stream compresses finalized DNG payloads; do not
-            // first apply JPEG/JPEG XL compression inside each DNG.
+            // 7z finalization archives the original MCRAW below. It does not
+            // pass through the DNG rendering pipeline.
         } else if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
             mRenderSettings.jxlDistance = -1.0f;
         } else if (mode.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
@@ -4069,6 +4069,14 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         return;
     }
 
+    if (archiveDngs &&
+        QFileInfo(srcFile).suffix().compare("mcraw", Qt::CaseInsensitive) != 0) {
+        QMessageBox::warning(this, tr("Finalize failed"),
+            tr("7z finalization is only available for MCRAW source clips. "
+               "DNG sequences and DirectLog clips cannot be archived with this format."));
+        return;
+    }
+
     QString archivePath;
     QString archiveSidecarPath;
     QString archiveGyroflowPath;
@@ -4113,8 +4121,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             return;
     }
 
-    // Use a temporary directory to avoid ProjectedFS locks
-    // We'll write to temp, then move files to the final location
+    // Rendered formats use a temporary directory to avoid ProjectedFS locks.
+    // The archive path also uses it as harmless transaction scratch space.
     QString tempPath = mountPath + ".finalizing-" +
         QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString retainedOutputPath = mountPath + "-finalized";
@@ -4135,14 +4143,18 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 
     spdlog::info("Using temp directory: {}", tempPath.toStdString());
 
-    const bool detectDuplicateDngs = ui->detectDuplicateDngsCheckBox->isChecked();
-    const bool interpolateFrames = ui->rifeInterpolationCheckBox->isChecked() &&
+    const bool detectDuplicateDngs = !archiveDngs &&
+        ui->detectDuplicateDngsCheckBox->isChecked();
+    const bool interpolateFrames = !archiveDngs &&
+        ui->rifeInterpolationCheckBox->isChecked() &&
         (fileInfo->duplicatedFrames > 0 || detectDuplicateDngs);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) return;
 
     // Create progress dialog
-    QProgressDialog progress("Rendering DNG sequence...", "Cancel", 0, totalFrames, this);
+    QProgressDialog progress(
+        archiveDngs ? "Preparing MCRAW archive..." : "Rendering DNG sequence...",
+        "Cancel", 0, totalFrames, this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
@@ -4164,34 +4176,37 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     spdlog::info("Compression checkbox state: {}", enableCompression);
 
 
-    // Render all frames directly to disk (bypassing ProjectedFS)
-    // This allows compression to work correctly with variable file sizes
+    // Render frame-based formats directly to disk (bypassing ProjectedFS).
+    // MCRAW archival deliberately skips this operation.
     bool mountReleased = false;
     try {
-        mFuseFilesystem->finalize(
-            mountId,
-            tempPath.toStdString(),
-            enableCompression,
-            finalizeOptions,
-            [&](size_t completed, size_t count, const std::string& name) {
-                progress.setMaximum(static_cast<int>(count));
-                progress.setValue(static_cast<int>(completed));
-                if (!name.empty()) {
-                    progress.setLabelText(
-                        QString("Finalizing—step %1 of %2: %3")
-                            .arg(std::min(completed + 1, count)).arg(count)
-                            .arg(QString::fromStdString(name)));
-                }
-                QApplication::processEvents();
-                return !progress.wasCanceled();
-            });
+        if (!archiveDngs) {
+            mFuseFilesystem->finalize(
+                mountId,
+                tempPath.toStdString(),
+                enableCompression,
+                finalizeOptions,
+                [&](size_t completed, size_t count, const std::string& name) {
+                    progress.setMaximum(static_cast<int>(count));
+                    progress.setValue(static_cast<int>(completed));
+                    if (!name.empty()) {
+                        progress.setLabelText(
+                            QString("Finalizing—step %1 of %2: %3")
+                                .arg(std::min(completed + 1, count)).arg(count)
+                                .arg(QString::fromStdString(name)));
+                    }
+                    QApplication::processEvents();
+                    return !progress.wasCanceled();
+                });
+        }
 
         if (!progress.wasCanceled()) {
-            spdlog::info("Rendered {} frames to temp directory", totalFrames);
+            if (!archiveDngs)
+                spdlog::info("Rendered {} frames to temp directory", totalFrames);
 
             if (archiveDngs) {
                 progress.setRange(0, 0);
-                progress.setLabelText("Compressing uncompressed DNGs with 7z LZMA2 Ultra...");
+                progress.setLabelText("Compressing original MCRAW with 7z LZMA2 Ultra...");
                 QApplication::processEvents();
                 const QString transactionId = ".partial-" +
                     QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -4200,10 +4215,12 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 const QString partialGyroflow = archiveGyroflowPath + transactionId;
                 RemoveFilesOnExit partialFiles{{partialArchive, partialSidecar, partialGyroflow}};
                 QProcess compressor;
-                compressor.setWorkingDirectory(tempPath);
+                const QFileInfo sourceInfo(srcFile);
+                compressor.setWorkingDirectory(sourceInfo.absolutePath());
                 compressor.setProcessChannelMode(QProcess::MergedChannels);
                 compressor.start(archiver, {"a", "-t7z", "-m0=lzma2", "-mx=9",
-                    "-mmt=on", "-ms=on", "-sse", "-y", partialArchive, "*.dng"});
+                    "-mmt=on", "-ms=on", "-sse", "-y", partialArchive,
+                    sourceInfo.fileName()});
                 if (!compressor.waitForStarted())
                     throw std::runtime_error("Could not start 7-Zip");
                 QByteArray diagnostic;
@@ -4297,8 +4314,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 QDir mountDir(mountPath);
                 if (mountDir.exists() && !mountDir.removeRecursively())
                     throw std::runtime_error("Could not remove the unmounted output directory");
-                spdlog::info("Finalize complete: {} frames archived to {}",
-                             totalFrames, archivePath.toStdString());
+                spdlog::info("Finalize complete: original MCRAW archived to {}",
+                             archivePath.toStdString());
             } else {
                 // Now move files from temp to final location
                 progress.setLabelText("Moving files to final location...");
