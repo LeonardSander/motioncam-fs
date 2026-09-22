@@ -75,8 +75,8 @@ private:
     bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData,
                          int outputWidth, int outputHeight, bool preserveLogEncoded,
                          bool smoothChroma);
-    void applyHLGToLinear(std::vector<uint16_t>& rgbData);
-    void applyLOG60ToLinear(std::vector<uint16_t>& rgbData);
+    void applyHLGToLinear(std::vector<uint16_t>& rgbData, uint32_t encodedWhite);
+    void applyLOG60ToLinear(std::vector<uint16_t>& rgbData, uint32_t encodedWhite);
     AVFrame* transferableFrame(AVFrame* frame);
     static AVPixelFormat selectPixelFormat(AVCodecContext* context,
                                            const AVPixelFormat* formats);

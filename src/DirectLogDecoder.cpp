@@ -820,15 +820,25 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     if (sws_scale(mSwsContext, input, inputStride, 0, height,
                   output, outputStride) != outputHeight)
         return false;
+
+    const AVPixFmtDescriptor* inputDescriptor = av_pix_fmt_desc_get(pixelFormat);
+    const bool eightBitInput = inputDescriptor && inputDescriptor->nb_components > 0 &&
+                               inputDescriptor->comp[0].depth <= 8;
+    // This producer's 8-bit limited path clips at RGB code 254. Preserve the
+    // original black and shadow transfer response, but promote that clipping
+    // code (and only values at or above it) to linear white.
+    constexpr uint32_t limitedRgbWhite = 254u * 257u;
+    const uint32_t encodedWhite = !fullRange && eightBitInput
+        ? limitedRgbWhite : 65535u;
     if (diagnostics)
         spdlog::info("DirectLog diagnostic: swscale_ms={:.3f}; transfer stage begin",
                      elapsedMilliseconds(scaleStart));
     
     // Apply HLG to linear conversion if needed
     if (mVideoInfo.isHLG) {
-        applyHLGToLinear(rgbData);
+        applyHLGToLinear(rgbData, encodedWhite);
     } else if (mVideoInfo.isLOG60 && !preserveLogEncoded) {
-        applyLOG60ToLinear(rgbData);
+        applyLOG60ToLinear(rgbData, encodedWhite);
     }
     if (diagnostics)
         spdlog::info("DirectLog diagnostic: transfer_and_conversion_total_ms={:.3f}",
@@ -837,11 +847,12 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     return true;
 }
 
-void DirectLogDecoder::applyHLGToLinear(std::vector<uint16_t>& rgbData) {
-    static const auto lut = [] {
+void DirectLogDecoder::applyHLGToLinear(
+        std::vector<uint16_t>& rgbData, uint32_t encodedWhite) {
+    const auto makeLut = [](uint32_t white) {
         std::array<uint16_t, 65536> values{};
         for (size_t i = 0; i < values.size(); ++i) {
-            const float encoded = i / 65535.0f;
+            const float encoded = i >= white ? 1.0f : i / 65535.0f;
             const float linear = encoded <= 0.5f
                 ? encoded * encoded / 3.0f
                 : (std::exp((encoded - 0.55991073f) / 0.17883277f) + 0.28466892f) / 12.0f;
@@ -849,7 +860,10 @@ void DirectLogDecoder::applyHLGToLinear(std::vector<uint16_t>& rgbData) {
                 std::clamp(std::lround(linear * 65535.0f), 0l, 65535l));
         }
         return values;
-    }();
+    };
+    static const auto fullLut = makeLut(65535u);
+    static const auto limited8BitLut = makeLut(254u * 257u);
+    const auto& lut = encodedWhite == 65535u ? fullLut : limited8BitLut;
     parallelPixelRanges(rgbData.size(), [&](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) rgbData[i] = lut[rgbData[i]];
     });
@@ -859,17 +873,21 @@ bool DirectLogDecoder::isHLGVideo(const std::string& filePath) {
     return boost::icontains(filePath, "HLG_NATIVE");
 }
 
-void DirectLogDecoder::applyLOG60ToLinear(std::vector<uint16_t>& rgbData) {
-    static const auto lut = [] {
+void DirectLogDecoder::applyLOG60ToLinear(
+        std::vector<uint16_t>& rgbData, uint32_t encodedWhite) {
+    const auto makeLut = [](uint32_t white) {
         std::array<uint16_t, 65536> values{};
         for (size_t i = 0; i < values.size(); ++i) {
-            const float encoded = i / 65535.0f;
+            const float encoded = i >= white ? 1.0f : i / 65535.0f;
             const float linear = (std::pow(61.0f, encoded) - 1.0f) / 60.0f;
             values[i] = static_cast<uint16_t>(std::clamp(
                 std::lround(linear * 65535.0f), 0l, 65535l));
         }
         return values;
-    }();
+    };
+    static const auto fullLut = makeLut(65535u);
+    static const auto limited8BitLut = makeLut(254u * 257u);
+    const auto& lut = encodedWhite == 65535u ? fullLut : limited8BitLut;
     parallelPixelRanges(rgbData.size(), [&](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) rgbData[i] = lut[rgbData[i]];
     });
