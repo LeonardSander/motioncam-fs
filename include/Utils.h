@@ -103,6 +103,14 @@ public:
 // ============================================================================
 
 unsigned short bitsNeeded(unsigned short value);
+inline unsigned short evenBitsNeeded(unsigned short value) {
+    unsigned short bits = 1;
+    while (bits < 16 && ((uint32_t{1} << bits) - 1) < value)
+        ++bits;
+    return (bits & 1u) != 0 && bits < 16
+        ? static_cast<unsigned short>(bits + 1)
+        : bits;
+}
 struct DngOutputLevels {
     double white = 65535.0;
     std::array<double, 4> black{};

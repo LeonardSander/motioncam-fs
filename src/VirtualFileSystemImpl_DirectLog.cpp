@@ -47,7 +47,7 @@ motioncam::ResolvedDataLevels directLogDataLevels(
 
 int directLogBaseLogBits(const motioncam::RenderSettings& settings) {
     const auto levels = directLogDataLevels(settings);
-    const int effectiveBits = motioncam::utils::bitsNeeded(static_cast<uint16_t>(
+    const int effectiveBits = motioncam::utils::evenBitsNeeded(static_cast<uint16_t>(
         std::clamp(std::lround(levels.white), 1l, 65535l)));
     return effectiveBits <= 10 ? effectiveBits : 12;
 }
@@ -980,7 +980,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
         pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
         pixels.outputScale = renderPlan.scale;
         pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
-        pixels.linearInputBitDepth = utils::bitsNeeded(static_cast<uint16_t>(
+        pixels.linearInputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
         pixels.sourceName = "DirectLog";
         vfs::processDngPixels(dngData, mConfig, pixels);
@@ -1032,7 +1032,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.metadata.blackLevelCount = 3;
         image.metadata.whiteLevel.fill(levels.white);
         image.metadata.whiteLevelCount = 3;
-        image.metadata.inputBitDepth = utils::bitsNeeded(static_cast<uint16_t>(
+        image.metadata.inputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(levels.white), 1l, 65535l)));
         image.metadata.iso = processed.metadata.iso;
         image.metadata.exposureTime = processed.metadata.shutterSpeed;
@@ -1199,19 +1199,19 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     vfs::buildGalleryFrameMap(galleryTimestamps, mFiles,
         info.sourceFrameToOutput, info.sourceFrameDuplicated);
     
-    // This describes the input, not the selected DNG render operation. A
-    // companion JSON may explicitly reinterpret the input CFA size.
-    const int cfaSize = mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0
-        ? mCalibration->cfaSize : 0;
-    info.dataType = vfs::getDisplayDataType(true, cfaSize);
+    // DirectLog's source representation is the encoded video pixel format;
+    // CFA overrides describe a later interpretation/rendering step.
+    info.dataType = mPixelFormat;
     
     // Determine levels info
     const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
     const std::array<float, 4> sourceBlack{0, 0, 0, 0};
     const auto displayLevels = resolveDataLevels(
         mConfig.levels, 65535.0f, sourceBlack, 65535.0f, sourceBlack, 3);
-    const int inputBits = utils::bitsNeeded(static_cast<uint16_t>(std::clamp(
+    int inputBits = utils::bitsNeeded(static_cast<uint16_t>(std::clamp(
         std::lround(displayLevels.white), 1l, 65535l)));
+    if ((inputBits & 1) != 0 && inputBits < 16)
+        ++inputBits;
     info.levelsInfo = std::to_string(static_cast<int>(displayLevels.white)) + "/" +
         std::to_string(static_cast<int>(displayLevels.black[0]));
     if (applyLogCurve) {

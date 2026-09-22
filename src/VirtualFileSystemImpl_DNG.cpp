@@ -942,7 +942,8 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         info.sourceFrameToOutput, info.sourceFrameDuplicated);
     
     // DNG sequences are pass-through, so we show source format
-    info.dataType = vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0) + " (DNG)";
+    info.dataType = "DNG " +
+        vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0);
     const bool applyLogCurve = (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
         mConfig.logTransform != LogTransformMode::Disabled &&
         (mConfig.logTransform != LogTransformMode::KeepInput ||

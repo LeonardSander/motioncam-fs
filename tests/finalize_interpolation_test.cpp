@@ -219,6 +219,18 @@ int main() {
     assert(motioncam::vfs::getDisplayDataLevels(
         15408.0f, black, 15408.0f, black,
         "Dynamic", "", true, false, 16) == "15408/64 -> 65535/256 16b");
+    const std::array<float, 4> zeroBlack{0.0f, 0.0f, 0.0f, 0.0f};
+    assert(motioncam::vfs::getDisplayDataLevels(
+        32000.0f, zeroBlack, 32000.0f, zeroBlack,
+        "Dynamic", "", false, false) == "32000/0 16b");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        32000.0f, zeroBlack, 32000.0f, zeroBlack,
+        "Dynamic", "Reduce by 2bit", false, false) ==
+        "32000/0 -> 16383/0 14b log");
+    assert(motioncam::utils::evenBitsNeeded(32000) == 16);
+    assert(motioncam::vfs::getDisplayDataType(false, 2) == "2x2");
+    assert(motioncam::vfs::getDisplayDataType(false, 8) == "8x8");
+    assert(motioncam::vfs::getDisplayDataType(true, 0) == "RGB");
 
     namespace fs = std::filesystem;
     const auto uncompressedA = makeDng(

@@ -2018,10 +2018,10 @@ void syncAudio(
 }
 
 std::string getDisplayDataType(bool sourceRgb, int cfaSize) {
-    if (cfaSize > 2)
-        return "Higher CFA " + std::to_string(cfaSize) + "x" + std::to_string(cfaSize);
-    if (cfaSize == 2 || !sourceRgb)
-        return "Bayer CFA";
+    if (cfaSize >= 2)
+        return std::to_string(cfaSize) + "x" + std::to_string(cfaSize);
+    if (!sourceRgb)
+        return "2x2";
     return "RGB";
 }
 
@@ -2071,6 +2071,11 @@ std::string getDisplayDataLevels(
     int useBits = inputBitDepth > 0 && usesSourceWhite
         ? static_cast<int>(std::min<uint32_t>(16, inputBitDepth))
         : std::min(16, static_cast<int>(std::ceil(std::log2(srcWhiteLevel + 1))));
+    // Camera containers commonly use a slightly sub-full-scale white level
+    // (for example 32000). Report the effective conventional sample depth,
+    // rather than presenting that as an unusual 15-bit format.
+    if ((useBits & 1) != 0 && useBits < 16)
+        ++useBits;
 
     if (logTransform.empty()) {
         if (applyShadingMap) {

@@ -4387,8 +4387,8 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
     // caller supplies the pre-bake white level, preserve the requested output
     // bit depth and requantize the expanded linear samples directly into it.
     const uint32_t bitDepthWhite = quantizationWhite ? quantizationWhite : sourceWhite;
-    uint32_t storedBits=1;
-    while (storedBits < 16 && ((uint32_t{1}<<storedBits)-1) < bitDepthWhite) ++storedBits;
+    uint32_t storedBits = utils::evenBitsNeeded(static_cast<uint16_t>(
+        std::min<uint32_t>(bitDepthWhite, 65535)));
     if (mode == LogTransformMode::ReduceBy2Bit) storedBits = std::max(1u, storedBits-2);
     else if (mode == LogTransformMode::ReduceBy4Bit) storedBits = std::max(1u, storedBits-4);
     else if (mode == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits-6);

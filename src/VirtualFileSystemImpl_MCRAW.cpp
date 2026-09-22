@@ -540,7 +540,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
-    mFileInfo.dataType = vfs::getDisplayDataType(false, displayCfaSize);
+    mFileInfo.dataType = "MCRAW " + vfs::getDisplayDataType(false, displayCfaSize);
     const auto displayPlan = utils::planDngFrameProcessing(
         mSettings, cameraFrameMetadata, mCalibration);
     mFileInfo.levelsInfo = vfs::getDisplayDataLevels(

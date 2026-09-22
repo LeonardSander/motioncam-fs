@@ -2103,7 +2103,7 @@ DngOutputLevels planDngOutputLevels(
     DngOutputLevels result{sourceWhite, sourceBlack};
     auto reducedWhite = [&](int reduction, int expansion = 0) {
         const int bits = std::clamp(
-            static_cast<int>(bitsNeeded(static_cast<uint16_t>(result.white))) -
+            static_cast<int>(evenBitsNeeded(static_cast<uint16_t>(result.white))) -
                 reduction + expansion,
             1, 16);
         result.white = static_cast<double>((uint32_t{1} << bits) - 1);
