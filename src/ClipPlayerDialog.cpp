@@ -302,6 +302,18 @@ void ClipPlayerDialog::reloadCurrentClip(){
         if(mClips[mIndex].sourceFrames>1&&!mFrameTimer.isActive())mFrameTimer.start();
     }
 }
+void ClipPlayerDialog::invalidateThumbnails(int mountId){
+    mThumbnailCache.remove(mountId);
+    for(auto it=mThumbnailCacheOrder.begin();it!=mThumbnailCacheOrder.end();)
+        if(it->first==mountId)it=mThumbnailCacheOrder.erase(it);else ++it;
+    if(mThumbnailDiskCache&&mThumbnailDiskCache->isValid()){
+        QDir cacheDir(mThumbnailDiskCache->path());
+        const auto files=cacheDir.entryList(
+            {QStringLiteral("%1-*.jpg").arg(mountId)},QDir::Files);
+        for(const auto& file:files)cacheDir.remove(file);
+    }
+    if(currentMountId()==mountId)rebuildThumbnailStrip();
+}
 void ClipPlayerDialog::updateClipInfo(int mountId,double fps,double durationSeconds,
         int sourceFrames,int width,int height,
         std::shared_ptr<const std::vector<bool>> duplicateFrames,

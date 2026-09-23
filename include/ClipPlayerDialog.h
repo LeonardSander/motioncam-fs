@@ -44,6 +44,7 @@ public:
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     std::shared_ptr<std::atomic_bool> thumbnailCollectionEnabled() const { return mThumbnailCollectionEnabled; }
     void reloadCurrentClip();
+    void invalidateThumbnails(int mountId);
     void updateClipInfo(int mountId, double fps, double durationSeconds, int sourceFrames,
                         int width, int height,
                         std::shared_ptr<const std::vector<bool>> duplicateFrames,

@@ -1353,6 +1353,19 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     if (watched->property("sourceJsonStatus").toBool() &&
         event->type() == QEvent::MouseButtonDblClick) {
+        // Cancel the refresh queued by the first click.  The release following
+        // a double-click may still emit QPushButton::clicked, so suppress that
+        // signal for the remainder of the platform double-click interval too.
+        const int serial = watched->property("refreshClickSerial").toInt() + 1;
+        watched->setProperty("refreshClickSerial", serial);
+        watched->setProperty("suppressRefreshClick", true);
+        QPointer<QObject> guardedWatched(watched);
+        QTimer::singleShot(QApplication::doubleClickInterval(), this,
+            [guardedWatched, serial] {
+                if (guardedWatched &&
+                    guardedWatched->property("refreshClickSerial").toInt() == serial)
+                    guardedWatched->setProperty("suppressRefreshClick", false);
+            });
         revealSourceJson(watched->property("sourceJsonPath").toString());
         return true;
     }
@@ -1825,8 +1838,20 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     buttonLayout->addWidget(statusContainer);
 
     // Connect refresh button to update calibration
-    connect(refreshButton, &QPushButton::clicked, this, [this, fileWidget] {
-        reloadCalibration(fileWidget);
+    connect(refreshButton, &QPushButton::clicked, this,
+            [this, fileWidget, refreshButton] {
+        if (refreshButton->property("suppressRefreshClick").toBool()) return;
+        const int serial = refreshButton->property("refreshClickSerial").toInt() + 1;
+        refreshButton->setProperty("refreshClickSerial", serial);
+        QPointer<QPushButton> guardedButton(refreshButton);
+        QPointer<QWidget> guardedFileWidget(fileWidget);
+        QTimer::singleShot(QApplication::doubleClickInterval(), this,
+            [this, guardedButton, guardedFileWidget, serial] {
+                if (!guardedButton || !guardedFileWidget ||
+                    guardedButton->property("refreshClickSerial").toInt() != serial)
+                    return;
+                reloadCalibration(guardedFileWidget);
+            });
     });
 
     // Add button layout to main layout
@@ -2055,6 +2080,18 @@ void MainWindow::mountFiles(
 
 motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
     auto settings = mLocalSettings.value(mountId, mGlobalRenderSettings);
+    // Source sidecars can be routed somewhere other than the conventional
+    // path (for example when a clip was opened from an archive).  These paths
+    // were previously attached only to the settings used for the initial
+    // mount.  Preview renderers are rebuilt independently, so always carry
+    // the per-card routing in every settings snapshot used for thumbnails and
+    // gallery playback.
+    if (const auto* fileWidget = fileWidgetForMount(mountId)) {
+        settings.sourceSidecarPath =
+            fileWidget->property("sidecarPath").toString().toStdString();
+        settings.sourceGyroflowSidecarPath =
+            fileWidget->property("gyroflowSidecarPath").toString().toStdString();
+    }
     for (const auto& mounted : mMountedFiles) {
         if (mounted.mountId != mountId) continue;
         const auto mountedInfo = mFuseFilesystem->getFileInfo(mountId);
@@ -5558,30 +5595,38 @@ void MainWindow::reloadCalibration(QWidget* fileWidget) {
     const auto mountId = fileWidget->property("mountId").toInt(&ok);
     if (!ok) return;
 
-    // updateOptions also reloads the sidecar. Preserve whether this clip uses
-    // global or local render settings; calibration file operations must not
-    // create a local settings override for the currently selected clip.
-    mFuseFilesystem->updateOptions(
-        mountId, mLocalSettings.value(mountId, mGlobalRenderSettings));
+    // A refresh is also the explicit rescan action for sidecars edited outside
+    // Fuse. Reload every mounted clip: more than one JSON may have been edited
+    // since the last rescan, and limiting invalidation to the clicked card
+    // leaves the remaining processed thumbnails stale. Preserve each clip's
+    // global/local settings and its routed sidecar path.
+    for (const auto& mounted : mMountedFiles)
+        mFuseFilesystem->updateOptions(
+            mounted.mountId, settingsForMount(mounted.mountId));
 
     // FileInfo (including sidecar validity) is rebuilt by updateOptions.  Read
     // it only after the reload so Create JSON and the clickable Loaded/Ignored
     // status immediately reflect the file that was just written or edited.
     updateCalibrationButtonStates();
-    updateThumbnail(mountId);
+    for (const auto& mounted : mMountedFiles)
+        updateThumbnail(mounted.mountId);
     updateFpsLabels();
 
     // A settings change reaches onProcessingFinished(), which refreshes an
     // open per-clip player.  Sidecar-only changes must do the same even though
     // the RenderSettings themselves did not change.
-    if (mClipPlayer && mGalleryMountId == mountId) {
-        if (const auto info = mFuseFilesystem->getFileInfo(mountId)) {
+    if (mClipPlayer && mGalleryMountId != motioncam::InvalidMountId) {
+        for (const auto& mounted : mMountedFiles)
+            mClipPlayer->invalidateThumbnails(mounted.mountId);
+        for (const auto& mounted : mMountedFiles) {
+            const auto info = mFuseFilesystem->getFileInfo(mounted.mountId);
+            if (!info) continue;
             const double fps = info->isSequence && info->fps > 0.0f ? info->fps : 1.0;
             const int frames = std::max(1, info->totalFrames - info->droppedFrames +
                 info->duplicatedFrames);
             const double duration = info->runtimeSeconds > 0.0f
                 ? info->runtimeSeconds : frames / fps;
-            mClipPlayer->updateClipInfo(mountId, fps, duration, frames,
+            mClipPlayer->updateClipInfo(mounted.mountId, fps, duration, frames,
                 info->width, info->height, info->duplicateFrameMask,
                 info->sourceFrameToOutput, info->sourceFrameDuplicated);
         }
