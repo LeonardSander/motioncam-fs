@@ -6,7 +6,7 @@
 - Open MotionCam FS, click **Open** or drag in `.mcraw` files to mount.
 - Adjust settings as needed (global on the right). Use **Apply to Selected** for overrides or **Apply to All** for everything.
 - Mounted DNG sequences appear in the mount folder (Windows default: source folder; macOS default: `~/Mounts/MotionCamFuse`).
-- Use **Play** to open the mounted sequence in MotionCamPlayer (set path in Preferences).
+- Use **Play** to inspect clips in the integrated Gallery.
 
 ## Workspace Tour
 - **Mount List**: Each card shows the mounted file, status, FPS, and actions (Play, Open folder, Remove). A local badge appears when per-file overrides are active.
@@ -19,9 +19,8 @@
 ## Preferences
 - **DNG Output Folder / Mount Folder**: Windows - leave empty to write next to source (must be NTFS) or set a dedicated NTFS folder. macOS - leave empty to use the default mount root (`~/Mounts/MotionCamFuse`) or set a custom mount folder.
 - **Delete on Unmount**: Windows - remove materialized DNGs when unmounting/clearing. macOS - remove the empty mount folder under the mount root.
-- **Video Player**: Path to MotionCamPlayer.exe (Windows) or MCRAW_Player.app (macOS) for the Play action.
 - **Unique Camera Model**: Configure the camera-model metadata override in the main settings panel.
-- **Reset**: Clears the saved mount/output folder and player path.
+- **Reset**: Clears the saved mount/output folder.
 - **Cache Management**: Windows only. Mode (Off/Quota), quota (GB), cleanup interval (sec).
 
 ## Render Settings (Right Panel)

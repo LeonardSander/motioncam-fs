@@ -223,7 +223,6 @@ private:
     QPushButton* mApplyAllButton = nullptr;
     QLabel* mSelectedFilesLabel = nullptr;
     QString mCurrentSessionFile;
-    QString mPlayerPath;
     QStringList mRecentSessions;
     QMenu* mRecentSessionsMenu = nullptr;
     QFutureSynchronizer<void> mThumbnailTasks;

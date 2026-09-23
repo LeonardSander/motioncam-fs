@@ -1239,7 +1239,6 @@ void MainWindow::saveSettings() {
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("deleteOnUnmount", mDeleteOnUnmount);
-    settings.setValue("playerPath", mPlayerPath);
     settings.setValue("cachePolicy", mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
     settings.setValue("cacheQuotaBytes", static_cast<qulonglong>(mCacheQuotaBytes));
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
@@ -1355,7 +1354,6 @@ void MainWindow::restoreSettings() {
 
     mCacheRootFolder = settings.value("cachePath").toString();
     mDeleteOnUnmount = settings.value("deleteOnUnmount", false).toBool();
-    mPlayerPath = settings.value("playerPath").toString();
     mCachePolicy = settings.value("cachePolicy", "quota").toString() == "off"
         ? motioncam::CachePolicy::Off : motioncam::CachePolicy::Quota;
     mCacheQuotaBytes = settings.value("cacheQuotaBytes",
@@ -5203,7 +5201,6 @@ void MainWindow::onCfaPhaseChanged(std::string input) {
 void MainWindow::onOpenPreferences() {
     SettingsDialog dialog(this);
     dialog.setCacheFolder(mCacheRootFolder);
-    dialog.setPlayerPath(mPlayerPath);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
     dialog.setFuseMountingEnabled(mFuseMountingEnabled);
@@ -5220,7 +5217,6 @@ void MainWindow::onOpenPreferences() {
 
     const bool wasAutoApply = mAutoApplyClipSettings;
     mCacheRootFolder = dialog.getCacheFolder();
-    mPlayerPath = dialog.getPlayerPath();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFuseMountingEnabled = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;

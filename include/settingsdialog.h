@@ -20,9 +20,6 @@ public:
     explicit SettingsDialog(QWidget *parent = nullptr);
     ~SettingsDialog();
 
-    void setPlayerPath(const QString& path);
-    QString getPlayerPath() const;
-
     void setCacheFolder(const QString& path);
     QString getCacheFolder() const;
 
@@ -55,7 +52,6 @@ public:
     void setMatrixProfiles(const QStringList& profiles);
 
 private slots:
-    void onBrowsePlayerPath();
     void onBrowseCacheFolder();
     void onCacheFolderTextChanged(const QString& text);
     void onCachePolicyChanged(int index);
@@ -66,9 +62,6 @@ private slots:
 
 private:
     int mHelpFontSizePt;
-    QLineEdit* mPlayerPathEdit;
-    QPushButton* mPlayerBrowseButton;
-
     QLineEdit* mCacheFolderEdit;
     QPushButton* mCacheBrowseButton;
     QPushButton* mResetPathsButton;

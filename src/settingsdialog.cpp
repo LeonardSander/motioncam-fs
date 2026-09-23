@@ -192,52 +192,6 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     directLogCacheLayout->addWidget(directLogCacheHelpLabel);
     mainLayout->addWidget(directLogCacheGroup);
 
-    // Player settings group
-    auto* playerGroup = new QGroupBox("Video Player", this);
-    auto* playerLayout = new QVBoxLayout(playerGroup);
-
-    auto* pathLayout = new QHBoxLayout();
-#ifdef __APPLE__
-    auto* pathLabel = new QLabel("Player App:", this);
-#elif __linux__
-    auto* pathLabel = new QLabel("Player Executable:", this);
-#else
-    auto* pathLabel = new QLabel("Player Executable:", this);
-#endif
-    mPlayerPathEdit = new QLineEdit(this);
-#ifdef __APPLE__
-    mPlayerPathEdit->setPlaceholderText("Path to MCRAW_Player.app...");
-#elif defined(__linux__)
-    mPlayerPathEdit->setPlaceholderText("Path to a video player executable...");
-#else
-    mPlayerPathEdit->setPlaceholderText("Path to MotionCamPlayer.exe...");
-#endif
-
-    mPlayerBrowseButton = new QPushButton("Browse...", this);
-    mPlayerBrowseButton->setMaximumWidth(100);
-
-    pathLayout->addWidget(pathLabel);
-    pathLayout->addWidget(mPlayerPathEdit, 1);
-    pathLayout->addWidget(mPlayerBrowseButton);
-    playerLayout->addLayout(pathLayout);
-
-#ifdef __APPLE__
-    auto* playerHelpLabel = new QLabel(
-        helpSpan("Path to MCRAW_Player.app for the Play button."),
-        this);
-#elif defined(__linux__)
-    auto* playerHelpLabel = new QLabel(
-        helpSpan("Optional player executable used by the Play button."), this);
-#else
-    auto* playerHelpLabel = new QLabel(
-        helpSpan("Path to MotionCamPlayer.exe for the Play button."),
-        this);
-#endif
-    playerHelpLabel->setWordWrap(true);
-    playerLayout->addWidget(playerHelpLabel);
-
-    mainLayout->addWidget(playerGroup);
-
     // Clip settings group
     auto* clipSettingsGroup = new QGroupBox("Clip Settings", this);
     auto* clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
@@ -300,10 +254,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     auto* resetLayout = new QHBoxLayout();
 #ifdef __APPLE__
     mResetPathsButton = new QPushButton("Reset", this);
-    mResetPathsButton->setToolTip("Clear the mount folder and player path.");
+    mResetPathsButton->setToolTip("Clear the mount folder.");
 #else
     mResetPathsButton = new QPushButton("Reset Paths", this);
-    mResetPathsButton->setToolTip("Clear the saved mount folder and player path.");
+    mResetPathsButton->setToolTip("Clear the saved output folder.");
 #endif
     resetLayout->addWidget(mResetPathsButton);
     resetLayout->addStretch();
@@ -316,7 +270,6 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     // Connect signals
     connect(mCacheBrowseButton, &QPushButton::clicked, this, &SettingsDialog::onBrowseCacheFolder);
-    connect(mPlayerBrowseButton, &QPushButton::clicked, this, &SettingsDialog::onBrowsePlayerPath);
     connect(mButtonBox, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(mButtonBox, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(mCacheFolderEdit, &QLineEdit::textChanged, this, &SettingsDialog::onCacheFolderTextChanged);
@@ -340,16 +293,6 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
 SettingsDialog::~SettingsDialog()
 {
-}
-
-void SettingsDialog::setPlayerPath(const QString& path)
-{
-    mPlayerPathEdit->setText(path);
-}
-
-QString SettingsDialog::getPlayerPath() const
-{
-    return mPlayerPathEdit->text();
 }
 
 void SettingsDialog::setCacheFolder(const QString& path)
@@ -619,46 +562,9 @@ void SettingsDialog::onBrowseCacheFolder()
     }
 }
 
-void SettingsDialog::onBrowsePlayerPath()
-{
-#ifdef __APPLE__
-    const QString startDir = mPlayerPathEdit->text().isEmpty()
-        ? QStringLiteral("/Applications")
-        : mPlayerPathEdit->text();
-    QString playerPath = QFileDialog::getOpenFileName(
-        this,
-        tr("Select MCRAW_Player.app"),
-        startDir,
-        tr("Applications (*.app)"));
-
-    const QString marker = ".app/Contents/";
-    const int markerIndex = playerPath.indexOf(marker, 0, Qt::CaseInsensitive);
-    if (markerIndex >= 0) {
-        playerPath = playerPath.left(markerIndex + 4);
-    }
-#else
-    QString playerPath = QFileDialog::getOpenFileName(
-        this,
-        tr("Select MotionCamPlayer.exe"),
-        mPlayerPathEdit->text(),
-        tr("MotionCamPlayer (MotionCamPlayer.exe);;Executable Files (*.exe)"));
-#endif
-
-    if (!playerPath.isEmpty()) {
-        mPlayerPathEdit->setText(playerPath);
-    }
-}
-
 void SettingsDialog::onResetPaths() {
-#ifdef __APPLE__
     mCacheFolderEdit->clear();
-    mPlayerPathEdit->clear();
     setCacheFolderWarning("");
-#else
-    mCacheFolderEdit->clear();
-    mPlayerPathEdit->clear();
-    setCacheFolderWarning("");
-#endif
 }
 
 void SettingsDialog::updateDirectLogCacheUsage()
