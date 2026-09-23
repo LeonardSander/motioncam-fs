@@ -62,6 +62,7 @@ public:
     void setSourceFrameThumbnail(int sourceFrame, const QByteArray& frame, int width, int height);
     void presentDroppedSourceFrame(int sourceFrame, const QByteArray& frame, int width, int height);
     void clearFrameSelections();
+    void clearFrameSelections(const QSet<int>& mountIds);
 signals:
     void currentClipChanged(int mountId, double startSeconds);
     void firstFramePresented(int mountId);

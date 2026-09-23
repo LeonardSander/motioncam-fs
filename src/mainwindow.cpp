@@ -2432,9 +2432,15 @@ void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sour
 }
 
 void MainWindow::clearSelectedFrames(){
-    mSelectedFrames.clear();autoSaveSession();
+    if(mSelectedMountIds.isEmpty()){
+        mSelectedFrames.clear();
+        if(mClipPlayer)mClipPlayer->clearFrameSelections();
+    }else{
+        for(auto mountId:mSelectedMountIds)mSelectedFrames.remove(mountId);
+        if(mClipPlayer)mClipPlayer->clearFrameSelections(mSelectedMountIds);
+    }
+    autoSaveSession();
     if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
-    if(mClipPlayer)mClipPlayer->clearFrameSelections();
 }
 
 void MainWindow::finalizeSelectedFrames(){

@@ -624,6 +624,12 @@ void ClipPlayerDialog::clearFrameSelections(){
     for(auto& clip:mClips)clip.selectedSourceFrames.clear();
     if(mThumbnailScroll&&mThumbnailScroll->isVisible())rebuildThumbnailStrip();
 }
+void ClipPlayerDialog::clearFrameSelections(const QSet<int>& mountIds){
+    for(auto& clip:mClips)
+        if(mountIds.contains(clip.mountId))clip.selectedSourceFrames.clear();
+    if(mThumbnailScroll&&mThumbnailScroll->isVisible()&&mountIds.contains(currentMountId()))
+        rebuildThumbnailStrip();
+}
 
 void ClipPlayerDialog::startDecoder(){
     const QString exe=ffmpegPath();if(exe.isEmpty()){mPlaybackFailed=true;mFrameTimer.stop();if(mLastPresentedImage.isNull())mVideo->setText(tr("FFmpeg was not found"));return;}
