@@ -7,6 +7,7 @@
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
 #include "DNGDecoder.h"
+#include "GalleryColor.h"
 #include "Utils.h"
 #include "VirtualFileSystemImpl.h"
 #include "ArchiveImport.h"
@@ -152,7 +153,8 @@ namespace {
     bool invertColorMatrix(const std::array<float, 9>& input,
                            std::array<float, 9>& inverse);
     bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
-                          std::array<float, 9>& cameraToXyzD50);
+                          std::array<float, 9>& cameraToXyzD50,
+                          float* firstIlluminantWeight = nullptr);
 
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
@@ -217,11 +219,9 @@ namespace {
             : (metadata.hasForwardMatrix2 || metadata.hasForwardMatrix1);
         std::array<float, 9> cameraToDisplay{};
         if (hasMatrix) {
-            const auto& sourceMatrix = ignoreForwardMat
-                ? (metadata.hasColorMatrix1 ? metadata.colorMatrix1 : metadata.colorMatrix2)
-                : (metadata.hasForwardMatrix2 ? metadata.forwardMatrix2 : metadata.forwardMatrix1);
             std::array<float, 9> inverted{};
-            const std::array<float, 9>* matrix = &sourceMatrix;
+            std::array<float, 9> forwardTransform{};
+            const std::array<float, 9>* matrix = nullptr;
             if (ignoreForwardMat) {
                 auto transformMetadata = metadata;
                 if (gainMapOnlyDebug)
@@ -230,6 +230,24 @@ namespace {
                     spdlog::warn("Preview ColorMatrix transform is invalid; using neutral display transform");
                     matrix = nullptr;
                 } else matrix = &inverted;
+            } else {
+                float firstIlluminantWeight = metadata.hasForwardMatrix2 ? 0.0f : 1.0f;
+                const bool forwardDiffers = metadata.hasForwardMatrix1 &&
+                    metadata.hasForwardMatrix2 &&
+                    metadata.forwardMatrix1 != metadata.forwardMatrix2;
+                const bool calibrationDiffers =
+                    motioncam::gallery::cameraCalibrationMatrix(metadata, true) !=
+                    motioncam::gallery::cameraCalibrationMatrix(metadata, false);
+                if (forwardDiffers || calibrationDiffers) {
+                    std::array<float, 9> unusedColorTransform{};
+                    colorMatrixToD50(metadata, unusedColorTransform,
+                                     &firstIlluminantWeight);
+                }
+                if (motioncam::gallery::forwardCameraToXyz(
+                        metadata, firstIlluminantWeight, exposure, forwardTransform))
+                    matrix = &forwardTransform;
+                else
+                    spdlog::warn("Preview ForwardMatrix transform is invalid; using neutral display transform");
             }
             // Both matrices and channel gains are constant for the frame.
             // Fold them here rather than doing two matrix passes per pixel.
@@ -239,7 +257,7 @@ namespace {
                         cameraToDisplay[row * 3 + column] +=
                             xyzToSrgbD50[row * 3 + xyz] *
                             (*matrix)[xyz * 3 + column] *
-                            (ignoreForwardMat ? exposure : gains[column]);
+                            (ignoreForwardMat ? exposure : 1.0f);
                 }
             }
         }
@@ -411,16 +429,24 @@ namespace {
     }
 
     bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
-                          std::array<float, 9>& cameraToXyzD50) {
+                          std::array<float, 9>& cameraToXyzD50,
+                          float* firstIlluminantWeight) {
         if (!metadata.hasColorMatrix1 && !metadata.hasColorMatrix2) return false;
+        const auto calibrated1 = metadata.hasColorMatrix1
+            ? motioncam::gallery::calibratedColorMatrix(metadata, true)
+            : std::array<float, 9>{};
+        const auto calibrated2 = metadata.hasColorMatrix2
+            ? motioncam::gallery::calibratedColorMatrix(metadata, false)
+            : calibrated1;
         const double temperature1 = illuminantTemperature(metadata.calibrationIlluminant1);
         const double temperature2 = illuminantTemperature(metadata.calibrationIlluminant2);
         double sceneTemperature = temperature1 > 0.0 ? temperature1 : 5000.0;
         std::array<float, 9> inverse{};
         std::array<float, 9> interpolated{};
         std::array<float, 3> sourceWhite{0.96422f, 1.0f, 0.82521f};
+        double weight = metadata.hasColorMatrix1 ? 1.0 : 0.0;
         for (int iteration = 0; iteration < 4; ++iteration) {
-            double weight = metadata.hasColorMatrix1 ? 1.0 : 0.0;
+            weight = metadata.hasColorMatrix1 ? 1.0 : 0.0;
             if (metadata.hasColorMatrix1 && metadata.hasColorMatrix2 &&
                 temperature1 > 0.0 && temperature2 > 0.0 && temperature1 != temperature2) {
                 weight = std::clamp((1.0 / sceneTemperature - 1.0 / temperature2) /
@@ -428,9 +454,9 @@ namespace {
             }
             for (size_t index = 0; index < interpolated.size(); ++index) {
                 const float first = metadata.hasColorMatrix1
-                    ? metadata.colorMatrix1[index] : metadata.colorMatrix2[index];
+                    ? calibrated1[index] : calibrated2[index];
                 const float second = metadata.hasColorMatrix2
-                    ? metadata.colorMatrix2[index] : first;
+                    ? calibrated2[index] : first;
                 interpolated[index] = static_cast<float>(first * weight + second * (1.0 - weight));
             }
             if (!invertColorMatrix(interpolated, inverse)) return false;
@@ -440,6 +466,8 @@ namespace {
             sceneTemperature = correlatedColorTemperature(sourceWhite[0] / sum,
                                                            sourceWhite[1] / sum);
         }
+        if (firstIlluminantWeight)
+            *firstIlluminantWeight = static_cast<float>(weight);
         const float sourceScale = sourceWhite[1] != 0.0f ? 1.0f / sourceWhite[1] : 1.0f;
         for (float& value : sourceWhite) value *= sourceScale;
         constexpr std::array<float, 9> bradford{

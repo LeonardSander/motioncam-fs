@@ -1,6 +1,7 @@
 #include "CalibrationData.h"
 #include "Types.h"
 #include "DataLevels.h"
+#include "GalleryColor.h"
 
 #include <cassert>
 #include <cmath>
@@ -79,6 +80,49 @@ int main() {
     })"));
     assert(cameraCalibration && cameraCalibration->hasCameraCalibration1);
     assert(nearlyEqual(cameraCalibration->cameraCalibration1[4], 0.9f));
+
+    DNGFrameMetadata galleryMetadata;
+    galleryMetadata.colorMatrix1 = {1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f,
+                                    7.0f, 8.0f, 9.0f};
+    galleryMetadata.cameraCalibration1 = {2.0f, 0.0f, 0.0f,
+                                          0.0f, 3.0f, 0.0f,
+                                          0.0f, 0.0f, 4.0f};
+    galleryMetadata.hasCameraCalibration1 = true;
+    const auto galleryMatrix = gallery::calibratedColorMatrix(galleryMetadata, true);
+    assert((galleryMatrix == std::array<float, 9>{2.0f, 4.0f, 6.0f,
+                                                  12.0f, 15.0f, 18.0f,
+                                                  28.0f, 32.0f, 36.0f}));
+    galleryMetadata.hasCameraCalibration1 = false;
+    assert(gallery::calibratedColorMatrix(galleryMetadata, true) ==
+           galleryMetadata.colorMatrix1);
+    const std::array<float, 9> firstForward{1, 2, 3, 4, 5, 6, 7, 8, 9};
+    const std::array<float, 9> secondForward{9, 8, 7, 6, 5, 4, 3, 2, 1};
+    const auto midpointForward = gallery::interpolateMatrix(
+        firstForward, secondForward, 0.5f);
+    assert((midpointForward == std::array<float, 9>{5, 5, 5, 5, 5, 5, 5, 5, 5}));
+    assert(gallery::interpolateMatrix(firstForward, secondForward, 1.0f) ==
+           firstForward);
+
+    DNGFrameMetadata forwardMetadata;
+    forwardMetadata.forwardMatrix1 = gallery::identityMatrix;
+    forwardMetadata.hasForwardMatrix1 = true;
+    forwardMetadata.cameraCalibration1 = {2, 0, 0, 0, 1, 0, 0, 0, 1};
+    forwardMetadata.cameraCalibration2 = forwardMetadata.cameraCalibration1;
+    forwardMetadata.hasCameraCalibration1 = true;
+    forwardMetadata.hasCameraCalibration2 = true;
+    forwardMetadata.asShotNeutral = {1, 1, 1};
+    std::array<float, 9> forwardTransform{};
+    assert(gallery::forwardCameraToXyz(
+        forwardMetadata, 1.0f, 2.0f, forwardTransform));
+    // Calibration maps the individual red neutral to 0.5 in reference space;
+    // its inverse and reference-neutral gain cancel for neutral red, while the
+    // requested exposure scales every channel.
+    assert((forwardTransform == std::array<float, 9>{2, 0, 0, 0, 2, 0, 0, 0, 2}));
+    forwardMetadata.asShotNeutral = {0.5f, 1.0f, 1.0f};
+    assert(gallery::forwardCameraToXyz(
+        forwardMetadata, 1.0f, 1.0f, forwardTransform));
+    assert((forwardTransform == std::array<float, 9>{2, 0, 0, 0, 1, 0, 0, 0, 1}));
 
     const auto higherCfaCalibration = CalibrationData::parse(std::string(R"({"cfaSize":8})"));
     assert(higherCfaCalibration.has_value());
