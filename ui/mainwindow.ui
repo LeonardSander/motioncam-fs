@@ -909,7 +909,7 @@
            <item>
             <widget class="QCheckBox" name="draftModeCheckBox">
              <property name="text">
-              <string>Proxy / Binning Mode</string>
+              <string>Proxy / Downscale</string>
              </property>
             </widget>
            </item>
@@ -952,7 +952,7 @@
              <item>
             <widget class="QCheckBox" name="higherCfaHqCheckBox">
              <property name="toolTip">
-              <string>Use high-quality demosaic and averaged proxy reduction. When disabled, gallery playback uses fast nearest-neighbor demosaic.</string>
+              <string>Use high-quality demosaic and averaged downscale. When disabled, gallery playback uses fast nearest-neighbor demosaic.</string>
              </property>
              <property name="text">
               <string>HQ</string>
