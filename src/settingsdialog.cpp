@@ -241,6 +241,15 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // Clip settings group
     auto* clipSettingsGroup = new QGroupBox("Clip Settings", this);
     auto* clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
+    mFuseMountingCheckBox = new QCheckBox("Mount clips as virtual DNG folders", this);
+    mFuseMountingCheckBox->setChecked(true);
+    clipSettingsLayout->addWidget(mFuseMountingCheckBox);
+    auto* fuseMountingHelpLabel = new QLabel(
+        helpSpan("Uses FUSE or Windows Projected File System to expose DNG sequences. "
+                 "Gallery, thumbnails, and finalization remain available when disabled; "
+                 "the setting applies to newly imported clips."), this);
+    fuseMountingHelpLabel->setWordWrap(true);
+    clipSettingsLayout->addWidget(fuseMountingHelpLabel);
     mAutoApplyClipSettingsCheckBox = new QCheckBox("Auto apply", this);
     mAutoApplyClipSettingsCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mAutoApplyClipSettingsCheckBox);
@@ -467,6 +476,26 @@ void SettingsDialog::setUnmountOnFinalize(bool enabled)
 bool SettingsDialog::getUnmountOnFinalize() const
 {
     return mUnmountOnFinalizeCheckBox->isChecked();
+}
+
+void SettingsDialog::setFuseMountingEnabled(bool enabled)
+{
+    mFuseMountingCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getFuseMountingEnabled() const
+{
+    return mFuseMountingCheckBox->isChecked();
+}
+
+void SettingsDialog::setFuseMountingAvailable(bool available)
+{
+    mFuseMountingCheckBox->setEnabled(available);
+    if (!available) {
+        mFuseMountingCheckBox->setChecked(false);
+        mFuseMountingCheckBox->setToolTip(
+            tr("The platform filesystem projection dependency is not installed."));
+    }
 }
 
 void SettingsDialog::setMatrixOverrideEnabled(bool enabled)

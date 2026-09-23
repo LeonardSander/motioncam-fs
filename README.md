@@ -120,7 +120,7 @@ Original MCRAW source files can be compressed without processing using 7z LZMA2 
 
 ### Preferences
 
-There are some more options configurable under Settings > Preferences. The output directory for mounted clips can be overridden to no longer use individual source clip directory. An indexing cache was introduced to accelerate access time for source clips. On Windows there is another cache limit option, since it is not capped by default like fuse3 on Linux. There are two more options to auto apply settings changes instead of applying to selected / all manually and to unmount clips on finalize.
+There are some more options configurable under Settings > Preferences. Here virtual DNG folder mounting using FUSE/ProjectedFS dependency can be disabled. The output directory for mounted clips can be overridden to no longer use individual source clip directory. An indexing cache was introduced to accelerate access time for source clips. On Windows there is another cache limit option, since it is not capped by default like fuse3 on Linux. There are two more options to auto apply settings changes instead of applying to selected / all manually and to unmount clips on finalize.
 
 ---
 

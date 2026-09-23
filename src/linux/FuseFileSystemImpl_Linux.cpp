@@ -127,8 +127,10 @@ FuseContext* context() {
 
 struct LinuxFuseSession {
     LinuxFuseSession(const std::string& source, const std::string& destination,
-                     std::unique_ptr<IVirtualFileSystem> filesystem)
-        : mSrcPath(source), mDstPath(destination), mFs(std::move(filesystem)) { start(); }
+                     std::unique_ptr<IVirtualFileSystem> filesystem, bool projectFiles)
+        : mSrcPath(source), mDstPath(destination), mFs(std::move(filesystem)) {
+        if (projectFiles) start();
+    }
 
     ~LinuxFuseSession() {
         if (mFuse) {
@@ -144,6 +146,7 @@ struct LinuxFuseSession {
 
     void updateOptions(const RenderSettings& settings) {
         mFs->updateOptions(settings);
+        if (!mFuse) return;
         if (mState) {
             const auto previous = mState->mountTime.load();
             mState->mountTime.store(
@@ -302,7 +305,8 @@ FuseFileSystemImpl_Linux::~FuseFileSystemImpl_Linux() {
 
 MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
                                         const std::string& srcFile,
-                                        const std::string& dstPath) {
+                                        const std::string& dstPath,
+                                        bool projectFiles) {
     const auto mountStarted = std::chrono::steady_clock::now();
     auto stageStarted = mountStarted;
     auto logStage = [&](const char* stage) {
@@ -321,11 +325,13 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     if (normalizedSource == normalizedDestination)
         throw std::runtime_error("Source and mount destination must be different paths");
 
-    recoverStaleMount(dstPath);
-    logStage("backend stale-mount recovery");
-    if (!QDir().mkpath(QString::fromStdString(dstPath)))
-        throw std::runtime_error("Failed to create " + dstPath);
-    logStage("mount directory creation");
+    if (projectFiles) {
+        recoverStaleMount(dstPath);
+        logStage("backend stale-mount recovery");
+        if (!QDir().mkpath(QString::fromStdString(dstPath)))
+            throw std::runtime_error("Failed to create " + dstPath);
+        logStage("mount directory creation");
+    }
 
     const std::string baseName = fs::path(dstPath).filename().string();
     std::unique_ptr<IVirtualFileSystem> filesystem;
@@ -352,12 +358,12 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
 
     const MountId mountId = mNextMountId++;
     auto session = std::make_shared<LinuxFuseSession>(
-        srcFile, dstPath, std::move(filesystem));
+        srcFile, dstPath, std::move(filesystem), projectFiles);
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         mMountedFiles.emplace(mountId, std::move(session));
     }
-    logStage("FUSE session creation/start");
+    logStage(projectFiles ? "FUSE session creation/start" : "processing session creation");
     return mountId;
 }
 void FuseFileSystemImpl_Linux::unmount(MountId mountId) {

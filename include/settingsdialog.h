@@ -44,6 +44,9 @@ public:
     bool getAutoApplyClipSettings() const;
     void setUnmountOnFinalize(bool enabled);
     bool getUnmountOnFinalize() const;
+    void setFuseMountingEnabled(bool enabled);
+    bool getFuseMountingEnabled() const;
+    void setFuseMountingAvailable(bool available);
 
     void setMatrixOverrideEnabled(bool enabled);
     bool getMatrixOverrideEnabled() const;
@@ -75,6 +78,7 @@ private:
     QCheckBox* mDeleteOnUnmountCheckBox;
     QCheckBox* mAutoApplyClipSettingsCheckBox;
     QCheckBox* mUnmountOnFinalizeCheckBox;
+    QCheckBox* mFuseMountingCheckBox;
     QCheckBox* mMatrixOverrideCheckBox;
     QComboBox* mMatrixProfileComboBox;
 

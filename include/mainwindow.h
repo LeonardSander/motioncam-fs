@@ -239,6 +239,8 @@ private:
     bool mSettingsDirty = false;
     bool mAutoApplyClipSettings = true;
     bool mUnmountOnFinalize = true;
+    bool mFuseMountingEnabled = true;
+    bool mFuseMountingAvailable = true;
     bool mGalleryPerformanceTestActive = false;
     bool mPerformanceThumbnailRun = false;
     QString mApplySelectedButtonBaseStyle;

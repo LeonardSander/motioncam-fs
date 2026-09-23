@@ -12,6 +12,7 @@
 #include <QGuiApplication>
 #include <QProcess>
 #include <QPushButton>
+#include <QSettings>
 #include <QUrl>
 #include <algorithm>
 #include <chrono>
@@ -76,13 +77,13 @@ bool platformReady() {
         "/Library/Frameworks/macfuse.framework", "/Library/Extensions/macfuse.kext",
         "/Library/Frameworks/fuse_t.framework"};
     for (const auto& path : candidates) if (QFileInfo::exists(path)) return true;
-    QMessageBox prompt(QMessageBox::Warning, "macFUSE Required",
-        "MotionCam Fuse needs macFUSE to mount clips. Install and approve macFUSE in "
-        "System Settings > Privacy & Security, then reopen the application.",
+    QMessageBox prompt(QMessageBox::Warning, "macFUSE Not Available",
+        "macFUSE is not available. You can continue using thumbnails, the gallery, "
+        "and finalization, but virtual DNG folders will not be mounted.",
         QMessageBox::NoButton);
     auto* download = prompt.addButton("Open macFUSE Download", QMessageBox::AcceptRole);
     auto* privacy = prompt.addButton("Open Privacy & Security", QMessageBox::ActionRole);
-    prompt.addButton(QMessageBox::Cancel);
+    auto* continueButton = prompt.addButton("Continue Without Mounting", QMessageBox::RejectRole);
     prompt.setDefaultButton(download);
     prompt.exec();
     if (prompt.clickedButton() == download)
@@ -90,6 +91,10 @@ bool platformReady() {
     else if (prompt.clickedButton() == privacy)
         QDesktopServices::openUrl(QUrl(
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Security"));
+    if (prompt.clickedButton() == continueButton) {
+        QSettings().setValue("fuseMountingEnabled", false);
+        return true;
+    }
     return false;
 }
 #elif defined(_WIN32)
@@ -97,12 +102,13 @@ bool platformReady() {
     HMODULE library = LoadLibraryW(L"projectedfslib.dll");
     if (library) { FreeLibrary(library); return true; }
     const QString script = QDir(QCoreApplication::applicationDirPath()).filePath("Enable_ProjFS.bat");
-    QMessageBox prompt(QMessageBox::Warning, "ProjectedFS Required",
-        "MotionCam Fuse needs Windows Projected File System. Enable it as administrator, "
-        "then restart Windows.", QMessageBox::NoButton);
+    QMessageBox prompt(QMessageBox::Warning, "ProjectedFS Not Available",
+        "Windows Projected File System is not available. You can continue using thumbnails, "
+        "the gallery, and finalization, but virtual DNG folders will not be mounted.",
+        QMessageBox::NoButton);
     auto* enable = prompt.addButton("Enable ProjectedFS (Admin)", QMessageBox::AcceptRole);
     auto* openFolder = prompt.addButton("Open Setup Folder", QMessageBox::ActionRole);
-    prompt.addButton(QMessageBox::Cancel);
+    auto* continueButton = prompt.addButton("Continue Without Mounting", QMessageBox::RejectRole);
     prompt.setDefaultButton(enable);
     prompt.exec();
     if (prompt.clickedButton() == openFolder) {
@@ -119,6 +125,10 @@ bool platformReady() {
             QProcess::startDetached("powershell.exe",
                 {"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command});
         }
+    }
+    if (prompt.clickedButton() == continueButton) {
+        QSettings().setValue("fuseMountingEnabled", false);
+        return true;
     }
     return false;
 }
@@ -237,7 +247,10 @@ int main(int argc, char *argv[])
     }
 
 #if defined(_WIN32) || defined(__APPLE__)
-    if (!platformReady()) return 1;
+    {
+        QSettings settings;
+        if (settings.value("fuseMountingEnabled", true).toBool() && !platformReady()) return 1;
+    }
 #endif
 
     // Create main window

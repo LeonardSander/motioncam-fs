@@ -96,6 +96,25 @@ extern "C" {
 #endif
 
 namespace {
+    bool projectionDependencyAvailable() {
+#ifdef _WIN32
+        HMODULE library = LoadLibraryW(L"projectedfslib.dll");
+        if (!library) return false;
+        FreeLibrary(library);
+        return true;
+#elif defined(__APPLE__)
+        const QStringList candidates{"/Library/Filesystems/macfuse.fs",
+            "/Library/Frameworks/macfuse.framework", "/Library/Extensions/macfuse.kext",
+            "/Library/Frameworks/fuse_t.framework"};
+        for (const auto& path : candidates)
+            if (QFileInfo::exists(path)) return true;
+        return false;
+#else
+        return QFileInfo::exists(QStringLiteral("/dev/fuse")) &&
+            !QStandardPaths::findExecutable(QStringLiteral("fusermount3")).isEmpty();
+#endif
+    }
+
     bool mergeDirectoryContents(const QString& sourcePath,const QString& destinationPath,
                                 QString& error) {
         if(!QDir().mkpath(destinationPath)){
@@ -927,7 +946,6 @@ MainWindow::MainWindow(QWidget *parent)
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Win>();
 #elif __APPLE__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_MacOs>();
-    QTimer::singleShot(0, this, &MainWindow::cleanupStaleMacFuseMounts);
 #elif __linux__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Linux>();
 #endif
@@ -937,6 +955,12 @@ MainWindow::MainWindow(QWidget *parent)
     ui->dragAndDropScrollArea->installEventFilter(this);
 
     restoreSettings();
+    mFuseMountingAvailable = projectionDependencyAvailable();
+    if (!mFuseMountingAvailable) mFuseMountingEnabled = false;
+#ifdef __APPLE__
+    if (mFuseMountingEnabled)
+        QTimer::singleShot(0, this, &MainWindow::cleanupStaleMacFuseMounts);
+#endif
     mGlobalRenderSettings = mRenderSettings;
 #ifdef _WIN32
     mFuseFilesystem->setCachePolicy(mCachePolicy);
@@ -1221,6 +1245,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
     settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
     settings.setValue("unmountOnFinalize", mUnmountOnFinalize);
+    settings.setValue("fuseMountingEnabled", mFuseMountingEnabled);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
     settings.setValue("cfrTarget", QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
     settings.setValue("cropTarget", QString::fromStdString(mRenderSettings.cropTarget));
@@ -1338,6 +1363,7 @@ void MainWindow::restoreSettings() {
     mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
     mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
     mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
+    mFuseMountingEnabled = settings.value("fuseMountingEnabled", true).toBool();
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Integer" : settings.value("cfrTarget").toString().toStdString());
     mRenderSettings.exposureCompensation = (!settings.contains("exposureCompensation") ? "" : settings.value("exposureCompensation").toString().toStdString());
@@ -1564,7 +1590,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     QProgressDialog* mountProgress = mImportBatchProgress.data();
     if (!mountProgress) {
         singleProgress = std::make_unique<QProgressDialog>(
-            tr("Reading and mounting %1...").arg(fileInfo.fileName()), QString(), 0, 0, this);
+            tr("Reading and importing %1...").arg(fileInfo.fileName()), QString(), 0, 0, this);
         mountProgress = singleProgress.get();
         mountProgress->setWindowModality(Qt::WindowModal);
         mountProgress->setCancelButton(nullptr);
@@ -1577,10 +1603,10 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     settings.sourceSidecarPath = sidecarPath.toStdString();
     settings.sourceGyroflowSidecarPath = gyroflowSidecarPath.toStdString();
 #ifdef __APPLE__
-    cleanupStaleMacFuseMounts();
+    if (mFuseMountingEnabled) cleanupStaleMacFuseMounts();
 #elif __linux__
     const qint64 cleanupStarted = mountTimer.elapsed();
-    if (!cleanupStaleLinuxFuseMount(dstPath, mountError)) {
+    if (mFuseMountingEnabled && !cleanupStaleLinuxFuseMount(dstPath, mountError)) {
         if (singleProgress) mountProgress->close();
         mMountInProgress = false;
         mMountPathInProgress.clear();
@@ -1596,10 +1622,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=fuse_startup_start clip={} path={}",
                      importIndex, filePath.toStdString());
-    auto future = QtConcurrent::run([this, settings, filePath, dstPath, &mountError] {
+    const bool projectFiles = mFuseMountingEnabled;
+    auto future = QtConcurrent::run([this, settings, filePath, dstPath, projectFiles, &mountError] {
         try {
             return mFuseFilesystem->mount(
-                settings, filePath.toStdString(), dstPath.toStdString());
+                settings, filePath.toStdString(), dstPath.toStdString(), projectFiles);
         } catch (const std::exception& error) {
             mountError = QString::fromUtf8(error.what());
             spdlog::error("Mount failed [{}]: {}", filePath.toStdString(), error.what());
@@ -1626,7 +1653,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     mMountPathInProgress.clear();
     if (mountId == motioncam::InvalidMountId) {
         if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
-        QMessageBox::critical(this, "Error", QString("There was an error mounting the file. (error: %1)").arg(mountError));
+        QMessageBox::critical(this, "Error",
+            QString("There was an error importing the file. (error: %1)").arg(mountError));
         return;
     }
 
@@ -1644,6 +1672,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     fileWidget->setProperty("gyroflowSidecarPath", gyroflowSidecarPath);
     fileWidget->setProperty("mountId", mountId);
     fileWidget->setProperty("mountPath", dstPath);
+    fileWidget->setProperty("projectedFiles", projectFiles);
     fileWidget->setObjectName(QStringLiteral("clipCard"));
     fileWidget->setProperty("clipCard", true);
     fileWidget->setCursor(Qt::PointingHandCursor);
@@ -1790,6 +1819,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     // Create and add the open button
     auto* openButton = new QPushButton("Open", fileWidget);
+    openButton->setEnabled(projectFiles);
+    if (!projectFiles) openButton->setToolTip(tr("Virtual DNG folder mounting is disabled."));
     openButton->setFixedSize(buttonWidth, buttonHeight);
     openButton->setIcon(QIcon(":/assets/folder_btn.png"));
     buttonLayout->addWidget(openButton);
@@ -1802,6 +1833,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     // Create and add the remove button
     auto* removeButton = new QPushButton("Unmount", fileWidget);
+    if (!projectFiles) removeButton->setText(tr("Remove"));
     removeButton->setFixedSize(buttonWidth, buttonHeight);
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
     buttonLayout->addWidget(removeButton);
@@ -4379,7 +4411,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 #ifdef _WIN32
                 QThread::msleep(150);
 #elif __APPLE__
-                if (!waitForMacFuseUnmount(mountPath, 10000))
+                if (fileWidget->property("projectedFiles").toBool() &&
+                    !waitForMacFuseUnmount(mountPath, 10000))
                     throw std::runtime_error("Timed out waiting for the macOS FUSE mount to close");
 #endif
                 QDir mountDir(mountPath);
@@ -4418,7 +4451,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 #ifdef _WIN32
             QThread::msleep(150);
 #elif __APPLE__
-            if (!waitForMacFuseUnmount(mountPath, 10000)) {
+            if (fileWidget->property("projectedFiles").toBool() &&
+                !waitForMacFuseUnmount(mountPath, 10000)) {
                 throw std::runtime_error("Timed out waiting for the macOS FUSE mount to close");
             }
 #endif
@@ -5172,6 +5206,8 @@ void MainWindow::onOpenPreferences() {
     dialog.setPlayerPath(mPlayerPath);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
+    dialog.setFuseMountingEnabled(mFuseMountingEnabled);
+    dialog.setFuseMountingAvailable(mFuseMountingAvailable);
 #ifdef _WIN32
     dialog.setDeleteOnUnmount(mDeleteOnUnmount);
     dialog.setCachePolicyMode(mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
@@ -5187,6 +5223,7 @@ void MainWindow::onOpenPreferences() {
     mPlayerPath = dialog.getPlayerPath();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
+    mFuseMountingEnabled = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;
     updateApplyButtonsVisibility();
 #ifdef _WIN32
     mDeleteOnUnmount = dialog.getDeleteOnUnmount();

@@ -106,7 +106,8 @@ struct FuseContext {
 
 class Session {
 public:
-    Session(const std::string& srcFile, const std::string& dstPath, std::unique_ptr<IVirtualFileSystem> fs);
+    Session(const std::string& srcFile, const std::string& dstPath,
+            std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles);
     ~Session();
 
     void updateOptions(const RenderSettings& settings);
@@ -140,14 +141,15 @@ private:
 };
 
 
-Session::Session(const std::string& srcFile, const std::string& dstPath, std::unique_ptr<IVirtualFileSystem> fs) :
+Session::Session(const std::string& srcFile, const std::string& dstPath,
+                 std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles) :
     mSrcFile(srcFile),
     mDstPath(dstPath),
     mFs(std::move(fs)),
     mFuseCh(nullptr),
     mFuse(nullptr)
 {
-    init(mFs.get());
+    if (projectFiles) init(mFs.get());
 }
 
 Session::~Session() {
@@ -171,8 +173,7 @@ Session::~Session() {
         mThread->join();
 
     QDir dst;
-
-    if(!dst.rmdir(mDstPath.c_str()))
+    if (channel && !dst.rmdir(mDstPath.c_str()))
         spdlog::warn("Failed to remove {}", mDstPath);
 
     spdlog::debug("Exiting session for {}", mSrcFile);
@@ -259,8 +260,7 @@ void Session::init(IVirtualFileSystem* fs) {
 void Session::updateOptions(const RenderSettings& settings)
 {
     mFs->updateOptions(settings);
-
-    fuse_invalidate_path(mFuse, mDstPath.c_str());
+    if (mFuse) fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
 
 FileInfo Session::getFileInfo() const {
@@ -447,7 +447,8 @@ FuseFileSystemImpl_MacOs::~FuseFileSystemImpl_MacOs() {
 MountId FuseFileSystemImpl_MacOs::mount(
     const RenderSettings& settings,
     const std::string& srcFile,
-    const std::string& dstPath)
+    const std::string& dstPath,
+    bool projectFiles)
 {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
@@ -460,7 +461,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
 
     QDir dst(dstPath.c_str());
 
-    if(!dst.exists()) {
+    if(projectFiles && !dst.exists()) {
         spdlog::info("Creating path {}", dstPath);
 
         if(!dst.mkpath(dstPath.c_str())) {
@@ -468,7 +469,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
 
             throw std::runtime_error("Failed to create " + dstPath);
         }
-    } else {
+    } else if (projectFiles) {
         QFileInfo dstInfo(QString::fromStdString(dstPath));
         if (!dstInfo.isDir()) {
             throw std::runtime_error("Mount path is not a directory: " + dstPath);
@@ -512,7 +513,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
             }
 
             auto session = std::make_shared<Session>(
-                srcFile, dstPath, std::move(filesystem));
+                srcFile, dstPath, std::move(filesystem), projectFiles);
 
             if(!session) {
                 spdlog::error("Failed to mount {} to {}", srcFile, dstPath);
