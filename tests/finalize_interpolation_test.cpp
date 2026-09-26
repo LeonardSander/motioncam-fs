@@ -794,15 +794,49 @@ int main() {
     assert(be32(opcodeOffset) == 1 && be32(opcodeOffset + 4) == 1);
     assert(be32(opcodeOffset + 8) == 0x01030000 && be32(opcodeOffset + 16) == 68);
     assert(be32(opcodeOffset + 20) == 1);
+    const double croppedCx = gyroflow->cx - (gyroflow->width - 8) / 2;
+    const double croppedCy = gyroflow->cy - (gyroflow->height - 8) / 2;
+    auto cornerRadius = [](double x, double y, double w, double h) {
+        return std::max({std::hypot(x, y), std::hypot(w - x, y),
+            std::hypot(x, h - y), std::hypot(w - x, h - y)});
+    };
+    const double radiusRatio = cornerRadius(croppedCx, croppedCy, 7, 7) /
+        cornerRadius(gyroflow->cx, gyroflow->cy,
+            gyroflow->width - 1, gyroflow->height - 1);
     for (size_t i = 0; i < gyroflow->dngRectilinear.size(); ++i)
         assert(std::abs(beDouble(opcodeOffset + 24 + i * 8) -
-            gyroflow->dngRectilinear[i]) < 1e-15);
+            gyroflow->dngRectilinear[i] * std::pow(radiusRatio, 2 * i)) < 1e-15);
     assert(beDouble(opcodeOffset + 56) == 0.0);
     assert(beDouble(opcodeOffset + 64) == 0.0);
-    assert(std::abs(beDouble(opcodeOffset + 72) -
-        gyroflow->cx / (gyroflow->width - 1.0)) < 1e-15);
-    assert(std::abs(beDouble(opcodeOffset + 80) -
-        gyroflow->cy / (gyroflow->height - 1.0)) < 1e-15);
+    assert(std::abs(beDouble(opcodeOffset + 72) - croppedCx / 7) < 1e-15);
+    assert(std::abs(beDouble(opcodeOffset + 80) - croppedCy / 7) < 1e-15);
+    auto sourceWarp = uncompressedA;
+    assert(motioncam::DNGDecoder::setWarpRectilinear(
+        sourceWarp, {1.0, 0.2, 0.03, 0.004}, 0.5, 0.5));
+    std::array<std::vector<uint8_t>, 3> rectilinearSidecar;
+    assert(motioncam::DNGDecoder::extractNonGainMapOpcodes(
+        sourceWarp, rectilinearSidecar));
+    auto croppedWarp = sourceWarp;
+    assert(motioncam::DNGDecoder::cropImage(croppedWarp, 4, 4));
+    const auto [cropWarpOffset, cropWarpBytes] = tagPayload(croppedWarp, 51022);
+    assert(cropWarpOffset && cropWarpBytes == 88);
+    auto cropDouble = [&](size_t at) {
+        uint64_t bits = 0;
+        for (size_t i = 0; i < 8; ++i) bits = bits << 8 | croppedWarp[at + i];
+        double value;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    };
+    assert(std::abs(cropDouble(cropWarpOffset + 72) - 0.5) < 1e-15);
+    assert(std::abs(cropDouble(cropWarpOffset + 32) - 0.2 * 9.0 / 49.0) < 1e-15);
+    auto mergedCropWarp = uncompressedA;
+    assert(motioncam::DNGDecoder::cropImage(mergedCropWarp, 4, 4));
+    assert(motioncam::DNGDecoder::mergeNonGainMapOpcodes(
+        mergedCropWarp, rectilinearSidecar, 8, 8));
+    const auto [mergedCropOffset, mergedCropBytes] = tagPayload(mergedCropWarp, 51022);
+    assert(mergedCropOffset && mergedCropBytes == cropWarpBytes);
+    for (size_t i = 24; i < 88; ++i)
+        assert(mergedCropWarp[mergedCropOffset + i] == croppedWarp[cropWarpOffset + i]);
     auto fisheyeWarped = uncompressedA;
     assert(motioncam::DNGDecoder::setWarpFisheye(fisheyeWarped,
         {1.0, 0.1, -0.01, 0.001}, gyroflow->cx / (gyroflow->width - 1.0),

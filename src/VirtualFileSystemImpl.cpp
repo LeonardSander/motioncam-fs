@@ -1093,7 +1093,8 @@ bool applyManualOpcodeSidecar(std::vector<uint8_t>& dng,
     const auto* selected = select(true);
     if (!selected) selected = select(false);
     return !selected || DNGDecoder::mergeNonGainMapOpcodes(
-        dng, selected->nonGainMapOpcodes);
+        dng, selected->nonGainMapOpcodes,
+        selected->image.layout.width, selected->image.layout.height);
 }
 
 bool applyManualDngMetadata(std::vector<uint8_t>& dng,
@@ -1311,6 +1312,18 @@ void applyGyroflowLensProfile(
             profile.cx / (profile.width - 1.0),
             profile.cy / (profile.height - 1.0)))
         throw std::runtime_error("Could not attach Gyroflow WarpRectilinear opcode");
+    DNGImageLayout layout;
+    if (!DNGDecoder::getImageLayout(dng, layout))
+        throw std::runtime_error("Could not read DNG dimensions for Gyroflow warp");
+    if (profile.width >= static_cast<int>(layout.width) &&
+        profile.height >= static_cast<int>(layout.height) &&
+        (profile.width > static_cast<int>(layout.width) ||
+         profile.height > static_cast<int>(layout.height)) &&
+        !DNGDecoder::resampleWarpRectilinear(dng, profile.width, profile.height,
+            (profile.width - layout.width) / 2,
+            (profile.height - layout.height) / 2,
+            layout.width, layout.height))
+        throw std::runtime_error("Could not resample Gyroflow warp for cropped DNG");
 }
 
 void loadSidecar(

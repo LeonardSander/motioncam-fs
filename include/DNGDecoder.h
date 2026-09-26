@@ -71,7 +71,11 @@ public:
     // sidecar distortion data supersedes distortion embedded in the frame.
     static bool mergeNonGainMapOpcodes(
         std::vector<uint8_t>& dngData,
-        const std::array<std::vector<uint8_t>, 3>& opcodeLists);
+        const std::array<std::vector<uint8_t>, 3>& opcodeLists,
+        uint32_t sourceWidth = 0, uint32_t sourceHeight = 0);
+    static bool resampleWarpRectilinear(std::vector<uint8_t>& dngData,
+        uint32_t sourceWidth, uint32_t sourceHeight,
+        uint32_t left, uint32_t top, uint32_t targetWidth, uint32_t targetHeight);
     static bool setWarpFisheye(std::vector<uint8_t>& dngData,
                                const std::array<double, 4>& coefficients,
                                double centerX, double centerY);

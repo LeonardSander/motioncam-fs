@@ -2204,12 +2204,71 @@ bool DNGDecoder::extractNonGainMapOpcodes(
     return true;
 }
 
+namespace {
+bool resampleRectilinearPayload(std::vector<uint8_t>& payload,
+        uint32_t sourceWidth, uint32_t sourceHeight, uint32_t left, uint32_t top,
+        uint32_t targetWidth, uint32_t targetHeight) {
+    if (payload.size() < 4 || sourceWidth < 2 || sourceHeight < 2 ||
+        targetWidth < 2 || targetHeight < 2) return false;
+    auto writeDouble = [&](size_t at, double value) {
+        uint64_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        for (int shift = 56; shift >= 0; shift -= 8)
+            payload[at++] = static_cast<uint8_t>(bits >> shift);
+    };
+    const uint32_t count = readBE32(payload.data());
+    size_t offset = 4;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (offset + 16 > payload.size()) return false;
+        const uint32_t id = readBE32(payload.data() + offset);
+        const uint32_t bytes = readBE32(payload.data() + offset + 12);
+        if (bytes > payload.size() - offset - 16) return false;
+        if (id == OPCODE_WARP_RECTILINEAR) {
+            if (bytes != 68 || readBE32(payload.data() + offset + 16) != 1)
+                return false;
+            const size_t at = offset + 20;
+            const double cx = readBEDouble(payload.data() + at + 48) * (sourceWidth - 1);
+            const double cy = readBEDouble(payload.data() + at + 56) * (sourceHeight - 1);
+            const double newCx = cx - left, newCy = cy - top;
+            auto radius = [](double x, double y, double w, double h) {
+                return std::max({std::hypot(x, y), std::hypot(w - x, y),
+                    std::hypot(x, h - y), std::hypot(w - x, h - y)});
+            };
+            const double oldRadius = radius(cx, cy, sourceWidth - 1, sourceHeight - 1);
+            const double newRadius = radius(newCx, newCy, targetWidth - 1, targetHeight - 1);
+            const double ratio = newRadius / oldRadius;
+            double power = 1.0;
+            for (size_t j = 0; j < 4; ++j) {
+                writeDouble(at + j * 8,
+                    readBEDouble(payload.data() + at + j * 8) * power);
+                power *= ratio * ratio;
+            }
+            for (size_t j = 0; j < 2; ++j)
+                writeDouble(at + 32 + j * 8,
+                    readBEDouble(payload.data() + at + 32 + j * 8) * ratio);
+            writeDouble(at + 48, newCx / (targetWidth - 1));
+            writeDouble(at + 56, newCy / (targetHeight - 1));
+        }
+        offset += 16 + bytes;
+    }
+    return offset == payload.size();
+}
+} // namespace
+
 bool DNGDecoder::mergeNonGainMapOpcodes(
         std::vector<uint8_t>& data,
-        const std::array<std::vector<uint8_t>, 3>& opcodeLists) {
+        const std::array<std::vector<uint8_t>, 3>& opcodeLists,
+        uint32_t sourceWidth, uint32_t sourceHeight) {
+    DNGImageLayout target;
+    if (sourceWidth && sourceHeight && !getImageLayout(data, target)) return false;
     for (size_t index = 0; index < opcodeLists.size(); ++index) {
-        const auto& sidecar = opcodeLists[index];
+        auto sidecar = opcodeLists[index];
         if (sidecar.empty()) continue;
+        if (sourceWidth >= target.width && sourceHeight >= target.height &&
+            (sourceWidth > target.width || sourceHeight > target.height) &&
+            !resampleRectilinearPayload(sidecar, sourceWidth, sourceHeight,
+                (sourceWidth - target.width) / 2, (sourceHeight - target.height) / 2,
+                target.width, target.height)) return false;
         std::set<uint32_t> sidecarIds;
         std::vector<uint8_t> checked;
         if (!filterOpcodePayload(sidecar.data(), sidecar.size(), {}, checked, &sidecarIds))
@@ -2247,6 +2306,29 @@ bool DNGDecoder::mergeNonGainMapOpcodes(
         merged[2] = static_cast<uint8_t>(count >> 8);
         merged[3] = static_cast<uint8_t>(count);
         if (!replaceOpcodeList(data, static_cast<int>(index + 1), merged, false)) return false;
+    }
+    return true;
+}
+
+bool DNGDecoder::resampleWarpRectilinear(std::vector<uint8_t>& data,
+        uint32_t sourceWidth, uint32_t sourceHeight, uint32_t left, uint32_t top,
+        uint32_t targetWidth, uint32_t targetHeight) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const auto primaryIfd = primaryImageIfd(data, entries, little);
+    if (!primaryIfd) return false;
+    for (const auto& entry : entries) {
+        if (entry.ifdOffset != *primaryIfd || !entry.count ||
+            (entry.tag != TIFF_TAG_OPCODE_LIST_1 &&
+             entry.tag != TIFF_TAG_OPCODE_LIST_2 &&
+             entry.tag != TIFF_TAG_OPCODE_LIST_3)) continue;
+        if (entry.valueOffset > data.size() || entry.count > data.size() - entry.valueOffset)
+            return false;
+        std::vector<uint8_t> payload(data.begin() + entry.valueOffset,
+            data.begin() + entry.valueOffset + entry.count);
+        if (!resampleRectilinearPayload(payload, sourceWidth, sourceHeight,
+                left, top, targetWidth, targetHeight)) return false;
+        std::copy(payload.begin(), payload.end(), data.begin() + entry.valueOffset);
     }
     return true;
 }
@@ -3086,6 +3168,8 @@ bool DNGDecoder::cropImage(std::vector<uint8_t>& data,
     uint32_t top = (sourceHeight - targetHeight) / 2;
     left = (left / alignment) * alignment;
     top = (top / alignment) * alignment;
+    if (!resampleWarpRectilinear(data, sourceWidth, sourceHeight,
+            left, top, targetWidth, targetHeight)) return false;
     std::vector<uint16_t> cropped(
         static_cast<size_t>(targetWidth) * targetHeight * channels);
     for (uint32_t y = 0; y < targetHeight; ++y)
