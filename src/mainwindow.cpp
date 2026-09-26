@@ -910,6 +910,12 @@ namespace {
                                     details.isEmpty() ? QString() : QString(": %1").arg(details));
             return false;
         }
+        if (isLinuxMountPoint(cleanPath)) {
+            errorMessage = QString("FUSE mount at %1 is still present after detachment. "
+                                   "Import stopped to avoid accessing an unresponsive mount.")
+                               .arg(cleanPath);
+            return false;
+        }
         return true;
     }
 #endif

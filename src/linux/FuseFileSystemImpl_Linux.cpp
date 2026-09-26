@@ -88,6 +88,17 @@ void recoverStaleMount(const std::string& path) {
             "Failed to unmount stale FUSE mount " + path +
             " (fusermount3 exit code " + std::to_string(fusermount.exitCode()) + ")");
     }
+    // A successful helper exit does not guarantee that the mount disappeared.
+    // Never let mkpath or fuse_mount follow a still-mounted, possibly dead FUSE endpoint.
+    std::ifstream remainingMounts("/proc/self/mountinfo");
+    for (std::string line; std::getline(remainingMounts, line);) {
+        std::istringstream fields(line);
+        std::string field;
+        for (int index = 0; index <= 4 && fields >> field; ++index) {
+            if (index == 4 && decodeMountPath(field) == expected)
+                throw std::runtime_error("FUSE mount remains after detachment at " + path);
+        }
+    }
 }
 
 void setupLogging() {
