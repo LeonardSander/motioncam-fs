@@ -1844,23 +1844,32 @@ void DNGDecoder::extractTimestampsFromFilenames() {
     boost::smatch match;
 
     std::vector<std::optional<int>> extracted(mFrames.size());
+    std::vector<std::string> sequencePrefixes(mFrames.size());
+    std::vector<size_t> counterWidths(mFrames.size());
     for (size_t i = 0; i < mFrames.size(); ++i) {
         const auto& frame = mFrames[i];
         boost::filesystem::path p(frame.filePath);
         std::string filename = p.stem().string();
         if (boost::regex_search(filename, match, frameNumberRegex)) {
             extracted[i] = std::stoi(match[1].str());
+            sequencePrefixes[i] = boost::algorithm::to_lower_copy(
+                filename.substr(0, static_cast<size_t>(match.position(1))));
+            counterWidths[i] = match[1].str().size();
         }
     }
 
     // Camera filenames commonly end in HHMMSS (for example IMG_..._145306).
-    // Treat the suffix as a frame counter only when the whole sequence looks
-    // like a plausible monotonically increasing counter. Otherwise retain the
-    // default 30 fps timestamps assigned while discovering the files.
+    // Treat the suffix as a frame counter only when every DNG belongs to one
+    // coherent filename series: the prefix and counter width must match, and
+    // counters must increase plausibly. A folder containing selected frames
+    // from multiple clips is a still collection even if all names happen to
+    // end in monotonically increasing numbers.
     bool plausibleCounter = extracted.size() >= 3;
     for (size_t i = 0; i < extracted.size(); ++i) {
         plausibleCounter &= extracted[i].has_value();
         if (i && plausibleCounter) {
+            plausibleCounter &= sequencePrefixes[i] == sequencePrefixes[0] &&
+                counterWidths[i] == counterWidths[0];
             const int delta = *extracted[i] - *extracted[i - 1];
             plausibleCounter &= delta > 0 && delta <= 100;
         }
@@ -1876,13 +1885,18 @@ void DNGDecoder::extractTimestampsFromFilenames() {
         }
         mSequenceInfo.hasFrameNumberSequence = true;
     } else {
-        // A folder of independently named stills is not a VFR sequence. Keep
-        // discovery order and expose it as a cinema-rate CFR clip. Do not
-        // replace timing read from the DNGs; frames without timing already have
-        // the discovery-order fallback assigned by findDNGFiles().
+        // A folder of independently named stills is not a timed sequence.
+        // Ignore embedded timing from the source clips and give every still a
+        // unique discovery-order identity on a fixed 24 fps timeline. This is
+        // also important for mixed finalized selections, where timestamps can
+        // repeat across clips and must never alias one frame to another.
         mSequenceInfo.fps = 24.0;
         for (size_t i = 0; i < mFrames.size(); ++i) {
             mFrames[i].frameNumber = static_cast<int>(i);
+            mFrames[i].timestamp = static_cast<Timestamp>(
+                i * 1000000000.0 / mSequenceInfo.fps);
+            mFrames[i].hasExactPresentationTimestamp = false;
+            mFrames[i].hasTimeCodeTimestamp = false;
         }
     }
     

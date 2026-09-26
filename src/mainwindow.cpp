@@ -96,6 +96,8 @@ extern "C" {
 #endif
 
 namespace {
+    void copyFileAtomically(const QString& source, const QString& destination);
+
     bool projectionDependencyAvailable() {
 #ifdef _WIN32
         HMODULE library = LoadLibraryW(L"projectedfslib.dll");
@@ -155,6 +157,172 @@ namespace {
             }
             input.close();QFile::remove(sourceFile);
         }
+        return true;
+    }
+
+    bool mergeDirectoryContentsFlat(const QString& sourcePath, const QString& destinationPath,
+                                    QString& error) {
+        if (!QDir().mkpath(destinationPath)) {
+            error = QObject::tr("Could not create selected frames output directory");
+            return false;
+        }
+        QList<QPair<QString, QString>> files;
+        QDirIterator iterator(sourcePath, QDir::Files | QDir::NoDotAndDotDot,
+                              QDirIterator::Subdirectories);
+        while (iterator.hasNext()) {
+            const QString sourceFile = iterator.next();
+            const QString fileName = QFileInfo(sourceFile).fileName();
+            const QString destinationFile = QDir(destinationPath).filePath(fileName);
+            files.append({sourceFile, destinationFile});
+        }
+        for (const auto& file : files) {
+            const QString& sourceFile = file.first;
+            const QString& destinationFile = file.second;
+            const QString fileName = QFileInfo(destinationFile).fileName();
+            if (!QFile::rename(sourceFile, destinationFile)) {
+                QFile input(sourceFile);
+                QSaveFile destination(destinationFile);
+                if (!input.open(QIODevice::ReadOnly) || !destination.open(QIODevice::WriteOnly)) {
+                    error = QObject::tr("Could not save selected frame %1").arg(fileName);
+                    return false;
+                }
+                while (!input.atEnd()) {
+                    const QByteArray block = input.read(1024 * 1024);
+                    if ((block.isEmpty() && input.error() != QFileDevice::NoError) ||
+                        destination.write(block) != block.size()) {
+                        destination.cancelWriting();
+                        error = QObject::tr("Could not save selected frame %1").arg(fileName);
+                        return false;
+                    }
+                }
+                if (!destination.commit()) {
+                    error = QObject::tr("Could not save selected frame %1").arg(fileName);
+                    return false;
+                }
+                input.close();
+                QFile::remove(sourceFile);
+            }
+        }
+        return true;
+    }
+
+    bool inheritHeroFrameSidecars(const QString& sourcePath, const QString& destinationPath,
+                                  bool flatten, QString& error) {
+        struct HeroFrame {
+            QString prefix;
+            QString fileName;
+            int frame = 0;
+            QString pp3;
+            QString xml;
+        };
+        auto frameParts = [](const QString& fileName, QString& prefix, int& frame) {
+            const QFileInfo info(fileName);
+            const QString stem = info.completeBaseName();
+            if (stem.size() < 6) return false;
+            const QString suffix = stem.right(6);
+            for (const QChar ch : suffix)
+                if (!ch.isDigit()) return false;
+            bool ok = false;
+            frame = suffix.toInt(&ok);
+            if (!ok) return false;
+            prefix = stem.left(stem.size() - 6);
+            return true;
+        };
+        auto sequenceKey = [flatten](const QString& root, const QString& path,
+                                     const QString& prefix) {
+            if (flatten) return prefix;
+            const QString relative = QDir(root).relativeFilePath(path);
+            return QFileInfo(relative).path() + QChar(0x1f) + prefix;
+        };
+
+        QHash<QString, QPair<QString, QString>> sidecarsByDng;
+        QStringList existingDngs;
+        QDirIterator existing(destinationPath, QDir::Files | QDir::NoDotAndDotDot,
+                              QDirIterator::Subdirectories);
+        while (existing.hasNext()) {
+            const QString path = existing.next();
+            const QString extension = QFileInfo(path).suffix().toLower();
+            if (extension == QStringLiteral("dng")) {
+                existingDngs.append(path);
+            } else if (extension == QStringLiteral("pp3") ||
+                       extension == QStringLiteral("xml")) {
+                const QString dngPath = path.left(path.size() - extension.size() - 1);
+                if (QFileInfo(dngPath).suffix().compare(QStringLiteral("dng"),
+                                                        Qt::CaseInsensitive) != 0)
+                    continue;
+                auto& sidecars = sidecarsByDng[dngPath.toCaseFolded()];
+                if (extension == QStringLiteral("pp3")) sidecars.first = path;
+                else sidecars.second = path;
+            }
+        }
+        QHash<QString, QVector<HeroFrame>> heroesByPrefix;
+        QVector<HeroFrame> allHeroes;
+        for (const QString& path : existingDngs) {
+            HeroFrame hero;
+            if (!frameParts(QFileInfo(path).fileName(), hero.prefix, hero.frame)) continue;
+            hero.fileName = QFileInfo(path).fileName();
+            const auto sidecars = sidecarsByDng.value(path.toCaseFolded());
+            hero.pp3 = sidecars.first;
+            hero.xml = sidecars.second;
+            if (!hero.pp3.isEmpty() || !hero.xml.isEmpty()) {
+                heroesByPrefix[sequenceKey(destinationPath, path, hero.prefix)].append(hero);
+                allHeroes.append(std::move(hero));
+            }
+        }
+        std::sort(allHeroes.begin(), allHeroes.end(), [](const HeroFrame& left, const HeroFrame& right) {
+            return QString::compare(left.fileName, right.fileName, Qt::CaseInsensitive) < 0;
+        });
+
+        size_t copiedSidecars = 0;
+        QDirIterator generated(sourcePath, QDir::Files | QDir::NoDotAndDotDot,
+                               QDirIterator::Subdirectories);
+        while (generated.hasNext()) {
+            const QString generatedPath = generated.next();
+            if (QFileInfo(generatedPath).suffix().compare(QStringLiteral("dng"), Qt::CaseInsensitive) != 0)
+                continue;
+            QString prefix;
+            int frame = 0;
+            if (!frameParts(QFileInfo(generatedPath).fileName(), prefix, frame)) continue;
+            auto heroes = heroesByPrefix.value(sequenceKey(sourcePath, generatedPath, prefix));
+            std::sort(heroes.begin(), heroes.end(), [](const HeroFrame& left, const HeroFrame& right) {
+                return left.frame < right.frame;
+            });
+            for (const auto& sidecar : {qMakePair(&HeroFrame::pp3, QStringLiteral("pp3")),
+                                        qMakePair(&HeroFrame::xml, QStringLiteral("xml"))}) {
+                const HeroFrame* selected = nullptr;
+                const HeroFrame* firstAfter = nullptr;
+                if (!heroes.isEmpty()) {
+                    for (const auto& hero : heroes) {
+                        if ((hero.*sidecar.first).isEmpty()) continue;
+                        if (hero.frame <= frame) selected = &hero;
+                        else if (!firstAfter) firstAfter = &hero;
+                    }
+                } else {
+                    // This clip has no hero of its own. In filename order,
+                    // inherit the final edit from the preceding clip, or the
+                    // first available edit from the following clip.
+                    for (const auto& hero : allHeroes) {
+                        if ((hero.*sidecar.first).isEmpty()) continue;
+                        const int order = QString::compare(
+                            hero.prefix, prefix, Qt::CaseInsensitive);
+                        if (order < 0) selected = &hero;
+                        else if (order > 0 && !firstAfter) firstAfter = &hero;
+                    }
+                }
+                if (!selected) selected = firstAfter;
+                if (!selected) continue;
+                const QString stagedSidecar = generatedPath + QLatin1Char('.') + sidecar.second;
+                try {
+                    copyFileAtomically(selected->*sidecar.first, stagedSidecar);
+                    ++copiedSidecars;
+                } catch (const std::exception& exception) {
+                    error = QString::fromUtf8(exception.what());
+                    return false;
+                }
+            }
+        }
+        spdlog::info("Selected-frame hero sidecars: output={} heroes={} copies={}",
+                     destinationPath.toStdString(), allHeroes.size(), copiedSidecars);
         return true;
     }
 
@@ -554,6 +722,33 @@ namespace {
         return image;
     }
 
+    template<typename T>
+    std::vector<T> rotateInterleaved(const std::vector<T>& input, uint32_t width,
+                                     uint32_t height, uint32_t channels,
+                                     int orientation) {
+        orientation = normalizedGalleryOrientation(orientation);
+        if (orientation < 0 || orientation == 0 || !width || !height || !channels)
+            return input;
+        if (input.size() < static_cast<size_t>(width) * height * channels)
+            return input;
+        const uint32_t outputWidth = orientation == 90 || orientation == 270 ? height : width;
+        std::vector<T> output(input.size());
+        for (uint32_t y = 0; y < height; ++y) {
+            for (uint32_t x = 0; x < width; ++x) {
+                uint32_t outputX = x, outputY = y;
+                if (orientation == 90) { outputX = height - 1 - y; outputY = x; }
+                else if (orientation == 180) { outputX = width - 1 - x; outputY = height - 1 - y; }
+                else if (orientation == 270) { outputX = y; outputY = width - 1 - x; }
+                const size_t source = (static_cast<size_t>(y) * width + x) * channels;
+                const size_t destination =
+                    (static_cast<size_t>(outputY) * outputWidth + outputX) * channels;
+                std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(source), channels,
+                            output.begin() + static_cast<std::ptrdiff_t>(destination));
+            }
+        }
+        return output;
+    }
+
     bool isCameraNativeFormat(const QString& mode) {
         const QString trimmed = mode.trimmed();
         return trimmed.startsWith("HEVC ", Qt::CaseInsensitive) ||
@@ -615,6 +810,25 @@ namespace {
             return false;
         distance = parsed;
         return true;
+    }
+
+    bool dngFinalizeCompressionDistance(const QString& mode, float& distance) {
+        const QString trimmed = mode.trimmed();
+        if (trimmed.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
+            distance = -1.0f;
+            return true;
+        }
+        if (trimmed.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
+            trimmed.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
+            trimmed.compare("JPEG DCT Lossy", Qt::CaseInsensitive) == 0) {
+            distance = motioncam::DNG_COMPRESSION_JPEG_DCT;
+            return true;
+        }
+        if (trimmed.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
+            distance = 0.0f;
+            return true;
+        }
+        return parseJxlDctDistance(trimmed, distance);
     }
 
 #ifdef __APPLE__
@@ -1026,20 +1240,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionModeComboBox, &QComboBox::currentTextChanged, this,
             [this](const QString& text) {
-        const QString mode = text.trimmed();
-        if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
-            mRenderSettings.jxlDistance = -1.0f;
-        } else if (mode.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
-                   mode.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
-                   mode.compare("JPEG DCT Lossy", Qt::CaseInsensitive) == 0) {
-            mRenderSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_DCT;
-        } else if (mode.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
-            mRenderSettings.jxlDistance = 0.0f;
-        } else {
-            float distance = 0.0f;
-            if (parseJxlDctDistance(mode, distance))
-                mRenderSettings.jxlDistance = distance;
-        }
+        float distance = 0.0f;
+        if (dngFinalizeCompressionDistance(text, distance))
+            mRenderSettings.jxlDistance = distance;
         onRenderSettingsChanged(Qt::CheckState::Unchecked);
     });
     connect(ui->draftQuality, &QComboBox::currentIndexChanged, this, &MainWindow::onDraftModeQualityChanged);
@@ -1077,11 +1280,17 @@ MainWindow::MainWindow(QWidget *parent)
     auto* selectedFrameButtons = new QHBoxLayout();
     mFinalizeSelectedFramesButton = new QPushButton(tr("Finalize Selected Frames"), this);
     mClearSelectedFramesButton = new QPushButton(tr("Clear Selected Frames"), this);
+    mSelectAllFramesButton = new QPushButton(tr("Select All Frames"), this);
+    auto* selectionEditButtons = new QVBoxLayout();
+    selectionEditButtons->setContentsMargins(0, 0, 0, 0);
+    selectionEditButtons->addWidget(mClearSelectedFramesButton);
+    selectionEditButtons->addWidget(mSelectAllFramesButton);
     selectedFrameButtons->addWidget(mFinalizeSelectedFramesButton);
-    selectedFrameButtons->addWidget(mClearSelectedFramesButton);
+    selectedFrameButtons->addLayout(selectionEditButtons);
     ui->compressionSection->addLayout(selectedFrameButtons);
     connect(mFinalizeSelectedFramesButton,&QPushButton::clicked,this,&MainWindow::finalizeSelectedFrames);
     connect(mClearSelectedFramesButton,&QPushButton::clicked,this,&MainWindow::clearSelectedFrames);
+    connect(mSelectAllFramesButton,&QPushButton::clicked,this,&MainWindow::selectAllFrames);
 
     ui->defaultSection->removeWidget(ui->defaultBtn);
     auto* applyButtons = new QHBoxLayout();
@@ -1244,6 +1453,8 @@ void MainWindow::saveSettings() {
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
     settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
     settings.setValue("unmountOnFinalize", mUnmountOnFinalize);
+    settings.setValue("finalizeSelectionToSingleDirectory", mFinalizeSelectionToSingleDirectory);
+    settings.setValue("inheritHeroFrameSidecars", mInheritHeroFrameSidecars);
     settings.setValue("fuseMountingEnabled", mFuseMountingEnabled);
     settings.setValue("draftQuality", mRenderSettings.draftScale);
     settings.setValue("cfrTarget", QString::fromStdString(cfrTargetToString(mRenderSettings.cfrTarget)));
@@ -1361,6 +1572,9 @@ void MainWindow::restoreSettings() {
     mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
     mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
     mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
+    mFinalizeSelectionToSingleDirectory =
+        settings.value("finalizeSelectionToSingleDirectory", false).toBool();
+    mInheritHeroFrameSidecars = settings.value("inheritHeroFrameSidecars", false).toBool();
     mFuseMountingEnabled = settings.value("fuseMountingEnabled", true).toBool();
     mRenderSettings.draftScale = std::max(1, settings.value("draftQuality").toInt());
     mRenderSettings.cfrTarget = stringToCFRTarget(!settings.contains("cfrTarget") ? "Prefer Integer" : settings.value("cfrTarget").toString().toStdString());
@@ -2185,12 +2399,13 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     // resolution remains the default and only the explicit proxy/draft option
     // reduces source resolution for faster playback.
     const auto generation = ++mGalleryGeneration;
-    const double previewFps = info->isSequence
-        ? (info->fps > 0.0f ? info->fps : 24.0f) : 1.0;
+    const double previewFps = info->fps > 0.0f ? info->fps : 24.0f;
+    const bool isSequence = info->isSequence;
+    if (!isSequence) settings.orientation = -1;
     const int playbackFrames=std::max(1,info->totalFrames-info->droppedFrames+
         info->duplicatedFrames);
     const size_t playbackFirstFrame = static_cast<size_t>(std::clamp(
-        std::floor(startSeconds * previewFps), 0.0,
+        std::round(startSeconds * previewFps), 0.0,
         static_cast<double>(playbackFrames-1)));
     const size_t firstFrame = backfillThumbnails ? 0 : playbackFirstFrame;
     QPointer<ClipPlayerDialog> player(mClipPlayer);
@@ -2198,7 +2413,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const auto incomingFrame=mClipPlayer->incomingFrame();
     const auto thumbnailCollectionEnabled=mClipPlayer->thumbnailCollectionEnabled();
     const bool diagnostics = mGalleryPerformanceTestActive;
-    auto render = [this, mountId, settings, generation, firstFrame,
+    auto render = [this, mountId, settings, generation, firstFrame, isSequence,
                    backfillThumbnails, player, playbackTarget, incomingFrame,
                    thumbnailCollectionEnabled, diagnostics] {
         const auto taskStarted = std::chrono::steady_clock::now();
@@ -2244,7 +2459,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                 [this, generation](size_t, size_t, const std::string&) {
                     return mGalleryGeneration.load() == generation;
                 },
-                [this, generation, player, mountId, settings, incomingFrame, thumbnailCollectionEnabled,
+                [this, generation, player, mountId, settings, isSequence, incomingFrame, thumbnailCollectionEnabled,
                  backfillThumbnails, &presentedFirstFrame,
                  &deliveredFrames, &thumbnailFrames, &displayDecodeMs, &deliveryWaitMs,
                  &taskStarted, diagnostics](
@@ -2257,6 +2472,30 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings) && preview.gainMapApplied);
+                    if (!isSequence) {
+                        const int orientation = normalizedGalleryOrientation(
+                            preview.metadata.orientation);
+                        if (orientation == 90 || orientation == 180 || orientation == 270) {
+                            const uint32_t sourceWidth = preview.width;
+                            const uint32_t sourceHeight = preview.height;
+                            preview.rgb = rotateInterleaved(
+                                preview.rgb, sourceWidth, sourceHeight, 6, orientation);
+                            if (preview.rawSamples && preview.rawWidth && preview.rawHeight &&
+                                preview.rawChannels) {
+                                auto rotatedRaw = rotateInterleaved(
+                                    *preview.rawSamples, preview.rawWidth, preview.rawHeight,
+                                    preview.rawChannels, orientation);
+                                preview.rawSamples =
+                                    std::make_shared<const std::vector<uint16_t>>(
+                                        std::move(rotatedRaw));
+                                if (orientation == 90 || orientation == 270)
+                                    std::swap(preview.rawWidth, preview.rawHeight);
+                            }
+                            if (orientation == 90 || orientation == 270)
+                                std::swap(preview.width, preview.height);
+                        }
+                        preview.metadata.orientation = 0;
+                    }
                     auto& rgb = preview.rgb;
                     const uint32_t width = preview.width, height = preview.height;
                     displayDecodeMs += std::chrono::duration<double, std::milli>(
@@ -2392,8 +2631,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         clip.sourceFile = mounted.srcFile;
         // Independent DNGs form a still gallery, not a 24 fps video sequence.
         // Give each item a stable one-second viewing interval.
-        clip.fps = info->isSequence
-            ? (info->fps > 0.0f ? info->fps : 24.0f) : 1.0f;
+        clip.fps = info->fps > 0.0f ? info->fps : 24.0f;
         clip.durationSeconds = info->runtimeSeconds > 0.0f ? info->runtimeSeconds
                                                            : info->totalFrames / clip.fps;
         clip.sourceFrames = std::max(1,info->totalFrames-info->droppedFrames+
@@ -2403,7 +2641,9 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         clip.nativeWidth = info->width;
         clip.nativeHeight = info->height;
         const int orientationOverride = settingsForMount(mounted.mountId).orientation;
-        clip.orientation = orientationOverride >= 0 ? orientationOverride : info->orientation;
+        clip.orientation = info->isSequence
+            ? (orientationOverride >= 0 ? orientationOverride : info->orientation)
+            : -1;
         clip.isSequence = info->isSequence;
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
@@ -2501,6 +2741,22 @@ void MainWindow::clearSelectedFrames(){
     if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
 }
 
+void MainWindow::selectAllFrames(){
+    mSelectedFrames.clear();
+    for(const auto& mounted:mMountedFiles){
+        const auto info=mFuseFilesystem->getFileInfo(mounted.mountId);
+        if(!info)continue;
+        const int sourceCount=info->sourceFrameToOutput
+            ?static_cast<int>(info->sourceFrameToOutput->size())
+            :std::max(1,info->totalFrames-info->droppedFrames+info->duplicatedFrames);
+        auto& selected=mSelectedFrames[mounted.mountId];
+        for(int source=0;source<sourceCount;++source)selected.insert(source);
+    }
+    if(mClipPlayer)mClipPlayer->selectAllFrameSelections();
+    autoSaveSession();
+    if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
+}
+
 void MainWindow::finalizeSelectedFrames(){
     QList<motioncam::MountId> renderIds;
     if(mSelectedMountIds.isEmpty()){
@@ -2511,9 +2767,35 @@ void MainWindow::finalizeSelectedFrames(){
     if(renderIds.isEmpty()){
         QMessageBox::information(this,tr("Finalize Selected Frames"),tr("No frames are selected in the target clips."));return;
     }
+    const bool compressionEnabled=ui->dngCompressionCheckBox->isChecked();
+    const QString compressionMode=ui->dngCompressionModeComboBox->currentText();
+    float compressionDistance=mRenderSettings.jxlDistance;
+    if(compressionEnabled){
+        if(isCameraNativeFormat(compressionMode)||isSevenZipFinalizeFormat(compressionMode)){
+            QMessageBox::warning(this,tr("Finalize Selected Frames"),
+                tr("The selected finalize format cannot represent an individual DNG frame "
+                   "selection. Choose a JPEG or JPEG XL DNG format."));
+            return;
+        }
+        if(!dngFinalizeCompressionDistance(compressionMode,compressionDistance)){
+            QMessageBox::warning(this,tr("Invalid finalize format"),
+                tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.3’."));
+            return;
+        }
+    }
+    QString sharedOutputDirectory;
+    if(mFinalizeSelectionToSingleDirectory){
+        sharedOutputDirectory=QFileDialog::getExistingDirectory(
+            this,tr("Select Output Directory for Selected Frames"),QString(),
+            QFileDialog::ShowDirsOnly|QFileDialog::DontResolveSymlinks);
+        if(sharedOutputDirectory.isEmpty())return;
+    }
     for(auto mountId:renderIds){
         auto* card=fileWidgetForMount(mountId);if(!card)continue;
-        const QString output=card->property("mountPath").toString()+QStringLiteral("-selection");
+        const QString output=mFinalizeSelectionToSingleDirectory?sharedOutputDirectory:
+            card->property("mountPath").toString()+QStringLiteral("-selection");
+        spdlog::info("Selected-frame finalize: mount={} output={} hero_sidecars={}",
+                     mountId, output.toStdString(), mInheritHeroFrameSidecars);
         const QString temporary=output+QStringLiteral(".finalizing-")+QUuid::createUuid().toString(QUuid::WithoutBraces);
         QDir().mkpath(temporary);
         const auto selected=mSelectedFrames.value(mountId);
@@ -2524,10 +2806,15 @@ void MainWindow::finalizeSelectedFrames(){
         mFuseFilesystem->updateOptions(mountId,sourceSettings);
         motioncam::FinalizeOptions options;
         options.skipDngFrame=[selected](size_t frame){return !selected.contains(static_cast<int>(frame));};
+        options.detectDuplicateDngs=ui->detectDuplicateDngsCheckBox->isChecked();
+        // Selected frames may omit the neighbors RIFE needs for a duplicated
+        // frame. Keep detection, but leave interpolation to whole-clip finalization.
+        options.interpolateDuplicatedFrames=false;
+        options.jxlDistance=compressionDistance;
         QProgressDialog progress(tr("Finalizing selected frames…"),tr("Cancel"),0,selected.size(),this);
         progress.setWindowModality(Qt::WindowModal);progress.setMinimumDuration(0);
         try{
-            mFuseFilesystem->finalize(mountId,temporary.toStdString(),false,options,
+            mFuseFilesystem->finalize(mountId,temporary.toStdString(),compressionEnabled,options,
                 [&progress](size_t completed,size_t count,const std::string& name){
                     progress.setMaximum(static_cast<int>(count));progress.setValue(static_cast<int>(completed));
                     if(!name.empty())progress.setLabelText(QString::fromStdString(name));
@@ -2535,7 +2822,18 @@ void MainWindow::finalizeSelectedFrames(){
                 });
             mFuseFilesystem->updateOptions(mountId,original);
             if(progress.wasCanceled()){QDir(temporary).removeRecursively();continue;}
-            if(!QFileInfo::exists(output)){
+            if(mInheritHeroFrameSidecars){
+                QString sidecarError;
+                if(!inheritHeroFrameSidecars(temporary,output,mFinalizeSelectionToSingleDirectory,
+                                             sidecarError))
+                    throw std::runtime_error(sidecarError.toStdString());
+            }
+            if(mFinalizeSelectionToSingleDirectory){
+                QString mergeError;
+                if(!mergeDirectoryContentsFlat(temporary,output,mergeError))
+                    throw std::runtime_error(mergeError.toStdString());
+                QDir(temporary).removeRecursively();
+            }else if(!QFileInfo::exists(output)){
                 if(!QDir(QFileInfo(output).absolutePath()).rename(temporary,output))
                     throw std::runtime_error("Could not publish selection folder");
             }else{
@@ -2550,7 +2848,10 @@ void MainWindow::finalizeSelectedFrames(){
             QMessageBox::critical(this,tr("Finalize Selected Frames"),QString::fromUtf8(error.what()));return;
         }
     }
-    QMessageBox::information(this,tr("Finalize Selected Frames"),tr("Selected frames were saved to each clip's -selection folder."));
+    QMessageBox::information(this,tr("Finalize Selected Frames"),
+        mFinalizeSelectionToSingleDirectory
+            ? tr("Selected frames were saved to %1.").arg(QDir::toNativeSeparators(sharedOutputDirectory))
+            : tr("Selected frames were saved to each clip's -selection folder."));
 }
 
 void MainWindow::startGalleryPerformanceTest(
@@ -4119,21 +4420,12 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             finalizeCameraNative(fileWidget, compressionMode);
             return;
         }
-        const QString mode = compressionMode.trimmed();
         if (archiveDngs) {
             // 7z finalization archives the original MCRAW below. It does not
             // pass through the DNG rendering pipeline.
-        } else if (mode.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
-            mRenderSettings.jxlDistance = -1.0f;
-        } else if (mode.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
-                   mode.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
-                   mode.compare("JPEG DCT Lossy", Qt::CaseInsensitive) == 0) {
-            mRenderSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_DCT;
-        } else if (mode.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
-            mRenderSettings.jxlDistance = 0.0f;
         } else {
             float distance = 0.0f;
-            if (!parseJxlDctDistance(mode, distance)) {
+            if (!dngFinalizeCompressionDistance(compressionMode, distance)) {
                 QMessageBox::warning(this, tr("Invalid finalize format"),
                     tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.3’."));
                 return;
@@ -5203,6 +5495,8 @@ void MainWindow::onOpenPreferences() {
     dialog.setCacheFolder(mCacheRootFolder);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
+    dialog.setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
+    dialog.setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
     dialog.setFuseMountingEnabled(mFuseMountingEnabled);
     dialog.setFuseMountingAvailable(mFuseMountingAvailable);
 #ifdef _WIN32
@@ -5219,6 +5513,8 @@ void MainWindow::onOpenPreferences() {
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
+    mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();
+    mInheritHeroFrameSidecars = dialog.getInheritHeroFrameSidecars();
     mFuseMountingEnabled = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;
     updateApplyButtonsVisibility();
 #ifdef _WIN32

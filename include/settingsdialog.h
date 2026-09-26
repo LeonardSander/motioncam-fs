@@ -41,6 +41,10 @@ public:
     bool getAutoApplyClipSettings() const;
     void setUnmountOnFinalize(bool enabled);
     bool getUnmountOnFinalize() const;
+    void setFinalizeSelectionToSingleDirectory(bool enabled);
+    bool getFinalizeSelectionToSingleDirectory() const;
+    void setInheritHeroFrameSidecars(bool enabled);
+    bool getInheritHeroFrameSidecars() const;
     void setFuseMountingEnabled(bool enabled);
     bool getFuseMountingEnabled() const;
     void setFuseMountingAvailable(bool available);
@@ -71,6 +75,8 @@ private:
     QCheckBox* mDeleteOnUnmountCheckBox;
     QCheckBox* mAutoApplyClipSettingsCheckBox;
     QCheckBox* mUnmountOnFinalizeCheckBox;
+    QCheckBox* mFinalizeSelectionToSingleDirectoryCheckBox;
+    QCheckBox* mInheritHeroFrameSidecarsCheckBox;
     QCheckBox* mFuseMountingCheckBox;
     QCheckBox* mMatrixOverrideCheckBox;
     QComboBox* mMatrixProfileComboBox;

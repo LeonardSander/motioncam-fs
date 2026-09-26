@@ -552,6 +552,26 @@ int main() {
         assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
     }
     std::filesystem::remove_all(shortSequencePath);
+    const auto mixedSelectionPath = std::filesystem::temp_directory_path() /
+        ("motioncam-jxl-mixed-selection-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(mixedSelectionPath);
+    const std::array<const char*, 4> mixedSelectionNames = {
+        "clip-a-000001.dng", "clip-a-000002.dng",
+        "clip-b-000003.dng", "clip-b-000004.dng"};
+    for (const char* name : mixedSelectionNames) {
+        std::ofstream output(mixedSelectionPath / name, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(legacyBytes.data()),
+                     static_cast<std::streamsize>(legacyBytes.size()));
+        assert(output.good());
+    }
+    {
+        motioncam::DNGDecoder stills(mixedSelectionPath.string());
+        assert(stills.getSequenceInfo().totalFrames == mixedSelectionNames.size());
+        assert(!stills.getSequenceInfo().hasFrameNumberSequence);
+        assert(std::abs(stills.getSequenceInfo().fps - 24.0) < 0.001);
+    }
+    std::filesystem::remove_all(mixedSelectionPath);
     const auto timedStillPath = std::filesystem::temp_directory_path() /
         ("motioncam-jxl-timed-stills-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -571,8 +591,11 @@ int main() {
         assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
         const auto& frames = sequence.getFrames();
         assert(frames.size() == 2);
-        assert(frames[0].timestamp == 100000000LL);
-        assert(frames[1].timestamp == 140000000LL);
+        assert(std::abs(sequence.getSequenceInfo().fps - 24.0) < 0.001);
+        assert(frames[0].timestamp == 0);
+        assert(frames[1].timestamp == 41666666);
+        assert(!frames[0].hasExactPresentationTimestamp &&
+               !frames[1].hasExactPresentationTimestamp);
     }
     std::filesystem::remove_all(timedStillPath);
     const auto datedSequencePath = std::filesystem::temp_directory_path() /

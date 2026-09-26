@@ -65,12 +65,8 @@ size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,
     const size_t rowBytes = rowBits == std::numeric_limits<size_t>::max()
         ? rowBits : saturatingAdd(rowBits, 7) / 8;
     const size_t packedBytes = saturatingMultiply(rowBytes, height);
-    const size_t uncompressedBytes = saturatingMultiply(
-        saturatingMultiply(saturatingMultiply(width, height), channels),
-        sizeof(uint16_t));
     return saturatingAdd(
-        saturatingAdd(std::max(packedBytes, uncompressedBytes),
-                      measuredMetadataBytes),
+        saturatingAdd(packedBytes, measuredMetadataBytes),
         transformedMetadataAllowance);
 }
 

@@ -275,10 +275,27 @@ void VirtualFileSystemImpl_DirectLog::init() {
         measuredMetadataBytes += largestManualSidecarBytes;
         const uint32_t projectedChannels =
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? 1u : 3u;
+        const auto levels = directLogDataLevels(mConfig);
+        const bool appliesLog = directLogAppliesLogTransform(mConfig);
+        const double sizingWhite = appliesLog
+            ? static_cast<double>(directLogQuantizationWhite(mConfig))
+            : levels.white;
+        const std::array<double, 4> sizingBlack{
+            levels.black[0], levels.black[1], levels.black[2], levels.black[3]};
+        const auto outputLevels = utils::planDngOutputLevels(
+            sizingWhite, sizingBlack,
+            mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
+            mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+            mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP,
+            appliesLog ? mConfig.logTransform : LogTransformMode::Disabled);
+        const uint32_t projectedBits = utils::dngPackedBits(
+            static_cast<uint16_t>(std::clamp(
+                std::lround(outputLevels.white), 1l, 65535l)),
+            projectedChannels == 3, mConfig.cameraNativeStaging);
         const auto projectedSize = [&](uint32_t projectedWidth,
                                        uint32_t projectedHeight) {
             return vfs::projectedDngSize(
-                projectedWidth, projectedHeight, projectedChannels, 16,
+                projectedWidth, projectedHeight, projectedChannels, projectedBits,
                 measuredMetadataBytes, transformedMetadataAllowance);
         };
         const uint32_t proxyScale = static_cast<uint32_t>(std::max(

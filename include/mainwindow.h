@@ -145,6 +145,7 @@ private slots:
     void finalizeFile(QWidget* fileWidget);
     void finalizeSelectedFrames();
     void clearSelectedFrames();
+    void selectAllFrames();
     void renderDroppedFrameThumbnail(motioncam::MountId mountId, int sourceFrame);
     void finalizeCameraNative(QWidget* fileWidget, const QString& mode);
     void createCalibrationJson(QWidget* fileWidget);
@@ -219,6 +220,7 @@ private:
     QHash<motioncam::MountId, QString> mArchiveTemporaryRoots;
     QPushButton* mFinalizeSelectedFramesButton = nullptr;
     QPushButton* mClearSelectedFramesButton = nullptr;
+    QPushButton* mSelectAllFramesButton = nullptr;
     QPushButton* mApplySelectedButton = nullptr;
     QPushButton* mApplyAllButton = nullptr;
     QLabel* mSelectedFilesLabel = nullptr;
@@ -238,6 +240,8 @@ private:
     bool mSettingsDirty = false;
     bool mAutoApplyClipSettings = true;
     bool mUnmountOnFinalize = true;
+    bool mFinalizeSelectionToSingleDirectory = false;
+    bool mInheritHeroFrameSidecars = false;
     bool mFuseMountingEnabled = true;
     bool mFuseMountingAvailable = true;
     bool mGalleryPerformanceTestActive = false;

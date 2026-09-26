@@ -222,6 +222,28 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         this);
     unmountOnFinalizeHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(unmountOnFinalizeHelpLabel);
+    mFinalizeSelectionToSingleDirectoryCheckBox = new QCheckBox(
+        "Finalize selected frames to a single directory", this);
+    mFinalizeSelectionToSingleDirectoryCheckBox->setChecked(false);
+    clipSettingsLayout->addWidget(mFinalizeSelectionToSingleDirectoryCheckBox);
+    auto* finalizeSelectionHelpLabel = new QLabel(
+        helpSpan("Prompts for one output directory when finalizing selected frames and places "
+                 "all finalized files there without creating a folder for each source clip."),
+        this);
+    finalizeSelectionHelpLabel->setWordWrap(true);
+    clipSettingsLayout->addWidget(finalizeSelectionHelpLabel);
+    mInheritHeroFrameSidecarsCheckBox = new QCheckBox(
+        "Copy hero frame PP3/XML sidecars to finalized selected frames", this);
+    mInheritHeroFrameSidecarsCheckBox->setChecked(false);
+    clipSettingsLayout->addWidget(mInheritHeroFrameSidecarsCheckBox);
+    auto* heroSidecarHelpLabel = new QLabel(
+        helpSpan("Copies edits from existing finalized DNG sidecars in the output folder. "
+                 "Each clip uses its preceding hero frame, or the first following hero; "
+                 "clips without a hero use the last sidecar of the preceding clip, "
+                 "or the first sidecar of the following clip."),
+        this);
+    heroSidecarHelpLabel->setWordWrap(true);
+    clipSettingsLayout->addWidget(heroSidecarHelpLabel);
     mainLayout->addWidget(clipSettingsGroup);
 
     // Matrix override group (disabled for Fuse-AllV2)
@@ -419,6 +441,26 @@ void SettingsDialog::setUnmountOnFinalize(bool enabled)
 bool SettingsDialog::getUnmountOnFinalize() const
 {
     return mUnmountOnFinalizeCheckBox->isChecked();
+}
+
+void SettingsDialog::setFinalizeSelectionToSingleDirectory(bool enabled)
+{
+    mFinalizeSelectionToSingleDirectoryCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getFinalizeSelectionToSingleDirectory() const
+{
+    return mFinalizeSelectionToSingleDirectoryCheckBox->isChecked();
+}
+
+void SettingsDialog::setInheritHeroFrameSidecars(bool enabled)
+{
+    mInheritHeroFrameSidecarsCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getInheritHeroFrameSidecars() const
+{
+    return mInheritHeroFrameSidecarsCheckBox->isChecked();
 }
 
 void SettingsDialog::setFuseMountingEnabled(bool enabled)

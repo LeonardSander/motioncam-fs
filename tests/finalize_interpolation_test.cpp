@@ -524,6 +524,8 @@ int main() {
     assert(motioncam::vfs::projectedDngSize(
         1, 1, 1, 16, std::numeric_limits<size_t>::max(), 1) ==
         std::numeric_limits<size_t>::max());
+    assert(motioncam::vfs::projectedDngSize(100, 10, 1, 10, 0, 0) == 1250);
+    assert(motioncam::vfs::projectedDngSize(1, 2, 3, 10, 0, 0) == 8);
     std::vector<uint16_t> markedRgb(8 * 8 * 3, 1000);
     motioncam::utils::markBadPixelsRgb(
         markedRgb.data(), 8, 8, 8, 8, 0, 0, markedPixels);

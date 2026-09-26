@@ -109,7 +109,16 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
         mHasCfa = mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
-        if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
+        std::vector<uint8_t> firstFrameBytes;
+        DNGImageLayout firstFrameLayout;
+        if (mDecoder->extractFrame(0, firstFrameBytes) &&
+            DNGDecoder::getImageLayout(firstFrameBytes, firstFrameLayout)) {
+            mHasCfa = firstFrameLayout.pixels == DNGPixelLayout::CFA;
+            mCfaSize = firstFrameLayout.cfaRepeatSize;
+            mCfaPhase = firstFrameLayout.cfaPhase;
+        }
+        if (mHasCfa && mCalibration && mCalibration->hasCfaSize &&
+            mCalibration->cfaSize > 0) {
             mCfaSize = mCalibration->cfaSize;
             mHasCfa = mCfaSize >= 2;
         }
@@ -185,7 +194,8 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                          missingExposureFrames);
         }
         
-        spdlog::info("DNG sequence loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames",
+        spdlog::info("DNG {} loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames",
+                     mHasFrameNumberSequence ? "sequence" : "stills",
                      mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate,
                      mFrameRateInfo.medianFrameRate, mTotalFrames);
 
@@ -268,13 +278,30 @@ void VirtualFileSystemImpl_DNG::init() {
         uint32_t height = frameIndex < frames.size() && frames[frameIndex].height > 0
             ? static_cast<uint32_t>(frames[frameIndex].height)
             : static_cast<uint32_t>(mHeight);
-        const bool binning = mHasCfa && mCfaSize > 2 &&
+        int frameCfaSize = mCfaSize;
+        std::array<uint8_t, 4> frameCfaPhase = mCfaPhase;
+        bool frameHasCfa = mDecoder->getCFAMetadata(
+            static_cast<int>(frameIndex), frameCfaSize, frameCfaPhase);
+        std::vector<uint8_t> frameBytes;
+        DNGImageLayout frameLayout;
+        if (mDecoder->extractFrame(static_cast<int>(frameIndex), frameBytes) &&
+            DNGDecoder::getImageLayout(frameBytes, frameLayout)) {
+            frameHasCfa = frameLayout.pixels == DNGPixelLayout::CFA;
+            frameCfaSize = frameLayout.cfaRepeatSize;
+            frameCfaPhase = frameLayout.cfaPhase;
+        }
+        if (frameHasCfa && mCalibration && mCalibration->hasCfaSize &&
+            mCalibration->cfaSize > 0) {
+            frameCfaSize = mCalibration->cfaSize;
+            frameHasCfa = frameCfaSize >= 2;
+        }
+        const bool binning = frameHasCfa && frameCfaSize > 2 &&
             (mConfig.quadBayerOption == QuadBayerMode::Binning ||
              mConfig.quadBayerOption == QuadBayerMode::Bin8x8To4x4);
         if (binning) {
             const uint32_t factor = mConfig.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
-                                    mCfaSize == 8
-                ? 2u : static_cast<uint32_t>(mCfaSize / 2);
+                                    frameCfaSize == 8
+                ? 2u : static_cast<uint32_t>(frameCfaSize / 2);
             width = std::max<uint32_t>(1, width / factor);
             height = std::max<uint32_t>(1, height / factor);
         }
@@ -283,16 +310,16 @@ void VirtualFileSystemImpl_DNG::init() {
             height = std::max<uint32_t>(1, height / static_cast<uint32_t>(scale));
         }
 
-        uint32_t channels = mHasCfa ? 1u : 3u;
+        uint32_t channels = frameHasCfa ? 1u : 3u;
         const bool remosaic = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
         const bool hq = mConfig.options & RENDER_OPT_HIGHER_CFA_HQ;
         const bool demosaicMode = mConfig.quadBayerOption == QuadBayerMode::Demosaic ||
                                   mConfig.quadBayerOption == QuadBayerMode::DemosaicColor ||
                                   mConfig.quadBayerOption == QuadBayerMode::DemosaicOCL;
-        if (!mHasCfa) channels = remosaic ? 1u : 3u;
+        if (!frameHasCfa) channels = remosaic ? 1u : 3u;
         else if (scale > 1 && hq)
             channels = remosaic ? 1u : 3u;
-        else if (scale == 1 && mCfaSize > 2 && demosaicMode)
+        else if (scale == 1 && frameCfaSize > 2 && demosaicMode)
             channels = remosaic ? 1u : 3u;
 
         uint32_t storedBits = frameIndex < mSourceInputBitDepths.size()
@@ -336,6 +363,11 @@ void VirtualFileSystemImpl_DNG::init() {
             else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits - 6);
             else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) storedBits = std::max(1u, storedBits - 8);
         }
+        const uint16_t storedWhite = storedBits >= 16
+            ? std::numeric_limits<uint16_t>::max()
+            : static_cast<uint16_t>((uint32_t{1} << storedBits) - 1);
+        storedBits = utils::dngPackedBits(
+            storedWhite, channels == 3, mConfig.cameraNativeStaging);
         size_t metadataBytes = frameIndex < mSourceMetadataSizes.size()
             ? mSourceMetadataSizes[frameIndex] : transformedMetadataAllowance;
         if (mCalibration && mConfig.badPixelTreatment == BadPixelTreatment::OpcodeOnly &&
@@ -352,11 +384,8 @@ void VirtualFileSystemImpl_DNG::init() {
                 ? std::numeric_limits<size_t>::max()
                 : metadataBytes + opcodeBytes;
         }
-        // The packed estimate is normally tight, but gain-map baking,
-        // metadata repair, and writers that promote samples to 16-bit can
-        // produce a larger strip than the selected storage bit depth implies.
-        // Never advertise less than an uncompressed 16-bit payload plus room
-        // for transformed metadata; a projected mount must not truncate it.
+        // The finalizer packs uncompressed samples to this storage depth. The
+        // metadata allowance covers rewritten tags and expanded opcodes.
         return vfs::projectedDngSize(width, height, channels, storedBits,
                                      metadataBytes,
                                      transformedMetadataAllowance);
@@ -377,6 +406,7 @@ void VirtualFileSystemImpl_DNG::init() {
             ? vfs::constructFrameFilename(mBaseName, static_cast<int>(i), 6, "dng")
             : boost::filesystem::path(frames[i].filePath).filename().string();
         dngEntry.userData = frames[i].timestamp;
+        dngEntry.sourceFrame = static_cast<int>(i);
         dngEntry.duplicateFrame = frames[i].duplicateFrame;
         dngEntry.syntheticFrame = frames[i].syntheticFrame;
         dngEntry.size = measuredDngSizes[i];
@@ -626,7 +656,14 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
     result.cfaPhase = mCfaPhase;
     result.hasCfa = DNGDecoder::getCFAMetadata(
         result.dng, result.cfaSize, result.cfaPhase);
-    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
+    DNGImageLayout sourceLayout;
+    if (DNGDecoder::getImageLayout(result.dng, sourceLayout)) {
+        result.hasCfa = sourceLayout.pixels == DNGPixelLayout::CFA;
+        result.cfaSize = sourceLayout.cfaRepeatSize;
+        result.cfaPhase = sourceLayout.cfaPhase;
+    }
+    if (result.hasCfa && mCalibration && mCalibration->hasCfaSize &&
+        mCalibration->cfaSize > 0) {
         result.cfaSize = mCalibration->cfaSize;
         result.hasCfa = result.cfaSize >= 2;
     }
@@ -901,7 +938,16 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
             spdlog::info("Reloaded calibration for DNG sequence: {}", calibPath.string());
     }
     mHasCfa = mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
-    if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0) {
+    std::vector<uint8_t> firstFrameBytes;
+    DNGImageLayout firstFrameLayout;
+    if (mDecoder->extractFrame(0, firstFrameBytes) &&
+        DNGDecoder::getImageLayout(firstFrameBytes, firstFrameLayout)) {
+        mHasCfa = firstFrameLayout.pixels == DNGPixelLayout::CFA;
+        mCfaSize = firstFrameLayout.cfaRepeatSize;
+        mCfaPhase = firstFrameLayout.cfaPhase;
+    }
+    if (mHasCfa && mCalibration && mCalibration->hasCfaSize &&
+        mCalibration->cfaSize > 0) {
         mCfaSize = mCalibration->cfaSize;
         mHasCfa = mCfaSize >= 2;
     }

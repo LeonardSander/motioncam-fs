@@ -63,6 +63,7 @@ public:
     void presentDroppedSourceFrame(int sourceFrame, const QByteArray& frame, int width, int height);
     void clearFrameSelections();
     void clearFrameSelections(const QSet<int>& mountIds);
+    void selectAllFrameSelections();
 signals:
     void currentClipChanged(int mountId, double startSeconds);
     void firstFramePresented(int mountId);
@@ -122,6 +123,7 @@ private:
                         bool persistToDisk = true);
     QString thumbnailCachePath(int mountId, int sourceFrame) const;
     void refreshThumbnailLabel(int sourceFrame);
+    QSize thumbnailSizeForSource(int sourceFrame) const;
     void setCurrentThumbnailFrame(int outputFrame);
     void setDroppedCursorVisible(bool visible);
     void setDuplicateCursorVisible(bool visible);
@@ -163,6 +165,7 @@ private:
     int mNextInputFrame=0;
     double mPositionSeconds=0.0, mStartSeconds=0.0;
     bool mPaused=false, mClosing=false, mPlaybackFailed=false;
+    bool mDirectFramesFinished=false;
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;
     int mAudioLoadGeneration=0;
