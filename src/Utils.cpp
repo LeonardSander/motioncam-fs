@@ -90,6 +90,16 @@ std::string gpsTimestamp(const std::string& source) {
     return source;
 }
 
+std::string captureDateTime(const std::string& source) {
+    std::tm utc{};
+    int milliseconds = 0;
+    if (!gpsUtcTime(source, utc, milliseconds) || utc.tm_year + 1900 < 2000)
+        return {};
+    std::ostringstream result;
+    result << std::put_time(&utc, "%Y:%m:%d %H:%M:%S");
+    return result.str();
+}
+
 std::string mcrawCaptureXmp(const CameraConfiguration& camera,
                             const CameraFrameMetadata& frame) {
     const auto& post = camera.extraData.postProcessSettings;
@@ -2314,6 +2324,14 @@ std::shared_ptr<std::vector<char>> generateDng(
     writer.WriteToFile(stream, &err);
 
     std::vector<DNGSidecarMetadataEntry> captureMetadata;
+    auto captureDate = captureDateTime(metadata.recvdTimestampMs);
+    if (captureDate.empty())
+        captureDate = captureDateTime(cameraConfiguration.extraData.postProcessSettings.gpsTime);
+    if (!captureDate.empty()) {
+        captureMetadata.push_back(asciiMetadata(306, captureDate)); // DateTime
+        captureMetadata.push_back(asciiMetadata(36867, captureDate, true)); // DateTimeOriginal
+        captureMetadata.push_back(asciiMetadata(36868, captureDate, true)); // DateTimeDigitized
+    }
     // TinyDNG writes these EXIF-defined fields into IFD0. Attach them after
     // serialization instead so they live in the ExifIFD required by EXIF.
     if (metadata.exposureTime > 0)
