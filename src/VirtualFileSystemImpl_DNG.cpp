@@ -972,6 +972,13 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, mWidth, mHeight);
     info.isSequence = mHasFrameNumberSequence;
+    if (!mHasFrameNumberSequence) {
+        auto names = std::make_shared<std::vector<std::string>>();
+        names->reserve(mDecoder->getFrames().size());
+        for (const auto& frame : mDecoder->getFrames())
+            names->push_back(boost::filesystem::path(frame.filePath).filename().string());
+        info.stillFrameNames = std::move(names);
+    }
     info.audioWav = mAudioWav;
     if (!mDecoder->getFrames().empty()) {
         DNGFrameMetadata metadata;

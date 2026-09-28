@@ -1,5 +1,6 @@
 #include "ClipPlayerDialog.h"
 #include <QCloseEvent>
+#include <QCursor>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
@@ -135,6 +136,9 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mOverlay=new QWidget(stage);mOverlay->setStyleSheet("background:transparent;");
     auto* overlayLayout=new QVBoxLayout(mOverlay);overlayLayout->setContentsMargins(10,10,10,0);
     mTitle=new QLabel(mOverlay);mTitle->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
+    mFpsLabel=new QLabel(stage);
+    mFpsLabel->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
+    mFpsLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     overlayLayout->addWidget(mTitle,0,Qt::AlignLeft);overlayLayout->addStretch(1);
     auto* controls=new QHBoxLayout;controls->setSpacing(8);auto* previous=new QPushButton(mOverlay);
     mPlayPause=new QPushButton(mOverlay); auto* next=new QPushButton(mOverlay);
@@ -170,7 +174,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlay->setGraphicsEffect(mOverlayOpacity);mOverlayOpacity->setOpacity(1.0);
     mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);mOverlayAnimation->setDuration(260);
-    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{setOverlayVisible(false);});
+    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!pointerOverThumbnailRow())setOverlayVisible(false);});
     mSurfaceUpdateTimer.setSingleShot(true);mSurfaceUpdateTimer.setInterval(300);
     connect(&mSurfaceUpdateTimer,&QTimer::timeout,this,[this]{
         // A later resize may arrive while a prior surface is still starting.
@@ -194,7 +198,8 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     // generation instead of repeatedly tearing down an active producer.
     const std::array<QWidget*,4> trackedWidgets{this,stage,mVideo,mOverlay};
     for(auto* widget:trackedWidgets)widget->setMouseTracking(true);
-    qApp->installEventFilter(this);mOverlay->raise();revealOverlay();
+    qApp->installEventFilter(this);mOverlay->raise();mFpsLabel->raise();revealOverlay();
+    updateFpsIndicator();
     connect(&mDecoder,&QProcess::readyReadStandardOutput,this,&ClipPlayerDialog::consumeOutput);
     connect(&mDecoder,qOverload<int,QProcess::ExitStatus>(&QProcess::finished),this,&ClipPlayerDialog::decoderFinished);
     connect(&mDecoder, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
@@ -221,6 +226,8 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             openClip(mIndex,0.0);return;
         }
         mPaused=!mPaused;updateButtonIcons();
+        if(!mPaused){mPresentationIntervals.clear();mLastPresentationMs=-1;mPresentationClock.restart();}
+        updateFpsIndicator();
         if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseMs=audioPositionMs();mAudioClock.invalidate();mAudioSink->suspend();}
             if(mThumbnailScroll&&mThumbnailScroll->isVisible())
                 emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
@@ -237,6 +244,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
     connect(mThumbnailToggle,&QPushButton::clicked,this,[this]{
         const bool show=!mThumbnailScroll->isVisible();mThumbnailScroll->setVisible(show);
+        if(!show)revealOverlay();
         mThumbnailCollectionEnabled->store(show);
         mThumbnailToggle->setIcon(thumbnailChevronIcon(!show));
         mThumbnailToggle->setToolTip(show?tr("Hide frame thumbnails"):tr("Show frame thumbnails"));
@@ -412,6 +420,8 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mCurrentThumbnailSource=sourceFrameForOutput(startFrame);
     if(mThumbnailScroll->isVisible())rebuildThumbnailStrip();
     mPlaybackFailed=false;mDirectFramesFinished=false;mPaused=preservePausedNavigation;
+    mPresentationIntervals.clear();mLastPresentationMs=-1;mPresentationClock.restart();
+    updateFpsIndicator();
     mPlayPause->setEnabled(true);updateButtonIcons();
     mMouseSourcePosition=QPoint(-1,-1);updateTitle();
     mWaitingForFirstFrame=!mLastPresentedImage.isNull();
@@ -647,7 +657,7 @@ void ClipPlayerDialog::presentDroppedSourceFrame(int sourceFrame,const QByteArra
     if(previous>=0)refreshThumbnailLabel(previous);
     refreshThumbnailLabel(sourceFrame);
     setDuplicateCursorVisible(false);setDroppedCursorVisible(true);
-    centerCurrentThumbnail();updateDisplayedImage();completeFrameStep();
+    centerCurrentThumbnail();updateDisplayedImage();updateTitle();completeFrameStep();
 }
 void ClipPlayerDialog::clearFrameSelections(){
     for(auto& clip:mClips)clip.selectedSourceFrames.clear();
@@ -931,8 +941,38 @@ void ClipPlayerDialog::updateTitle(){
             }
         }
     }
-    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(mClips[mIndex].title)
+    QString title=mClips[mIndex].title;
+    const auto& names=mClips[mIndex].stillFrameNames;
+    const int source=mCurrentThumbnailSource>=0?mCurrentThumbnailSource:
+        sourceFrameForOutput(mPosition->value());
+    if(names&&source>=0&&source<static_cast<int>(names->size()))
+        title+=QStringLiteral(" — ")+QString::fromStdString((*names)[source]);
+    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(title)
         .arg(mIndex+1).arg(mClips.size()).arg(view));
+}
+
+void ClipPlayerDialog::updateFpsIndicator(){
+    if(!mFpsLabel)return;
+    mFpsLabel->setVisible(!mPaused&&mIndex>=0&&mClips[mIndex].sourceFrames>1&&
+        !mPresentationIntervals.empty());
+    auto positionLabel=[this]{
+        mFpsLabel->adjustSize();
+        mFpsLabel->move(mFpsLabel->parentWidget()->width()-mFpsLabel->width()-10,10);
+        mFpsLabel->raise();
+    };
+    if(mPresentationIntervals.empty())return;
+    auto sorted=std::vector<qint64>(mPresentationIntervals.begin(),mPresentationIntervals.end());
+    std::sort(sorted.begin(),sorted.end());
+    const size_t index=sorted.size()-std::max<size_t>(1,(sorted.size()+99)/100);
+    // The slowest 1% of presentation intervals determine the low frame rate.
+    const qint64 slow=sorted[index];
+    mFpsLabel->setText(tr("%1 fps").arg(1000.0/std::max<qint64>(1,slow),0,'f',1));
+    positionLabel();
+}
+
+bool ClipPlayerDialog::pointerOverThumbnailRow()const{
+    return mThumbnailScroll&&mThumbnailScroll->isVisible()&&
+        mThumbnailScroll->rect().contains(mThumbnailScroll->mapFromGlobal(QCursor::pos()));
 }
 
 void ClipPlayerDialog::updateMouseSourcePosition(const QPointF& globalPosition){
@@ -1078,6 +1118,7 @@ void ClipPlayerDialog::updateButtonIcons(){
     mPlayPause->setIcon(style()->standardIcon(mPaused?QStyle::SP_MediaPlay:QStyle::SP_MediaPause));
     mAudioButton->setIcon(style()->standardIcon(mAudioEnabled?QStyle::SP_MediaVolume:QStyle::SP_MediaVolumeMuted));
     if(mFullscreenButton)mFullscreenButton->setIcon(fullscreenIcon(isFullScreen()));
+    updateFpsIndicator();
 }
 void ClipPlayerDialog::setOverlayVisible(bool visible){
     mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,!visible);
@@ -1091,7 +1132,7 @@ void ClipPlayerDialog::revealOverlay(){
     if(!alreadyFadingIn&&(mOverlayOpacity->opacity()<0.999||
                           mOverlayAnimation->state()==QAbstractAnimation::Running))
         setOverlayVisible(true);
-    mOverlayTimer.start();
+    if(pointerOverThumbnailRow())mOverlayTimer.stop();else mOverlayTimer.start();
 }
 void ClipPlayerDialog::updateDisplayedImage(){
     // The old surface remains the interactive fallback while a decoder
@@ -1460,7 +1501,6 @@ void ClipPlayerDialog::showNextFrame(){
         mLastSurfacePan=mDecoderSurfacePan;
         mLastSurfaceViewportPan=mDecoderSurfaceViewportPan;
         updateDisplayedImage();
-        updateTitle();
         if(!mFirstFrameReady){
             mFirstFrameReady=true;
             emit firstFramePresented(currentMountId());
@@ -1476,6 +1516,17 @@ void ClipPlayerDialog::showNextFrame(){
             (*duplicateMask)[presentedFrame]);
         if(!mPosition->isSliderDown())mPosition->setValue(presentedFrame);
         setCurrentThumbnailFrame(presentedFrame);
+        updateTitle();
+        if(!mPaused){
+            if(!mPresentationClock.isValid())mPresentationClock.start();
+            const qint64 now=mPresentationClock.elapsed();
+            if(mLastPresentationMs>=0&&now>mLastPresentationMs){
+                mPresentationIntervals.push_back(now-mLastPresentationMs);
+                if(mPresentationIntervals.size()>120)mPresentationIntervals.pop_front();
+            }
+            mLastPresentationMs=now;
+            updateFpsIndicator();
+        }
         emit framePresented(currentMountId(),presentedFrame);
         mPositionSeconds=(presentedFrame+1)/fps;
         completeFrameStep();
@@ -1486,7 +1537,7 @@ void ClipPlayerDialog::showNextFrame(){
         if(!mPlaybackFailed&&
            (mClips[mIndex].isSequence?mDecoder.state()==QProcess::NotRunning:
             mDirectFramesFinished)&&mBytes.isEmpty()){
-            mFrameTimer.stop();if(mClips[mIndex].autoAdvance&&!mThumbnailScroll->isVisible())advance();else {mPaused=true;updateButtonIcons();}
+            mFrameTimer.stop();if(mClips[mIndex].autoAdvance&&!mThumbnailScroll->isVisible())advance();else {mPaused=true;updateButtonIcons();updateFpsIndicator();}
         }
     }
 }
@@ -1591,6 +1642,12 @@ QString ClipPlayerDialog::framePositionText(int frame)const{
 bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     const auto* watchedWidget=qobject_cast<QWidget*>(watched);
     const bool belongsToPlayer=watchedWidget&&watchedWidget->window()==this;
+    if(mFpsLabel&&watched==mFpsLabel->parentWidget()&&event->type()==QEvent::Resize)
+        updateFpsIndicator();
+    if(belongsToPlayer&&event->type()==QEvent::Leave&&
+       mThumbnailScroll&&(watchedWidget==mThumbnailScroll||
+       mThumbnailScroll->isAncestorOf(watchedWidget))&&!pointerOverThumbnailRow())
+        mOverlayTimer.start();
     if(belongsToPlayer&&event->type()==QEvent::KeyPress){
         auto* key=static_cast<QKeyEvent*>(event);
         if(key->key()==Qt::Key_Left||key->key()==Qt::Key_Right){

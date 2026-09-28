@@ -139,6 +139,7 @@ struct FileInfo {
     // False for independent DNG still collections. Such folders may contain
     // mixed dimensions and must not advance into the next mounted clip.
     bool isSequence = true;
+    std::shared_ptr<const std::vector<std::string>> stillFrameNames;
 };
 
 namespace vfs {

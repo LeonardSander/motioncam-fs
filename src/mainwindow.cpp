@@ -2716,6 +2716,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         clip.duplicateFrames = info->duplicateFrameMask;
         clip.sourceFrameToOutput = info->sourceFrameToOutput;
         clip.sourceFrameDuplicated = info->sourceFrameDuplicated;
+        clip.stillFrameNames = info->stillFrameNames;
         clip.selectedSourceFrames = mSelectedFrames.value(mounted.mountId);
         clips.push_back(std::move(clip));
     }

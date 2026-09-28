@@ -28,7 +28,7 @@ class ClipPlayerDialog final : public QDialog {
     Q_OBJECT
 public:
     enum class FramePushResult { Accepted, Retry, Stopped };
-    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int nativeWidth=0; int nativeHeight=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; QSet<int> selectedSourceFrames; };
+    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int nativeWidth=0; int nativeHeight=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; std::shared_ptr<const std::vector<std::string>> stillFrameNames; QSet<int> selectedSourceFrames; };
     explicit ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent=nullptr);
     ~ClipPlayerDialog() override;
     int currentMountId() const;
@@ -109,6 +109,8 @@ private:
     QPointF effectivePanForZoom(const QPointF& pan, double zoomPercent) const;
     QPointF surfaceScaleForZoom(double zoomPercent) const;
     void updateTitle();
+    void updateFpsIndicator();
+    bool pointerOverThumbnailRow() const;
     void updateMouseSourcePosition(const QPointF& globalPosition);
     void updateDisplayedImage();
     double fitScale() const;
@@ -132,7 +134,7 @@ private:
     int sourceFrameForOutput(int outputFrame) const;
     QImage rgb48Image(const QByteArray& frame, int width, int height) const;
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
-    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr;
+    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
     QPushButton* mThumbnailToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
     QWidget* mThumbnailContent=nullptr; QHash<int,QLabel*> mThumbnailLabels;
@@ -149,6 +151,9 @@ private:
     QPropertyAnimation* mOverlayAnimation=nullptr;
     QTimer mOverlayTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
     QElapsedTimer mZoomAnimationClock;
+    QElapsedTimer mPresentationClock;
+    std::deque<qint64> mPresentationIntervals;
+    qint64 mLastPresentationMs=-1;
     QBuffer* mAudioBuffer=nullptr;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
     QAudioSink* mAudioSink=nullptr;
