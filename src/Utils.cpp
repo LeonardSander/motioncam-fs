@@ -90,14 +90,42 @@ std::string gpsTimestamp(const std::string& source) {
     return source;
 }
 
-std::string captureDateTime(const std::string& source) {
+struct CaptureDateTime {
+    std::string dateTime;
+    std::string offset;
+};
+
+CaptureDateTime captureDateTime(const std::string& source) {
     std::tm utc{};
     int milliseconds = 0;
     if (!gpsUtcTime(source, utc, milliseconds) || utc.tm_year + 1900 < 2000)
         return {};
+    const std::time_t seconds = static_cast<std::time_t>(std::stoll(source) / 1000);
+    std::tm local{};
+#ifdef _WIN32
+    if (localtime_s(&local, &seconds) != 0) return {};
+#else
+    if (!localtime_r(&seconds, &local)) return {};
+#endif
     std::ostringstream result;
-    result << std::put_time(&utc, "%Y:%m:%d %H:%M:%S");
-    return result.str();
+    result << std::put_time(&local, "%Y:%m:%d %H:%M:%S");
+    // Format the offset for the capture date, including daylight saving time.
+#ifdef _WIN32
+    long timezoneSeconds = 0;
+    long daylightBiasSeconds = 0;
+    if (_get_timezone(&timezoneSeconds) != 0 ||
+        _get_dstbias(&daylightBiasSeconds) != 0) return {};
+    const long offsetSeconds = -timezoneSeconds -
+        (local.tm_isdst > 0 ? daylightBiasSeconds : 0);
+#else
+    const long offsetSeconds = local.tm_gmtoff;
+#endif
+    const long absoluteMinutes = std::abs(offsetSeconds) / 60;
+    std::ostringstream offset;
+    offset << (offsetSeconds < 0 ? '-' : '+') << std::setfill('0')
+           << std::setw(2) << absoluteMinutes / 60 << ':'
+           << std::setw(2) << absoluteMinutes % 60;
+    return {result.str(), offset.str()};
 }
 
 std::string mcrawCaptureXmp(const CameraConfiguration& camera,
@@ -2325,12 +2353,15 @@ std::shared_ptr<std::vector<char>> generateDng(
 
     std::vector<DNGSidecarMetadataEntry> captureMetadata;
     auto captureDate = captureDateTime(metadata.recvdTimestampMs);
-    if (captureDate.empty())
+    if (captureDate.dateTime.empty())
         captureDate = captureDateTime(cameraConfiguration.extraData.postProcessSettings.gpsTime);
-    if (!captureDate.empty()) {
-        captureMetadata.push_back(asciiMetadata(306, captureDate)); // DateTime
-        captureMetadata.push_back(asciiMetadata(36867, captureDate, true)); // DateTimeOriginal
-        captureMetadata.push_back(asciiMetadata(36868, captureDate, true)); // DateTimeDigitized
+    if (!captureDate.dateTime.empty()) {
+        captureMetadata.push_back(asciiMetadata(306, captureDate.dateTime)); // DateTime
+        captureMetadata.push_back(asciiMetadata(36867, captureDate.dateTime, true)); // DateTimeOriginal
+        captureMetadata.push_back(asciiMetadata(36868, captureDate.dateTime, true)); // DateTimeDigitized
+        captureMetadata.push_back(asciiMetadata(36880, captureDate.offset, true)); // OffsetTime
+        captureMetadata.push_back(asciiMetadata(36881, captureDate.offset, true)); // OffsetTimeOriginal
+        captureMetadata.push_back(asciiMetadata(36882, captureDate.offset, true)); // OffsetTimeDigitized
     }
     // TinyDNG writes these EXIF-defined fields into IFD0. Attach them after
     // serialization instead so they live in the ExifIFD required by EXIF.
