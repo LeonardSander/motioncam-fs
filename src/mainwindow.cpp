@@ -1517,6 +1517,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cacheQuotaBytes", static_cast<qulonglong>(mCacheQuotaBytes));
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
     settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
+    settings.setValue("galleryFpsIndicatorEnabled", mGalleryFpsIndicatorEnabled);
     settings.setValue("unmountOnFinalize", mUnmountOnFinalize);
     settings.setValue("finalizeSelectionToSingleDirectory", mFinalizeSelectionToSingleDirectory);
     settings.setValue("inheritHeroFrameSidecars", mInheritHeroFrameSidecars);
@@ -1636,6 +1637,7 @@ void MainWindow::restoreSettings() {
         QVariant::fromValue<qulonglong>(30ULL * 1024 * 1024 * 1024)).toULongLong();
     mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
     mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
+    mGalleryFpsIndicatorEnabled = settings.value("galleryFpsIndicatorEnabled", true).toBool();
     mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
     mFinalizeSelectionToSingleDirectory =
         settings.value("finalizeSelectionToSingleDirectory", false).toBool();
@@ -2727,6 +2729,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     // main window. WA_DeleteOnClose handles ownership for this independent
     // top-level window; mClipPlayer is a QPointer and clears on deletion.
     mClipPlayer = new ClipPlayerDialog(std::move(clips), mountId, nullptr);
+    mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
             [this](int id, double startSeconds) {
                 mGalleryMountId = id;
@@ -5561,6 +5564,7 @@ void MainWindow::onOpenPreferences() {
     SettingsDialog dialog(this);
     dialog.setCacheFolder(mCacheRootFolder);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
+    dialog.setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
     dialog.setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
     dialog.setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
@@ -5579,6 +5583,8 @@ void MainWindow::onOpenPreferences() {
     const bool wasAutoApply = mAutoApplyClipSettings;
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
+    mGalleryFpsIndicatorEnabled = dialog.getGalleryFpsIndicatorEnabled();
+    if (mClipPlayer) mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();
     mInheritHeroFrameSidecars = dialog.getInheritHeroFrameSidecars();

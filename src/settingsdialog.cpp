@@ -213,6 +213,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         this);
     autoApplyHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(autoApplyHelpLabel);
+    mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
+    mGalleryFpsIndicatorCheckBox->setChecked(true);
+    clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
     mUnmountOnFinalizeCheckBox = new QCheckBox("Unmount on finalize", this);
     mUnmountOnFinalizeCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mUnmountOnFinalizeCheckBox);
@@ -431,6 +434,16 @@ void SettingsDialog::setAutoApplyClipSettings(bool enabled)
 bool SettingsDialog::getAutoApplyClipSettings() const
 {
     return mAutoApplyClipSettingsCheckBox->isChecked();
+}
+
+void SettingsDialog::setGalleryFpsIndicatorEnabled(bool enabled)
+{
+    mGalleryFpsIndicatorCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getGalleryFpsIndicatorEnabled() const
+{
+    return mGalleryFpsIndicatorCheckBox->isChecked();
 }
 
 void SettingsDialog::setUnmountOnFinalize(bool enabled)

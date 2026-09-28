@@ -40,6 +40,7 @@ public:
     bool isPlaybackPaused() const { return mPaused; }
     void requestThumbnailBackfill();
     void setThumbnailStripVisible(bool visible);
+    void setFpsIndicatorEnabled(bool enabled);
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     std::shared_ptr<std::atomic_bool> thumbnailCollectionEnabled() const { return mThumbnailCollectionEnabled; }
@@ -170,6 +171,7 @@ private:
     int mNextInputFrame=0;
     double mPositionSeconds=0.0, mStartSeconds=0.0;
     bool mPaused=false, mClosing=false, mPlaybackFailed=false;
+    bool mFpsIndicatorEnabled=true;
     bool mDirectFramesFinished=false;
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;

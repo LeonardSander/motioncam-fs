@@ -953,7 +953,7 @@ void ClipPlayerDialog::updateTitle(){
 
 void ClipPlayerDialog::updateFpsIndicator(){
     if(!mFpsLabel)return;
-    mFpsLabel->setVisible(!mPaused&&mIndex>=0&&mClips[mIndex].sourceFrames>1&&
+    mFpsLabel->setVisible(mFpsIndicatorEnabled&&!mPaused&&mIndex>=0&&mClips[mIndex].sourceFrames>1&&
         !mPresentationIntervals.empty());
     auto positionLabel=[this]{
         mFpsLabel->adjustSize();
@@ -968,6 +968,11 @@ void ClipPlayerDialog::updateFpsIndicator(){
     const qint64 slow=sorted[index];
     mFpsLabel->setText(tr("%1 fps").arg(1000.0/std::max<qint64>(1,slow),0,'f',1));
     positionLabel();
+}
+
+void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
+    mFpsIndicatorEnabled=enabled;
+    updateFpsIndicator();
 }
 
 bool ClipPlayerDialog::pointerOverThumbnailRow()const{

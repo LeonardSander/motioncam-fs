@@ -239,6 +239,7 @@ private:
     QFutureSynchronizer<void> mGalleryTasks;
     bool mSettingsDirty = false;
     bool mAutoApplyClipSettings = true;
+    bool mGalleryFpsIndicatorEnabled = true;
     bool mUnmountOnFinalize = true;
     bool mFinalizeSelectionToSingleDirectory = false;
     bool mInheritHeroFrameSidecars = false;
