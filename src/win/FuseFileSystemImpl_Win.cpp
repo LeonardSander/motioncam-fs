@@ -105,6 +105,7 @@ public:
     FileInfo getFileInfo() const;
     const std::string& sourcePath() const { return mSrcPath; }
     const std::string& destinationPath() const { return mDstPath; }
+    void setProjectionEnabled(bool enabled);
     HRESULT dehydrate(const std::filesystem::path& relativePath) {
         if (!mProjectFiles) return S_FALSE;
         PRJ_UPDATE_FAILURE_CAUSES cause = PRJ_UPDATE_FAILURE_CAUSE_NONE;
@@ -139,6 +140,7 @@ protected:
         _Inout_ PRJ_NOTIFICATION_PARAMETERS* NotificationParameters) override;
 
 private:
+    void startProjection();
     std::string mSrcPath;
     std::string mDstPath;
     RenderSettings mConfig;
@@ -157,7 +159,10 @@ Session::Session(
     : mSrcPath(srcPath), mDstPath(dstPath), mFs(std::move(fs)),
       mProjectFiles(projectFiles)
 {
-    if (!mProjectFiles) return;
+    if (mProjectFiles) startProjection();
+}
+
+void Session::startProjection() {
     SetOptionalMethods(OptionalMethods::Notify);
 
     // Specify the notifications that we want ProjFS to send to us.  Everywhere under the virtualization
@@ -195,6 +200,17 @@ Session::Session(
 
 Session::~Session() {
     if (mProjectFiles) Stop();
+}
+
+void Session::setProjectionEnabled(bool enabled) {
+    if (enabled == mProjectFiles) return;
+    if (enabled) {
+        startProjection();
+        mProjectFiles = true;
+    } else {
+        Stop();
+        mProjectFiles = false;
+    }
 }
 
 void Session::updateOptions(const RenderSettings& settings) {
@@ -691,6 +707,16 @@ void FuseFileSystemImpl_Win::unmount(MountId mountId) {
         mPreviewRenderers.erase(mountId);
     }
     session.reset();
+}
+
+void FuseFileSystemImpl_Win::setProjectionEnabled(MountId mountId, bool enabled) {
+    std::shared_ptr<VirtualizationInstance> instance;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
+            instance = it->second;
+    }
+    if (instance) static_cast<Session*>(instance.get())->setProjectionEnabled(enabled);
 }
 
 void FuseFileSystemImpl_Win::updateOptions(MountId mountId, const RenderSettings& settings) {

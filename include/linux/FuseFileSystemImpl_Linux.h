@@ -24,6 +24,7 @@ public:
     MountId mount(const RenderSettings& settings, const std::string& srcFile,
                   const std::string& dstPath, bool projectFiles = true) override;
     void unmount(MountId mountId) override;
+    void setProjectionEnabled(MountId mountId, bool enabled) override;
     void updateOptions(MountId mountId, const RenderSettings& settings) override;
     std::optional<FileInfo> getFileInfo(MountId mountId) override;
     void finalize(MountId, const std::string&, bool, const FinalizeOptions&,

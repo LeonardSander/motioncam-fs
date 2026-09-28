@@ -31,6 +31,7 @@ public:
     virtual MountId mount(const RenderSettings& settings, const std::string& srcFile,
                           const std::string& dstPath, bool projectFiles = true) = 0;
     virtual void unmount(MountId mountId) = 0;
+    virtual void setProjectionEnabled(MountId mountId, bool enabled) = 0;
     virtual void updateOptions(MountId mountId, const RenderSettings& settings) = 0;
     virtual std::optional<FileInfo> getFileInfo(MountId mountId) = 0;
     virtual void setCachePolicy(CachePolicy) {}

@@ -29,6 +29,7 @@ public:
         bool projectFiles = true) override;
 
     void unmount(MountId mountId) override;
+    void setProjectionEnabled(MountId mountId, bool enabled) override;
     void updateOptions(
         MountId mountId,
         const RenderSettings& settings) override;

@@ -106,6 +106,7 @@ struct FuseContext {
 
 class Session {
 public:
+    void setProjectionEnabled(bool enabled);
     Session(const std::string& srcFile, const std::string& dstPath,
             std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles);
     ~Session();
@@ -119,6 +120,7 @@ public:
         const std::function<void(const std::vector<uint8_t>&, Timestamp)>&, bool);
 
 private:
+    void stopProjection();
     void init(IVirtualFileSystem* fs);
 
     void fuseMain(struct fuse_chan* ch, struct fuse* fuse);
@@ -153,27 +155,11 @@ Session::Session(const std::string& srcFile, const std::string& dstPath,
 }
 
 Session::~Session() {
-    auto mountPoint = mDstPath;
-    auto channel = mFuseCh;
-
-    if(channel) {
-        std::thread([mountPoint, channel]() {
-            spdlog::debug("Unmounting {}", mountPoint);
-
-            fuse_unmount(mountPoint.c_str(), channel);
-
-            spdlog::debug("Umounted {}", mountPoint);
-        }).detach();
-    }
-
-    mFuseCh = nullptr;
-    mFuse = nullptr;
-
-    if(mThread && mThread->joinable())
-        mThread->join();
+    const bool projected = mFuseCh != nullptr;
+    stopProjection();
 
     QDir dst;
-    if (channel && !dst.rmdir(mDstPath.c_str()))
+    if (projected && !dst.rmdir(mDstPath.c_str()))
         spdlog::warn("Failed to remove {}", mDstPath);
 
     spdlog::debug("Exiting session for {}", mSrcFile);
@@ -263,6 +249,28 @@ void Session::updateOptions(const RenderSettings& settings)
     if (mFuse) fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
 
+void Session::stopProjection() {
+    if (!mFuseCh) return;
+    fuse_unmount(mDstPath.c_str(), mFuseCh);
+    if (mThread && mThread->joinable()) mThread->join();
+    mThread.reset();
+    mFuseCh = nullptr;
+    mFuse = nullptr;
+}
+
+void Session::setProjectionEnabled(bool enabled) {
+    if (enabled == (mFuseCh != nullptr)) return;
+    if (!enabled) {
+        stopProjection();
+        if (!QDir().rmdir(QString::fromStdString(mDstPath)))
+            spdlog::warn("Could not remove empty mount directory {}", mDstPath);
+        return;
+    }
+    if (!QDir().mkpath(QString::fromStdString(mDstPath)))
+        throw std::runtime_error("Failed to create " + mDstPath);
+    init(mFs.get());
+}
+
 FileInfo Session::getFileInfo() const {
     return mFs->getFileInfo();
 }
@@ -299,9 +307,6 @@ void Session::fuseDestroy(void* privateData) {
     spdlog::debug("fuseDestroy() entering");
 
     auto* context = reinterpret_cast<FuseContext*>(privateData);
-
-    if(context->fs)
-        delete context->fs;
 
     context->fs = nullptr;
     context->nextFileHandle = INT_MIN;
@@ -552,6 +557,15 @@ void FuseFileSystemImpl_MacOs::unmount(MountId mountId) {
     // Session destruction waits for the FUSE loop to exit. Keep this synchronous
     // so callers can safely reuse the same mount point after unmount() returns.
     session.reset();
+}
+void FuseFileSystemImpl_MacOs::setProjectionEnabled(MountId mountId, bool enabled) {
+    std::shared_ptr<Session> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
+            session = it->second;
+    }
+    if (session) session->setProjectionEnabled(enabled);
 }
 
 void FuseFileSystemImpl_MacOs::updateOptions(

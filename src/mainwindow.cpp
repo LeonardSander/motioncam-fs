@@ -5521,7 +5521,31 @@ void MainWindow::onOpenPreferences() {
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();
     mInheritHeroFrameSidecars = dialog.getInheritHeroFrameSidecars();
-    mFuseMountingEnabled = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;
+    const bool requestedProjection = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;
+    if (requestedProjection != mFuseMountingEnabled) {
+        std::vector<motioncam::MountId> changedMounts;
+        try {
+            for (const auto& mounted : mMountedFiles) {
+                mFuseFilesystem->setProjectionEnabled(mounted.mountId, requestedProjection);
+                changedMounts.push_back(mounted.mountId);
+            }
+            mFuseMountingEnabled = requestedProjection;
+            for (const auto mountId : changedMounts) {
+                if (auto* card = fileWidgetForMount(mountId))
+                    card->setProperty("projectedFiles", requestedProjection);
+            }
+        } catch (const std::exception& error) {
+            for (auto it = changedMounts.rbegin(); it != changedMounts.rend(); ++it) {
+                try { mFuseFilesystem->setProjectionEnabled(*it, mFuseMountingEnabled); }
+                catch (const std::exception& rollbackError) {
+                    spdlog::error("Failed to restore projection for mount {}: {}", *it, rollbackError.what());
+                }
+            }
+            QMessageBox::warning(this, tr("Mount setting"),
+                                 tr("Could not change the active DNG mounts: %1")
+                                     .arg(QString::fromUtf8(error.what())));
+        }
+    }
     updateApplyButtonsVisibility();
 #ifdef _WIN32
     mDeleteOnUnmount = dialog.getDeleteOnUnmount();

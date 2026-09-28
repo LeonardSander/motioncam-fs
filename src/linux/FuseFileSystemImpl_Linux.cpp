@@ -144,6 +144,25 @@ struct LinuxFuseSession {
     }
 
     ~LinuxFuseSession() {
+        stop();
+        QDir().rmdir(QString::fromStdString(mDstPath));
+    }
+
+    void setProjectionEnabled(bool enabled) {
+        if (enabled == (mFuse != nullptr)) return;
+        if (!enabled) {
+            stop();
+            if (!QDir().rmdir(QString::fromStdString(mDstPath)))
+                spdlog::warn("Could not remove empty mount directory {}", mDstPath);
+            return;
+        }
+        recoverStaleMount(mDstPath);
+        if (!QDir().mkpath(QString::fromStdString(mDstPath)))
+            throw std::runtime_error("Failed to create " + mDstPath);
+        start();
+    }
+
+    void stop() {
         if (mFuse) {
             fuse_exit(mFuse);
             fuse_unmount(mFuse);
@@ -152,7 +171,8 @@ struct LinuxFuseSession {
             mThread.join();
         if (mFuse)
             fuse_destroy(mFuse);
-        QDir().rmdir(QString::fromStdString(mDstPath));
+        mFuse = nullptr;
+        mState = nullptr;
     }
 
     void updateOptions(const RenderSettings& settings) {
@@ -390,6 +410,15 @@ void FuseFileSystemImpl_Linux::unmount(MountId mountId) {
     // Session shutdown may wait for FUSE or an in-flight user. Never hold the
     // global mount registry lock while doing that work.
     session.reset();
+}
+void FuseFileSystemImpl_Linux::setProjectionEnabled(MountId mountId, bool enabled) {
+    std::shared_ptr<LinuxFuseSession> session;
+    {
+        std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+        if (const auto it = mMountedFiles.find(mountId); it != mMountedFiles.end())
+            session = it->second;
+    }
+    if (session) session->setProjectionEnabled(enabled);
 }
 void FuseFileSystemImpl_Linux::updateOptions(MountId mountId, const RenderSettings& settings) {
     std::shared_ptr<LinuxFuseSession> session;

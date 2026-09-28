@@ -201,7 +201,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     auto* fuseMountingHelpLabel = new QLabel(
         helpSpan("Uses FUSE or Windows Projected File System to expose DNG sequences. "
                  "Gallery, thumbnails, and finalization remain available when disabled; "
-                 "the setting applies to newly imported clips."), this);
+                 "the setting also updates clips already imported."), this);
     fuseMountingHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(fuseMountingHelpLabel);
     mAutoApplyClipSettingsCheckBox = new QCheckBox("Auto apply", this);
