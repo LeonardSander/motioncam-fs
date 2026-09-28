@@ -22,6 +22,7 @@
 #endif
 
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QKeyEvent>
 #include <QCloseEvent>
@@ -37,6 +38,10 @@ using namespace motioncam;
 #include <QPointer>
 #include <QMessageBox>
 #include <QFileDialog>
+#include <QFileSystemModel>
+#include <QDialogButtonBox>
+#include <QTreeView>
+#include <QLineEdit>
 #include <QSettings>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -50,6 +55,8 @@ using namespace motioncam;
 #include <QProgressDialog>
 #include <QProgressBar>
 #include <QScrollBar>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QThread>
 #include <QUuid>
 #include <QTemporaryDir>
@@ -1401,6 +1408,85 @@ MainWindow::MainWindow(QWidget *parent)
     connect(saveSession, &QAction::triggered, this, &MainWindow::onSaveSession);
     connect(saveSessionAs, &QAction::triggered, this, &MainWindow::onSaveSessionAs);
     mRecentSessionsMenu = fileMenu->addMenu(tr("Recent Sessions"));
+    fileMenu->addSeparator();
+    auto* openClip = fileMenu->addAction(tr("Open Clip..."));
+    connect(openClip, &QAction::triggered, this, [this] {
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Open Clips"));
+        dialog.resize(760, 520);
+
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* navigation = new QHBoxLayout();
+        auto* upButton = new QPushButton(tr("Up"), &dialog);
+        auto* location = new QLineEdit(&dialog);
+        navigation->addWidget(upButton);
+        navigation->addWidget(location);
+        layout->addLayout(navigation);
+
+        auto* model = new QFileSystemModel(&dialog);
+        model->setRootPath(QDir::rootPath());
+        model->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
+        auto* browser = new QTreeView(&dialog);
+        browser->setModel(model);
+        browser->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        browser->setRootIsDecorated(false);
+        browser->setSortingEnabled(true);
+        browser->sortByColumn(0, Qt::AscendingOrder);
+        layout->addWidget(browser);
+        layout->addWidget(new QLabel(tr("Select clips or folders. MOV/MP4 files must contain NATIVE in the name."), &dialog));
+
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Open | QDialogButtonBox::Cancel, &dialog);
+        auto* acceptButton = buttons->button(QDialogButtonBox::Open);
+        acceptButton->setEnabled(false);
+        layout->addWidget(buttons);
+
+        const auto supported = [](const QString& path) {
+            const QFileInfo info(path);
+            if (info.isDir()) return true;
+            const QString name = info.fileName();
+            return name.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                   name.endsWith(".7z", Qt::CaseInsensitive) ||
+                   name.endsWith(".dng", Qt::CaseInsensitive) ||
+                   (name.contains("NATIVE", Qt::CaseInsensitive) &&
+                    (name.endsWith(".mov", Qt::CaseInsensitive) ||
+                     name.endsWith(".mp4", Qt::CaseInsensitive) ||
+                     name.endsWith(".mkv", Qt::CaseInsensitive)));
+        };
+        const auto selectedPaths = [browser, model] {
+            QStringList paths;
+            for (const auto& index : browser->selectionModel()->selectedRows(0))
+                paths.append(model->filePath(index));
+            return paths;
+        };
+        const auto navigate = [browser, model, location](const QString& path) {
+            const QFileInfo info(path);
+            if (!info.isDir()) return;
+            const QString directory = info.absoluteFilePath();
+            browser->selectionModel()->clearSelection();
+            browser->setRootIndex(model->index(directory));
+            location->setText(directory);
+        };
+        navigate(QDir::homePath());
+        connect(upButton, &QPushButton::clicked, &dialog, [location, navigate] {
+            navigate(QDir(location->text()).absoluteFilePath(".."));
+        });
+        connect(location, &QLineEdit::returnPressed, &dialog, [location, navigate] {
+            navigate(location->text());
+        });
+        connect(browser, &QTreeView::doubleClicked, &dialog, [model, navigate](const QModelIndex& index) {
+            if (model->isDir(index)) navigate(model->filePath(index));
+        });
+        connect(browser->selectionModel(), &QItemSelectionModel::selectionChanged, &dialog,
+                [acceptButton, selectedPaths, supported] {
+            const auto paths = selectedPaths();
+            acceptButton->setEnabled(!paths.isEmpty() &&
+                std::all_of(paths.cbegin(), paths.cend(), supported));
+        });
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() == QDialog::Accepted)
+            mountFiles(selectedPaths());
+    });
 #ifdef __APPLE__
     fileMenu->addSeparator();
     auto* forceUnmount = fileMenu->addAction(tr("Force Unmount All"));
@@ -1718,29 +1804,16 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     if (watched == ui->dragAndDropScrollArea) {
         if (event->type() == QEvent::DragEnter) {
             auto* dragEvent = static_cast<QDragEnterEvent*>(event);
-
-            if (dragEvent->mimeData()->hasUrls()) {
-                const auto urls = dragEvent->mimeData()->urls();
-
-                // Check if at least one file has the extension we want
-                for (const auto& url : urls) {
-                    auto filePath = url.toLocalFile();
-
-                    // Accept MCRAW files, MOV/MP4 files with NATIVE suffix, or DNG files/directories
-                    if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
-                        filePath.endsWith(".7z", Qt::CaseInsensitive) ||
-                        (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
-                         (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
-                          filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
-                          filePath.endsWith(".mkv", Qt::CaseInsensitive))) ||
-                        filePath.endsWith(".dng", Qt::CaseInsensitive) ||
-                        QFileInfo(filePath).isDir()) {
-                        dragEvent->acceptProposedAction();
-                        return true;
-                    }
-                }
-            }
-
+            // On Wayland, reading the URL list can require a data transfer from
+            // the drag source. Keep the drag-enter response independent of it.
+            if (dragEvent->mimeData()->hasUrls())
+                dragEvent->acceptProposedAction();
+            return true;
+        }
+        else if (event->type() == QEvent::DragMove) {
+            auto* dragEvent = static_cast<QDragMoveEvent*>(event);
+            if (dragEvent->mimeData()->hasUrls())
+                dragEvent->acceptProposedAction();
             return true;
         }
         else if (event->type() == QEvent::Drop) {
@@ -1764,9 +1837,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                     }
                 }
 
-                mountFiles(filePaths);
-
-                dropEvent->acceptProposedAction();
+                if (!filePaths.isEmpty()) {
+                    dropEvent->acceptProposedAction();
+                    mountFiles(filePaths);
+                }
             }
 
             return true;
