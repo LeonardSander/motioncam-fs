@@ -462,6 +462,28 @@ namespace {
             (!metadata.profileTables->hueSat1.values.empty() ||
              !metadata.profileTables->hueSat2.values.empty() ||
              !metadata.profileTables->look.values.empty());
+        motioncam::DNGProfileTable blendedHueSat;
+        const motioncam::DNGProfileTable* hueSatTable = nullptr;
+        if (useProfileTables) {
+            const auto& first = metadata.profileTables->hueSat1;
+            const auto& second = metadata.profileTables->hueSat2;
+            hueSatTable = !first.values.empty() ? &first :
+                !second.values.empty() ? &second : nullptr;
+            if (!first.values.empty() && !second.values.empty() &&
+                first.hueDivisions == second.hueDivisions &&
+                first.saturationDivisions == second.saturationDivisions &&
+                first.valueDivisions == second.valueDivisions &&
+                first.encoding == second.encoding &&
+                first.values.size() == second.values.size()) {
+                blendedHueSat = first;
+                const float secondWeight = 1.0f - firstIlluminantWeight;
+                for (size_t index = 0; index < blendedHueSat.values.size(); ++index)
+                    blendedHueSat.values[index] =
+                        first.values[index] * firstIlluminantWeight +
+                        second.values[index] * secondWeight;
+                hueSatTable = &blendedHueSat;
+            }
+        }
         std::array<std::array<uint16_t, 65536>, 3> channelTransfer;
         if (!useMatrix) {
             for (size_t value = 0; value < 65536; ++value) {
@@ -523,12 +545,8 @@ namespace {
                          1.3459433f * xyz[0] - 0.2556075f * xyz[1] - 0.0511118f * xyz[2],
                         -0.5445989f * xyz[0] + 1.5081673f * xyz[1] + 0.0205351f * xyz[2],
                          1.2118128f * xyz[2]};
-                    if (!tables.hueSat1.values.empty())
-                        motioncam::gallery::applyProfileTable(
-                            proPhoto, tables.hueSat1, &tables.hueSat2,
-                            firstIlluminantWeight);
-                    else if (!tables.hueSat2.values.empty())
-                        motioncam::gallery::applyProfileTable(proPhoto, tables.hueSat2);
+                    if (hueSatTable)
+                        motioncam::gallery::applyProfileTable(proPhoto, *hueSatTable);
                     for (float& channel : proPhoto) channel *= exposure;
                     if (!tables.look.values.empty())
                         motioncam::gallery::applyProfileTable(proPhoto, tables.look);
