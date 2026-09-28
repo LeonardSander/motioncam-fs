@@ -2745,7 +2745,6 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
             if(selected)mSelectedFrames[id].insert(frame);
             else {mSelectedFrames[id].remove(frame);if(mSelectedFrames[id].isEmpty())mSelectedFrames.remove(id);}
             autoSaveSession();
-            if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
         });
     connect(mClipPlayer,&ClipPlayerDialog::sourceFrameThumbnailRequested,this,
         &MainWindow::renderDroppedFrameThumbnail);
@@ -2808,7 +2807,6 @@ void MainWindow::clearSelectedFrames(){
         if(mClipPlayer)mClipPlayer->clearFrameSelections(mSelectedMountIds);
     }
     autoSaveSession();
-    if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
 }
 
 void MainWindow::selectAllFrames(){
@@ -2824,7 +2822,6 @@ void MainWindow::selectAllFrames(){
     }
     if(mClipPlayer)mClipPlayer->selectAllFrameSelections();
     autoSaveSession();
-    if(!mCurrentSessionFile.isEmpty())saveSessionToFile(mCurrentSessionFile);
 }
 
 void MainWindow::finalizeSelectedFrames(){
@@ -5644,7 +5641,7 @@ void MainWindow::onOpenPreferences() {
         clearApplyFeedback();
 }
 
-void MainWindow::saveSessionToFile(const QString& path) {
+bool MainWindow::saveSessionToFile(const QString& path) {
     auto encode = [](const motioncam::RenderSettings& settings) {
         QJsonObject object;
         object["options"] = static_cast<int>(settings.options);
@@ -5686,15 +5683,17 @@ void MainWindow::saveSessionToFile(const QString& path) {
     if (!file.open(QIODevice::WriteOnly) ||
         file.write(QJsonDocument(root).toJson()) < 0 || !file.commit()) {
         QMessageBox::warning(this, tr("Save Session"), tr("Could not save %1").arg(path));
-        return;
+        return false;
     }
     if (QFileInfo(path).absoluteFilePath() != QFileInfo(autoSessionPath()).absoluteFilePath()) {
         mCurrentSessionFile = path;
         addRecentSession(path);
     }
+    return true;
 }
 
 void MainWindow::clearSession() {
+    mClearingSession = true;
     while (!mMountedFiles.isEmpty()) {
         auto* card = fileWidgetForMount(mMountedFiles.front().mountId);
         if (card) removeFile(card);
@@ -5709,6 +5708,7 @@ void MainWindow::clearSession() {
     mSelectedMountIds.clear();
     mSelectedFrames.clear();
     updateSelectionUi();
+    mClearingSession = false;
 }
 
 void MainWindow::loadSessionFromFile(const QString& path) {
@@ -5797,14 +5797,8 @@ QString MainWindow::autoSessionPath() const {
 void MainWindow::autoSaveSession() {
     // Automated diagnostics may load purpose-built subsets. They must never
     // replace the user's resumable interactive session.
-    if (mGalleryPerformanceTestActive) return;
-    if (mMountedFiles.isEmpty()) {
-        QFile::remove(autoSessionPath());
-        return;
-    }
-    const QString current = mCurrentSessionFile;
+    if (mGalleryPerformanceTestActive || mClearingSession || mMountedFiles.isEmpty()) return;
     saveSessionToFile(autoSessionPath());
-    mCurrentSessionFile = current;
 }
 
 void MainWindow::promptToResumeSession() {
@@ -5819,7 +5813,7 @@ void MainWindow::promptToResumeSession() {
     prompt.setDefaultButton(resume);
     prompt.exec();
     if (prompt.clickedButton() == resume) loadSessionFromFile(path);
-    else onNewSession();
+    // An empty new session leaves the last snapshot available on the next start.
 }
 
 #ifdef __APPLE__
@@ -5874,7 +5868,9 @@ void MainWindow::updateRecentSessionsMenu() {
         auto* action = mRecentSessionsMenu->addAction(QFileInfo(path).completeBaseName());
         action->setToolTip(path);
         connect(action, &QAction::triggered, this, [this, path] {
-            if (QFileInfo::exists(path)) loadSessionFromFile(path);
+            if (QFileInfo::exists(path)) {
+                if (confirmSaveBeforeReplacingSession()) loadSessionFromFile(path);
+            }
             else {
                 mRecentSessions.removeAll(path);
                 QSettings(PACKAGE_NAME, APP_NAME).setValue("recentSessions", mRecentSessions);
@@ -5894,17 +5890,35 @@ void MainWindow::onClearRecentSessions() {
 }
 
 void MainWindow::onNewSession() {
+    if (!confirmSaveBeforeReplacingSession()) return;
     clearSession();
     mCurrentSessionFile.clear();
-    QFile::remove(autoSessionPath());
-    onSetDefaultSettings(false);
-    mGlobalRenderSettings = buildRenderSettings();
-    mRenderSettings = mGlobalRenderSettings;
     clearApplyFeedback();
 }
 void MainWindow::onLoadSession() {
     const QString path = QFileDialog::getOpenFileName(this, tr("Load Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
-    if (!path.isEmpty()) loadSessionFromFile(path);
+    if (!path.isEmpty() && confirmSaveBeforeReplacingSession()) loadSessionFromFile(path);
+}
+bool MainWindow::confirmSaveBeforeReplacingSession() {
+    if (mMountedFiles.isEmpty()) return true;
+    QMessageBox prompt(this);
+    prompt.setIcon(QMessageBox::Question);
+    prompt.setWindowTitle(tr("Save Session"));
+    prompt.setText(tr("Save the current session before continuing?"));
+    auto* save = prompt.addButton(tr("Save"), QMessageBox::AcceptRole);
+    prompt.addButton(tr("Discard"), QMessageBox::DestructiveRole);
+    auto* cancel = prompt.addButton(QMessageBox::Cancel);
+    prompt.setDefaultButton(save);
+    prompt.exec();
+    if (prompt.clickedButton() == cancel || !prompt.clickedButton()) return false;
+    if (prompt.clickedButton() != save) return true;
+    QString path = mCurrentSessionFile;
+    if (path.isEmpty()) {
+        path = QFileDialog::getSaveFileName(this, tr("Save Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
+        if (path.isEmpty()) return false;
+        if (!path.endsWith(".json", Qt::CaseInsensitive)) path += ".json";
+    }
+    return saveSessionToFile(path);
 }
 void MainWindow::onSaveSession() {
     if (mCurrentSessionFile.isEmpty()) onSaveSessionAs();

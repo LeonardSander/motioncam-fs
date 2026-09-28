@@ -171,7 +171,8 @@ private:
                        const QString& gyroflowSidecarPath = {});
     void cleanupArchiveMount(motioncam::MountId mountId);
     QWidget* fileWidgetForMount(motioncam::MountId mountId) const;
-    void saveSessionToFile(const QString& path);
+    bool saveSessionToFile(const QString& path);
+    bool confirmSaveBeforeReplacingSession();
     void loadSessionFromFile(const QString& path);
     void clearSession();
     void updateRecentSessionsMenu();
@@ -225,6 +226,7 @@ private:
     QPushButton* mApplyAllButton = nullptr;
     QLabel* mSelectedFilesLabel = nullptr;
     QString mCurrentSessionFile;
+    bool mClearingSession = false;
     QStringList mRecentSessions;
     QMenu* mRecentSessionsMenu = nullptr;
     QFutureSynchronizer<void> mThumbnailTasks;
