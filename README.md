@@ -90,6 +90,10 @@ There is the option to ignore forward matrices, so Gallery falls back to chromat
 
 To apply manual vignette correction by supplying a suitable white image measurement, DNG sidecars named <source_name>_white.dng are ingested per clip to be converted to gainmaps for the output DNG with usual processing all available. A sidecar named <source_name>_opcode.dng copies its opcode lists (including gain maps and lens distortion), matrices, and asShotNeutral.
 
+- **DCP camera profiles**
+
+Place `<source_name>.dcp` beside the clip, or set `"dcp": "profile.dcp"` in its JSON sidecar. The sibling DCP takes precedence over the JSON reference and over profile fields in a DNG sidecar; explicit JSON matrix overrides still take precedence. Gallery and thumbnails use the DCP color and forward matrices, hue/saturation maps, and look table. Tone curves and other profile fields are copied to output DNGs for compatible readers. Set `"useDcpGainmap": true` in the clip JSON to convert a spatial-only DCP gain table to OpcodeList3, replacing source and JSON gain maps in previews, preprocessing, and output DNGs. Without this switch, the DCP gain table remains profile metadata. Gain tables whose values also depend on image color or brightness remain profile metadata because a DNG GainMap opcode cannot represent that behavior.
+
 ---
 
 ### Reduction options

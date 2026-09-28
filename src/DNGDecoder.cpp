@@ -2514,6 +2514,7 @@ bool DNGDecoder::setOrientation(std::vector<uint8_t>& data, int clockwiseDegrees
 
 bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
                                   DNGFrameMetadata& metadata) {
+    metadata.profileTables.reset();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -2624,6 +2625,55 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
         else if (entry.tag == TIFF_TAG_CALIBRATION_ILLUMINANT_2 &&
                  entry.type == TIFF_TYPE_SHORT && entry.count)
             metadata.calibrationIlluminant2 = read16(data.data() + entry.valueOffset, little);
+    }
+    auto findProfileEntry = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.tag == tag) return &entry;
+        return nullptr;
+    };
+    auto readProfileTable = [&](uint16_t dimensionsTag, uint16_t dataTag,
+                                uint16_t encodingTag, DNGProfileTable& table) {
+        const auto* dimensions = findProfileEntry(dimensionsTag);
+        const auto* values = findProfileEntry(dataTag);
+        if (!dimensions || !values || dimensions->type != TIFF_TYPE_LONG ||
+            dimensions->count != 3 || values->type != 11) return;
+        const uint32_t hue = read32(data.data() + dimensions->valueOffset, little);
+        const uint32_t saturation = read32(data.data() + dimensions->valueOffset + 4, little);
+        const uint32_t value = read32(data.data() + dimensions->valueOffset + 8, little);
+        if (!hue || saturation < 2 || !value || hue > 1024 ||
+            saturation > 1024 || value > 1024) return;
+        const uint64_t count = static_cast<uint64_t>(hue) * saturation * value * 3;
+        if (count > 3u * 1024u * 1024u ||
+            values->count != count) return;
+        uint32_t encoding = 0;
+        if (const auto* field = findProfileEntry(encodingTag)) {
+            if (field->type != TIFF_TYPE_LONG || field->count != 1) return;
+            encoding = read32(data.data() + field->valueOffset, little);
+            if (encoding > 1) return;
+        }
+        table.hueDivisions = hue;
+        table.saturationDivisions = saturation;
+        table.valueDivisions = value;
+        table.encoding = encoding;
+        table.values.reserve(static_cast<size_t>(count));
+        for (uint32_t index = 0; index < count; ++index) {
+            const uint32_t bits = read32(data.data() + values->valueOffset + index * 4, little);
+            float number;
+            std::memcpy(&number, &bits, sizeof(number));
+            if (!std::isfinite(number)) {
+                table = {};
+                return;
+            }
+            table.values.push_back(number);
+        }
+    };
+    if (findProfileEntry(50937) || findProfileEntry(50981)) {
+        auto tables = std::make_shared<DNGProfileTables>();
+        readProfileTable(50937, 50938, 51107, tables->hueSat1);
+        readProfileTable(50937, 50939, 51107, tables->hueSat2);
+        readProfileTable(50981, 50982, 51108, tables->look);
+        if (!tables->hueSat1.values.empty() || !tables->hueSat2.values.empty() ||
+            !tables->look.values.empty()) metadata.profileTables = std::move(tables);
     }
     auto bitsForMaximum = [](uint32_t maximum) {
         uint32_t bits = 1;
@@ -2771,7 +2821,7 @@ bool DNGDecoder::extractSidecarMetadata(
     bool little = true;
     const auto entries = findTiffEntries(sidecar, little);
     if (entries.empty()) return false;
-    const std::array<uint16_t, 17> transferable = {
+    const std::vector<uint16_t> transferable = {
         TIFF_TAG_MAKE, TIFF_TAG_MODEL, TIFF_TAG_F_NUMBER,
         TIFF_TAG_APERTURE_VALUE, TIFF_TAG_FOCAL_LENGTH,
         TIFF_TAG_FOCAL_LENGTH_35MM, TIFF_TAG_UNIQUE_CAMERA_MODEL,
@@ -2780,12 +2830,61 @@ bool DNGDecoder::extractSidecarMetadata(
         TIFF_TAG_CAMERA_CALIBRATION_2, TIFF_TAG_FORWARD_MATRIX_1,
         TIFF_TAG_FORWARD_MATRIX_2, TIFF_TAG_AS_SHOT_NEUTRAL,
         TIFF_TAG_CALIBRATION_ILLUMINANT_1,
-        TIFF_TAG_CALIBRATION_ILLUMINANT_2};
+        TIFF_TAG_CALIBRATION_ILLUMINANT_2,
+        50931, // CameraCalibrationSignature
+        50932, // ProfileCalibrationSignature
+        50934, // AsShotProfileName
+        50936, // ProfileName
+        50937, // ProfileHueSatMapDims
+        50938, // ProfileHueSatMapData1
+        50939, // ProfileHueSatMapData2
+        50940, // ProfileToneCurve
+        50941, // ProfileEmbedPolicy
+        50942, // ProfileCopyright
+        50981, // ProfileLookTableDims
+        50982, // ProfileLookTableData
+        51107, // ProfileHueSatMapEncoding
+        51108, // ProfileLookTableEncoding
+        52525, // ProfileGainTableMap
+        52529, 52530, 52531, 52532, // Third illuminant and matrices
+        52533, 52534, 52535, // Custom illuminants
+        52537, // ProfileHueSatMapData3
+        52551, // ProfileDynamicRange
+        52552, // ProfileGroupName
+        52544  // ProfileGainTableMap2
+    };
     auto toLittleEndian = [&](const TiffEntry& entry, std::vector<uint8_t>& value) {
         const size_t unit = tiffTypeSize(entry.type);
         const size_t bytes = unit * entry.count;
         value.resize(bytes);
         const uint8_t* input = sidecar.data() + entry.valueOffset;
+        if (!little && entry.type == TIFF_TYPE_UNDEFINED &&
+            (entry.tag == 52525 || entry.tag == 52544) &&
+            bytes >= (entry.tag == 52544 ? 80u : 64u)) {
+            std::memcpy(value.data(), input, bytes);
+            auto swapAt = [&](size_t offset, size_t length) {
+                std::reverse(value.begin() + offset,
+                             value.begin() + offset + length);
+            };
+            swapAt(0, 4); swapAt(4, 4);
+            for (size_t offset = 8; offset < 40; offset += 8) swapAt(offset, 8);
+            swapAt(40, 4);
+            for (size_t offset = 44; offset < 64; offset += 4) swapAt(offset, 4);
+            size_t sampleBytes = 4;
+            size_t headerBytes = 64;
+            if (entry.tag == 52544) {
+                const uint32_t dataType = read32(input + 64, false);
+                if (dataType == 0) sampleBytes = 1;
+                else if (dataType == 1 || dataType == 2) sampleBytes = 2;
+                swapAt(64, 4);
+                for (size_t offset = 68; offset < 80; offset += 4) swapAt(offset, 4);
+                headerBytes = 80;
+            }
+            if (sampleBytes > 1)
+                for (size_t offset = headerBytes; offset + sampleBytes <= bytes;
+                     offset += sampleBytes) swapAt(offset, sampleBytes);
+            return;
+        }
         if (little || unit == 1) {
             std::memcpy(value.data(), input, bytes);
             return;
@@ -2821,6 +2920,59 @@ bool DNGDecoder::extractSidecarMetadata(
         added.insert(entry.tag);
     }
     return true;
+}
+
+bool DNGDecoder::replaceSidecarMetadata(
+        std::vector<uint8_t>& data,
+        const std::vector<DNGSidecarMetadataEntry>& metadata) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    std::set<uint16_t> owned;
+    std::set<uint32_t> affected;
+    for (const auto& item : metadata) owned.insert(item.tag);
+    for (const auto& entry : entries) {
+        if (!owned.count(entry.tag)) continue;
+        write16(data.data() + entry.entryOffset, 0, little);
+        affected.insert(entry.ifdOffset);
+    }
+    for (uint32_t ifd : affected)
+        if (!sortTiffIfdEntries(data, ifd, little)) return false;
+    return fillMissingSidecarMetadata(data, metadata);
+}
+
+bool DNGDecoder::removeMetadataTags(std::vector<uint8_t>& data,
+                                    const std::vector<uint16_t>& tags) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    std::set<uint32_t> affected;
+    for (const auto& entry : entries) {
+        if (std::find(tags.begin(), tags.end(), entry.tag) == tags.end()) continue;
+        write16(data.data() + entry.entryOffset, 0, little);
+        affected.insert(entry.ifdOffset);
+    }
+    for (uint32_t ifd : affected)
+        if (!sortTiffIfdEntries(data, ifd, little)) return false;
+    return true;
+}
+
+bool DNGDecoder::requireDngVersion(std::vector<uint8_t>& data, uint8_t minor) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_DNG_VERSION ||
+            entry.type != TIFF_TYPE_BYTE || entry.count < 4) continue;
+        if (data[entry.valueOffset] < 1 ||
+            (data[entry.valueOffset] == 1 && data[entry.valueOffset + 1] < minor)) {
+            data[entry.valueOffset] = 1;
+            data[entry.valueOffset + 1] = minor;
+            data[entry.valueOffset + 2] = data[entry.valueOffset + 3] = 0;
+        }
+        return true;
+    }
+    return false;
 }
 
 bool DNGDecoder::fillMissingSidecarMetadata(
@@ -4997,7 +5149,8 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     const uint32_t sourceHeight = image.layout.height;
     uint32_t gainMapSourceScale = 1;
     uint32_t remainingPreviewScale = requestedPreviewScale;
-    const bool hasCrop = !settings.cropTarget.empty() && settings.cropTarget != "0x0";
+    const bool hasCrop = (settings.options & RENDER_OPT_CROPPING) &&
+        !settings.cropTarget.empty() && settings.cropTarget != "0x0";
     const bool explicitBinning =
         settings.quadBayerOption == QuadBayerMode::Binning ||
         settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
@@ -5143,7 +5296,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         rgb = std::move(remosaicedRgb);
     }
 
-    if (applyPreviewScale) {
+    if (applyPreviewScale && (settings.options & RENDER_OPT_CROPPING)) {
         uint32_t cropWidth = 0, cropHeight = 0, cropStride = 0;
         try {
             utils::parseCropTarget(settings.cropTarget, cropWidth, cropHeight, cropStride);

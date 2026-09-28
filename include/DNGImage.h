@@ -9,6 +9,20 @@
 
 namespace motioncam {
 
+struct DNGProfileTable {
+    uint32_t hueDivisions = 0;
+    uint32_t saturationDivisions = 0;
+    uint32_t valueDivisions = 0;
+    uint32_t encoding = 0;
+    std::vector<float> values;
+};
+
+struct DNGProfileTables {
+    DNGProfileTable hueSat1;
+    DNGProfileTable hueSat2;
+    DNGProfileTable look;
+};
+
 struct DNGFrameMetadata {
     size_t metadataBytes = 0;
     std::string uniqueCameraModel;
@@ -42,6 +56,7 @@ struct DNGFrameMetadata {
     bool hasForwardMatrix2 = false;
     bool hasCameraCalibration1 = false;
     bool hasCameraCalibration2 = false;
+    std::shared_ptr<const DNGProfileTables> profileTables;
 };
 
 struct PreviewFrame {

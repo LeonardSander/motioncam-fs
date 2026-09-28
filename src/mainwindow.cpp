@@ -405,6 +405,8 @@ namespace {
             ? (metadata.hasColorMatrix2 || metadata.hasColorMatrix1)
             : (metadata.hasForwardMatrix2 || metadata.hasForwardMatrix1);
         std::array<float, 9> cameraToDisplay{};
+        std::array<float, 9> cameraToXyz{};
+        float firstIlluminantWeight = metadata.hasForwardMatrix2 ? 0.0f : 1.0f;
         if (hasMatrix) {
             std::array<float, 9> inverted{};
             std::array<float, 9> forwardTransform{};
@@ -413,19 +415,22 @@ namespace {
                 auto transformMetadata = metadata;
                 if (gainMapOnlyDebug)
                     transformMetadata.asShotNeutral = {1.0f, 1.0f, 1.0f};
-                if (!colorMatrixToD50(transformMetadata, inverted)) {
+                if (!colorMatrixToD50(transformMetadata, inverted,
+                                      &firstIlluminantWeight)) {
                     spdlog::warn("Preview ColorMatrix transform is invalid; using neutral display transform");
                     matrix = nullptr;
                 } else matrix = &inverted;
             } else {
-                float firstIlluminantWeight = metadata.hasForwardMatrix2 ? 0.0f : 1.0f;
                 const bool forwardDiffers = metadata.hasForwardMatrix1 &&
                     metadata.hasForwardMatrix2 &&
                     metadata.forwardMatrix1 != metadata.forwardMatrix2;
                 const bool calibrationDiffers =
                     motioncam::gallery::cameraCalibrationMatrix(metadata, true) !=
                     motioncam::gallery::cameraCalibrationMatrix(metadata, false);
-                if (forwardDiffers || calibrationDiffers) {
+                const bool tableDiffers = metadata.profileTables &&
+                    !metadata.profileTables->hueSat1.values.empty() &&
+                    !metadata.profileTables->hueSat2.values.empty();
+                if (forwardDiffers || calibrationDiffers || tableDiffers) {
                     std::array<float, 9> unusedColorTransform{};
                     colorMatrixToD50(metadata, unusedColorTransform,
                                      &firstIlluminantWeight);
@@ -440,6 +445,8 @@ namespace {
             // Fold them here rather than doing two matrix passes per pixel.
             if (matrix) for (int row = 0; row < 3; ++row) {
                 for (int column = 0; column < 3; ++column) {
+                    cameraToXyz[row * 3 + column] = (*matrix)[row * 3 + column] *
+                        (ignoreForwardMat ? 1.0f : 1.0f / std::max(exposure, 1e-8f));
                     for (int xyz = 0; xyz < 3; ++xyz)
                         cameraToDisplay[row * 3 + column] +=
                             xyzToSrgbD50[row * 3 + xyz] *
@@ -450,6 +457,11 @@ namespace {
         }
         const bool useMatrix = std::any_of(cameraToDisplay.begin(), cameraToDisplay.end(),
                                            [](float value) { return value != 0.0f; });
+        const bool useProfileTables = useMatrix && !gainMapOnlyDebug &&
+            metadata.profileTables &&
+            (!metadata.profileTables->hueSat1.values.empty() ||
+             !metadata.profileTables->hueSat2.values.empty() ||
+             !metadata.profileTables->look.values.empty());
         std::array<std::array<uint16_t, 65536>, 3> channelTransfer;
         if (!useMatrix) {
             for (size_t value = 0; value < 65536; ++value) {
@@ -501,7 +513,36 @@ namespace {
                                       pixels[offset + 1] * normalize,
                                       pixels[offset + 2] * normalize};
                 float display[3];
-                for (int row = 0; row < 3; ++row) {
+                if (useProfileTables) {
+                    const auto& tables = *metadata.profileTables;
+                    std::array<float, 3> xyz{};
+                    for (int row = 0; row < 3; ++row)
+                        for (int column = 0; column < 3; ++column)
+                            xyz[row] += cameraToXyz[row * 3 + column] * camera[column];
+                    std::array<float, 3> proPhoto{
+                         1.3459433f * xyz[0] - 0.2556075f * xyz[1] - 0.0511118f * xyz[2],
+                        -0.5445989f * xyz[0] + 1.5081673f * xyz[1] + 0.0205351f * xyz[2],
+                         1.2118128f * xyz[2]};
+                    if (!tables.hueSat1.values.empty())
+                        motioncam::gallery::applyProfileTable(
+                            proPhoto, tables.hueSat1, &tables.hueSat2,
+                            firstIlluminantWeight);
+                    else if (!tables.hueSat2.values.empty())
+                        motioncam::gallery::applyProfileTable(proPhoto, tables.hueSat2);
+                    for (float& channel : proPhoto) channel *= exposure;
+                    if (!tables.look.values.empty())
+                        motioncam::gallery::applyProfileTable(proPhoto, tables.look);
+                    xyz = {
+                        0.7976749f * proPhoto[0] + 0.1351917f * proPhoto[1] +
+                            0.0313534f * proPhoto[2],
+                        0.2880402f * proPhoto[0] + 0.7118741f * proPhoto[1] +
+                            0.0000857f * proPhoto[2],
+                        0.82521f * proPhoto[2]};
+                    for (int row = 0; row < 3; ++row)
+                        display[row] = xyzToSrgbD50[row * 3] * xyz[0] +
+                            xyzToSrgbD50[row * 3 + 1] * xyz[1] +
+                            xyzToSrgbD50[row * 3 + 2] * xyz[2];
+                } else for (int row = 0; row < 3; ++row) {
                     display[row] = cameraToDisplay[row * 3] * camera[0] +
                                    cameraToDisplay[row * 3 + 1] * camera[1] +
                                    cameraToDisplay[row * 3 + 2] * camera[2];
@@ -2037,6 +2078,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     // Create and add the open button
     auto* openButton = new QPushButton("Open", fileWidget);
+    openButton->setObjectName(QStringLiteral("openDestinationButton"));
     openButton->setEnabled(projectFiles);
     if (!projectFiles) openButton->setToolTip(tr("Virtual DNG folder mounting is disabled."));
     openButton->setFixedSize(buttonWidth, buttonHeight);
@@ -5531,8 +5573,14 @@ void MainWindow::onOpenPreferences() {
             }
             mFuseMountingEnabled = requestedProjection;
             for (const auto mountId : changedMounts) {
-                if (auto* card = fileWidgetForMount(mountId))
+                if (auto* card = fileWidgetForMount(mountId)) {
                     card->setProperty("projectedFiles", requestedProjection);
+                    if (auto* button = card->findChild<QPushButton*>(QStringLiteral("openDestinationButton"))) {
+                        button->setEnabled(requestedProjection);
+                        button->setToolTip(requestedProjection ? QString() :
+                            tr("Virtual DNG folder mounting is disabled."));
+                    }
+                }
             }
         } catch (const std::exception& error) {
             for (auto it = changedMounts.rbegin(); it != changedMounts.rend(); ++it) {

@@ -178,6 +178,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             const auto sidecarMaps = vfs::loadSidecarGainMaps(
                 mSidecarMetadata, 0, "gainMaps");
             if (!sidecarMaps.empty()) mSourceHasGainMap = true;
+            if (mManualVignetteSidecars.useDcpGainmap) mSourceHasGainMap = true;
         }
         // Exposure normalization/smoothing is meaningful only when every
         // frame has both ISO and ExposureTime. Missing optional exposure tags
@@ -370,6 +371,7 @@ void VirtualFileSystemImpl_DNG::init() {
             storedWhite, channels == 3, mConfig.cameraNativeStaging);
         size_t metadataBytes = frameIndex < mSourceMetadataSizes.size()
             ? mSourceMetadataSizes[frameIndex] : transformedMetadataAllowance;
+        metadataBytes += vfs::projectedDcpMetadataSize(mManualVignetteSidecars);
         if (mCalibration && mConfig.badPixelTreatment == BadPixelTreatment::OpcodeOnly &&
             channels == 1) {
             const uint32_t sensorWidth = mCalibration->hasFullSensorResolution

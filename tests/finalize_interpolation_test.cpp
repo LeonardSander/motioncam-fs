@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -891,6 +892,160 @@ int main() {
         output.write(reinterpret_cast<const char*>(bytes.data()),
                      static_cast<std::streamsize>(bytes.size()));
     };
+    // A DCP is a TIFF profile. Spatial-only ProfileGainTableMap values can
+    // become an OpcodeList2 gain map; profile and matrix fields remain usable
+    // when the profile is selected from a sibling or JSON reference.
+    auto profile = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
+    motioncam::DNGFrameMetadata profileMatrices;
+    profileMatrices.hasColorMatrix1 = true;
+    profileMatrices.colorMatrix1 = {0.8f, 0.1f, 0.1f,
+                                    0.1f, 0.8f, 0.1f,
+                                    0.1f, 0.1f, 0.8f};
+    assert(motioncam::DNGDecoder::updateColorMatrices(profile, profileMatrices));
+    motioncam::DNGSidecarMetadataEntry profileName;
+    profileName.tag = 50936; profileName.type = 2;
+    profileName.value = {'T', 'e', 's', 't', ' ', 'D', 'C', 'P', 0};
+    profileName.count = static_cast<uint32_t>(profileName.value.size());
+    motioncam::DNGSidecarMetadataEntry gainTable;
+    gainTable.tag = 52525; gainTable.type = 7;
+    gainTable.value.resize(64 + 4 * 2 * 2);
+    gainTable.count = static_cast<uint32_t>(gainTable.value.size());
+    auto put32 = [&](size_t at, uint32_t value) {
+        for (size_t i = 0; i < 4; ++i)
+            gainTable.value[at + i] = static_cast<uint8_t>(value >> (8 * i));
+    };
+    auto putFloat = [&](size_t at, float value) {
+        uint32_t bits; std::memcpy(&bits, &value, 4); put32(at, bits);
+    };
+    auto putDouble = [&](size_t at, double value) {
+        uint64_t bits; std::memcpy(&bits, &value, 8);
+        for (size_t i = 0; i < 8; ++i)
+            gainTable.value[at + i] = static_cast<uint8_t>(bits >> (8 * i));
+    };
+    put32(0, 2); put32(4, 2);
+    putDouble(8, 1.0); putDouble(16, 1.0);
+    putDouble(24, 0.0); putDouble(32, 0.0);
+    put32(40, 1);
+    for (size_t i = 0; i < 4; ++i) putFloat(64 + i * 4, 1.0f + i * 0.25f);
+    assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(
+        profile, {profileName, gainTable}));
+    auto profileTag = [](uint16_t tag, uint16_t type,
+                         std::initializer_list<uint32_t> values) {
+        motioncam::DNGSidecarMetadataEntry entry;
+        entry.tag = tag;
+        entry.type = type;
+        entry.count = static_cast<uint32_t>(values.size());
+        for (const auto value : values)
+            for (int byte = 0; byte < 4; ++byte)
+                entry.value.push_back(static_cast<uint8_t>(value >> (byte * 8)));
+        return entry;
+    };
+    auto profileFloatBits = [](float value) {
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        return bits;
+    };
+    auto hueData = profileTag(50938, 11, {
+        profileFloatBits(0), profileFloatBits(1), profileFloatBits(1),
+        profileFloatBits(60), profileFloatBits(1), profileFloatBits(1),
+        profileFloatBits(0), profileFloatBits(1), profileFloatBits(1),
+        profileFloatBits(60), profileFloatBits(1), profileFloatBits(1)});
+    auto lookData = hueData;
+    lookData.tag = 50982;
+    assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(profile, {
+        profileTag(50937, 4, {2, 2, 1}), hueData,
+        profileTag(50981, 4, {2, 2, 1}), lookData,
+        profileTag(50940, 11, {profileFloatBits(0), profileFloatBits(0),
+                               profileFloatBits(1), profileFloatBits(1)})}));
+    auto adobeDcp = profile;
+    adobeDcp[2] = 'R'; adobeDcp[3] = 'C';
+    writeDng(root / "profileclip.dcp", adobeDcp);
+    auto selectedProfile = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "profileclip.dng").string());
+    assert(selectedProfile.hasDcp && selectedProfile.dcpSpatialGainMap &&
+           !selectedProfile.useDcpGainmap);
+    assert(selectedProfile.dcpColor.profileTables &&
+           selectedProfile.dcpColor.profileTables->hueSat1.values.size() == 12 &&
+           selectedProfile.dcpColor.profileTables->look.values.size() == 12);
+    const nlohmann::json enableDcpGain{{"useDcpGainmap", true}};
+    const boost::filesystem::path profileClipJson((root / "profileclip.json").string());
+    auto activeProfile = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "profileclip.dng").string(), &enableDcpGain, &profileClipJson);
+    assert(activeProfile.useDcpGainmap);
+    auto profileOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
+    motioncam::GainMap staleMap = *activeProfile.dcpSpatialGainMap;
+    staleMap.top = staleMap.left = 0; staleMap.bottom = staleMap.right = 8;
+    staleMap.channels = staleMap.planes = 1;
+    assert(motioncam::DNGDecoder::replaceGainMaps(profileOutput, 2, {staleMap}));
+    assert(motioncam::vfs::applyManualVignetteSidecar(
+        profileOutput, activeProfile));
+    assert(motioncam::vfs::applyManualDngMetadata(
+        profileOutput, activeProfile, nullptr));
+    motioncam::DNGFrameMetadata profileOutputColor;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        profileOutput, profileOutputColor));
+    assert(profileOutputColor.hasColorMatrix1 &&
+           std::abs(profileOutputColor.colorMatrix1[0] - 0.8f) < 1e-4f);
+    assert(profileOutputColor.profileTables &&
+           profileOutputColor.profileTables->hueSat1.values.size() == 12 &&
+           profileOutputColor.profileTables->look.values.size() == 12);
+    assert(tagValue(profileOutput, 50940).count == 4);
+    std::vector<motioncam::GainMap> profileOutputMaps;
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        profileOutput, 2, profileOutputMaps));
+    assert(profileOutputMaps.empty());
+    assert(motioncam::DNGDecoder::getGainMaps(
+        profileOutput, 3, profileOutputMaps));
+    assert(profileOutputMaps.size() == 1 &&
+           profileOutputMaps.front().channels == 1 &&
+           profileOutputMaps.front().planes == 3);
+    auto bakedProfile = profileOutput;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        bakedProfile, false, false));
+    profileOutputMaps.clear();
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        bakedProfile, 3, profileOutputMaps));
+    assert(tagValue(profileOutput, 50936).count == profileName.count);
+    assert(tagValue(profileOutput, 52525).count == 0);
+    auto optOutOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
+    assert(motioncam::vfs::applyManualVignetteSidecar(
+        optOutOutput, selectedProfile));
+    assert(motioncam::vfs::applyManualDngMetadata(
+        optOutOutput, selectedProfile, nullptr));
+    assert(tagValue(optOutOutput, 52525).count == gainTable.count);
+    profileOutputMaps.clear();
+    assert(!motioncam::DNGDecoder::getGainMaps(
+        optOutOutput, 3, profileOutputMaps));
+    assert(profileOutputMaps.empty());
+    motioncam::CalibrationData explicitJson;
+    explicitJson.hasColorMatrix1 = true;
+    auto jsonOwnedOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
+    assert(motioncam::vfs::applyManualDngMetadata(
+        jsonOwnedOutput, selectedProfile, &explicitJson));
+    assert(tagValue(jsonOwnedOutput, 50721).count == 0);
+    const nlohmann::json referencedProfile{{"dcp", "profileclip.dcp"}};
+    const boost::filesystem::path profileJson((root / "profileclip.json").string());
+    assert(motioncam::vfs::loadManualVignetteSidecars(
+        (root / "otherclip.dng").string(), &referencedProfile,
+        &profileJson).hasDcp);
+    auto siblingProfile = profile;
+    profileMatrices.colorMatrix1[0] = 0.6f;
+    assert(motioncam::DNGDecoder::updateColorMatrices(
+        siblingProfile, profileMatrices));
+    writeDng(root / "otherclip.dcp", siblingProfile);
+    const auto siblingSelected = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "otherclip.dng").string(), &referencedProfile, &profileJson);
+    assert(siblingSelected.hasDcp &&
+           std::abs(siblingSelected.dcpColor.colorMatrix1[0] - 0.6f) < 1e-4f);
+    writeDng(root / "metadata_opcode.dng", profile);
+    const auto metadataDngSidecar = motioncam::vfs::loadManualVignetteSidecars(
+        (root / "metadata.dng").string());
+    assert(metadataDngSidecar.candidates.size() == 1);
+    auto metadataOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
+    assert(motioncam::vfs::applyManualDngMetadata(
+        metadataOutput, metadataDngSidecar, nullptr));
+    assert(tagValue(metadataOutput, 50936).count == profileName.count);
+    assert(tagValue(metadataOutput, 52525).count == gainTable.count);
     writeDng(root / "legacy_gainmap.dng", fisheyeWarped);
     auto legacySidecar = motioncam::vfs::loadManualVignetteSidecars(
         (root / "legacy.dng").string());
@@ -957,6 +1112,13 @@ int main() {
         dng, motioncam::RenderSettings{}, preview, false, false));
     assert(!preview.rawSamples && preview.rawWidth == 0 &&
            preview.rawHeight == 0 && preview.rawChannels == 0);
+    auto inactiveCrop = motioncam::RenderSettings{};
+    inactiveCrop.cropTarget = "4x4_4";
+    assert(motioncam::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
+    assert(preview.width == 8 && preview.height == 8);
+    inactiveCrop.options |= motioncam::RENDER_OPT_CROPPING;
+    assert(motioncam::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
+    assert(preview.width == 4 && preview.height == 4);
     assert(preview.rgb[0] == 0 && preview.rgb[1] == 128);
     motioncam::DNGFrameMetadata metadata;
     assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));

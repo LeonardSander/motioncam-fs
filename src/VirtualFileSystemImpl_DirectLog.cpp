@@ -257,7 +257,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
         }
         constexpr size_t transformedMetadataAllowance = 256 * 1024;
         size_t measuredMetadataBytes =
-            vfs::projectedSidecarMetadataSize(mSidecarMetadata);
+            vfs::projectedSidecarMetadataSize(mSidecarMetadata) +
+            vfs::projectedDcpMetadataSize(mManualVignetteSidecars);
         size_t largestManualSidecarBytes = 0;
         for (const auto& candidate : mManualVignetteSidecars.candidates) {
             size_t candidateBytes = 0;
@@ -849,6 +850,10 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
                 mManualVignetteSidecars, manualTarget,
                 manualOpcode2, manualOpcode3))
             throw std::runtime_error("Could not prepare manual DirectLog vignette sidecar");
+        if (mManualVignetteSidecars.useDcpGainmap) {
+            result.gainMaps.opcodeList2.clear();
+            result.gainMaps.opcodeList3.clear();
+        }
         if (!manualOpcode2.empty())
             result.gainMaps.opcodeList2 = std::move(manualOpcode2);
         if (!manualOpcode3.empty())

@@ -346,7 +346,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
     // both the serialized documents and the expanded native/sidecar map data.
     constexpr size_t transformedMetadataAllowance = 256 * 1024;
     size_t serializedMetadataBytes = metadata.dump().size() +
-        vfs::projectedSidecarMetadataSize(mSidecarMetadata);
+        vfs::projectedSidecarMetadataSize(mSidecarMetadata) +
+        vfs::projectedDcpMetadataSize(mManualVignetteSidecars);
     if (mCalibration && mSettings.badPixelTreatment == BadPixelTreatment::OpcodeOnly) {
         const size_t opcodeBytes = vfs::projectedBadPixelOpcodeSize(
             *mCalibration, static_cast<uint32_t>(cameraFrameMetadata.originalWidth),
@@ -742,9 +743,11 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         // white/gain DNG. Preserve exact finalized ordering for those uncommon
         // overrides.
         if (!mManualVignetteSidecars.candidates.empty() ||
+            mManualVignetteSidecars.hasDcp ||
             vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
                                     "deferredGainMaps")) {
-            bool gainMapApplied = !mManualVignetteSidecars.candidates.empty();
+            bool gainMapApplied = !mManualVignetteSidecars.candidates.empty() ||
+                mManualVignetteSidecars.useDcpGainmap;
             if (!gainMapApplied) {
                 const auto deferred = vfs::loadSidecarGainMaps(
                     mSidecarMetadata, frameIt->second, "deferredGainMaps");

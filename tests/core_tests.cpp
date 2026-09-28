@@ -33,6 +33,8 @@ int main() {
     assert(exampleCalibration.contains("_fullSensorResolution"));
     assert(exampleCalibration.contains("_dng_white"));
     assert(exampleCalibration.contains("_dng_opcode"));
+    assert(exampleCalibration.contains("_dcp"));
+    assert(exampleCalibration.contains("_useDcpGainmap"));
     assert(exampleCalibration.contains("_gyroflow"));
     assert(exampleCalibration.value("_ignoreForwardMat", true) == false);
     assert(exampleCalibration.value("_orientation", -1) == 0);
@@ -103,6 +105,32 @@ int main() {
     assert((midpointForward == std::array<float, 9>{5, 5, 5, 5, 5, 5, 5, 5, 5}));
     assert(gallery::interpolateMatrix(firstForward, secondForward, 1.0f) ==
            firstForward);
+
+    DNGProfileTable profileTable;
+    profileTable.hueDivisions = 2;
+    profileTable.saturationDivisions = 2;
+    profileTable.valueDivisions = 1;
+    profileTable.values = {
+        0, 1, 1,  60, 1, 1,
+        0, 1, 1,  60, 1, 1};
+    auto red = std::array<float, 3>{0.5f, 0.0f, 0.0f};
+    gallery::applyProfileTable(red, profileTable);
+    assert(nearlyEqual(red[0], 0.5f) && nearlyEqual(red[1], 0.5f) &&
+           nearlyEqual(red[2], 0.0f));
+    auto secondTable = profileTable;
+    for (size_t index = 0; index < secondTable.values.size(); index += 3)
+        secondTable.values[index] = 0.0f;
+    red = {0.5f, 0.0f, 0.0f};
+    gallery::applyProfileTable(red, profileTable, &secondTable, 0.5f);
+    assert(nearlyEqual(red[0], 0.5f) && nearlyEqual(red[1], 0.25f));
+    profileTable.valueDivisions = 2;
+    profileTable.encoding = 1;
+    const auto firstValueSlice = profileTable.values;
+    profileTable.values.insert(profileTable.values.end(),
+                               firstValueSlice.begin(), firstValueSlice.end());
+    red = {0.25f, 0.0f, 0.0f};
+    gallery::applyProfileTable(red, profileTable);
+    assert(nearlyEqual(red[0], 0.25f) && nearlyEqual(red[1], 0.25f));
 
     DNGFrameMetadata forwardMetadata;
     forwardMetadata.forwardMatrix1 = gallery::identityMatrix;

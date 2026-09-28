@@ -749,6 +749,109 @@ std::string lower(std::string value) {
     return value;
 }
 
+std::optional<GainMap> spatialDcpGainMap(
+        const std::vector<DNGSidecarMetadataEntry>& metadata, bool little) {
+    const DNGSidecarMetadataEntry* selected = nullptr;
+    for (const auto& entry : metadata)
+        if (entry.tag == 52544 || (entry.tag == 52525 && !selected))
+            selected = &entry;
+    if (!selected || selected->type != 7) return std::nullopt;
+    const auto& bytes = selected->value;
+    const bool version2 = selected->tag == 52544;
+    if (bytes.size() < (version2 ? 80u : 64u)) return std::nullopt;
+    auto u32 = [&](size_t offset) -> uint32_t {
+        uint32_t result = 0;
+        for (size_t i = 0; i < 4; ++i)
+            result |= static_cast<uint32_t>(bytes[offset + i]) <<
+                (little ? 8 * i : 8 * (3 - i));
+        return result;
+    };
+    auto f32 = [&](size_t offset) {
+        const uint32_t bits = u32(offset);
+        float result;
+        std::memcpy(&result, &bits, 4);
+        return result;
+    };
+    auto f64 = [&](size_t offset) {
+        uint64_t bits = 0;
+        for (size_t i = 0; i < 8; ++i)
+            bits |= static_cast<uint64_t>(bytes[offset + i]) <<
+                (little ? 8 * i : 8 * (7 - i));
+        double result;
+        std::memcpy(&result, &bits, 8);
+        return result;
+    };
+    const uint32_t rows = u32(0), columns = u32(4), points = u32(40);
+    const uint32_t dataType = version2 ? u32(64) : 3;
+    if (!rows || !columns || !points || rows > 4096 || columns > 4096 ||
+        dataType > 3) return std::nullopt;
+    const size_t sampleBytes = dataType == 0 ? 1 : dataType <= 2 ? 2 : 4;
+    const size_t header = version2 ? 80 : 64;
+    const uint64_t total = static_cast<uint64_t>(rows) * columns * points;
+    if (total > (bytes.size() - header) / sampleBytes ||
+        bytes.size() != header + total * sampleBytes) return std::nullopt;
+    const double spacingV = f64(8), spacingH = f64(16);
+    const double originV = f64(24), originH = f64(32);
+    if (!std::isfinite(spacingV) || !std::isfinite(spacingH) ||
+        !std::isfinite(originV) || !std::isfinite(originH) ||
+        spacingV <= 0 || spacingH <= 0) return std::nullopt;
+    const float gainMin = version2 ? f32(72) : 0.0f;
+    const float gainMax = version2 ? f32(76) : 0.0f;
+    auto sample = [&](size_t index) {
+        const size_t at = header + index * sampleBytes;
+        if (dataType == 0)
+            return gainMin + (gainMax - gainMin) * bytes[at] / 255.0f;
+        if (dataType == 1) {
+            const uint16_t value = little
+                ? static_cast<uint16_t>(bytes[at] | bytes[at + 1] << 8)
+                : static_cast<uint16_t>(bytes[at] << 8 | bytes[at + 1]);
+            return gainMin + (gainMax - gainMin) * value / 65535.0f;
+        }
+        if (dataType == 2) {
+            const uint16_t half = little
+                ? static_cast<uint16_t>(bytes[at] | bytes[at + 1] << 8)
+                : static_cast<uint16_t>(bytes[at] << 8 | bytes[at + 1]);
+            const uint32_t sign = static_cast<uint32_t>(half & 0x8000) << 16;
+            const uint32_t exponent = (half >> 10) & 31;
+            const uint32_t fraction = half & 1023;
+            uint32_t bits;
+            if (exponent == 0) {
+                if (fraction == 0) bits = sign;
+                else {
+                    uint32_t mantissa = fraction;
+                    int shift = 0;
+                    while ((mantissa & 0x400) == 0) { mantissa <<= 1; ++shift; }
+                    bits = sign | static_cast<uint32_t>(113 - shift) << 23 |
+                        (mantissa & 0x3ff) << 13;
+                }
+            } else if (exponent == 31)
+                bits = sign | 0x7f800000u | fraction << 13;
+            else bits = sign | (exponent + 112) << 23 | fraction << 13;
+            float value;
+            std::memcpy(&value, &bits, 4);
+            return value;
+        }
+        return f32(at);
+    };
+    GainMap map{};
+    map.width = columns; map.height = rows;
+    map.channels = 1; map.planes = 1;
+    map.rowPitch = map.colPitch = 1;
+    map.spacingV = spacingV; map.spacingH = spacingH;
+    map.originV = originV; map.originH = originH;
+    map.data.reserve(static_cast<size_t>(rows) * columns);
+    for (size_t i = 0; i < static_cast<size_t>(rows) * columns; ++i) {
+        const float value = sample(i * points);
+        if (!std::isfinite(value) || value < 0.0f) return std::nullopt;
+        for (size_t n = 1; n < points; ++n)
+            if (std::abs(sample(i * points + n) - value) >
+                1e-5f * std::max(1.0f, std::abs(value)))
+                return std::nullopt;
+        map.data.push_back(value);
+    }
+    return map;
+}
+
 std::vector<const ManualVignetteSidecars::Candidate*> manualCandidateOrder(
         const ManualVignetteSidecars& sidecars) {
     std::vector<const ManualVignetteSidecars::Candidate*> ordered;
@@ -892,6 +995,59 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     const auto parent = directory ? source : source.parent_path();
     const std::string stem = lower(
         directory ? source.filename().string() : source.stem().string());
+    auto discoveredDcp = parent /
+        ((directory ? source.filename() : source.stem()).string() + ".dcp");
+    if (!boost::filesystem::is_regular_file(discoveredDcp) && sidecarFile &&
+        sidecarFile->parent_path() != parent) {
+        auto routedDcp = *sidecarFile;
+        routedDcp.replace_extension(".dcp");
+        if (boost::filesystem::is_regular_file(routedDcp))
+            discoveredDcp = std::move(routedDcp);
+    }
+    const auto dcpPath = sidecar && sidecarFile
+        ? referencedSidecarPath(discoveredDcp, *sidecar, *sidecarFile, "dcp")
+        : discoveredDcp;
+    if (boost::filesystem::is_regular_file(dcpPath)) {
+        std::ifstream profile(dcpPath.string(), std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(profile)), {});
+        // Adobe DCP uses a TIFF directory with the 'CR' version marker
+        // instead of TIFF's 42. The remaining offsets and entries are TIFF.
+        if (bytes.size() >= 8 &&
+            ((bytes[0] == 'I' && bytes[1] == 'I' &&
+              bytes[2] == 'R' && bytes[3] == 'C') ||
+             (bytes[0] == 'M' && bytes[1] == 'M' &&
+              bytes[2] == 'C' && bytes[3] == 'R'))) {
+            bytes[2] = bytes[0] == 'I' ? 42 : 0;
+            bytes[3] = bytes[0] == 'I' ? 0 : 42;
+        }
+        if (DNGDecoder::extractSidecarMetadata(bytes, result.dcpMetadata) &&
+            DNGDecoder::getColorMetadata(bytes, result.dcpColor) &&
+            (result.dcpColor.hasColorMatrix1 ||
+             std::any_of(result.dcpMetadata.begin(), result.dcpMetadata.end(),
+                 [](const DNGSidecarMetadataEntry& entry) {
+                     return entry.tag == 50936 || entry.tag == 50938 ||
+                         entry.tag == 50982 || entry.tag == 52525 ||
+                         entry.tag == 52544;
+                 }))) {
+            result.hasDcp = true;
+            result.dcpSpatialGainMap = spatialDcpGainMap(result.dcpMetadata, true);
+            spdlog::info("Loaded DCP profile {}", dcpPath.string());
+        } else {
+            result.dcpMetadata.clear();
+            spdlog::warn("Ignoring invalid DCP profile {}", dcpPath.string());
+        }
+    }
+    if (sidecar && sidecar->is_object()) {
+        const auto option = sidecar->find("useDcpGainmap");
+        if (option != sidecar->end() && option->is_boolean() &&
+            option->get<bool>()) {
+            if (result.hasDcp && result.dcpSpatialGainMap)
+                result.useDcpGainmap = true;
+            else spdlog::warn(
+                "useDcpGainmap requested for {} without a spatial-only DCP gain table",
+                sourcePath);
+        }
+    }
     auto loadCandidate = [&](const boost::filesystem::path& path, bool white,
                              std::string illuminant = {}, bool legacyGainMapName = false) {
         std::ifstream input(path.string(), std::ios::binary);
@@ -932,6 +1088,13 @@ ManualVignetteSidecars loadManualVignetteSidecars(
             }
         } else if (candidate.image.opcodeList2.empty() &&
                    candidate.image.opcodeList3.empty() &&
+                   std::none_of(candidate.metadata.begin(), candidate.metadata.end(),
+                       [](const DNGSidecarMetadataEntry& entry) {
+                           return entry.tag == 50936 || entry.tag == 50938 ||
+                               entry.tag == 50939 || entry.tag == 50940 ||
+                               entry.tag == 50982 || entry.tag == 52525 ||
+                               entry.tag == 52537 || entry.tag == 52544;
+                       }) &&
                    std::all_of(candidate.nonGainMapOpcodes.begin(),
                                candidate.nonGainMapOpcodes.end(),
                                [](const auto& payload) { return payload.empty(); })) {
@@ -1032,6 +1195,19 @@ bool manualVignetteSidecarGainMaps(
         std::vector<GainMap>& opcodeList2, std::vector<GainMap>& opcodeList3) {
     opcodeList2.clear();
     opcodeList3.clear();
+    if (sidecars.useDcpGainmap && sidecars.dcpSpatialGainMap &&
+        targetLayout.width && targetLayout.height) {
+        auto map = *sidecars.dcpSpatialGainMap;
+        map.top = map.left = 0;
+        map.bottom = targetLayout.height;
+        map.right = targetLayout.width;
+        map.coordinateWidth = targetLayout.width;
+        map.coordinateHeight = targetLayout.height;
+        map.channels = 1;
+        map.planes = 3;
+        opcodeList3.push_back(std::move(map));
+        return true;
+    }
     for (const auto* selected : manualCandidateOrder(sidecars)) {
         // A file named _white is a flat-field capture, irrespective of any
         // stale OpcodeList2 it happens to contain.  Always derive its map from
@@ -1068,12 +1244,15 @@ bool manualVignetteSidecarGainMaps(
 
 bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                                 const ManualVignetteSidecars& sidecars) {
-    if (sidecars.candidates.empty()) return true;
+    if (sidecars.candidates.empty() && !sidecars.useDcpGainmap) return true;
     DNGImageLayout frameLayout;
     if (!DNGDecoder::getImageLayout(dng, frameLayout)) return false;
     std::vector<GainMap> opcodeList2, opcodeList3;
     if (!manualVignetteSidecarGainMaps(
             sidecars, frameLayout, opcodeList2, opcodeList3)) return false;
+    if (sidecars.useDcpGainmap)
+        return DNGDecoder::replaceGainMaps(dng, 2, {}) &&
+            DNGDecoder::replaceGainMaps(dng, 3, opcodeList3);
     return (opcodeList2.empty() || DNGDecoder::replaceGainMaps(dng, 2, opcodeList2)) &&
         (opcodeList3.empty() || DNGDecoder::replaceGainMaps(dng, 3, opcodeList3));
 }
@@ -1101,7 +1280,7 @@ bool applyManualDngMetadata(std::vector<uint8_t>& dng,
                             const ManualVignetteSidecars& sidecars,
                             const CalibrationData* jsonOverride) {
     const auto ordered = manualCandidateOrder(sidecars);
-    if (ordered.empty()) return true;
+    if (ordered.empty() && !sidecars.hasDcp) return true;
     std::vector<uint16_t> excluded;
     if (jsonOverride) {
         if (jsonOverride->hasColorMatrix1) excluded.push_back(50721);
@@ -1114,16 +1293,89 @@ bool applyManualDngMetadata(std::vector<uint8_t>& dng,
         if (jsonOverride->hasForwardMatrix1) excluded.push_back(50964);
         if (jsonOverride->hasForwardMatrix2) excluded.push_back(50965);
     }
-    return DNGDecoder::fillMissingSidecarMetadata(
-        dng, ordered.front()->metadata, excluded);
+    for (const auto* candidate : ordered)
+        if (!DNGDecoder::fillMissingSidecarMetadata(
+                dng, candidate->metadata, excluded)) return false;
+    uint8_t requiredMinor = 0;
+    auto includeVersion = [&](const std::vector<DNGSidecarMetadataEntry>& metadata) {
+        for (const auto& entry : metadata) {
+            if (entry.tag == 52544) requiredMinor = 7;
+            else if (entry.tag == 52525 ||
+                     (entry.tag >= 52529 && entry.tag <= 52537))
+                requiredMinor = std::max<uint8_t>(requiredMinor, 6);
+        }
+    };
+    for (const auto* candidate : ordered) includeVersion(candidate->metadata);
+    if (!sidecars.hasDcp)
+        return !requiredMinor || DNGDecoder::requireDngVersion(dng, requiredMinor);
+    const auto isProfileTag = [](uint16_t tag) {
+        switch (tag) {
+        case 50721: case 50722: case 50723: case 50724:
+        case 50778: case 50779: case 50964: case 50965:
+        case 50931: case 50932: case 50934: case 50936:
+        case 50937: case 50938: case 50939: case 50940:
+        case 50941: case 50942: case 50981: case 50982:
+        case 51107: case 51108: case 52525: case 52544:
+        case 52529: case 52530: case 52531: case 52532:
+        case 52533: case 52534: case 52535: case 52537:
+        case 52551: case 52552:
+            return true;
+        default: return false;
+        }
+    };
+    std::vector<DNGSidecarMetadataEntry> selected;
+    for (const auto& entry : sidecars.dcpMetadata)
+        if (isProfileTag(entry.tag) &&
+            !(sidecars.useDcpGainmap &&
+              (entry.tag == 52525 || entry.tag == 52544)) &&
+            std::find(excluded.begin(), excluded.end(), entry.tag) == excluded.end())
+            selected.push_back(entry);
+    if (sidecars.useDcpGainmap &&
+        !DNGDecoder::removeMetadataTags(dng, {52525, 52544})) return false;
+    includeVersion(selected);
+    return DNGDecoder::replaceSidecarMetadata(dng, selected) &&
+        (!requiredMinor || DNGDecoder::requireDngVersion(dng, requiredMinor));
 }
 
 void mergeManualDngMetadata(DNGFrameMetadata& metadata,
                             const ManualVignetteSidecars& sidecars,
                             const CalibrationData* jsonOverride) {
     const auto ordered = manualCandidateOrder(sidecars);
+    if (sidecars.hasDcp) {
+        const auto& profile = sidecars.dcpColor;
+        if (profile.profileTables)
+            metadata.profileTables = profile.profileTables;
+        auto overrideMatrix = [](const auto& source, bool present,
+                                 auto& destination, bool& destinationPresent,
+                                 bool jsonOwned) {
+            if (present && !jsonOwned) {
+                destination = source;
+                destinationPresent = true;
+            }
+        };
+        overrideMatrix(profile.colorMatrix1, profile.hasColorMatrix1,
+            metadata.colorMatrix1, metadata.hasColorMatrix1,
+            jsonOverride && jsonOverride->hasColorMatrix1);
+        overrideMatrix(profile.colorMatrix2, profile.hasColorMatrix2,
+            metadata.colorMatrix2, metadata.hasColorMatrix2,
+            jsonOverride && jsonOverride->hasColorMatrix2);
+        overrideMatrix(profile.forwardMatrix1, profile.hasForwardMatrix1,
+            metadata.forwardMatrix1, metadata.hasForwardMatrix1,
+            jsonOverride && jsonOverride->hasForwardMatrix1);
+        overrideMatrix(profile.forwardMatrix2, profile.hasForwardMatrix2,
+            metadata.forwardMatrix2, metadata.hasForwardMatrix2,
+            jsonOverride && jsonOverride->hasForwardMatrix2);
+        if (profile.calibrationIlluminant1 &&
+            !(jsonOverride && jsonOverride->hasCalibrationIlluminant1))
+            metadata.calibrationIlluminant1 = profile.calibrationIlluminant1;
+        if (profile.calibrationIlluminant2 &&
+            !(jsonOverride && jsonOverride->hasCalibrationIlluminant2))
+            metadata.calibrationIlluminant2 = profile.calibrationIlluminant2;
+    }
     if (ordered.empty()) return;
     const auto& sidecar = ordered.front()->image.metadata;
+    if (!metadata.profileTables && sidecar.profileTables)
+        metadata.profileTables = sidecar.profileTables;
     auto copyMatrix = [](const auto& source, bool sourcePresent,
                          auto& destination, bool& destinationPresent,
                          bool jsonOwned) {
@@ -1163,6 +1415,19 @@ void mergeManualDngMetadata(DNGFrameMetadata& metadata,
         metadata.calibrationIlluminant2 = sidecar.calibrationIlluminant2;
     if (metadata.uniqueCameraModel.empty())
         metadata.uniqueCameraModel = sidecar.uniqueCameraModel;
+}
+
+size_t projectedDcpMetadataSize(const ManualVignetteSidecars& sidecars) {
+    size_t bytes = 0;
+    for (const auto& entry : sidecars.dcpMetadata)
+        bytes += entry.value.size() + 12;
+    for (const auto& candidate : sidecars.candidates)
+        for (const auto& entry : candidate.metadata)
+            bytes += entry.value.size() + 12;
+    if (sidecars.dcpSpatialGainMap)
+        bytes += 4 * projectedGainMapMetadataSize(
+            {*sidecars.dcpSpatialGainMap}) + 1024;
+    return bytes;
 }
 
 std::array<int, 2> manualVignetteSensorResolution(

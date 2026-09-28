@@ -245,6 +245,11 @@ struct ManualVignetteSidecars {
         std::array<std::vector<uint8_t>, 3> nonGainMapOpcodes;
     };
     std::vector<Candidate> candidates;
+    std::vector<DNGSidecarMetadataEntry> dcpMetadata;
+    DNGFrameMetadata dcpColor;
+    bool hasDcp = false;
+    std::optional<GainMap> dcpSpatialGainMap;
+    bool useDcpGainmap = false;
     std::shared_ptr<Cache> cache = std::make_shared<Cache>();
 };
 
@@ -266,6 +271,7 @@ void mergeManualDngMetadata(DNGFrameMetadata& metadata,
                             const CalibrationData* jsonOverride);
 std::array<int, 2> manualVignetteSensorResolution(
     const ManualVignetteSidecars& sidecars);
+size_t projectedDcpMetadataSize(const ManualVignetteSidecars& sidecars);
 
 void processDngPixels(std::vector<uint8_t>& dng,
                       const RenderSettings& settings,

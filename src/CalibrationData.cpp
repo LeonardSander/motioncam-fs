@@ -439,6 +439,8 @@ std::string CalibrationData::createExampleJson() {
   "_comment8b": "Optional absolute paths, or paths relative to this JSON; conventionally named sibling files take priority",
   "_dng_white": "calibration/flat-field.dng",
   "_dng_opcode": "calibration/opcodes.dng",
+  "_dcp": "calibration/camera-profile.dcp",
+  "_useDcpGainmap": false,
   "_gyroflow": "calibration/lens-profile.json",
   "_comment9": "Bad/PDAF start/end are full-sensor coordinates; repeat defines lattice spacing",
   "_badPixels": [
