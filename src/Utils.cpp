@@ -2377,11 +2377,18 @@ std::shared_ptr<std::vector<char>> generateDng(
             37378, 2.0 * std::log2(aperture), false)); // ApertureValue
     }
     if (!cameraConfiguration.focalLengths.empty() &&
-        cameraConfiguration.focalLengths.front() > 0.0f)
+        std::isfinite(cameraConfiguration.focalLengths.front()) &&
+        cameraConfiguration.focalLengths.front() > 0.0f) {
+        const double focalLength35mm = cameraConfiguration.focalLengths.front();
+        // MCRAW provides only the 35 mm equivalent. Also use it for the EXIF
+        // focal length so applications that read only that tag show a value.
+        captureMetadata.push_back(rationalMetadata(
+            37386, focalLength35mm, false)); // FocalLength
         captureMetadata.push_back(shortMetadata(
             41989, static_cast<uint16_t>(std::clamp<long>(
-                std::lround(cameraConfiguration.focalLengths.front()), 1, 65535)),
+                std::lround(focalLength35mm), 1, 65535)),
             true)); // FocalLengthIn35mmFilm
+    }
     if (metadata.exposureCompensation != 0 &&
         cameraConfiguration.hasExposureCompensationStep) {
         const double step = cameraConfiguration.exposureCompensationStep;
