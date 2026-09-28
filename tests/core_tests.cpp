@@ -2,6 +2,7 @@
 #include "Types.h"
 #include "DataLevels.h"
 #include "GalleryColor.h"
+#include "GainMapBake.h"
 
 #include <cassert>
 #include <cmath>
@@ -16,6 +17,16 @@ bool nearlyEqual(float lhs, float rhs) {
 
 int main() {
     using namespace motioncam;
+
+    const auto bake = planLinearGainBake(1023.0, {64.0, 64.0, 63.0, 63.0}, false);
+    assert(bake.destinationWhite == 4095.0);
+    assert((bake.destinationBlack == std::array<double, 4>{256.0, 256.0, 256.0, 256.0}));
+    for (size_t phase = 0; phase < 4; ++phase)
+        assert(bakeLinearGainSample(static_cast<uint16_t>(bake.sourceBlack[phase]),
+            1.0f, bake.sourceBlack[phase], bake.sourceWhite,
+            bake.destinationBlack[phase], bake.destinationWhite) == 256);
+    assert((planLinearGainBake(1023.0, {0.0, 0.0, 0.0, 0.0}, false).destinationBlack ==
+        std::array<double, 4>{0.0, 0.0, 0.0, 0.0}));
 
     const auto levelsCalibration = CalibrationData::parse(std::string(R"({"dataLevels":"full"})"));
     assert(levelsCalibration.has_value());

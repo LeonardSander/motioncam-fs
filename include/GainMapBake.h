@@ -90,10 +90,21 @@ inline LinearGainBakeLevels planLinearGainBake(
         16, result.sourceBits + (normalizeGainMaps ? 4u : 2u));
     result.destinationWhite = static_cast<double>(
         (uint32_t{1} << result.destinationBits) - 1);
+    // Baking subtracts each source phase's black level before scaling. The
+    // encoded offset can therefore be common to every output phase.
     const double scale = std::ldexp(
         1.0, static_cast<int>(result.destinationBits - result.sourceBits));
-    for (size_t channel = 0; channel < result.destinationBlack.size(); ++channel)
-        result.destinationBlack[channel] = sourceBlack[channel] * scale;
+    double scaledBlack = 0.0;
+    for (double black : sourceBlack) scaledBlack += black * scale / sourceBlack.size();
+    double standardBlack = 0.0;
+    if (scaledBlack > 0.0) {
+        standardBlack = 1.0;
+        while (standardBlack < 16384.0 &&
+               std::abs(standardBlack * 4.0 - scaledBlack) <
+                   std::abs(standardBlack - scaledBlack))
+            standardBlack *= 4.0;
+    }
+    result.destinationBlack.fill(standardBlack);
     return result;
 }
 
