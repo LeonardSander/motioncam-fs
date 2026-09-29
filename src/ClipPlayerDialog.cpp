@@ -128,7 +128,7 @@ protected:
             qRgba(0,0,0,0),qRgba(240,65,65,42),
             qRgba(65,215,65,42),qRgba(230,195,65,42),
             qRgba(75,115,240,42),qRgba(175,75,205,42),
-            qRgba(220,205,70,42),qRgba(175,175,175,42)};
+            qRgba(65,205,220,42),qRgba(175,175,175,42)};
         QImage fill(graph.size(),QImage::Format_ARGB32);
         fill.fill(Qt::transparent);
         for(int x=0;x<fill.width();++x) {
@@ -176,7 +176,7 @@ protected:
         }
         const std::array<QRgb,8> lineColors={
             qRgb(0,0,0),qRgb(255,75,75),qRgb(80,255,80),qRgb(230,195,65),
-            qRgb(85,130,255),qRgb(175,75,205),qRgb(220,205,70),qRgb(255,255,255)};
+            qRgb(85,130,255),qRgb(175,75,205),qRgb(70,225,235),qRgb(255,255,255)};
         QImage strokes(graph.size(),QImage::Format_ARGB32);
         strokes.fill(Qt::transparent);
         for(int y=0;y<strokes.height();++y) {
@@ -188,30 +188,6 @@ protected:
                 const int r=qAlpha(red[x]),g=qAlpha(green[x]),b=qAlpha(blue[x]);
                 const int mask=(r>0?1:0)|(g>0?2:0)|(b>0?4:0);
                 if(mask) {
-                    if(x>=strokes.width()-3) {
-                        // At clipping, retain the original green/blue/red
-                        // painter order instead of combining stroke colors.
-                        double opacity=0.0,redPremul=0.0,greenPremul=0.0,
-                            bluePremul=0.0;
-                        const std::array<int,3> coverage={g,b,r};
-                        const std::array<QRgb,3> source={lineColors[2],
-                            lineColors[4],lineColors[1]};
-                        for(int channel=0;channel<3;++channel) {
-                            const double alpha=coverage[channel]*210.0/(255.0*255.0);
-                            redPremul=qRed(source[channel])*alpha+
-                                redPremul*(1.0-alpha);
-                            greenPremul=qGreen(source[channel])*alpha+
-                                greenPremul*(1.0-alpha);
-                            bluePremul=qBlue(source[channel])*alpha+
-                                bluePremul*(1.0-alpha);
-                            opacity=alpha+opacity*(1.0-alpha);
-                        }
-                        if(opacity>0.0)
-                            output[x]=qRgba(qRound(redPremul/opacity),
-                                qRound(greenPremul/opacity),
-                                qRound(bluePremul/opacity),qRound(opacity*255.0));
-                        continue;
-                    }
                     const QRgb color=lineColors[mask];
                     output[x]=qRgba(qRed(color),qGreen(color),qBlue(color),
                         std::max({r,g,b})*210/255);
