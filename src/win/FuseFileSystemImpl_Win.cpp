@@ -192,7 +192,7 @@ void Session::startProjection() {
     prjOptions.NotificationMappings = notificationMappings;
     prjOptions.NotificationMappingsCount = 1;
 
-    auto hr = this->Start(fromUTF8(dstPath).c_str(), &prjOptions);
+    auto hr = this->Start(fromUTF8(mDstPath).c_str(), &prjOptions);
     if(hr != S_OK) {
         throw std::runtime_error("Failed to create mount point (error: + " + std::to_string(hr) + ")");
     }
