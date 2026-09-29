@@ -5001,13 +5001,13 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     if (!sourceWidth) sourceWidth = image.layout.width;
     if (!sourceHeight) sourceHeight = image.layout.height;
     sourceScale = std::max(1u, sourceScale);
-    auto sourceCoordinate = [](uint32_t coordinate, uint32_t scale,
-                               uint32_t limit) {
-        // For an even proxy stride, retain the reduced pixel's CFA parity
-        // instead of using a fixed block center (which would select one phase
-        // for every output pixel).
+    auto sourceCoordinate = [rgb](uint32_t coordinate, uint32_t scale,
+                                  uint32_t limit) {
+        // Match reduceRGB's center sample for RGB; preserve Bayer phase for CFA.
         return std::min(limit - 1, coordinate * scale +
-                        (scale > 1 ? (coordinate & 1u) : 0u));
+                        (scale > 1
+                             ? (rgb ? (scale - 1) / 2 : (coordinate & 1u))
+                             : 0u));
     };
     if (channels != 1 && channels != 3) return false;
     const uint32_t phaseGroup = static_cast<uint32_t>(
@@ -5231,6 +5231,25 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         image.layout.height = proxyHeight;
         gainMapSourceScale *= remainingPreviewScale;
     }
+    // RGB nearest-neighbor proxies need gain correction only at the samples
+    // that survive reduction. Keep the original samples for the histogram.
+    const bool fastRgbProxy = applyPreviewScale && remainingPreviewScale > 1 &&
+        image.layout.pixels != DNGPixelLayout::CFA &&
+        image.layout.samplesPerPixel == 3 &&
+        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
+        !(settings.options & RENDER_OPT_REMOSAIC_TO_BAYER) && !hasCrop;
+    if (fastRgbProxy) {
+        std::vector<uint16_t> reduced;
+        uint32_t proxyWidth = 0, proxyHeight = 0;
+        utils::reduceRGB(image.samples, reduced, image.layout.width,
+                         image.layout.height, remainingPreviewScale, false,
+                         proxyWidth, proxyHeight);
+        if (reduced.empty()) return false;
+        image.samples = std::move(reduced);
+        image.layout.width = proxyWidth;
+        image.layout.height = proxyHeight;
+        gainMapSourceScale = remainingPreviewScale;
+    }
     if (!bakeDecodedPreviewGainMaps(
             image, settings, sourceWidth, sourceHeight, gainMapSourceScale,
             &frame.gainMapApplied)) return false;
@@ -5322,9 +5341,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         }
     }
 
-    // The fast CFA path is already at the requested scale. Other layouts keep
-    // the established post-demosaic reduction behavior.
-    const uint32_t previewScale = fastCfaProxy ? 1u : remainingPreviewScale;
+    // The fast paths are already at the requested scale.
+    const uint32_t previewScale = fastCfaProxy || fastRgbProxy
+        ? 1u : remainingPreviewScale;
     if (previewScale > 1) {
         std::vector<uint16_t> reduced;
         uint32_t reducedWidth = 0, reducedHeight = 0;

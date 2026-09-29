@@ -98,6 +98,7 @@ void PreviewRenderer::render(
     }), entries.end());
     const size_t firstFrame = std::min(options.firstFrame, entries.size());
     size_t completed = 0;
+    const bool profileFrames = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     for (size_t index = firstFrame; index < entries.size(); ++index) {
         if (progress && !progress(completed, entries.size() - firstFrame,
                 "Rendering " + entries[index].name))
@@ -106,6 +107,7 @@ void PreviewRenderer::render(
             ++completed;
             continue;
         }
+        const auto materializeStarted = std::chrono::steady_clock::now();
         PreviewFrame frame;
         if (!state->filesystem->materializePreviewFrame(
                 entries[index], frame, options.retainSourceSamples)) {
@@ -116,7 +118,15 @@ void PreviewRenderer::render(
                                            options.retainSourceSamples))
                 throw std::runtime_error("Could not decode preview " + entries[index].name);
         }
+        const auto materializeFinished = std::chrono::steady_clock::now();
         frameReady(std::move(frame));
+        if (profileFrames)
+            spdlog::info(
+                "GALLERY_PERF event=preview_frame source={} frame={} materialize_ms={:.3f} callback_ms={:.3f}",
+                mSource, index,
+                std::chrono::duration<double, std::milli>(materializeFinished - materializeStarted).count(),
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - materializeFinished).count());
         ++completed;
     }
     if (galleryDiagnosticsEnabled())

@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <cstdlib>
 #include <ctime>
 #include <iomanip>
 #include <numeric>
@@ -1500,6 +1502,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     bool retainSourceSamples)
 {
     Measure m("generateDng");
+    const auto previewProfileStarted = std::chrono::steady_clock::now();
 
     unsigned int width = metadata.width;
     unsigned int height = metadata.height;
@@ -1620,6 +1623,7 @@ std::shared_ptr<std::vector<char>> generateDng(
             badPixelTreatment, demosaic);
     }
 
+    const auto preprocessStarted = std::chrono::steady_clock::now();
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
         width, height,
@@ -1638,6 +1642,7 @@ std::shared_ptr<std::vector<char>> generateDng(
         settings.quadBayerOption,
         true // includeOpcode
     );
+    const auto preprocessFinished = std::chrono::steady_clock::now();
 
     int processedRepeatSize = cfaRepeatSize;
     // preprocessData's sparse draft path emits ordinary Bayer, regardless of
@@ -1785,6 +1790,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     }
 
     if (previewFrame) {
+      const auto previewStarted = std::chrono::steady_clock::now();
       std::vector<uint16_t> rgbSamples;
       std::array<float, 3> rgbBlack{};
       if (demosaic && !remosaic) {
@@ -1921,6 +1927,13 @@ std::shared_ptr<std::vector<char>> generateDng(
       color.orientation = calibration && calibration->hasOrientation
                               ? calibration->orientation
                               : sourceOrientation();
+      if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=mcraw_generate_stage width={} height={} setup_ms={:.3f} preprocess_ms={:.3f} intermediate_ms={:.3f} preview_ms={:.3f}",
+            width, height,
+            std::chrono::duration<double, std::milli>(preprocessStarted-previewProfileStarted).count(),
+            std::chrono::duration<double, std::milli>(preprocessFinished-preprocessStarted).count(),
+            std::chrono::duration<double, std::milli>(previewStarted-preprocessFinished).count(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());
       return nullptr;
     }
 

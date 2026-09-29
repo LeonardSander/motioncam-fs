@@ -20,6 +20,7 @@ class QLabel; class QPushButton; class QSlider; class QScrollArea; class QCheckB
 class QEvent;
 class QBuffer;
 class QTemporaryDir;
+class GalleryGpuVideo;
 class QGraphicsOpacityEffect; class QPropertyAnimation; class QWidget;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
 class QAudioSink;
@@ -30,7 +31,7 @@ class ClipPlayerDialog final : public QDialog {
     Q_OBJECT
 public:
     enum class FramePushResult { Accepted, Retry, Stopped };
-    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int nativeWidth=0; int nativeHeight=0; int orientation=-1; bool isSequence=true; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; std::shared_ptr<const std::vector<std::string>> stillFrameNames; QSet<int> selectedSourceFrames; };
+    struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int nativeWidth=0; int nativeHeight=0; int orientation=-1; bool isSequence=true; bool directPresentation=false; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; std::shared_ptr<const std::vector<std::string>> stillFrameNames; QSet<int> selectedSourceFrames; };
     explicit ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent=nullptr);
     ~ClipPlayerDialog() override;
     int currentMountId() const;
@@ -44,6 +45,7 @@ public:
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
     void setHistogramEnabled(bool enabled);
+    void setPerformanceOverlayPinned(bool pinned);
     bool histogramEnabled() const { return mHistogramEnabled; }
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
@@ -60,13 +62,13 @@ public:
         int rawWidth = 0, int rawHeight = 0, int rawChannels = 0,
         float rawBlack = 0.0f, float rawWhite = 65535.0f,
         int rawCfaSize = 2, std::array<uint8_t, 4> rawCfaPhase = {0, 1, 1, 2},
-        std::array<float, 4> rawBlackLevels = {});
+        std::array<float, 4> rawBlackLevels = {}, int rawOrientation = 0);
     void presentRgb48Frame(const QByteArray& frame, int width, int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
         int rawWidth = 0, int rawHeight = 0, int rawChannels = 0,
         float rawBlack = 0.0f, float rawWhite = 65535.0f,
         int rawCfaSize = 2, std::array<uint8_t, 4> rawCfaPhase = {0, 1, 1, 2},
-        std::array<float, 4> rawBlackLevels = {});
+        std::array<float, 4> rawBlackLevels = {}, int rawOrientation = 0);
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
@@ -97,6 +99,7 @@ private:
         std::array<float, 4> blackLevels{};
         int cfaSize=2;
         std::array<uint8_t, 4> cfaPhase{0, 1, 1, 2};
+        int orientation=0;
     };
     struct SubmittedFrame { int sourceFrame=0; RawFrame raw; };
     struct QueuedFrame { QImage image; int sourceFrame=0; RawFrame raw; };
@@ -152,7 +155,7 @@ private:
     int sourceFrameForOutput(int outputFrame) const;
     QImage rgb48Image(const QByteArray& frame, int width, int height) const;
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
-    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
+    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; GalleryGpuVideo* mGpuVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
     QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
     QWidget* mThumbnailContent=nullptr; QHash<int,QLabel*> mThumbnailLabels;
@@ -191,12 +194,18 @@ private:
     bool mFpsIndicatorEnabled=true;
     bool mHistogramEnabled=false;
     bool mHistogramExpanded=false;
+    bool mPerformanceOverlayPinned=false;
     std::optional<uint16_t> mDetectedClipValue;
     const std::vector<uint16_t>* mIntensitySamples=nullptr;
     QPoint mIntensityPosition{-1,-1};
     QString mCachedIntensity;
     std::vector<std::array<uint32_t,3>> mClipValueCounts;
+    std::array<std::vector<uint16_t>,4> mHistogramBinsByPhase;
+    std::array<float,4> mHistogramBinBlackLevels{};
+    float mHistogramBinWhite=0.0f;
+    int mHistogramBinChannels=0;
     bool mDirectFramesFinished=false;
+    bool mDirectSequencePresentation=false;
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;
     int mAudioLoadGeneration=0;

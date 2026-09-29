@@ -14,6 +14,13 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
+#if defined(MOTIONCAM_HAS_QUICKWIDGETS)
+#include <QQuickWidget>
+#include <QQuickItem>
+#include <QQuickWindow>
+#include <QSGSimpleTextureNode>
+#include <QSGRendererInterface>
+#endif
 #include <QPainter>
 #include <QPainterPath>
 #include <QPropertyAnimation>
@@ -33,6 +40,7 @@
 #include <QtConcurrent>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <functional>
 #include <spdlog/spdlog.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
@@ -279,6 +287,106 @@ QSize frameThumbnailSize(int width,int height,int orientation){
 }
 }
 
+#if defined(MOTIONCAM_HAS_QUICKWIDGETS)
+class GalleryTextureItem final : public QQuickItem {
+public:
+    GalleryTextureItem() { setFlag(ItemHasContents); }
+
+    void setFrame(const QImage& image, const QRectF& target, bool smooth) {
+        mFrame = image;
+        mTarget = target;
+        mSmooth = smooth;
+        update();
+    }
+
+protected:
+    QSGNode* updatePaintNode(QSGNode* oldNode,
+                            UpdatePaintNodeData*) override {
+        const auto started = std::chrono::steady_clock::now();
+        if(mFrame.isNull()||!window()){
+            delete oldNode;
+            mUploadedFrameKey=0;
+            return nullptr;
+        }
+        if(oldNode&&mUploadedFrameKey==mFrame.cacheKey()){
+            auto* node=static_cast<QSGSimpleTextureNode*>(oldNode);
+            node->setRect(mTarget);
+            node->setFiltering(mSmooth?QSGTexture::Linear:QSGTexture::Nearest);
+            return node;
+        }
+        delete oldNode;
+        auto* texture=window()->createTextureFromImage(mFrame);
+        if(!texture){mUploadedFrameKey=0;return nullptr;}
+        auto* node=new QSGSimpleTextureNode;
+        node->setOwnsTexture(true);
+        node->setTexture(texture);
+        node->setRect(mTarget);
+        node->setFiltering(mSmooth?QSGTexture::Linear:QSGTexture::Nearest);
+        mUploadedFrameKey=mFrame.cacheKey();
+        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+            !mFrame.isNull())
+            spdlog::info("GALLERY_PERF event=gpu_present source={}x{} viewport={}x{} cpu_ms={:.3f}",
+                mFrame.width(), mFrame.height(), width(), height(),
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started).count());
+        return node;
+    }
+
+private:
+    QImage mFrame;
+    QRectF mTarget;
+    bool mSmooth = true;
+    qint64 mUploadedFrameKey=0;
+};
+
+class GalleryGpuVideo final : public QQuickWidget {
+public:
+    explicit GalleryGpuVideo(QWidget* parent) : QQuickWidget(parent) {
+        connect(this,&QQuickWidget::sceneGraphError,this,
+            [this](QQuickWindow::SceneGraphError,const QString& message){
+                mAvailable=false;
+                spdlog::warn("Gallery Vulkan presentation unavailable: {}",
+                    message.toStdString());
+            });
+        setResizeMode(SizeRootObjectToView);
+        setClearColor(QColor(96,96,96));
+        mTextureItem=new GalleryTextureItem;
+        mTextureItem->setSize(QSizeF(640,360));
+        setContent(QUrl(),nullptr,mTextureItem);
+        if(status()==QQuickWidget::Error||!rootObject()){
+            mAvailable=false;
+            spdlog::error("Gallery Vulkan scene initialization failed");
+            return;
+        }
+        spdlog::info("Gallery scene graph API: {}",
+            static_cast<int>(quickWindow()->rendererInterface()->graphicsApi()));
+    }
+
+    void setFrame(const QImage& image,const QRectF& target,bool smooth) {
+        if(mTextureItem)mTextureItem->setFrame(image,target,smooth);
+    }
+    bool usable() const {return mAvailable;}
+
+private:
+    GalleryTextureItem* mTextureItem=nullptr;
+    bool mAvailable=true;
+};
+#else
+class GalleryGpuVideo final : public QLabel {
+public:
+    using QLabel::QLabel;
+    void setFrame(const QImage& image,const QRectF& target,bool smooth) {
+        QImage canvas(size(),QImage::Format_RGB888);
+        canvas.fill(QColor(96,96,96));
+        QPainter painter(&canvas);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform,smooth);
+        painter.drawImage(target,image);
+        setPixmap(QPixmap::fromImage(canvas));
+    }
+    bool usable() const {return true;}
+};
+#endif
+
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
     mThumbnailDiskCache=std::make_unique<QTemporaryDir>();
@@ -347,13 +455,16 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlay->setGraphicsEffect(mOverlayOpacity);mOverlayOpacity->setOpacity(1.0);
     mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);mOverlayAnimation->setDuration(260);
-    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mHistogramExpanded&&!pointerOverThumbnailRow())setOverlayVisible(false);});
+    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mPerformanceOverlayPinned&&!mHistogramExpanded&&!pointerOverThumbnailRow())setOverlayVisible(false);});
     mSurfaceUpdateTimer.setSingleShot(true);mSurfaceUpdateTimer.setInterval(300);
     connect(&mSurfaceUpdateTimer,&QTimer::timeout,this,[this]{
         // A later resize may arrive while a prior surface is still starting.
         // The retained image, rather than first-frame state, is the authority
         // for whether it is safe and necessary to restart at the final size.
         if(mIndex<0||mLastPresentedImage.isNull())return;
+        if(mDirectSequencePresentation&&mClips[mIndex].isSequence){
+            updateDisplayedImage();return;
+        }
         // While zoom is animating, build the crop for its already-known final
         // target in parallel. Keep presenting the intermediate transform until
         // that backing surface arrives.
@@ -394,7 +505,8 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(mPlayPause,&QPushButton::clicked,this,[this]{
         if(mPaused&&mThumbnailScroll&&mThumbnailScroll->isVisible()&&mPosition&&
            mPosition->value()>=mPosition->maximum()&&
-           (mClips[mIndex].isSequence?mDecoder.state()==QProcess::NotRunning:
+           (mClips[mIndex].isSequence&&!mDirectSequencePresentation
+                ?mDecoder.state()==QProcess::NotRunning:
             mDirectFramesFinished)&&mFrames.empty()&&mBytes.isEmpty()){
             openClip(mIndex,0.0);return;
         }
@@ -583,6 +695,33 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     ++mAudioLoadGeneration;mAudioLoading=false;
     mFirstFrameReady=false;mAudioStartPending=mAudioEnabled;
     mIndex=index;
+    // Present sequence frames at source size so a larger viewport does not
+    // increase the FFmpeg output pipe and copy cost.
+    mDirectSequencePresentation=mClips[index].isSequence &&
+        (mClips[index].directPresentation ||
+         qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_DIRECT_PRESENT")) &&
+        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
+    if(mDirectSequencePresentation&&!mGpuVideo){
+#if defined(MOTIONCAM_HAS_QUICKWIDGETS)
+        static const bool vulkanSelected=[] {
+#if !defined(Q_OS_MACOS)
+            QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
+#endif
+            return true;
+        }();
+        (void)vulkanSelected;
+#endif
+        auto* stage=mVideo->parentWidget();
+        mGpuVideo=new GalleryGpuVideo(stage);
+        mGpuVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
+        mGpuVideo->setMouseTracking(true);
+        static_cast<QStackedLayout*>(stage->layout())->insertWidget(1,mGpuVideo);
+    }
+    if(mGpuVideo)mGpuVideo->hide();
+    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=gallery_presenter mount={} mode={}",
+            mClips[index].mountId,
+            mDirectSequencePresentation?"direct":"ffmpeg");
     if(changingClip)
         mRequestedZoomPercent=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     const auto& clip=mClips[index];
@@ -860,6 +999,9 @@ void ClipPlayerDialog::selectAllFrameSelections(){
 }
 
 void ClipPlayerDialog::startDecoder(){
+    if(mDirectSequencePresentation){
+        updateFrameTimerInterval();mFrameTimer.start();return;
+    }
     const QString exe=ffmpegPath();if(exe.isEmpty()){mPlaybackFailed=true;mFrameTimer.stop();if(mLastPresentedImage.isNull())mVideo->setText(tr("FFmpeg was not found"));return;}
     // openClip can run from the constructor, before Qt has performed its first
     // automatic layout pass. Activate both layouts so the decoder is sized to
@@ -1117,10 +1259,18 @@ void ClipPlayerDialog::updateTitle(){
             const auto& clip=mClips[mIndex];
             const int nativeWidth=clip.nativeWidth>0?clip.nativeWidth:raw.width;
             const int nativeHeight=clip.nativeHeight>0?clip.nativeHeight:raw.height;
-            const int x=std::clamp(static_cast<int>(std::floor(
-                (mMouseSourcePosition.x()+0.5)*raw.width/nativeWidth)),0,raw.width-1);
-            const int y=std::clamp(static_cast<int>(std::floor(
-                (mMouseSourcePosition.y()+0.5)*raw.height/nativeHeight)),0,raw.height-1);
+            const int orientedWidth=raw.orientation==90||raw.orientation==270
+                ?raw.height:raw.width;
+            const int orientedHeight=raw.orientation==90||raw.orientation==270
+                ?raw.width:raw.height;
+            const int orientedX=std::clamp(static_cast<int>(std::floor(
+                (mMouseSourcePosition.x()+0.5)*orientedWidth/nativeWidth)),0,orientedWidth-1);
+            const int orientedY=std::clamp(static_cast<int>(std::floor(
+                (mMouseSourcePosition.y()+0.5)*orientedHeight/nativeHeight)),0,orientedHeight-1);
+            int x=orientedX,y=orientedY;
+            if(raw.orientation==90){x=orientedY;y=raw.height-1-orientedX;}
+            else if(raw.orientation==180){x=raw.width-1-orientedX;y=raw.height-1-orientedY;}
+            else if(raw.orientation==270){x=raw.width-1-orientedY;y=orientedX;}
             const size_t offset=(static_cast<size_t>(y)*raw.width+x)*raw.channels;
             if(offset+raw.channels<=raw.samples->size()){
                 static const std::array<QString,3> colors={
@@ -1179,6 +1329,15 @@ void ClipPlayerDialog::setHistogramEnabled(bool enabled){
     updateHistogram();
 }
 
+void ClipPlayerDialog::setPerformanceOverlayPinned(bool pinned){
+    mPerformanceOverlayPinned=pinned;
+    if(!pinned)return;
+    mOverlayTimer.stop();
+    mOverlayAnimation->stop();
+    mOverlayOpacity->setOpacity(1.0);
+    mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,false);
+}
+
 void ClipPlayerDialog::setHistogramExpanded(bool expanded){
     if(mHistogramExpanded==expanded)return;
     mHistogramExpanded=expanded;
@@ -1207,6 +1366,7 @@ void ClipPlayerDialog::setHistogramExpanded(bool expanded){
 }
 
 void ClipPlayerDialog::updateHistogram(){
+    const auto histogramStarted=std::chrono::steady_clock::now();
     const auto& raw=mPresentedRawFrame;
     mIntensitySamples=nullptr;
     mDetectedClipValue.reset();
@@ -1226,25 +1386,38 @@ void ClipPlayerDialog::updateHistogram(){
                   std::array<uint32_t,3>{});
         std::array<size_t,3> sampleCounts{};
         const int phaseBlock=std::max(1,raw.cfaSize/2);
+        if(mHistogramBinChannels!=raw.channels || mHistogramBinWhite!=raw.white ||
+           mHistogramBinBlackLevels!=raw.blackLevels) {
+            mHistogramBinChannels=raw.channels;
+            mHistogramBinWhite=raw.white;
+            mHistogramBinBlackLevels=raw.blackLevels;
+            const int phases=raw.channels==3?3:4;
+            for(int phase=0;phase<phases;++phase) {
+                auto& lookup=mHistogramBinsByPhase[phase];
+                lookup.resize(65536);
+                const float black=raw.blackLevels[phase];
+                const double range=std::max(1.0f,raw.white-black);
+                for(int value=0;value<65536;++value) {
+                    const double normalized=std::clamp(
+                        (double(value)-black)/range,0.0,1.0);
+                    const double stops=std::clamp(
+                        -std::log2(std::max(normalized,1.0/65536.0)),0.0,16.0);
+                    lookup[value]=static_cast<uint16_t>(std::clamp(qRound(
+                        RawHistogram::stopPosition(stops)*559.0),0,559));
+                }
+            }
+        }
         for(size_t pixel=0;pixel<pixels;pixel+=stride) {
             for(int channel=0;channel<raw.channels;++channel) {
                 const uint16_t value=(*raw.samples)[pixel*raw.channels+channel];
-                const int phase=((((pixel/raw.width)/phaseBlock)&1u)<<1) |
-                    (((pixel%raw.width)/phaseBlock)&1u);
+                const int phase=raw.channels==3?channel:
+                    static_cast<int>(((((pixel/raw.width)/phaseBlock)&1u)<<1) |
+                                     (((pixel%raw.width)/phaseBlock)&1u));
                 const int color=raw.channels==3?channel:
                     std::min<int>(2,raw.cfaPhase[phase]);
                 ++sampleCounts[color];
                 ++mClipValueCounts[value][color];
-                const float channelBlack=raw.channels==3?
-                    raw.blackLevels[channel]:raw.blackLevels[phase];
-                const double normalized=std::clamp(
-                    (double(value)-channelBlack)/
-                    std::max(1.0f,raw.white-channelBlack),0.0,1.0);
-                const double stops=std::clamp(
-                    -std::log2(std::max(normalized,1.0/65536.0)),0.0,16.0);
-                const int bin=std::clamp(qRound(
-                    RawHistogram::stopPosition(stops)*559.0),0,559);
-                ++bins[color][bin];
+                ++bins[color][mHistogramBinsByPhase[phase][value]];
             }
         }
         for(int color=0;color<3;++color) {
@@ -1273,6 +1446,11 @@ void ClipPlayerDialog::updateHistogram(){
     if(mHistogram)
         static_cast<RawHistogram*>(mHistogram)->setBins(bins);
     updateTitle();
+    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=histogram_frame width={} height={} channels={} latency_ms={:.3f}",
+            raw.width,raw.height,raw.channels,
+            std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now()-histogramStarted).count());
 }
 
 void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
@@ -1431,6 +1609,12 @@ void ClipPlayerDialog::updateButtonIcons(){
     updateFpsIndicator();
 }
 void ClipPlayerDialog::setOverlayVisible(bool visible){
+    if(mPerformanceOverlayPinned){
+        mOverlayTimer.stop();
+        mOverlayAnimation->stop();
+        mOverlayOpacity->setOpacity(1.0);
+        return;
+    }
     if(!visible&&mHistogramExpanded)return;
     mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,!visible);
     mOverlayAnimation->stop();mOverlayAnimation->setStartValue(mOverlayOpacity->opacity());
@@ -1438,6 +1622,7 @@ void ClipPlayerDialog::setOverlayVisible(bool visible){
     if(!visible)QToolTip::hideText();
 }
 void ClipPlayerDialog::revealOverlay(){
+    if(mPerformanceOverlayPinned)return;
     const bool alreadyFadingIn=mOverlayAnimation->state()==QAbstractAnimation::Running&&
         mOverlayAnimation->endValue().toDouble()>0.5;
     if(!alreadyFadingIn&&(mOverlayOpacity->opacity()<0.999||
@@ -1451,6 +1636,43 @@ void ClipPlayerDialog::updateDisplayedImage(){
     // refresh is pending. Suppressing it here made all wheel/drag input appear
     // ignored until the replacement frame arrived, especially during play.
     if(mLastPresentedImage.isNull())return;
+    if(mDirectSequencePresentation&&mGpuVideo&&mGpuVideo->usable()){
+        QRectF target;
+        bool smooth=true;
+        if(mZoomPercent<=0.0){
+            const double scale=fitScale();
+            const QSizeF size(mLastPresentedImage.width()*scale,
+                              mLastPresentedImage.height()*scale);
+            target=QRectF(QPointF((mGpuVideo->width()-size.width())/2.0,
+                                  (mGpuVideo->height()-size.height())/2.0),size);
+        }else{
+            const double zoom=mZoomPercent/100.0;
+            QPointF displayPan=mPanSourcePixels;
+            const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
+            if(orientation==90)
+                displayPan=QPointF(-mPanSourcePixels.y(),mPanSourcePixels.x());
+            else if(orientation==180)displayPan=-mPanSourcePixels;
+            else if(orientation==270)
+                displayPan=QPointF(mPanSourcePixels.y(),-mPanSourcePixels.x());
+            const QSizeF size(mLastPresentedImage.width()*zoom,
+                              mLastPresentedImage.height()*zoom);
+            target=QRectF(QPointF((mGpuVideo->width()-size.width())/2.0-
+                                       displayPan.x()*zoom,
+                                  (mGpuVideo->height()-size.height())/2.0-
+                                       displayPan.y()*zoom),size);
+            smooth=mZoomPercent<400.0 &&
+                std::abs(zoom-std::round(zoom))>=0.0001;
+        }
+        mGpuVideo->setFrame(mLastPresentedImage,target,smooth);
+        if(!mGpuVideo->isVisible()){
+            mGpuVideo->show();
+            mGpuVideo->raise();
+            mOverlay->raise();
+            mFpsLabel->raise();
+        }
+        return;
+    }
+    if(mGpuVideo&&mGpuVideo->isVisible())mGpuVideo->hide();
     if(mLastImageIsSource){
         if(mZoomPercent<=0.0){
             const double scale=fitScale();
@@ -1765,7 +1987,7 @@ void ClipPlayerDialog::showNextFrame(){
         const QSize viewport=mVideo->size().expandedTo(QSize(640,360));
         const int viewportWidth=std::max(2,viewport.width()&~1);
         const int viewportHeight=std::max(2,viewport.height()&~1);
-        if(mClips[mIndex].isSequence&&
+        if(mClips[mIndex].isSequence&&!mDirectSequencePresentation&&
            (mWidth!=viewportWidth||mHeight!=viewportHeight)){
             // This frame belongs to a decoder created for an intermediate
             // resize geometry. Never promote it to the visible surface. The
@@ -1786,8 +2008,11 @@ void ClipPlayerDialog::showNextFrame(){
             const bool dimensionsChanged=clip.width!=queued.image.width()||
                 clip.height!=queued.image.height();
             clip.width=queued.image.width();clip.height=queued.image.height();
-            clip.nativeWidth=queued.raw.width>0?queued.raw.width:clip.width;
-            clip.nativeHeight=queued.raw.height>0?queued.raw.height:clip.height;
+            const bool rawSwap=queued.raw.orientation==90||queued.raw.orientation==270;
+            clip.nativeWidth=queued.raw.width>0
+                ?(rawSwap?queued.raw.height:queued.raw.width):clip.width;
+            clip.nativeHeight=queued.raw.height>0
+                ?(rawSwap?queued.raw.width:queued.raw.height):clip.height;
             if(dimensionsChanged){
                 mPanSourcePixels=QPointF();
                 const double minimum=fitScale()*100.0;
@@ -1809,7 +2034,7 @@ void ClipPlayerDialog::showNextFrame(){
         mPresentedRawFrame=queued.raw;
         updateHistogram();
         mWaitingForFirstFrame=false;
-        mLastImageIsSource=!mClips[mIndex].isSequence;
+        mLastImageIsSource=!mClips[mIndex].isSequence||mDirectSequencePresentation;
         mLastSurfaceScale=mDecoderSurfaceScale;
         mLastSurfacePan=mDecoderSurfacePan;
         mLastSurfaceViewportPan=mDecoderSurfaceViewportPan;
@@ -1848,7 +2073,8 @@ void ClipPlayerDialog::showNextFrame(){
         if(mPaused)mFrameTimer.stop();
     }else{
         if(!mPlaybackFailed&&
-           (mClips[mIndex].isSequence?mDecoder.state()==QProcess::NotRunning:
+           (mClips[mIndex].isSequence&&!mDirectSequencePresentation
+                ?mDecoder.state()==QProcess::NotRunning:
             mDirectFramesFinished)&&mBytes.isEmpty()){
             mFrameTimer.stop();if(mClips[mIndex].autoAdvance&&!mThumbnailScroll->isVisible())advance();else {mPaused=true;updateButtonIcons();updateFpsIndicator();}
         }
@@ -1996,7 +2222,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
             ? wheel->pixelDelta().y()/40.0 : wheel->angleDelta().y()/120.0;
         changeZoom(steps);event->accept();return true;
     }
-    const bool panSurface=watched==mVideo||watched==mOverlay;
+    const bool panSurface=watched==mVideo||watched==mGpuVideo||watched==mOverlay;
     if(belongsToPlayer&&panSurface&&event->type()==QEvent::MouseButtonDblClick){
         auto* mouse=static_cast<QMouseEvent*>(event);
         if(mouse->button()==Qt::LeftButton){
@@ -2088,15 +2314,31 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
     const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
     const bool swap=orientation==90||orientation==270;
     QImage image(swap?height:width,swap?width:height,QImage::Format_RGB888);
+    if(image.isNull())return {};
     const auto* source=reinterpret_cast<const uchar*>(frame.constData());
-    for(int y=0;y<height;++y)for(int x=0;x<width;++x){
-        int outputX=x,outputY=y;
-        if(orientation==90){outputX=height-1-y;outputY=x;}
-        else if(orientation==180){outputX=width-1-x;outputY=height-1-y;}
-        else if(orientation==270){outputX=y;outputY=width-1-x;}
-        const qsizetype input=(qsizetype(y)*width+x)*6;
-        uchar* destination=image.scanLine(outputY)+qsizetype(outputX)*3;
-        destination[0]=source[input+1];destination[1]=source[input+3];destination[2]=source[input+5];
+    if(orientation!=90&&orientation!=180&&orientation!=270){
+        for(int y=0;y<height;++y){
+            auto* destination=image.scanLine(y);
+            const auto* row=source+qsizetype(y)*width*6;
+            for(int x=0;x<width;++x){
+                const auto* input=row+qsizetype(x)*6;
+                auto* output=destination+qsizetype(x)*3;
+                output[0]=input[1];output[1]=input[3];output[2]=input[5];
+            }
+        }
+    }else{
+        for(int y=0;y<height;++y){
+            const auto* row=source+qsizetype(y)*width*6;
+            for(int x=0;x<width;++x){
+                int outputX=x,outputY=y;
+                if(orientation==90){outputX=height-1-y;outputY=x;}
+                else if(orientation==180){outputX=width-1-x;outputY=height-1-y;}
+                else {outputX=y;outputY=width-1-x;}
+                const auto* input=row+qsizetype(x)*6;
+                auto* output=image.scanLine(outputY)+qsizetype(outputX)*3;
+                output[0]=input[1];output[1]=input[3];output[2]=input[5];
+            }
+        }
     }
     return image;
 }
@@ -2131,13 +2373,14 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         std::shared_ptr<const std::vector<uint16_t>> rawSamples,
         int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
         int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
-        std::array<float,4> rawBlackLevels){
+        std::array<float,4> rawBlackLevels,int rawOrientation){
     // Stills are presented directly from the processed RGB48 callback. Feeding
     // them through a timed FFmpeg graph would display the same image twice and
     // can apply the video surface's output aspect ratio to the second copy.
     if(mIndex>=0&&mClips[mIndex].sourceFrames<=1)return FramePushResult::Accepted;
     if(mClosing||mPlaybackFailed)return FramePushResult::Stopped;
-    if(mClips[mIndex].isSequence&&mDecoder.state()!=QProcess::Running)
+    if(mClips[mIndex].isSequence&&!mDirectSequencePresentation&&
+       mDecoder.state()!=QProcess::Running)
         return FramePushResult::Retry;
     if(mAudioEnabled&&mIncomingFrame->load()>mNextInputFrame){
         mNextInputFrame=mIncomingFrame->load();
@@ -2149,13 +2392,20 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     const size_t maximumPending=rawSamples?2u:6u;
     if(mSubmittedFrames.size()+mFrames.size()>=maximumPending)
         return FramePushResult::Retry;
-    if(!mClips[mIndex].isSequence){
+    if(!mClips[mIndex].isSequence||mDirectSequencePresentation){
+        const auto convertStarted=std::chrono::steady_clock::now();
         const QImage image=rgb48Image(frame,width,height);
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+           mDirectSequencePresentation)
+            spdlog::info("GALLERY_PERF event=direct_present_convert source={}x{} ms={:.3f}",
+                width,height,std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now()-convertStarted).count());
         if(image.isNull())return FramePushResult::Stopped;
-        const int sourceFrame=std::max(mNextInputFrame,mIncomingFrame->load());
+        const int sourceFrame=mClips[mIndex].isSequence
+            ?mNextInputFrame:std::max(mNextInputFrame,mIncomingFrame->load());
         mFrames.push_back({image,sourceFrame,
             {std::move(rawSamples),rawWidth,rawHeight,rawChannels,rawBlack,rawWhite,
-                rawBlackLevels,rawCfaSize,rawCfaPhase}});
+                rawBlackLevels,rawCfaSize,rawCfaPhase,rawOrientation}});
         mNextInputFrame=sourceFrame+1;
         return FramePushResult::Accepted;
     }
@@ -2166,7 +2416,7 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         if(mDecoder.write(frame)!=frame.size())return FramePushResult::Retry;
         mSubmittedFrames.push_back({mNextInputFrame,
             {std::move(rawSamples),rawWidth,rawHeight,rawChannels,rawBlack,rawWhite,
-                rawBlackLevels,rawCfaSize,rawCfaPhase}});
+                rawBlackLevels,rawCfaSize,rawCfaPhase,rawOrientation}});
         ++mNextInputFrame;return FramePushResult::Accepted;
     }
     return FramePushResult::Stopped;
@@ -2175,7 +2425,7 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
         std::shared_ptr<const std::vector<uint16_t>> rawSamples,
         int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
         int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
-        std::array<float,4> rawBlackLevels){
+        std::array<float,4> rawBlackLevels,int rawOrientation){
     const bool dimensionsChanged=mIndex>=0&&
         (mClips[mIndex].width!=width||mClips[mIndex].height!=height);
     if(dimensionsChanged&&mClips[mIndex].sourceFrames>1&&mClips[mIndex].isSequence){
@@ -2193,10 +2443,15 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
     // resize releases the held frame too early and briefly scales it using
     // geometry that does not belong to the active decoder.
     if(mIndex>=0&&mClips[mIndex].sourceFrames>1)return;
+    if(mIndex>=0&&!mClips[mIndex].isSequence&&rawWidth>0&&rawHeight>0){
+        const bool swap=rawOrientation==90||rawOrientation==270;
+        mClips[mIndex].nativeWidth=swap?rawHeight:rawWidth;
+        mClips[mIndex].nativeHeight=swap?rawWidth:rawHeight;
+    }
     const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
     mLastPresentedImage=image;mLastImageIsSource=true;
     mPresentedRawFrame={std::move(rawSamples),rawWidth,rawHeight,rawChannels,
-        rawBlack,rawWhite,rawBlackLevels,rawCfaSize,rawCfaPhase};
+        rawBlack,rawWhite,rawBlackLevels,rawCfaSize,rawCfaPhase,rawOrientation};
     updateHistogram();
     mWaitingForFirstFrame=false;
     setDroppedCursorVisible(false);
@@ -2214,7 +2469,9 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
 }
 void ClipPlayerDialog::finishRgb48Frames(){
     if(mIndex<0||mClips[mIndex].sourceFrames<=1)return;
-    if(!mClips[mIndex].isSequence){mDirectFramesFinished=true;return;}
+    if(!mClips[mIndex].isSequence||mDirectSequencePresentation){
+        mDirectFramesFinished=true;return;
+    }
     if(mDecoder.state()==QProcess::Running)mDecoder.closeWriteChannel();
 }
 void ClipPlayerDialog::failRgb48Frames(const QString& error){mPlaybackFailed=true;mFrameTimer.stop();mTitle->setText(tr("Frame rendering failed: %1").arg(error));mDecoder.kill();completeFrameStep();}
@@ -2228,11 +2485,13 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
     updateVisibleThumbnailWidgets();
-    // Scale-to-fit is viewport-relative. Rebase the hidden wheel
-    // accumulator immediately so the next gesture starts at the new fit,
-    // rather than jumping from the previous window geometry.
+    // Keep the wheel accumulator aligned with the new fit geometry.
     if(mZoomPercent<=0.0&&mIndex>=0)
         mRequestedZoomPercent=fitScale()*100.0;
+    if(mDirectSequencePresentation&&mIndex>=0&&mClips[mIndex].isSequence){
+        if(!mLastPresentedImage.isNull())updateDisplayedImage();
+        return;
+    }
     // Never redraw the old frame into the new widget geometry here. Doing so
     // stretches an old-resolution surface during live resize/fullscreen
     // transitions. Also stop presentation immediately: otherwise a frame

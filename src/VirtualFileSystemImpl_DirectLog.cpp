@@ -823,6 +823,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 
 VirtualFileSystemImpl_DirectLog::ProcessedFrame
 VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
+    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
+    const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
     result.timestamp = std::get<Timestamp>(entry.userData);
     const auto frameIt = mFrameIndexByTimestamp.find(result.timestamp);
@@ -836,6 +838,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
     result.height = 0;
 
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
+    const auto sidecarsFinished = std::chrono::steady_clock::now();
     if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude) {
         DNGImageLayout manualTarget;
         manualTarget.width = static_cast<uint32_t>(mWidth);
@@ -867,6 +870,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
     if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
                                 result.height, false, smoothChroma))
         throw std::runtime_error("Could not decode DirectLog frame");
+    const auto extracted = std::chrono::steady_clock::now();
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;
 
@@ -943,6 +947,11 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
     if ((mConfig.options & RENDER_OPT_SMOOTH_WHITE_BALANCE) &&
         mSmoothedAsShotNeutrals.count(result.timestamp))
         result.metadata.asShotNeutral = mSmoothedAsShotNeutrals.at(result.timestamp);
+    if (profile)
+        spdlog::info("GALLERY_PERF event=directlog_process_stage sidecars_ms={:.3f} extract_ms={:.3f} remaining_ms={:.3f}",
+            std::chrono::duration<double, std::milli>(sidecarsFinished-processStarted).count(),
+            std::chrono::duration<double, std::milli>(extracted-sidecarsFinished).count(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-extracted).count());
     return result;
 }
 
@@ -1040,7 +1049,9 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview, bool retainSourceSamples) {
     std::shared_lock renderLock(mRenderMutex);
     try {
+        const auto processStarted = std::chrono::steady_clock::now();
         auto processed = processFrame(entry);
+        const auto processFinished = std::chrono::steady_clock::now();
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
         image.layout.width = static_cast<uint32_t>(processed.width);
@@ -1139,8 +1150,16 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.timestamp = vfs::outputTimestamp(
             entry, processed.timestamp, mDecoder->getFrames().front().timestamp,
             mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-        return DNGDecoder::decodePreview(std::move(image), mConfig, preview, true,
-                                         retainSourceSamples);
+        const auto previewStarted = std::chrono::steady_clock::now();
+        const bool decoded = DNGDecoder::decodePreview(
+            std::move(image), mConfig, preview, true, retainSourceSamples);
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
+                mSrcPath,
+                std::chrono::duration<double, std::milli>(processFinished-processStarted).count(),
+                std::chrono::duration<double, std::milli>(previewStarted-processFinished).count(),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());
+        return decoded;
     } catch (const std::exception&) { return false; }
 }
 

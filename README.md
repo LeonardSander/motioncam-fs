@@ -167,6 +167,27 @@ cmake --build build --parallel
 
 See `HELP.md` for usage, preferences, and feature details.
 
+Gallery playback profiling can be run from a release build with:
+
+```bash
+MOTIONCAM_GALLERY_PERF_PROFILE=1 MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1 \
+  MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1 \
+  ./build/MotionCamFuse --gallery-perf-session /path/to/session.json \
+  --gallery-perf-playback-ms 3000
+```
+
+The runner enables the histogram, keeps its overlay visible throughout the
+run, and logs per-frame materialization, color processing, and histogram
+timings. `MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1`
+uses the session's draft scale with HQ off; omit it for full-resolution playback.
+`MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1` keeps the run focused on playback and
+seeks; omit it to include paused thumbnail backfill.
+`MOTIONCAM_GALLERY_PERF_VIEWPORT=960x540` tests a fixed window size. Sequence
+frames, including full-resolution frames, are presented at source size through
+Qt Quick's Vulkan scene graph when available; Qt uses its native graphics
+backend on macOS. Set `MOTIONCAM_GALLERY_FFMPEG_PRESENT=1` to compare the
+previous FFmpeg presenter.
+
 ---
 
 ### MotionCam DirectLog Camera Native Guide

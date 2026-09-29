@@ -741,9 +741,11 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         // The direct CameraFrameMetadata path can carry the normal Android lens
         // shading map, but not a deferred OpcodeList3 map or a manual
         // white/gain DNG. Preserve exact finalized ordering for those uncommon
-        // overrides.
+        // overrides. HQ previews keep the finalized DNG route for DCPs.
         if (!mManualVignetteSidecars.candidates.empty() ||
-            mManualVignetteSidecars.hasDcp ||
+            mManualVignetteSidecars.useDcpGainmap ||
+            (mManualVignetteSidecars.hasDcp &&
+             (mSettings.options & RENDER_OPT_HIGHER_CFA_HQ)) ||
             vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
                                     "deferredGainMaps")) {
             bool gainMapApplied = !mManualVignetteSidecars.candidates.empty() ||
@@ -822,8 +824,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight,
                                    strideOverride);
+        const auto loadStarted = std::chrono::steady_clock::now();
         decoder->loadFrame(timestamp, frameData, metadata,
                            static_cast<int>(strideOverride));
+        const auto loadFinished = std::chrono::steady_clock::now();
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
         frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
         auto cameraConfig =
@@ -844,10 +848,22 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         std::optional<std::array<float, 3>> neutralOverride;
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
+        const auto generateStarted = std::chrono::steady_clock::now();
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
                            mSettings, mCalibration, false, exposureOverride,
                            neutralOverride, &preview, retainSourceSamples);
+        // A DCP used only for color metadata does not require constructing and
+        // decoding a full DNG. Apply its color tables to the direct preview.
+        if (mManualVignetteSidecars.hasDcp)
+            vfs::mergeManualDngMetadata(preview.metadata, mManualVignetteSidecars,
+                                         mCalibration ? &*mCalibration : nullptr);
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=mcraw_preview_stage source={} load_ms={:.3f} prepare_ms={:.3f} generate_ms={:.3f}",
+                mSrcPath,
+                std::chrono::duration<double, std::milli>(loadFinished-loadStarted).count(),
+                std::chrono::duration<double, std::milli>(generateStarted-loadFinished).count(),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-generateStarted).count());
         preview.gainMapApplied =
             (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
             (mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&

@@ -469,6 +469,11 @@ namespace {
             (!metadata.profileTables->hueSat1.values.empty() ||
              !metadata.profileTables->hueSat2.values.empty() ||
              !metadata.profileTables->look.values.empty());
+        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=color_transform pixels={} matrix={} tables={} hue_values={} look_values={}",
+                pixelCount, useMatrix, useProfileTables,
+                metadata.profileTables ? metadata.profileTables->hueSat1.values.size() : 0,
+                metadata.profileTables ? metadata.profileTables->look.values.size() : 0);
         motioncam::DNGProfileTable blendedHueSat;
         const motioncam::DNGProfileTable* hueSatTable = nullptr;
         if (useProfileTables) {
@@ -583,8 +588,9 @@ namespace {
             }
         };
         constexpr size_t minimumPixelsPerWorker = 256 * 1024;
+        const unsigned int availableWorkers = std::max(1u, std::thread::hardware_concurrency());
         const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
-            4, std::max<size_t>(1,
+            std::min(12u, availableWorkers), std::max<size_t>(1,
                 (pixelCount + minimumPixelsPerWorker - 1) / minimumPixelsPerWorker)));
         std::vector<std::thread> threads;
         threads.reserve(workers - 1);
@@ -2616,50 +2622,15 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings) && preview.gainMapApplied);
+                    const int rawOrientation = !isSequence
+                        ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
                     if (!isSequence) {
-                        const int orientation = normalizedGalleryOrientation(
-                            preview.metadata.orientation);
+                        const int orientation = rawOrientation;
                         if (orientation == 90 || orientation == 180 || orientation == 270) {
                             const uint32_t sourceWidth = preview.width;
                             const uint32_t sourceHeight = preview.height;
                             preview.rgb = rotateInterleaved(
                                 preview.rgb, sourceWidth, sourceHeight, 6, orientation);
-                            if (preview.rawSamples && preview.rawWidth && preview.rawHeight &&
-                                preview.rawChannels) {
-                                if (preview.rawChannels == 1) {
-                                    const int block = std::max(1, preview.rawCfaSize / 2);
-                                    const int oldWidth = static_cast<int>(preview.rawWidth);
-                                    const int oldHeight = static_cast<int>(preview.rawHeight);
-                                    const auto oldPhase = preview.rawCfaPhase;
-                                    const auto oldBlackLevels = preview.rawBlackLevels;
-                                    for (int phase = 0; phase < 4; ++phase) {
-                                        const int x = (phase % 2) * block;
-                                        const int y = (phase / 2) * block;
-                                        int sourceX = x, sourceY = y;
-                                        if (orientation == 90) {
-                                            sourceX = y; sourceY = oldHeight - 1 - x;
-                                        } else if (orientation == 180) {
-                                            sourceX = oldWidth - 1 - x;
-                                            sourceY = oldHeight - 1 - y;
-                                        } else if (orientation == 270) {
-                                            sourceX = oldWidth - 1 - y; sourceY = x;
-                                        }
-                                        const int sourcePhase =
-                                            (((sourceY / block) & 1) << 1) |
-                                            ((sourceX / block) & 1);
-                                        preview.rawCfaPhase[phase] = oldPhase[sourcePhase];
-                                        preview.rawBlackLevels[phase] = oldBlackLevels[sourcePhase];
-                                    }
-                                }
-                                auto rotatedRaw = rotateInterleaved(
-                                    *preview.rawSamples, preview.rawWidth, preview.rawHeight,
-                                    preview.rawChannels, orientation);
-                                preview.rawSamples =
-                                    std::make_shared<const std::vector<uint16_t>>(
-                                        std::move(rotatedRaw));
-                                if (orientation == 90 || orientation == 270)
-                                    std::swap(preview.rawWidth, preview.rawHeight);
-                            }
                             if (orientation == 90 || orientation == 270)
                                 std::swap(preview.width, preview.height);
                         }
@@ -2706,7 +2677,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 static_cast<int>(preview.rawChannels),
                                 preview.rawBlack, preview.rawWhite,
                                 preview.rawCfaSize, preview.rawCfaPhase,
-                                preview.rawBlackLevels);
+                                preview.rawBlackLevels, rawOrientation);
                         }, Qt::BlockingQueuedConnection);
                         presentedFirstFrame = true;
                         if (diagnostics)
@@ -2731,7 +2702,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 static_cast<int>(preview.rawChannels),
                                 preview.rawBlack, preview.rawWhite,
                                 preview.rawCfaSize, preview.rawCfaPhase,
-                                preview.rawBlackLevels);
+                                preview.rawBlackLevels, rawOrientation);
                             else pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                         }, Qt::BlockingQueuedConnection);
                         if (pushResult == ClipPlayerDialog::FramePushResult::Retry)
@@ -2771,8 +2742,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
             if (mGalleryGeneration.load() != generation) {
                 if (diagnostics)
                     spdlog::info(
-                        "GALLERY_PERF event=gallery_render_task_cancelled mount={} generation={} frames={} total_ms={:.3f}",
-                        mountId, generation, deliveredFrames,
+                        "GALLERY_PERF event=gallery_render_task_cancelled mount={} generation={} frames={} decode_ms={:.3f} delivery_ms={:.3f} total_ms={:.3f}",
+                        mountId, generation, deliveredFrames, displayDecodeMs,
+                        deliveryWaitMs,
                         std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - taskStarted).count());
                 return;
@@ -2820,6 +2792,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
             ? (orientationOverride >= 0 ? orientationOverride : info->orientation)
             : -1;
         clip.isSequence = info->isSequence;
+        clip.directPresentation = info->isSequence;
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
         clip.duplicateFrames = info->duplicateFrameMask;
@@ -3179,6 +3152,8 @@ void MainWindow::startGalleryPerformanceTest(
     // A proxy-preserving diagnostic run can opt out for scale-specific tests.
     const bool preserveGalleryProxy = qEnvironmentVariableIsSet(
         "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY");
+    const bool forceHighQuality = qEnvironmentVariableIsSet(
+        "MOTIONCAM_GALLERY_PERF_FORCE_HQ");
     for (const auto mountId : state->mounts) {
         auto settings = settingsForMount(mountId);
         settings.options = static_cast<motioncam::FileRenderOptions>(
@@ -3187,13 +3162,22 @@ void MainWindow::startGalleryPerformanceTest(
                     ? motioncam::RENDER_OPT_HIGHER_CFA_HQ
                     : (motioncam::RENDER_OPT_DRAFT |
                        motioncam::RENDER_OPT_HIGHER_CFA_HQ))));
+        if (forceHighQuality)
+            settings.options = static_cast<motioncam::FileRenderOptions>(
+                settings.options | motioncam::RENDER_OPT_HIGHER_CFA_HQ);
         if (!preserveGalleryProxy) settings.draftScale = 1;
+        spdlog::info("GALLERY_PERF event=gallery_clip_settings mount={} draft={} scale={} hq={}",
+            mountId, bool(settings.options & motioncam::RENDER_OPT_DRAFT),
+            settings.draftScale,
+            bool(settings.options & motioncam::RENDER_OPT_HIGHER_CFA_HQ));
         mLocalSettings.insert(mountId, settings);
         mFuseFilesystem->updateOptions(mountId, settings);
     }
+    const QString requestedViewport = qEnvironmentVariable("MOTIONCAM_GALLERY_PERF_VIEWPORT");
     spdlog::info(
-        "GALLERY_PERF event=gallery_mode resolution={} hq=false demosaic=nearest window=maximized",
-        preserveGalleryProxy ? "proxy" : "full");
+        "GALLERY_PERF event=gallery_mode resolution={} hq={} window={}",
+        preserveGalleryProxy ? "proxy" : "full", forceHighQuality,
+        requestedViewport.isEmpty() ? "maximized" : requestedViewport.toStdString());
 
     QElapsedTimer gallerySetupTimer;
     gallerySetupTimer.start();
@@ -3208,6 +3192,10 @@ void MainWindow::startGalleryPerformanceTest(
         QCoreApplication::exit(4);
         return;
     }
+    mClipPlayer->setPerformanceOverlayPinned(true);
+    mClipPlayer->setHistogramEnabled(true);
+    spdlog::info("GALLERY_PERF event=gallery_histogram enabled={} overlay_pinned=true",
+                 mClipPlayer->histogramEnabled());
     mClipPlayer->setAutomaticAdvanceEnabled(false);
     // Playback should create strip images as a byproduct; enabling the strip
     // here makes that overhead part of every playback sample.
@@ -3215,7 +3203,19 @@ void MainWindow::startGalleryPerformanceTest(
     // Playback samples target the most demanding normal UI geometry. Keep the
     // gallery maximized after setup and after the resize/cancellation preflight
     // so the measured FFmpeg surface matches a maximized interactive gallery.
-    mClipPlayer->showMaximized();
+    const QStringList viewportParts = requestedViewport.split('x');
+    bool widthValid = false, heightValid = false;
+    const int viewportWidth = viewportParts.value(0).toInt(&widthValid);
+    const int viewportHeight = viewportParts.value(1).toInt(&heightValid);
+    if (viewportParts.size() == 2 && widthValid && heightValid &&
+        viewportWidth >= 640 && viewportHeight >= 360) {
+        mClipPlayer->showNormal();
+        mClipPlayer->resize(viewportWidth, viewportHeight);
+        spdlog::info("GALLERY_PERF event=gallery_viewport requested={}x{}",
+            viewportWidth, viewportHeight);
+    } else {
+        mClipPlayer->showMaximized();
+    }
     spdlog::info("GALLERY_PERF event=gallery_setup_complete latency_ms={}",
                  gallerySetupTimer.elapsed());
 
@@ -3269,6 +3269,12 @@ void MainWindow::startGalleryPerformanceTest(
         QTimer::singleShot(state->playbackMs, this,
             [this, state, startClip, startSample, afterSeek, serial] {
                 if (state->actionSerial != serial || !mClipPlayer) return;
+                if (mClipPlayer->currentMountId() != state->mounts[state->clipIndex]) {
+                    spdlog::error("GALLERY_PERF event=suite_failed reason=unexpected_clip expected={} actual={}",
+                        state->mounts[state->clipIndex], mClipPlayer->currentMountId());
+                    QCoreApplication::exit(9);
+                    return;
+                }
                 const qint64 elapsed = std::max<qint64>(1, state->sampleTimer.elapsed());
                 const qint64 activeElapsed = state->firstPresentedMs >= 0 &&
                                              state->lastPresentedMs > state->firstPresentedMs
@@ -3295,6 +3301,11 @@ void MainWindow::startGalleryPerformanceTest(
                             QCoreApplication::exit(6);
                         });
                 } else {
+                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL")) {
+                        ++state->clipIndex;
+                        (*startClip)();
+                        return;
+                    }
                     state->phase = RunState::Phase::ThumbnailBackfill;
                     state->actionTimer.restart();
                     const int backfillSerial = ++state->actionSerial;

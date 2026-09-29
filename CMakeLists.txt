@@ -32,6 +32,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network Concurrent Multimedia)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Concurrent Multimedia)
+if(QT_VERSION_MAJOR EQUAL 6)
+    find_package(Qt6 COMPONENTS QuickWidgets QUIET)
+endif()
 
 set(APP_NAME "MotionCam Fuse")
 set(DEPENDENCIES_PATH deps)
@@ -436,6 +439,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   ${JXL_TARGET}
   ${FFMPEG_LIBRARIES}
   ${platform-specific})
+if(TARGET Qt6::QuickWidgets)
+  target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::QuickWidgets)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_QUICKWIDGETS=1)
+endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE TINY_DNG_ENABLE_JPEG_XL)
 add_compile_definitions(BS_THREAD_POOL_ENABLE_PRIORITY)
 
