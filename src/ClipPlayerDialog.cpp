@@ -1527,7 +1527,7 @@ void ClipPlayerDialog::showNextFrame(){
             const qint64 now=mPresentationClock.elapsed();
             if(mLastPresentationMs>=0&&now>mLastPresentationMs){
                 mPresentationIntervals.push_back(now-mLastPresentationMs);
-                if(mPresentationIntervals.size()>120)mPresentationIntervals.pop_front();
+                if(mPresentationIntervals.size()>20)mPresentationIntervals.pop_front();
             }
             mLastPresentationMs=now;
             updateFpsIndicator();
