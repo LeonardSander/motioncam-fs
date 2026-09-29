@@ -762,6 +762,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                 (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
             std::shared_ptr<const std::vector<uint16_t>> sourceSamples;
             uint32_t sourceWidth = 0, sourceHeight = 0;
+            CameraFrameMetadata sourceFrameMetadata;
             if (retainSourceSamples) {
                 std::vector<uint8_t> sourceData;
                 nlohmann::json sourceMetadataJson;
@@ -773,6 +774,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                                    static_cast<int>(strideOverride));
                 const auto sourceMetadata =
                     CameraFrameMetadata::parse(sourceMetadataJson);
+                sourceFrameMetadata = sourceMetadata;
                 const size_t sampleCount =
                     static_cast<size_t>(sourceMetadata.width) * sourceMetadata.height;
                 if (sourceData.size() >= sampleCount * sizeof(uint16_t)) {
@@ -795,6 +797,19 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                     preview.rawWidth = sourceWidth;
                     preview.rawHeight = sourceHeight;
                     preview.rawChannels = 1;
+                    auto cameraConfig = CameraConfiguration::parse(
+                        decoder->getContainerMetadata());
+                    const auto histogramLevels = resolveDataLevels(
+                        mSettings.levels, sourceFrameMetadata.dynamicWhiteLevel,
+                        sourceFrameMetadata.dynamicBlackLevel,
+                        cameraConfig.whiteLevel, cameraConfig.blackLevel);
+                    preview.rawBlack = histogramLevels.black[0];
+                    preview.rawBlackLevels = histogramLevels.black;
+                    preview.rawWhite = histogramLevels.white;
+                    preview.rawCfaSize = mCalibration && mCalibration->hasCfaSize
+                        ? mCalibration->cfaSize : sourceFrameMetadata.cfaSize;
+                    preview.rawCfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
+                        mSettings, mCalibration, cameraConfig.sensorArrangement));
                 }
                 return decoded;
             } catch (const std::exception&) {

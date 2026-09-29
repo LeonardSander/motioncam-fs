@@ -536,6 +536,17 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             const uint32_t sourceHeight = image.layout.height;
             const uint32_t sourceChannels =
                 image.layout.pixels == DNGPixelLayout::CFA ? 1u : 3u;
+            const float sourceWhite = image.metadata.whiteLevelCount && image.metadata.whiteLevel[0] > 0
+                ? image.metadata.whiteLevel[0]
+                : image.metadata.inputBitDepth > 0
+                    ? static_cast<float>((1u << std::min(image.metadata.inputBitDepth, 16u)) - 1u)
+                    : 65535.0f;
+            auto sourceBlackLevels = image.metadata.blackLevel;
+            if (image.metadata.blackLevelCount == 1)
+                sourceBlackLevels.fill(sourceBlackLevels[0]);
+            const auto histogramLevels = resolveDataLevels(
+                mConfig.levels, sourceWhite, sourceBlackLevels,
+                sourceWhite, sourceBlackLevels);
             if (retainSourceSamples)
                 sourceSamples =
                     std::make_shared<const std::vector<uint16_t>>(image.samples);
@@ -606,6 +617,11 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     preview.rawWidth = sourceWidth;
                     preview.rawHeight = sourceHeight;
                     preview.rawChannels = sourceChannels;
+                    preview.rawBlack = histogramLevels.black[0];
+                    preview.rawBlackLevels = histogramLevels.black;
+                    preview.rawWhite = histogramLevels.white;
+                    preview.rawCfaSize = prepared.cfaSize;
+                    preview.rawCfaPhase = prepared.cfaPhase;
                 }
                 preview.timestamp = outputTimestamp;
                 if (mConfig.options & RENDER_OPT_BAKE_ISO) {

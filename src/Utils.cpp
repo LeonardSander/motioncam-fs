@@ -1513,6 +1513,15 @@ std::shared_ptr<std::vector<char>> generateDng(
         previewFrame->rawWidth = width;
         previewFrame->rawHeight = height;
         previewFrame->rawChannels = 1;
+        const auto histogramLevels = resolveDataLevels(
+            settings.levels, metadata.dynamicWhiteLevel,
+            metadata.dynamicBlackLevel, cameraConfiguration.whiteLevel,
+            cameraConfiguration.blackLevel);
+        previewFrame->rawBlack = histogramLevels.black[0];
+        previewFrame->rawBlackLevels = histogramLevels.black;
+        previewFrame->rawWhite = histogramLevels.white;
+        previewFrame->rawCfaSize = calibration && calibration->hasCfaSize
+            ? calibration->cfaSize : metadata.cfaSize;
     }
 
     std::array<uint8_t, 4> cfa;
@@ -1543,6 +1552,7 @@ std::shared_ptr<std::vector<char>> generateDng(
        sensorArrangement != "grbg" && sensorArrangement != "gbrg")
         throw std::runtime_error("Invalid sensor arrangement");
     cfa = cfaColorsFromPhase(sensorArrangement);
+    if (previewFrame && retainSourceSamples) previewFrame->rawCfaPhase = cfa;
 
     CameraFrameMetadata gainMetadata = metadata;
     if (settings.vignetteCorrection == VignetteCorrectionMode::Exclude) {

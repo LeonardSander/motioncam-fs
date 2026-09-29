@@ -41,6 +41,8 @@ public:
     bool getAutoApplyClipSettings() const;
     void setGalleryFpsIndicatorEnabled(bool enabled);
     bool getGalleryFpsIndicatorEnabled() const;
+    void setGalleryHistogramEnabled(bool enabled);
+    bool getGalleryHistogramEnabled() const;
     void setUnmountOnFinalize(bool enabled);
     bool getUnmountOnFinalize() const;
     void setFinalizeSelectionToSingleDirectory(bool enabled);
@@ -77,6 +79,7 @@ private:
     QCheckBox* mDeleteOnUnmountCheckBox;
     QCheckBox* mAutoApplyClipSettingsCheckBox;
     QCheckBox* mGalleryFpsIndicatorCheckBox;
+    QCheckBox* mGalleryHistogramCheckBox;
     QCheckBox* mUnmountOnFinalizeCheckBox;
     QCheckBox* mFinalizeSelectionToSingleDirectoryCheckBox;
     QCheckBox* mInheritHeroFrameSidecarsCheckBox;

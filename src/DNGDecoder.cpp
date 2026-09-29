@@ -5141,6 +5141,15 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         frame.rawHeight = image.layout.height;
         frame.rawChannels = image.layout.pixels == DNGPixelLayout::CFA ? 1u : 3u;
         frame.rawSamples = std::make_shared<const std::vector<uint16_t>>(image.samples);
+        frame.rawBlack = image.metadata.blackLevel[0];
+        frame.rawBlackLevels = image.metadata.blackLevel;
+        frame.rawWhite = image.metadata.whiteLevelCount && image.metadata.whiteLevel[0] > 0
+            ? image.metadata.whiteLevel[0]
+            : image.metadata.inputBitDepth > 0
+                ? static_cast<float>((1u << std::min(image.metadata.inputBitDepth, 16u)) - 1u)
+                : 65535.0f;
+        frame.rawCfaSize = image.layout.cfaRepeatSize;
+        frame.rawCfaPhase = image.layout.cfaPhase;
     }
     const uint32_t requestedPreviewScale =
         applyPreviewScale && (settings.options & RENDER_OPT_DRAFT)

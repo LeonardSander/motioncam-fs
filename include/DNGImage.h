@@ -67,6 +67,11 @@ struct PreviewFrame {
     uint32_t rawWidth = 0;
     uint32_t rawHeight = 0;
     uint32_t rawChannels = 0;
+    float rawBlack = 0.0f;
+    std::array<float, 4> rawBlackLevels{};
+    float rawWhite = 65535.0f;
+    int rawCfaSize = 2;
+    std::array<uint8_t, 4> rawCfaPhase{0, 1, 1, 2};
     uint32_t width = 0;
     uint32_t height = 0;
     DNGFrameMetadata metadata;

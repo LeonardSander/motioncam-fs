@@ -216,6 +216,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
     mGalleryFpsIndicatorCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
+    mGalleryHistogramCheckBox = new QCheckBox("Show raw RGB histogram in gallery", this);
+    clipSettingsLayout->addWidget(mGalleryHistogramCheckBox);
     mUnmountOnFinalizeCheckBox = new QCheckBox("Unmount on finalize", this);
     mUnmountOnFinalizeCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mUnmountOnFinalizeCheckBox);
@@ -444,6 +446,16 @@ void SettingsDialog::setGalleryFpsIndicatorEnabled(bool enabled)
 bool SettingsDialog::getGalleryFpsIndicatorEnabled() const
 {
     return mGalleryFpsIndicatorCheckBox->isChecked();
+}
+
+void SettingsDialog::setGalleryHistogramEnabled(bool enabled)
+{
+    mGalleryHistogramCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getGalleryHistogramEnabled() const
+{
+    return mGalleryHistogramCheckBox->isChecked();
 }
 
 void SettingsDialog::setUnmountOnFinalize(bool enabled)

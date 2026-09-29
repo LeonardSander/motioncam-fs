@@ -1604,6 +1604,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
     settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
     settings.setValue("galleryFpsIndicatorEnabled", mGalleryFpsIndicatorEnabled);
+    settings.setValue("galleryHistogramEnabled", mGalleryHistogramEnabled);
     settings.setValue("unmountOnFinalize", mUnmountOnFinalize);
     settings.setValue("finalizeSelectionToSingleDirectory", mFinalizeSelectionToSingleDirectory);
     settings.setValue("inheritHeroFrameSidecars", mInheritHeroFrameSidecars);
@@ -1724,6 +1725,7 @@ void MainWindow::restoreSettings() {
     mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
     mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
     mGalleryFpsIndicatorEnabled = settings.value("galleryFpsIndicatorEnabled", true).toBool();
+    mGalleryHistogramEnabled = settings.value("galleryHistogramEnabled", false).toBool();
     mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
     mFinalizeSelectionToSingleDirectory =
         settings.value("finalizeSelectionToSingleDirectory", false).toBool();
@@ -2624,6 +2626,31 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 preview.rgb, sourceWidth, sourceHeight, 6, orientation);
                             if (preview.rawSamples && preview.rawWidth && preview.rawHeight &&
                                 preview.rawChannels) {
+                                if (preview.rawChannels == 1) {
+                                    const int block = std::max(1, preview.rawCfaSize / 2);
+                                    const int oldWidth = static_cast<int>(preview.rawWidth);
+                                    const int oldHeight = static_cast<int>(preview.rawHeight);
+                                    const auto oldPhase = preview.rawCfaPhase;
+                                    const auto oldBlackLevels = preview.rawBlackLevels;
+                                    for (int phase = 0; phase < 4; ++phase) {
+                                        const int x = (phase % 2) * block;
+                                        const int y = (phase / 2) * block;
+                                        int sourceX = x, sourceY = y;
+                                        if (orientation == 90) {
+                                            sourceX = y; sourceY = oldHeight - 1 - x;
+                                        } else if (orientation == 180) {
+                                            sourceX = oldWidth - 1 - x;
+                                            sourceY = oldHeight - 1 - y;
+                                        } else if (orientation == 270) {
+                                            sourceX = oldWidth - 1 - y; sourceY = x;
+                                        }
+                                        const int sourcePhase =
+                                            (((sourceY / block) & 1) << 1) |
+                                            ((sourceX / block) & 1);
+                                        preview.rawCfaPhase[phase] = oldPhase[sourcePhase];
+                                        preview.rawBlackLevels[phase] = oldBlackLevels[sourcePhase];
+                                    }
+                                }
                                 auto rotatedRaw = rotateInterleaved(
                                     *preview.rawSamples, preview.rawWidth, preview.rawHeight,
                                     preview.rawChannels, orientation);
@@ -2676,7 +2703,10 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 bytes, static_cast<int>(width), static_cast<int>(height),
                                 preview.rawSamples, static_cast<int>(preview.rawWidth),
                                 static_cast<int>(preview.rawHeight),
-                                static_cast<int>(preview.rawChannels));
+                                static_cast<int>(preview.rawChannels),
+                                preview.rawBlack, preview.rawWhite,
+                                preview.rawCfaSize, preview.rawCfaPhase,
+                                preview.rawBlackLevels);
                         }, Qt::BlockingQueuedConnection);
                         presentedFirstFrame = true;
                         if (diagnostics)
@@ -2698,7 +2728,10 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 bytes, static_cast<int>(width), static_cast<int>(height),
                                 preview.rawSamples, static_cast<int>(preview.rawWidth),
                                 static_cast<int>(preview.rawHeight),
-                                static_cast<int>(preview.rawChannels));
+                                static_cast<int>(preview.rawChannels),
+                                preview.rawBlack, preview.rawWhite,
+                                preview.rawCfaSize, preview.rawCfaPhase,
+                                preview.rawBlackLevels);
                             else pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                         }, Qt::BlockingQueuedConnection);
                         if (pushResult == ClipPlayerDialog::FramePushResult::Retry)
@@ -2804,6 +2837,11 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     // top-level window; mClipPlayer is a QPointer and clears on deletion.
     mClipPlayer = new ClipPlayerDialog(std::move(clips), mountId, nullptr);
     mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
+    mClipPlayer->setHistogramEnabled(mGalleryHistogramEnabled);
+    connect(mClipPlayer, &ClipPlayerDialog::histogramEnabledChanged, this, [this](bool enabled) {
+        mGalleryHistogramEnabled = enabled;
+        QSettings(PACKAGE_NAME, APP_NAME).setValue("galleryHistogramEnabled", enabled);
+    });
     connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
             [this](int id, double startSeconds) {
                 mGalleryMountId = id;
@@ -5636,6 +5674,7 @@ void MainWindow::onOpenPreferences() {
     dialog.setCacheFolder(mCacheRootFolder);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog.setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
+    dialog.setGalleryHistogramEnabled(mGalleryHistogramEnabled);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
     dialog.setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
     dialog.setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
@@ -5655,6 +5694,8 @@ void MainWindow::onOpenPreferences() {
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mGalleryFpsIndicatorEnabled = dialog.getGalleryFpsIndicatorEnabled();
+    mGalleryHistogramEnabled = dialog.getGalleryHistogramEnabled();
+    if (mClipPlayer) mClipPlayer->setHistogramEnabled(mGalleryHistogramEnabled);
     if (mClipPlayer) mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();

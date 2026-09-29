@@ -13,7 +13,9 @@
 #include <memory>
 #include <atomic>
 #include <deque>
+#include <optional>
 #include <vector>
+#include <array>
 class QLabel; class QPushButton; class QSlider; class QScrollArea; class QCheckBox;
 class QEvent;
 class QBuffer;
@@ -41,6 +43,8 @@ public:
     void requestThumbnailBackfill();
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
+    void setHistogramEnabled(bool enabled);
+    bool histogramEnabled() const { return mHistogramEnabled; }
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     std::shared_ptr<std::atomic_bool> thumbnailCollectionEnabled() const { return mThumbnailCollectionEnabled; }
@@ -53,10 +57,16 @@ public:
                         std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated);
     FramePushResult pushRgb48Frame(const QByteArray& frame, int width, int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
-        int rawWidth = 0, int rawHeight = 0, int rawChannels = 0);
+        int rawWidth = 0, int rawHeight = 0, int rawChannels = 0,
+        float rawBlack = 0.0f, float rawWhite = 65535.0f,
+        int rawCfaSize = 2, std::array<uint8_t, 4> rawCfaPhase = {0, 1, 1, 2},
+        std::array<float, 4> rawBlackLevels = {});
     void presentRgb48Frame(const QByteArray& frame, int width, int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
-        int rawWidth = 0, int rawHeight = 0, int rawChannels = 0);
+        int rawWidth = 0, int rawHeight = 0, int rawChannels = 0,
+        float rawBlack = 0.0f, float rawWhite = 65535.0f,
+        int rawCfaSize = 2, std::array<uint8_t, 4> rawCfaPhase = {0, 1, 1, 2},
+        std::array<float, 4> rawBlackLevels = {});
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
@@ -66,6 +76,7 @@ public:
     void clearFrameSelections(const QSet<int>& mountIds);
     void selectAllFrameSelections();
 signals:
+    void histogramEnabledChanged(bool enabled);
     void currentClipChanged(int mountId, double startSeconds);
     void firstFramePresented(int mountId);
     void framePresented(int mountId, int frame);
@@ -82,6 +93,10 @@ private:
     struct RawFrame {
         std::shared_ptr<const std::vector<uint16_t>> samples;
         int width=0,height=0,channels=0;
+        float black=0.0f, white=65535.0f;
+        std::array<float, 4> blackLevels{};
+        int cfaSize=2;
+        std::array<uint8_t, 4> cfaPhase{0, 1, 1, 2};
     };
     struct SubmittedFrame { int sourceFrame=0; RawFrame raw; };
     struct QueuedFrame { QImage image; int sourceFrame=0; RawFrame raw; };
@@ -102,6 +117,7 @@ private:
     void updateButtonIcons();
     void revealOverlay();
     void setOverlayVisible(bool visible);
+    void setHistogramExpanded(bool expanded);
     void changeZoom(double wheelSteps);
     void advanceZoomAnimation();
     void setZoomAnimationTarget(double target);
@@ -111,6 +127,7 @@ private:
     QPointF surfaceScaleForZoom(double zoomPercent) const;
     void updateTitle();
     void updateFpsIndicator();
+    void updateHistogram();
     bool pointerOverThumbnailRow() const;
     void updateMouseSourcePosition(const QPointF& globalPosition);
     void updateDisplayedImage();
@@ -135,9 +152,9 @@ private:
     int sourceFrameForOutput(int outputFrame) const;
     QImage rgb48Image(const QByteArray& frame, int width, int height) const;
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
-    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr;
+    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
-    QPushButton* mThumbnailToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
+    QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
     QWidget* mThumbnailContent=nullptr; QHash<int,QLabel*> mThumbnailLabels;
     QHash<int,QWidget*> mThumbnailItems;
     QHash<int,QHash<int,QImage>> mThumbnailCache;
@@ -172,6 +189,13 @@ private:
     double mPositionSeconds=0.0, mStartSeconds=0.0;
     bool mPaused=false, mClosing=false, mPlaybackFailed=false;
     bool mFpsIndicatorEnabled=true;
+    bool mHistogramEnabled=false;
+    bool mHistogramExpanded=false;
+    std::optional<uint16_t> mDetectedClipValue;
+    const std::vector<uint16_t>* mIntensitySamples=nullptr;
+    QPoint mIntensityPosition{-1,-1};
+    QString mCachedIntensity;
+    std::vector<std::array<uint32_t,3>> mClipValueCounts;
     bool mDirectFramesFinished=false;
     bool mStoppingDecoder=false, mSeeking=false, mAudioEnabled=false;
     bool mFirstFrameReady=false, mAudioStartPending=false, mAudioLoading=false;

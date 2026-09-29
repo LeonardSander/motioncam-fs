@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -32,6 +33,7 @@
 #include <QtConcurrent>
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <spdlog/spdlog.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
 #include <QAudioFormat>
@@ -70,6 +72,191 @@ QIcon thumbnailChevronIcon(bool up) {
     painter.setPen(QPen(Qt::white,3.0,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
     const qreal upper=up?9.0:20.0,lower=up?20.0:9.0;
     painter.drawPolyline(QPolygonF({QPointF(5.0,lower),QPointF(15.0,upper),QPointF(25.0,lower)}));
+    return QIcon(pixmap);
+}
+
+class RawHistogram final : public QWidget {
+public:
+    using Bins=std::array<std::array<float,560>,3>;
+    explicit RawHistogram(QWidget* parent) : QWidget(parent) {
+        setFixedSize(560,260);
+    }
+    std::function<void()> doubleClicked;
+    void setBins(const Bins& bins) {
+        mBins=bins;
+        update();
+    }
+    static double stopPosition(double stops) {
+        const double remaining=16.0-stops;
+        return remaining*(1.0+remaining/16.0)/32.0;
+    }
+protected:
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        if(event->button()==Qt::LeftButton && doubleClicked) {
+            doubleClicked();
+            event->accept();
+            return;
+        }
+        QWidget::mouseDoubleClickEvent(event);
+    }
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(),QColor(0,0,0,165));
+        const QRect graph(8,8,width()-16,height()-16);
+        painter.setPen(QColor(125,125,125,150));
+        for(int stop=0;stop<=16;++stop) {
+            const int x=graph.left()+qRound((graph.width()-1)*stopPosition(stop));
+            painter.drawLine(x,graph.top(),x,graph.bottom());
+        }
+        float peak=1.0f;
+        for(const auto& channel:mBins)
+            for(float count:channel)peak=std::max(peak,count);
+        painter.save();
+        painter.setClipRect(graph);
+        const qreal baseline=graph.bottom()-1.5;
+        const qreal amplitude=graph.height()-3.0;
+        const float toe=std::min(24.0f,peak);
+        const qreal toeHeight=std::pow(toe/peak,0.4)*amplitude;
+        auto heightFor=[&](int channel,int bin) {
+            const float count=mBins[channel][bin];
+            return count<toe ? count/toe*toeHeight :
+                std::pow(count/peak,0.4)*amplitude;
+        };
+        // Draw each RGB combination once. Repeated translucent overpainting
+        // makes the bottom of dense histograms look like a solid color strip.
+        const std::array<QRgb,8> fillColors={
+            qRgba(0,0,0,0),qRgba(240,65,65,42),
+            qRgba(65,215,65,42),qRgba(230,195,65,42),
+            qRgba(75,115,240,42),qRgba(175,75,205,42),
+            qRgba(220,205,70,42),qRgba(175,175,175,42)};
+        QImage fill(graph.size(),QImage::Format_ARGB32);
+        fill.fill(Qt::transparent);
+        for(int x=0;x<fill.width();++x) {
+            const int bin=std::clamp(qRound(x*559.0/(fill.width()-1)),0,559);
+            const std::array<double,3> top={baseline-heightFor(0,bin),
+                baseline-heightFor(1,bin),baseline-heightFor(2,bin)};
+            for(int y=0;y<fill.height();++y) {
+                const qreal absoluteY=graph.top()+y;
+                if(absoluteY>=baseline)break;
+                const int mask=(mBins[0][bin]>0 && absoluteY>=top[0] ? 1 : 0) |
+                    (mBins[1][bin]>0 && absoluteY>=top[1] ? 2 : 0) |
+                    (mBins[2][bin]>0 && absoluteY>=top[2] ? 4 : 0);
+                if(mask)reinterpret_cast<QRgb*>(fill.scanLine(y))[x]=fillColors[mask];
+            }
+        }
+        painter.drawImage(graph.topLeft(),fill);
+        std::array<QImage,3> strokeMasks;
+        for(int c=0;c<3;++c) {
+            QPainterPath path;
+            bool inRun=false;
+            for(int x=0;x<560;++x) {
+                const qreal position=graph.left()+x*(graph.width()-1)/559.0;
+                if(mBins[c][x]==0) {
+                    if(inRun)path.lineTo(position,baseline);
+                    inRun=false;
+                    continue;
+                }
+                const qreal top=baseline-heightFor(c,x);
+                if(inRun)path.lineTo(position,top);
+                else {
+                    path.moveTo(graph.left()+std::max(0,x-1)*(graph.width()-1)/559.0,
+                        baseline);
+                    path.lineTo(position,top);
+                }
+                inRun=true;
+            }
+            if(inRun)path.lineTo(graph.right(),baseline);
+            strokeMasks[c]=QImage(graph.size(),QImage::Format_ARGB32);
+            strokeMasks[c].fill(Qt::transparent);
+            QPainter maskPainter(&strokeMasks[c]);
+            maskPainter.setRenderHint(QPainter::Antialiasing);
+            maskPainter.translate(-graph.topLeft());
+            maskPainter.setPen(QPen(Qt::white,1.3));
+            maskPainter.drawPath(path);
+        }
+        const std::array<QRgb,8> lineColors={
+            qRgb(0,0,0),qRgb(255,75,75),qRgb(80,255,80),qRgb(230,195,65),
+            qRgb(85,130,255),qRgb(175,75,205),qRgb(220,205,70),qRgb(255,255,255)};
+        QImage strokes(graph.size(),QImage::Format_ARGB32);
+        strokes.fill(Qt::transparent);
+        for(int y=0;y<strokes.height();++y) {
+            auto* output=reinterpret_cast<QRgb*>(strokes.scanLine(y));
+            const auto* red=reinterpret_cast<const QRgb*>(strokeMasks[0].constScanLine(y));
+            const auto* green=reinterpret_cast<const QRgb*>(strokeMasks[1].constScanLine(y));
+            const auto* blue=reinterpret_cast<const QRgb*>(strokeMasks[2].constScanLine(y));
+            for(int x=0;x<strokes.width();++x) {
+                const int r=qAlpha(red[x]),g=qAlpha(green[x]),b=qAlpha(blue[x]);
+                const int mask=(r>0?1:0)|(g>0?2:0)|(b>0?4:0);
+                if(mask) {
+                    if(x>=strokes.width()-3) {
+                        // At clipping, retain the original green/blue/red
+                        // painter order instead of combining stroke colors.
+                        double opacity=0.0,redPremul=0.0,greenPremul=0.0,
+                            bluePremul=0.0;
+                        const std::array<int,3> coverage={g,b,r};
+                        const std::array<QRgb,3> source={lineColors[2],
+                            lineColors[4],lineColors[1]};
+                        for(int channel=0;channel<3;++channel) {
+                            const double alpha=coverage[channel]*210.0/(255.0*255.0);
+                            redPremul=qRed(source[channel])*alpha+
+                                redPremul*(1.0-alpha);
+                            greenPremul=qGreen(source[channel])*alpha+
+                                greenPremul*(1.0-alpha);
+                            bluePremul=qBlue(source[channel])*alpha+
+                                bluePremul*(1.0-alpha);
+                            opacity=alpha+opacity*(1.0-alpha);
+                        }
+                        if(opacity>0.0)
+                            output[x]=qRgba(qRound(redPremul/opacity),
+                                qRound(greenPremul/opacity),
+                                qRound(bluePremul/opacity),qRound(opacity*255.0));
+                        continue;
+                    }
+                    const QRgb color=lineColors[mask];
+                    output[x]=qRgba(qRed(color),qGreen(color),qBlue(color),
+                        std::max({r,g,b})*210/255);
+                }
+            }
+        }
+        painter.drawImage(graph.topLeft(),strokes);
+        painter.restore();
+        painter.setPen(QColor(220,220,220));
+        for(int stop=16;stop>=0;stop-=4) {
+            const int x=graph.left()+qRound((graph.width()-1)*stopPosition(stop));
+            const QString label=stop==0?QStringLiteral("0 EV"):
+                QStringLiteral("-%1").arg(stop);
+            const int labelWidth=painter.fontMetrics().horizontalAdvance(label);
+            const int labelX=std::clamp(x-labelWidth/2,0,width()-labelWidth);
+            const QRect labelRect(labelX,graph.top(),labelWidth,
+                painter.fontMetrics().height());
+            painter.drawText(labelRect,Qt::AlignCenter,label);
+        }
+    }
+private:
+    Bins mBins{};
+};
+
+QIcon histogramIcon() {
+    QPixmap pixmap(24,24);pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(QColor(220,220,220,190),1));
+    painter.drawLine(QPointF(2,21),QPointF(22,21));
+    const std::array<QColor,3> colors={
+        QColor(255,95,95),QColor(100,235,105),QColor(105,155,255)};
+    const std::array<std::array<QPointF,7>,3> traces={{
+        {{{2,20},{4,18},{6,10},{8,5},{10,11},{13,18},{22,20}}},
+        {{{2,20},{7,18},{10,13},{12,6},{14,10},{17,18},{22,20}}},
+        {{{2,20},{11,19},{15,15},{18,7},{20,11},{21,17},{22,20}}}
+    }};
+    for(int channel=0;channel<3;++channel) {
+        QPainterPath path(traces[channel][0]);
+        for(int point=1;point<7;++point)
+            path.lineTo(traces[channel][point]);
+        painter.setPen(QPen(colors[channel],1.7,Qt::SolidLine,Qt::RoundCap,
+            Qt::RoundJoin));
+        painter.drawPath(path);
+    }
     return QIcon(pixmap);
 }
 
@@ -135,23 +322,33 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mVideo->setStyleSheet("background:#606060;color:#e0e0e0;border:none;margin:0;padding:0;");stack->addWidget(mVideo);
     mOverlay=new QWidget(stage);mOverlay->setStyleSheet("background:transparent;");
     auto* overlayLayout=new QVBoxLayout(mOverlay);overlayLayout->setContentsMargins(10,10,10,0);
-    mTitle=new QLabel(mOverlay);mTitle->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
+    mTitle=new QLabel(mOverlay);mTitle->setTextFormat(Qt::RichText);mTitle->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
     mFpsLabel=new QLabel(stage);
     mFpsLabel->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
     mFpsLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-    overlayLayout->addWidget(mTitle,0,Qt::AlignLeft);overlayLayout->addStretch(1);
+    overlayLayout->addWidget(mTitle,0,Qt::AlignLeft);
+    mHistogram=new RawHistogram(mOverlay);
+    static_cast<RawHistogram*>(mHistogram)->doubleClicked=[this]{
+        setHistogramExpanded(!mHistogramExpanded);
+    };
+    mHistogram->hide();
+    overlayLayout->addWidget(mHistogram,0,Qt::AlignLeft);
+    overlayLayout->addStretch(1);
     auto* controls=new QHBoxLayout;controls->setSpacing(8);auto* previous=new QPushButton(mOverlay);
     mPlayPause=new QPushButton(mOverlay); auto* next=new QPushButton(mOverlay);
     mAudioButton=new QPushButton(mOverlay);mAudioButton->setCheckable(true);
     mFullscreenButton=new QPushButton(mOverlay);mThumbnailToggle=new QPushButton(mOverlay);
-    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)}");}
+    mHistogramToggle=new QPushButton(mOverlay);mHistogramToggle->setCheckable(true);
+    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle,mHistogramToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)}");}
     previous->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));previous->setToolTip(tr("Previous clip"));
     next->setIcon(style()->standardIcon(QStyle::SP_MediaSkipForward));next->setToolTip(tr("Next clip"));
     mPlayPause->setToolTip(tr("Play / pause"));mAudioButton->setToolTip(tr("Mute / unmute audio"));mFullscreenButton->setToolTip(tr("Toggle fullscreen"));
     mFullscreenButton->setIcon(fullscreenIcon(false));
+    mHistogramToggle->setIcon(histogramIcon());
+    mHistogramToggle->setToolTip(tr("Show raw RGB histogram"));
     mThumbnailToggle->setToolTip(tr("Show frame thumbnails"));
     mThumbnailToggle->setIcon(thumbnailChevronIcon(true));mThumbnailToggle->setIconSize(QSize(22,22));
-    controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mThumbnailToggle);controls->addWidget(mAudioButton);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);
+    controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mThumbnailToggle);controls->addWidget(mAudioButton);controls->addWidget(mHistogramToggle);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);
     mThumbnailScroll=new QScrollArea(mOverlay);mThumbnailScroll->setWidgetResizable(true);
     mThumbnailScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     mThumbnailScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -174,7 +371,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlay->setGraphicsEffect(mOverlayOpacity);mOverlayOpacity->setOpacity(1.0);
     mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);mOverlayAnimation->setDuration(260);
-    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!pointerOverThumbnailRow())setOverlayVisible(false);});
+    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mHistogramExpanded&&!pointerOverThumbnailRow())setOverlayVisible(false);});
     mSurfaceUpdateTimer.setSingleShot(true);mSurfaceUpdateTimer.setInterval(300);
     connect(&mSurfaceUpdateTimer,&QTimer::timeout,this,[this]{
         // A later resize may arrive while a prior surface is still starting.
@@ -240,6 +437,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         }}
     });
     connect(mAudioButton,&QPushButton::toggled,this,&ClipPlayerDialog::setAudioEnabled);
+    connect(mHistogramToggle,&QPushButton::toggled,this,[this](bool enabled){
+        setHistogramEnabled(enabled);
+        emit histogramEnabledChanged(enabled);
+    });
     connect(previous,&QPushButton::clicked,this,[this]{ if(!mClips.isEmpty())openClip((mIndex-1+mClips.size())%mClips.size()); });
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
     connect(mThumbnailToggle,&QPushButton::clicked,this,[this]{
@@ -400,6 +601,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     emit currentClipChanged(requestedClip.mountId,requestedSeconds);
     stopDecoder();mBytes.clear();mBytesOffset=0;mFrames.clear();mSubmittedFrames.clear();
     mPresentedRawFrame={};
+    updateHistogram();
     mAudioLoadCancelled->store(true);
     mAudioLoadCancelled=std::make_shared<std::atomic_bool>(false);
     ++mAudioLoadGeneration;mAudioLoading=false;
@@ -912,6 +1114,7 @@ void ClipPlayerDialog::adoptRenderedDimensions(int width,int height){
     rebaseZoom(mZoomAnimationTarget);
     clip.width=width;clip.height=height;
     clampPanToZoom();
+    mIntensitySamples=nullptr;
     updateTitle();
 }
 
@@ -920,12 +1123,21 @@ void ClipPlayerDialog::updateTitle(){
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     QString view=mZoomPercent>0.0
         ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit");
+    if(mDetectedClipValue)
+        view+=tr(" — Clip %1").arg(*mDetectedClipValue);
     if(mMouseSourcePosition.x()>=0&&mMouseSourcePosition.y()>=0){
         view+=tr(" — x %1, y %2").arg(mMouseSourcePosition.x())
             .arg(mMouseSourcePosition.y());
-        const auto& raw=mPresentedRawFrame;
+    }
+    const auto& raw=mPresentedRawFrame;
+    if(mIntensitySamples!=raw.samples.get() ||
+       mIntensityPosition!=mMouseSourcePosition) {
+        mIntensitySamples=raw.samples.get();
+        mIntensityPosition=mMouseSourcePosition;
+        mCachedIntensity.clear();
         if(raw.samples&&raw.width>0&&raw.height>0&&
-           (raw.channels==1||raw.channels==3)){
+           (raw.channels==1||raw.channels==3)&&
+           mMouseSourcePosition.x()>=0&&mMouseSourcePosition.y()>=0){
             const auto& clip=mClips[mIndex];
             const int nativeWidth=clip.nativeWidth>0?clip.nativeWidth:raw.width;
             const int nativeHeight=clip.nativeHeight>0?clip.nativeHeight:raw.height;
@@ -935,9 +1147,19 @@ void ClipPlayerDialog::updateTitle(){
                 (mMouseSourcePosition.y()+0.5)*raw.height/nativeHeight)),0,raw.height-1);
             const size_t offset=(static_cast<size_t>(y)*raw.width+x)*raw.channels;
             if(offset+raw.channels<=raw.samples->size()){
-                view+=tr(" — intensity %1").arg((*raw.samples)[offset]);
-                for(int channel=1;channel<raw.channels;++channel)
-                    view+=QStringLiteral(", %1").arg((*raw.samples)[offset+channel]);
+                static const std::array<QString,3> colors={
+                    QStringLiteral("#ff7777"),QStringLiteral("#8fff8f"),
+                    QStringLiteral("#8faaff")};
+                mCachedIntensity=tr(" — intensity ").toHtmlEscaped();
+                const int phaseBlock=std::max(1,raw.cfaSize/2);
+                const int phase=(((y/phaseBlock)&1)<<1)|((x/phaseBlock)&1);
+                for(int channel=0;channel<raw.channels;++channel){
+                    if(channel>0)mCachedIntensity+=QStringLiteral(", ");
+                    const int color=raw.channels==3?channel:
+                        std::min<int>(2,raw.cfaPhase[phase]);
+                    mCachedIntensity+=QStringLiteral("<span style='color:%1'>%2</span>")
+                        .arg(colors[color]).arg((*raw.samples)[offset+channel]);
+                }
             }
         }
     }
@@ -947,8 +1169,9 @@ void ClipPlayerDialog::updateTitle(){
         sourceFrameForOutput(mPosition->value());
     if(names&&source>=0&&source<static_cast<int>(names->size()))
         title+=QStringLiteral(" — ")+QString::fromStdString((*names)[source]);
-    mTitle->setText(QString("%1 — %2 / %3 — %4").arg(title)
-        .arg(mIndex+1).arg(mClips.size()).arg(view));
+    mTitle->setText(QString("%1 — %2 / %3 — %4%5")
+        .arg(title.toHtmlEscaped()).arg(mIndex+1).arg(mClips.size())
+        .arg(view.toHtmlEscaped()).arg(mCachedIntensity));
 }
 
 void ClipPlayerDialog::updateFpsIndicator(){
@@ -968,6 +1191,112 @@ void ClipPlayerDialog::updateFpsIndicator(){
     const qint64 slow=sorted[index];
     mFpsLabel->setText(tr("%1 fps").arg(1000.0/std::max<qint64>(1,slow),0,'f',1));
     positionLabel();
+}
+
+void ClipPlayerDialog::setHistogramEnabled(bool enabled){
+    if(!enabled && mHistogramExpanded)setHistogramExpanded(false);
+    mHistogramEnabled=enabled;
+    mHistogramToggle->setChecked(enabled);
+    mHistogramToggle->setToolTip(enabled?tr("Hide raw RGB histogram"):
+        tr("Show raw RGB histogram"));
+    mHistogram->setVisible(enabled);
+    updateHistogram();
+}
+
+void ClipPlayerDialog::setHistogramExpanded(bool expanded){
+    if(mHistogramExpanded==expanded)return;
+    mHistogramExpanded=expanded;
+    auto* layout=static_cast<QVBoxLayout*>(mOverlay->layout());
+    if(expanded){
+        mHistogram->setMinimumSize(0,0);
+        mHistogram->setMaximumSize(QWIDGETSIZE_MAX,QWIDGETSIZE_MAX);
+        mHistogram->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
+        layout->setAlignment(mHistogram,Qt::Alignment{});
+        layout->setStretch(1,1);
+        layout->setStretch(2,0);
+        mOverlayTimer.stop();
+        mOverlayAnimation->stop();
+        mOverlayOpacity->setOpacity(1.0);
+        mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,false);
+    }else{
+        mHistogram->setFixedSize(560,260);
+        mHistogram->setSizePolicy(QSizePolicy::Fixed,QSizePolicy::Fixed);
+        layout->setAlignment(mHistogram,Qt::AlignLeft);
+        layout->setStretch(1,0);
+        layout->setStretch(2,1);
+        revealOverlay();
+    }
+    layout->invalidate();
+    layout->activate();
+}
+
+void ClipPlayerDialog::updateHistogram(){
+    const auto& raw=mPresentedRawFrame;
+    mIntensitySamples=nullptr;
+    mDetectedClipValue.reset();
+    if(!mHistogramEnabled){
+        updateTitle();
+        return;
+    }
+    RawHistogram::Bins bins{};
+    if(raw.samples && raw.width>0 && raw.height>0 &&
+       (raw.channels==1||raw.channels==3) && raw.white>raw.black) {
+        const size_t pixels=std::min(raw.samples->size()/raw.channels,
+            static_cast<size_t>(raw.width)*raw.height);
+        size_t stride=std::max<size_t>(1,pixels/250000);
+        if(stride>1 && stride%2==0)++stride;
+        if(mClipValueCounts.size()!=65536)mClipValueCounts.resize(65536);
+        std::fill(mClipValueCounts.begin(),mClipValueCounts.end(),
+                  std::array<uint32_t,3>{});
+        std::array<size_t,3> sampleCounts{};
+        const int phaseBlock=std::max(1,raw.cfaSize/2);
+        for(size_t pixel=0;pixel<pixels;pixel+=stride) {
+            for(int channel=0;channel<raw.channels;++channel) {
+                const uint16_t value=(*raw.samples)[pixel*raw.channels+channel];
+                const int phase=((((pixel/raw.width)/phaseBlock)&1u)<<1) |
+                    (((pixel%raw.width)/phaseBlock)&1u);
+                const int color=raw.channels==3?channel:
+                    std::min<int>(2,raw.cfaPhase[phase]);
+                ++sampleCounts[color];
+                ++mClipValueCounts[value][color];
+                const float channelBlack=raw.channels==3?
+                    raw.blackLevels[channel]:raw.blackLevels[phase];
+                const double normalized=std::clamp(
+                    (double(value)-channelBlack)/
+                    std::max(1.0f,raw.white-channelBlack),0.0,1.0);
+                const double stops=std::clamp(
+                    -std::log2(std::max(normalized,1.0/65536.0)),0.0,16.0);
+                const int bin=std::clamp(qRound(
+                    RawHistogram::stopPosition(stops)*559.0),0,559);
+                ++bins[color][bin];
+            }
+        }
+        for(int color=0;color<3;++color) {
+            if(sampleCounts[color]==0)continue;
+            const size_t brightestCount=std::max<size_t>(1,
+                (sampleCounts[color]+99)/100);
+            size_t included=0,modeCount=0;
+            int modeValue=-1;
+            for(int value=65535;value>=0 && included<brightestCount;--value) {
+                const size_t count=std::min<size_t>(
+                    mClipValueCounts[value][color],brightestCount-included);
+                included+=count;
+                if(count>modeCount) {
+                    modeCount=count;
+                    modeValue=value;
+                }
+            }
+            // A repeated clipping code dominates the bright tail even when
+            // a few brighter hot pixels prevent it from being the raw maximum.
+            if(modeCount*10>=brightestCount && modeValue>raw.black &&
+               modeValue!=qRound(raw.white) &&
+               (!mDetectedClipValue || modeValue>*mDetectedClipValue))
+                mDetectedClipValue=static_cast<uint16_t>(modeValue);
+        }
+    }
+    if(mHistogram)
+        static_cast<RawHistogram*>(mHistogram)->setBins(bins);
+    updateTitle();
 }
 
 void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
@@ -1126,6 +1455,7 @@ void ClipPlayerDialog::updateButtonIcons(){
     updateFpsIndicator();
 }
 void ClipPlayerDialog::setOverlayVisible(bool visible){
+    if(!visible&&mHistogramExpanded)return;
     mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,!visible);
     mOverlayAnimation->stop();mOverlayAnimation->setStartValue(mOverlayOpacity->opacity());
     mOverlayAnimation->setEndValue(visible?1.0:0.0);mOverlayAnimation->start();
@@ -1137,7 +1467,8 @@ void ClipPlayerDialog::revealOverlay(){
     if(!alreadyFadingIn&&(mOverlayOpacity->opacity()<0.999||
                           mOverlayAnimation->state()==QAbstractAnimation::Running))
         setOverlayVisible(true);
-    if(pointerOverThumbnailRow())mOverlayTimer.stop();else mOverlayTimer.start();
+    if(mHistogramExpanded||pointerOverThumbnailRow())mOverlayTimer.stop();
+    else mOverlayTimer.start();
 }
 void ClipPlayerDialog::updateDisplayedImage(){
     // The old surface remains the interactive fallback while a decoder
@@ -1500,6 +1831,7 @@ void ClipPlayerDialog::showNextFrame(){
         }
         mLastPresentedImage=queued.image;
         mPresentedRawFrame=queued.raw;
+        updateHistogram();
         mWaitingForFirstFrame=false;
         mLastImageIsSource=!mClips[mIndex].isSequence;
         mLastSurfaceScale=mDecoderSurfaceScale;
@@ -1821,7 +2153,9 @@ QImage ClipPlayerDialog::rgb48Thumbnail(const QByteArray& frame,int width,int he
 ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         const QByteArray& frame,int width,int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples,
-        int rawWidth,int rawHeight,int rawChannels){
+        int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
+        int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
+        std::array<float,4> rawBlackLevels){
     // Stills are presented directly from the processed RGB48 callback. Feeding
     // them through a timed FFmpeg graph would display the same image twice and
     // can apply the video surface's output aspect ratio to the second copy.
@@ -1844,7 +2178,8 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         if(image.isNull())return FramePushResult::Stopped;
         const int sourceFrame=std::max(mNextInputFrame,mIncomingFrame->load());
         mFrames.push_back({image,sourceFrame,
-            {std::move(rawSamples),rawWidth,rawHeight,rawChannels}});
+            {std::move(rawSamples),rawWidth,rawHeight,rawChannels,rawBlack,rawWhite,
+                rawBlackLevels,rawCfaSize,rawCfaPhase}});
         mNextInputFrame=sourceFrame+1;
         return FramePushResult::Accepted;
     }
@@ -1854,14 +2189,17 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
            frame.size()!=qint64(width)*height*6)return FramePushResult::Stopped;
         if(mDecoder.write(frame)!=frame.size())return FramePushResult::Retry;
         mSubmittedFrames.push_back({mNextInputFrame,
-            {std::move(rawSamples),rawWidth,rawHeight,rawChannels}});
+            {std::move(rawSamples),rawWidth,rawHeight,rawChannels,rawBlack,rawWhite,
+                rawBlackLevels,rawCfaSize,rawCfaPhase}});
         ++mNextInputFrame;return FramePushResult::Accepted;
     }
     return FramePushResult::Stopped;
 }
 void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples,
-        int rawWidth,int rawHeight,int rawChannels){
+        int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
+        int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
+        std::array<float,4> rawBlackLevels){
     const bool dimensionsChanged=mIndex>=0&&
         (mClips[mIndex].width!=width||mClips[mIndex].height!=height);
     if(dimensionsChanged&&mClips[mIndex].sourceFrames>1&&mClips[mIndex].isSequence){
@@ -1881,7 +2219,9 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
     if(mIndex>=0&&mClips[mIndex].sourceFrames>1)return;
     const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
     mLastPresentedImage=image;mLastImageIsSource=true;
-    mPresentedRawFrame={std::move(rawSamples),rawWidth,rawHeight,rawChannels};
+    mPresentedRawFrame={std::move(rawSamples),rawWidth,rawHeight,rawChannels,
+        rawBlack,rawWhite,rawBlackLevels,rawCfaSize,rawCfaPhase};
+    updateHistogram();
     mWaitingForFirstFrame=false;
     setDroppedCursorVisible(false);
     setDuplicateCursorVisible(false);
