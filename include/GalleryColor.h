@@ -56,6 +56,10 @@ inline std::array<float, 3> sampleProfileTable(const DNGProfileTable& table,
         const float lower = lerp(
             lerp(sample(v0, h0, s0, channel), sample(v0, h0, s1, channel), sf),
             lerp(sample(v0, h1, s0, channel), sample(v0, h1, s1, channel), sf), hf);
+        if (v0 == v1) {
+            result[channel] = lower;
+            continue;
+        }
         const float upper = lerp(
             lerp(sample(v1, h0, s0, channel), sample(v1, h0, s1, channel), sf),
             lerp(sample(v1, h1, s0, channel), sample(v1, h1, s1, channel), sf), hf);

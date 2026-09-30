@@ -113,9 +113,10 @@ void PreviewRenderer::render(
                 entries[index], frame, options.retainSourceSamples)) {
             auto bytes = state->filesystem->materializeFile(entries[index], false);
             if (!bytes) throw std::runtime_error("Failed to render " + entries[index].name);
-            std::vector<uint8_t> dng(bytes->begin(), bytes->end());
-            if (!DNGDecoder::decodePreview(std::move(dng), settings, frame, false,
-                                           options.retainSourceSamples))
+            // All sources use the same processed-DNG fallback. The projected
+            // frame already contains the requested crop, gain, and proxy work.
+            if (!vfs::decodeProcessedDngPreview(
+                    bytes, frame, false, options.retainSourceSamples))
                 throw std::runtime_error("Could not decode preview " + entries[index].name);
         }
         const auto materializeFinished = std::chrono::steady_clock::now();

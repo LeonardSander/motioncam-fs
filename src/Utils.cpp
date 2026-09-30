@@ -13,9 +13,11 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <iomanip>
 #include <numeric>
 #include <sstream>
+#include <thread>
 
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/back_inserter.hpp>
@@ -1259,7 +1261,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     //
 
     uint32_t originalWidth = inOutWidth;
-    uint32_t dstOffset = 0;
 
     // Validate parameters
     if (dstWhiteLevel <= 0 || dstWhiteLevel > 65535) {
@@ -1283,8 +1284,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     const bool disableDither = false;
 
     // Process the image by copying and packing 2x2 Bayer blocks
-    std::array<float, 16> shadingMapVals;
-    shadingMapVals.fill(1.0f);
     std::vector<uint8_t> dst;
     dst.resize(sizeof(uint16_t) * newWidth * newHeight);
     uint16_t* dstData = reinterpret_cast<uint16_t*>(dst.data());
@@ -1294,8 +1293,16 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         throw std::runtime_error("Destination buffer allocation failed");
     }
 
-    for (auto y = 0; y < newHeight; y += 2 * (scale < 2 ? cfaSize : 1)) {
+    // Each row group writes only its own rows in dst. Keep temporary gain
+    // values local to a worker so full-resolution preprocessing can run in
+    // parallel without duplicating either image buffer.
+    const uint32_t rowStep = 2 * (scale < 2 ? cfaSize : 1);
+    auto processRows = [&](uint32_t firstY, uint32_t lastY) {
+    std::array<float, 16> shadingMapVals;
+    shadingMapVals.fill(1.0f);
+    for (auto y = firstY; y < lastY; y += rowStep) {
         for (auto x = 0; x < newWidth; x += 2 * (scale < 2 ? cfaSize : 1)) {
+            const size_t dstOffset = static_cast<size_t>(y) * newWidth + x;
             // Get the source coordinates (scaled)
             uint32_t srcY = y * sourceScale;
             uint32_t srcX = x * sourceScale;
@@ -1388,7 +1395,6 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                 dstData[dstOffset + newWidth]      = static_cast<unsigned short>(s[2]);
                 dstData[dstOffset + newWidth + 1]  = static_cast<unsigned short>(s[3]);
 
-                dstOffset += 2;
             } else {
                 std::array<uint16_t, 16> s = {                
                     srcData[srcY * originalWidth + srcX], srcData[srcY * originalWidth + srcX + 1], srcData[(srcY + 1) * originalWidth + srcX], srcData[(srcY + 1) * originalWidth + srcX + 1],
@@ -1467,11 +1473,36 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                 dstData[dstOffset + newWidth * 3 + 2]   = static_cast<unsigned short>(s[14]);
                 dstData[dstOffset + newWidth * 3 + 3]   = static_cast<unsigned short>(s[15]);
                               
-                dstOffset += 2 * cfaSize;
-            }            
+            }
         }
-        dstOffset += newWidth * (cfaSize == 2 && scale == 1 ? 3 : 1);
     }
+    };
+    const uint32_t rowGroups = newHeight / rowStep;
+    const unsigned workers = dst.size() >= 8 * 1024 * 1024
+        ? std::min<unsigned>(8, std::min<unsigned>(
+            std::max(1u, std::thread::hardware_concurrency()), rowGroups)) : 1;
+    std::vector<std::exception_ptr> errors(workers);
+    auto runWorker = [&](unsigned worker) {
+        try {
+            processRows(rowStep * (rowGroups * worker / workers),
+                rowStep * (rowGroups * (worker + 1) / workers));
+        } catch (...) {
+            errors[worker] = std::current_exception();
+        }
+    };
+    std::vector<std::thread> threads;
+    threads.reserve(workers - 1);
+    try {
+        for (unsigned worker = 1; worker < workers; ++worker)
+            threads.emplace_back(runWorker, worker);
+    } catch (...) {
+        for (auto& thread : threads) thread.join();
+        throw;
+    }
+    runWorker(0);
+    for (auto& thread : threads) thread.join();
+    for (const auto& error : errors)
+        if (error) std::rethrow_exception(error);
 
     // Update dimensions
     inOutWidth = newWidth;

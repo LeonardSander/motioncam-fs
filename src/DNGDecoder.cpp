@@ -5009,6 +5009,34 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                              ? (rgb ? (scale - 1) / 2 : (coordinate & 1u))
                              : 0u));
     };
+    struct GainMapAxes {
+        std::vector<GainMapAxisSample> x;
+        std::vector<GainMapAxisSample> y;
+        bool valid = false;
+    };
+    std::vector<GainMapAxes> axes(maps.size());
+    for (size_t index = 0; index < maps.size(); ++index) {
+        const auto& map = maps[index];
+        auto& cached = axes[index];
+        cached.valid = validGainMap(map);
+        if (!cached.valid) continue;
+        cached.x.reserve(image.layout.width);
+        cached.y.reserve(image.layout.height);
+        for (uint32_t x = 0; x < image.layout.width; ++x) {
+            const auto sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
+            const double normalizedX = (static_cast<double>(sourceX) + 0.5) / sourceWidth;
+            const double gridX = map.spacingH > 0.0
+                ? (normalizedX - map.originH) / map.spacingH : 0.0;
+            cached.x.push_back(sampleGainMapAxis(gridX, map.width));
+        }
+        for (uint32_t y = 0; y < image.layout.height; ++y) {
+            const auto sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
+            const double normalizedY = (static_cast<double>(sourceY) + 0.5) / sourceHeight;
+            const double gridY = map.spacingV > 0.0
+                ? (normalizedY - map.originV) / map.spacingV : 0.0;
+            cached.y.push_back(sampleGainMapAxis(gridY, map.height));
+        }
+    }
     if (channels != 1 && channels != 3) return false;
     const uint32_t phaseGroup = static_cast<uint32_t>(
         std::max(1, image.layout.cfaRepeatSize / 2));
@@ -5017,9 +5045,10 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     for (const auto& map : maps)
         scalarPhaseGroups.push_back(phaseGroup > 1
             ? scalarCfaGroupOrigin(map, maps) : std::nullopt);
-    auto gainsAt = [&](const GainMap& map, uint32_t sourceX, uint32_t sourceY) {
+    auto gainsAt = [&](const GainMap& map, uint32_t sourceX, uint32_t sourceY,
+                       const GainMapAxisSample& sx, const GainMapAxisSample& sy) {
         std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
-        if (!validGainMap(map) || sourceX < map.left || sourceX >= map.right ||
+        if (sourceX < map.left || sourceX >= map.right ||
             sourceY < map.top || sourceY >= map.bottom) return gains;
         if (map.channels == 1) {
             const size_t mapIndex = static_cast<size_t>(&map - maps.data());
@@ -5038,14 +5067,6 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
         const uint32_t pixelPhase = static_cast<uint32_t>(gainMapPhaseChannel(
             sourceX, sourceY, 0, 0, phaseGroup));
         const uint32_t pixelColor = cfaPhase[pixelPhase];
-        const double normalizedX = (static_cast<double>(sourceX) + 0.5) / sourceWidth;
-        const double normalizedY = (static_cast<double>(sourceY) + 0.5) / sourceHeight;
-        const double gridX = map.spacingH > 0.0
-            ? (normalizedX - map.originH) / map.spacingH : 0.0;
-        const double gridY = map.spacingV > 0.0
-            ? (normalizedY - map.originV) / map.spacingV : 0.0;
-        const auto sx = sampleGainMapAxis(gridX, map.width);
-        const auto sy = sampleGainMapAxis(gridY, map.height);
         const uint32_t sampledChannels = rgb ? channels : 1u;
         for (uint32_t channel = 0; channel < sampledChannels; ++channel) {
             gains[channel] = sampleGainMapBilinear(sx, sy,
@@ -5066,14 +5087,28 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     };
     const double fallbackWhite = static_cast<double>(
         (uint32_t{1} << std::min(16u, image.layout.bitsPerSample)) - 1);
+    std::array<double, 4> sourceBlack{};
+    std::array<double, 4> normalizedRange{};
+    for (size_t channel = 0; channel < sourceBlack.size(); ++channel) {
+        sourceBlack[channel] = image.metadata.blackLevelCount
+            ? image.metadata.blackLevel[std::min<size_t>(
+                  channel, image.metadata.blackLevelCount - 1)] : 0.0;
+        const double white = image.metadata.whiteLevelCount
+            ? image.metadata.whiteLevel[std::min<size_t>(
+                  channel, image.metadata.whiteLevelCount - 1)] : fallbackWhite;
+        normalizedRange[channel] = 65535.0 /
+            std::max(1.0, white - sourceBlack[channel]);
+    }
     auto bakeRows = [&](uint32_t beginY, uint32_t endY) {
         for (uint32_t y = beginY; y < endY; ++y) {
             const uint32_t sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
             for (uint32_t x = 0; x < image.layout.width; ++x) {
                 const uint32_t sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
                 std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
-                for (const auto& map : maps) {
-                    const auto sampled = gainsAt(map, sourceX, sourceY);
+                for (size_t mapIndex = 0; mapIndex < maps.size(); ++mapIndex) {
+                    if (!axes[mapIndex].valid) continue;
+                    const auto sampled = gainsAt(maps[mapIndex], sourceX, sourceY,
+                        axes[mapIndex].x[x], axes[mapIndex].y[y]);
                     for (uint32_t channel = 0; channel < channels; ++channel)
                         gains[channel] *= sampled[channel];
                 }
@@ -5083,15 +5118,13 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                     const size_t index =
                         (static_cast<size_t>(y) * image.layout.width + x) * channels + channel;
                     const size_t levelChannel = rgb ? channel : cfaLevelChannel;
-                    const double black = image.metadata.blackLevelCount
-                        ? image.metadata.blackLevel[std::min<size_t>(
-                              levelChannel, image.metadata.blackLevelCount - 1)] : 0.0;
-                    const double white = image.metadata.whiteLevelCount
-                        ? image.metadata.whiteLevel[std::min<size_t>(
-                              levelChannel, image.metadata.whiteLevelCount - 1)] : fallbackWhite;
-                    image.samples[index] = bakeLinearGainSample(
-                        image.samples[index], gains[channel], black, white, 0.0, 65535.0,
-                        debugGainMap);
+                    const double value = debugGainMap
+                        ? (gains[channel] > 0.0f ? 65535.0 / gains[channel] : 0.0)
+                        : gains[channel] *
+                            (image.samples[index] - sourceBlack[levelChannel]) *
+                            normalizedRange[levelChannel];
+                    image.samples[index] = static_cast<uint16_t>(
+                        std::clamp(std::lround(value), 0l, 65535l));
                 }
             }
         }
@@ -5250,9 +5283,11 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         image.layout.height = proxyHeight;
         gainMapSourceScale = remainingPreviewScale;
     }
+    const auto gainStarted = std::chrono::steady_clock::now();
     if (!bakeDecodedPreviewGainMaps(
             image, settings, sourceWidth, sourceHeight, gainMapSourceScale,
             &frame.gainMapApplied)) return false;
+    const auto gainFinished = std::chrono::steady_clock::now();
     frame.metadata = image.metadata;
     frame.timestamp = image.timestamp;
     uint32_t width = image.layout.width;
@@ -5374,8 +5409,15 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         // Normal gallery output can be normalized directly into the byte
         // buffer. Avoid a second full-size uint16 RGB allocation and the
         // subsequent copy (155 MiB each for a 27 MP Quad Bayer preview).
-        return utils::normalizeRgb16Bytes(
+        const bool normalized = utils::normalizeRgb16Bytes(
             rgb, frame.rgb, outputBlack, outputWhite);
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=decoded_preview_stage pixels={} gain_ms={:.3f} remaining_ms={:.3f}",
+                static_cast<size_t>(width) * height,
+                std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now()-gainFinished).count());
+        return normalized;
     }
     std::vector<uint16_t> normalizedSamples;
     if (!utils::normalizeRgb16(rgb, normalizedSamples, outputBlack, outputWhite))

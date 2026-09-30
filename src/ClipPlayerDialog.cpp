@@ -42,6 +42,8 @@
 #include <array>
 #include <chrono>
 #include <functional>
+#include <thread>
+#include <vector>
 #include <spdlog/spdlog.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
 #include <QAudioFormat>
@@ -2327,7 +2329,14 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
             }
         }
     }else{
-        for(int y=0;y<height;++y){
+        // Rotated frames scatter into different output rows. Split the source
+        // rows across workers; every output pixel has one writer. Obtain the
+        // writable pointer before spawning workers so QImage never detaches
+        // while they are running.
+        auto* outputBits=image.bits();
+        const qsizetype outputStride=image.bytesPerLine();
+        auto convertRows=[&](int first,int last){
+        for(int y=first;y<last;++y){
             const auto* row=source+qsizetype(y)*width*6;
             for(int x=0;x<width;++x){
                 int outputX=x,outputY=y;
@@ -2335,10 +2344,26 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
                 else if(orientation==180){outputX=width-1-x;outputY=height-1-y;}
                 else {outputX=y;outputY=width-1-x;}
                 const auto* input=row+qsizetype(x)*6;
-                auto* output=image.scanLine(outputY)+qsizetype(outputX)*3;
+                auto* output=outputBits+qsizetype(outputY)*outputStride+
+                    qsizetype(outputX)*3;
                 output[0]=input[1];output[1]=input[3];output[2]=input[5];
             }
         }
+        };
+        const unsigned workers=width*qsizetype(height)>=4*1024*1024
+            ?std::min(4u,std::max(1u,std::thread::hardware_concurrency())):1u;
+        std::vector<std::thread> threads;
+        threads.reserve(workers-1);
+        try{
+            for(unsigned worker=1;worker<workers;++worker)
+                threads.emplace_back(convertRows,int(qsizetype(height)*worker/workers),
+                    int(qsizetype(height)*(worker+1)/workers));
+        }catch(...){
+            for(auto& thread:threads)thread.join();
+            throw;
+        }
+        convertRows(0,int(height/workers));
+        for(auto& thread:threads)thread.join();
     }
     return image;
 }

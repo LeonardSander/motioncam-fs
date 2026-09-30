@@ -822,7 +822,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 }
 
 VirtualFileSystemImpl_DirectLog::ProcessedFrame
-VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
+VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale) {
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
     const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
@@ -831,11 +831,6 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
     if (frameIt == mFrameIndexByTimestamp.end())
         throw std::runtime_error("DirectLog source frame not found");
     result.frameNumber = static_cast<int>(frameIt->second);
-
-    // Decode the canonical source geometry. The common DNG processor owns
-    // user crop and proxy/remosaic topology for every source.
-    result.width = 0;
-    result.height = 0;
 
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
     const auto sidecarsFinished = std::chrono::steady_clock::now();
@@ -862,6 +857,29 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry) {
         if (!manualOpcode3.empty())
             result.gainMaps.opcodeList3 = std::move(manualOpcode3);
     }
+    // Collapse complete CFA-phase maps while their source phase offsets are
+    // intact. RGB maps and scalar luminance maps can then be rebased to the
+    // proxy geometry without changing which color each map affects.
+    std::vector<GainMap> rgbMaps;
+    if (previewScale > 1)
+        rgbMaps = collapseCfaGainMapsForRgb(
+            result.gainMaps.opcodeList2, directLogCfaPhase(mConfig, mCalibration));
+    const bool rgbMapsSafe = std::all_of(rgbMaps.begin(), rgbMaps.end(),
+        [](const GainMap& map) {
+            return validGainMap(map) && map.channels == 3 &&
+                map.rowPitch == 1 && map.colPitch == 1;
+        });
+    const bool luminanceMapsSafe = std::all_of(
+        result.gainMaps.opcodeList3.begin(), result.gainMaps.opcodeList3.end(),
+        [](const GainMap& map) {
+            return validGainMap(map) && map.channels == 1 &&
+                map.rowPitch == 1 && map.colPitch == 1;
+        });
+    const bool scaleInFfmpeg = previewScale > 1 && rgbMapsSafe && luminanceMapsSafe;
+    if (scaleInFfmpeg)
+        result.gainMaps.opcodeList2 = std::move(rgbMaps);
+    result.width = scaleInFfmpeg ? mWidth / previewScale : 0;
+    result.height = scaleInFfmpeg ? mHeight / previewScale : 0;
     // Interpolated chroma reconstruction softens colour detail before RGB is
     // sampled back into a Bayer mosaic. Preserve the decoded chroma samples
     // for remosaiced DNG output; RGB output and previews retain smoothing.
@@ -1050,7 +1068,15 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
     std::shared_lock renderLock(mRenderMutex);
     try {
         const auto processStarted = std::chrono::steady_clock::now();
-        auto processed = processFrame(entry);
+        const int configuredScale = std::max(1,
+            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
+        const bool directProxy = configuredScale > 1 &&
+            !(mConfig.options & (RENDER_OPT_CROPPING |
+                                 RENDER_OPT_REMOSAIC_TO_BAYER |
+                                 RENDER_OPT_HIGHER_CFA_HQ)) &&
+            !(mCalibration && mCalibration->hasLeftTopCropStride) &&
+            mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
+        auto processed = processFrame(entry, directProxy ? configuredScale : 1);
         const auto processFinished = std::chrono::steady_clock::now();
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
@@ -1151,11 +1177,18 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             entry, processed.timestamp, mDecoder->getFrames().front().timestamp,
             mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
         const auto previewStarted = std::chrono::steady_clock::now();
+        auto previewSettings = mConfig;
+        const bool scaledInFfmpeg = directProxy &&
+            processed.width == mWidth / configuredScale &&
+            processed.height == mHeight / configuredScale;
+        if (scaledInFfmpeg)
+            previewSettings.options = static_cast<FileRenderOptions>(
+                previewSettings.options & ~RENDER_OPT_DRAFT);
         const bool decoded = DNGDecoder::decodePreview(
-            std::move(image), mConfig, preview, true, retainSourceSamples);
+            std::move(image), previewSettings, preview, true, retainSourceSamples);
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
-            spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
-                mSrcPath,
+            spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} ffmpeg_proxy={} width={} height={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
+                mSrcPath, scaledInFfmpeg, processed.width, processed.height,
                 std::chrono::duration<double, std::milli>(processFinished-processStarted).count(),
                 std::chrono::duration<double, std::milli>(previewStarted-processFinished).count(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());

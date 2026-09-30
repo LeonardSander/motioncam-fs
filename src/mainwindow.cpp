@@ -391,8 +391,10 @@ namespace {
             -0.9787684f, 1.9161415f, 0.0334540f,
              0.0719453f,-0.2289914f, 1.4052427f};
         auto transfer=[](float value){
-            const size_t index = static_cast<size_t>(std::lround(
-                std::clamp(value, 0.0f, 1.0f) * 65535.0f));
+            // The input is clamped to [0, 1], so rounding to the nearest LUT
+            // entry needs no general-purpose floating-point rounding call.
+            const size_t index = static_cast<size_t>(
+                std::clamp(value, 0.0f, 1.0f) * 65535.0f + 0.5f);
             return srgbTransfer[index];
         };
         constexpr float highlightBlendStart = 0.90f;
@@ -470,10 +472,14 @@ namespace {
              !metadata.profileTables->hueSat2.values.empty() ||
              !metadata.profileTables->look.values.empty());
         if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
-            spdlog::info("GALLERY_PERF event=color_transform pixels={} matrix={} tables={} hue_values={} look_values={}",
+            spdlog::info("GALLERY_PERF event=color_transform pixels={} matrix={} tables={} hue_values={} hue_value_divisions={} hue_encoding={} look_values={} look_value_divisions={} look_encoding={}",
                 pixelCount, useMatrix, useProfileTables,
                 metadata.profileTables ? metadata.profileTables->hueSat1.values.size() : 0,
-                metadata.profileTables ? metadata.profileTables->look.values.size() : 0);
+                metadata.profileTables ? metadata.profileTables->hueSat1.valueDivisions : 0,
+                metadata.profileTables ? metadata.profileTables->hueSat1.encoding : 0,
+                metadata.profileTables ? metadata.profileTables->look.values.size() : 0,
+                metadata.profileTables ? metadata.profileTables->look.valueDivisions : 0,
+                metadata.profileTables ? metadata.profileTables->look.encoding : 0);
         motioncam::DNGProfileTable blendedHueSat;
         const motioncam::DNGProfileTable* hueSatTable = nullptr;
         if (useProfileTables) {
@@ -587,7 +593,11 @@ namespace {
                         neutral * neutralWeight);
             }
         };
-        constexpr size_t minimumPixelsPerWorker = 256 * 1024;
+        // Profile-table interpolation is CPU-heavy even at proxy resolution.
+        // Use smaller chunks only for those frames; the ordinary matrix path
+        // keeps its lower thread overhead at proxy sizes.
+        const size_t minimumPixelsPerWorker = useProfileTables
+            ? 64 * 1024 : 256 * 1024;
         const unsigned int availableWorkers = std::max(1u, std::thread::hardware_concurrency());
         const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
             std::min(12u, availableWorkers), std::max<size_t>(1,
@@ -2636,24 +2646,34 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         }
                         preview.metadata.orientation = 0;
                     }
-                    auto& rgb = preview.rgb;
                     const uint32_t width = preview.width, height = preview.height;
                     displayDecodeMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - decodeStarted).count();
                     if (mGalleryGeneration.load() != generation) return;
                     const auto deliveryStarted = std::chrono::steady_clock::now();
-                    const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),
-                                           static_cast<qsizetype>(rgb.size()));
+                    // Keep the processed frame alive across queued thumbnail
+                    // delivery without copying its full RGB48 payload. The
+                    // playback handoff below is synchronous, so the view also
+                    // remains valid while Qt and FFmpeg consume it.
+                    auto rgb = std::make_shared<std::vector<uint8_t>>(
+                        std::move(preview.rgb));
+                    const QByteArray bytes = QByteArray::fromRawData(
+                        reinterpret_cast<const char*>(rgb->data()),
+                        static_cast<qsizetype>(rgb->size()));
                     const int thumbnailOutputFrame=incomingFrame->load();
                     if(thumbnailCollectionEnabled->load()){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
-                                                        thumbnailCollectionEnabled,bytes,width,height,
+                                                        thumbnailCollectionEnabled,rgb,width,height,
                                                         thumbnailOutputFrame]{
                             if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
-                               player->currentMountId()==mountId&&thumbnailCollectionEnabled->load())
-                                player->setOutputFrameThumbnail(thumbnailOutputFrame,bytes,
-                                static_cast<int>(width),static_cast<int>(height));
+                               player->currentMountId()==mountId&&thumbnailCollectionEnabled->load()) {
+                                const QByteArray view = QByteArray::fromRawData(
+                                    reinterpret_cast<const char*>(rgb->data()),
+                                    static_cast<qsizetype>(rgb->size()));
+                                player->setOutputFrameThumbnail(thumbnailOutputFrame,view,
+                                    static_cast<int>(width),static_cast<int>(height));
+                            }
                         },Qt::QueuedConnection);
                     }
                     // Thumbnail backfill must never enter the playback pipe.

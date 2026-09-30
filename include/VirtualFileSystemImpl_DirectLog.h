@@ -80,7 +80,7 @@ private:
         int width = 0;
         int height = 0;
     };
-    ProcessedFrame processFrame(const Entry& entry);
+    ProcessedFrame processFrame(const Entry& entry, int previewScale = 1);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
