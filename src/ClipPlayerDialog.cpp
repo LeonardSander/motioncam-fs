@@ -92,13 +92,22 @@ public:
         setFixedSize(560,260);
     }
     std::function<void()> doubleClicked;
-    void setBins(const Bins& bins) {
+    void setBins(const Bins& bins, float white, const std::array<float,4>& blackLevels,
+                 int phases) {
         mBins=bins;
+        mWhite=white;
+        mBlackLevels=blackLevels;
+        mPhases=phases;
         update();
     }
-    static double stopPosition(double stops) {
-        const double remaining=16.0-stops;
-        return remaining*(1.0+remaining/16.0)/32.0;
+    static double stopPosition(int stop, int maxStop) {
+        if(maxStop<2)return stop==0?1.0:0.025;
+        // Keep the first interval three times the width of the last.
+        // Leave a small margin before the last guide for code zero.
+        const double remaining=double(maxStop-stop)/maxStop;
+        const double quadratic=double(maxStop)/(2.0*(maxStop-1));
+        return 0.025+0.975*((1.0-quadratic)*remaining+
+            quadratic*remaining*remaining);
     }
 protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override {
@@ -114,8 +123,10 @@ protected:
         painter.fillRect(rect(),QColor(0,0,0,165));
         const QRect graph(8,8,width()-16,height()-16);
         painter.setPen(QColor(125,125,125,150));
-        for(int stop=0;stop<=16;++stop) {
-            const int x=graph.left()+qRound((graph.width()-1)*stopPosition(stop));
+        const int maxStop=mWhite>=1.0f ? std::min(16,static_cast<int>(std::floor(std::log2(mWhite)))) : 0;
+        for(int stop=0;stop<=maxStop;++stop) {
+            const int x=graph.left()+qRound((graph.width()-1)*
+                stopPosition(stop,maxStop));
             painter.drawLine(x,graph.top(),x,graph.bottom());
         }
         float peak=1.0f;
@@ -206,9 +217,17 @@ protected:
         }
         painter.drawImage(graph.topLeft(),strokes);
         painter.restore();
+        painter.setPen(QPen(QColor(150,105,45,95),1.5));
+        for(int phase=0;phase<mPhases;++phase) {
+            if(mBlackLevels[phase]<=0.0f)continue;
+            const int x=graph.left()+qRound((graph.width()-1)*
+                std::clamp(double(mBlackLevels[phase])/mWhite,0.0,1.0));
+            painter.drawLine(x,graph.top(),x,graph.bottom());
+        }
         painter.setPen(QColor(220,220,220));
-        for(int stop=16;stop>=0;stop-=4) {
-            const int x=graph.left()+qRound((graph.width()-1)*stopPosition(stop));
+        for(int stop=0;stop<=maxStop;stop+=4) {
+            const int x=graph.left()+qRound((graph.width()-1)*
+                stopPosition(stop,maxStop));
             const QString label=stop==0?QStringLiteral("0 EV"):
                 QStringLiteral("-%1").arg(stop);
             const int labelWidth=painter.fontMetrics().horizontalAdvance(label);
@@ -220,6 +239,9 @@ protected:
     }
 private:
     Bins mBins{};
+    float mWhite=0.0f;
+    std::array<float,4> mBlackLevels{};
+    int mPhases=0;
 };
 
 QIcon histogramIcon() {
@@ -1397,15 +1419,9 @@ void ClipPlayerDialog::updateHistogram(){
             for(int phase=0;phase<phases;++phase) {
                 auto& lookup=mHistogramBinsByPhase[phase];
                 lookup.resize(65536);
-                const float black=raw.blackLevels[phase];
-                const double range=std::max(1.0f,raw.white-black);
                 for(int value=0;value<65536;++value) {
-                    const double normalized=std::clamp(
-                        (double(value)-black)/range,0.0,1.0);
-                    const double stops=std::clamp(
-                        -std::log2(std::max(normalized,1.0/65536.0)),0.0,16.0);
                     lookup[value]=static_cast<uint16_t>(std::clamp(qRound(
-                        RawHistogram::stopPosition(stops)*559.0),0,559));
+                        double(value)/raw.white*559.0),0,559));
                 }
             }
         }
@@ -1446,7 +1462,9 @@ void ClipPlayerDialog::updateHistogram(){
         }
     }
     if(mHistogram)
-        static_cast<RawHistogram*>(mHistogram)->setBins(bins);
+        static_cast<RawHistogram*>(mHistogram)->setBins(bins,raw.white,
+            raw.blackLevels,raw.samples && raw.white>raw.black && raw.white>0.0f
+                ? (raw.channels==3?3:4) : 0);
     updateTitle();
     if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=histogram_frame width={} height={} channels={} latency_ms={:.3f}",
