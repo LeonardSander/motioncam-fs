@@ -830,6 +830,17 @@ int main() {
     };
     assert(std::abs(cropDouble(cropWarpOffset + 72) - 0.5) < 1e-15);
     assert(std::abs(cropDouble(cropWarpOffset + 32) - 0.2 * 9.0 / 49.0) < 1e-15);
+    auto packedCrop = makeLogCfaDng(400, 0);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(packedCrop));
+    assert(tagValue(packedCrop, 258).value == 10);
+    assert(motioncam::DNGDecoder::cropImage(packedCrop, 16, 16));
+    assert(tagValue(packedCrop, 258).value == 16);
+    motioncam::DecodedDNGImage croppedSamples;
+    assert(motioncam::DNGDecoder::decodeImage(
+        packedCrop, croppedSamples, false, false));
+    assert(croppedSamples.samples.size() == 16 * 16);
+    assert(std::all_of(croppedSamples.samples.begin(), croppedSamples.samples.end(),
+        [](uint16_t sample) { return sample == 400; }));
     auto mergedCropWarp = uncompressedA;
     assert(motioncam::DNGDecoder::cropImage(mergedCropWarp, 4, 4));
     assert(motioncam::DNGDecoder::mergeNonGainMapOpcodes(

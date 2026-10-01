@@ -38,7 +38,7 @@ int main() {
     assert(exampleCalibration.contains("_dataLevels"));
     assert(exampleCalibration.value("_levels", "") == "Dynamic");
     assert(exampleCalibration.value("_centerCrop", "") == "3840,2160");
-    assert(exampleCalibration.value("_leftTopCropStride", "") == "4096x2304");
+    assert(exampleCalibration.value("_leftTopCropStride", "") == "4096x2304_4096");
     assert(exampleCalibration.contains("_cfaSize"));
     assert(exampleCalibration.contains("_needGainMapOrderFixed"));
     assert(exampleCalibration.contains("_fullSensorResolution"));
@@ -67,14 +67,18 @@ int main() {
     const auto renderOverrides = CalibrationData::parse(std::string(R"({
         "levels":"4095/64,65,66",
         "centerCrop":"3840,2160",
-        "leftTopCropStride":"4096x2304"
+        "leftTopCropStride":"4096x2304_4096"
     })"));
     assert(renderOverrides && renderOverrides->hasLevels &&
            renderOverrides->levels == "4095/64,65,66");
     assert(renderOverrides->hasCenterCrop &&
            (renderOverrides->centerCrop == std::array<int, 2>{3840, 2160}));
     assert(renderOverrides->hasLeftTopCropStride &&
-           (renderOverrides->leftTopCropStride == std::array<int, 2>{4096, 2304}));
+           (renderOverrides->leftTopCropStride == std::array<int, 3>{4096, 2304, 4096}));
+    const auto legacyCrop = CalibrationData::parse(
+        std::string(R"({"leftTopCropStride":"4096x2304"})"));
+    assert(legacyCrop && legacyCrop->hasLeftTopCropStride &&
+           (legacyCrop->leftTopCropStride == std::array<int, 3>{4096, 2304, 4096}));
 
     const auto gainMapCalibration = CalibrationData::parse(
         std::string(R"({"needGainMapOrderFixed":true})"));

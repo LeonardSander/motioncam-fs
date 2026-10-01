@@ -3389,7 +3389,8 @@ bool DNGDecoder::cropImage(std::vector<uint8_t>& data,
     const auto widthE = find(TIFF_TAG_IMAGE_WIDTH), heightE = find(TIFF_TAG_IMAGE_HEIGHT);
     const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
     const auto rowsE = find(TIFF_TAG_ROWS_PER_STRIP);
-    if (!widthE || !heightE || !offsetsE || !countsE || !rowsE ||
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE);
+    if (!widthE || !heightE || !offsetsE || !countsE || !rowsE || !bitsE ||
         offsetsE->count != 1 || countsE->count != 1) return false;
     const uint32_t stripOffset = scalar(*offsetsE);
     const uint32_t stripBytes = scalar(*countsE);
@@ -3402,6 +3403,13 @@ bool DNGDecoder::cropImage(std::vector<uint8_t>& data,
     setScalar(*heightE, targetHeight);
     setScalar(*rowsE, targetHeight);
     setScalar(*countsE, static_cast<uint32_t>(bytes.size()));
+    for (uint32_t i = 0; i < bitsE->count; ++i) {
+        const size_t at = bitsE->valueOffset + static_cast<size_t>(i) *
+            (bitsE->type == TIFF_TYPE_SHORT ? 2u : 4u);
+        if (bitsE->type == TIFF_TYPE_SHORT) write16(data.data() + at, 16, little);
+        else if (bitsE->type == TIFF_TYPE_LONG) write32(data.data() + at, 16, little);
+        else return false;
+    }
     auto setValues = [&](const TiffEntry* entry, std::initializer_list<double> values) {
         if (!entry || entry->count < values.size()) return;
         uint32_t index = 0;

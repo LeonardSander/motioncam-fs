@@ -281,8 +281,41 @@ std::optional<CalibrationData> CalibrationData::parse(const nlohmann::json& j) {
         };
         try { parseDimensions("centerCrop", data.centerCrop, data.hasCenterCrop); }
         catch (const std::exception& error) { spdlog::warn("Ignoring invalid calibration field 'centerCrop': {}", error.what()); }
-        try { parseDimensions("leftTopCropStride", data.leftTopCropStride,
-                              data.hasLeftTopCropStride); }
+        try {
+            if (j.contains("leftTopCropStride")) {
+                const auto& field = j["leftTopCropStride"];
+                std::array<int, 3> values{};
+                if (field.is_array()) {
+                    if (field.size() == 3) values = parseArray<int, 3>(field);
+                    else if (field.size() == 2) {
+                        const auto legacy = parseArray<int, 2>(field);
+                        values = {legacy[0], legacy[1], legacy[0]};
+                    } else throw std::invalid_argument("expected width,height[,stride]");
+                } else if (field.is_string()) {
+                    std::string value = field.get<std::string>();
+                    std::replace(value.begin(), value.end(), 'x', ',');
+                    std::replace(value.begin(), value.end(), 'X', ',');
+                    std::replace(value.begin(), value.end(), '_', ',');
+                    std::stringstream stream(value);
+                    std::string part;
+                    std::vector<int> components;
+                    while (std::getline(stream, part, ',')) {
+                        size_t consumed = 0;
+                        const int component = std::stoi(part, &consumed);
+                        if (consumed != part.size()) throw std::invalid_argument("invalid number");
+                        components.push_back(component);
+                    }
+                    if (components.size() != 2 && components.size() != 3)
+                        throw std::invalid_argument("expected width,height[,stride]");
+                    values = {components[0], components[1],
+                              components.size() == 3 ? components[2] : components[0]};
+                } else throw std::invalid_argument("expected array or string");
+                if (values[0] <= 0 || values[1] <= 0 || values[2] < values[0])
+                    throw std::invalid_argument("invalid crop dimensions or stride");
+                data.leftTopCropStride = values;
+                data.hasLeftTopCropStride = true;
+            }
+        }
         catch (const std::exception& error) { spdlog::warn("Ignoring invalid calibration field 'leftTopCropStride': {}", error.what()); }
 
         parseField("cfaSize", [&](const auto& cfaSize) {
@@ -429,7 +462,7 @@ std::string CalibrationData::createExampleJson() {
   "_comment6": "Raw white/black override; numeric RGB black levels may be written as white/r,g,b",
   "_levels": "Dynamic",
   "_centerCrop": "3840,2160",
-  "_leftTopCropStride": "4096x2304",
+  "_leftTopCropStride": "4096x2304_4096",
   "_comment6b": "CFA repeat size: 2 for Bayer, 4/6/8 for quad bayer and higher CFA sensors",
   "_cfaSize": 2,
   "_comment7": "Fix gainmap cfa bayer phase mismatches",
