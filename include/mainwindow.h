@@ -243,6 +243,7 @@ private:
     bool mAutoApplyClipSettings = true;
     bool mGalleryFpsIndicatorEnabled = true;
     bool mGalleryHistogramEnabled = false;
+    bool mGalleryClippingEnabled = false;
     bool mUnmountOnFinalize = true;
     bool mFinalizeSelectionToSingleDirectory = false;
     bool mInheritHeroFrameSidecars = false;

@@ -61,6 +61,9 @@ struct DNGFrameMetadata {
 
 struct PreviewFrame {
     std::vector<uint8_t> rgb;
+    bool clippingRequested = false;
+    // 0 = normal, 1 = below black, 3..9 = clipped RGB channel bitmask + 2.
+    std::vector<uint8_t> clipping;
     // Unmodified unpacked source samples captured before preview scaling,
     // gain-map application, demosaic, normalization, and colour transforms.
     std::shared_ptr<const std::vector<uint16_t>> rawSamples;

@@ -32,6 +32,34 @@
 #include <tuple>
 
 namespace {
+void cropPreviewRawToVisibleTopLeft(motioncam::PreviewFrame& preview,
+                                    const motioncam::RenderSettings& settings) {
+    if (!(settings.options & motioncam::RENDER_OPT_CROPPING) ||
+        !preview.rawSamples || preview.rawChannels != 1) return;
+    uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
+    motioncam::utils::parseCropTarget(settings.cropTarget, cropWidth, cropHeight, stride);
+    if (!cropWidth || !cropHeight || cropWidth > preview.rawWidth ||
+        cropHeight > preview.rawHeight ||
+        !preview.width || !preview.height ||
+        preview.rawSamples->size() < static_cast<size_t>(preview.rawWidth) * preview.rawHeight) return;
+    // Preprocessing trims crop dimensions to complete CFA groups before the
+    // proxy is made. Match the retained source footprint, including a crop
+    // whose height is not divisible by four.
+    cropWidth = std::min(cropWidth, preview.width *
+        std::max(1u, cropWidth / preview.width));
+    cropHeight = std::min(cropHeight, preview.height *
+        std::max(1u, cropHeight / preview.height));
+    if (cropWidth == preview.rawWidth && cropHeight == preview.rawHeight) return;
+    auto visible = std::make_shared<std::vector<uint16_t>>(
+        static_cast<size_t>(cropWidth) * cropHeight);
+    for (uint32_t y = 0; y < cropHeight; ++y)
+        std::copy_n(preview.rawSamples->begin() + static_cast<size_t>(y) * preview.rawWidth,
+                    cropWidth, visible->begin() + static_cast<size_t>(y) * cropWidth);
+    preview.rawSamples = std::move(visible);
+    preview.rawWidth = cropWidth;
+    preview.rawHeight = cropHeight;
+}
+
 struct CachedMcrawAnalysis {
     std::vector<motioncam::Timestamp> frames;
     double baselineExposure = 0.0;
@@ -813,6 +841,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                     preview.rawCfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
                         mSettings, mCalibration, cameraConfig.sensorArrangement));
                 }
+                if (decoded) cropPreviewRawToVisibleTopLeft(preview, mSettings);
                 return decoded;
             } catch (const std::exception&) {
                 return false;
@@ -871,6 +900,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         preview.timestamp = vfs::outputTimestamp(
             entry, timestamp, mSourceFrames.front(), mFps,
             mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
+        cropPreviewRawToVisibleTopLeft(preview, mSettings);
         return !preview.rgb.empty();
     } catch (const std::exception& error) {
         spdlog::warn("Direct MCRAW preview preparation failed for {}: {}",

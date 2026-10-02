@@ -494,6 +494,8 @@ struct FinalizeOptions {
 struct PreviewOptions {
     size_t firstFrame = 0;
     std::function<bool(size_t)> skipFrame;
+    // Build the pre-demosaic clipping mask only for visible gallery playback.
+    bool clippingEnabled = false;
     // Preserve unpacked source samples for interactive pixel inspection.
     // Disabled by default because a source-sized plane can be very large.
     bool retainSourceSamples = false;

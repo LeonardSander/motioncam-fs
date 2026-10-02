@@ -268,6 +268,18 @@ QIcon histogramIcon() {
     return QIcon(pixmap);
 }
 
+QIcon clippingIcon() {
+    QPixmap pixmap(24,24);pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setPen(QPen(QColor(225,225,225),1.5));
+    painter.drawRect(2,2,20,20);
+    painter.fillRect(5,5,6,6,QColor(210,75,75));
+    painter.fillRect(13,5,6,6,QColor(80,210,95));
+    painter.fillRect(5,13,6,6,QColor(90,135,235));
+    painter.fillRect(13,13,6,6,QColor(120,65,25));
+    return QIcon(pixmap);
+}
+
 class DuplicateSlider final : public QSlider {
 public:
     explicit DuplicateSlider(QWidget* parent) : QSlider(Qt::Horizontal,parent) {}
@@ -447,16 +459,19 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mAudioButton=new QPushButton(mOverlay);mAudioButton->setCheckable(true);
     mFullscreenButton=new QPushButton(mOverlay);mThumbnailToggle=new QPushButton(mOverlay);
     mHistogramToggle=new QPushButton(mOverlay);mHistogramToggle->setCheckable(true);
-    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle,mHistogramToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)}");}
+    mClippingToggle=new QPushButton(mOverlay);mClippingToggle->setCheckable(true);
+    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle,mHistogramToggle,mClippingToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)} QPushButton:checked{background:rgba(70,95,125,220)}");}
     previous->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));previous->setToolTip(tr("Previous clip"));
     next->setIcon(style()->standardIcon(QStyle::SP_MediaSkipForward));next->setToolTip(tr("Next clip"));
     mPlayPause->setToolTip(tr("Play / pause"));mAudioButton->setToolTip(tr("Mute / unmute audio"));mFullscreenButton->setToolTip(tr("Toggle fullscreen"));
     mFullscreenButton->setIcon(fullscreenIcon(false));
     mHistogramToggle->setIcon(histogramIcon());
     mHistogramToggle->setToolTip(tr("Show raw RGB histogram"));
+    mClippingToggle->setIcon(clippingIcon());
+    mClippingToggle->setToolTip(tr("Show raw clipping indication"));
     mThumbnailToggle->setToolTip(tr("Show frame thumbnails"));
     mThumbnailToggle->setIcon(thumbnailChevronIcon(true));mThumbnailToggle->setIconSize(QSize(22,22));
-    controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mThumbnailToggle);controls->addWidget(mAudioButton);controls->addWidget(mHistogramToggle);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);
+    controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mThumbnailToggle);controls->addWidget(mAudioButton);controls->addWidget(mHistogramToggle);controls->addWidget(mClippingToggle);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);
     mThumbnailScroll=new QScrollArea(mOverlay);mThumbnailScroll->setWidgetResizable(true);
     mThumbnailScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     mThumbnailScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -552,6 +567,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(mHistogramToggle,&QPushButton::toggled,this,[this](bool enabled){
         setHistogramEnabled(enabled);
         emit histogramEnabledChanged(enabled);
+    });
+    connect(mClippingToggle,&QPushButton::toggled,this,[this](bool enabled){
+        setClippingEnabled(enabled);
+        emit clippingEnabledChanged(enabled);
     });
     connect(previous,&QPushButton::clicked,this,[this]{ if(!mClips.isEmpty())openClip((mIndex-1+mClips.size())%mClips.size()); });
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
@@ -767,6 +786,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mMouseSourcePosition=QPoint(-1,-1);updateTitle();
     mWaitingForFirstFrame=!mLastPresentedImage.isNull();
     if(!mWaitingForFirstFrame)mVideo->setText(tr("Preparing playback…"));
+    else if(!changingClip)updateDisplayedImage();
     if(!mViewportRefreshPending)configureAudio();
     mViewportRefreshPending=false;
     if(mClips[index].sourceFrames>1){
@@ -975,14 +995,22 @@ void ClipPlayerDialog::cacheThumbnail(int mountId,int sourceFrame,const QImage& 
 
 void ClipPlayerDialog::setSourceFrameThumbnail(int sourceFrame,const QByteArray& frame,int width,int height){
     if(!mThumbnailCollectionEnabled->load())return;
-    const QImage thumbnail=rgb48Thumbnail(frame,width,height);if(thumbnail.isNull())return;
-    cacheThumbnail(currentMountId(),sourceFrame,thumbnail);
+    setSourceFrameThumbnailImage(sourceFrame,rgb48Thumbnail(frame,width,height));
+}
+
+void ClipPlayerDialog::setSourceFrameThumbnailImage(int sourceFrame,const QImage& image){
+    if(!mThumbnailCollectionEnabled->load()||image.isNull())return;
+    cacheThumbnail(currentMountId(),sourceFrame,image);
     if(mIndex>=0&&!mClips[mIndex].isSequence)updateVisibleThumbnailWidgets();
     else refreshThumbnailLabel(sourceFrame);
 }
 
 void ClipPlayerDialog::setOutputFrameThumbnail(int outputFrame,const QByteArray& frame,int width,int height){
     const int source=sourceFrameForOutput(outputFrame);if(source>=0)setSourceFrameThumbnail(source,frame,width,height);
+}
+void ClipPlayerDialog::setOutputFrameThumbnailImage(int outputFrame,const QImage& image){
+    const int source=sourceFrameForOutput(outputFrame);
+    if(source>=0)setSourceFrameThumbnailImage(source,image);
 }
 void ClipPlayerDialog::presentDroppedSourceFrame(int sourceFrame,const QByteArray& frame,int width,int height){
     if(!mThumbnailCollectionEnabled->load()||mIndex<0)return;
@@ -1351,6 +1379,13 @@ void ClipPlayerDialog::setHistogramEnabled(bool enabled){
         tr("Show raw RGB histogram"));
     mHistogram->setVisible(enabled);
     updateHistogram();
+}
+
+void ClipPlayerDialog::setClippingEnabled(bool enabled){
+    mClippingEnabled=enabled;
+    mClippingToggle->setChecked(enabled);
+    mClippingToggle->setToolTip(enabled?tr("Hide raw clipping indication"):
+        tr("Show raw clipping indication"));
 }
 
 void ClipPlayerDialog::setPerformanceOverlayPinned(bool pinned){
@@ -2386,14 +2421,18 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
     return image;
 }
 QImage ClipPlayerDialog::rgb48Thumbnail(const QByteArray& frame,int width,int height)const{
-    if(width<=0||height<=0||frame.size()<qint64(width)*height*6)return {};
     const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
+    return makeRgb48Thumbnail(reinterpret_cast<const uint8_t*>(frame.constData()),
+                              frame.size(),width,height,orientation);
+}
+QImage ClipPlayerDialog::makeRgb48Thumbnail(const uint8_t* source,qsizetype bytes,
+                                             int width,int height,int orientation){
+    if(!source||width<=0||height<=0||bytes<qint64(width)*height*6)return {};
     const bool swap=orientation==90||orientation==270;
     const int orientedWidth=swap?height:width,orientedHeight=swap?width:height;
     const QSize outputSize=frameThumbnailSize(width,height,orientation);
     const int outputWidth=outputSize.width(),outputHeight=outputSize.height();
     QImage image(outputWidth,outputHeight,QImage::Format_RGB888);
-    const auto* source=reinterpret_cast<const uchar*>(frame.constData());
     for(int y=0;y<outputHeight;++y){
         auto* destination=image.scanLine(y);
         const int orientedY=std::min(orientedHeight-1,y*orientedHeight/outputHeight);

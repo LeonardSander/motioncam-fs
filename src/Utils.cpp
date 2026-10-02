@@ -1194,8 +1194,11 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         cropWidth = 0;
         cropHeight = 0;
     } else {
-        left = (fullWidth - cropWidth) / 2;
-        top = (fullHeight - cropHeight) / 2;
+        // A stride suffix denotes a top-left crop of the decoded MCRAW
+        // buffer. The gain map and clipping classifier must use the same
+        // source origin as the pixel preprocessing pass.
+        left = ignoredStride ? 0 : (fullWidth - cropWidth) / 2;
+        top = ignoredStride ? 0 : (fullHeight - cropHeight) / 2;
     }
 
     const float shadingMapScaleX = 1.0f / static_cast<float>(fullWidth);
@@ -1587,6 +1590,38 @@ std::shared_ptr<std::vector<char>> generateDng(
         throw std::runtime_error("Invalid sensor arrangement");
     cfa = cfaColorsFromPhase(sensorArrangement);
     if (previewFrame && retainSourceSamples) previewFrame->rawCfaPhase = cfa;
+    uint32_t clippingWidth = 0, clippingHeight = 0;
+    auto classifyPreviewClipping = [&](const std::vector<uint16_t>& samples,
+                                       uint32_t sampleWidth, uint32_t sampleHeight,
+                                       int repeatSize,
+                                       const std::array<uint16_t, 4>& black,
+                                       uint16_t white) {
+        if (!previewFrame || !previewFrame->clippingRequested) return;
+        clippingWidth = sampleWidth;
+        clippingHeight = sampleHeight;
+        previewFrame->clipping.assign(static_cast<size_t>(sampleWidth) * sampleHeight, 0);
+        const uint32_t cell = static_cast<uint32_t>(std::max(2, repeatSize));
+        const uint32_t group = std::max(1u, cell / 2);
+        for (uint32_t top = 0; top < sampleHeight; top += cell)
+            for (uint32_t left = 0; left < sampleWidth; left += cell) {
+                uint8_t clipped = 0;
+                for (uint32_t phase = 0; phase < 4; ++phase) {
+                    const uint32_t x = left + (phase & 1u) * group;
+                    const uint32_t y = top + (phase >> 1u) * group;
+                    if (x >= sampleWidth || y >= sampleHeight) continue;
+                    const uint16_t value = samples[static_cast<size_t>(y) * sampleWidth + x];
+                    if (value >= white) clipped |= static_cast<uint8_t>(1u << cfa[phase]);
+                }
+                const uint8_t indication = clipped ? 2 + clipped : 0;
+                for (uint32_t y = top; y < std::min(top + cell, sampleHeight); ++y)
+                    for (uint32_t x = left; x < std::min(left + cell, sampleWidth); ++x) {
+                        const uint32_t phase = ((y - top) / group) * 2 + (x - left) / group;
+                        const size_t index = static_cast<size_t>(y) * sampleWidth + x;
+                        previewFrame->clipping[index] = samples[index] < black[phase]
+                            ? 1 : indication;
+                    }
+            }
+    };
 
     CameraFrameMetadata gainMetadata = metadata;
     if (settings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
@@ -1728,6 +1763,8 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (demosaic) {
         std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
         std::memcpy(cfaSamples.data(), processedData.data(), cfaSamples.size() * sizeof(uint16_t));
+        classifyPreviewClipping(cfaSamples, width, height, processedRepeatSize,
+                                dstBlackLevel, dstWhiteLevel);
         std::array<uint32_t, 3> blackSums = {0, 0, 0};
         std::array<uint32_t, 3> blackCounts = {0, 0, 0};
         for (int phaseIndex = 0; phaseIndex < 4; ++phaseIndex) {
@@ -1835,6 +1872,8 @@ std::shared_ptr<std::vector<char>> generateDng(
         std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
         std::memcpy(cfaSamples.data(), processedData.data(),
                     processedData.size());
+        classifyPreviewClipping(cfaSamples, width, height, processedRepeatSize,
+                                dstBlackLevel, dstWhiteLevel);
         std::array<unsigned int, 3> sums{}, counts{};
         for (int phase = 0; phase < 4; ++phase) {
           sums[cfa[phase]] += dstBlackLevel[phase];
@@ -1865,6 +1904,21 @@ std::shared_ptr<std::vector<char>> generateDng(
         throw std::runtime_error("Could not normalize preview image");
       previewFrame->width = width;
       previewFrame->height = height;
+      if (previewFrame->clippingRequested &&
+          (clippingWidth != width || clippingHeight != height)) {
+        auto source = std::move(previewFrame->clipping);
+        previewFrame->clipping.resize(static_cast<size_t>(width) * height);
+        const uint32_t reductionScale = hqProxy
+            ? static_cast<uint32_t>(draftScale) : 1;
+        const uint32_t sample = (reductionScale - 1) / 2;
+        for (uint32_t y = 0; y < height; ++y)
+          for (uint32_t x = 0; x < width; ++x)
+            previewFrame->clipping[static_cast<size_t>(y) * width + x] =
+                source[static_cast<size_t>(std::min(clippingHeight - 1,
+                    y * reductionScale + sample)) * clippingWidth +
+                    std::min(clippingWidth - 1,
+                        x * reductionScale + sample)];
+      }
       auto &color = previewFrame->metadata;
       color.iso = metadata.iso;
       color.exposureTime = metadata.exposureTime / 1e9;

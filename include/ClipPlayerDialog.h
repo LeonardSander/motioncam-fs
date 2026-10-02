@@ -45,6 +45,7 @@ public:
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
     void setHistogramEnabled(bool enabled);
+    void setClippingEnabled(bool enabled);
     void setPerformanceOverlayPinned(bool pinned);
     bool histogramEnabled() const { return mHistogramEnabled; }
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
@@ -72,6 +73,9 @@ public:
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
+    void setOutputFrameThumbnailImage(int outputFrame, const QImage& image);
+    static QImage makeRgb48Thumbnail(const uint8_t* pixels, qsizetype bytes,
+                                    int width, int height, int orientation);
     void setSourceFrameThumbnail(int sourceFrame, const QByteArray& frame, int width, int height);
     void presentDroppedSourceFrame(int sourceFrame, const QByteArray& frame, int width, int height);
     void clearFrameSelections();
@@ -79,6 +83,7 @@ public:
     void selectAllFrameSelections();
 signals:
     void histogramEnabledChanged(bool enabled);
+    void clippingEnabledChanged(bool enabled);
     void currentClipChanged(int mountId, double startSeconds);
     void firstFramePresented(int mountId);
     void framePresented(int mountId, int frame);
@@ -155,9 +160,10 @@ private:
     int sourceFrameForOutput(int outputFrame) const;
     QImage rgb48Image(const QByteArray& frame, int width, int height) const;
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
+    void setSourceFrameThumbnailImage(int sourceFrame, const QImage& image);
     QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; GalleryGpuVideo* mGpuVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
-    QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
+    QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QPushButton* mClippingToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
     QWidget* mThumbnailContent=nullptr; QHash<int,QLabel*> mThumbnailLabels;
     QHash<int,QWidget*> mThumbnailItems;
     QHash<int,QHash<int,QImage>> mThumbnailCache;
@@ -193,6 +199,7 @@ private:
     bool mPaused=false, mClosing=false, mPlaybackFailed=false;
     bool mFpsIndicatorEnabled=true;
     bool mHistogramEnabled=false;
+    bool mClippingEnabled=false;
     bool mHistogramExpanded=false;
     bool mPerformanceOverlayPinned=false;
     std::optional<uint16_t> mDetectedClipValue;

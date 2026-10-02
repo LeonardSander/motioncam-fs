@@ -628,6 +628,27 @@ namespace {
         return settings;
     }
 
+    void applyGalleryClipping(std::vector<uint8_t>& rgb,
+                              const std::vector<uint8_t>& clipping) {
+        if (rgb.size() != clipping.size() * 6) return;
+        for (size_t pixel = 0; pixel < clipping.size(); ++pixel) {
+            const uint8_t indication = clipping[pixel];
+            if (!indication) continue;
+            const uint8_t bits = indication > 1 ? indication - 2 : 0;
+            const std::array<uint16_t, 3> color = indication == 1
+                ? std::array<uint16_t, 3>{32768, 16384, 0}
+                : bits == 7 ? std::array<uint16_t, 3>{0, 0, 0}
+                : std::array<uint16_t, 3>{
+                    static_cast<uint16_t>((bits & 1) ? 65535 : 0),
+                    static_cast<uint16_t>((bits & 2) ? 65535 : 0),
+                    static_cast<uint16_t>((bits & 4) ? 65535 : 0)};
+            for (size_t channel = 0; channel < 3; ++channel) {
+                rgb[pixel * 6 + channel * 2] = static_cast<uint8_t>(color[channel]);
+                rgb[pixel * 6 + channel * 2 + 1] = static_cast<uint8_t>(color[channel] >> 8);
+            }
+        }
+    }
+
     bool gainMapOnlyDebug(const motioncam::RenderSettings& settings) {
         return settings.vignetteCorrection == motioncam::VignetteCorrectionMode::Bake &&
             (settings.options & motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
@@ -1621,6 +1642,7 @@ void MainWindow::saveSettings() {
     settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
     settings.setValue("galleryFpsIndicatorEnabled", mGalleryFpsIndicatorEnabled);
     settings.setValue("galleryHistogramEnabled", mGalleryHistogramEnabled);
+    settings.setValue("galleryClippingEnabled", mGalleryClippingEnabled);
     settings.setValue("unmountOnFinalize", mUnmountOnFinalize);
     settings.setValue("finalizeSelectionToSingleDirectory", mFinalizeSelectionToSingleDirectory);
     settings.setValue("inheritHeroFrameSidecars", mInheritHeroFrameSidecars);
@@ -1742,6 +1764,7 @@ void MainWindow::restoreSettings() {
     mAutoApplyClipSettings = settings.value("autoApplyClipSettings", true).toBool();
     mGalleryFpsIndicatorEnabled = settings.value("galleryFpsIndicatorEnabled", true).toBool();
     mGalleryHistogramEnabled = settings.value("galleryHistogramEnabled", false).toBool();
+    mGalleryClippingEnabled = settings.value("galleryClippingEnabled", false).toBool();
     mUnmountOnFinalize = settings.value("unmountOnFinalize", true).toBool();
     mFinalizeSelectionToSingleDirectory =
         settings.value("finalizeSelectionToSingleDirectory", false).toBool();
@@ -2561,6 +2584,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const auto generation = ++mGalleryGeneration;
     const double previewFps = info->fps > 0.0f ? info->fps : 24.0f;
     const bool isSequence = info->isSequence;
+    const int thumbnailOrientation = isSequence
+        ? (settings.orientation >= 0 ? settings.orientation : info->orientation) : -1;
     if (!isSequence) settings.orientation = -1;
     const int playbackFrames=std::max(1,info->totalFrames-info->droppedFrames+
         info->duplicatedFrames);
@@ -2573,9 +2598,11 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const auto incomingFrame=mClipPlayer->incomingFrame();
     const auto thumbnailCollectionEnabled=mClipPlayer->thumbnailCollectionEnabled();
     const bool diagnostics = mGalleryPerformanceTestActive;
+    const bool clippingEnabled = mGalleryClippingEnabled && !backfillThumbnails;
     auto render = [this, mountId, settings, generation, firstFrame, isSequence,
+                   thumbnailOrientation,
                    backfillThumbnails, player, playbackTarget, incomingFrame,
-                   thumbnailCollectionEnabled, diagnostics] {
+                   thumbnailCollectionEnabled, diagnostics, clippingEnabled] {
         const auto taskStarted = std::chrono::steady_clock::now();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
@@ -2604,6 +2631,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
         try {
             motioncam::PreviewOptions options;
             options.firstFrame = firstFrame;
+            options.clippingEnabled = clippingEnabled;
             options.retainSourceSamples = !backfillThumbnails;
             options.skipFrame = [playbackTarget,incomingFrame,backfillThumbnails](size_t frame) {
                 if(backfillThumbnails){
@@ -2620,6 +2648,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     return mGalleryGeneration.load() == generation;
                 },
                 [this, generation, player, mountId, settings, isSequence, incomingFrame, thumbnailCollectionEnabled,
+                 thumbnailOrientation,
+                 clippingEnabled,
                  backfillThumbnails, &presentedFirstFrame,
                  &deliveredFrames, &thumbnailFrames, &displayDecodeMs, &deliveryWaitMs,
                  &taskStarted, diagnostics](
@@ -2632,8 +2662,17 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings) && preview.gainMapApplied);
+                    const bool collectThumbnail = thumbnailCollectionEnabled->load();
                     const int rawOrientation = !isSequence
                         ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
+                    QImage unmarkedThumbnail;
+                    if (clippingEnabled && collectThumbnail)
+                        unmarkedThumbnail = ClipPlayerDialog::makeRgb48Thumbnail(
+                            preview.rgb.data(), static_cast<qsizetype>(preview.rgb.size()),
+                            static_cast<int>(preview.width), static_cast<int>(preview.height),
+                            isSequence ? thumbnailOrientation : rawOrientation);
+                    if (clippingEnabled)
+                        applyGalleryClipping(preview.rgb, preview.clipping);
                     if (!isSequence) {
                         const int orientation = rawOrientation;
                         if (orientation == 90 || orientation == 180 || orientation == 270) {
@@ -2661,7 +2700,17 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         reinterpret_cast<const char*>(rgb->data()),
                         static_cast<qsizetype>(rgb->size()));
                     const int thumbnailOutputFrame=incomingFrame->load();
-                    if(thumbnailCollectionEnabled->load()){
+                    if(collectThumbnail && !unmarkedThumbnail.isNull()){
+                        ++thumbnailFrames;
+                        QMetaObject::invokeMethod(this,[this,player,mountId,generation,
+                                                        thumbnailCollectionEnabled,unmarkedThumbnail,
+                                                        thumbnailOutputFrame]{
+                            if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
+                               player->currentMountId()==mountId&&thumbnailCollectionEnabled->load())
+                                player->setOutputFrameThumbnailImage(
+                                    thumbnailOutputFrame,unmarkedThumbnail);
+                        },Qt::QueuedConnection);
+                    } else if(collectThumbnail && !clippingEnabled){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
                                                         thumbnailCollectionEnabled,rgb,width,height,
@@ -2831,9 +2880,15 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     mClipPlayer = new ClipPlayerDialog(std::move(clips), mountId, nullptr);
     mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     mClipPlayer->setHistogramEnabled(mGalleryHistogramEnabled);
+    mClipPlayer->setClippingEnabled(mGalleryClippingEnabled);
     connect(mClipPlayer, &ClipPlayerDialog::histogramEnabledChanged, this, [this](bool enabled) {
         mGalleryHistogramEnabled = enabled;
         QSettings(PACKAGE_NAME, APP_NAME).setValue("galleryHistogramEnabled", enabled);
+    });
+    connect(mClipPlayer, &ClipPlayerDialog::clippingEnabledChanged, this, [this](bool enabled) {
+        mGalleryClippingEnabled = enabled;
+        QSettings(PACKAGE_NAME, APP_NAME).setValue("galleryClippingEnabled", enabled);
+        if (mClipPlayer) mClipPlayer->reloadCurrentClip();
     });
     connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
             [this](int id, double startSeconds) {

@@ -109,6 +109,7 @@ void PreviewRenderer::render(
         }
         const auto materializeStarted = std::chrono::steady_clock::now();
         PreviewFrame frame;
+        frame.clippingRequested = options.clippingEnabled;
         if (!state->filesystem->materializePreviewFrame(
                 entries[index], frame, options.retainSourceSamples)) {
             auto bytes = state->filesystem->materializeFile(entries[index], false);
