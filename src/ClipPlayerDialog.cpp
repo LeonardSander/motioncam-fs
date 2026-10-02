@@ -92,24 +92,62 @@ public:
         setFixedSize(560,260);
     }
     std::function<void()> doubleClicked;
+    std::function<void()> distributionChanged;
+    double distribution() const { return mDistribution; }
+    void scrollDistribution(double steps) {
+        const double next=std::clamp(mDistribution-steps*0.1,-1.0,1.0);
+        if(next==mDistribution)return;
+        mDistribution=next;
+        if(distributionChanged)distributionChanged();
+    }
     void setBins(const Bins& bins, float white, const std::array<float,4>& blackLevels,
-                 int phases) {
+                 const std::array<uint8_t,4>& phaseColors, int phases) {
         mBins=bins;
         mWhite=white;
         mBlackLevels=blackLevels;
+        mPhaseColors=phaseColors;
         mPhases=phases;
         update();
     }
-    static double stopPosition(int stop, int maxStop) {
-        if(maxStop<2)return stop==0?1.0:0.025;
-        // Keep the first interval three times the width of the last.
-        // Leave a small margin before the last guide for code zero.
-        const double remaining=double(maxStop-stop)/maxStop;
-        const double quadratic=double(maxStop)/(2.0*(maxStop-1));
-        return 0.025+0.975*((1.0-quadratic)*remaining+
-            quadratic*remaining*remaining);
+    static double position(double value,double white,double black,double distribution) {
+        if(white<=black)return 0.0;
+        const double range=white-black;
+        const int below=std::max(1,static_cast<int>(std::ceil(std::log2(range))));
+        const double above=white<65535.0 ?
+            std::min(1.0,std::log2((65535.0-black)/range)) : 0.0;
+        const double first=std::pow(3.0,distribution);
+        auto width=[&](int stop) {
+            return first+(1.0-first)*std::min(stop,below-1)/std::max(1,below-1);
+        };
+        auto widthSum=[&](int count) {
+            return count*first+(1.0-first)*count*(count-1)/
+                (2.0*std::max(1,below-1));
+        };
+        const double belowWidth=widthSum(below);
+        const double darkWidth=black>0.0 ? width(below-1) : 0.0;
+        const double total=belowWidth+darkWidth+above*first;
+        if(value>=white) {
+            const double ev=std::min(above,std::log2((value-black)/range));
+            return (darkWidth+belowWidth+ev*first)/total;
+        }
+        if(value<=black) {
+            if(black<=0.0)return 0.0;
+            return std::clamp(value/black,0.0,1.0)*darkWidth/total;
+        }
+        const double ev=std::log2(range/(value-black));
+        const int full=std::min(below,static_cast<int>(ev));
+        double offset=widthSum(full);
+        offset+=std::min(1.0,ev-full)*width(std::min(full,below-1));
+        return std::clamp((darkWidth+belowWidth-offset)/total,0.0,1.0);
     }
 protected:
+    void wheelEvent(QWheelEvent* event) override {
+        const double steps=!event->pixelDelta().isNull() ?
+            event->pixelDelta().y()/40.0 : event->angleDelta().y()/120.0;
+        if(steps==0.0) { QWidget::wheelEvent(event); return; }
+        scrollDistribution(steps);
+        event->accept();
+    }
     void mouseDoubleClickEvent(QMouseEvent* event) override {
         if(event->button()==Qt::LeftButton && doubleClicked) {
             doubleClicked();
@@ -123,14 +161,37 @@ protected:
         painter.fillRect(rect(),QColor(0,0,0,165));
         const QRect graph(8,8,width()-16,height()-16);
         painter.setPen(QColor(125,125,125,150));
-        const int maxStop=mWhite>=1.0f ? std::min(16,static_cast<int>(std::floor(std::log2(mWhite)))) : 0;
+        const double black=blackLevel();
+        const int maxStop=mWhite>black ?
+            static_cast<int>(std::ceil(std::log2(double(mWhite)-black))) : 0;
         for(int stop=0;stop<=maxStop;++stop) {
             const int x=graph.left()+qRound((graph.width()-1)*
-                stopPosition(stop,maxStop));
+                position(black+std::ldexp(double(mWhite)-black,-stop),mWhite,black,mDistribution));
             painter.drawLine(x,graph.top(),x,graph.bottom());
         }
+        if(mWhite>0.0f && mWhite<65535.0f) {
+            const int above=static_cast<int>(std::floor(
+                std::min(1.0,std::log2((65535.0-black)/(mWhite-black)))));
+            for(int stop=1;stop<=above;++stop) {
+                const int x=graph.left()+qRound((graph.width()-1)*
+                    position(black+std::ldexp(double(mWhite)-black,stop),mWhite,black,mDistribution));
+                painter.drawLine(x,graph.top(),x,graph.bottom());
+            }
+        }
+        Bins displayBins=mBins;
+        for(auto& channel:displayBins) {
+            int previous=-1;
+            for(int bin=0;bin<560;++bin) {
+                if(channel[bin]<=0.0f)continue;
+                if(previous>=0 && bin>previous+1)
+                    for(int gap=previous+1;gap<bin;++gap)
+                        channel[gap]=channel[previous]+(channel[bin]-channel[previous])*
+                            float(gap-previous)/float(bin-previous);
+                previous=bin;
+            }
+        }
         float peak=1.0f;
-        for(const auto& channel:mBins)
+        for(const auto& channel:displayBins)
             for(float count:channel)peak=std::max(peak,count);
         painter.save();
         painter.setClipRect(graph);
@@ -139,7 +200,7 @@ protected:
         const float toe=std::min(24.0f,peak);
         const qreal toeHeight=std::pow(toe/peak,0.4)*amplitude;
         auto heightFor=[&](int channel,int bin) {
-            const float count=mBins[channel][bin];
+            const float count=displayBins[channel][bin];
             return count<toe ? count/toe*toeHeight :
                 std::pow(count/peak,0.4)*amplitude;
         };
@@ -159,9 +220,9 @@ protected:
             for(int y=0;y<fill.height();++y) {
                 const qreal absoluteY=graph.top()+y;
                 if(absoluteY>=baseline)break;
-                const int mask=(mBins[0][bin]>0 && absoluteY>=top[0] ? 1 : 0) |
-                    (mBins[1][bin]>0 && absoluteY>=top[1] ? 2 : 0) |
-                    (mBins[2][bin]>0 && absoluteY>=top[2] ? 4 : 0);
+                const int mask=(displayBins[0][bin]>0 && absoluteY>=top[0] ? 1 : 0) |
+                    (displayBins[1][bin]>0 && absoluteY>=top[1] ? 2 : 0) |
+                    (displayBins[2][bin]>0 && absoluteY>=top[2] ? 4 : 0);
                 if(mask)reinterpret_cast<QRgb*>(fill.scanLine(y))[x]=fillColors[mask];
             }
         }
@@ -172,7 +233,7 @@ protected:
             bool inRun=false;
             for(int x=0;x<560;++x) {
                 const qreal position=graph.left()+x*(graph.width()-1)/559.0;
-                if(mBins[c][x]==0) {
+                if(displayBins[c][x]==0) {
                     if(inRun)path.lineTo(position,baseline);
                     inRun=false;
                     continue;
@@ -218,16 +279,42 @@ protected:
         painter.drawImage(graph.topLeft(),strokes);
         painter.restore();
         painter.setPen(QPen(QColor(150,105,45,95),1.5));
+        std::array<int,4> blackMarkerXs{};
+        std::array<int,4> blackMarkerMasks{};
+        int blackMarkerCount=0;
         for(int phase=0;phase<mPhases;++phase) {
             if(mBlackLevels[phase]<=0.0f)continue;
             const int x=graph.left()+qRound((graph.width()-1)*
-                std::clamp(double(mBlackLevels[phase])/mWhite,0.0,1.0));
-            painter.drawLine(x,graph.top(),x,graph.bottom());
+                position(mBlackLevels[phase],mWhite,black,mDistribution));
+            int marker=0;
+            while(marker<blackMarkerCount && blackMarkerXs[marker]!=x)++marker;
+            if(marker==blackMarkerCount) {
+                blackMarkerXs[marker]=x;
+                ++blackMarkerCount;
+                painter.drawLine(x,graph.top(),x,graph.bottom());
+            }
+            blackMarkerMasks[marker]|=1<<std::min<int>(2,mPhaseColors[phase]);
+        }
+        painter.setPen(QColor(125,125,125,150));
+        for(int stop=0;stop<=maxStop;++stop) {
+            const int x=graph.left()+qRound((graph.width()-1)*
+                position(black+std::ldexp(double(mWhite)-black,-stop),
+                    mWhite,black,mDistribution));
+            for(int marker=0;marker<blackMarkerCount;++marker)
+                if(std::abs(x-blackMarkerXs[marker])<=1) {
+                    painter.drawLine(x,graph.top(),x,graph.bottom());
+                    break;
+                }
+        }
+        painter.setPen(Qt::NoPen);
+        for(int marker=0;marker<blackMarkerCount;++marker) {
+            painter.setBrush(QColor::fromRgb(lineColors[blackMarkerMasks[marker]]));
+            painter.drawEllipse(QPointF(blackMarkerXs[marker],graph.bottom()+4.0),2.0,2.0);
         }
         painter.setPen(QColor(220,220,220));
         for(int stop=0;stop<=maxStop;stop+=4) {
             const int x=graph.left()+qRound((graph.width()-1)*
-                stopPosition(stop,maxStop));
+                position(black+std::ldexp(double(mWhite)-black,-stop),mWhite,black,mDistribution));
             const QString label=stop==0?QStringLiteral("0 EV"):
                 QStringLiteral("-%1").arg(stop);
             const int labelWidth=painter.fontMetrics().horizontalAdvance(label);
@@ -236,12 +323,30 @@ protected:
                 painter.fontMetrics().height());
             painter.drawText(labelRect,Qt::AlignCenter,label);
         }
+        if(mWhite>0.0f && mWhite<65535.0f) {
+            const int x=graph.left()+qRound((graph.width()-1)*
+                position(std::min(65535.0,black+2.0*(double(mWhite)-black)),mWhite,black,mDistribution));
+            const QString label=QStringLiteral("+1");
+            const int labelWidth=painter.fontMetrics().horizontalAdvance(label);
+            const int labelX=std::clamp(x-labelWidth/2,0,width()-labelWidth);
+            painter.drawText(QRect(labelX,graph.top(),labelWidth,
+                painter.fontMetrics().height()),Qt::AlignCenter,label);
+        }
     }
 private:
+    double blackLevel() const {
+        double black=0.0;
+        for(int phase=0;phase<mPhases;++phase)
+            if(mBlackLevels[phase]>0.0f && (black==0.0 || mBlackLevels[phase]<black))
+                black=mBlackLevels[phase];
+        return black;
+    }
     Bins mBins{};
     float mWhite=0.0f;
     std::array<float,4> mBlackLevels{};
+    std::array<uint8_t,4> mPhaseColors{};
     int mPhases=0;
+    double mDistribution=1.0;
 };
 
 QIcon histogramIcon() {
@@ -451,6 +556,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     static_cast<RawHistogram*>(mHistogram)->doubleClicked=[this]{
         setHistogramExpanded(!mHistogramExpanded);
     };
+    static_cast<RawHistogram*>(mHistogram)->distributionChanged=[this]{ updateHistogram(); };
     mHistogram->hide();
     overlayLayout->addWidget(mHistogram,0,Qt::AlignLeft);
     overlayLayout->addStretch(1);
@@ -1445,18 +1551,26 @@ void ClipPlayerDialog::updateHistogram(){
                   std::array<uint32_t,3>{});
         std::array<size_t,3> sampleCounts{};
         const int phaseBlock=std::max(1,raw.cfaSize/2);
+        const double distribution=static_cast<RawHistogram*>(mHistogram)->distribution();
         if(mHistogramBinChannels!=raw.channels || mHistogramBinWhite!=raw.white ||
+           mHistogramBinDistribution!=distribution ||
            mHistogramBinBlackLevels!=raw.blackLevels) {
             mHistogramBinChannels=raw.channels;
             mHistogramBinWhite=raw.white;
+            mHistogramBinDistribution=distribution;
             mHistogramBinBlackLevels=raw.blackLevels;
             const int phases=raw.channels==3?3:4;
+            double histogramBlack=0.0;
+            for(int phase=0;phase<phases;++phase)
+                if(raw.blackLevels[phase]>0.0f &&
+                   (histogramBlack==0.0 || raw.blackLevels[phase]<histogramBlack))
+                    histogramBlack=raw.blackLevels[phase];
             for(int phase=0;phase<phases;++phase) {
                 auto& lookup=mHistogramBinsByPhase[phase];
                 lookup.resize(65536);
                 for(int value=0;value<65536;++value) {
                     lookup[value]=static_cast<uint16_t>(std::clamp(qRound(
-                        double(value)/raw.white*559.0),0,559));
+                        RawHistogram::position(value,raw.white,histogramBlack,distribution)*559.0),0,559));
                 }
             }
         }
@@ -1498,7 +1612,8 @@ void ClipPlayerDialog::updateHistogram(){
     }
     if(mHistogram)
         static_cast<RawHistogram*>(mHistogram)->setBins(bins,raw.white,
-            raw.blackLevels,raw.samples && raw.white>raw.black && raw.white>0.0f
+            raw.blackLevels,raw.channels==3 ? std::array<uint8_t,4>{0,1,2,0} :
+                raw.cfaPhase,raw.samples && raw.white>raw.black && raw.white>0.0f
                 ? (raw.channels==3?3:4) : 0);
     updateTitle();
     if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
@@ -2264,6 +2379,13 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     if(belongsToPlayer&&event->type()==QEvent::Wheel){
         revealOverlay();
         const auto* wheel=static_cast<QWheelEvent*>(event);
+        if(mHistogramEnabled && mHistogram->isVisible() && watchedWidget &&
+           (watchedWidget==mHistogram || mHistogram->isAncestorOf(watchedWidget))) {
+            const double steps=!wheel->pixelDelta().isNull() ?
+                wheel->pixelDelta().y()/40.0 : wheel->angleDelta().y()/120.0;
+            static_cast<RawHistogram*>(mHistogram)->scrollDistribution(steps);
+            event->accept();return true;
+        }
         const bool overThumbnails=mThumbnailScroll&&mThumbnailScroll->isVisible()&&
             watchedWidget&&(watchedWidget==mThumbnailScroll||mThumbnailScroll->isAncestorOf(watchedWidget));
         if(overThumbnails){

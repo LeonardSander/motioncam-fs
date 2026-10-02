@@ -210,6 +210,7 @@ private:
     std::array<std::vector<uint16_t>,4> mHistogramBinsByPhase;
     std::array<float,4> mHistogramBinBlackLevels{};
     float mHistogramBinWhite=0.0f;
+    double mHistogramBinDistribution=0.0;
     int mHistogramBinChannels=0;
     bool mDirectFramesFinished=false;
     bool mDirectSequencePresentation=false;
