@@ -45,6 +45,8 @@ public:
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
     void setHistogramEnabled(bool enabled);
+    void setHistogramExpanded(bool expanded);
+    void setPerformancePixelOverlayEnabled(bool enabled);
     void setClippingEnabled(bool enabled);
     void setPerformanceOverlayPinned(bool pinned);
     bool histogramEnabled() const { return mHistogramEnabled; }
@@ -125,7 +127,6 @@ private:
     void updateButtonIcons();
     void revealOverlay();
     void setOverlayVisible(bool visible);
-    void setHistogramExpanded(bool expanded);
     void changeZoom(double wheelSteps);
     void advanceZoomAnimation();
     void setZoomAnimationTarget(double target);

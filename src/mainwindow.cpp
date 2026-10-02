@@ -3269,6 +3269,8 @@ void MainWindow::startGalleryPerformanceTest(
     }
     mClipPlayer->setPerformanceOverlayPinned(true);
     mClipPlayer->setHistogramEnabled(true);
+    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM"))
+        mClipPlayer->setHistogramExpanded(true);
     spdlog::info("GALLERY_PERF event=gallery_histogram enabled={} overlay_pinned=true",
                  mClipPlayer->histogramEnabled());
     mClipPlayer->setAutomaticAdvanceEnabled(false);
@@ -3364,7 +3366,13 @@ void MainWindow::startGalleryPerformanceTest(
                     state->phase = RunState::Phase::Seek;
                     state->actionTimer.restart();
                     const int seekSerial = ++state->actionSerial;
-                    const double target = mClipPlayer->currentDurationSeconds() * 0.5;
+                    bool seekSecondsValid = false;
+                    const double requestedSeekSeconds = qEnvironmentVariable(
+                        "MOTIONCAM_GALLERY_PERF_SEEK_SECONDS").toDouble(&seekSecondsValid);
+                    const double target = seekSecondsValid ?
+                        std::clamp(requestedSeekSeconds, 0.0,
+                            mClipPlayer->currentDurationSeconds()) :
+                        mClipPlayer->currentDurationSeconds() * 0.5;
                     spdlog::info("GALLERY_PERF event=seek_start clip={} mount={} target_s={:.3f}",
                                  state->clipIndex, mClipPlayer->currentMountId(), target);
                     mClipPlayer->seekToSeconds(target);
@@ -3420,6 +3428,7 @@ void MainWindow::startGalleryPerformanceTest(
                 mountId != state->mounts[state->clipIndex]) return;
             if (state->phase == RunState::Phase::Init) {
                 ++state->actionSerial;
+                mClipPlayer->setPerformancePixelOverlayEnabled(true);
                 if (state->clipIndex == 0)
                     spdlog::info(
                         "GALLERY_PERF event=gallery_startup_first_frame clip={} mount={} latency_ms={}",

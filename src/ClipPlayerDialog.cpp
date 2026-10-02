@@ -157,6 +157,7 @@ protected:
         QWidget::mouseDoubleClickEvent(event);
     }
     void paintEvent(QPaintEvent*) override {
+        const auto paintStarted=std::chrono::steady_clock::now();
         QPainter painter(this);
         painter.fillRect(rect(),QColor(0,0,0,165));
         const QRect graph(8,8,width()-16,height()-16);
@@ -215,9 +216,15 @@ protected:
         fill.fill(Qt::transparent);
         for(int x=0;x<fill.width();++x) {
             const int bin=std::clamp(qRound(x*559.0/(fill.width()-1)),0,559);
+            if(displayBins[0][bin]==0.0f && displayBins[1][bin]==0.0f &&
+               displayBins[2][bin]==0.0f)continue;
             const std::array<double,3> top={baseline-heightFor(0,bin),
                 baseline-heightFor(1,bin),baseline-heightFor(2,bin)};
-            for(int y=0;y<fill.height();++y) {
+            const int firstY=std::max(0,static_cast<int>(std::floor(
+                std::min({top[0],top[1],top[2]})-graph.top())));
+            const int lastY=std::min(fill.height(),
+                static_cast<int>(std::ceil(baseline-graph.top())));
+            for(int y=firstY;y<lastY;++y) {
                 const qreal absoluteY=graph.top()+y;
                 if(absoluteY>=baseline)break;
                 const int mask=(displayBins[0][bin]>0 && absoluteY>=top[0] ? 1 : 0) |
@@ -227,38 +234,40 @@ protected:
             }
         }
         painter.drawImage(graph.topLeft(),fill);
+        const auto fillFinished=std::chrono::steady_clock::now();
+        const std::array<QRgb,8> lineColors={
+            qRgb(0,0,0),qRgb(255,75,75),qRgb(80,255,80),qRgb(230,195,65),
+            qRgb(85,130,255),qRgb(175,75,205),qRgb(70,225,235),qRgb(255,255,255)};
         std::array<QImage,3> strokeMasks;
         for(int c=0;c<3;++c) {
-            QPainterPath path;
-            bool inRun=false;
-            for(int x=0;x<560;++x) {
-                const qreal position=graph.left()+x*(graph.width()-1)/559.0;
-                if(displayBins[c][x]==0) {
-                    if(inRun)path.lineTo(position,baseline);
-                    inRun=false;
-                    continue;
-                }
-                const qreal top=baseline-heightFor(c,x);
-                if(inRun)path.lineTo(position,top);
-                else {
-                    path.moveTo(graph.left()+std::max(0,x-1)*(graph.width()-1)/559.0,
-                        baseline);
-                    path.lineTo(position,top);
-                }
-                inRun=true;
-            }
-            if(inRun)path.lineTo(graph.right(),baseline);
             strokeMasks[c]=QImage(graph.size(),QImage::Format_ARGB32);
             strokeMasks[c].fill(Qt::transparent);
             QPainter maskPainter(&strokeMasks[c]);
             maskPainter.setRenderHint(QPainter::Antialiasing);
             maskPainter.translate(-graph.topLeft());
             maskPainter.setPen(QPen(Qt::white,1.3));
-            maskPainter.drawPath(path);
+            std::vector<QLineF> lines;
+            QPointF previous;
+            bool inRun=false;
+            for(int x=0;x<560;++x) {
+                const qreal position=graph.left()+x*(graph.width()-1)/559.0;
+                if(displayBins[c][x]==0) {
+                    if(inRun)lines.emplace_back(previous,QPointF(position,baseline));
+                    inRun=false;
+                    continue;
+                }
+                const qreal top=baseline-heightFor(c,x);
+                if(!inRun)previous=QPointF(
+                    graph.left()+std::max(0,x-1)*(graph.width()-1)/559.0,baseline);
+                const QPointF current(position,top);
+                lines.emplace_back(previous,current);
+                previous=current;
+                inRun=true;
+            }
+            if(inRun)lines.emplace_back(previous,QPointF(graph.right(),baseline));
+            if(!lines.empty())maskPainter.drawLines(lines.data(),static_cast<int>(lines.size()));
         }
-        const std::array<QRgb,8> lineColors={
-            qRgb(0,0,0),qRgb(255,75,75),qRgb(80,255,80),qRgb(230,195,65),
-            qRgb(85,130,255),qRgb(175,75,205),qRgb(70,225,235),qRgb(255,255,255)};
+        const auto masksFinished=std::chrono::steady_clock::now();
         QImage strokes(graph.size(),QImage::Format_ARGB32);
         strokes.fill(Qt::transparent);
         for(int y=0;y<strokes.height();++y) {
@@ -277,6 +286,7 @@ protected:
             }
         }
         painter.drawImage(graph.topLeft(),strokes);
+        const auto strokesFinished=std::chrono::steady_clock::now();
         painter.restore();
         painter.setPen(QPen(QColor(150,105,45,95),1.5));
         std::array<int,4> blackMarkerXs{};
@@ -331,6 +341,16 @@ protected:
             const int labelX=std::clamp(x-labelWidth/2,0,width()-labelWidth);
             painter.drawText(QRect(labelX,graph.top(),labelWidth,
                 painter.fontMetrics().height()),Qt::AlignCenter,label);
+        }
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT")) {
+            const auto now=std::chrono::steady_clock::now();
+            auto ms=[](auto end,auto start) {
+                return std::chrono::duration<double,std::milli>(end-start).count();
+            };
+            spdlog::info("GALLERY_PERF event=histogram_paint width={} height={} fill_ms={:.3f} masks_ms={:.3f} combine_ms={:.3f} rest_ms={:.3f} total_ms={:.3f}",
+                width(),height(),ms(fillFinished,paintStarted),
+                ms(masksFinished,fillFinished),ms(strokesFinished,masksFinished),
+                ms(now,strokesFinished),ms(now,paintStarted));
         }
     }
 private:
@@ -1501,6 +1521,15 @@ void ClipPlayerDialog::setPerformanceOverlayPinned(bool pinned){
     mOverlayAnimation->stop();
     mOverlayOpacity->setOpacity(1.0);
     mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,false);
+}
+
+void ClipPlayerDialog::setPerformancePixelOverlayEnabled(bool enabled){
+    if(mIndex<0 || mIndex>=mClips.size())return;
+    const auto& clip=mClips[mIndex];
+    mMouseSourcePosition=enabled ? QPoint(
+        std::max(0,clip.nativeWidth/2),std::max(0,clip.nativeHeight/2)) : QPoint(-1,-1);
+    mIntensitySamples=nullptr;
+    updateTitle();
 }
 
 void ClipPlayerDialog::setHistogramExpanded(bool expanded){
