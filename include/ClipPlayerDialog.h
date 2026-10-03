@@ -208,10 +208,12 @@ private:
     QPoint mIntensityPosition{-1,-1};
     QString mCachedIntensity;
     std::vector<std::array<uint32_t,3>> mClipValueCounts;
-    std::array<std::vector<uint16_t>,4> mHistogramBinsByPhase;
+    std::vector<float> mHistogramCodePositions;
     std::array<float,4> mHistogramBinBlackLevels{};
     float mHistogramBinWhite=0.0f;
     double mHistogramBinDistribution=0.0;
+    int mHistogramBinWidth=0;
+    bool mHistogramResizePending=false;
     int mHistogramBinChannels=0;
     bool mDirectFramesFinished=false;
     bool mDirectSequencePresentation=false;

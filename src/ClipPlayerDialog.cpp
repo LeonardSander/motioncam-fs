@@ -87,22 +87,27 @@ QIcon thumbnailChevronIcon(bool up) {
 
 class RawHistogram final : public QWidget {
 public:
-    using Bins=std::array<std::array<float,560>,3>;
+    using Bins=std::array<std::vector<float>,3>;
     explicit RawHistogram(QWidget* parent) : QWidget(parent) {
         setFixedSize(560,260);
     }
     std::function<void()> doubleClicked;
     std::function<void()> distributionChanged;
+    std::function<void()> binsGeometryChanged;
     double distribution() const { return mDistribution; }
+    int binCount() const { return std::clamp(width()-16,2,65535); }
     void scrollDistribution(double steps) {
-        const double next=std::clamp(mDistribution-steps*0.1,-1.0,1.0);
+        const double next=std::clamp(mDistribution+steps*0.5,-1.0,1.0);
         if(next==mDistribution)return;
         mDistribution=next;
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=histogram_distribution value={:.3f}",
+                mDistribution);
         if(distributionChanged)distributionChanged();
     }
-    void setBins(const Bins& bins, float white, const std::array<float,4>& blackLevels,
+    void setBins(Bins bins, float white, const std::array<float,4>& blackLevels,
                  const std::array<uint8_t,4>& phaseColors, int phases) {
-        mBins=bins;
+        mBins=std::move(bins);
         mWhite=white;
         mBlackLevels=blackLevels;
         mPhaseColors=phaseColors;
@@ -116,12 +121,22 @@ public:
         const double above=white<65535.0 ?
             std::min(1.0,std::log2((65535.0-black)/range)) : 0.0;
         const double first=std::pow(3.0,distribution);
+        const double shadowFocus=(1.0-distribution)*0.5;
         auto width=[&](int stop) {
-            return first+(1.0-first)*std::min(stop,below-1)/std::max(1,below-1);
+            const double fraction=double(std::min(stop,below-1))/
+                std::max(1,below-1);
+            const double shaped=(1.0-shadowFocus)*fraction+
+                shadowFocus*fraction*fraction*fraction;
+            return first+(1.0-first)*shaped;
         };
         auto widthSum=[&](int count) {
-            return count*first+(1.0-first)*count*(count-1)/
-                (2.0*std::max(1,below-1));
+            const double denominator=std::max(1,below-1);
+            const double triangular=count*(count-1)*0.5;
+            const double linear=triangular/denominator;
+            const double cubic=triangular*triangular/
+                (denominator*denominator*denominator);
+            return count*first+(1.0-first)*
+                ((1.0-shadowFocus)*linear+shadowFocus*cubic);
         };
         const double belowWidth=widthSum(below);
         const double darkWidth=black>0.0 ? width(below-1) : 0.0;
@@ -141,6 +156,10 @@ public:
         return std::clamp((darkWidth+belowWidth-offset)/total,0.0,1.0);
     }
 protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        if(binsGeometryChanged)binsGeometryChanged();
+    }
     void wheelEvent(QWheelEvent* event) override {
         const double steps=!event->pixelDelta().isNull() ?
             event->pixelDelta().y()/40.0 : event->angleDelta().y()/120.0;
@@ -179,15 +198,20 @@ protected:
                 painter.drawLine(x,graph.top(),x,graph.bottom());
             }
         }
+        if(mBins[0].empty())return;
         Bins displayBins=mBins;
+        const int binCount=static_cast<int>(displayBins[0].size());
         for(auto& channel:displayBins) {
             int previous=-1;
-            for(int bin=0;bin<560;++bin) {
+            for(int bin=0;bin<binCount;++bin) {
                 if(channel[bin]<=0.0f)continue;
-                if(previous>=0 && bin>previous+1)
-                    for(int gap=previous+1;gap<bin;++gap)
-                        channel[gap]=channel[previous]+(channel[bin]-channel[previous])*
-                            float(gap-previous)/float(bin-previous);
+                if(previous>=0 && bin-previous<=13)
+                    for(int gap=previous+1;gap<bin;++gap) {
+                        const float t=float(gap-previous)/float(bin-previous);
+                        const float smooth=t*t*(3.0f-2.0f*t);
+                        channel[gap]=channel[previous]+smooth*
+                            (channel[bin]-channel[previous]);
+                    }
                 previous=bin;
             }
         }
@@ -215,7 +239,8 @@ protected:
         QImage fill(graph.size(),QImage::Format_ARGB32);
         fill.fill(Qt::transparent);
         for(int x=0;x<fill.width();++x) {
-            const int bin=std::clamp(qRound(x*559.0/(fill.width()-1)),0,559);
+            const int bin=std::clamp(qRound(x*double(binCount-1)/
+                std::max(1,fill.width()-1)),0,binCount-1);
             if(displayBins[0][bin]==0.0f && displayBins[1][bin]==0.0f &&
                displayBins[2][bin]==0.0f)continue;
             const std::array<double,3> top={baseline-heightFor(0,bin),
@@ -249,8 +274,9 @@ protected:
             std::vector<QLineF> lines;
             QPointF previous;
             bool inRun=false;
-            for(int x=0;x<560;++x) {
-                const qreal position=graph.left()+x*(graph.width()-1)/559.0;
+            for(int x=0;x<binCount;++x) {
+                const qreal position=graph.left()+x*(graph.width()-1)/
+                    double(binCount-1);
                 if(displayBins[c][x]==0) {
                     if(inRun)lines.emplace_back(previous,QPointF(position,baseline));
                     inRun=false;
@@ -258,7 +284,8 @@ protected:
                 }
                 const qreal top=baseline-heightFor(c,x);
                 if(!inRun)previous=QPointF(
-                    graph.left()+std::max(0,x-1)*(graph.width()-1)/559.0,baseline);
+                    graph.left()+std::max(0,x-1)*(graph.width()-1)/
+                        double(binCount-1),baseline);
                 const QPointF current(position,top);
                 lines.emplace_back(previous,current);
                 previous=current;
@@ -577,6 +604,14 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         setHistogramExpanded(!mHistogramExpanded);
     };
     static_cast<RawHistogram*>(mHistogram)->distributionChanged=[this]{ updateHistogram(); };
+    static_cast<RawHistogram*>(mHistogram)->binsGeometryChanged=[this]{
+        if(mHistogramResizePending)return;
+        mHistogramResizePending=true;
+        QTimer::singleShot(0,this,[this]{
+            mHistogramResizePending=false;
+            if(mHistogramEnabled)updateHistogram();
+        });
+    };
     mHistogram->hide();
     overlayLayout->addWidget(mHistogram,0,Qt::AlignLeft);
     overlayLayout->addStretch(1);
@@ -1568,12 +1603,16 @@ void ClipPlayerDialog::updateHistogram(){
         updateTitle();
         return;
     }
+    const int binCount=static_cast<RawHistogram*>(mHistogram)->binCount();
     RawHistogram::Bins bins{};
+    for(auto& channel:bins)channel.assign(binCount,0.0f);
     if(raw.samples && raw.width>0 && raw.height>0 &&
        (raw.channels==1||raw.channels==3) && raw.white>raw.black) {
         const size_t pixels=std::min(raw.samples->size()/raw.channels,
             static_cast<size_t>(raw.width)*raw.height);
-        size_t stride=std::max<size_t>(1,pixels/250000);
+        const size_t sampleTarget=std::max<size_t>(250000,
+            static_cast<size_t>(binCount)*128);
+        size_t stride=std::max<size_t>(1,pixels/sampleTarget);
         if(stride>1 && stride%2==0)++stride;
         if(mClipValueCounts.size()!=65536)mClipValueCounts.resize(65536);
         std::fill(mClipValueCounts.begin(),mClipValueCounts.end(),
@@ -1582,10 +1621,12 @@ void ClipPlayerDialog::updateHistogram(){
         const int phaseBlock=std::max(1,raw.cfaSize/2);
         const double distribution=static_cast<RawHistogram*>(mHistogram)->distribution();
         if(mHistogramBinChannels!=raw.channels || mHistogramBinWhite!=raw.white ||
+           mHistogramBinWidth!=binCount ||
            mHistogramBinDistribution!=distribution ||
            mHistogramBinBlackLevels!=raw.blackLevels) {
             mHistogramBinChannels=raw.channels;
             mHistogramBinWhite=raw.white;
+            mHistogramBinWidth=binCount;
             mHistogramBinDistribution=distribution;
             mHistogramBinBlackLevels=raw.blackLevels;
             const int phases=raw.channels==3?3:4;
@@ -1594,14 +1635,11 @@ void ClipPlayerDialog::updateHistogram(){
                 if(raw.blackLevels[phase]>0.0f &&
                    (histogramBlack==0.0 || raw.blackLevels[phase]<histogramBlack))
                     histogramBlack=raw.blackLevels[phase];
-            for(int phase=0;phase<phases;++phase) {
-                auto& lookup=mHistogramBinsByPhase[phase];
-                lookup.resize(65536);
-                for(int value=0;value<65536;++value) {
-                    lookup[value]=static_cast<uint16_t>(std::clamp(qRound(
-                        RawHistogram::position(value,raw.white,histogramBlack,distribution)*559.0),0,559));
-                }
-            }
+            mHistogramCodePositions.resize(65536);
+            for(int value=0;value<65536;++value)
+                mHistogramCodePositions[value]=static_cast<float>(
+                    RawHistogram::position(value,raw.white,histogramBlack,distribution)*
+                        (binCount-1));
         }
         for(size_t pixel=0;pixel<pixels;pixel+=stride) {
             for(int channel=0;channel<raw.channels;++channel) {
@@ -1613,7 +1651,58 @@ void ClipPlayerDialog::updateHistogram(){
                     std::min<int>(2,raw.cfaPhase[phase]);
                 ++sampleCounts[color];
                 ++mClipValueCounts[value][color];
-                ++bins[color][mHistogramBinsByPhase[phase][value]];
+            }
+        }
+        // Sample the raw-code histogram at the displayed x coordinates. A code
+        // can cover several screen pixels near black; interpolating in code
+        // space preserves its shape as the stop widths change.
+        for(int color=0;color<3;++color) {
+            std::vector<float> codeCounts(65536);
+            int previous=-1;
+            for(int value=0;value<65536;++value) {
+                const float count=static_cast<float>(mClipValueCounts[value][color]);
+                if(count<=0.0f)continue;
+                if(previous>=0 && value>previous+1 && value-previous<=8)
+                    for(int missing=previous+1;missing<value;++missing)
+                        codeCounts[missing]=codeCounts[previous]+
+                            (count-codeCounts[previous])*
+                                float(missing-previous)/float(value-previous);
+                codeCounts[value]=count;
+                previous=value;
+            }
+            std::vector<double> cumulative(65537);
+            for(int value=0;value<65536;++value)
+                cumulative[value+1]=cumulative[value]+codeCounts[value];
+            const auto begin=mHistogramCodePositions.begin();
+            const auto end=mHistogramCodePositions.end();
+            for(int bin=0;bin<binCount;++bin) {
+                const auto first=std::lower_bound(begin,end,float(bin)-0.5f);
+                const auto last=std::lower_bound(first,end,float(bin)+0.5f);
+                if(last>first) {
+                    bins[color][bin]=static_cast<float>(
+                        cumulative[last-begin]-cumulative[first-begin]);
+                    continue;
+                }
+                const auto upper=std::lower_bound(begin,end,float(bin));
+                if(upper==begin || upper==end)continue;
+                const int right=static_cast<int>(upper-begin);
+                const int left=right-1;
+                const float span=mHistogramCodePositions[right]-
+                    mHistogramCodePositions[left];
+                if(span<=0.0f)continue;
+                const float t=(bin-mHistogramCodePositions[left])/span;
+                const float y0=codeCounts[left],y1=codeCounts[right];
+                const float delta=y1-y0;
+                auto slope=[](float a,float b) {
+                    return a*b>0.0f ? 2.0f*a*b/(a+b) : 0.0f;
+                };
+                const float m0=left>0 ? slope(y0-codeCounts[left-1],delta) : delta;
+                const float m1=right<65535 ?
+                    slope(delta,codeCounts[right+1]-y1) : delta;
+                const float t2=t*t,t3=t2*t;
+                bins[color][bin]=std::max(0.0f,
+                    (2*t3-3*t2+1)*y0+(t3-2*t2+t)*m0+
+                    (-2*t3+3*t2)*y1+(t3-t2)*m1);
             }
         }
         for(int color=0;color<3;++color) {
@@ -1640,14 +1729,14 @@ void ClipPlayerDialog::updateHistogram(){
         }
     }
     if(mHistogram)
-        static_cast<RawHistogram*>(mHistogram)->setBins(bins,raw.white,
+        static_cast<RawHistogram*>(mHistogram)->setBins(std::move(bins),raw.white,
             raw.blackLevels,raw.channels==3 ? std::array<uint8_t,4>{0,1,2,0} :
                 raw.cfaPhase,raw.samples && raw.white>raw.black && raw.white>0.0f
                 ? (raw.channels==3?3:4) : 0);
     updateTitle();
     if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
-        spdlog::info("GALLERY_PERF event=histogram_frame width={} height={} channels={} latency_ms={:.3f}",
-            raw.width,raw.height,raw.channels,
+        spdlog::info("GALLERY_PERF event=histogram_frame width={} height={} channels={} bins={} latency_ms={:.3f}",
+            raw.width,raw.height,raw.channels,binCount,
             std::chrono::duration<double,std::milli>(
                 std::chrono::steady_clock::now()-histogramStarted).count());
 }
@@ -2408,8 +2497,8 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     if(belongsToPlayer&&event->type()==QEvent::Wheel){
         revealOverlay();
         const auto* wheel=static_cast<QWheelEvent*>(event);
-        if(mHistogramEnabled && mHistogram->isVisible() && watchedWidget &&
-           (watchedWidget==mHistogram || mHistogram->isAncestorOf(watchedWidget))) {
+        if(mHistogramEnabled && mHistogram->isVisible() &&
+           mHistogram->rect().contains(mHistogram->mapFromGlobal(QCursor::pos()))) {
             const double steps=!wheel->pixelDelta().isNull() ?
                 wheel->pixelDelta().y()/40.0 : wheel->angleDelta().y()/120.0;
             static_cast<RawHistogram*>(mHistogram)->scrollDistribution(steps);
