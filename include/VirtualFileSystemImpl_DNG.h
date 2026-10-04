@@ -36,7 +36,7 @@ public:
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
     bool sourceImagePayloadsEqual(const Entry& left, const Entry& right) override;
-    std::shared_ptr<std::vector<char>> materializeFile(
+    std::shared_ptr<std::vector<uint8_t>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
     bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame,
                                  bool retainSourceSamples = false) override;
@@ -50,7 +50,7 @@ private:
         bool hasCfa = false;
     };
     int readPriority(const Entry& entry) const override;
-    std::function<std::shared_ptr<std::vector<char>>()>
+    std::function<std::shared_ptr<std::vector<uint8_t>>()>
         staticMaterializer(const Entry& entry) override;
     void init();
     

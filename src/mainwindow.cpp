@@ -2615,10 +2615,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const auto thumbnailCollectionEnabled=mClipPlayer->thumbnailCollectionEnabled();
     const bool diagnostics = mGalleryPerformanceTestActive;
     const bool clippingEnabled = mGalleryClippingEnabled && !backfillThumbnails;
+    const bool histogramEnabled = mClipPlayer->histogramEnabled() && !backfillThumbnails;
     auto render = [this, mountId, settings, generation, firstFrame, isSequence,
                    thumbnailOrientation,
                    backfillThumbnails, player, playbackTarget, incomingFrame,
-                   thumbnailCollectionEnabled, diagnostics, clippingEnabled] {
+                   thumbnailCollectionEnabled, diagnostics, clippingEnabled,
+                   histogramEnabled] {
         const auto taskStarted = std::chrono::steady_clock::now();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
@@ -2648,7 +2650,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
             motioncam::PreviewOptions options;
             options.firstFrame = firstFrame;
             options.clippingEnabled = clippingEnabled;
-            options.retainSourceSamples = !backfillThumbnails;
+            options.retainSourceSamples = histogramEnabled;
             options.skipFrame = [playbackTarget,incomingFrame,backfillThumbnails](size_t frame) {
                 if(backfillThumbnails){
                     incomingFrame->store(static_cast<int>(frame));return false;
@@ -2900,6 +2902,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     connect(mClipPlayer, &ClipPlayerDialog::histogramEnabledChanged, this, [this](bool enabled) {
         mGalleryHistogramEnabled = enabled;
         QSettings(PACKAGE_NAME, APP_NAME).setValue("galleryHistogramEnabled", enabled);
+        if (mClipPlayer) mClipPlayer->reloadCurrentClip();
     });
     connect(mClipPlayer, &ClipPlayerDialog::clippingEnabledChanged, this, [this](bool enabled) {
         mGalleryClippingEnabled = enabled;
@@ -3284,18 +3287,24 @@ void MainWindow::startGalleryPerformanceTest(
         QCoreApplication::exit(4);
         return;
     }
+    mClipPlayer->setPerformanceUncapped(true);
+    spdlog::info("GALLERY_PERF event=playback_cadence mode=uncapped timer_ms=1");
     if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING"))
         mClipPlayer->setClippingEnabled(true);
     mClipPlayer->setPerformanceOverlayPinned(true);
-    mClipPlayer->setHistogramEnabled(true);
+    mClipPlayer->setHistogramEnabled(!qEnvironmentVariableIsSet(
+        "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM"));
     if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM"))
         mClipPlayer->setHistogramExpanded(true);
     spdlog::info("GALLERY_PERF event=gallery_histogram enabled={} overlay_pinned=true",
                  mClipPlayer->histogramEnabled());
     mClipPlayer->setAutomaticAdvanceEnabled(false);
-    // Playback should create strip images as a byproduct; enabling the strip
-    // here makes that overhead part of every playback sample.
-    mClipPlayer->setThumbnailStripVisible(true);
+    // The optional decode-focused run excludes thumbnail collection and row
+    // layout work. The ordinary performance run includes both.
+    const bool showThumbnailStrip = !qEnvironmentVariableIsSet(
+        "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS");
+    mClipPlayer->setThumbnailStripVisible(showThumbnailStrip);
+    spdlog::info("GALLERY_PERF event=thumbnail_strip enabled={}", showThumbnailStrip);
     // Playback samples target the most demanding normal UI geometry. Keep the
     // gallery maximized after setup and after the resize/cancellation preflight
     // so the measured FFmpeg surface matches a maximized interactive gallery.
@@ -3405,7 +3414,8 @@ void MainWindow::startGalleryPerformanceTest(
                             QCoreApplication::exit(6);
                         });
                 } else {
-                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL")) {
+                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL") ||
+                        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS")) {
                         ++state->clipIndex;
                         (*startClip)();
                         return;

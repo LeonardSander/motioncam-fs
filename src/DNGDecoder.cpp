@@ -5200,6 +5200,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         ? static_cast<uint32_t>(std::max(1, settings.draftScale)) : 1u;
     const uint32_t sourceWidth = image.layout.width;
     const uint32_t sourceHeight = image.layout.height;
+    const auto proxyStarted = std::chrono::steady_clock::now();
     uint32_t gainMapSourceScale = 1;
     uint32_t remainingPreviewScale = requestedPreviewScale;
     const bool hasCrop = (settings.options & RENDER_OPT_CROPPING) &&
@@ -5240,6 +5241,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             remainingPreviewScale = std::max(1u,
                 remainingPreviewScale / topologyScale);
     }
+    const auto topologyFinished = std::chrono::steady_clock::now();
     // Ordinary Bayer proxy previews do not need full-resolution demosaic or
     // gain-map traversal. Decimate the CFA first, while retaining the source
     // geometry for gain-map interpolation. Restrict this to the nearest/HQ
@@ -5293,6 +5295,17 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         image.layout.width = proxyWidth;
         image.layout.height = proxyHeight;
         gainMapSourceScale = remainingPreviewScale;
+    }
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+        static_cast<uint64_t>(sourceWidth) * sourceHeight >= 10000000) {
+        const auto proxyFinished = std::chrono::steady_clock::now();
+        spdlog::info(
+            "GALLERY_PERF event=large_dng_proxy source={}x{} proxy={}x{} cfa={} scale={} remaining={} topology_ms={:.3f} reduction_ms={:.3f}",
+            sourceWidth, sourceHeight, image.layout.width, image.layout.height,
+            image.layout.cfaRepeatSize, requestedPreviewScale,
+            remainingPreviewScale,
+            std::chrono::duration<double, std::milli>(topologyFinished - proxyStarted).count(),
+            std::chrono::duration<double, std::milli>(proxyFinished - topologyFinished).count());
     }
     const auto gainStarted = std::chrono::steady_clock::now();
     if (!bakeDecodedPreviewGainMaps(

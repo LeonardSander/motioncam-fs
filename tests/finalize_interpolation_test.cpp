@@ -187,11 +187,11 @@ public:
     std::optional<motioncam::Entry> findEntry(const std::string&) const override { return {}; }
     int readFile(const motioncam::Entry&, size_t, size_t, void*,
                  std::function<void(size_t, int)>, bool) override { return -1; }
-    std::shared_ptr<std::vector<char>> materializeFile(const motioncam::Entry& entry, bool) override {
+    std::shared_ptr<std::vector<uint8_t>> materializeFile(const motioncam::Entry& entry, bool) override {
         if (entry.name == "audio.wav") {
             ++mAncillaryMaterializations;
-            return std::make_shared<std::vector<char>>(
-                std::initializer_list<char>{'R', 'I', 'F', 'F'});
+            return std::make_shared<std::vector<uint8_t>>(
+                std::initializer_list<uint8_t>{'R', 'I', 'F', 'F'});
         }
         const auto& source = std::get<int64_t>(entry.userData) == 0 ? mLeft : mRight;
         auto timed = source;
@@ -199,7 +199,7 @@ public:
             std::distance(mEntries.begin(), std::find_if(mEntries.begin(), mEntries.end(),
                 [&](const auto& candidate) { return candidate.name == entry.name; })));
         assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
-        return std::make_shared<std::vector<char>>(timed.begin(), timed.end());
+        return std::make_shared<std::vector<uint8_t>>(timed.begin(), timed.end());
     }
     bool materializePreviewFrame(const motioncam::Entry&, motioncam::PreviewFrame&,
                                  bool = false) override {
@@ -626,7 +626,7 @@ int main() {
     std::vector<motioncam::GainMap> consumedOrderedMap;
     assert(!motioncam::DNGDecoder::getGainMaps(
         orderedRgb, 3, consumedOrderedMap));
-    auto processedPreviewDng = std::make_shared<std::vector<char>>(
+    auto processedPreviewDng = std::make_shared<std::vector<uint8_t>>(
         orderedRgb.begin(), orderedRgb.end());
     motioncam::PreviewFrame processedPreview;
     assert(motioncam::vfs::decodeProcessedDngPreview(
@@ -1359,21 +1359,21 @@ int main() {
     int renders = 0;
     const auto render = [&] {
         ++renders;
-        return std::make_shared<std::vector<char>>(
-            std::initializer_list<char>{'a', 'b', 'c', 'd'});
+        return std::make_shared<std::vector<uint8_t>>(
+            std::initializer_list<uint8_t>{'a', 'b', 'c', 'd'});
     };
     assert(*motioncam::vfs::materializeCached(cache, mountedEntry, false, render) ==
-        std::vector<char>({'a', 'b', 'c', 'd'}));
+        std::vector<uint8_t>({'a', 'b', 'c', 'd'}));
     assert(*motioncam::vfs::materializeCached(cache, mountedEntry, false, render) ==
-        std::vector<char>({'a', 'b', 'c', 'd'}));
+        std::vector<uint8_t>({'a', 'b', 'c', 'd'}));
     assert(renders == 1);
 
     motioncam::LRUCache undersizedCache(2);
     int oversizedRenders = 0;
     const auto oversizedRender = [&] {
         ++oversizedRenders;
-        return std::make_shared<std::vector<char>>(
-            std::initializer_list<char>{'a', 'b', 'c', 'd'});
+        return std::make_shared<std::vector<uint8_t>>(
+            std::initializer_list<uint8_t>{'a', 'b', 'c', 'd'});
     };
     assert(motioncam::vfs::materializeCached(
         undersizedCache, mountedEntry, false, oversizedRender)->size() == 4);

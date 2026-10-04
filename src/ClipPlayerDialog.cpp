@@ -708,6 +708,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
            (mClips[mIndex].isSequence&&!mDirectSequencePresentation
                 ?mDecoder.state()==QProcess::NotRunning:
             mDirectFramesFinished)&&mFrames.empty()&&mBytes.isEmpty()){
+            mPaused=false;
             openClip(mIndex,0.0);return;
         }
         mPaused=!mPaused;updateButtonIcons();
@@ -873,8 +874,8 @@ QString ClipPlayerDialog::ffmpegPath()const{
 void ClipPlayerDialog::openClip(int index,double startSeconds){
     if(index<0||index>=mClips.size())return;
     const bool changingClip=index!=mIndex;
-    const bool preservePausedNavigation=changingClip&&mPaused&&mThumbnailScroll&&
-        mThumbnailScroll->isVisible();
+    const bool preservePausedNavigation=mPaused&&(!changingClip||
+        (mThumbnailScroll&&mThumbnailScroll->isVisible()));
     if(changingClip){
         // A requested (unsnapped) wheel value belongs to the geometry that
         // produced it. Do not carry that hidden accumulator into another clip.
@@ -898,6 +899,9 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mAudioLoadCancelled=std::make_shared<std::atomic_bool>(false);
     ++mAudioLoadGeneration;mAudioLoading=false;
     mFirstFrameReady=false;mAudioStartPending=mAudioEnabled;
+    if(!changingClip&&!mPaused&&mAudioEnabled&&mAudioSink){
+        mAudioSink->stop();mAudioClock.invalidate();
+    }
     mIndex=index;
     // Present sequence frames at source size so a larger viewport does not
     // increase the FFmpeg output pipe and copy cost.
@@ -948,7 +952,10 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mWaitingForFirstFrame=!mLastPresentedImage.isNull();
     if(!mWaitingForFirstFrame)mVideo->setText(tr("Preparing playback…"));
     else if(!changingClip)updateDisplayedImage();
-    if(!mViewportRefreshPending)configureAudio();
+    // Refreshing the current video frame does not change its audio source.
+    // In particular, keep a suspended sink untouched while the player is
+    // paused; rebuilding it can replay a buffered tail during the refresh.
+    if(!mViewportRefreshPending&&(changingClip||!mAudioSink))configureAudio();
     mViewportRefreshPending=false;
     if(mClips[index].sourceFrames>1){
         if(clip.isSequence)startDecoder();
@@ -1084,10 +1091,19 @@ void ClipPlayerDialog::refreshThumbnailLabel(int sourceFrame){
         cached.load(thumbnailCachePath(currentMountId(),sourceFrame));
         if(!cached.isNull())cacheThumbnail(currentMountId(),sourceFrame,cached,false);
     }
-    if(cached.isNull()){label->setPixmap(QPixmap());return;}
+    if(cached.isNull()){
+        label->setProperty("thumbnailImageKey", QVariant());
+        label->setPixmap(QPixmap());
+        return;
+    }
     const QSize insetSize(std::max(1,label->width()-2),std::max(1,label->height()-2));
-    label->setPixmap(QPixmap::fromImage(cached).scaled(
-        insetSize,Qt::KeepAspectRatio,Qt::SmoothTransformation));
+    if(label->property("thumbnailImageKey").toLongLong()!=cached.cacheKey()||
+       label->property("thumbnailImageSize").toSize()!=insetSize){
+        label->setPixmap(QPixmap::fromImage(cached).scaled(
+            insetSize,Qt::KeepAspectRatio,Qt::SmoothTransformation));
+        label->setProperty("thumbnailImageKey",static_cast<qlonglong>(cached.cacheKey()));
+        label->setProperty("thumbnailImageSize",insetSize);
+    }
     label->setText(QString());
 }
 
@@ -1120,12 +1136,18 @@ void ClipPlayerDialog::centerCurrentThumbnail(){
     auto* bar=mThumbnailScroll->horizontalScrollBar();
     if(mIndex<0||mIndex>=mClips.size())return;
     int left=8;
-    for(int source=0;source<mCurrentThumbnailSource;++source)
-        left+=thumbnailSizeForSource(source).width()+16;
+    if(mClips[mIndex].isSequence){
+        left+=std::max(0,mCurrentThumbnailSource)*
+            (thumbnailSizeForSource(0).width()+16);
+    }else{
+        for(int source=0;source<mCurrentThumbnailSource;++source)
+            left+=thumbnailSizeForSource(source).width()+16;
+    }
     const int center=left+(thumbnailSizeForSource(mCurrentThumbnailSource).width()+8)/2;
     bar->setValue(std::clamp(center-mThumbnailScroll->viewport()->width()/2,
         bar->minimum(),bar->maximum()));
-    updateVisibleThumbnailWidgets();
+    // A changed scroll position emits valueChanged and updates visible items.
+    // When it is unchanged, only the previous/current highlight needs work.
 }
 
 QString ClipPlayerDialog::thumbnailCachePath(int mountId,int sourceFrame)const{
@@ -1454,14 +1476,18 @@ void ClipPlayerDialog::updateTitle(){
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     QString view=mZoomPercent>0.0
         ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit");
-    if(mDetectedClipValue)
+    if(mHistogramEnabled&&mDetectedClipValue)
         view+=tr(" — Clip %1").arg(*mDetectedClipValue);
-    if(mMouseSourcePosition.x()>=0&&mMouseSourcePosition.y()>=0){
+    if(mHistogramEnabled&&mMouseSourcePosition.x()>=0&&
+       mMouseSourcePosition.y()>=0){
         view+=tr(" — x %1, y %2").arg(mMouseSourcePosition.x())
             .arg(mMouseSourcePosition.y());
     }
     const auto& raw=mPresentedRawFrame;
-    if(mIntensitySamples!=raw.samples.get() ||
+    if(!mHistogramEnabled){
+        mIntensitySamples=nullptr;
+        mCachedIntensity.clear();
+    }else if(mIntensitySamples!=raw.samples.get() ||
        mIntensityPosition!=mMouseSourcePosition) {
         mIntensitySamples=raw.samples.get();
         mIntensityPosition=mMouseSourcePosition;
@@ -1535,11 +1561,17 @@ void ClipPlayerDialog::updateFpsIndicator(){
 void ClipPlayerDialog::setHistogramEnabled(bool enabled){
     if(!enabled && mHistogramExpanded)setHistogramExpanded(false);
     mHistogramEnabled=enabled;
+    if(!enabled)mPresentedRawFrame.samples.reset();
     mHistogramToggle->setChecked(enabled);
     mHistogramToggle->setToolTip(enabled?tr("Hide raw RGB histogram"):
         tr("Show raw RGB histogram"));
     mHistogram->setVisible(enabled);
     updateHistogram();
+}
+
+void ClipPlayerDialog::setPerformanceUncapped(bool enabled){
+    mPerformanceUncapped=enabled;
+    if(mIndex>=0)updateFrameTimerInterval();
 }
 
 void ClipPlayerDialog::setClippingEnabled(bool enabled){
@@ -1834,6 +1866,32 @@ void ClipPlayerDialog::updateMouseSourcePosition(const QPointF& globalPosition){
                 const int nativeHeight=clip.nativeHeight>0?clip.nativeHeight:height;
                 x=std::clamp(static_cast<int>(std::floor((x+0.5)*nativeWidth/width)),0,nativeWidth-1);
                 y=std::clamp(static_cast<int>(std::floor((y+0.5)*nativeHeight/height)),0,nativeHeight-1);
+                const auto& raw=mPresentedRawFrame;
+                if(mHistogramEnabled&&raw.samples&&raw.channels==1&&raw.orientation==0&&
+                   raw.width==static_cast<uint32_t>(nativeWidth)&&
+                   raw.height==static_cast<uint32_t>(nativeHeight)&&
+                   clip.width>0&&clip.height>0&&
+                   raw.width%static_cast<uint32_t>(clip.width)==0&&
+                   raw.height%static_cast<uint32_t>(clip.height)==0){
+                    const int phaseBlock=std::max(1,raw.cfaSize/2);
+                    const int scaleX=static_cast<int>(raw.width/clip.width);
+                    const int scaleY=static_cast<int>(raw.height/clip.height);
+                    // Even-stride proxy decimation keeps Bayer parity by
+                    // selecting alternating phases inside each source block.
+                    // Sampling every block center would select one color only.
+                    if(scaleX>phaseBlock&&scaleX%phaseBlock==0&&
+                       (scaleX/phaseBlock)%2==0){
+                        const int proxyX=x/scaleX;
+                        x=std::min(nativeWidth-1,proxyX*scaleX+
+                            (proxyX&1)*phaseBlock);
+                    }
+                    if(scaleY>phaseBlock&&scaleY%phaseBlock==0&&
+                       (scaleY/phaseBlock)%2==0){
+                        const int proxyY=y/scaleY;
+                        y=std::min(nativeHeight-1,proxyY*scaleY+
+                            (proxyY&1)*phaseBlock);
+                    }
+                }
                 next=QPoint(x,y);
             }
         }
@@ -2031,12 +2089,17 @@ void ClipPlayerDialog::updateDisplayedImage(){
 }
 
 void ClipPlayerDialog::updateFrameTimerInterval(){
-    // Audio changes the authority used to select a frame, not the cadence at
-    // which the UI needs to render. Polling at 5 ms made the UI read the video
-    // pipe and enter presentation logic up to 200 times per second. A normal
-    // frame-period tick is sufficient to detect lateness and skip frames.
-    mFrameTimer.setInterval(std::max(1,qRound(
-        1000.0/std::clamp(mClips[mIndex].fps,1.0,240.0))));
+    if(mPerformanceUncapped){
+        mFrameTimer.setInterval(1);
+        return;
+    }
+    const double frameMs=1000.0/std::clamp(mClips[mIndex].fps,1.0,240.0);
+    // Audio frame boundaries are independent of the UI timer phase. Polling
+    // exactly once per frame can miss a boundary and hold a frame for another
+    // full period, especially when a coarse timer fires early. Half-period
+    // precise ticks bound that extra wait without the old 5 ms polling cost.
+    mFrameTimer.setTimerType(mAudioEnabled?Qt::PreciseTimer:Qt::CoarseTimer);
+    mFrameTimer.setInterval(std::max(1,qRound(frameMs/(mAudioEnabled?2.0:1.0))));
 }
 void ClipPlayerDialog::configureAudio(){
     if(mAudioSink){mAudioSink->stop();delete mAudioSink;mAudioSink=nullptr;}
@@ -2269,7 +2332,7 @@ void ClipPlayerDialog::showNextFrame(){
         // Dropping is restricted to the pre-materialization scheduler; if
         // rendering itself exceeds one frame period, discarding here would
         // reject every completed frame forever.
-        if(mFrames.empty()||qRound(mPositionSeconds*fps)>audioFrame)return;
+        if(mFrames.empty()||mFrames.front().sourceFrame>audioFrame)return;
     }
     if(!mFrames.empty()){
         const QSize viewport=mVideo->size().expandedTo(QSize(640,360));

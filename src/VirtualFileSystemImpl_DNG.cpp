@@ -18,6 +18,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -433,17 +434,17 @@ int VirtualFileSystemImpl_DNG::readPriority(const Entry& entry) const {
         ? vfs::outputFrameNumber(entry) : 0;
 }
 
-std::function<std::shared_ptr<std::vector<char>>()>
+std::function<std::shared_ptr<std::vector<uint8_t>>()>
 VirtualFileSystemImpl_DNG::staticMaterializer(const Entry& entry) {
     if (entry.name != "audio.wav") return {};
     return [this, entry] { return materializeFile(entry, false); };
 }
 
-std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
+std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
     if (entry.name == "audio.wav" && mAudioWav)
-        return std::make_shared<std::vector<char>>(mAudioWav->begin(), mAudioWav->end());
+        return std::make_shared<std::vector<uint8_t>>(mAudioWav->begin(), mAudioWav->end());
 
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         const auto materializeStarted = std::chrono::steady_clock::now();
@@ -478,7 +479,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DNG::materializeFile(
                     " exceeds advertised mounted size " + std::to_string(advertisedSize));
             bytes.resize(advertisedSize, 0);
         }
-        auto output = std::make_shared<std::vector<char>>(bytes.begin(), bytes.end());
+        auto output = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
         const auto completedAt = std::chrono::steady_clock::now();
         spdlog::info(
             "DNG timing [{}]: materialize complete {:.1f} ms "
@@ -514,10 +515,13 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     // processor, including gain-map-only rendering.
     {
         try {
+            const auto previewStarted = std::chrono::steady_clock::now();
             auto prepared = prepareFrame(frameIt->second, false);
+            const auto preparedAt = std::chrono::steady_clock::now();
             DecodedDNGImage image;
             if (!DNGDecoder::decodeImage(std::move(prepared.dng), image))
                 throw std::runtime_error("Could not decode source DNG preview");
+            const auto decodedAt = std::chrono::steady_clock::now();
             if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
                 fallbackGainMapApplied = !image.opcodeList2.empty();
                 if (!(mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
@@ -553,6 +557,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             std::vector<utils::ActiveBadPixel> markedPixels;
             const uint32_t markedSourceWidth = image.layout.width;
             const uint32_t markedSourceHeight = image.layout.height;
+            const auto badPixelsStarted = std::chrono::steady_clock::now();
             if (mCalibration && mCalibration->hasBadPixels &&
                 mConfig.badPixelTreatment != BadPixelTreatment::Disabled &&
                 image.layout.pixels == DNGPixelLayout::CFA) {
@@ -573,6 +578,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     image.metadata.exposureTime, *mCalibration,
                     mConfig.badPixelTreatment, true);
             }
+            const auto badPixelsFinished = std::chrono::steady_clock::now();
             vfs::mergeManualDngMetadata(
                 image.metadata, mManualVignetteSidecars,
                 mCalibration ? &*mCalibration : nullptr);
@@ -610,8 +616,21 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                 if (mCalibration->hasCalibrationIlluminant2)
                     image.metadata.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
             }
+            const auto pipelineStarted = std::chrono::steady_clock::now();
             if (DNGDecoder::decodePreview(
                     std::move(image), mConfig, preview, true, false)) {
+                if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+                    const auto completedAt = std::chrono::steady_clock::now();
+                    spdlog::info(
+                        "GALLERY_PERF event=dng_preview_stage source={} prepare_ms={:.3f} decode_ms={:.3f} bad_pixels_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f} total_ms={:.3f}",
+                        mSrcPath,
+                        std::chrono::duration<double, std::milli>(preparedAt - previewStarted).count(),
+                        std::chrono::duration<double, std::milli>(decodedAt - preparedAt).count(),
+                        std::chrono::duration<double, std::milli>(badPixelsFinished - badPixelsStarted).count(),
+                        std::chrono::duration<double, std::milli>(pipelineStarted - badPixelsFinished).count(),
+                        std::chrono::duration<double, std::milli>(completedAt - pipelineStarted).count(),
+                        std::chrono::duration<double, std::milli>(completedAt - previewStarted).count());
+                }
                 if (retainSourceSamples) {
                     preview.rawSamples = std::move(sourceSamples);
                     preview.rawWidth = sourceWidth;

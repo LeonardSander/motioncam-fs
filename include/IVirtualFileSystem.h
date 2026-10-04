@@ -33,7 +33,7 @@ public:
     // Produce the complete bytes for an entry. Mounted range reads and
     // permanent exports must share this path so they cannot render different
     // frame sequences or metadata.
-    virtual std::shared_ptr<std::vector<char>> materializeFile(
+    virtual std::shared_ptr<std::vector<uint8_t>> materializeFile(
         const Entry& entry,
         bool jpegCompression = false) = 0;
     virtual bool materializePreviewFrame(const Entry&, PreviewFrame&,

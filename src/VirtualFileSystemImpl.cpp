@@ -308,10 +308,12 @@ void processDngPixels(std::vector<uint8_t>& dng,
 }
 
 bool decodeProcessedDngPreview(
-        const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview,
+        const std::shared_ptr<std::vector<uint8_t>>& dng, PreviewFrame& preview,
         bool gainMapApplied, bool retainSourceSamples) {
     if (!dng) return false;
-    std::vector<uint8_t> bytes(dng->begin(), dng->end());
+    // The decoder only consumes the byte vector by value; retain the cached
+    // mounted frame for future range reads and copy only on this fallback.
+    std::vector<uint8_t> bytes(*dng);
     // All requested processing is already baked or represented in the
     // canonical frame. Decode without applying a second crop/proxy/gain pass.
     const bool decoded = DNGDecoder::decodePreview(
@@ -1629,9 +1631,9 @@ void loadSidecar(
     calibration = found->second.calibration;
 }
 
-std::shared_ptr<std::vector<char>> materializeCached(
+std::shared_ptr<std::vector<uint8_t>> materializeCached(
         LRUCache& cache, const Entry& entry, bool bypassCache,
-        const std::function<std::shared_ptr<std::vector<char>>()>& renderer) {
+        const std::function<std::shared_ptr<std::vector<uint8_t>>()>& renderer) {
     if (bypassCache) return renderer();
     if (auto cached = cache.get(entry)) {
         cache.put(entry, cached);
@@ -1652,8 +1654,8 @@ int readMountedEntry(
         const Entry& entry, size_t pos, size_t len, void* dst,
         const std::function<void(size_t, int)>& result, bool async,
         BS::thread_pool& processingThreadPool,
-        const std::function<std::shared_ptr<std::vector<char>>()>& materializer,
-        const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer,
+        const std::function<std::shared_ptr<std::vector<uint8_t>>()>& materializer,
+        const std::function<std::shared_ptr<std::vector<uint8_t>>()>& staticMaterializer,
         int priority) {
     if (const auto desktop = readDesktopIni(entry, pos, len, dst, result)) return *desktop;
     auto copyRange = [=]() -> size_t {
@@ -2457,7 +2459,7 @@ int MountedDngSource::readPriority(const Entry& entry) const {
     return vfs::outputFrameNumber(entry);
 }
 
-std::function<std::shared_ptr<std::vector<char>>()>
+std::function<std::shared_ptr<std::vector<uint8_t>>()>
 MountedDngSource::staticMaterializer(const Entry&) {
     return {};
 }

@@ -20,7 +20,7 @@ public:
 
     // Get value from cache, returns nullptr if not found
     // If another thread is already processing the same key, this thread will wait
-    std::shared_ptr<std::vector<char>> get(const Entry& key) {
+    std::shared_ptr<std::vector<uint8_t>> get(const Entry& key) {
         std::unique_lock<std::mutex> lock(mMutex);
 
         // Concurrent range reads for a large mounted file are expected. Let the
@@ -51,7 +51,7 @@ public:
     }
 
     // Add or update value in cache
-    void put(const Entry& key, std::shared_ptr<std::vector<char>> value) {
+    void put(const Entry& key, std::shared_ptr<std::vector<uint8_t>> value) {
         std::lock_guard<std::mutex> lock(mMutex);
 
         size_t valueSize = value->size();
@@ -145,7 +145,7 @@ public:
     }
 
 private:
-    using CacheItem = std::pair<Entry, std::shared_ptr<std::vector<char>>>;
+    using CacheItem = std::pair<Entry, std::shared_ptr<std::vector<uint8_t>>>;
     using CacheList = std::list<CacheItem>;
     using CacheMap = std::unordered_map<Entry, typename CacheList::iterator, Entry::Hash>;
 

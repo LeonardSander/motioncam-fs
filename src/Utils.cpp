@@ -374,9 +374,9 @@ std::vector<unsigned short> makeLogLinearizationTable(unsigned int storedWhiteLe
 // vectorbuf and vector_ostream implementations
 // ============================================================================
 
-vectorbuf::vectorbuf(std::vector<char>& vec) : vec_(vec) {
+vectorbuf::vectorbuf(std::vector<uint8_t>& vec) : vec_(vec) {
     if (!vec_.empty()) {
-        setp(vec_.data(), vec_.data() + vec_.size());
+        setp(reinterpret_cast<char*>(vec_.data()), reinterpret_cast<char*>(vec_.data() + vec_.size()));
     }
 }
 
@@ -384,9 +384,9 @@ vectorbuf::int_type vectorbuf::overflow(int_type c) {
     if (c != traits_type::eof()) {
         size_t old_size = vec_.size();
         vec_.resize(old_size + 1);
-        vec_[old_size] = static_cast<char>(c);
+        vec_[old_size] = static_cast<uint8_t>(c);
 
-        setp(vec_.data(), vec_.data() + vec_.size());
+        setp(reinterpret_cast<char*>(vec_.data()), reinterpret_cast<char*>(vec_.data() + vec_.size()));
         pbump(static_cast<int>(old_size + 1));
     }
     return c;
@@ -398,7 +398,7 @@ std::streamsize vectorbuf::xsputn(const char* s, std::streamsize count) {
 
     if (static_cast<size_t>(count) > available) {
         vec_.resize(old_size + count);
-        setp(vec_.data(), vec_.data() + vec_.size());
+        setp(reinterpret_cast<char*>(vec_.data()), reinterpret_cast<char*>(vec_.data() + vec_.size()));
         pbump(static_cast<int>(old_size));
     }
 
@@ -445,7 +445,7 @@ vectorbuf::pos_type vectorbuf::seekpos(pos_type sp, std::ios_base::openmode whic
             vec_.resize(static_cast<size_t>(pos));
         }
 
-        setp(vec_.data(), vec_.data() + vec_.size());
+        setp(reinterpret_cast<char*>(vec_.data()), reinterpret_cast<char*>(vec_.data() + vec_.size()));
         pbump(static_cast<int>(pos));
 
         return sp;
@@ -454,14 +454,14 @@ vectorbuf::pos_type vectorbuf::seekpos(pos_type sp, std::ios_base::openmode whic
     return pos_type(off_type(-1));
 }
 
-vector_ostream::vector_ostream(std::vector<char>& vec)
+vector_ostream::vector_ostream(std::vector<uint8_t>& vec)
     : std::ostream(&buf_), buf_(vec) {}
 
-std::vector<char>& vector_ostream::vector() {
+std::vector<uint8_t>& vector_ostream::vector() {
     return buf_.vec_;
 }
 
-const std::vector<char>& vector_ostream::vector() const {
+const std::vector<uint8_t>& vector_ostream::vector() const {
     return buf_.vec_;
 }
 
@@ -1548,7 +1548,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                            opcodeList2, opcodeList3);
 }
 
-std::shared_ptr<std::vector<char>> generateDng(
+std::shared_ptr<std::vector<uint8_t>> generateDng(
     std::vector<uint8_t>& data,
     const CameraFrameMetadata& metadata,
     const CameraConfiguration& cameraConfiguration,
@@ -2505,7 +2505,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     writer.AddImage(&dng);
 
     // Save to memory
-    auto output = std::make_shared<std::vector<char>>();
+    auto output = std::make_shared<std::vector<uint8_t>>();
 
     // Reserve enough to fit the data
     output->reserve(width*height*sizeof(uint16_t) + 512*1024);
@@ -2605,17 +2605,13 @@ std::shared_ptr<std::vector<char>> generateDng(
         captureMetadata.push_back(std::move(xmp));
     }
     if (!captureMetadata.empty()) {
-        std::vector<uint8_t> bytes(output->begin(), output->end());
-        if (!DNGDecoder::fillMissingSidecarMetadata(bytes, captureMetadata))
+        if (!DNGDecoder::fillMissingSidecarMetadata(*output, captureMetadata))
             throw std::runtime_error("Failed to attach MCRAW capture metadata");
-        output->assign(bytes.begin(), bytes.end());
     }
 
     if (lossyJpegDct) {
-        std::vector<uint8_t> bytes(output->begin(), output->end());
-        if (!DNGDecoder::compressLossyJPEG(bytes))
+        if (!DNGDecoder::compressLossyJPEG(*output))
             throw std::runtime_error("Failed to enable lossy JPEG DCT compression");
-        output->assign(bytes.begin(), bytes.end());
     }
 
     return output;

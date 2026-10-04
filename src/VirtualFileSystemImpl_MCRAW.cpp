@@ -630,11 +630,11 @@ void VirtualFileSystemImpl_MCRAW::clearAnalysisCache() {
         spdlog::warn("Could not clear MCRAW analysis cache: {}", error.message());
 }
 
-std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
+std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
     if (boost::ends_with(entry.name, "wav"))
-        return std::make_shared<std::vector<char>>(mAudioFile.begin(), mAudioFile.end());
+        return std::make_shared<std::vector<uint8_t>>(mAudioFile.begin(), mAudioFile.end());
 
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
@@ -713,7 +713,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
             neutralOverride);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
-        std::vector<uint8_t> timed(output->begin(), output->end());
+        std::vector<uint8_t>& timed = *output;
         attachSidecarGainMapOpcodes(timed, frameIt->second);
         const auto nativePlan = utils::planDngFrameProcessing(
             frameSettings, frameMetadata, mCalibration);
@@ -749,7 +749,6 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_MCRAW::materializeFile(
                     "Generated MCRAW DNG exceeds advertised mounted size");
             timed.resize(entry.size, 0);
         }
-        output = std::make_shared<std::vector<char>>(timed.begin(), timed.end());
         return output;
     });
 }
@@ -946,7 +945,7 @@ int VirtualFileSystemImpl_MCRAW::readPriority(const Entry& entry) const {
     return boost::ends_with(entry.name, ".dng") ? vfs::outputFrameNumber(entry) : 0;
 }
 
-std::function<std::shared_ptr<std::vector<char>>()>
+std::function<std::shared_ptr<std::vector<uint8_t>>()>
 VirtualFileSystemImpl_MCRAW::staticMaterializer(const Entry& entry) {
     if (!boost::ends_with(entry.name, ".wav")) return {};
     return [this, entry] { return materializeFile(entry, false); };

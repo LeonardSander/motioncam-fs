@@ -45,6 +45,7 @@ public:
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
     void setHistogramEnabled(bool enabled);
+    void setPerformanceUncapped(bool enabled);
     void setHistogramExpanded(bool expanded);
     void setPerformancePixelOverlayEnabled(bool enabled);
     void setClippingEnabled(bool enabled);
@@ -200,6 +201,7 @@ private:
     bool mPaused=false, mClosing=false, mPlaybackFailed=false;
     bool mFpsIndicatorEnabled=true;
     bool mHistogramEnabled=false;
+    bool mPerformanceUncapped=false;
     bool mClippingEnabled=false;
     bool mHistogramExpanded=false;
     bool mPerformanceOverlayPinned=false;

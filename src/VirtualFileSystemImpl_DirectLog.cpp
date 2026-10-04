@@ -973,7 +973,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     return result;
 }
 
-std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeFile(
+std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materializeFile(
     const Entry& entry, bool jpegCompression) {
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
@@ -1054,7 +1054,7 @@ std::shared_ptr<std::vector<char>> VirtualFileSystemImpl_DirectLog::materializeF
                     "Generated DirectLog DNG exceeds advertised mounted size");
             dngData.resize(entry.size, 0);
         }
-        auto output = std::make_shared<std::vector<char>>(dngData.begin(), dngData.end());
+        auto output = std::make_shared<std::vector<uint8_t>>(std::move(dngData));
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
                          frameNumber, elapsedMilliseconds(stageStart),

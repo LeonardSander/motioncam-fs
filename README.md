@@ -182,6 +182,12 @@ timings. `MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1`
 uses the session's draft scale with HQ off; omit it for full-resolution playback.
 `MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1` keeps the run focused on playback and
 seeks; omit it to include paused thumbnail backfill.
+The performance runner polls presentation every 1 ms instead of pacing it to
+the clip frame rate, so its playback samples measure gallery throughput.
+`MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM=1` measures the same run without retaining
+raw samples or drawing the histogram.
+`MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS=1` hides the thumbnail row and disables
+its frame collection during playback.
 `MOTIONCAM_GALLERY_PERF_VIEWPORT=960x540` tests a fixed window size. Sequence
 frames, including full-resolution frames, are presented at source size through
 Qt Quick's Vulkan scene graph when available; Qt uses its native graphics

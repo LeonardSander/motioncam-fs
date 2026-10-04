@@ -83,7 +83,7 @@ public:
 
 protected:
     virtual int readPriority(const Entry& entry) const;
-    virtual std::function<std::shared_ptr<std::vector<char>>()>
+    virtual std::function<std::shared_ptr<std::vector<uint8_t>>()>
         staticMaterializer(const Entry& entry);
 
     LRUCache& mCache;
@@ -278,7 +278,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
                       const RenderSettings& settings,
                       const DngPixelPipelineOptions& options);
 bool decodeProcessedDngPreview(
-    const std::shared_ptr<std::vector<char>>& dng, PreviewFrame& preview,
+    const std::shared_ptr<std::vector<uint8_t>>& dng, PreviewFrame& preview,
     bool gainMapApplied = false, bool retainSourceSamples = false);
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
@@ -347,16 +347,16 @@ void loadSidecar(
     std::optional<CalibrationData>& calibration,
     bool refresh = false);
 
-std::shared_ptr<std::vector<char>> materializeCached(
+std::shared_ptr<std::vector<uint8_t>> materializeCached(
     LRUCache& cache, const Entry& entry, bool bypassCache,
-    const std::function<std::shared_ptr<std::vector<char>>()>& renderer);
+    const std::function<std::shared_ptr<std::vector<uint8_t>>()>& renderer);
 
 int readMountedEntry(
     const Entry& entry, size_t pos, size_t len, void* dst,
     const std::function<void(size_t, int)>& result, bool async,
     BS::thread_pool& processingThreadPool,
-    const std::function<std::shared_ptr<std::vector<char>>()>& materializer,
-    const std::function<std::shared_ptr<std::vector<char>>()>& staticMaterializer = {},
+    const std::function<std::shared_ptr<std::vector<uint8_t>>()>& materializer,
+    const std::function<std::shared_ptr<std::vector<uint8_t>>()>& staticMaterializer = {},
     int priority = 0);
 
 void finalize(

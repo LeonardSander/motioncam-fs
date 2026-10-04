@@ -70,11 +70,11 @@ void markBadPixelsCfa(uint16_t* samples, uint32_t outputWidth,
 
 class vectorbuf : public std::streambuf {
 private:
-    std::vector<char>& vec_;
+    std::vector<uint8_t>& vec_;
     friend class vector_ostream;
 
 public:
-    explicit vectorbuf(std::vector<char>& vec);
+    explicit vectorbuf(std::vector<uint8_t>& vec);
 
 protected:
     virtual int_type overflow(int_type c) override;
@@ -89,9 +89,9 @@ private:
     vectorbuf buf_;
 
 public:
-    explicit vector_ostream(std::vector<char>& vec);
-    std::vector<char>& vector();
-    const std::vector<char>& vector() const;
+    explicit vector_ostream(std::vector<uint8_t>& vec);
+    std::vector<uint8_t>& vector();
+    const std::vector<uint8_t>& vector() const;
     std::streampos tell();
     vector_ostream& seek(std::streampos pos);
     vector_ostream& seek_relative(std::streamoff off);
@@ -199,7 +199,7 @@ preprocessData(
     QuadBayerMode quadBayerOption,
     bool includeOpcode);
 
-std::shared_ptr<std::vector<char>> generateDng(
+std::shared_ptr<std::vector<uint8_t>> generateDng(
     std::vector<uint8_t>& data,
     const CameraFrameMetadata& metadata,
     const CameraConfiguration& cameraConfiguration,
