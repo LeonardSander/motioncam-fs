@@ -7,6 +7,7 @@
 #include "VirtualFileSystemImpl.h"
 #include "DNGDecoder.h"
 #include "GainMapBake.h"
+#include "CpuWorkerBudget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1296,6 +1297,42 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         throw std::runtime_error("Destination buffer allocation failed");
     }
 
+    // DNG previews cache gain-map axes before their pixel loop. Do the same
+    // for native raw preprocessing: each sensor coordinate is reused across
+    // CFA phases, so interpolation coordinates need computing only once.
+    std::vector<GainMapAxisSample> shadingX, shadingY;
+    if (applyShadingMap && !lensShadingMap.empty() &&
+        metadata.lensShadingMapWidth > 0 && metadata.lensShadingMapHeight > 0) {
+        shadingX.resize(static_cast<size_t>(inOutWidth) + 4);
+        shadingY.resize(static_cast<size_t>(inOutHeight) + 4);
+        for (size_t x = 0; x < shadingX.size(); ++x) {
+            const float position = (static_cast<uint32_t>(x) + left) * shadingMapScaleX;
+            shadingX[x] = sampleGainMapAxis(
+                std::clamp(position, 0.0f, 1.0f) *
+                    (metadata.lensShadingMapWidth - 1),
+                metadata.lensShadingMapWidth);
+        }
+        for (size_t y = 0; y < shadingY.size(); ++y) {
+            const float position = (static_cast<uint32_t>(y) + top) * shadingMapScaleY;
+            shadingY[y] = sampleGainMapAxis(
+                std::clamp(position, 0.0f, 1.0f) *
+                    (metadata.lensShadingMapHeight - 1),
+                metadata.lensShadingMapHeight);
+        }
+    }
+    auto shadingValue = [&](uint32_t x, uint32_t y, int channel) {
+        if (x >= shadingX.size() || y >= shadingY.size())
+            return getShadingMapValueInternal(
+                (x + left) * shadingMapScaleX,
+                (y + top) * shadingMapScaleY, channel, lensShadingMap,
+                metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+        return sampleGainMapBilinear(shadingX[x], shadingY[y],
+            [&](uint32_t px, uint32_t py) {
+                return lensShadingMap[channel][
+                    static_cast<size_t>(py) * metadata.lensShadingMapWidth + px];
+            });
+    };
+
     // Each row group writes only its own rows in dst. Keep temporary gain
     // values local to a worker so full-resolution preprocessing can run in
     // parallel without duplicating either image buffer.
@@ -1346,10 +1383,10 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                         // distinct and select the plane at this sensor position.
                         return ((py / group) & 1) * 2 + ((px / group) & 1);
                     };
-                    shadingMapVals[0] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, shadingChannel(srcX, srcY), lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[1] = getShadingMapValueInternal((srcX + left + proxyGroupSize) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, shadingChannel(srcX + proxyGroupSize, srcY), lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[2] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + proxyGroupSize) * shadingMapScaleY, shadingChannel(srcX, srcY + proxyGroupSize), lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[3] = getShadingMapValueInternal((srcX + left + proxyGroupSize) * shadingMapScaleX, (srcY + top + proxyGroupSize) * shadingMapScaleY, shadingChannel(srcX + proxyGroupSize, srcY + proxyGroupSize), lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                    shadingMapVals[0] = shadingValue(srcX, srcY, shadingChannel(srcX, srcY));
+                    shadingMapVals[1] = shadingValue(srcX + proxyGroupSize, srcY, shadingChannel(srcX + proxyGroupSize, srcY));
+                    shadingMapVals[2] = shadingValue(srcX, srcY + proxyGroupSize, shadingChannel(srcX, srcY + proxyGroupSize));
+                    shadingMapVals[3] = shadingValue(srcX + proxyGroupSize, srcY + proxyGroupSize, shadingChannel(srcX + proxyGroupSize, srcY + proxyGroupSize));
                 }
 
                 std::array<float, 4> p;
@@ -1406,24 +1443,15 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                     srcData[(srcY + 2) * originalWidth + srcX + 2], srcData[(srcY + 2) * originalWidth + srcX + 3], srcData[(srcY + 3) * originalWidth + srcX + 2], srcData[(srcY + 3) * originalWidth + srcX + 3]
                 };
 
-                if(applyShadingMap) { 
-                    // Calculate position in shading map     
-                    shadingMapVals[0] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[1] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[2] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[3] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 0, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[4] = getShadingMapValueInternal((srcX + left + 2) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[5] = getShadingMapValueInternal((srcX + left + 3) * shadingMapScaleX, (srcY + top) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[6] = getShadingMapValueInternal((srcX + left + 2) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[7] = getShadingMapValueInternal((srcX + left + 3) * shadingMapScaleX, (srcY + top + 1) * shadingMapScaleY, 1, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[8] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[9] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top + 2) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[10] = getShadingMapValueInternal((srcX + left) * shadingMapScaleX, (srcY + top + 3) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[11] = getShadingMapValueInternal((srcX + left + 1) * shadingMapScaleX, (srcY + top + 3) * shadingMapScaleY, 2, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[12] = getShadingMapValueInternal((srcX + left + 2) * shadingMapScaleX, (srcY + top + 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[13] = getShadingMapValueInternal((srcX + left + 3) * shadingMapScaleX, (srcY + top + 2) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[14] = getShadingMapValueInternal((srcX + left + 2) * shadingMapScaleX, (srcY + top + 3) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-                    shadingMapVals[15] = getShadingMapValueInternal((srcX + left + 3) * shadingMapScaleX, (srcY + top + 3) * shadingMapScaleY, 3, lensShadingMap, metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
+                if(applyShadingMap) {
+                    for (uint32_t index = 0; index < 16; ++index) {
+                        const uint32_t phase = index / 4;
+                        const uint32_t local = index % 4;
+                        shadingMapVals[index] = shadingValue(
+                            srcX + (phase & 1u) * 2u + (local & 1u),
+                            srcY + (phase >> 1u) * 2u + (local >> 1u),
+                            static_cast<int>(phase));
+                    }
                 }
 
                 std::array<float, 16> p;
@@ -1483,7 +1511,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     const uint32_t rowGroups = newHeight / rowStep;
     const unsigned workers = dst.size() >= 8 * 1024 * 1024
         ? std::min<unsigned>(8, std::min<unsigned>(
-            std::max(1u, std::thread::hardware_concurrency()), rowGroups)) : 1;
+            availableCpuWorkers(), rowGroups)) : 1;
     std::vector<std::exception_ptr> errors(workers);
     auto runWorker = [&](unsigned worker) {
         try {
@@ -1591,7 +1619,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     cfa = cfaColorsFromPhase(sensorArrangement);
     if (previewFrame && retainSourceSamples) previewFrame->rawCfaPhase = cfa;
     uint32_t clippingWidth = 0, clippingHeight = 0;
-    auto classifyPreviewClipping = [&](const std::vector<uint16_t>& samples,
+    auto classifyPreviewClipping = [&](const uint16_t* samples,
                                        uint32_t sampleWidth, uint32_t sampleHeight,
                                        int repeatSize,
                                        const std::array<uint16_t, 4>& black,
@@ -1599,28 +1627,14 @@ std::shared_ptr<std::vector<char>> generateDng(
         if (!previewFrame || !previewFrame->clippingRequested) return;
         clippingWidth = sampleWidth;
         clippingHeight = sampleHeight;
-        previewFrame->clipping.assign(static_cast<size_t>(sampleWidth) * sampleHeight, 0);
-        const uint32_t cell = static_cast<uint32_t>(std::max(2, repeatSize));
-        const uint32_t group = std::max(1u, cell / 2);
-        for (uint32_t top = 0; top < sampleHeight; top += cell)
-            for (uint32_t left = 0; left < sampleWidth; left += cell) {
-                uint8_t clipped = 0;
-                for (uint32_t phase = 0; phase < 4; ++phase) {
-                    const uint32_t x = left + (phase & 1u) * group;
-                    const uint32_t y = top + (phase >> 1u) * group;
-                    if (x >= sampleWidth || y >= sampleHeight) continue;
-                    const uint16_t value = samples[static_cast<size_t>(y) * sampleWidth + x];
-                    if (value >= white) clipped |= static_cast<uint8_t>(1u << cfa[phase]);
-                }
-                const uint8_t indication = clipped ? 2 + clipped : 0;
-                for (uint32_t y = top; y < std::min(top + cell, sampleHeight); ++y)
-                    for (uint32_t x = left; x < std::min(left + cell, sampleWidth); ++x) {
-                        const uint32_t phase = ((y - top) / group) * 2 + (x - left) / group;
-                        const size_t index = static_cast<size_t>(y) * sampleWidth + x;
-                        previewFrame->clipping[index] = samples[index] < black[phase]
-                            ? 1 : indication;
-                    }
-            }
+        std::array<float, 4> floatBlack{}, floatWhite{};
+        for (uint32_t phase = 0; phase < 4; ++phase) {
+            floatBlack[phase] = black[phase];
+            floatWhite[phase] = white;
+        }
+        classifyCfaPreviewClipping(
+            samples, sampleWidth, sampleHeight, repeatSize, cfa,
+            floatBlack, floatWhite, previewFrame->clipping);
     };
 
     CameraFrameMetadata gainMetadata = metadata;
@@ -1763,7 +1777,7 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (demosaic) {
         std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
         std::memcpy(cfaSamples.data(), processedData.data(), cfaSamples.size() * sizeof(uint16_t));
-        classifyPreviewClipping(cfaSamples, width, height, processedRepeatSize,
+        classifyPreviewClipping(cfaSamples.data(), width, height, processedRepeatSize,
                                 dstBlackLevel, dstWhiteLevel);
         std::array<uint32_t, 3> blackSums = {0, 0, 0};
         std::array<uint32_t, 3> blackCounts = {0, 0, 0};
@@ -1860,19 +1874,36 @@ std::shared_ptr<std::vector<char>> generateDng(
     if (previewFrame) {
       const auto previewStarted = std::chrono::steady_clock::now();
       std::vector<uint16_t> rgbSamples;
+      const uint16_t* previewRgb = nullptr;
+      size_t previewRgbSamples = 0;
+      double demosaicMs = 0.0;
+      bool previewReady = false;
+      uint32_t previewWidth = width, previewHeight = height;
       std::array<float, 3> rgbBlack{};
       if (demosaic && !remosaic) {
-        rgbSamples.resize(processedData.size() / sizeof(uint16_t));
-        std::memcpy(rgbSamples.data(), processedData.data(),
-                    processedData.size());
+        previewRgb = reinterpret_cast<const uint16_t*>(processedData.data());
+        previewRgbSamples = processedData.size() / sizeof(uint16_t);
         rgbBlack = {static_cast<float>(dstBlackLevel[0]),
                     static_cast<float>(dstBlackLevel[1]),
                     static_cast<float>(dstBlackLevel[2])};
       } else {
-        std::vector<uint16_t> cfaSamples(static_cast<size_t>(width) * height);
-        std::memcpy(cfaSamples.data(), processedData.data(),
-                    processedData.size());
-        classifyPreviewClipping(cfaSamples, width, height, processedRepeatSize,
+        if (processedData.size() != static_cast<size_t>(width) * height * sizeof(uint16_t))
+          throw std::runtime_error("Invalid preview CFA size");
+        const auto* cfaSamples = reinterpret_cast<const uint16_t*>(processedData.data());
+        std::vector<uint16_t> previewCfa;
+        int previewRepeatSize = processedRepeatSize;
+        if (!(settings.options & RENDER_OPT_HIGHER_CFA_HQ) && previewRepeatSize > 2) {
+          std::vector<uint16_t> source(cfaSamples,
+              cfaSamples + static_cast<size_t>(width) * height);
+          binHigherCFA(source, previewCfa, width, height,
+              static_cast<uint32_t>(previewRepeatSize / 2),
+              previewWidth, previewHeight, 0);
+          if (previewCfa.empty())
+            throw std::runtime_error("Could not reduce preview CFA to Bayer");
+          cfaSamples = previewCfa.data();
+          previewRepeatSize = 2;
+        }
+        classifyPreviewClipping(cfaSamples, previewWidth, previewHeight, previewRepeatSize,
                                 dstBlackLevel, dstWhiteLevel);
         std::array<unsigned int, 3> sums{}, counts{};
         for (int phase = 0; phase < 4; ++phase) {
@@ -1885,35 +1916,59 @@ std::shared_ptr<std::vector<char>> generateDng(
                   ? static_cast<float>(sums[channel]) / counts[channel]
                   : 0.0f;
 
-        // Gallery preview quality is controlled by HQ independently of output
-        // resolution: HQ uses the proper demosaic, while HQ-off uses the fast
-        // nearest-colour reconstruction at both native and proxy resolution.
-        const bool nearestColourPreview =
+        // Reduce higher CFA to Bayer for the non-HQ gallery preview, then
+        // reconstruct every Bayer preview with bilinear interpolation.
+        const bool fastGalleryPreview =
             !(settings.options & RENDER_OPT_HIGHER_CFA_HQ);
-        demosaicCfaForOutput(cfaSamples, rgbSamples, width, height,
-                             processedRepeatSize, cfa, QuadBayerMode::Demosaic,
-                             rgbBlack, nearestColourPreview);
-        if (rgbSamples.empty())
+        const auto demosaicStarted = std::chrono::steady_clock::now();
+        if (fastGalleryPreview) {
+          const std::array<double, 3> previewBlack{
+              rgbBlack[0], rgbBlack[1], rgbBlack[2]};
+          const std::array<double, 3> previewWhite{
+              static_cast<double>(dstWhiteLevel), static_cast<double>(dstWhiteLevel),
+              static_cast<double>(dstWhiteLevel)};
+          previewReady = previewRepeatSize == 2 &&
+            demosaicBilinearBayerToRgb16Bytes(
+                cfaSamples, previewFrame->rgb, previewWidth, previewHeight,
+                cfa, previewBlack, previewWhite);
+        } else {
+          std::vector<uint16_t> source(cfaSamples,
+                                       cfaSamples + static_cast<size_t>(width) * height);
+          demosaicCfaForOutput(source, rgbSamples, width, height,
+                               processedRepeatSize, cfa, QuadBayerMode::Demosaic,
+                               rgbBlack, false);
+          previewRgb = rgbSamples.data();
+          previewRgbSamples = rgbSamples.size();
+        }
+        demosaicMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - demosaicStarted).count();
+        if (!previewReady && rgbSamples.empty())
           throw std::runtime_error("Could not demosaic preview image");
       }
       const double previewWhite = dstWhiteLevel;
-      if (!normalizeRgb16Bytes(
-              rgbSamples, previewFrame->rgb,
+      const auto normalizeStarted = std::chrono::steady_clock::now();
+      if (!previewReady && !normalizeRgb16Bytes(
+              previewRgb, previewRgbSamples, previewFrame->rgb,
               {rgbBlack[0], rgbBlack[1], rgbBlack[2]},
               {previewWhite, previewWhite, previewWhite}))
         throw std::runtime_error("Could not normalize preview image");
-      previewFrame->width = width;
-      previewFrame->height = height;
+      if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=mcraw_preview_detail width={} height={} demosaic_ms={:.3f} normalize_ms={:.3f}",
+            previewWidth, previewHeight, demosaicMs,
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - normalizeStarted).count());
+      previewFrame->width = previewWidth;
+      previewFrame->height = previewHeight;
       if (previewFrame->clippingRequested &&
-          (clippingWidth != width || clippingHeight != height)) {
+          (clippingWidth != previewWidth || clippingHeight != previewHeight)) {
         auto source = std::move(previewFrame->clipping);
-        previewFrame->clipping.resize(static_cast<size_t>(width) * height);
+        previewFrame->clipping.resize(static_cast<size_t>(previewWidth) * previewHeight);
         const uint32_t reductionScale = hqProxy
             ? static_cast<uint32_t>(draftScale) : 1;
         const uint32_t sample = (reductionScale - 1) / 2;
-        for (uint32_t y = 0; y < height; ++y)
-          for (uint32_t x = 0; x < width; ++x)
-            previewFrame->clipping[static_cast<size_t>(y) * width + x] =
+        for (uint32_t y = 0; y < previewHeight; ++y)
+          for (uint32_t x = 0; x < previewWidth; ++x)
+            previewFrame->clipping[static_cast<size_t>(y) * previewWidth + x] =
                 source[static_cast<size_t>(std::min(clippingHeight - 1,
                     y * reductionScale + sample)) * clippingWidth +
                     std::min(clippingWidth - 1,

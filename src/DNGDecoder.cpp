@@ -2,6 +2,7 @@
 #include "DataLevels.h"
 #include "Utils.h"
 #include "GainMapBake.h"
+#include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -4230,7 +4231,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         std::atomic_uint32_t nextTile{0};
         std::atomic_bool decodeFailed{false};
         const unsigned workerCount = std::min<unsigned>(
-            expectedCount, std::min(8u, std::max(1u, std::thread::hardware_concurrency())));
+            expectedCount, std::min(8u, utils::availableCpuWorkers()));
         auto decodeTiles = [&] {
             while (!decodeFailed.load(std::memory_order_relaxed)) {
                 if (backgroundWork) yieldToForegroundDngWork();
@@ -5138,7 +5139,8 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
         }
     };
     constexpr uint32_t minimumRowsPerWorker = 128;
-    const uint32_t workerCount = std::min<uint32_t>(8, std::max<uint32_t>(1,
+    const uint32_t workerCount = std::min<uint32_t>(
+        std::min(16u, utils::availableCpuWorkers()), std::max<uint32_t>(1,
         (image.layout.height + minimumRowsPerWorker - 1) / minimumRowsPerWorker));
     std::vector<std::thread> workers;
     workers.reserve(workerCount - 1);
@@ -5296,6 +5298,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (!bakeDecodedPreviewGainMaps(
             image, settings, sourceWidth, sourceHeight, gainMapSourceScale,
             &frame.gainMapApplied)) return false;
+    const auto gainFinished = std::chrono::steady_clock::now();
     // Classify the samples actually sent to demosaic, after proxy selection and
     // gain correction. A CFA cell reports each color once, including either
     // green position; a low sample takes precedence over highlight clipping.
@@ -5310,51 +5313,53 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (frame.clippingRequested) {
     clipping.resize(static_cast<size_t>(clippingWidth) * clippingHeight);
     if (image.layout.pixels == DNGPixelLayout::CFA) {
-        const uint32_t cell = static_cast<uint32_t>(std::max(2, image.layout.cfaRepeatSize));
-        const uint32_t group = std::max(1u, cell / 2);
-        for (uint32_t top = 0; top < clippingHeight; top += cell)
-            for (uint32_t left = 0; left < clippingWidth; left += cell) {
-                uint8_t clipped = 0;
-                for (uint32_t phase = 0; phase < 4; ++phase) {
-                    const uint32_t x = left + (phase & 1u) * group;
-                    const uint32_t y = top + (phase >> 1u) * group;
-                    if (x >= clippingWidth || y >= clippingHeight) continue;
-                    const uint16_t value = image.samples[static_cast<size_t>(y) * clippingWidth + x];
-                    const uint32_t color = std::min<uint32_t>(2, image.layout.cfaPhase[phase]);
-                    const float white = image.metadata.whiteLevelCount
-                        ? image.metadata.whiteLevel[std::min<uint32_t>(
-                            image.metadata.whiteLevelCount - 1,
-                            image.metadata.whiteLevelCount == 3 ? color : phase)]
-                        : clippingWhite;
-                    if (value >= white) clipped |= static_cast<uint8_t>(1u << color);
-                }
-                const uint8_t indication = clipped ? 2 + clipped : 0;
-                for (uint32_t y = top; y < std::min(top + cell, clippingHeight); ++y)
-                    for (uint32_t x = left; x < std::min(left + cell, clippingWidth); ++x) {
-                        const uint32_t phase = ((y - top) / group) * 2 + (x - left) / group;
-                        const size_t index = static_cast<size_t>(y) * clippingWidth + x;
-                        clipping[index] = image.samples[index] < image.metadata.blackLevel[phase]
-                            ? 1 : indication;
-                    }
-            }
-    } else {
-        for (size_t pixel = 0; pixel < clipping.size(); ++pixel) {
-            uint8_t clipped = 0;
-            bool belowBlack = false;
-            for (uint32_t channel = 0; channel < 3; ++channel) {
-                const uint16_t value = image.samples[pixel * 3 + channel];
-                const float black = image.metadata.blackLevelCount
-                    ? image.metadata.blackLevel[std::min(channel, image.metadata.blackLevelCount - 1)] : 0.0f;
-                const float white = image.metadata.whiteLevelCount
-                    ? image.metadata.whiteLevel[std::min(channel, image.metadata.whiteLevelCount - 1)] : 65535.0f;
-                belowBlack |= value < black;
-                if (value >= white) clipped |= static_cast<uint8_t>(1u << channel);
-            }
-            clipping[pixel] = belowBlack ? 1 : clipped ? 2 + clipped : 0;
+        std::array<float, 4> white{};
+        for (uint32_t phase = 0; phase < 4; ++phase) {
+            const uint32_t color = std::min<uint32_t>(2, image.layout.cfaPhase[phase]);
+            white[phase] = image.metadata.whiteLevelCount
+                ? image.metadata.whiteLevel[std::min<uint32_t>(
+                    image.metadata.whiteLevelCount - 1,
+                    image.metadata.whiteLevelCount == 3 ? color : phase)]
+                : clippingWhite;
         }
+        utils::classifyCfaPreviewClipping(
+            image.samples.data(), clippingWidth, clippingHeight,
+            image.layout.cfaRepeatSize, image.layout.cfaPhase,
+            image.metadata.blackLevel, white, clipping);
+    } else {
+        std::array<float, 3> black{}, white{};
+        for (uint32_t channel = 0; channel < 3; ++channel) {
+            black[channel] = image.metadata.blackLevelCount
+                ? image.metadata.blackLevel[std::min(channel, image.metadata.blackLevelCount - 1)] : 0.0f;
+            white[channel] = image.metadata.whiteLevelCount
+                ? image.metadata.whiteLevel[std::min(channel, image.metadata.whiteLevelCount - 1)] : 65535.0f;
+        }
+        auto classify = [&](size_t begin, size_t end) {
+            for (size_t pixel = begin; pixel < end; ++pixel) {
+                uint8_t clipped = 0;
+                bool belowBlack = false;
+                for (uint32_t channel = 0; channel < 3; ++channel) {
+                    const uint16_t value = image.samples[pixel * 3 + channel];
+                    belowBlack |= value < black[channel];
+                    if (value >= white[channel]) clipped |= static_cast<uint8_t>(1u << channel);
+                }
+                clipping[pixel] = belowBlack ? 1 : clipped ? 2 + clipped : 0;
+            }
+        };
+        constexpr size_t minimumPixelsPerWorker = 256 * 1024;
+        const unsigned workers = static_cast<unsigned>(std::min<size_t>(
+            utils::availableCpuWorkers(), std::max<size_t>(1,
+                (clipping.size() + minimumPixelsPerWorker - 1) / minimumPixelsPerWorker)));
+        std::vector<std::thread> threads;
+        threads.reserve(workers - 1);
+        for (unsigned worker = 1; worker < workers; ++worker)
+            threads.emplace_back(classify, clipping.size() * worker / workers,
+                                 clipping.size() * (worker + 1) / workers);
+        classify(0, clipping.size() / workers);
+        for (auto& thread : threads) thread.join();
     }
     }
-    const auto gainFinished = std::chrono::steady_clock::now();
+    const auto clippingFinished = std::chrono::steady_clock::now();
     frame.metadata = image.metadata;
     frame.timestamp = image.timestamp;
     uint32_t width = image.layout.width;
@@ -5366,7 +5371,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (image.layout.pixels == DNGPixelLayout::CFA) {
         int repeatSize = image.layout.cfaRepeatSize;
         const bool highQuality = settings.options & RENDER_OPT_HIGHER_CFA_HQ;
-        if (!highQuality && !explicitBinning && repeatSize > 2) {
+        if (!highQuality && repeatSize > 2) {
             std::vector<uint16_t> binned;
             uint32_t binnedWidth = 0, binnedHeight = 0;
             utils::binHigherCFA(image.samples, binned, width, height,
@@ -5380,32 +5385,18 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             if (frame.clippingRequested) {
             clippingWidth = width;
             clippingHeight = height;
-            clipping.assign(static_cast<size_t>(width) * height, 0);
-            for (uint32_t top = 0; top < height; top += 2)
-                for (uint32_t left = 0; left < width; left += 2) {
-                    uint8_t clipped = 0;
-                    for (uint32_t phase = 0; phase < 4; ++phase) {
-                        const uint32_t x = left + (phase & 1u);
-                        const uint32_t y = top + (phase >> 1u);
-                        if (x >= width || y >= height) continue;
-                        const uint16_t value = image.samples[static_cast<size_t>(y) * width + x];
-                        const uint32_t color = std::min<uint32_t>(2, image.layout.cfaPhase[phase]);
-                        const float white = image.metadata.whiteLevelCount
-                            ? image.metadata.whiteLevel[std::min<uint32_t>(
-                                image.metadata.whiteLevelCount - 1,
-                                image.metadata.whiteLevelCount == 3 ? color : phase)]
-                            : clippingWhite;
-                        if (value >= white) clipped |= static_cast<uint8_t>(1u << color);
-                    }
-                    const uint8_t indication = clipped ? 2 + clipped : 0;
-                    for (uint32_t y = top; y < std::min(top + 2, height); ++y)
-                        for (uint32_t x = left; x < std::min(left + 2, width); ++x) {
-                            const uint32_t phase = (y - top) * 2 + x - left;
-                            const size_t index = static_cast<size_t>(y) * width + x;
-                            clipping[index] = image.samples[index] < image.metadata.blackLevel[phase]
-                                ? 1 : indication;
-                        }
-                }
+            std::array<float, 4> white{};
+            for (uint32_t phase = 0; phase < 4; ++phase) {
+                const uint32_t color = std::min<uint32_t>(2, image.layout.cfaPhase[phase]);
+                white[phase] = image.metadata.whiteLevelCount
+                    ? image.metadata.whiteLevel[std::min<uint32_t>(
+                        image.metadata.whiteLevelCount - 1,
+                        image.metadata.whiteLevelCount == 3 ? color : phase)]
+                    : clippingWhite;
+            }
+            utils::classifyCfaPreviewClipping(
+                image.samples.data(), width, height, repeatSize,
+                image.layout.cfaPhase, image.metadata.blackLevel, white, clipping);
             }
         }
         std::array<uint32_t, 3> blackSums{};
@@ -5423,10 +5414,54 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                                         blackCounts[channel];
         for (size_t channel = 0; channel < outputBlack.size(); ++channel)
             outputBlack[channel] = channelBlack[channel];
-        utils::demosaicCfaForOutput(
-            image.samples, rgb, width, height, repeatSize, image.layout.cfaPhase,
-            highQuality ? settings.quadBayerOption : QuadBayerMode::Demosaic,
-            channelBlack, !highQuality);
+        // The ordinary non-HQ gallery preview has no further RGB
+        // processing at this point. Reconstruct and normalize directly into
+        // the output buffer instead of allocating a full-size RGB16 frame.
+        // Keep the two-pass path for operations that still need that frame.
+        const bool encodePreviewLog = applyPreviewScale &&
+            (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
+            settings.logTransform != LogTransformMode::Disabled &&
+            settings.logTransform != LogTransformMode::KeepInput;
+        const bool directFastPreview = !highQuality &&
+            (!applyPreviewScale ||
+             !(settings.options & (RENDER_OPT_REMOSAIC_TO_BAYER |
+                                   RENDER_OPT_CROPPING))) &&
+            (fastCfaProxy || remainingPreviewScale == 1) &&
+            !encodePreviewLog && clippingWidth == width &&
+            clippingHeight == height;
+        if (directFastPreview) {
+            std::array<double, 3> outputWhite{};
+            for (size_t channel = 0; channel < outputWhite.size(); ++channel)
+                outputWhite[channel] = image.metadata.whiteLevelCount
+                    ? image.metadata.whiteLevel[std::min<size_t>(
+                          channel, image.metadata.whiteLevelCount - 1)]
+                    : 65535.0;
+            const bool reconstructed = repeatSize == 2 &&
+                utils::demosaicBilinearBayerToRgb16Bytes(
+                    image.samples.data(), frame.rgb, width, height,
+                    image.layout.cfaPhase, outputBlack, outputWhite);
+            if (!reconstructed) return false;
+            frame.width = width;
+            frame.height = height;
+            if (frame.clippingRequested) frame.clipping = std::move(clipping);
+            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                spdlog::info("GALLERY_PERF event=decoded_preview_stage pixels={} gain_ms={:.3f} clipping_ms={:.3f} remaining_ms={:.3f}",
+                    static_cast<size_t>(width) * height,
+                    std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
+                    std::chrono::duration<double, std::milli>(clippingFinished-gainFinished).count(),
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now()-clippingFinished).count());
+            return true;
+        }
+        if (!highQuality) {
+            if (repeatSize != 2 || !utils::demosaicBilinearBayer(
+                    image.samples.data(), rgb, width, height,
+                    image.layout.cfaPhase)) return false;
+        } else {
+            utils::demosaicCfaForOutput(
+                image.samples, rgb, width, height, repeatSize, image.layout.cfaPhase,
+                settings.quadBayerOption, channelBlack, false);
+        }
         if (rgb.empty()) return false;
     } else {
         rgb = std::move(image.samples);
@@ -5542,11 +5577,12 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         const bool normalized = utils::normalizeRgb16Bytes(
             rgb, frame.rgb, outputBlack, outputWhite);
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
-            spdlog::info("GALLERY_PERF event=decoded_preview_stage pixels={} gain_ms={:.3f} remaining_ms={:.3f}",
+            spdlog::info("GALLERY_PERF event=decoded_preview_stage pixels={} gain_ms={:.3f} clipping_ms={:.3f} remaining_ms={:.3f}",
                 static_cast<size_t>(width) * height,
                 std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
+                std::chrono::duration<double, std::milli>(clippingFinished-gainFinished).count(),
                 std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now()-gainFinished).count());
+                    std::chrono::steady_clock::now()-clippingFinished).count());
         return normalized;
     }
     std::vector<uint16_t> normalizedSamples;

@@ -272,5 +272,172 @@ int main() {
     motioncam::utils::binHigherCFA(eightByEight, binned, 16, 16, 2,
                                    reducedWidth, reducedHeight);
     assert(reducedWidth == 8 && reducedHeight == 8 && binned[0] == 400);
+
+    // The large-frame normalization LUT must preserve scalar rounding, and
+    // changing levels must invalidate the thread-local table.
+    std::vector<uint16_t> levelsInput(262144 * 3);
+    for (size_t pixel = 0; pixel < 262144; ++pixel)
+        for (size_t channel = 0; channel < 3; ++channel)
+            levelsInput[pixel * 3 + channel] = static_cast<uint16_t>(
+                (pixel * (channel * 2 + 1)) & 65535);
+    std::vector<uint8_t> levelsOutput;
+    for (const auto& white : {std::array<double, 3>{1023.0, 4095.5, 65535.0},
+                              std::array<double, 3>{2047.0, 8191.0, 50000.0}}) {
+        const std::array<double, 3> black{64.0, 256.5, 1000.0};
+        if (!motioncam::utils::normalizeRgb16Bytes(
+                levelsInput.data(), levelsInput.size(), levelsOutput, black, white)) return 1;
+        const auto* actual = reinterpret_cast<const uint16_t*>(levelsOutput.data());
+        for (size_t index = 0; index < levelsInput.size(); ++index) {
+            const size_t channel = index % 3;
+            const auto expected = static_cast<uint16_t>(std::clamp(std::lround(
+                (levelsInput[index] - black[channel]) /
+                    (white[channel] - black[channel]) * 65535.0), 0l, 65535l));
+            if (actual[index] != expected) return 2;
+        }
+    }
+
+    // Interior direct lookup and the boundary fallback must select the same
+    // nearest CFA sample, including distance ties.
+    for (int repeat : {2, 4}) {
+        constexpr int width = 65, height = 49;
+        std::vector<uint16_t> source(width * height);
+        for (size_t index = 0; index < source.size(); ++index)
+            source[index] = static_cast<uint16_t>((index * 71) & 65535);
+        std::vector<uint16_t> actual;
+        motioncam::utils::demosaicCfaForOutput(
+            source, actual, width, height, repeat, rggb,
+            motioncam::QuadBayerMode::Demosaic, {}, true);
+        std::vector<uint8_t> oldPreview, directPreview;
+        const std::array<double, 3> previewBlack{64.0, 128.5, 256.0};
+        const std::array<double, 3> previewWhite{1023.0, 4095.0, 65535.0};
+        if (!motioncam::utils::normalizeRgb16Bytes(
+                actual, oldPreview, previewBlack, previewWhite) ||
+            !motioncam::utils::demosaicNearestCfaToRgb16Bytes(
+                source.data(), directPreview, width, height, repeat, rggb,
+                previewBlack, previewWhite) || oldPreview != directPreview) return 4;
+        const int block = repeat / 2;
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                for (int channel = 0; channel < 3; ++channel) {
+                    int bestDistance = 100000;
+                    uint16_t expected = 0;
+                    for (int dy = -repeat; dy <= repeat; ++dy)
+                        for (int dx = -repeat; dx <= repeat; ++dx) {
+                            const int sx = x + dx, sy = y + dy;
+                            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+                            const int color = rggb[((sy % repeat) / block) * 2 +
+                                                   ((sx % repeat) / block)];
+                            const int distance = dx * dx + dy * dy;
+                            if (color == channel && distance < bestDistance) {
+                                bestDistance = distance;
+                                expected = source[sy * width + sx];
+                            }
+                        }
+                    if (actual[(y * width + x) * 3 + channel] != expected) return 3;
+                }
+    }
+    {
+        constexpr int width = 1024, height = 512;
+        std::vector<uint16_t> source(width * height);
+        for (size_t index = 0; index < source.size(); ++index)
+            source[index] = static_cast<uint16_t>((index * 109) & 65535);
+        std::vector<uint16_t> oldRgb;
+        std::vector<uint8_t> oldPreview, directPreview;
+        const std::array<double, 3> black{64.0, 128.0, 256.0};
+        const std::array<double, 3> white{1023.0, 4095.0, 65535.0};
+        motioncam::utils::demosaicCfaForOutput(source, oldRgb, width, height,
+            2, rggb, motioncam::QuadBayerMode::Demosaic, {}, true);
+        if (!motioncam::utils::normalizeRgb16Bytes(
+                oldRgb, oldPreview, black, white) ||
+            !motioncam::utils::demosaicNearestCfaToRgb16Bytes(
+                source.data(), directPreview, width, height, 2, rggb,
+                black, white) || oldPreview != directPreview) return 5;
+        if (!motioncam::utils::demosaicBilinearBayer(
+                source.data(), oldRgb, width, height, rggb) ||
+            !motioncam::utils::normalizeRgb16Bytes(
+                oldRgb, oldPreview, black, white) ||
+            !motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                source.data(), directPreview, width, height, rggb,
+                black, white) || oldPreview != directPreview) return 12;
+    }
+    for (const auto& bayer : {
+             motioncam::cfaColorsFromPhase("rggb"),
+             motioncam::cfaColorsFromPhase("bggr"),
+             motioncam::cfaColorsFromPhase("grbg"),
+             motioncam::cfaColorsFromPhase("gbrg")}) {
+        const std::array<uint16_t, 3> flat{600, 1800, 3200};
+        const std::vector<uint16_t> tiny{
+            flat[bayer[0]], flat[bayer[1]], flat[bayer[2]], flat[bayer[3]]};
+        std::vector<uint16_t> tinyRgb;
+        if (!motioncam::utils::demosaicBilinearBayer(
+                tiny.data(), tinyRgb, 2, 2, bayer)) return 13;
+        for (size_t pixel = 0; pixel < 4; ++pixel)
+            for (size_t channel = 0; channel < 3; ++channel)
+                if (tinyRgb[pixel * 3 + channel] != flat[channel]) return 14;
+        constexpr int width = 65, height = 49;
+        std::vector<uint16_t> source(width * height);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                source[static_cast<size_t>(y) * width + x] =
+                    flat[bayer[((y & 1) << 1) | (x & 1)]];
+        std::vector<uint16_t> bilinear;
+        if (!motioncam::utils::demosaicBilinearBayer(
+                source.data(), bilinear, width, height, bayer)) return 7;
+        for (size_t pixel = 0; pixel < source.size(); ++pixel)
+            for (size_t channel = 0; channel < 3; ++channel)
+                if (bilinear[pixel * 3 + channel] != flat[channel]) return 8;
+        const auto redPhase = static_cast<int>(std::find(
+            bayer.begin(), bayer.end(), uint8_t{0}) - bayer.begin());
+        const int redX = 32 + (redPhase & 1);
+        const int redY = 24 + (redPhase >> 1);
+        source[static_cast<size_t>(redY) * width + redX] = 4095;
+        if (!motioncam::utils::demosaicBilinearBayer(
+                source.data(), bilinear, width, height, bayer)) return 9;
+        if (bilinear[(static_cast<size_t>(redY) * width + redX) * 3] != 4095 ||
+            bilinear[(static_cast<size_t>(redY) * width + redX + 1) * 3] !=
+                (4095 + flat[0] + 1) / 2) return 11;
+        const std::array<double, 3> black{64.0, 96.0, 128.0};
+        const std::array<double, 3> white{4095.0, 4095.0, 4095.0};
+        std::vector<uint8_t> twoPass, direct;
+        if (!motioncam::utils::normalizeRgb16Bytes(
+                bilinear, twoPass, black, white) ||
+            !motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                source.data(), direct, width, height, bayer,
+                black, white) || direct != twoPass) return 10;
+    }
+    for (int repeat : {2, 4, 8}) {
+        constexpr uint32_t width = 35, height = 27;
+        std::vector<uint16_t> source(width * height);
+        for (size_t index = 0; index < source.size(); ++index)
+            source[index] = static_cast<uint16_t>((index * 73) % 4096);
+        const std::array<float, 4> black{64, 66, 68, 70};
+        const std::array<float, 4> white{4050, 4060, 4070, 4080};
+        std::vector<uint8_t> actual, expected(width * height);
+        motioncam::utils::classifyCfaPreviewClipping(
+            source.data(), width, height, repeat, rggb, black, white, actual);
+        const uint32_t cell = static_cast<uint32_t>(repeat);
+        const uint32_t group = cell / 2;
+        for (uint32_t top = 0; top < height; top += cell)
+            for (uint32_t left = 0; left < width; left += cell) {
+                uint8_t clipped = 0;
+                for (uint32_t phase = 0; phase < 4; ++phase) {
+                    const uint32_t x = left + (phase & 1u) * group;
+                    const uint32_t y = top + (phase >> 1u) * group;
+                    if (x < width && y < height &&
+                        source[static_cast<size_t>(y) * width + x] >= white[phase])
+                        clipped |= static_cast<uint8_t>(1u << rggb[phase]);
+                }
+                const uint8_t indication = clipped ? 2 + clipped : 0;
+                for (uint32_t y = top; y < std::min(top + cell, height); ++y)
+                    for (uint32_t x = left; x < std::min(left + cell, width); ++x) {
+                        const uint32_t phase = ((y - top) / group) * 2 +
+                            (x - left) / group;
+                        const size_t index = static_cast<size_t>(y) * width + x;
+                        expected[index] = source[index] < black[phase]
+                            ? 1 : indication;
+                    }
+            }
+        if (actual != expected) return 6;
+    }
     return 0;
 }

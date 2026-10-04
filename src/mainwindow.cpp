@@ -9,6 +9,7 @@
 #include "DNGDecoder.h"
 #include "GalleryColor.h"
 #include "Utils.h"
+#include "CpuWorkerBudget.h"
 #include "VirtualFileSystemImpl.h"
 #include "ArchiveImport.h"
 
@@ -363,6 +364,7 @@ namespace {
         if (bytes.size() % 6 != 0) return;
         auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
         const size_t pixelCount = bytes.size() / 6;
+        const auto transformStarted = std::chrono::steady_clock::now();
         static const std::array<uint16_t, 65536> srgbTransfer = [] {
             std::array<uint16_t, 65536> result{};
             for (size_t index = 0; index < result.size(); ++index) {
@@ -563,11 +565,19 @@ namespace {
                          1.3459433f * xyz[0] - 0.2556075f * xyz[1] - 0.0511118f * xyz[2],
                         -0.5445989f * xyz[0] + 1.5081673f * xyz[1] + 0.0205351f * xyz[2],
                          1.2118128f * xyz[2]};
-                    if (hueSatTable)
-                        motioncam::gallery::applyProfileTable(proPhoto, *hueSatTable);
-                    for (float& channel : proPhoto) channel *= exposure;
-                    if (!tables.look.values.empty())
-                        motioncam::gallery::applyProfileTable(proPhoto, tables.look);
+                    if (hueSatTable && !tables.look.values.empty() &&
+                        hueSatTable->valueDivisions == 1 &&
+                        hueSatTable->encoding == 0 && tables.look.encoding == 0 &&
+                        exposure > 0.0f && std::isfinite(exposure)) {
+                        motioncam::gallery::applyHueSatAndLook(
+                            proPhoto, *hueSatTable, tables.look, exposure);
+                    } else {
+                        if (hueSatTable)
+                            motioncam::gallery::applyProfileTable(proPhoto, *hueSatTable);
+                        for (float& channel : proPhoto) channel *= exposure;
+                        if (!tables.look.values.empty())
+                            motioncam::gallery::applyProfileTable(proPhoto, tables.look);
+                    }
                     xyz = {
                         0.7976749f * proPhoto[0] + 0.1351917f * proPhoto[1] +
                             0.0313534f * proPhoto[2],
@@ -598,9 +608,10 @@ namespace {
         // keeps its lower thread overhead at proxy sizes.
         const size_t minimumPixelsPerWorker = useProfileTables
             ? 64 * 1024 : 256 * 1024;
-        const unsigned int availableWorkers = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned int availableWorkers = motioncam::utils::availableCpuWorkers();
+        const unsigned int workerLimit = useProfileTables ? 24u : 12u;
         const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
-            std::min(12u, availableWorkers), std::max<size_t>(1,
+            std::min(workerLimit, availableWorkers), std::max<size_t>(1,
                 (pixelCount + minimumPixelsPerWorker - 1) / minimumPixelsPerWorker)));
         std::vector<std::thread> threads;
         threads.reserve(workers - 1);
@@ -611,6 +622,11 @@ namespace {
         }
         convertRange(0, pixelCount / workers);
         for (auto& thread : threads) thread.join();
+        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=gallery_color_stage pixels={} tables={} workers={} elapsed_ms={:.3f}",
+                pixelCount, useProfileTables, workers,
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - transformStarted).count());
     }
 
     motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
@@ -3259,6 +3275,7 @@ void MainWindow::startGalleryPerformanceTest(
     auto galleryStartupTimer = std::make_shared<QElapsedTimer>();
     galleryStartupTimer->start();
     spdlog::info("GALLERY_PERF event=gallery_setup_start clips={}", state->mounts.size());
+    const bool previousClippingEnabled = mGalleryClippingEnabled;
     // Create the player without starting a hidden warm-up render. The first
     // render is started below after all diagnostic signal hooks are installed.
     playMount(state->mounts.front(), false);
@@ -3267,6 +3284,8 @@ void MainWindow::startGalleryPerformanceTest(
         QCoreApplication::exit(4);
         return;
     }
+    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING"))
+        mClipPlayer->setClippingEnabled(true);
     mClipPlayer->setPerformanceOverlayPinned(true);
     mClipPlayer->setHistogramEnabled(true);
     if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM"))
@@ -3296,12 +3315,14 @@ void MainWindow::startGalleryPerformanceTest(
     spdlog::info("GALLERY_PERF event=gallery_setup_complete latency_ms={}",
                  gallerySetupTimer.elapsed());
 
-    auto finishSuite = [this, state, suiteStarted] {
+    auto finishSuite = [this, state, suiteStarted, previousClippingEnabled] {
         const double totalMs = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - suiteStarted).count();
         spdlog::info("GALLERY_PERF event=suite_complete clips={} total_ms={:.3f}",
                      state->mounts.size(), totalMs);
+        if (mClipPlayer) mClipPlayer->setClippingEnabled(previousClippingEnabled);
         if (mClipPlayer) mClipPlayer->close();
+        mGalleryClippingEnabled = previousClippingEnabled;
         QCoreApplication::quit();
     };
 

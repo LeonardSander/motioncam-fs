@@ -1,5 +1,6 @@
 #include "Utils.h"
 #include "GainMapBake.h"
+#include "CpuWorkerBudget.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,8 +14,8 @@ namespace {
 template <typename Function>
 void parallelRows(uint32_t rows, Function&& function) {
     constexpr uint32_t minimumRowsPerWorker = 128;
-    const uint32_t workers = std::min<uint32_t>(8, std::max<uint32_t>(1,
-        std::min<uint32_t>(std::thread::hardware_concurrency(),
+    const uint32_t workers = std::min<uint32_t>(16, std::max<uint32_t>(1,
+        std::min<uint32_t>(availableCpuWorkers(),
             (rows + minimumRowsPerWorker - 1) / minimumRowsPerWorker)));
     std::vector<std::thread> threads;
     threads.reserve(workers - 1);
@@ -23,6 +24,82 @@ void parallelRows(uint32_t rows, Function&& function) {
                              rows * (worker + 1) / workers);
     function(0, rows / workers);
     for (auto& thread : threads) thread.join();
+}
+
+using Offset = std::pair<int16_t, int16_t>;
+struct NearestPattern {
+    int repeat = 0;
+    std::array<uint8_t, 4> phase{};
+    std::vector<std::vector<Offset>> candidates;
+    std::vector<std::array<Offset, 3>> nearest;
+    bool fastInterior = false;
+};
+
+const NearestPattern& nearestPattern(int repeat, const std::array<uint8_t, 4>& phase) {
+    static thread_local NearestPattern pattern;
+    if (pattern.repeat == repeat && pattern.phase == phase) return pattern;
+    pattern.repeat = repeat;
+    pattern.phase = phase;
+    pattern.candidates.assign(static_cast<size_t>(repeat) * repeat * 3, {});
+    pattern.nearest.resize(static_cast<size_t>(repeat) * repeat);
+    const int block = std::max(1, repeat / 2);
+    auto colorAt = [&](int x, int y) {
+        return phase[((y % repeat) / block) * 2 + ((x % repeat) / block)];
+    };
+    for (int phaseY = 0; phaseY < repeat; ++phaseY)
+        for (int phaseX = 0; phaseX < repeat; ++phaseX)
+            for (int channel = 0; channel < 3; ++channel) {
+                auto& candidates = pattern.candidates[
+                    (static_cast<size_t>(phaseY) * repeat + phaseX) * 3 + channel];
+                for (int dy = -repeat; dy <= repeat; ++dy)
+                    for (int dx = -repeat; dx <= repeat; ++dx) {
+                        int sampleX = (phaseX + dx) % repeat;
+                        int sampleY = (phaseY + dy) % repeat;
+                        if (sampleX < 0) sampleX += repeat;
+                        if (sampleY < 0) sampleY += repeat;
+                        if (colorAt(sampleX, sampleY) == channel)
+                            candidates.emplace_back(dx, dy);
+                    }
+                std::stable_sort(candidates.begin(), candidates.end(),
+                    [](const Offset& left, const Offset& right) {
+                        return left.first * left.first + left.second * left.second <
+                               right.first * right.first + right.second * right.second;
+                    });
+            }
+    pattern.fastInterior = true;
+    for (size_t index = 0; index < pattern.nearest.size(); ++index)
+        for (int channel = 0; channel < 3; ++channel) {
+            const auto& candidates = pattern.candidates[index * 3 + channel];
+            if (candidates.empty()) pattern.fastInterior = false;
+            else pattern.nearest[index][channel] = candidates.front();
+        }
+    return pattern;
+}
+
+using LevelTables = std::array<std::vector<uint16_t>, 3>;
+const LevelTables& normalizationLevels(const std::array<double, 3>& black,
+                                       const std::array<double, 3>& white) {
+    struct Cache {
+        LevelTables channels;
+        std::array<double, 3> black{}, white{};
+        bool ready = false;
+    };
+    static thread_local Cache cache;
+    if (!cache.ready || cache.black != black || cache.white != white) {
+        for (size_t channel = 0; channel < 3; ++channel) {
+            auto& levels = cache.channels[channel];
+            levels.resize(65536);
+            for (size_t value = 0; value < levels.size(); ++value)
+                levels[value] = static_cast<uint16_t>(std::clamp(std::lround(
+                    (value - black[channel]) /
+                        (white[channel] - black[channel]) * 65535.0),
+                    0l, 65535l));
+        }
+        cache.black = black;
+        cache.white = white;
+        cache.ready = true;
+    }
+    return cache.channels;
 }
 }
 
@@ -42,52 +119,273 @@ void demosaicCfaForOutput(
         return;
     }
 
-    const int block = std::max(1, cfaRepeatSize / 2);
-    auto colorAt = [&](int x, int y) {
-        return bayerPhase[((y % cfaRepeatSize) / block) * 2 +
-                          ((x % cfaRepeatSize) / block)];
-    };
-    using Offset = std::pair<int16_t, int16_t>;
-    std::vector<std::vector<Offset>> offsets(
-        static_cast<size_t>(cfaRepeatSize) * cfaRepeatSize * 3);
-    for (int phaseY = 0; phaseY < cfaRepeatSize; ++phaseY)
-        for (int phaseX = 0; phaseX < cfaRepeatSize; ++phaseX)
-            for (int channel = 0; channel < 3; ++channel) {
-                auto& candidates = offsets[
-                    (static_cast<size_t>(phaseY) * cfaRepeatSize + phaseX) * 3 + channel];
-                for (int dy = -cfaRepeatSize; dy <= cfaRepeatSize; ++dy)
-                    for (int dx = -cfaRepeatSize; dx <= cfaRepeatSize; ++dx) {
-                        int sampleX = (phaseX + dx) % cfaRepeatSize;
-                        int sampleY = (phaseY + dy) % cfaRepeatSize;
-                        if (sampleX < 0) sampleX += cfaRepeatSize;
-                        if (sampleY < 0) sampleY += cfaRepeatSize;
-                        if (colorAt(sampleX, sampleY) == channel)
-                            candidates.emplace_back(dx, dy);
-                    }
-                std::stable_sort(candidates.begin(), candidates.end(),
-                    [](const Offset& left, const Offset& right) {
-                        return left.first * left.first + left.second * left.second <
-                               right.first * right.first + right.second * right.second;
-                    });
-            }
+    const auto& pattern = nearestPattern(cfaRepeatSize, bayerPhase);
 
     rgbData.assign(static_cast<size_t>(width) * height * 3, 0);
     parallelRows(static_cast<uint32_t>(height), [&](uint32_t begin, uint32_t end) {
         for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y)
-          for (int x = 0; x < width; ++x)
+          for (int x = 0; x < width; ++x) {
+            const size_t phase = static_cast<size_t>(y % cfaRepeatSize) *
+                cfaRepeatSize + x % cfaRepeatSize;
+            const size_t destination = (static_cast<size_t>(y) * width + x) * 3;
+            if (pattern.fastInterior && x >= cfaRepeatSize && y >= cfaRepeatSize &&
+                x + cfaRepeatSize < width && y + cfaRepeatSize < height) {
+                const auto& selected = pattern.nearest[phase];
+                for (int channel = 0; channel < 3; ++channel) {
+                    const auto [dx, dy] = selected[channel];
+                    rgbData[destination + channel] = cfaData[
+                        static_cast<size_t>(y + dy) * width + x + dx];
+                }
+                continue;
+            }
             for (int channel = 0; channel < 3; ++channel) {
-                const auto& candidates = offsets[
-                    (static_cast<size_t>(y % cfaRepeatSize) * cfaRepeatSize +
-                     x % cfaRepeatSize) * 3 + channel];
+                const auto& candidates = pattern.candidates[
+                    phase * 3 + channel];
                 for (const auto& [dx, dy] : candidates) {
                     const int sourceX = x + dx, sourceY = y + dy;
                     if (sourceX < 0 || sourceY < 0 || sourceX >= width || sourceY >= height)
                         continue;
-                    rgbData[(static_cast<size_t>(y) * width + x) * 3 + channel] =
+                    rgbData[destination + channel] =
                         cfaData[static_cast<size_t>(sourceY) * width + sourceX];
                     break;
                 }
             }
+          }
+    });
+}
+
+bool demosaicNearestCfaToRgb16Bytes(
+        const uint16_t* cfaData, std::vector<uint8_t>& rgbBytes,
+        int width, int height, int cfaRepeatSize,
+        const std::array<uint8_t, 4>& bayerPhase,
+        const std::array<double, 3>& black,
+        const std::array<double, 3>& white) {
+    if (!cfaData || width <= 0 || height <= 0 || cfaRepeatSize < 2) return false;
+    for (size_t channel = 0; channel < 3; ++channel)
+        if (!(white[channel] > black[channel])) return false;
+    const auto& pattern = nearestPattern(cfaRepeatSize, bayerPhase);
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    rgbBytes.resize(pixelCount * 3 * sizeof(uint16_t));
+    auto* output = reinterpret_cast<uint16_t*>(rgbBytes.data());
+    const LevelTables* levels = pixelCount >= 256 * 1024
+        ? &normalizationLevels(black, white) : nullptr;
+    auto normalize = [&](uint16_t value, int channel) -> uint16_t {
+        if (levels) return (*levels)[channel][value];
+        return static_cast<uint16_t>(std::clamp(std::lround(
+            (value - black[channel]) /
+                (white[channel] - black[channel]) * 65535.0), 0l, 65535l));
+    };
+    parallelRows(static_cast<uint32_t>(height), [&](uint32_t begin, uint32_t end) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y)
+            for (int x = 0; x < width; ++x) {
+                const size_t phase = static_cast<size_t>(y % cfaRepeatSize) *
+                    cfaRepeatSize + x % cfaRepeatSize;
+                const size_t destination = (static_cast<size_t>(y) * width + x) * 3;
+                if (pattern.fastInterior && x >= cfaRepeatSize && y >= cfaRepeatSize &&
+                    x + cfaRepeatSize < width && y + cfaRepeatSize < height) {
+                    const auto& selected = pattern.nearest[phase];
+                    for (int channel = 0; channel < 3; ++channel) {
+                        const auto [dx, dy] = selected[channel];
+                        const uint16_t sample = cfaData[
+                            static_cast<size_t>(y + dy) * width + x + dx];
+                        output[destination + channel] = normalize(sample, channel);
+                    }
+                    continue;
+                }
+                for (int channel = 0; channel < 3; ++channel) {
+                    uint16_t sample = 0;
+                    for (const auto& [dx, dy] : pattern.candidates[phase * 3 + channel]) {
+                        const int sourceX = x + dx, sourceY = y + dy;
+                        if (sourceX < 0 || sourceY < 0 || sourceX >= width || sourceY >= height)
+                            continue;
+                        sample = cfaData[static_cast<size_t>(sourceY) * width + sourceX];
+                        break;
+                    }
+                    output[destination + channel] = normalize(sample, channel);
+                }
+            }
+    });
+    return true;
+}
+
+namespace {
+bool validBayerPhase(const std::array<uint8_t, 4>& phase) {
+    return phase == std::array<uint8_t, 4>{0, 1, 1, 2} ||
+           phase == std::array<uint8_t, 4>{2, 1, 1, 0} ||
+           phase == std::array<uint8_t, 4>{1, 0, 2, 1} ||
+           phase == std::array<uint8_t, 4>{1, 2, 0, 1};
+}
+
+template <typename WritePixel>
+bool reconstructBilinearBayer(const uint16_t* source, int width, int height,
+                              const std::array<uint8_t, 4>& phase,
+                              WritePixel&& writePixel) {
+    if (!source || width < 2 || height < 2 || !validBayerPhase(phase))
+        return false;
+    constexpr std::array<Offset, 4> cardinal{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
+    constexpr std::array<Offset, 4> diagonal{{{-1, -1}, {1, -1}, {-1, 1}, {1, 1}}};
+    constexpr std::array<Offset, 2> horizontal{{{-1, 0}, {1, 0}}};
+    constexpr std::array<Offset, 2> vertical{{{0, -1}, {0, 1}}};
+    auto averageAtEdge = [&](int x, int y, uint8_t color, uint8_t native) {
+        if (color == native) return source[static_cast<size_t>(y) * width + x];
+        const Offset* offsets = nullptr;
+        size_t count = 0;
+        if (native == 1) {
+            const uint8_t horizontalColor = phase[((y & 1) << 1) | ((x + 1) & 1)];
+            if (color == horizontalColor) {
+                offsets = horizontal.data();
+                count = horizontal.size();
+            } else {
+                offsets = vertical.data();
+                count = vertical.size();
+            }
+        } else if (color == 1) {
+            offsets = cardinal.data();
+            count = cardinal.size();
+        } else {
+            offsets = diagonal.data();
+            count = diagonal.size();
+        }
+        uint32_t sum = 0, valid = 0;
+        for (size_t index = 0; index < count; ++index) {
+            const int sx = x + offsets[index].first;
+            const int sy = y + offsets[index].second;
+            if (sx >= 0 && sx < width && sy >= 0 && sy < height) {
+                sum += source[static_cast<size_t>(sy) * width + sx];
+                ++valid;
+            }
+        }
+        return static_cast<uint16_t>((sum + valid / 2) / valid);
+    };
+    parallelRows(static_cast<uint32_t>(height), [&](uint32_t begin, uint32_t end) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y) {
+            const auto* row = source + static_cast<size_t>(y) * width;
+            const auto* above = y > 0 ? row - width : row;
+            const auto* below = y + 1 < height ? row + width : row;
+            for (int x = 0; x < width; ++x) {
+                const uint8_t native = phase[((y & 1) << 1) | (x & 1)];
+                uint16_t red, green, blue;
+                if (x > 0 && x + 1 < width && y > 0 && y + 1 < height) {
+                    const uint16_t center = row[x];
+                    if (native == 1) {
+                        green = center;
+                        const uint16_t across = static_cast<uint16_t>(
+                            (static_cast<uint32_t>(row[x - 1]) + row[x + 1] + 1) / 2);
+                        const uint16_t down = static_cast<uint16_t>(
+                            (static_cast<uint32_t>(above[x]) + below[x] + 1) / 2);
+                        const uint8_t horizontalColor =
+                            phase[((y & 1) << 1) | ((x + 1) & 1)];
+                        red = horizontalColor == 0 ? across : down;
+                        blue = horizontalColor == 2 ? across : down;
+                    } else {
+                        green = static_cast<uint16_t>((
+                            static_cast<uint32_t>(row[x - 1]) + row[x + 1] +
+                            above[x] + below[x] + 2) / 4);
+                        const uint16_t opposite = static_cast<uint16_t>((
+                            static_cast<uint32_t>(above[x - 1]) + above[x + 1] +
+                            below[x - 1] + below[x + 1] + 2) / 4);
+                        red = native == 0 ? center : opposite;
+                        blue = native == 2 ? center : opposite;
+                    }
+                } else {
+                    red = averageAtEdge(x, y, 0, native);
+                    green = averageAtEdge(x, y, 1, native);
+                    blue = averageAtEdge(x, y, 2, native);
+                }
+                writePixel((static_cast<size_t>(y) * width + x) * 3,
+                           red, green, blue);
+            }
+        }
+    });
+    return true;
+}
+} // namespace
+
+bool demosaicBilinearBayerToRgb16Bytes(
+        const uint16_t* cfaData, std::vector<uint8_t>& rgbBytes,
+        int width, int height, const std::array<uint8_t, 4>& bayerPhase,
+        const std::array<double, 3>& black,
+        const std::array<double, 3>& white) {
+    for (size_t channel = 0; channel < 3; ++channel)
+        if (!(white[channel] > black[channel])) return false;
+    if (!cfaData || width < 2 || height < 2 || !validBayerPhase(bayerPhase))
+        return false;
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    rgbBytes.resize(pixelCount * 3 * sizeof(uint16_t));
+    auto* output = reinterpret_cast<uint16_t*>(rgbBytes.data());
+    const LevelTables* levels = pixelCount >= 256 * 1024
+        ? &normalizationLevels(black, white) : nullptr;
+    auto normalize = [&](uint16_t value, size_t channel) -> uint16_t {
+        if (levels) return (*levels)[channel][value];
+        return static_cast<uint16_t>(std::clamp(std::lround(
+            (value - black[channel]) /
+                (white[channel] - black[channel]) * 65535.0), 0l, 65535l));
+    };
+    return reconstructBilinearBayer(
+        cfaData, width, height, bayerPhase,
+        [&](size_t index, uint16_t red, uint16_t green, uint16_t blue) {
+            output[index] = normalize(red, 0);
+            output[index + 1] = normalize(green, 1);
+            output[index + 2] = normalize(blue, 2);
+        });
+}
+
+bool demosaicBilinearBayer(
+        const uint16_t* cfaData, std::vector<uint16_t>& rgb,
+        int width, int height, const std::array<uint8_t, 4>& bayerPhase) {
+    if (!cfaData || width < 2 || height < 2 || !validBayerPhase(bayerPhase))
+        return false;
+    rgb.resize(static_cast<size_t>(width) * height * 3);
+    return reconstructBilinearBayer(
+        cfaData, width, height, bayerPhase,
+        [&](size_t index, uint16_t red, uint16_t green, uint16_t blue) {
+            rgb[index] = red;
+            rgb[index + 1] = green;
+            rgb[index + 2] = blue;
+        });
+}
+
+void classifyCfaPreviewClipping(
+        const uint16_t* samples, uint32_t width, uint32_t height,
+        int cfaRepeatSize, const std::array<uint8_t, 4>& cfaPhase,
+        const std::array<float, 4>& black,
+        const std::array<float, 4>& white,
+        std::vector<uint8_t>& clipping) {
+    if (!samples || !width || !height) {
+        clipping.clear();
+        return;
+    }
+    const uint32_t cell = static_cast<uint32_t>(std::max(2, cfaRepeatSize));
+    const uint32_t group = std::max(1u, cell / 2);
+    const uint32_t cellRows = (height + cell - 1) / cell;
+    clipping.resize(static_cast<size_t>(width) * height);
+    parallelRows(cellRows, [&](uint32_t firstRow, uint32_t lastRow) {
+        for (uint32_t row = firstRow; row < lastRow; ++row) {
+            const uint32_t top = row * cell;
+            const uint32_t bottom = std::min(top + cell, height);
+            for (uint32_t left = 0; left < width; left += cell) {
+                const uint32_t right = std::min(left + cell, width);
+                uint8_t clipped = 0;
+                for (uint32_t phase = 0; phase < 4; ++phase) {
+                    const uint32_t x = left + (phase & 1u) * group;
+                    const uint32_t y = top + (phase >> 1u) * group;
+                    if (x < width && y < height &&
+                        samples[static_cast<size_t>(y) * width + x] >= white[phase])
+                        clipped |= static_cast<uint8_t>(
+                            1u << std::min<uint8_t>(2, cfaPhase[phase]));
+                }
+                const uint8_t indication = clipped ? 2 + clipped : 0;
+                for (uint32_t y = top; y < bottom; ++y) {
+                    const uint32_t phaseRow = ((y - top) / group) * 2;
+                    for (uint32_t x = left; x < right; ++x) {
+                        const uint32_t phase = phaseRow + (x - left) / group;
+                        const size_t index = static_cast<size_t>(y) * width + x;
+                        clipping[index] = samples[index] < black[phase]
+                            ? 1 : indication;
+                    }
+                }
+            }
+        }
     });
 }
 
@@ -117,17 +415,40 @@ bool normalizeRgb16Bytes(const std::vector<uint16_t>& input,
                          std::vector<uint8_t>& output,
                          const std::array<double, 3>& black,
                          const std::array<double, 3>& white) {
-    if (input.size() % 3 != 0) return false;
+    return normalizeRgb16Bytes(input.data(), input.size(), output, black, white);
+}
+
+bool normalizeRgb16Bytes(const uint16_t* input, size_t sampleCount,
+                         std::vector<uint8_t>& output,
+                         const std::array<double, 3>& black,
+                         const std::array<double, 3>& white) {
+    if (sampleCount % 3 != 0 || (!input && sampleCount)) return false;
     for (size_t channel = 0; channel < 3; ++channel)
         if (!(white[channel] > black[channel])) return false;
-    output.resize(input.size() * sizeof(uint16_t));
+    if (!sampleCount) {
+        output.clear();
+        return true;
+    }
+    output.resize(sampleCount * sizeof(uint16_t));
     if (black == std::array<double, 3>{0.0, 0.0, 0.0} &&
         white == std::array<double, 3>{65535.0, 65535.0, 65535.0}) {
-        std::memcpy(output.data(), input.data(), output.size());
+        std::memcpy(output.data(), input, output.size());
         return true;
     }
     auto* normalized = reinterpret_cast<uint16_t*>(output.data());
-    const size_t pixels = input.size() / 3;
+    const size_t pixels = sampleCount / 3;
+    if (pixels >= 256 * 1024) {
+        const auto& channels = normalizationLevels(black, white);
+        parallelRows(static_cast<uint32_t>(pixels), [&](uint32_t begin, uint32_t end) {
+            for (size_t pixel = begin; pixel < end; ++pixel) {
+                const size_t offset = pixel * 3;
+                normalized[offset] = channels[0][input[offset]];
+                normalized[offset + 1] = channels[1][input[offset + 1]];
+                normalized[offset + 2] = channels[2][input[offset + 2]];
+            }
+        });
+        return true;
+    }
     parallelRows(static_cast<uint32_t>(pixels), [&](uint32_t begin, uint32_t end) {
         for (size_t pixel = begin; pixel < end; ++pixel)
             for (size_t channel = 0; channel < 3; ++channel) {

@@ -147,6 +147,46 @@ int main() {
     gallery::applyProfileTable(red, profileTable);
     assert(nearlyEqual(red[0], 0.25f) && nearlyEqual(red[1], 0.25f));
 
+    DNGProfileTable hueSat, look;
+    hueSat.hueDivisions = 30;
+    hueSat.saturationDivisions = 15;
+    hueSat.valueDivisions = 1;
+    look.hueDivisions = 24;
+    look.saturationDivisions = 12;
+    look.valueDivisions = 16;
+    for (uint32_t h = 0; h < hueSat.hueDivisions; ++h)
+        for (uint32_t s = 0; s < hueSat.saturationDivisions; ++s) {
+            const float angle = 6.2831853f * h / hueSat.hueDivisions;
+            hueSat.values.insert(hueSat.values.end(), {
+                8.0f * std::sin(angle), 1.0f + 0.05f * std::cos(angle),
+                1.0f + 0.04f * std::sin(angle)});
+        }
+    for (uint32_t v = 0; v < look.valueDivisions; ++v)
+        for (uint32_t h = 0; h < look.hueDivisions; ++h)
+            for (uint32_t s = 0; s < look.saturationDivisions; ++s) {
+                const float angle = 6.2831853f * h / look.hueDivisions;
+                look.values.insert(look.values.end(), {
+                    4.0f * std::sin(angle), 1.0f + 0.02f * std::cos(angle),
+                    1.0f + 0.05f * std::sin(angle)});
+            }
+    uint32_t colorSeed = 123;
+    for (float exposure : {0.25f, 0.5f, 1.0f, 2.0f, 4.0f})
+        for (int sample = 0; sample < 4096; ++sample) {
+            std::array<float, 3> original{};
+            for (float& channel : original) {
+                colorSeed = colorSeed * 1664525u + 1013904223u;
+                channel = -0.1f + (colorSeed % 21001) / 10000.0f;
+            }
+            auto twoPass = original;
+            gallery::applyProfileTable(twoPass, hueSat);
+            for (float& channel : twoPass) channel *= exposure;
+            gallery::applyProfileTable(twoPass, look);
+            gallery::applyHueSatAndLook(original, hueSat, look, exposure);
+            for (size_t channel = 0; channel < 3; ++channel)
+                if (std::abs(original[channel] - twoPass[channel]) * 65535.0f > 1.0f)
+                    return 4;
+        }
+
     DNGFrameMetadata forwardMetadata;
     forwardMetadata.forwardMatrix1 = gallery::identityMatrix;
     forwardMetadata.hasForwardMatrix1 = true;

@@ -120,6 +120,55 @@ inline void applyProfileTable(std::array<float, 3>& rgb,
         rgb[i] = encoded ? srgbDecode(result[i] + offset) : result[i] + offset;
 }
 
+// A 2D HueSat map followed by an unencoded Look map preserves hue and
+// saturation through the intervening exposure multiplication. Apply both
+// corrections in HSV before converting back to RGB once.
+inline void applyHueSatAndLook(std::array<float, 3>& rgb,
+                              const DNGProfileTable& hueSat,
+                              const DNGProfileTable& look,
+                              float exposure) {
+    const float maximum = std::max({rgb[0], rgb[1], rgb[2], 0.0f});
+    const float minimum = std::max(0.0f, std::min({rgb[0], rgb[1], rgb[2]}));
+    const float delta = maximum - minimum;
+    float hue = 0.0f;
+    if (delta > 1e-8f) {
+        if (maximum == rgb[0]) hue = 60.0f * (rgb[1] - rgb[2]) / delta;
+        else if (maximum == rgb[1]) hue = 60.0f * (2.0f + (rgb[2] - rgb[0]) / delta);
+        else hue = 60.0f * (4.0f + (rgb[0] - rgb[1]) / delta);
+    }
+    if (hue < 0.0f) hue += 360.0f;
+    else if (hue >= 360.0f) hue -= 360.0f;
+    float saturation = maximum > 1e-8f ? delta / maximum : 0.0f;
+    const auto hueAdjustment = sampleProfileTable(hueSat, hue, saturation, maximum);
+    hue += hueAdjustment[0];
+    if (hue < 0.0f || hue >= 360.0f) {
+        hue = std::fmod(hue, 360.0f);
+        if (hue < 0.0f) hue += 360.0f;
+    }
+    saturation = std::clamp(saturation * hueAdjustment[1], 0.0f, 1.0f);
+    float value = std::clamp(maximum * hueAdjustment[2], 0.0f, 1.0f) * exposure;
+    const auto lookAdjustment = sampleProfileTable(look, hue, saturation, value);
+    hue += lookAdjustment[0];
+    if (hue < 0.0f || hue >= 360.0f) {
+        hue = std::fmod(hue, 360.0f);
+        if (hue < 0.0f) hue += 360.0f;
+    }
+    saturation = std::clamp(saturation * lookAdjustment[1], 0.0f, 1.0f);
+    value = std::clamp(value * lookAdjustment[2], 0.0f, 1.0f);
+    const float chroma = value * saturation;
+    const float sector = hue / 60.0f;
+    const float x = chroma * (1.0f - std::abs(
+        sector - 2.0f * std::floor(sector * 0.5f) - 1.0f));
+    if (sector < 1.0f) rgb = {chroma, x, 0.0f};
+    else if (sector < 2.0f) rgb = {x, chroma, 0.0f};
+    else if (sector < 3.0f) rgb = {0.0f, chroma, x};
+    else if (sector < 4.0f) rgb = {0.0f, x, chroma};
+    else if (sector < 5.0f) rgb = {x, 0.0f, chroma};
+    else rgb = {chroma, 0.0f, x};
+    const float offset = value - chroma;
+    for (float& channel : rgb) channel += offset;
+}
+
 inline std::array<float, 9> interpolateMatrix(const std::array<float, 9>& first,
                                                const std::array<float, 9>& second,
                                                float firstWeight) {

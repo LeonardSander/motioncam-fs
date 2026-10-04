@@ -1131,6 +1131,67 @@ int main() {
     assert(motioncam::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
     assert(preview.width == 4 && preview.height == 4);
     assert(preview.rgb[0] == 0 && preview.rgb[1] == 128);
+    // An inactive crop forces the existing two-pass DNG preview route. Its
+    // pixels and clipping overlay must match the direct CFA output route.
+    motioncam::DecodedDNGImage cfaPreviewImage;
+    cfaPreviewImage.layout.width = 64;
+    cfaPreviewImage.layout.height = 48;
+    cfaPreviewImage.layout.bitsPerSample = 12;
+    cfaPreviewImage.layout.samplesPerPixel = 1;
+    cfaPreviewImage.layout.pixels = motioncam::DNGPixelLayout::CFA;
+    cfaPreviewImage.layout.cfaRepeatSize = 2;
+    cfaPreviewImage.layout.cfaPhase = {0, 1, 1, 2};
+    cfaPreviewImage.metadata.blackLevel = {64.0f, 66.0f, 68.0f, 70.0f};
+    cfaPreviewImage.metadata.blackLevelCount = 4;
+    cfaPreviewImage.metadata.whiteLevel = {4095.0f, 4095.0f, 4095.0f, 4095.0f};
+    cfaPreviewImage.metadata.whiteLevelCount = 4;
+    cfaPreviewImage.samples.resize(64 * 48);
+    for (size_t index = 0; index < cfaPreviewImage.samples.size(); ++index)
+        cfaPreviewImage.samples[index] = static_cast<uint16_t>(
+            index % 53 == 0 ? 4095 : index % 47 == 0 ? 32 : (index * 37) % 4096);
+    motioncam::PreviewFrame directCfaPreview, twoPassCfaPreview;
+    directCfaPreview.clippingRequested = true;
+    twoPassCfaPreview.clippingRequested = true;
+    motioncam::RenderSettings directSettings, twoPassSettings;
+    twoPassSettings.options |= motioncam::RENDER_OPT_CROPPING;
+    if (!motioncam::DNGDecoder::decodePreview(
+            cfaPreviewImage, directSettings, directCfaPreview, true) ||
+        !motioncam::DNGDecoder::decodePreview(
+            std::move(cfaPreviewImage), twoPassSettings, twoPassCfaPreview, true) ||
+        directCfaPreview.width != twoPassCfaPreview.width ||
+        directCfaPreview.height != twoPassCfaPreview.height ||
+        directCfaPreview.rgb != twoPassCfaPreview.rgb ||
+        directCfaPreview.clipping != twoPassCfaPreview.clipping) return 2;
+    // An explicit 8x8-to-4x4 reduction must still reach Bayer before the
+    // non-HQ gallery demosaic; no higher-CFA nearest path remains.
+    motioncam::DecodedDNGImage higherCfaPreview;
+    higherCfaPreview.layout.width = 64;
+    higherCfaPreview.layout.height = 64;
+    higherCfaPreview.layout.bitsPerSample = 12;
+    higherCfaPreview.layout.samplesPerPixel = 1;
+    higherCfaPreview.layout.pixels = motioncam::DNGPixelLayout::CFA;
+    higherCfaPreview.layout.cfaRepeatSize = 8;
+    higherCfaPreview.layout.cfaPhase = {0, 1, 1, 2};
+    higherCfaPreview.metadata.blackLevel = {64.0f, 64.0f, 64.0f, 64.0f};
+    higherCfaPreview.metadata.blackLevelCount = 4;
+    higherCfaPreview.metadata.whiteLevel = {4095.0f, 4095.0f, 4095.0f, 4095.0f};
+    higherCfaPreview.metadata.whiteLevelCount = 4;
+    higherCfaPreview.samples.resize(64 * 64);
+    for (uint32_t y = 0; y < 64; ++y)
+        for (uint32_t x = 0; x < 64; ++x)
+            higherCfaPreview.samples[y * 64 + x] =
+                std::array<uint16_t, 3>{1000, 2000, 3000}[
+                    higherCfaPreview.layout.cfaPhase[(y / 4 % 2) * 2 + x / 4 % 2]];
+    motioncam::RenderSettings higherCfaSettings;
+    higherCfaSettings.quadBayerOption = motioncam::QuadBayerMode::Bin8x8To4x4;
+    motioncam::PreviewFrame higherCfaResult;
+    higherCfaResult.clippingRequested = true;
+    if (!motioncam::DNGDecoder::decodePreview(
+            std::move(higherCfaPreview), higherCfaSettings,
+            higherCfaResult, true) ||
+        higherCfaResult.width != 16 || higherCfaResult.height != 16 ||
+        higherCfaResult.rgb.size() != 16 * 16 * 6 ||
+        higherCfaResult.clipping.size() != 16 * 16) return 3;
     motioncam::DNGFrameMetadata metadata;
     assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
     assert(std::abs(metadata.exposureTime - 0.02) < 1e-5);

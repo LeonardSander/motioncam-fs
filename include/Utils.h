@@ -315,6 +315,32 @@ void demosaicCfaForOutput(
     const std::array<float, 3>& channelBlack,
     bool nearestColour);
 
+bool demosaicNearestCfaToRgb16Bytes(
+    const uint16_t* cfaData, std::vector<uint8_t>& rgbBytes,
+    int width, int height, int cfaRepeatSize,
+    const std::array<uint8_t, 4>& bayerPhase,
+    const std::array<double, 3>& black,
+    const std::array<double, 3>& white);
+
+// Bilinear Bayer reconstruction for non-HQ gallery previews. The byte form
+// combines reconstruction with level normalization and avoids an RGB16 copy.
+bool demosaicBilinearBayerToRgb16Bytes(
+    const uint16_t* cfaData, std::vector<uint8_t>& rgbBytes,
+    int width, int height, const std::array<uint8_t, 4>& bayerPhase,
+    const std::array<double, 3>& black,
+    const std::array<double, 3>& white);
+
+bool demosaicBilinearBayer(
+    const uint16_t* cfaData, std::vector<uint16_t>& rgb,
+    int width, int height, const std::array<uint8_t, 4>& bayerPhase);
+
+void classifyCfaPreviewClipping(
+    const uint16_t* samples, uint32_t width, uint32_t height, int cfaRepeatSize,
+    const std::array<uint8_t, 4>& cfaPhase,
+    const std::array<float, 4>& black,
+    const std::array<float, 4>& white,
+    std::vector<uint8_t>& clipping);
+
 bool normalizeRgb16(
     const std::vector<uint16_t>& input,
     std::vector<uint16_t>& output,
@@ -323,6 +349,12 @@ bool normalizeRgb16(
 
 bool normalizeRgb16Bytes(
     const std::vector<uint16_t>& input,
+    std::vector<uint8_t>& output,
+    const std::array<double, 3>& black,
+    const std::array<double, 3>& white);
+
+bool normalizeRgb16Bytes(
+    const uint16_t* input, size_t sampleCount,
     std::vector<uint8_t>& output,
     const std::array<double, 3>& black,
     const std::array<double, 3>& white);

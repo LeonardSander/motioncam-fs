@@ -1,4 +1,5 @@
 #include "DirectLogDecoder.h"
+#include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
 #include <boost/algorithm/string.hpp>
 #include <stdexcept>
@@ -166,7 +167,7 @@ void configureSoftwareThreading(AVCodecContext* context) {
 template<typename Function>
 void parallelPixelRanges(size_t count, Function&& function) {
     constexpr size_t minimumPerWorker = 1u << 20;
-    const unsigned int available = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned int available = motioncam::utils::availableCpuWorkers();
     const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
         std::min<unsigned int>(available, 4),
         std::max<size_t>(1, (count + minimumPerWorker - 1) / minimumPerWorker)));
@@ -817,9 +818,90 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     const auto scaleStart = std::chrono::steady_clock::now();
     uint8_t* output[] = {reinterpret_cast<uint8_t*>(rgbData.data())};
     int outputStride[] = {outputWidth * 3 * static_cast<int>(sizeof(uint16_t))};
-    if (sws_scale(mSwsContext, input, inputStride, 0, height,
-                  output, outputStride) != outputHeight)
-        return false;
+    const AVPixFmtDescriptor* scaleDescriptor = av_pix_fmt_desc_get(pixelFormat);
+    if (mVerifiedBandFormat != pixelFormat || mVerifiedBandSmooth != smoothChroma ||
+        mVerifiedBandFullRange != fullRange) {
+        mVerifiedBandFormat = pixelFormat;
+        mVerifiedBandSmooth = smoothChroma;
+        mVerifiedBandFullRange = fullRange;
+        mVerifiedBandCounts = 0;
+        mBandConversionRejected = false;
+    }
+    const bool bandCandidate = outputWidth == width &&
+        outputHeight == height && scaleDescriptor &&
+        (scaleDescriptor->flags & AV_PIX_FMT_FLAG_PLANAR) &&
+        !(scaleDescriptor->flags & AV_PIX_FMT_FLAG_RGB) && input[1] &&
+        scaleDescriptor->nb_components == 3 &&
+        scaleDescriptor->log2_chroma_h <= 1 && height >= 1024;
+    const unsigned bandCount = bandCandidate
+        ? std::min(8u, motioncam::utils::availableCpuWorkers()) : 1u;
+    bool bandSuccess = false;
+    if (bandCount > 1 && !mBandConversionRejected) {
+        const int alignment = 1 << scaleDescriptor->log2_chroma_h;
+        const int rowsPerBand = ((height + static_cast<int>(bandCount) - 1) /
+            static_cast<int>(bandCount) + alignment - 1) / alignment * alignment;
+        if (mBandSwsContexts.size() < bandCount)
+            mBandSwsContexts.resize(bandCount, nullptr);
+        std::atomic_bool failed{false};
+        auto scaleBand = [&](unsigned band) {
+            const int begin = static_cast<int>(band) * rowsPerBand;
+            if (begin >= height) return;
+            const int end = std::min(height, begin + rowsPerBand);
+            constexpr int haloRows = 16;
+            const int sourceBegin = std::max(0, begin - haloRows);
+            const int sourceEnd = std::min(height, end + haloRows);
+            const int localHeight = sourceEnd - sourceBegin;
+            auto& context = mBandSwsContexts[band];
+            context = sws_getCachedContext(context, width, localHeight, pixelFormat,
+                width, localHeight, AV_PIX_FMT_RGB48LE,
+                smoothChroma ? SWS_BICUBIC : SWS_POINT,
+                nullptr, nullptr, nullptr);
+            if (!context || sws_setColorspaceDetails(context, coefficients,
+                fullRange ? 1 : 0, coefficients, 1, 0, 1 << 16, 1 << 16) < 0) {
+                failed.store(true);
+                return;
+            }
+            const uint8_t* bandInput[4] = {
+                input[0] + static_cast<ptrdiff_t>(sourceBegin) * inputStride[0],
+                input[1] + static_cast<ptrdiff_t>(sourceBegin / alignment) * inputStride[1],
+                input[2] ? input[2] + static_cast<ptrdiff_t>(sourceBegin / alignment) * inputStride[2] : nullptr,
+                input[3]};
+            std::vector<uint16_t> converted(static_cast<size_t>(width) * localHeight * 3);
+            uint8_t* bandOutput[] = {reinterpret_cast<uint8_t*>(converted.data())};
+            if (sws_scale(context, bandInput, inputStride, 0, localHeight,
+                          bandOutput, outputStride) != localHeight) {
+                failed.store(true);
+                return;
+            }
+            const size_t offset = static_cast<size_t>(begin - sourceBegin) * width * 3;
+            std::copy_n(converted.data() + offset, static_cast<size_t>(end - begin) * width * 3,
+                rgbData.data() + static_cast<size_t>(begin) * width * 3);
+        };
+        std::vector<std::thread> threads;
+        threads.reserve(bandCount - 1);
+        for (unsigned band = 1; band < bandCount; ++band)
+            threads.emplace_back(scaleBand, band);
+        scaleBand(0);
+        for (auto& thread : threads) thread.join();
+        bandSuccess = !failed.load();
+        if (bandSuccess && !(mVerifiedBandCounts & (1u << bandCount))) {
+            std::vector<uint16_t> reference(rgbData.size());
+            uint8_t* referenceOutput[] = {reinterpret_cast<uint8_t*>(reference.data())};
+            bandSuccess = sws_scale(mSwsContext, input, inputStride, 0, height,
+                                    referenceOutput, outputStride) == outputHeight;
+            const bool matches = bandSuccess && reference == rgbData;
+            if (matches) mVerifiedBandCounts |= static_cast<uint16_t>(1u << bandCount);
+            else mBandConversionRejected = true;
+            if (diagnostics)
+                spdlog::info("DirectLog diagnostic: banded_yuv_conversion exact_match={}",
+                    matches);
+        }
+    }
+    if (!bandSuccess || mBandConversionRejected) {
+        if (sws_scale(mSwsContext, input, inputStride, 0, height,
+                      output, outputStride) != outputHeight)
+            return false;
+    }
 
     const AVPixFmtDescriptor* inputDescriptor = av_pix_fmt_desc_get(pixelFormat);
     const bool eightBitInput = inputDescriptor && inputDescriptor->nb_components > 0 &&
@@ -928,6 +1010,16 @@ void DirectLogDecoder::clearTimelineCache() {
 }
 
 void DirectLogDecoder::cleanup() {
+    for (auto*& context : mBandSwsContexts) {
+        if (context) sws_freeContext(context);
+        context = nullptr;
+    }
+    mBandSwsContexts.clear();
+    mVerifiedBandCounts = 0;
+    mBandConversionRejected = false;
+    mVerifiedBandFormat = AV_PIX_FMT_NONE;
+    mVerifiedBandSmooth = false;
+    mVerifiedBandFullRange = false;
     if (mSwsContext) {
         sws_freeContext(mSwsContext);
         mSwsContext = nullptr;

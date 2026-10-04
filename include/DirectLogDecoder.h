@@ -93,6 +93,12 @@ private:
     AVFrame* mTransferFrame;
     AVPacket* mPacket;
     SwsContext* mSwsContext;
+    std::vector<SwsContext*> mBandSwsContexts;
+    uint16_t mVerifiedBandCounts = 0;
+    bool mBandConversionRejected = false;
+    AVPixelFormat mVerifiedBandFormat = AV_PIX_FMT_NONE;
+    bool mVerifiedBandSmooth = false;
+    bool mVerifiedBandFullRange = false;
     AVBufferRef* mHardwareDeviceContext;
     AVPixelFormat mHardwarePixelFormat;
     bool mDecoderInitialized;
