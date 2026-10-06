@@ -502,28 +502,87 @@ bool cropInterleaved(const std::vector<uint16_t>& input,
     return true;
 }
 
+float logTriangularDither(uint32_t x, uint32_t y, bool highQuality) {
+    uint32_t seed;
+    if (highQuality) {
+        seed = (x * 1664525u + y * 1013904223u) ^ 0xdeadbeefu;
+        seed ^= seed >> 16;
+        seed *= 0x85ebca6bu;
+        seed ^= seed >> 13;
+        seed *= 0xc2b2ae35u;
+        seed ^= seed >> 16;
+    } else {
+        seed = (x * 0x9e3779b1u) ^ (y * 0x85ebca77u);
+        seed ^= seed >> 16;
+        seed *= 0x7feb352du;
+        seed ^= seed >> 15;
+    }
+    return ((seed & 0xffffu) / 65535.0f +
+            ((seed >> 16) & 0xffffu) / 65535.0f - 1.0f) * 0.5f;
+}
+
 void encodeLog60(std::vector<uint16_t>& samples,
                  uint32_t width, uint32_t height, uint32_t channels,
                  const std::array<double, 4>& blackLevel,
-                 double whiteLevel, uint16_t encodedWhite) {
+                 double whiteLevel, uint16_t encodedWhite, bool highQuality) {
     if (!channels || (channels != 1 && channels != 3) || !encodedWhite ||
         samples.size() != static_cast<size_t>(width) * height * channels)
         throw std::invalid_argument("Invalid LOG60 image");
-    for (uint32_t y = 0; y < height; ++y)
-        for (uint32_t x = 0; x < width; ++x)
-            for (uint32_t channel = 0; channel < channels; ++channel) {
-                const size_t index = (static_cast<size_t>(y) * width + x) *
-                                     channels + channel;
-                const uint32_t level = channels == 1
-                    ? ((y & 1u) * 2u + (x & 1u)) : channel;
-                const double normalized = std::clamp(
-                    (samples[index] - blackLevel[level]) /
-                    std::max(1.0, whiteLevel - blackLevel[level]), 0.0, 1.0);
-                const double encoded = std::log2(1.0 + 60.0 * normalized) /
-                                       std::log2(61.0);
-                samples[index] = static_cast<uint16_t>(
-                    std::lround(encoded * encodedWhite));
+    const auto encode = [&](uint16_t sample, uint32_t level) {
+        const double normalized = std::clamp(
+            (sample - blackLevel[level]) /
+            std::max(1.0, whiteLevel - blackLevel[level]), 0.0, 1.0);
+        const double encoded = std::log2(1.0 + 60.0 * normalized) /
+                               std::log2(61.0);
+        return encoded * encodedWhite;
+    };
+    if (samples.size() < 65536) {
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                for (uint32_t channel = 0; channel < channels; ++channel) {
+                    const size_t index = (static_cast<size_t>(y) * width + x) *
+                                         channels + channel;
+                    const uint32_t level = channels == 1
+                        ? ((y & 1u) * 2u + (x & 1u)) : channel;
+                    const auto value = encode(samples[index], level) +
+                        logTriangularDither(x, y, highQuality);
+                    samples[index] = static_cast<uint16_t>(std::clamp(
+                        std::lround(value), 0l, static_cast<long>(encodedWhite)));
+                }
+        return;
+    }
+    std::array<std::vector<float>, 4> lookup;
+    const uint32_t levels = channels == 1 ? 4u : 3u;
+    for (uint32_t level = 0; level < levels; ++level) {
+        lookup[level].resize(65536);
+        for (uint32_t sample = 0; sample < 65536; ++sample)
+            lookup[level][sample] = static_cast<float>(
+                encode(static_cast<uint16_t>(sample), level));
+    }
+    parallelRows(height, [&](uint32_t start, uint32_t end) {
+        for (uint32_t y = start; y < end; ++y) {
+            const size_t row = static_cast<size_t>(y) * width * channels;
+            if (channels == 3) {
+                for (uint32_t x = 0; x < width; ++x) {
+                    const float dither = logTriangularDither(x, y, highQuality);
+                    for (uint32_t channel = 0; channel < 3; ++channel) {
+                        auto& sample = samples[row + static_cast<size_t>(x) * 3 + channel];
+                        const float value = lookup[channel][sample] + dither;
+                        sample = static_cast<uint16_t>(std::clamp(
+                            std::lround(value), 0l, static_cast<long>(encodedWhite)));
+                    }
+                }
+            } else {
+                for (uint32_t x = 0; x < width; ++x) {
+                    auto& sample = samples[row + x];
+                    const float value = lookup[((y & 1u) << 1u) | (x & 1u)][sample] +
+                        logTriangularDither(x, y, highQuality);
+                    sample = static_cast<uint16_t>(std::clamp(
+                        std::lround(value), 0l, static_cast<long>(encodedWhite)));
+                }
             }
+        }
+    });
 }
 
 void remosaicRGBToBayer(const std::vector<uint16_t>& rgbData,
@@ -601,7 +660,9 @@ void demosaicHigherCFA(
     // prevents the four colour planes from being reconstructed on offset grids,
     // which was the source of the residual coloured edge/aberration pattern.
     std::vector<float> mosaic(static_cast<size_t>(lowWidth) * lowHeight);
-    for (int by = 0; by < lowHeight; ++by) for (int bx = 0; bx < lowWidth; ++bx) {
+    parallelRows(static_cast<uint32_t>(lowHeight), [&](uint32_t first, uint32_t last) {
+    for (int by = static_cast<int>(first); by < static_cast<int>(last); ++by)
+        for (int bx = 0; bx < lowWidth; ++bx) {
         double sum = 0.0;
         int count = 0;
         for (int y = by * group; y < std::min(height, (by + 1) * group); ++y)
@@ -611,6 +672,7 @@ void demosaicHigherCFA(
             }
         mosaic[lowIndex(bx, by)] = count ? static_cast<float>(sum / count) : 0.0f;
     }
+    });
 
     // First form provisional complete planes on the compact Bayer grid. A
     // second pass uses an RGB luma estimate as its edge guide (VNG threshold
@@ -640,9 +702,12 @@ void demosaicHigherCFA(
         return weights ? static_cast<float>(sum / weights) : mosaic[lowIndex(x, y)];
     };
     for (int channel = 0; channel < 3; ++channel)
-        for (int y = 0; y < lowHeight; ++y) for (int x = 0; x < lowWidth; ++x)
-            lowPlanes[channel][lowIndex(x, y)] = lowColor(x, y) == channel
-                ? mosaic[lowIndex(x, y)] : interpolate(x, y, channel, nullptr);
+        parallelRows(static_cast<uint32_t>(lowHeight), [&](uint32_t first, uint32_t last) {
+            for (int y = static_cast<int>(first); y < static_cast<int>(last); ++y)
+                for (int x = 0; x < lowWidth; ++x)
+                    lowPlanes[channel][lowIndex(x, y)] = lowColor(x, y) == channel
+                        ? mosaic[lowIndex(x, y)] : interpolate(x, y, channel, nullptr);
+        });
 
     std::vector<float> lumaGuide(mosaic.size());
     for (size_t i = 0; i < mosaic.size(); ++i)
@@ -652,10 +717,13 @@ void demosaicHigherCFA(
 
     auto refinedPlanes = lowPlanes;
     for (int channel = 0; channel < 3; ++channel)
-        for (int y = 0; y < lowHeight; ++y) for (int x = 0; x < lowWidth; ++x)
-            if (lowColor(x, y) != channel)
-                refinedPlanes[channel][lowIndex(x, y)] =
-                    interpolate(x, y, channel, &lumaGuide);
+        parallelRows(static_cast<uint32_t>(lowHeight), [&](uint32_t first, uint32_t last) {
+            for (int y = static_cast<int>(first); y < static_cast<int>(last); ++y)
+                for (int x = 0; x < lowWidth; ++x)
+                    if (lowColor(x, y) != channel)
+                        refinedPlanes[channel][lowIndex(x, y)] =
+                            interpolate(x, y, channel, &lumaGuide);
+        });
     lowPlanes = std::move(refinedPlanes);
 
     if (color) {
@@ -816,7 +884,9 @@ void demosaicHigherCFA(
     }
 
     rgbData.resize(static_cast<size_t>(width) * height * 3);
-    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+    parallelRows(static_cast<uint32_t>(height), [&](uint32_t first, uint32_t last) {
+    for (int y = static_cast<int>(first); y < static_cast<int>(last); ++y)
+        for (int x = 0; x < width; ++x) {
         const float lx = (x + 0.5f) / group - 0.5f;
         const float ly = (y + 0.5f) / group - 0.5f;
         std::array<float, 3> rgb = {
@@ -890,6 +960,7 @@ void demosaicHigherCFA(
             rgbData[output + channel] = static_cast<uint16_t>(
                 std::clamp(std::lround(rgb[channel]), 0l, 65535l));
     }
+    });
 
 }
 

@@ -2,13 +2,62 @@
 #include "GainMapBake.h"
 #include "DNGImage.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 int main() {
+    for (const auto [x, y] : {std::pair<uint32_t, uint32_t>{0, 0},
+                              {37, 91}, {12031, 9023}}) {
+        uint32_t seed = (x * 1664525u + y * 1013904223u) ^ 0xdeadbeefu;
+        seed ^= seed >> 16; seed *= 0x85ebca6bu;
+        seed ^= seed >> 13; seed *= 0xc2b2ae35u; seed ^= seed >> 16;
+        const float oldDither = ((seed & 0xffffu) / 65535.0f +
+            ((seed >> 16) & 0xffffu) / 65535.0f - 1.0f) * 0.5f;
+        assert(motioncam::utils::logTriangularDither(x, y, true) == oldDither);
+    }
+    const std::array<double, 4> logBlack{64.0, 130.5, 260.0, 512.25};
+    for (uint32_t channels : {1u, 3u}) {
+        constexpr uint32_t width = 256, height = 256;
+        std::vector<uint16_t> samples(static_cast<size_t>(width) * height * channels);
+        for (size_t index = 0; index < samples.size(); ++index)
+            samples[index] = static_cast<uint16_t>((index * 173 + index / 7) & 65535);
+        auto repeat = samples;
+        auto hq = samples;
+        motioncam::utils::encodeLog60(
+            samples, width, height, channels, logBlack, 16000.0, 4095);
+        motioncam::utils::encodeLog60(
+            repeat, width, height, channels, logBlack, 16000.0, 4095);
+        motioncam::utils::encodeLog60(
+            hq, width, height, channels, logBlack, 16000.0, 4095, true);
+        assert(samples == repeat);
+        assert(samples != hq);
+        assert(std::all_of(samples.begin(), samples.end(), [](uint16_t value) {
+            return value <= 4095;
+        }));
+    }
+    for (const uint32_t width : {128u, 256u})
+        for (const bool highQuality : {false, true}) {
+            std::vector<uint16_t> neutral(static_cast<size_t>(width) * width * 3);
+            for (size_t pixel = 0; pixel < neutral.size() / 3; ++pixel)
+                std::fill_n(neutral.begin() + pixel * 3, 3,
+                            static_cast<uint16_t>((pixel * 173) & 65535));
+            motioncam::utils::encodeLog60(
+                neutral, width, width, 3, {0.0, 0.0, 0.0, 0.0},
+                16000.0, 4095, highQuality);
+            for (size_t pixel = 0; pixel < neutral.size() / 3; ++pixel)
+                assert(neutral[pixel * 3] == neutral[pixel * 3 + 1] &&
+                       neutral[pixel * 3] == neutral[pixel * 3 + 2]);
+        }
+    std::vector<uint16_t> flat(256 * 256, 1000);
+    motioncam::utils::encodeLog60(flat, 256, 256, 1,
+                                  {0.0, 0.0, 0.0, 0.0}, 16000.0, 1023);
+    assert(*std::min_element(flat.begin(), flat.end()) <
+           *std::max_element(flat.begin(), flat.end()));
     const auto rggb = motioncam::cfaColorsFromPhase("rggb");
     assert(motioncam::cfaColorAt(rggb, 0, 0) == 0);
     assert(motioncam::cfaColorAt(rggb, 1, 0) == 1);

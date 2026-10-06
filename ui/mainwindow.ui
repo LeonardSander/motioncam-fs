@@ -850,6 +850,19 @@
             </widget>
            </item>
            <item>
+            <spacer name="logTransformControlsSpacer">
+             <property name="orientation">
+              <enum>Qt::Horizontal</enum>
+             </property>
+             <property name="sizeType">
+              <enum>QSizePolicy::Expanding</enum>
+             </property>
+             <property name="sizeHint" stdset="0">
+              <size><width>20</width><height>20</height></size>
+             </property>
+            </spacer>
+           </item>
+           <item>
             <widget class="QComboBox" name="logTransformComboBox">
              <property name="minimumSize">
               <size>
@@ -880,6 +893,16 @@
                <string>Reduce by 6bit</string>
               </property>
              </item>
+            </widget>
+           </item>
+           <item>
+            <widget class="QCheckBox" name="logHqCheckBox">
+             <property name="text">
+              <string>HQ</string>
+             </property>
+             <property name="toolTip">
+              <string>Use full per-pixel triangular dithering for the log curve.</string>
+             </property>
             </widget>
            </item>
           </layout>

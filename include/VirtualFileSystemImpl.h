@@ -210,6 +210,8 @@ struct DngPixelPipelineOptions {
     std::array<uint8_t, 4> cfaPhase{0, 1, 1, 2};
     bool hasCfa = false;
     int outputScale = 1;
+    // The source adapter has already produced the sparse non-HQ Bayer proxy.
+    bool preScaledProxy = false;
     uint32_t inputQuantizationWhite = 0;
     // Non-zero for sources which enter this pipeline as linear samples but
     // use KeepInput as a source-specific log ceiling (DirectLog: 12 bits).

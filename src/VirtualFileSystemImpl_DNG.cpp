@@ -35,6 +35,36 @@ using motioncam::Timestamp;
 namespace motioncam {
 
 namespace {
+class DngFrameWorkSlot {
+public:
+    DngFrameWorkSlot(std::mutex& mutex, std::condition_variable& available,
+                     int& activeUnits, int units)
+        : mMutex(mutex), mAvailable(available), mActiveUnits(activeUnits),
+          mUnits(units) {
+        std::unique_lock lock(mMutex);
+        mAvailable.wait(lock, [&] { return mActiveUnits + mUnits <= 4; });
+        mActiveUnits += mUnits;
+    }
+
+    ~DngFrameWorkSlot() { release(); }
+
+    void release() {
+        if (!mUnits) return;
+        {
+            std::lock_guard lock(mMutex);
+            mActiveUnits -= mUnits;
+            mUnits = 0;
+        }
+        mAvailable.notify_all();
+    }
+
+private:
+    std::mutex& mMutex;
+    std::condition_variable& mAvailable;
+    int& mActiveUnits;
+    int mUnits;
+};
+
 bool sameRenderSettings(const RenderSettings& left, const RenderSettings& right) {
     return left.options == right.options &&
            left.draftScale == right.draftScale &&
@@ -462,14 +492,16 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
         struct ForegroundGuard {
             ~ForegroundGuard() { DNGDecoder::endForegroundWork(); }
         } foregroundGuard;
-        // Concurrent readers commonly probe every frame at once. Serializing
-        // the heavyweight decode prevents several 108 MP working sets from
-        // forcing the machine into swap; queued reads still keep thumbnails
-        // paused through the foreground-work counter above.
-        std::lock_guard<std::mutex> materializeLock(mMaterializeMutex);
+        // Ordinary frames can progress together. Keep the 108 MP working
+        // set exclusive so Resolve's read-ahead cannot drive the host into swap.
+        const int workUnits = static_cast<uint64_t>(mWidth) * mHeight > 32'000'000 ? 4 : 1;
+        DngFrameWorkSlot workSlot(mMaterializeMutex, mMaterializeAvailable,
+                                  mActiveMaterializeUnits, workUnits);
+        const auto acquiredAt = std::chrono::steady_clock::now();
+        FrameStageTiming stageTiming;
         auto bytes = transformFrame(
             frameIt->second, renderPlan.outputTimestamp, jpegCompression,
-            renderPlan.nativeMetadataFrame);
+            renderPlan.nativeMetadataFrame, &stageTiming);
         const auto transformedAt = std::chrono::steady_clock::now();
         const size_t advertisedSize = entry.size;
         if (!jpegCompression && !mConfig.streamingPreview) {
@@ -483,12 +515,21 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
         const auto completedAt = std::chrono::steady_clock::now();
         spdlog::info(
             "DNG timing [{}]: materialize complete {:.1f} ms "
-            "(transform {:.1f} ms, pad/copy {:.1f} ms, output {:.2f} MiB)",
+            "(queue {:.1f} ms, transform {:.1f} ms, pad/copy {:.1f} ms, output {:.2f} MiB)",
             entry.name,
             std::chrono::duration<double, std::milli>(completedAt - materializeStarted).count(),
-            std::chrono::duration<double, std::milli>(transformedAt - materializeStarted).count(),
+            std::chrono::duration<double, std::milli>(acquiredAt - materializeStarted).count(),
+            std::chrono::duration<double, std::milli>(transformedAt - acquiredAt).count(),
             std::chrono::duration<double, std::milli>(completedAt - transformedAt).count(),
             static_cast<double>(output->size()) / (1024.0 * 1024.0));
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=mounted_frame_stage source=DNG source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms=0 process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
+                         mSrcPath, frameIt->second,
+                         std::chrono::duration<double, std::milli>(acquiredAt-materializeStarted).count(),
+                         stageTiming.loadMs, stageTiming.processMs,
+                         stageTiming.finalizeMs,
+                         std::chrono::duration<double, std::milli>(completedAt-materializeStarted).count(),
+                         output->size());
         return output;
     });
 }
@@ -507,7 +548,9 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
         : timestamp - mDecoder->getFrames().front().timestamp;
     DNGDecoder::beginForegroundWork();
     struct ForegroundGuard { ~ForegroundGuard() { DNGDecoder::endForegroundWork(); } } guard;
-    std::unique_lock<std::mutex> materializeLock(mMaterializeMutex);
+    const int workUnits = static_cast<uint64_t>(mWidth) * mHeight > 32'000'000 ? 4 : 1;
+    DngFrameWorkSlot workSlot(mMaterializeMutex, mMaterializeAvailable,
+                              mActiveMaterializeUnits, workUnits);
     bool fallbackGainMapApplied = false;
     preview.rawSamples.reset();
     preview.rawWidth = preview.rawHeight = preview.rawChannels = 0;
@@ -667,7 +710,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                          entry.name, error.what());
         }
     }
-    materializeLock.unlock();
+    workSlot.release();
     renderLock.unlock();
     try { return vfs::decodeProcessedDngPreview(
         materializeFile(entry, false), preview, fallbackGainMapApplied,
@@ -677,17 +720,26 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
 
 VirtualFileSystemImpl_DNG::PreparedFrame
 VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImage) {
+    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto preparationStarted = std::chrono::steady_clock::now();
     const auto& frames = mDecoder->getFrames();
     if (frameIndex >= frames.size()) throw std::out_of_range("DNG source frame index");
     PreparedFrame result;
     if (!mDecoder->extractFrame(static_cast<int>(frameIndex), result.dng))
         throw std::runtime_error("Could not read source DNG");
-    if (!mDecoder->getFrameMetadata(static_cast<int>(frameIndex), result.sourceMetadata))
+    const auto extractedAt = std::chrono::steady_clock::now();
+    // The frame is already in memory. getFrameMetadata can reopen and read the
+    // entire source DNG on a cache miss, which is costly during sequence reads.
+    if (!DNGDecoder::getColorMetadata(result.dng, result.sourceMetadata))
         throw std::runtime_error("Could not read DNG frame metadata");
+    result.sourceMetadata.hasExposure =
+        result.sourceMetadata.iso > 0.0 &&
+        result.sourceMetadata.exposureTime > 0.0;
     if (!DNGDecoder::removeThumbnails(result.dng))
         throw std::runtime_error("Could not remove source DNG thumbnails");
     if (canonicalizeImage && !DNGDecoder::ensureUncompressed(result.dng))
         throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
+    const auto canonicalizedAt = std::chrono::steady_clock::now();
 
     result.cfaSize = mCfaSize;
     result.cfaPhase = mCfaPhase;
@@ -781,6 +833,13 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
             result.dng, updateBaseline ? &resolved.baselineExposure : nullptr,
             updateNeutral ? &resolved.asShotNeutral : nullptr))
         throw std::runtime_error("Could not update DNG exposure/white-balance tags");
+    if (profile)
+        spdlog::info("GALLERY_PERF event=dng_source_preparation source={} extract_ms={:.3f} canonicalize_ms={:.3f} metadata_ms={:.3f} bytes={}",
+                     frames[frameIndex].filePath,
+                     std::chrono::duration<double, std::milli>(extractedAt-preparationStarted).count(),
+                     std::chrono::duration<double, std::milli>(canonicalizedAt-extractedAt).count(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-canonicalizedAt).count(),
+                     result.dng.size());
     return result;
 }
 
@@ -820,7 +879,7 @@ DNGFrameMetadata VirtualFileSystemImpl_DNG::resolvedFrameMetadata(
 
 std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
-        bool nativeResolution) {
+        bool nativeResolution, FrameStageTiming* timing) {
     const auto& frames = mDecoder->getFrames();
     if (frameIndex >= frames.size()) throw std::out_of_range("DNG source frame index");
     const auto& frame = frames[frameIndex];
@@ -852,6 +911,8 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     const auto frameCfaPhase = prepared.cfaPhase;
     const bool frameHasCfa = prepared.hasCfa;
     logStage("source preparation", bytes.size());
+    if (timing) timing->loadMs =
+        std::chrono::duration<double, std::milli>(stageStarted-started).count();
 
     uint32_t inputQuantizationWhite = 0;
     const auto levelSeparator = mConfig.levels.find('/');
@@ -878,6 +939,8 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     pixels.sourceName = frame.filePath;
     vfs::processDngPixels(bytes, mConfig, pixels);
     logStage("topology/gain/log processing", bytes.size());
+    if (timing) timing->processMs =
+        std::chrono::duration<double, std::milli>(stageStarted-started).count() - timing->loadMs;
     vfs::DngFinalizeOptions finalize;
     finalize.frameRate = mFps;
     finalize.timestamp = outputTimestamp;
@@ -891,6 +954,9 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     vfs::finalizeDng(bytes, mConfig, finalize);
     logStage(jpegCompression ? "finalize and compression" : "log/timing/bit packing",
              bytes.size());
+    if (timing) timing->finalizeMs =
+        std::chrono::duration<double, std::milli>(stageStarted-started).count() -
+        timing->loadMs - timing->processMs;
     const auto completed = std::chrono::steady_clock::now();
     spdlog::info("DNG timing [{}]: transform total {:.1f} ms",
                  frame.filePath,

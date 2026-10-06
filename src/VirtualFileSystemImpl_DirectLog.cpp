@@ -748,6 +748,17 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 const size_t planeSize = static_cast<size_t>(map.width) * map.height;
                 if (!map.channels || map.data.size() != planeSize * map.channels)
                     throw std::runtime_error("Invalid DirectLog opcode gain-map payload");
+                if (cfaPhases && map.channels == 3) {
+                    // The early proxy decode has already collapsed CFA phase
+                    // maps to RGB. Keep the three channels in one RGB opcode;
+                    // splitting them into scalar opcodes would apply all three
+                    // gains to every channel during the shared bake.
+                    params.plane = 0;
+                    params.planes = 3;
+                    params.gain_data = map.data;
+                    result.AddGainMap(params);
+                    continue;
+                }
                 if (cfaPhases && map.channels > 1 && map.channels != 4)
                     throw std::runtime_error("Unsupported DirectLog CFA gain-map channel count");
                 // Sidecars are point-major; the shared opcode helper accepts
@@ -766,14 +777,17 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         const auto opcodeList3 = makeOpcodeList(opcodeList3Maps, false);
         if (!opcodeList2.IsEmpty()) dng.SetOpcodeList2(opcodeList2);
         if (!opcodeList3.IsEmpty()) dng.SetOpcodeList3(opcodeList3);
-        // Write DNG to memory stream
-        std::ostringstream oss;
+        // Use the same vector-backed writer as MCRAW. Avoid constructing an
+        // intermediate string and copying the complete RGB DNG afterward.
+        dngData.clear();
+        dngData.reserve(imageDataSize + 512 * 1024);
+        utils::vector_ostream stream(dngData);
         tinydngwriter::DNGWriter writer(false); // little-endian
         writer.AddImage(&dng);
         
         std::string err;
         diagnosticStage = std::chrono::steady_clock::now();
-        if (!writer.WriteToFile(oss, &err)) {
+        if (!writer.WriteToFile(stream, &err)) {
             spdlog::error("Failed to write DNG for frame {}: {}", frameNumber, err);
             return false;
         }
@@ -781,10 +795,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             spdlog::info("DirectLog diagnostic: frame={} writer_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));
 
-        // Copy to output vector
+        // Apply metadata directly to the vector-backed DNG.
         diagnosticStage = std::chrono::steady_clock::now();
-        std::string dngStr = std::move(oss).str();
-        dngData.assign(dngStr.begin(), dngStr.end());
         if (!vfs::applyManualOpcodeSidecar(dngData, mManualVignetteSidecars))
             throw std::runtime_error("Could not apply DirectLog opcode sidecar");
         if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
@@ -979,9 +991,38 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         const auto materializeStart = std::chrono::steady_clock::now();
         const auto& frames = mDecoder->getFrames();
-        // Native frame zero belongs to the mounted proxy contract only. A
-        // finalized sequence uses one consistent selected output resolution.
-        auto processed = processFrame(entry);
+        const int configuredScale = std::max(1,
+            vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
+        const bool directProxy = !jpegCompression && !mConfig.streamingPreview &&
+            vfs::outputFrameNumber(entry) != 0 && configuredScale > 1 &&
+            !(mConfig.options & (RENDER_OPT_CROPPING |
+                                 RENDER_OPT_HIGHER_CFA_HQ)) &&
+            !(mCalibration && mCalibration->hasLeftTopCropStride) &&
+            mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
+        const auto queueStarted = std::chrono::steady_clock::now();
+        struct DngWriterSlot {
+            VirtualFileSystemImpl_DirectLog& owner;
+            explicit DngWriterSlot(VirtualFileSystemImpl_DirectLog& value) : owner(value) {
+                std::unique_lock lock(owner.mDngWriterMutex);
+                owner.mDngWriterAvailable.wait(lock, [&] {
+                    return owner.mActiveDngWriters < 4;
+                });
+                ++owner.mActiveDngWriters;
+            }
+            ~DngWriterSlot() {
+                {
+                    std::lock_guard lock(owner.mDngWriterMutex);
+                    --owner.mActiveDngWriters;
+                }
+                owner.mDngWriterAvailable.notify_one();
+            }
+        } writerSlot(*this);
+        const auto acquiredAt = std::chrono::steady_clock::now();
+        auto processed = processFrame(entry, directProxy ? configuredScale : 1);
+        const auto decodedAt = std::chrono::steady_clock::now();
+        const bool scaledInFfmpeg = directProxy &&
+            processed.width == mWidth / configuredScale &&
+            processed.height == mHeight / configuredScale;
         const auto timestamp = processed.timestamp;
         const int frameNumber = processed.frameNumber;
         const bool diagnostics = directLogDiagnosticsEnabled();
@@ -999,23 +1040,6 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                          frameNumber, elapsedMilliseconds(stageStart));
             stageStart = std::chrono::steady_clock::now();
         }
-        struct DngWriterSlot {
-            VirtualFileSystemImpl_DirectLog& owner;
-            explicit DngWriterSlot(VirtualFileSystemImpl_DirectLog& value) : owner(value) {
-                std::unique_lock lock(owner.mDngWriterMutex);
-                owner.mDngWriterAvailable.wait(lock, [&] {
-                    return owner.mActiveDngWriters < 2;
-                });
-                ++owner.mActiveDngWriters;
-            }
-            ~DngWriterSlot() {
-                {
-                    std::lock_guard lock(owner.mDngWriterMutex);
-                    --owner.mActiveDngWriters;
-                }
-                owner.mDngWriterAvailable.notify_one();
-            }
-        } writerSlot(*this);
         std::vector<uint8_t> dngData;
         if (!convertRGBToDNG(std::move(processed.rgb), dngData, outputFrameNumber,
                              timestamp,
@@ -1028,15 +1052,18 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                              processed.gainMaps.opcodeList3,
                              processed.width, processed.height))
             throw std::runtime_error("Could not generate DirectLog DNG");
+        const auto generatedAt = std::chrono::steady_clock::now();
         vfs::DngPixelPipelineOptions pixels;
         pixels.hasCfa = false;
         pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
         pixels.outputScale = renderPlan.scale;
+        pixels.preScaledProxy = scaledInFfmpeg;
         pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
         pixels.linearInputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
         pixels.sourceName = "DirectLog";
         vfs::processDngPixels(dngData, mConfig, pixels);
+        const auto processedAt = std::chrono::steady_clock::now();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
         finalize.timestamp = renderPlan.outputTimestamp;
@@ -1048,6 +1075,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "DirectLog";
         vfs::finalizeDng(dngData, mConfig, finalize);
+        const auto finalizedAt = std::chrono::steady_clock::now();
         if (!jpegCompression && !mConfig.streamingPreview) {
             if (dngData.size() > entry.size)
                 throw std::runtime_error(
@@ -1055,9 +1083,28 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             dngData.resize(entry.size, 0);
         }
         auto output = std::make_shared<std::vector<uint8_t>>(std::move(dngData));
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+            spdlog::info("GALLERY_PERF event=directlog_mounted_proxy frame={} ffmpeg_proxy={} width={} height={}",
+                         frameNumber, scaledInFfmpeg, processed.width,
+                         processed.height);
+            spdlog::info("GALLERY_PERF event=mounted_frame_stage source=DirectLog source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
+                         mSrcPath, frameNumber,
+                         std::chrono::duration<double, std::milli>(acquiredAt-queueStarted).count(),
+                         std::chrono::duration<double, std::milli>(decodedAt-acquiredAt).count(),
+                         std::chrono::duration<double, std::milli>(generatedAt-decodedAt).count(),
+                         std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
+                         std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
+                         elapsedMilliseconds(materializeStart), output->size());
+        }
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
-                         frameNumber, elapsedMilliseconds(stageStart),
+            spdlog::info("DirectLog diagnostic: frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
+                         frameNumber,
+                         std::chrono::duration<double, std::milli>(acquiredAt-queueStarted).count(),
+                         std::chrono::duration<double, std::milli>(decodedAt-acquiredAt).count(),
+                         std::chrono::duration<double, std::milli>(generatedAt-decodedAt).count(),
+                         std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
+                         std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
+                         elapsedMilliseconds(stageStart),
                          elapsedMilliseconds(materializeStart), output->size());
         return output;
     });

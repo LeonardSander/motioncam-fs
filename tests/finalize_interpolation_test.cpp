@@ -121,9 +121,16 @@ std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
     return result;
 }
 
-std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp) {
-    constexpr uint32_t width = 32, height = 32;
+std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp,
+                                   bool withLinearization = true,
+                                   uint32_t width = 32, bool patterned = false) {
+    constexpr uint32_t height = 32;
     std::vector<uint16_t> pixels(width * height, value);
+    if (patterned)
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                pixels[static_cast<size_t>(y) * width + x] =
+                    static_cast<uint16_t>((y * 37 + x * 53) & 1023);
     std::vector<uint16_t> linearization(1024);
     for (size_t i = 0; i < linearization.size(); ++i)
         linearization[i] = static_cast<uint16_t>(std::min<size_t>(65535, i * 64));
@@ -140,7 +147,8 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
     assert(image.SetCFARepeatPatternDim(2, 2) && image.SetCFAPattern(4, pattern));
     assert(image.SetBlackLevelRepeatDim(2, 2) && image.SetBlackLevel(4, black));
     assert(image.SetWhiteLevel(1023));
-    assert(image.SetLinearizationTable(linearization.size(), linearization.data()));
+    if (withLinearization)
+        assert(image.SetLinearizationTable(linearization.size(), linearization.data()));
     assert(image.SetExposureTime(0.01f) && image.SetIso(100));
     const float neutral[3] = {1.0f, 1.0f, 1.0f};
     assert(image.SetBaselineExposure(0.0f) && image.SetAsShotNeutral(3, neutral));
@@ -382,6 +390,98 @@ int main() {
     assert(rgbPixel(31, 0) == rgbPixel(30, 1));
     assert(rgbPixel(0, 31) == rgbPixel(1, 30));
     assert(rgbPixel(31, 31) == rgbPixel(30, 30));
+    auto proxyCfa = makeLogCfaDng(1023, 0);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        proxyCfa, 2, constantPhaseMaps));
+    motioncam::RenderSettings cfaProxySettings;
+    cfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_DRAFT |
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+    cfaProxySettings.draftScale = 2;
+    auto proxyPipeline = cfaPipeline;
+    proxyPipeline.calibration = nullptr;
+    proxyPipeline.outputScale = 2;
+    motioncam::vfs::processDngPixels(
+        proxyCfa, cfaProxySettings, proxyPipeline);
+    motioncam::DecodedDNGImage proxyImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        proxyCfa, proxyImage, false, false));
+    assert(proxyImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(proxyImage.layout.width == 16 && proxyImage.layout.height == 16);
+
+    auto preScaledCfa = makeLogCfaDng(1023, 0);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        preScaledCfa, 2, constantPhaseMaps));
+    proxyPipeline.preScaledProxy = true;
+    motioncam::vfs::processDngPixels(
+        preScaledCfa, cfaProxySettings, proxyPipeline);
+    motioncam::DecodedDNGImage preScaledImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        preScaledCfa, preScaledImage, false, false));
+    assert(preScaledImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(preScaledImage.layout.width == 32 && preScaledImage.layout.height == 32);
+
+    auto hqProxy = makeLogCfaDng(1023, 0);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        hqProxy, 2, constantPhaseMaps));
+    cfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
+        cfaProxySettings.options | motioncam::RENDER_OPT_HIGHER_CFA_HQ);
+    proxyPipeline.preScaledProxy = false;
+    motioncam::vfs::processDngPixels(
+        hqProxy, cfaProxySettings, proxyPipeline);
+    motioncam::DecodedDNGImage hqProxyImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        hqProxy, hqProxyImage, false, false));
+    assert(hqProxyImage.layout.pixels == motioncam::DNGPixelLayout::LinearRGB);
+    auto keepInputGain = makeLogCfaDng(1023, 0);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        keepInputGain, 2, constantPhaseMaps));
+    motioncam::RenderSettings keepInputSettings;
+    keepInputSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_LOG_TRANSFORM |
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+    keepInputSettings.logTransform = motioncam::LogTransformMode::KeepInput;
+    auto keepInputPipeline = cfaPipeline;
+    keepInputPipeline.calibration = nullptr;
+    keepInputPipeline.inputQuantizationWhite = 1023;
+    motioncam::vfs::processDngPixels(
+        keepInputGain, keepInputSettings, keepInputPipeline);
+    assert(tagValue(keepInputGain, 50712).count == 1024);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(keepInputGain));
+    assert(tagValue(keepInputGain, 50712).count == 1024);
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(keepInputGain));
+    assert(motioncam::DNGDecoder::getLinearizationTableCount(keepInputGain) == 1024);
+    auto linearCfa = makeLogCfaDng(1023, 0, false);
+    assert(tagValue(linearCfa, 50712).count == 0);
+    motioncam::vfs::DngPixelPipelineOptions sourceDngPipeline;
+    sourceDngPipeline.hasCfa = true;
+    sourceDngPipeline.cfaRepeatSize = 2;
+    motioncam::RenderSettings sourceKeepInput;
+    sourceKeepInput.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+    sourceKeepInput.logTransform = motioncam::LogTransformMode::KeepInput;
+    auto keepExistingLog = makeLogCfaDng(1023, 0);
+    motioncam::vfs::processDngPixels(
+        keepExistingLog, sourceKeepInput, sourceDngPipeline);
+    assert(tagValue(keepExistingLog, 50712).count == 1024);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        keepExistingLog, makeLogCfaDng(1023, 0)));
+    auto keepExistingProxyLog = makeLogCfaDng(1023, 0);
+    sourceKeepInput.options = static_cast<motioncam::FileRenderOptions>(
+        sourceKeepInput.options | motioncam::RENDER_OPT_DRAFT);
+    sourceKeepInput.draftScale = 2;
+    sourceDngPipeline.outputScale = 2;
+    motioncam::vfs::processDngPixels(
+        keepExistingProxyLog, sourceKeepInput, sourceDngPipeline);
+    assert(tagValue(keepExistingProxyLog, 50712).count == 1024);
+    motioncam::DecodedDNGImage keptProxyImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        keepExistingProxyLog, keptProxyImage, false, false));
+    assert(keptProxyImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        linearCfa, 2, constantPhaseMaps));
+    motioncam::vfs::processDngPixels(
+        linearCfa, keepInputSettings, keepInputPipeline);
+    assert(tagValue(linearCfa, 50712).count > 0);
     badPixelCalibration.badPixels.front().action =
         motioncam::CalibrationData::BadPixelAction::Interpolate;
     auto opcodeCfa = makeLogCfaDng(1023, 0);
@@ -833,6 +933,15 @@ int main() {
     auto packedCrop = makeLogCfaDng(400, 0);
     assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(packedCrop));
     assert(tagValue(packedCrop, 258).value == 10);
+    auto packedPattern = makeLogCfaDng(0, 0, true, 18, true);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(packedPattern));
+    motioncam::DecodedDNGImage packedPatternImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        packedPattern, packedPatternImage, false, false));
+    for (uint32_t y = 0; y < 32; ++y)
+        for (uint32_t x = 0; x < 18; ++x)
+            assert(packedPatternImage.samples[static_cast<size_t>(y) * 18 + x] ==
+                   ((y * 37 + x * 53) & 1023));
     assert(motioncam::DNGDecoder::cropImage(packedCrop, 16, 16));
     assert(tagValue(packedCrop, 258).value == 16);
     motioncam::DecodedDNGImage croppedSamples;
@@ -1189,9 +1298,9 @@ int main() {
     if (!motioncam::DNGDecoder::decodePreview(
             std::move(higherCfaPreview), higherCfaSettings,
             higherCfaResult, true) ||
-        higherCfaResult.width != 16 || higherCfaResult.height != 16 ||
-        higherCfaResult.rgb.size() != 16 * 16 * 6 ||
-        higherCfaResult.clipping.size() != 16 * 16) return 3;
+        higherCfaResult.width != 32 || higherCfaResult.height != 32 ||
+        higherCfaResult.rgb.size() != 32 * 32 * 6 ||
+        higherCfaResult.clipping.size() != 32 * 32) return 3;
     motioncam::DNGFrameMetadata metadata;
     assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
     assert(std::abs(metadata.exposureTime - 0.02) < 1e-5);

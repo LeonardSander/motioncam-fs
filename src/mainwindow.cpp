@@ -1227,6 +1227,8 @@ motioncam::RenderSettings MainWindow::buildRenderSettings() const {
 
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+    if(ui->logHqCheckBox->isChecked())
+        settings.options |= motioncam::RENDER_OPT_LOG_HQ;
 
     if(ui->remosaicCheckBox->checkState() == Qt::CheckState::Checked)
         settings.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
@@ -1360,6 +1362,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->cropEnableCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->camModelOverrideCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->logTransformCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
+    connect(ui->logHqCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->remosaicCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->higherCfaHqCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->dngCompressionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
@@ -1643,6 +1646,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
+    settings.setValue("logHq", ui->logHqCheckBox->isChecked());
     settings.setValue("remosaicEnabled", ui->remosaicCheckBox->isChecked());
     settings.setValue("jpegCompression", ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("jxlDistance", mRenderSettings.jxlDistance);
@@ -1726,6 +1730,7 @@ void MainWindow::restoreSettings() {
     ui->logTransformCheckBox->setCheckState(
         !settings.contains("logTransformEnabled") ? Qt::CheckState::Checked :
         (settings.value("logTransformEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
+    ui->logHqCheckBox->setChecked(settings.value("logHq", false).toBool());
 
     ui->remosaicCheckBox->setChecked(settings.value("remosaicEnabled", false).toBool());
 
@@ -2441,7 +2446,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     updateClipIndices();
     if (!mGalleryPerformanceTestActive) {
         QTimer::singleShot(250, this, [this, mountId] { updateThumbnail(mountId); });
-    } else {
+    } else if (mPerformanceThumbnailRun) {
         // Exercise the responsive startup path: thumbnail work begins as soon
         // as its mount is available and overlaps construction of later mounts.
         spdlog::info("GALLERY_PERF event=thumbnail_start mount={}", mountId);
@@ -3103,6 +3108,9 @@ void MainWindow::finalizeSelectedFrames(){
 void MainWindow::startGalleryPerformanceTest(
         const QString& sessionPath, int playbackMilliseconds,
         bool generateThumbnails) {
+    const bool mountedMode = qEnvironmentVariable("MOTIONCAM_GALLERY_PERF_MODE") ==
+        QStringLiteral("mounted");
+    if (mountedMode) generateThumbnails = false;
     const QFileInfo session(sessionPath);
     if (!session.isFile()) {
         spdlog::error("GALLERY_PERF event=suite_failed reason=session_not_found path={}",
@@ -3113,8 +3121,9 @@ void MainWindow::startGalleryPerformanceTest(
 
     const auto suiteStarted = std::chrono::steady_clock::now();
     mGalleryPerformanceTestActive = true;
-    spdlog::info("GALLERY_PERF event=suite_start session={} playback_ms={} thumbnails={}",
-                 session.absoluteFilePath().toStdString(), playbackMilliseconds,
+    spdlog::info("GALLERY_PERF event=suite_start session={} mode={} playback_ms={} thumbnails={}",
+                 session.absoluteFilePath().toStdString(),
+                 mountedMode ? "mounted" : "gallery", playbackMilliseconds,
                  generateThumbnails);
     auto thumbnailsFinished = std::make_shared<QSet<motioncam::MountId>>();
     if (generateThumbnails)
@@ -3140,89 +3149,161 @@ void MainWindow::startGalleryPerformanceTest(
         return;
     }
 
-    spdlog::info(
-        "GALLERY_PERF event=cold_gallery_start clips={} thumbnails_enabled={} thumbnails_complete={} import_ms={:.3f}",
-        mMountedFiles.size(), generateThumbnails, thumbnailsFinished->size(),
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - importStarted).count());
-
-    // Disabled for now: direct reads from the mounted DNG projection can
-    // deadlock the performance run and require a host reboot. Keep the code in
-    // place for targeted investigation, but benchmark only gallery playback.
-#if 0
-    // Exercise the actual mounted projection before gallery rendering can warm
-    // related source data. This models the
-    // access pattern of an external DNG sequence player: first frame, next
-    // frame, then a midpoint seek. Read and DNG/display decode are reported
-    // separately so FUSE/materialization regressions are distinguishable from
-    // gallery conversion costs.
-    QElapsedTimer mountedSuiteTimer;
-    mountedSuiteTimer.start();
-    int mountedSamples = 0;
-    int mountedFailures = 0;
-    spdlog::info("GALLERY_PERF event=mounted_sequence_suite_start clips={}",
-                 mMountedFiles.size());
-    for (int clipIndex = 0; clipIndex < mMountedFiles.size(); ++clipIndex) {
-        const auto& mounted = mMountedFiles[clipIndex];
-        auto* card = fileWidgetForMount(mounted.mountId);
-        const QString mountPath = card ? card->property("mountPath").toString() : QString();
-        QElapsedTimer enumerationTimer;
-        enumerationTimer.start();
-        const QFileInfoList dngFiles = QDir(mountPath).entryInfoList(
-            QStringList() << "*.dng" << "*.DNG", QDir::Files | QDir::Readable, QDir::Name);
+    if (!mountedMode)
         spdlog::info(
-            "GALLERY_PERF event=mounted_sequence_enumerated clip={} mount={} files={} latency_ms={}",
-            clipIndex, mounted.mountId, dngFiles.size(), enumerationTimer.elapsed());
-        if (dngFiles.isEmpty()) {
-            spdlog::error("GALLERY_PERF event=mounted_sequence_failed clip={} mount={} reason=no_dng_files path={}",
-                          clipIndex, mounted.mountId, mountPath.toStdString());
-            ++mountedFailures;
-            continue;
+            "GALLERY_PERF event=cold_gallery_start clips={} thumbnails_enabled={} thumbnails_complete={} import_ms={:.3f}",
+            mMountedFiles.size(), generateThumbnails, thumbnailsFinished->size(),
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - importStarted).count());
+
+    // Keep mounted reads off the UI thread. FUSE callbacks and mount setup can
+    // need that thread while a client is blocked waiting for a frame.
+    if (mountedMode) {
+        struct MountedSampleClip {
+            int index;
+            motioncam::MountId mount;
+            QString path;
+        };
+        QVector<MountedSampleClip> clips;
+        for (int i = 0; i < mMountedFiles.size(); ++i) {
+            const auto mount = mMountedFiles[i].mountId;
+            auto* card = fileWidgetForMount(mount);
+            clips.push_back({i, mount,
+                card ? card->property("mountPath").toString() : QString()});
         }
-        QVector<QPair<QString, int>> samples;
-        samples.push_back({QStringLiteral("first"), 0});
-        if (dngFiles.size() > 1) samples.push_back({QStringLiteral("sequential"), 1});
-        const int midpoint = dngFiles.size() / 2;
-        if (midpoint > 1) samples.push_back({QStringLiteral("seek"), midpoint});
-        for (const auto& sample : samples) {
-            QElapsedTimer timer;
-            timer.start();
-            QFile file(dngFiles[sample.second].absoluteFilePath());
-            const bool opened = file.open(QIODevice::ReadOnly);
-            std::vector<uint8_t> dng;
-            if (opened) {
-                dng.resize(static_cast<size_t>(std::max<qint64>(0, file.size())));
-                const qint64 bytesRead = dng.empty()
-                    ? 0 : file.read(reinterpret_cast<char*>(dng.data()),
-                                   static_cast<qint64>(dng.size()));
-                if (bytesRead < 0) dng.clear();
-                else dng.resize(static_cast<size_t>(bytesRead));
+        QPointer<MainWindow> window(this);
+        QThreadPool::globalInstance()->start([clips = std::move(clips), window] {
+            QElapsedTimer suiteTimer;
+            suiteTimer.start();
+            int samples = 0;
+            int readFailures = 0;
+            int previewFailures = 0;
+            spdlog::info("GALLERY_PERF event=mounted_sequence_suite_start clips={}",
+                         clips.size());
+            for (const auto& clip : clips) {
+                QElapsedTimer enumerationTimer;
+                enumerationTimer.start();
+                const auto files = QDir(clip.path).entryInfoList(
+                    QStringList() << "*.dng" << "*.DNG",
+                    QDir::Files | QDir::Readable, QDir::Name);
+                spdlog::info("GALLERY_PERF event=mounted_sequence_enumerated clip={} mount={} files={} latency_ms={}",
+                             clip.index, clip.mount, files.size(), enumerationTimer.elapsed());
+                if (files.isEmpty()) { ++readFailures; continue; }
+                QVector<QPair<const char*, int>> positions{{"first", 0}};
+                if (files.size() > 1) positions.push_back({"sequential", 1});
+                if (files.size() > 2) positions.push_back({"sequential", 2});
+                const int midpoint = files.size() / 2;
+                if (midpoint > 2) positions.push_back({"seek", midpoint});
+                if (midpoint + 1 < files.size() && midpoint > 2)
+                    positions.push_back({"after_seek", midpoint + 1});
+                for (const auto& [access, frame] : positions) {
+                    QElapsedTimer timer;
+                    timer.start();
+                    QFile file(files[frame].absoluteFilePath());
+                    std::vector<uint8_t> dng;
+                    const bool opened = file.open(QIODevice::ReadOnly);
+                    bool complete = false;
+                    if (opened && file.size() > 0) {
+                        const auto expected = static_cast<size_t>(file.size());
+                        dng.resize(expected);
+                        size_t received = 0;
+                        while (received < expected) {
+                            const auto count = file.read(
+                                reinterpret_cast<char*>(dng.data() + received),
+                                static_cast<qint64>(std::min<size_t>(
+                                    expected - received, 4 * 1024 * 1024)));
+                            if (count <= 0) break;
+                            received += static_cast<size_t>(count);
+                        }
+                        complete = received == expected;
+                        dng.resize(received);
+                    }
+                    const qint64 readMs = timer.elapsed();
+                    timer.restart();
+                    const size_t bytes = dng.size();
+                    motioncam::DNGImageLayout layout;
+                    const bool layoutValid = complete &&
+                        motioncam::DNGDecoder::getImageLayout(dng, layout);
+                    const uint32_t linearizationEntries = complete
+                        ? motioncam::DNGDecoder::getLinearizationTableCount(dng) : 0;
+                    if (clip.index == 0 && frame == 0) {
+                        const QString dumpPath = qEnvironmentVariable(
+                            "MOTIONCAM_GALLERY_PERF_DUMP_DNG");
+                        if (!dumpPath.isEmpty()) {
+                            QFile dump(dumpPath);
+                            if (dump.open(QIODevice::WriteOnly))
+                                dump.write(reinterpret_cast<const char*>(dng.data()),
+                                           static_cast<qint64>(dng.size()));
+                        }
+                    }
+                    motioncam::PreviewFrame preview;
+                    const bool decoded = complete &&
+                        motioncam::DNGDecoder::decodePreview(
+                            std::move(dng), motioncam::RenderSettings{},
+                            preview, false);
+                    uint64_t pixelHash = 1469598103934665603ull;
+                    if (decoded) for (const uint8_t value : preview.rgb) {
+                        pixelHash ^= value;
+                        pixelHash *= 1099511628211ull;
+                    }
+                    const qint64 decodeMs = timer.elapsed();
+                    ++samples;
+                    if (!complete) ++readFailures;
+                    if (complete && !decoded) ++previewFailures;
+                    spdlog::info("GALLERY_PERF event=mounted_sequence_sample clip={} mount={} access={} frame={} read_success={} preview_decoded={} bytes={} read_ms={} decode_ms={} width={} height={} cfa={} channels={} linearization_entries={} pixel_hash={}",
+                                 clip.index, clip.mount, access, frame, complete, decoded,
+                                 bytes, readMs, decodeMs, preview.width,
+                                 preview.height,
+                                 layoutValid && layout.pixels == motioncam::DNGPixelLayout::CFA,
+                                 layoutValid ? layout.samplesPerPixel : 0,
+                                 linearizationEntries,
+                                 pixelHash);
+                }
+                if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PARALLEL_READS") &&
+                    files.size() >= 8) {
+                    bool countValid = false;
+                    const int requestedCount = qEnvironmentVariableIntValue(
+                        "MOTIONCAM_GALLERY_PERF_PARALLEL_READ_COUNT", &countValid);
+                    const int parallelCount = std::min(
+                        static_cast<int>(files.size()) - 3,
+                        countValid ? std::clamp(requestedCount, 1, 16) : 4);
+                    std::vector<std::thread> readers;
+                    std::atomic<int> concurrentFailures{0};
+                    for (int frame = 3; frame < 3 + parallelCount; ++frame) {
+                        const QString path = files[frame].absoluteFilePath();
+                        readers.emplace_back([clip, frame, path, &concurrentFailures] {
+                            QElapsedTimer timer;
+                            timer.start();
+                            QFile file(path);
+                            qint64 received = 0;
+                            bool complete = file.open(QIODevice::ReadOnly);
+                            if (complete) {
+                                std::vector<char> buffer(4 * 1024 * 1024);
+                                while (received < file.size()) {
+                                    const qint64 count = file.read(buffer.data(),
+                                        std::min<qint64>(buffer.size(), file.size() - received));
+                                    if (count <= 0) { complete = false; break; }
+                                    received += count;
+                                }
+                            }
+                            if (!complete) ++concurrentFailures;
+                            spdlog::info("GALLERY_PERF event=mounted_parallel_sample clip={} frame={} read_success={} bytes={} read_ms={}",
+                                         clip.index, frame, complete, received, timer.elapsed());
+                        });
+                    }
+                    for (auto& reader : readers) reader.join();
+                    samples += parallelCount;
+                    readFailures += concurrentFailures.load();
+                }
             }
-            const qint64 readMs = timer.elapsed();
-            timer.restart();
-            const auto previewSettings =
-                previewRenderSettings(settingsForMount(mounted.mountId));
-            const size_t dngBytes = dng.size();
-            motioncam::PreviewFrame preview;
-            const bool decoded = opened && motioncam::DNGDecoder::decodePreview(
-                std::move(dng), previewSettings, preview, false);
-            if (decoded)
-                applyGalleryColorTransform(
-                    preview.rgb, preview.metadata, previewSettings.ignoreForwardMat,
-                    gainMapOnlyDebug(previewSettings) && preview.gainMapApplied);
-            const qint64 decodeMs = timer.elapsed();
-            ++mountedSamples;
-            if (!decoded) ++mountedFailures;
-            spdlog::info(
-                "GALLERY_PERF event=mounted_sequence_sample clip={} mount={} access={} frame={} success={} bytes={} read_ms={} decode_ms={} width={} height={}",
-                clipIndex, mounted.mountId, sample.first.toStdString(), sample.second,
-                decoded, dngBytes, readMs, decodeMs, preview.width, preview.height);
-        }
+            spdlog::info("GALLERY_PERF event=mounted_sequence_suite_complete samples={} read_failures={} preview_failures={} latency_ms={}",
+                         samples, readFailures, previewFailures, suiteTimer.elapsed());
+            if (window) QMetaObject::invokeMethod(window, [readFailures, previewFailures] {
+                QCoreApplication::exit(readFailures || previewFailures ? 4 : 0);
+            }, Qt::QueuedConnection);
+        });
+        return;
     }
-    spdlog::info(
-        "GALLERY_PERF event=mounted_sequence_suite_complete samples={} failures={} latency_ms={}",
-        mountedSamples, mountedFailures, mountedSuiteTimer.elapsed());
-#endif
 
     struct RunState {
         enum class Phase { Init, Playback, Seek, SeekPlayback, ThumbnailBackfill };
@@ -5155,11 +5236,13 @@ void MainWindow::updateUi() {
     // Bit depth reduction combobox only enabled when checkbox is checked
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked) {
         ui->logTransformComboBox->setEnabled(true);
+        ui->logHqCheckBox->setEnabled(true);
         if (ui->logTransformComboBox->currentText() == "")
             ui->logTransformComboBox->setCurrentText("Keep Input");
     } else {
         ui->logTransformComboBox->setCurrentText("");
         ui->logTransformComboBox->setEnabled(false);
+        ui->logHqCheckBox->setEnabled(false);
     }
 
     // Normalization applies to both baked pixels and retained output gain maps.
@@ -5396,7 +5479,8 @@ void MainWindow::updateSelectionUi() {
         b7(ui->normalizeExposureCheckBox), b8(ui->smoothExposureCheckBox),
         b9(ui->smoothWhiteBalanceCheckBox), b10(ui->bakeIsoCheckBox),
         b11(ui->cfrConversionCheckBox), b12(ui->cropEnableCheckBox),
-        b13(ui->camModelOverrideCheckBox), b14(ui->logTransformCheckBox);
+        b13(ui->camModelOverrideCheckBox), b14(ui->logTransformCheckBox),
+        b14a(ui->logHqCheckBox);
     const QSignalBlocker b15(ui->cfrTarget), b16(ui->cropTargetComboBox),
         b17(ui->camModelOverrideComboBox), b18(ui->levelsComboBox),
         b19(ui->exposureCompensationLineEdit), b20(ui->logTransformComboBox),
@@ -5411,6 +5495,7 @@ void MainWindow::updateSelectionUi() {
                       ui->smoothWhiteBalanceCheckBox, ui->bakeIsoCheckBox,
                       ui->cfrConversionCheckBox, ui->cropEnableCheckBox,
                       ui->camModelOverrideCheckBox, ui->logTransformCheckBox,
+                      ui->logHqCheckBox,
                       ui->remosaicCheckBox, ui->higherCfaHqCheckBox,
                       ui->dngCompressionCheckBox})
         box->setTristate(false);
@@ -5447,6 +5532,7 @@ void MainWindow::updateSelectionUi() {
     ui->cropEnableCheckBox->setChecked(checked(motioncam::RENDER_OPT_CROPPING));
     ui->camModelOverrideCheckBox->setChecked(checked(motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
     ui->logTransformCheckBox->setChecked(checked(motioncam::RENDER_OPT_LOG_TRANSFORM));
+    ui->logHqCheckBox->setChecked(checked(motioncam::RENDER_OPT_LOG_HQ));
     ui->remosaicCheckBox->setChecked(checked(motioncam::RENDER_OPT_REMOSAIC_TO_BAYER));
     ui->higherCfaHqCheckBox->setChecked(checked(motioncam::RENDER_OPT_HIGHER_CFA_HQ));
     ui->dngCompressionCheckBox->setChecked(checked(motioncam::RENDER_OPT_JPEG_COMPRESSION));
@@ -5507,6 +5593,7 @@ void MainWindow::updateSelectionUi() {
         markCheck(ui->cropEnableCheckBox, mixedFlag(motioncam::RENDER_OPT_CROPPING));
         markCheck(ui->camModelOverrideCheckBox, mixedFlag(motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
         markCheck(ui->logTransformCheckBox, mixedFlag(motioncam::RENDER_OPT_LOG_TRANSFORM));
+        markCheck(ui->logHqCheckBox, mixedFlag(motioncam::RENDER_OPT_LOG_HQ));
         markCheck(ui->remosaicCheckBox, mixedFlag(motioncam::RENDER_OPT_REMOSAIC_TO_BAYER));
         markCheck(ui->higherCfaHqCheckBox, mixedFlag(motioncam::RENDER_OPT_HIGHER_CFA_HQ));
         markCheck(ui->dngCompressionCheckBox, mixedFlag(motioncam::RENDER_OPT_JPEG_COMPRESSION));
@@ -5563,6 +5650,7 @@ void MainWindow::onApplySelected() {
         preserveMixedFlag(ui->cropEnableCheckBox, motioncam::RENDER_OPT_CROPPING);
         preserveMixedFlag(ui->camModelOverrideCheckBox, motioncam::RENDER_OPT_CAMMODEL_OVERRIDE);
         preserveMixedFlag(ui->logTransformCheckBox, motioncam::RENDER_OPT_LOG_TRANSFORM);
+        preserveMixedFlag(ui->logHqCheckBox, motioncam::RENDER_OPT_LOG_HQ);
         preserveMixedFlag(ui->remosaicCheckBox, motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
         preserveMixedFlag(ui->higherCfaHqCheckBox, motioncam::RENDER_OPT_HIGHER_CFA_HQ);
         preserveMixedFlag(ui->dngCompressionCheckBox, motioncam::RENDER_OPT_JPEG_COMPRESSION);
@@ -6189,6 +6277,7 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);
+    ui->logHqCheckBox->setChecked(false);
     ui->higherCfaHqCheckBox->setChecked(false);
     ui->dngCompressionModeComboBox->setCurrentIndex(0);
     ui->dngCompressionCheckBox->setChecked(true);

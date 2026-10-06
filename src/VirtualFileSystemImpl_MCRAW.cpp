@@ -637,6 +637,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         return std::make_shared<std::vector<uint8_t>>(mAudioFile.begin(), mAudioFile.end());
 
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
+        const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+        const auto materializeStarted = std::chrono::steady_clock::now();
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
@@ -652,6 +654,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
+        const auto loadedAt = std::chrono::steady_clock::now();
         RenderSettings frameSettings = mSettings;
         const auto renderPlan = vfs::planDngRender(
             entry, timestamp, mSourceFrames.front(), frameSettings, mFps,
@@ -687,6 +690,24 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         // All source-independent pixel operations run below through the same
         // DNG pipeline used by imported DNG and DirectLog frames.
         RenderSettings generationSettings = frameSettings;
+        const bool earlyProxy = !jpegCompression && !frameSettings.streamingPreview &&
+            renderPlan.scale > 1 &&
+            !(frameSettings.options & (RENDER_OPT_CROPPING |
+                                       RENDER_OPT_HIGHER_CFA_HQ |
+                                       RENDER_OPT_REMOSAIC_TO_BAYER |
+                                       RENDER_OPT_DEBUG_SHADING_MAP)) &&
+            !frameSettings.cameraNativeStaging &&
+            !(mCalibration && mCalibration->hasBadPixels &&
+              frameSettings.badPixelTreatment != BadPixelTreatment::Disabled) &&
+            mManualVignetteSidecars.candidates.empty() &&
+            !mManualVignetteSidecars.useDcpGainmap &&
+            !vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
+                                    "gainMaps") &&
+            !vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
+                                    "deferredGainMaps") &&
+            (frameSettings.quadBayerOption == QuadBayerMode::Demosaic ||
+             frameSettings.quadBayerOption == QuadBayerMode::DemosaicColor ||
+             frameSettings.quadBayerOption == QuadBayerMode::DemosaicOCL);
         generationSettings.options = static_cast<FileRenderOptions>(
             generationSettings.options &
             ~(RENDER_OPT_CROPPING | RENDER_OPT_DRAFT |
@@ -695,6 +716,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
               RENDER_OPT_OPTIMIZE_GAIN_MAPS | RENDER_OPT_DEBUG_SHADING_MAP |
               RENDER_OPT_LOG_TRANSFORM | RENDER_OPT_REMOSAIC_TO_BAYER |
               RENDER_OPT_HIGHER_CFA_HQ | RENDER_OPT_BAKE_ISO));
+        if (earlyProxy) generationSettings.options |= RENDER_OPT_DRAFT;
         generationSettings.quadBayerOption = QuadBayerMode::CorrectQBCFAMetadata;
         generationSettings.cameraNativeStaging = false;
         generationSettings.streamingPreview = false;
@@ -713,16 +735,18 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             neutralOverride);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
+        const auto generatedAt = std::chrono::steady_clock::now();
         std::vector<uint8_t>& timed = *output;
         attachSidecarGainMapOpcodes(timed, frameIt->second);
         const auto nativePlan = utils::planDngFrameProcessing(
             frameSettings, frameMetadata, mCalibration);
         vfs::DngPixelPipelineOptions pixels;
-        pixels.cfaRepeatSize = nativePlan.cfaRepeatSize;
+        pixels.cfaRepeatSize = earlyProxy ? 2 : nativePlan.cfaRepeatSize;
         pixels.cfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
             frameSettings, mCalibration, cameraConfig.sensorArrangement));
         pixels.hasCfa = true;
         pixels.outputScale = renderPlan.scale;
+        pixels.preScaledProxy = earlyProxy;
         const uint32_t inputBits = utils::bitsNeeded(static_cast<uint16_t>(
             std::clamp(cameraConfig.whiteLevel, 1.0f, 65535.0f)));
         pixels.inputQuantizationWhite = inputBits < 16
@@ -732,6 +756,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         pixels.exposureTime = frameMetadata.exposureTime / 1.0e9;
         pixels.sourceName = "MCRAW";
         vfs::processDngPixels(timed, frameSettings, pixels);
+        const auto processedAt = std::chrono::steady_clock::now();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
         finalize.timestamp = renderPlan.outputTimestamp;
@@ -743,11 +768,37 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "MCRAW";
         vfs::finalizeDng(timed, frameSettings, finalize);
+        const auto finalizedAt = std::chrono::steady_clock::now();
         if (!jpegCompression && !mSettings.streamingPreview) {
             if (timed.size() > entry.size)
                 throw std::runtime_error(
                     "Generated MCRAW DNG exceeds advertised mounted size");
             timed.resize(entry.size, 0);
+        }
+        spdlog::info("MCRAW timing [{} frame={}]: load {:.1f} ms, generate {:.1f} ms, process {:.1f} ms, finalize {:.1f} ms, total {:.1f} ms, output {:.2f} MiB",
+                     mSrcPath, vfs::outputFrameNumber(entry),
+                     std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
+                     std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
+                     std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
+                     std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-materializeStarted).count(),
+                     static_cast<double>(timed.size()) / (1024.0 * 1024.0));
+        if (profile) {
+            spdlog::info("GALLERY_PERF event=mcraw_mounted_stage source={} frame={} early_proxy={} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f}",
+                         mSrcPath, vfs::outputFrameNumber(entry), earlyProxy,
+                         std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
+                         std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
+                         std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
+                         std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-materializeStarted).count());
+            spdlog::info("GALLERY_PERF event=mounted_frame_stage source=MCRAW source_path={} frame={} queue_ms=0 load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
+                         mSrcPath, vfs::outputFrameNumber(entry),
+                         std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
+                         std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
+                         std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
+                         std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
+                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-materializeStarted).count(),
+                         output->size());
         }
         return output;
     });

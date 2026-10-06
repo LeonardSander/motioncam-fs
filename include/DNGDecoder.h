@@ -121,10 +121,12 @@ public:
     static bool cropImage(std::vector<uint8_t>& dngData,
                           uint32_t targetWidth, uint32_t targetHeight);
     static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode,
-                                  uint32_t quantizationWhite = 0);
+                                  uint32_t quantizationWhite = 0,
+                                  bool highQuality = false);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
     static bool getImageLayout(const std::vector<uint8_t>& dngData,
                                DNGImageLayout& layout);
+    static uint32_t getLinearizationTableCount(const std::vector<uint8_t>& dngData);
     static bool decodeImage(std::vector<uint8_t> dngData,
                             DecodedDNGImage& image,
                             bool backgroundWork = false,
@@ -198,6 +200,10 @@ public:
     static bool imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash);
 
 private:
+    static bool decodeImageBorrowed(std::vector<uint8_t>& dngData,
+                                    DecodedDNGImage& image,
+                                    bool backgroundWork,
+                                    bool applyLinearization);
     void analyzeSequence();
     void findDNGFiles();
     void extractTimestampsFromFilenames();

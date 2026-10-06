@@ -864,6 +864,11 @@ namespace {
                           bool little) {
         const size_t oldEnd = static_cast<size_t>(stripOffset) + stripBytes;
         if (stripOffset > data.size() || oldEnd > data.size()) return false;
+        if (replacement.size() == stripBytes) {
+            if (stripBytes)
+                std::memcpy(data.data() + stripOffset, replacement.data(), stripBytes);
+            return true;
+        }
         const auto entries = findTiffEntries(data, little);
         const uint32_t oldRoot = read32(data.data() + 4, little);
         struct PointerPatch { size_t entryOffset; uint32_t rawOffset; };
@@ -3715,10 +3720,13 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     const uint32_t stripBytes = scalar(*countsE);
     if (!width || !height || bits < 8 || bits > 16 || stripOffset > data.size() ||
         stripBytes > data.size() - stripOffset) return false;
+    const bool profileTopology = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto topologyStarted = std::chrono::steady_clock::now();
     DecodedDNGImage decoded;
     if (!decodeImage(data, decoded, false, false) || decoded.layout.width != width ||
         decoded.layout.height != height || decoded.layout.samplesPerPixel != 1)
         return false;
+    const auto decodedAt = std::chrono::steady_clock::now();
     std::vector<uint16_t> pixels = std::move(decoded.samples);
 
     std::array<double, 4> sourceBlack = {0.0, 0.0, 0.0, 0.0};
@@ -3862,12 +3870,14 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         else output = std::move(rgb);
     }
 
+    const auto convertedAt = std::chrono::steady_clock::now();
     const uint32_t newBytes = static_cast<uint32_t>(output.size() * sizeof(uint16_t));
     std::vector<uint8_t> outputBytes(newBytes);
     for (size_t i = 0; i < output.size(); ++i) {
         outputBytes[i * 2] = little ? output[i] & 0xff : output[i] >> 8;
         outputBytes[i * 2 + 1] = little ? output[i] >> 8 : output[i] & 0xff;
     }
+    const auto serializedAt = std::chrono::steady_clock::now();
     auto setScalar = [&](const TiffEntry& e, uint32_t value) {
         if (e.type == TIFF_TYPE_SHORT) write16(data.data() + e.valueOffset, value, little);
         else write32(data.data() + e.valueOffset, value, little);
@@ -3950,7 +3960,15 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
             for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
         }
     }
-    return replaceTiffStrip(data, stripOffset, stripBytes, outputBytes, little);
+    const bool replaced = replaceTiffStrip(data, stripOffset, stripBytes, outputBytes, little);
+    if (profileTopology)
+        spdlog::info("GALLERY_PERF event=dng_cfa_topology width={} height={} repeat={} scale={} decode_ms={:.3f} convert_ms={:.3f} serialize_ms={:.3f} write_ms={:.3f}",
+                     sourceWidth, sourceHeight, repeatSize, proxyScale,
+                     std::chrono::duration<double, std::milli>(decodedAt-topologyStarted).count(),
+                     std::chrono::duration<double, std::milli>(convertedAt-decodedAt).count(),
+                     std::chrono::duration<double, std::milli>(serializedAt-convertedAt).count(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-serializedAt).count());
+    return replaced;
 }
 
 static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundWork,
@@ -4024,6 +4042,11 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         imageSamples > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) ||
         width > static_cast<uint32_t>(std::numeric_limits<int>::max()) / channels)
         return false;
+    if (decodedImage && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=dng_decode_layout width={} height={} channels={} bits={} compression={} planar={} strips={} tiles={}",
+                     width, height, channels, bits, compression, planar,
+                     stripOffsetsE ? stripOffsetsE->count : 0,
+                     tileOffsetsE ? tileOffsetsE->count : 0);
     auto setScalar = [&](const TiffEntry& entry, uint32_t value) {
         if (entry.type == TIFF_TYPE_SHORT)
             write16(data.data() + entry.valueOffset, static_cast<uint16_t>(value), little);
@@ -4190,6 +4213,57 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         return true;
     };
 
+    // Decode an uncompressed chunky strip straight into the destination. The
+    // generic path allocates two full images and unpacks non-byte-aligned
+    // samples one bit at a time.
+    if (!tileOffsetsE && !tileCountsE && stripOffsetsE && stripCountsE &&
+        stripOffsetsE->count == 1 && stripCountsE->count == 1 &&
+        compression == TIFF_COMPRESSION_NONE && planar == 1 &&
+        decodedImage) {
+        uint32_t offset = 0, byteCount = 0;
+        const uint64_t rowSamples = static_cast<uint64_t>(width) * channels;
+        const uint64_t rowBytes = (rowSamples * bits + 7) / 8;
+        if (!arrayValue(*stripOffsetsE, 0, offset) ||
+            !arrayValue(*stripCountsE, 0, byteCount) ||
+            offset > data.size() || byteCount > data.size() - offset ||
+            rowBytes > byteCount / height) return false;
+        decodedImage->samples.resize(imageSamples);
+        auto* destination = decodedImage->samples.data();
+        if (bits == 16) {
+            const uint16_t endianCheck = 1;
+            const bool hostLittle = *reinterpret_cast<const uint8_t*>(&endianCheck) == 1;
+            if (little == hostLittle) {
+                std::memcpy(destination, data.data() + offset,
+                            imageSamples * sizeof(uint16_t));
+            } else {
+                for (size_t i = 0; i < imageSamples; ++i)
+                    destination[i] = read16(
+                        data.data() + offset + i * sizeof(uint16_t), little);
+            }
+        } else if (bits == 8) {
+            const auto* source = data.data() + offset;
+            for (size_t i = 0; i < imageSamples; ++i)
+                destination[i] = source[i];
+        } else {
+            const uint32_t mask = (1u << bits) - 1;
+            for (uint32_t y = 0; y < height; ++y) {
+                const auto* source = data.data() + offset + y * rowBytes;
+                auto* row = destination + static_cast<size_t>(y) * rowSamples;
+                uint64_t bit = 0;
+                for (uint64_t x = 0; x < rowSamples; ++x, bit += bits) {
+                    const uint64_t byte = bit / 8;
+                    const uint32_t shift = static_cast<uint32_t>(bit % 8);
+                    uint32_t packed = static_cast<uint32_t>(source[byte]) << 16;
+                    if (byte + 1 < rowBytes)
+                        packed |= static_cast<uint32_t>(source[byte + 1]) << 8;
+                    if (byte + 2 < rowBytes)
+                        packed |= source[byte + 2];
+                    row[x] = static_cast<uint16_t>((packed >> (24 - bits - shift)) & mask);
+                }
+            }
+        }
+        return true;
+    }
     // A single chunky, uncompressed strip is already the canonical topology.
     if (!tileOffsetsE && !tileCountsE && stripOffsetsE && stripCountsE &&
         stripOffsetsE->count == 1 && stripCountsE->count == 1 &&
@@ -4356,14 +4430,49 @@ bool DNGDecoder::ensureUncompressed(std::vector<uint8_t>& data, bool backgroundW
     return decodeOrCanonicalizeDng(data, backgroundWork, nullptr);
 }
 
+uint32_t DNGDecoder::getLinearizationTableCount(const std::vector<uint8_t>& data) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    uint32_t rawIfd = 0;
+    bool foundRaw = false;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_PHOTOMETRIC || !entry.count ||
+            (entry.type != TIFF_TYPE_SHORT && entry.type != TIFF_TYPE_LONG)) continue;
+        const auto value = entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + entry.valueOffset, little)
+            : read32(data.data() + entry.valueOffset, little);
+        if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+            rawIfd = entry.ifdOffset;
+            foundRaw = true;
+            break;
+        }
+    }
+    if (!foundRaw) return 0;
+    for (const auto& entry : entries)
+        if (entry.tag == TIFF_TAG_LINEARIZATION_TABLE &&
+            entry.ifdOffset == rawIfd &&
+            entry.type == TIFF_TYPE_SHORT && entry.count > 1)
+            return entry.count;
+    return 0;
+}
+
 bool DNGDecoder::decodeImage(std::vector<uint8_t> data, DecodedDNGImage& image,
                              bool backgroundWork, bool applyLinearization) {
+    return decodeImageBorrowed(data, image, backgroundWork, applyLinearization);
+}
+
+bool DNGDecoder::decodeImageBorrowed(std::vector<uint8_t>& data,
+                                     DecodedDNGImage& image,
+                                     bool backgroundWork, bool applyLinearization) {
+    const bool profileDecode = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto decodeStarted = std::chrono::steady_clock::now();
     image = {};
     if (!getImageLayout(data, image.layout)) return false;
     getColorMetadata(data, image.metadata);
     getTimingMetadata(data, image.timestamp);
     getGainMaps(data, 2, image.opcodeList2);
     getGainMaps(data, 3, image.opcodeList3);
+    const auto metadataAt = std::chrono::steady_clock::now();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     std::vector<uint16_t> linearization;
@@ -4377,6 +4486,7 @@ bool DNGDecoder::decodeImage(std::vector<uint8_t> data, DecodedDNGImage& image,
             break;
         }
     if (!decodeOrCanonicalizeDng(data, backgroundWork, &image)) return false;
+    const auto pixelsAt = std::chrono::steady_clock::now();
     if (applyLinearization && !linearization.empty()) {
         for (uint16_t& sample : image.samples) {
             const size_t index = std::min<size_t>(sample, linearization.size() - 1);
@@ -4384,6 +4494,14 @@ bool DNGDecoder::decodeImage(std::vector<uint8_t> data, DecodedDNGImage& image,
         }
         image.linearizationApplied = true;
     }
+    if (profileDecode)
+        spdlog::info("GALLERY_PERF event=dng_decode_stage width={} height={} channels={} opcode2={} opcode3={} metadata_ms={:.3f} pixels_ms={:.3f} linearization_ms={:.3f}",
+                     image.layout.width, image.layout.height,
+                     image.layout.samplesPerPixel, image.opcodeList2.size(),
+                     image.opcodeList3.size(),
+                     std::chrono::duration<double, std::milli>(metadataAt-decodeStarted).count(),
+                     std::chrono::duration<double, std::milli>(pixelsAt-metadataAt).count(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-pixelsAt).count());
     return true;
 }
 
@@ -4690,17 +4808,38 @@ bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
     const size_t packedBytes = rowBytes * height;
     if (packedBytes > std::numeric_limits<uint32_t>::max()) return false;
     std::vector<uint8_t> packed(packedBytes, 0);
-    for (uint32_t y = 0; y < height; ++y) {
-        size_t bit = static_cast<size_t>(y) * rowBytes * 8;
-        for (uint32_t x = 0; x < width * channels; ++x) {
-            const size_t source = (static_cast<size_t>(y) * width * channels + x) * 2;
-            const uint16_t value = std::min<uint16_t>(
-                read16(data.data() + oldOffset + source, little),
-                static_cast<uint16_t>((uint32_t{1} << packedBits) - 1));
-            for (int b = static_cast<int>(packedBits) - 1; b >= 0; --b, ++bit)
-                packed[bit / 8] |= static_cast<uint8_t>(((value >> b) & 1u) << (7 - bit % 8));
+    const auto packRows = [&](uint32_t first, uint32_t last) {
+        for (uint32_t y = first; y < last; ++y) {
+            uint8_t* destination = packed.data() + static_cast<size_t>(y) * rowBytes;
+            uint32_t buffered = 0;
+            int bufferedBits = 0;
+            for (uint32_t x = 0; x < width * channels; ++x) {
+                const size_t source = (static_cast<size_t>(y) * width * channels + x) * 2;
+                const uint16_t value = std::min<uint16_t>(
+                    read16(data.data() + oldOffset + source, little),
+                    static_cast<uint16_t>((uint32_t{1} << packedBits) - 1));
+                buffered = (buffered << packedBits) | value;
+                bufferedBits += packedBits;
+                while (bufferedBits >= 8) {
+                    bufferedBits -= 8;
+                    *destination++ = static_cast<uint8_t>(buffered >> bufferedBits);
+                    buffered &= (uint32_t{1} << bufferedBits) - 1;
+                }
+            }
+            if (bufferedBits)
+                *destination = static_cast<uint8_t>(buffered << (8 - bufferedBits));
         }
-    }
+    };
+    const uint32_t workers = std::min<uint32_t>(
+        std::min<uint32_t>(8, utils::availableCpuWorkers()),
+        std::max<uint32_t>(1, height / 256));
+    std::vector<std::thread> packingThreads;
+    packingThreads.reserve(workers - 1);
+    for (uint32_t worker = 1; worker < workers; ++worker)
+        packingThreads.emplace_back(packRows, height * worker / workers,
+                                    height * (worker + 1) / workers);
+    packRows(0, height / workers);
+    for (auto& thread : packingThreads) thread.join();
     for (uint32_t i = 0; i < bitsE->count; ++i)
         write16(data.data() + bitsE->valueOffset + static_cast<size_t>(i) * 2,
                 static_cast<uint16_t>(packedBits), little);
@@ -4712,7 +4851,7 @@ bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
 }
 
 bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode mode,
-                                   uint32_t quantizationWhite) {
+                                   uint32_t quantizationWhite, bool highQuality) {
     if (mode == LogTransformMode::Disabled) return true;
     bool little = true;
     auto entries = findTiffEntries(data, little);
@@ -4783,7 +4922,7 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
         logSamples[i] = static_cast<uint16_t>(value);
     }
     utils::encodeLog60(logSamples, width, height, channels, black,
-                       sourceWhite, static_cast<uint16_t>(storedWhite));
+                       sourceWhite, static_cast<uint16_t>(storedWhite), highQuality);
     for (size_t i = 0; i < samples; ++i)
         write16(data.data() + offset + i * 2, logSamples[i], little);
     if (inputLinearization)
@@ -5208,6 +5347,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     const bool explicitBinning =
         settings.quadBayerOption == QuadBayerMode::Binning ||
         settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
+    bool partialEightBinApplied = false;
     // HQ-off higher-CFA output first combines each same-colour sensor block
     // into ordinary Bayer. Do that before gain-map traversal and demosaic so a
     // 108 MP Quad Bayer frame does not run either operation at 108 MP. The
@@ -5233,6 +5373,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         image.layout.width = binnedWidth;
         image.layout.height = binnedHeight;
         image.layout.cfaRepeatSize /= static_cast<int>(topologyScale);
+        partialEightBinApplied =
+            settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+            topologyScale == 2 && image.layout.cfaRepeatSize == 4;
         gainMapSourceScale = topologyScale;
         // A selected binning mode is part of the requested gallery rendering,
         // not a substitute for its proxy scale. Only the implicit fast
@@ -5384,17 +5527,23 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (image.layout.pixels == DNGPixelLayout::CFA) {
         int repeatSize = image.layout.cfaRepeatSize;
         const bool highQuality = settings.options & RENDER_OPT_HIGHER_CFA_HQ;
-        if (!highQuality && repeatSize > 2) {
+        if (!highQuality && repeatSize > 2 && !partialEightBinApplied) {
             std::vector<uint16_t> binned;
             uint32_t binnedWidth = 0, binnedHeight = 0;
+            const uint32_t factor =
+                settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+                        repeatSize == 8 ? 2u
+                                        : static_cast<uint32_t>(repeatSize / 2);
             utils::binHigherCFA(image.samples, binned, width, height,
-                                static_cast<uint32_t>(repeatSize / 2),
+                                factor,
                                 binnedWidth, binnedHeight, 0);
             if (binned.empty()) return false;
             image.samples = std::move(binned);
             width = binnedWidth;
             height = binnedHeight;
-            repeatSize = 2;
+            repeatSize /= static_cast<int>(factor);
+            partialEightBinApplied = repeatSize == 4 &&
+                settings.quadBayerOption == QuadBayerMode::Bin8x8To4x4;
             if (frame.clippingRequested) {
             clippingWidth = width;
             clippingHeight = height;
@@ -5435,7 +5584,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
             settings.logTransform != LogTransformMode::Disabled &&
             settings.logTransform != LogTransformMode::KeepInput;
-        const bool directFastPreview = !highQuality &&
+        const bool directFastPreview = !highQuality && repeatSize == 2 &&
             (!applyPreviewScale ||
              !(settings.options & (RENDER_OPT_REMOSAIC_TO_BAYER |
                                    RENDER_OPT_CROPPING))) &&
@@ -5467,9 +5616,16 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             return true;
         }
         if (!highQuality) {
-            if (repeatSize != 2 || !utils::demosaicBilinearBayer(
-                    image.samples.data(), rgb, width, height,
-                    image.layout.cfaPhase)) return false;
+            if (repeatSize == 2) {
+                if (!utils::demosaicBilinearBayer(
+                        image.samples.data(), rgb, width, height,
+                        image.layout.cfaPhase)) return false;
+            } else if (partialEightBinApplied) {
+                utils::demosaicCfaForOutput(
+                    image.samples, rgb, width, height, repeatSize,
+                    image.layout.cfaPhase, QuadBayerMode::Demosaic,
+                    channelBlack, false);
+            } else return false;
         } else {
             utils::demosaicCfaForOutput(
                 image.samples, rgb, width, height, repeatSize, image.layout.cfaPhase,
@@ -5614,7 +5770,8 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         encodedWhite = static_cast<uint16_t>(
             (uint32_t{1} << std::min(16, bits)) - 1);
         utils::encodeLog60(normalizedSamples, width, height, 3,
-                           {0.0, 0.0, 0.0, 0.0}, 65535.0, encodedWhite);
+                           {0.0, 0.0, 0.0, 0.0}, 65535.0, encodedWhite,
+                           settings.options & RENDER_OPT_LOG_HQ);
     }
     for (size_t i = 0; i < normalizedSamples.size(); ++i) {
         const uint16_t normalized = encodedWhite == 65535 ? normalizedSamples[i]
@@ -6105,6 +6262,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool debugGainMap,
                               int cfaRepeatSizeOverride,
                               std::optional<std::array<uint8_t, 4>> cfaPhaseOverride) {
+    const bool profileBake = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto bakeStarted = std::chrono::steady_clock::now();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -6279,8 +6438,22 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                          : std::array<uint8_t, 4>{0, 1, 1, 2};
     if (sourceIsRgb) maps = collapseCfaGainMapsForRgb(maps, cfaPhase);
 
+    const auto predecodeAt = std::chrono::steady_clock::now();
     DecodedDNGImage decodedImage;
-    if (!decodeImage(data, decodedImage)) {
+    // Canonical single strips are read-only during decode. Borrow the DNG
+    // vector in that case instead of copying the entire 16-bit RGB container.
+    // Other layouts retain the copy because canonicalization can move IFDs
+    // and invalidate the entry offsets collected above.
+    const auto planarE = find(TIFF_TAG_PLANAR_CONFIGURATION);
+    const bool borrowCanonicalStrip =
+        compression == TIFF_COMPRESSION_NONE &&
+        find(TIFF_TAG_ROWS_PER_STRIP) &&
+        !find(TIFF_TAG_TILE_OFFSETS) && !find(TIFF_TAG_TILE_BYTE_COUNTS) &&
+        (!planarE || scalar(*planarE) == 1);
+    const bool decoded = borrowCanonicalStrip
+        ? decodeImageBorrowed(data, decodedImage, false, true)
+        : decodeImage(data, decodedImage);
+    if (!decoded) {
         spdlog::warn("Could not decode DNG image for gain-map bake");
         return false;
     }
@@ -6289,6 +6462,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         spdlog::warn("Decoded DNG layout mismatch during gain-map bake");
         return false;
     }
+    const auto decodedAt = std::chrono::steady_clock::now();
     std::vector<uint16_t>& pixels = decodedImage.samples;
     if (decodedImage.linearizationApplied && linearizationE)
         write16(data.data() + linearizationE->entryOffset,
@@ -6448,28 +6622,47 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         }
         return gain;
     };
-    for (uint32_t y = 0; y < height; ++y) for (uint32_t x = 0; x < width; ++x)
-        for (uint32_t channel = 0; channel < imageChannels; ++channel) {
-        float gain = effectiveGain(x, y, channel);
-        const size_t index = (static_cast<size_t>(y) * width + x) * imageChannels + channel;
-        const uint32_t levelChannel = sourceIsRgb ? channel : static_cast<uint32_t>(
-            gainMapPhaseChannel(x, y, 0, 0, phaseGroup));
-        pixels[index] = bakeLinearGainSample(
-            pixels[index], gain, black[levelChannel], white[levelChannel],
-            destinationBlack[levelChannel], destinationWhite, debugGainMap);
-    }
+    auto bakeRows = [&](uint32_t first, uint32_t last) {
+        for (uint32_t y = first; y < last; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                for (uint32_t channel = 0; channel < imageChannels; ++channel) {
+                    const float gain = effectiveGain(x, y, channel);
+                    const size_t index =
+                        (static_cast<size_t>(y) * width + x) * imageChannels + channel;
+                    const uint32_t levelChannel = sourceIsRgb ? channel
+                        : static_cast<uint32_t>(gainMapPhaseChannel(
+                            x, y, 0, 0, phaseGroup));
+                    pixels[index] = bakeLinearGainSample(
+                        pixels[index], gain, black[levelChannel], white[levelChannel],
+                        destinationBlack[levelChannel], destinationWhite, debugGainMap);
+                }
+    };
+    const uint32_t workers = static_cast<uint64_t>(width) * height >= 1000000
+        ? std::min<uint32_t>(16, std::min<uint32_t>(utils::availableCpuWorkers(),
+              std::max<uint32_t>(1, height / 128)))
+        : 1;
+    std::vector<std::thread> bakeThreads;
+    bakeThreads.reserve(workers - 1);
+    for (uint32_t worker = 1; worker < workers; ++worker)
+        bakeThreads.emplace_back(bakeRows, height * worker / workers,
+                                 height * (worker + 1) / workers);
+    bakeRows(0, height / workers);
+    for (auto& thread : bakeThreads) thread.join();
+    const auto bakedAt = std::chrono::steady_clock::now();
 
     const uint32_t newBytes = width * height * imageChannels * 2;
     std::vector<uint8_t> replacement(newBytes);
-    for (size_t i = 0; i < pixels.size(); ++i) {
-        if (little) {
-            replacement[i * 2] = pixels[i] & 0xff;
-            replacement[i * 2 + 1] = pixels[i] >> 8;
-        } else {
-            replacement[i * 2] = pixels[i] >> 8;
-            replacement[i * 2 + 1] = pixels[i] & 0xff;
+    const uint16_t endianCheck = 1;
+    const bool hostLittle = *reinterpret_cast<const uint8_t*>(&endianCheck) == 1;
+    if (little == hostLittle) {
+        std::memcpy(replacement.data(), pixels.data(), newBytes);
+    } else {
+        for (size_t i = 0; i < pixels.size(); ++i) {
+            replacement[i * 2] = little ? pixels[i] & 0xff : pixels[i] >> 8;
+            replacement[i * 2 + 1] = little ? pixels[i] >> 8 : pixels[i] & 0xff;
         }
     }
+    const auto serializedAt = std::chrono::steady_clock::now();
     auto writeScalar = [&](const TiffEntry& e, uint32_t value, uint32_t index = 0) {
         const size_t pos = e.valueOffset + index * (e.type == TIFF_TYPE_SHORT ? 2 : 4);
         if (e.type == TIFF_TYPE_SHORT) write16(data.data() + pos, static_cast<uint16_t>(value), little);
@@ -6531,7 +6724,17 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         !updateMetadata(data, &*updatedBaseline,
                         updatedNeutral ? &*updatedNeutral : nullptr))
         return false;
-    return replaceTiffStrip(data, stripOffset, stripBytes, replacement, little);
+    const bool replaced = replaceTiffStrip(data, stripOffset, stripBytes, replacement, little);
+    if (profileBake)
+        spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
+                     width, height, imageChannels, maps.size(), colorOnly,
+                     gridColorSeparated,
+                     std::chrono::duration<double, std::milli>(predecodeAt-bakeStarted).count(),
+                     std::chrono::duration<double, std::milli>(decodedAt-predecodeAt).count(),
+                     std::chrono::duration<double, std::milli>(bakedAt-decodedAt).count(),
+                     std::chrono::duration<double, std::milli>(serializedAt-bakedAt).count(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-serializedAt).count());
+    return replaced;
 }
 
 bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGainMaps,

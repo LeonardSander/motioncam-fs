@@ -6,6 +6,7 @@
 #include <VirtualFileSystemImpl.h>
 #include <memory>
 #include <array>
+#include <condition_variable>
 #include <map>
 #include <shared_mutex>
 #include <unordered_map>
@@ -58,9 +59,14 @@ private:
     DNGFrameMetadata resolvedFrameMetadata(
         size_t frameIndex, DNGFrameMetadata metadata) const;
     PreparedFrame prepareFrame(size_t frameIndex, bool canonicalizeImage = true);
+    struct FrameStageTiming {
+        double loadMs = 0;
+        double processMs = 0;
+        double finalizeMs = 0;
+    };
     std::vector<uint8_t> transformFrame(
         size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
-        bool nativeResolution = false);
+        bool nativeResolution = false, FrameStageTiming* timing = nullptr);
 
 private:
     const std::string mSrcPath;
@@ -94,6 +100,8 @@ private:
     std::map<Timestamp, double> mIsoValues;
     mutable std::mutex mPayloadHashMutex;
     mutable std::mutex mMaterializeMutex;
+    std::condition_variable mMaterializeAvailable;
+    int mActiveMaterializeUnits = 0;
     mutable std::shared_mutex mRenderMutex;
     std::unordered_map<size_t, uint64_t> mPayloadHashes;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;

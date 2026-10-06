@@ -1109,6 +1109,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     std::string cropTarget,
     std::string levels,
     LogTransformMode logTransform,
+    bool logHq,
     QuadBayerMode quadBayerOption,
     bool includeOpcode)
 {
@@ -1403,13 +1404,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                     std::array<float, 4> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
                     for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
                         if (!disableDither) {
-                            uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
-                            // Apply multiple hash iterations to improve randomness
-                            seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
-                            // Generate triangular dither: sum of two uniform random values
-                            float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
-                            // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
-                            dither[i] = (r1 + r2 - 1.0f) * 0.5f;
+                            dither[i] = logTriangularDither(
+                                x + (i & 1), y + (i >> 1), logHq);
                         } else {
                             dither[i] = 0.0f;
                         }
@@ -1468,13 +1464,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                     std::array<float, 16> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
                     for (int i = 0; i < 16; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
                         if (!disableDither) {
-                            uint32_t seed = ((x + (i & 1)) * 1664525 + (y + (i >> 1)) * 1013904223) ^ 0xdeadbeef; // Create unique seed for each pixel using position and pixel index
-                            // Apply multiple hash iterations to improve randomness
-                            seed ^= seed >> 16; seed *= 0x85ebca6b; seed ^= seed >> 13; seed *= 0xc2b2ae35; seed ^= seed >> 16;                    
-                            // Generate triangular dither: sum of two uniform random values
-                            float r1 = (seed & 0xffff) / 65535.0f; float r2 = ((seed >> 16) & 0xffff) / 65535.0f;                    
-                            // Triangular distribution: r1 + r2 - 1, range [-1, 1] Scale down for subtle dithering appropriate for log encoding
-                            dither[i] = (r1 + r2 - 1.0f) * 0.5f;
+                            dither[i] = logTriangularDither(
+                                x + (i & 1), y + (i >> 1), logHq);
                         } else {
                             dither[i] = 0.0f;
                         }
@@ -1719,6 +1710,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         cropTarget,
         settings.levels,
         effectiveLogTransform,
+        settings.options & RENDER_OPT_LOG_HQ,
         settings.quadBayerOption,
         true // includeOpcode
     );

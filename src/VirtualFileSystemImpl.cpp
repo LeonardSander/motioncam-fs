@@ -127,8 +127,11 @@ size_t projectedBadPixelOpcodeSize(const CalibrationData& calibration,
 void processDngPixels(std::vector<uint8_t>& dng,
         const RenderSettings& settings,
         const DngPixelPipelineOptions& options) {
+    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto pipelineStarted = std::chrono::steady_clock::now();
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
+    const int scale = options.preScaledProxy ? 1 : options.outputScale;
     // All three source adapters converge here after native and sidecar maps
     // have been attached. Do not carry no-op gain metadata into output DNGs.
     if (!DNGDecoder::discardNeutralGainMaps(dng))
@@ -160,13 +163,13 @@ void processDngPixels(std::vector<uint8_t>& dng,
         const float white = decoded.metadata.whiteLevelCount
             ? decoded.metadata.whiteLevel[0] : 65535.0f;
         const bool streamingKeepsCfa = settings.streamingPreview &&
-            options.outputScale == 1 &&
+            scale == 1 &&
             !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
             !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP);
         const bool willDemosaic = demosaics(settings.quadBayerOption) &&
             !streamingKeepsCfa &&
             (options.cfaRepeatSize > 2 || settings.cameraNativeStaging ||
-             options.outputScale > 1);
+             scale > 1);
         badPixelsWillDemosaic = willDemosaic;
         markedSourceWidth = decoded.layout.width;
         markedSourceHeight = decoded.layout.height;
@@ -221,20 +224,22 @@ void processDngPixels(std::vector<uint8_t>& dng,
     const bool bakeGain = (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
         (hasOpcode2 || (hasOpcode3Luma && !colorOnly) || debugGainMap);
     QuadBayerMode mode = settings.quadBayerOption;
-    if (settings.streamingPreview && options.outputScale == 1 &&
+    if (settings.streamingPreview && scale == 1 &&
         !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) && !debugGainMap &&
         demosaics(mode))
         mode = QuadBayerMode::CorrectQBCFAMetadata;
     const bool remosaic = settings.options & RENDER_OPT_REMOSAIC_TO_BAYER;
     const bool topologyBeforeBake = bakeGain &&
-        (options.outputScale > 1 ||
+        (scale > 1 ||
          (!options.hasCfa && remosaic) ||
          (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
+    const auto setupFinished = std::chrono::steady_clock::now();
     if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
             dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
-            options.outputScale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
+            scale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
             false, true))
         throw std::runtime_error("Unsupported pre-gain topology conversion for " + source);
+    const auto preTopologyFinished = std::chrono::steady_clock::now();
     const bool normalizeGainMaps = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     const bool optimizeGainMaps = settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
     if ((hasOpcode2 || (normalizeGainMaps && hasOpcode3Luma)) && !bakeGain &&
@@ -247,19 +252,22 @@ void processDngPixels(std::vector<uint8_t>& dng,
             debugGainMap,
             topologyBeforeBake ? 2 : options.cfaRepeatSize, options.cfaPhase))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
+    const auto gainFinished = std::chrono::steady_clock::now();
     if (!topologyBeforeBake &&
         (options.cfaRepeatSize > 2 ||
          (options.hasCfa && settings.cameraNativeStaging) ||
-         options.outputScale > 1 || remosaic) &&
+         scale > 1 || remosaic) &&
         !DNGDecoder::processHigherCFA(
             dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
-            options.outputScale, settings.options & RENDER_OPT_HIGHER_CFA_HQ))
+            scale, settings.options & RENDER_OPT_HIGHER_CFA_HQ))
         throw std::runtime_error("Unsupported CFA/RGB topology conversion for " + source);
-    if (topologyBeforeBake && options.hasCfa && options.outputScale > 1 &&
+    if (topologyBeforeBake && options.hasCfa && scale > 1 &&
+        (settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
         demosaics(mode) && !remosaic &&
         !DNGDecoder::processHigherCFA(
             dng, 2, options.cfaPhase, mode, false, 1, false))
         throw std::runtime_error("Unsupported post-gain demosaic for " + source);
+    const auto postTopologyFinished = std::chrono::steady_clock::now();
     bool applyLog = settings.logTransform != LogTransformMode::KeepInput || bakeGain;
     if (options.linearInputBitDepth) {
         uint32_t outputBits = 1;
@@ -281,7 +289,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
         applyLog &&
         !DNGDecoder::applyLogTransform(
-            dng, settings.logTransform, options.inputQuantizationWhite))
+            dng, settings.logTransform, options.inputQuantizationWhite,
+            settings.options & RENDER_OPT_LOG_HQ))
         throw std::runtime_error("Could not apply log transform to " + source);
     if (badPixelTreatment == BadPixelTreatment::MarkPixels &&
         badPixelsWillDemosaic && !markedPixels.empty()) {
@@ -305,6 +314,14 @@ void processDngPixels(std::vector<uint8_t>& dng,
         if (!DNGDecoder::encodeImage(dng, marked))
             throw std::runtime_error("Could not encode marked DNG: " + source);
     }
+    if (profile)
+        spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
+                     source, options.preScaledProxy, options.outputScale,
+                     std::chrono::duration<double, std::milli>(setupFinished-pipelineStarted).count(),
+                     std::chrono::duration<double, std::milli>(preTopologyFinished-setupFinished).count(),
+                     std::chrono::duration<double, std::milli>(gainFinished-preTopologyFinished).count(),
+                     std::chrono::duration<double, std::milli>(postTopologyFinished-gainFinished).count(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-postTopologyFinished).count());
 }
 
 bool decodeProcessedDngPreview(
@@ -326,6 +343,18 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
                  const DngFinalizeOptions& options) {
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
+    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    auto stageStarted = std::chrono::steady_clock::now();
+    auto profileStage = [&](const char* stage) {
+        if (profile) {
+            const auto now = std::chrono::steady_clock::now();
+            spdlog::info("GALLERY_PERF event=dng_finalize_stage source={} stage={} elapsed_ms={:.3f} bytes={}",
+                         source, stage,
+                         std::chrono::duration<double, std::milli>(now-stageStarted).count(),
+                         dng.size());
+            stageStarted = now;
+        }
+    };
     const double exposureOffset = configuredExposureOffset(settings);
     if (exposureOffset != 0.0) {
         DNGFrameMetadata metadata;
@@ -335,16 +364,21 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
         if (!DNGDecoder::updateMetadata(dng, &baselineExposure, nullptr))
             throw std::runtime_error("Could not update " + source + " exposure metadata");
     }
+    profileStage("exposure_metadata");
     if (options.isoOverlay &&
         !DNGDecoder::bakeIsoOverlay(dng, *options.isoOverlay))
         throw std::runtime_error("Could not bake ISO overlay into " + source + " DNG");
+    profileStage("iso_overlay");
     if (options.writeTiming &&
         !DNGDecoder::setTimingMetadata(dng, options.frameRate, options.timestamp))
         throw std::runtime_error("Could not update " + source + " DNG timing metadata");
+    profileStage("timing_metadata");
     if (options.packToWhiteLevel && !DNGDecoder::packUncompressedToWhiteLevel(dng))
         throw std::runtime_error("Could not pack " + source + " DNG to its sensor bit depth");
+    profileStage("bit_packing");
     if (options.gyroflowLensProfile)
         applyGyroflowLensProfile(dng, *options.gyroflowLensProfile);
+    profileStage("lens_metadata");
     if (!options.compression) return;
 
     const bool compressed = isLossyJpegDct(settings.jxlDistance)
@@ -354,6 +388,7 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
             : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance);
     if (!compressed)
         throw std::runtime_error("Could not compress " + source + " DNG");
+    profileStage("compression");
 }
 
 namespace {

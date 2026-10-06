@@ -196,6 +196,7 @@ preprocessData(
     std::string cropTarget,
     std::string levels,
     LogTransformMode logTransform,
+    bool logHq,
     QuadBayerMode quadBayerOption,
     bool includeOpcode);
 
@@ -264,7 +265,12 @@ void encodeLog60(
     uint32_t channels,
     const std::array<double, 4>& blackLevel,
     double whiteLevel,
-    uint16_t encodedWhite);
+    uint16_t encodedWhite,
+    bool highQuality = false);
+
+// Deterministic triangular dither in output-code units. HQ preserves the
+// original per-pixel hash; the fast path uses a cheaper spatial hash.
+float logTriangularDither(uint32_t x, uint32_t y, bool highQuality);
 
 // Averages each 2x2 same-colour block of a 4x4 quad-Bayer image into one
 // sample, producing an ordinary 2x2 Bayer mosaic at half resolution.

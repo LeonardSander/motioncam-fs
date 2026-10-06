@@ -102,6 +102,8 @@ Place `<source_name>.dcp` beside the clip, or set `"dcp": "profile.dcp"` in its 
   
 A logarithmic transfer curve is applied to the image data with dithering. The inverse of the applied transfer curve is contained in a **Linearization Table** in DNG metadata to map the pixel values into a linear distribution with 16b precision. This efficient redistribution of pixel values allows the output bitdepth to be reduced while staying visually lossless with slightly increased noise. 10b footage can be reduced to 8b and 12/14b to 10b in a safe manner. Davinci only supports 8b and above for cfa DNGs. 
 
+The adjacent **HQ** checkbox selects the original per-pixel triangular dither hash. With HQ off, the log curve still uses triangular dither with a cheaper spatial hash. The checkbox is available only while the log curve is enabled.
+
 - **Proxy / Binning Mode**
   
 Input resolution is being reduced by discarding pixel values to increase playback performance or by box-avergaing them to smooth the image if HQ is enabled. CFA sources are demosaiced in advance for the latter option. To reduce the resulting RGB pixel values to bayer CFA Remosaic can be enabled for better performance.
@@ -184,6 +186,24 @@ uses the session's draft scale with HQ off; omit it for full-resolution playback
 seeks; omit it to include paused thumbnail backfill.
 The performance runner polls presentation every 1 ms instead of pacing it to
 the clip frame rate, so its playback samples measure gallery throughput.
+Set `MOTIONCAM_GALLERY_PERF_MODE=mounted` to run the mounted DNG sequence
+benchmark instead of gallery playback. It reads frames 0, 1, and 2, seeks to
+the midpoint, then reads the next frame for each clip. Its
+`mounted_sequence_sample` log records full-file FUSE read time and DNG preview
+decode time separately. Mounted reads run on a worker thread so the UI event
+loop remains available to service mounts. Each invocation runs only one mode;
+mounted mode also disables thumbnail generation.
+Set `MOTIONCAM_GALLERY_PERF_PARALLEL_READS=1` in mounted mode to add four
+simultaneous cold reads per clip; the `mounted_parallel_sample` events expose
+queueing that sequential reads cannot measure.
+Set `MOTIONCAM_GALLERY_PERF_PARALLEL_READ_COUNT=12` to test a larger read-ahead
+burst; the count is capped at 16 and applies only in mounted mode.
+With `MOTIONCAM_GALLERY_PERF_PROFILE=1`, `mounted_frame_stage` reports the same
+queue, load, DNG generation, shared pixel processing, finalization, and total
+times for MCRAW, DirectLog, and DNG sources. `source_path` separates clips of
+the same source type.
+Set `MOTIONCAM_GALLERY_PERF_DUMP_DNG=/tmp/mounted-first.dng` to retain the first
+mounted frame for inspection of its TIFF tags.
 `MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM=1` measures the same run without retaining
 raw samples or drawing the histogram.
 `MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS=1` hides the thumbnail row and disables
