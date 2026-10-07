@@ -1,3 +1,4 @@
+
 # MotionCam Fuse – Virtual File System
 
 > **Work in Progress**
@@ -6,7 +7,7 @@
 
 ---
 
-<img width="1531" height="724" alt="image" src="https://github.com/user-attachments/assets/880479b3-142f-4a54-9ce1-bf63b59b6c5c" />
+<img width="2621" height="1396" alt="ui" src="https://github.com/user-attachments/assets/3fed84d2-77e2-4380-80f3-2e7443df2947" />
 
 ---
 
