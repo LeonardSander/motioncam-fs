@@ -517,7 +517,8 @@ VirtualFileSystemImpl_DirectLog::frameMetadata(int frameNumber) const {
 std::vector<GainMap> VirtualFileSystemImpl_DirectLog::loadSidecarGainMaps(
         int frameNumber, const char* field) const {
     return frameNumber < 0 ? std::vector<GainMap>{} :
-        vfs::loadSidecarGainMaps(mSidecarMetadata, static_cast<size_t>(frameNumber), field);
+        vfs::loadSidecarGainMaps(mSidecarMetadata, static_cast<size_t>(frameNumber),
+                                field, mWidth, mHeight);
 }
 
 VirtualFileSystemImpl_DirectLog::PreparedSidecarGainMaps

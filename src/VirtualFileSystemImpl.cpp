@@ -611,7 +611,8 @@ std::optional<int> readDesktopIni(
 }
 
 std::vector<GainMap> loadSidecarGainMaps(
-        const nlohmann::json& sidecar, size_t frameNumber, const char* field) {
+        const nlohmann::json& sidecar, size_t frameNumber, const char* field,
+        uint32_t frameWidth, uint32_t frameHeight) {
     std::vector<GainMap> maps;
     const nlohmann::json* references = nullptr;
     const nlohmann::json* formats = nullptr;
@@ -666,8 +667,19 @@ std::vector<GainMap> loadSidecarGainMaps(
         map.left = format.at("left").get<uint32_t>();
         map.bottom = format.at("bottom").get<uint32_t>();
         map.right = format.at("right").get<uint32_t>();
-        map.coordinateWidth = format.value("coordinateWidth", map.right);
-        map.coordinateHeight = format.value("coordinateHeight", map.bottom);
+        if (format.contains("coordinateWidth") &&
+            format.contains("coordinateHeight")) {
+            map.coordinateWidth = format.at("coordinateWidth").get<uint32_t>();
+            map.coordinateHeight = format.at("coordinateHeight").get<uint32_t>();
+        } else if (frameWidth && frameHeight) {
+            const auto extent = inferLegacyGainMapSensorResolution(
+                frameWidth, frameHeight, map.right, map.bottom);
+            map.coordinateWidth = extent[0];
+            map.coordinateHeight = extent[1];
+        } else {
+            map.coordinateWidth = map.right;
+            map.coordinateHeight = map.bottom;
+        }
         map.plane = format.at("plane").get<uint32_t>();
         map.planes = format.at("planes").get<uint32_t>();
         map.rowPitch = format.at("rowPitch").get<uint32_t>();
@@ -1514,6 +1526,21 @@ std::array<int, 2> manualVignetteSensorResolution(
                     static_cast<int>(candidate.image.opcodeList2.front().coordinateHeight)};
     }
     return {0, 0};
+}
+
+std::array<int, 2> inferLegacyGainMapSensorResolution(
+        uint32_t frameWidth, uint32_t frameHeight,
+        uint32_t mapRight, uint32_t mapBottom) {
+    // Same smallest-fitting sensor catalog used by legacy DirectLog maps.
+    constexpr std::array<std::array<int, 2>, 5> sensors{{
+        {2048, 1536}, {4096, 3072}, {4608, 3456},
+        {8192, 6144}, {9248, 6944}}};
+    const auto width = std::max(frameWidth, mapRight);
+    const auto height = std::max(frameHeight, mapBottom);
+    for (const auto& sensor : sensors)
+        if (sensor[0] >= width && sensor[1] >= height)
+            return sensor;
+    return {static_cast<int>(frameWidth), static_cast<int>(frameHeight)};
 }
 
 boost::filesystem::path gyroflowSidecarPath(const std::string& sourcePath) {

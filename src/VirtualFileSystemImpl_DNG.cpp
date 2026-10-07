@@ -785,15 +785,38 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
             : std::nullopt;
     if (!DNGDecoder::repairGainMapCfaPhase(result.dng, gainMapOrderOverride))
         throw std::runtime_error("Could not reconcile DNG gain maps with its CFA phase");
-    // Camera Native finalization expects the original opcode geometry and
-    // performs its own sensor-aware processing. Resample therefore falls back
-    // to Uncropped for its staging DNGs.
-    if (!mConfig.cameraNativeStaging &&
-        mConfig.vignetteCorrection == VignetteCorrectionMode::Resample) {
+    // Preview and output baking both need the sensor window before sampling.
+    // Camera Native retained maps keep their uncropped opcode geometry.
+    if (mConfig.vignetteCorrection == VignetteCorrectionMode::Bake ||
+        (!mConfig.cameraNativeStaging &&
+         mConfig.vignetteCorrection == VignetteCorrectionMode::Resample)) {
         const auto manualResolution =
             vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
-        const auto sensorResolution = mCalibration && mCalibration->hasFullSensorResolution
+        auto sensorResolution = mCalibration && mCalibration->hasFullSensorResolution
             ? mCalibration->fullSensorResolution : manualResolution;
+        const uint32_t width = sourceLayout.width ? sourceLayout.width : mWidth;
+        const uint32_t height = sourceLayout.height ? sourceLayout.height : mHeight;
+        if (!(mCalibration && mCalibration->hasFullSensorResolution) &&
+            (sensorResolution[0] < static_cast<int>(width) ||
+             sensorResolution[1] < static_cast<int>(height)))
+            sensorResolution = {0, 0};
+        if (sensorResolution[0] <= 0 && sensorResolution[1] <= 0 &&
+            static_cast<uint64_t>(width) * 3 > static_cast<uint64_t>(height) * 4) {
+            std::vector<GainMap> maps;
+            DNGDecoder::getGainMaps(result.dng, 2, maps);
+            std::vector<GainMap> deferred;
+            if (DNGDecoder::getGainMaps(result.dng, 3, deferred))
+                maps.insert(maps.end(), deferred.begin(), deferred.end());
+            if (!maps.empty()) {
+                uint32_t right = width, bottom = height;
+                for (const auto& map : maps) {
+                    right = std::max(right, map.right);
+                    bottom = std::max(bottom, map.bottom);
+                }
+                sensorResolution = vfs::inferLegacyGainMapSensorResolution(
+                    width, height, right, bottom);
+            }
+        }
         if (sensorResolution[0] > 0 && sensorResolution[1] > 0 &&
             !DNGDecoder::cropGainMapsToFullSensor(
                 result.dng, sensorResolution[0], sensorResolution[1]))

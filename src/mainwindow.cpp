@@ -422,11 +422,44 @@ namespace {
             std::array<float, 9> inverted{};
             std::array<float, 9> forwardTransform{};
             const std::array<float, 9>* matrix = nullptr;
-            if (ignoreForwardMat) {
+            if (gainMapOnlyDebug) {
+                // Display the map through the camera color matrix without
+                // channel scaling from AsShotNeutral.
                 auto transformMetadata = metadata;
-                if (gainMapOnlyDebug)
-                    transformMetadata.asShotNeutral = {1.0f, 1.0f, 1.0f};
-                if (!colorMatrixToD50(transformMetadata, inverted,
+                transformMetadata.asShotNeutral = {1.0f, 1.0f, 1.0f};
+                if (!ignoreForwardMat &&
+                    (metadata.hasColorMatrix1 || metadata.hasColorMatrix2)) {
+                    std::array<float, 9> unused{};
+                    colorMatrixToD50(metadata, unused, &firstIlluminantWeight);
+                }
+                if (ignoreForwardMat) {
+                    if (colorMatrixToD50(transformMetadata, inverted,
+                                         &firstIlluminantWeight))
+                        matrix = &inverted;
+                } else {
+                    const auto first = metadata.hasForwardMatrix1
+                        ? metadata.forwardMatrix1 : metadata.forwardMatrix2;
+                    const auto second = metadata.hasForwardMatrix2
+                        ? metadata.forwardMatrix2 : first;
+                    const auto calibration = motioncam::gallery::interpolateMatrix(
+                        motioncam::gallery::cameraCalibrationMatrix(metadata, true),
+                        motioncam::gallery::cameraCalibrationMatrix(metadata, false),
+                        firstIlluminantWeight);
+                    std::array<float, 9> inverseCalibration{};
+                    if (motioncam::gallery::invertMatrix(calibration, inverseCalibration)) {
+                        const auto forward = motioncam::gallery::interpolateMatrix(
+                            first, second, firstIlluminantWeight);
+                        for (int row = 0; row < 3; ++row)
+                            for (int column = 0; column < 3; ++column)
+                                for (int inner = 0; inner < 3; ++inner)
+                                    forwardTransform[row * 3 + column] +=
+                                        forward[row * 3 + inner] *
+                                        inverseCalibration[inner * 3 + column];
+                        matrix = &forwardTransform;
+                    }
+                }
+            } else if (ignoreForwardMat) {
+                if (!colorMatrixToD50(metadata, inverted,
                                       &firstIlluminantWeight)) {
                     spdlog::warn("Preview ColorMatrix transform is invalid; using neutral display transform");
                     matrix = nullptr;
@@ -457,12 +490,13 @@ namespace {
             if (matrix) for (int row = 0; row < 3; ++row) {
                 for (int column = 0; column < 3; ++column) {
                     cameraToXyz[row * 3 + column] = (*matrix)[row * 3 + column] *
-                        (ignoreForwardMat ? 1.0f : 1.0f / std::max(exposure, 1e-8f));
+                        (ignoreForwardMat || gainMapOnlyDebug ? 1.0f
+                            : 1.0f / std::max(exposure, 1e-8f));
                     for (int xyz = 0; xyz < 3; ++xyz)
                         cameraToDisplay[row * 3 + column] +=
                             xyzToSrgbD50[row * 3 + xyz] *
                             (*matrix)[xyz * 3 + column] *
-                            (ignoreForwardMat ? exposure : 1.0f);
+                            (ignoreForwardMat || gainMapOnlyDebug ? exposure : 1.0f);
                 }
             }
         }
@@ -2175,7 +2209,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
         // First row: Runtime, Resolution, Data Type, Levels
         auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
-                                 "<span style='color: #888888;'> | Resolution: %2x%3 | Data Type: %4 | Levels: %5</span>")
+                                 "<span style='color: #888888;'> | Resolution: %2x%3 | Type: %4 | Levels: %5</span>")
                                 .arg(runtimeStr)
                                 .arg(info.width)
                                 .arg(info.height)
@@ -2684,7 +2718,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     const auto decodeStarted = std::chrono::steady_clock::now();
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
-                        gainMapOnlyDebug(settings) && preview.gainMapApplied);
+                        gainMapOnlyDebug(settings));
                     const bool collectThumbnail = thumbnailCollectionEnabled->load();
                     const int rawOrientation = !isSequence
                         ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
@@ -2959,7 +2993,7 @@ void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sour
                     if(delivered||mGalleryGeneration.load()!=generation)return;
                     applyGalleryColorTransform(preview.rgb, preview.metadata,
                                                settings.ignoreForwardMat,
-                                               gainMapOnlyDebug(settings) && preview.gainMapApplied);
+                                               gainMapOnlyDebug(settings));
                     auto& rgb=preview.rgb;const uint32_t width=preview.width,height=preview.height;
                     delivered=true;
                     const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),static_cast<qsizetype>(rgb.size()));
@@ -5310,7 +5344,7 @@ void MainWindow::updateFpsLabels() {
             }
 
             auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
-                                     "<span style='color: #888888;'> | Resolution: %2x%3 | Data Type: %4 | Levels: %5</span>")
+                                     "<span style='color: #888888;'> | Resolution: %2x%3 | Type: %4 | Levels: %5</span>")
                                     .arg(runtimeStr)
                                     .arg(info.width)
                                     .arg(info.height)
@@ -5741,7 +5775,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
                     if (cancelled->load() || !image.isNull()) return;
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
-                        gainMapOnlyDebug(settings) && preview.gainMapApplied);
+                        gainMapOnlyDebug(settings));
                     const int orientation = settings.orientation >= 0
                         ? settings.orientation : preview.metadata.orientation;
                     image = previewImage(preview.rgb, preview.width, preview.height,

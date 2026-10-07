@@ -232,6 +232,18 @@ private:
 } // namespace
 
 int main() {
+    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(1920, 1080, 1920, 1080) ==
+            std::array<int, 2>{2048, 1536}));
+    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 3840, 2160) ==
+            std::array<int, 2>{4096, 3072}));
+    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 4600, 3400) ==
+            std::array<int, 2>{4608, 3456}));
+    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(4400, 2500, 4400, 2500) ==
+            std::array<int, 2>{4608, 3456}));
+    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(7680, 4320, 7680, 4320) ==
+            std::array<int, 2>{8192, 6144}));
+    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(9000, 6000, 9000, 6000) ==
+            std::array<int, 2>{9248, 6944}));
     motioncam::RenderSettings exposureSettings;
     exposureSettings.cameraModel.clear();
     exposureSettings.exposureCompensation = "0.8";

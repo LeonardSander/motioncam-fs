@@ -276,6 +276,9 @@ void mergeManualDngMetadata(DNGFrameMetadata& metadata,
                             bool applyJsonValues = true);
 std::array<int, 2> manualVignetteSensorResolution(
     const ManualVignetteSidecars& sidecars);
+std::array<int, 2> inferLegacyGainMapSensorResolution(
+    uint32_t frameWidth, uint32_t frameHeight,
+    uint32_t mapRight, uint32_t mapBottom);
 size_t projectedDcpMetadataSize(const ManualVignetteSidecars& sidecars);
 
 void processDngPixels(std::vector<uint8_t>& dng,
@@ -316,7 +319,8 @@ std::optional<int> readDesktopIni(
     const std::function<void(size_t, int)>& result);
 
 std::vector<GainMap> loadSidecarGainMaps(
-    const nlohmann::json& sidecar, size_t frameNumber, const char* field);
+    const nlohmann::json& sidecar, size_t frameNumber, const char* field,
+    uint32_t frameWidth = 0, uint32_t frameHeight = 0);
 
 bool hasSidecarGainMaps(
     const nlohmann::json& sidecar, size_t frameNumber, const char* field);

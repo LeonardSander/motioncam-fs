@@ -88,6 +88,35 @@ std::string effectiveCfaArrangement(
     return sensorArrangement;
 }
 
+void resolveOverriddenGainMapSensor(
+        motioncam::CameraFrameMetadata& frame,
+        const std::optional<motioncam::CalibrationData>& calibration,
+        const motioncam::vfs::ManualVignetteSidecars& manualSidecars,
+        const std::vector<motioncam::GainMap>& maps) {
+    if (maps.empty() && manualSidecars.candidates.empty()) return;
+    if (calibration && calibration->hasFullSensorResolution) {
+        frame.originalWidth = calibration->fullSensorResolution[0];
+        frame.originalHeight = calibration->fullSensorResolution[1];
+        return;
+    }
+    if (frame.originalWidth > 0 && frame.originalHeight > 0) return;
+    uint32_t right = frame.width, bottom = frame.height;
+    for (const auto& map : maps) {
+        right = std::max(right, map.right);
+        bottom = std::max(bottom, map.bottom);
+    }
+    if (right > frame.width || bottom > frame.height) {
+        frame.originalWidth = right;
+        frame.originalHeight = bottom;
+        return;
+    }
+    const auto manual = motioncam::vfs::manualVignetteSensorResolution(manualSidecars);
+    if (manual[0] >= frame.width && manual[1] >= frame.height) {
+        frame.originalWidth = manual[0];
+        frame.originalHeight = manual[1];
+    }
+}
+
 motioncam::RenderSettings canonicalMcrawGenerationSettings(
         const motioncam::RenderSettings& settings, bool earlyProxy = false) {
     auto canonical = settings;
@@ -694,19 +723,16 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
         frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
-        const auto manualSensorResolution =
-            vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
-        if (frameMetadata.originalWidth <= 0 && manualSensorResolution[0] > 0)
-            frameMetadata.originalWidth = manualSensorResolution[0];
-        if (frameMetadata.originalHeight <= 0 && manualSensorResolution[1] > 0)
-            frameMetadata.originalHeight = manualSensorResolution[1];
+        const auto sidecarMaps = vfs::loadSidecarGainMaps(
+            mSidecarMetadata, frameIt->second, "gainMaps");
+        resolveOverriddenGainMapSensor(frameMetadata, mCalibration,
+                                       mManualVignetteSidecars, sidecarMaps);
         auto cameraConfig = CameraConfiguration::parse(decoder->getContainerMetadata());
         reorderNativeShadingMapToCfaPhases(
             frameMetadata, effectiveCfaArrangement(
                 frameSettings, mCalibration, cameraConfig.sensorArrangement));
         utils::overrideLensShadingMap(frameMetadata,
-            vfs::loadSidecarGainMaps(mSidecarMetadata,
-                frameIt->second, "gainMaps"),
+            sidecarMaps,
             cfaColorsFromPhase(effectiveCfaArrangement(
                 frameSettings, mCalibration, cameraConfig.sensorArrangement)));
         // The native adapter performs CFA-only bad-pixel treatment and emits
@@ -898,6 +924,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         const auto loadFinished = std::chrono::steady_clock::now();
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
         frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
+        const auto sidecarMaps = vfs::loadSidecarGainMaps(
+            mSidecarMetadata, frameIt->second, "gainMaps");
+        resolveOverriddenGainMapSensor(frameMetadata, mCalibration,
+                                       mManualVignetteSidecars, sidecarMaps);
         auto cameraConfig =
             CameraConfiguration::parse(decoder->getContainerMetadata());
         reorderNativeShadingMapToCfaPhases(
@@ -906,8 +936,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                                     cameraConfig.sensorArrangement));
         utils::overrideLensShadingMap(
             frameMetadata,
-            vfs::loadSidecarGainMaps(mSidecarMetadata, frameIt->second,
-                                     "gainMaps"),
+            sidecarMaps,
             cfaColorsFromPhase(effectiveCfaArrangement(
                 mSettings, mCalibration, cameraConfig.sensorArrangement)));
         std::optional<float> exposureOverride;
