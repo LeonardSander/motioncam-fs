@@ -8,6 +8,7 @@
 #include "GainMapBake.h"
 #include "LRUCache.h"
 #include "Types.h"
+#include "AudioWriter.h"
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -25,6 +26,9 @@
 #include <fstream>
 #include <mutex>
 #include <QByteArray>
+extern "C" {
+#include <libswresample/swresample.h>
+}
 
 using motioncam::Timestamp;
 
@@ -105,6 +109,90 @@ std::array<uint8_t, 4> directLogCfaPhase(
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
+}
+
+std::shared_ptr<std::vector<uint8_t>> decodeAudioWav(
+        const std::string& path, double fps) {
+    AVFormatContext* rawFormat = nullptr;
+    if (avformat_open_input(&rawFormat, path.c_str(), nullptr, nullptr) < 0)
+        throw std::runtime_error("Could not open DirectLog audio source");
+    std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)> format(
+        rawFormat, [](AVFormatContext* value) { avformat_close_input(&value); });
+    if (avformat_find_stream_info(format.get(), nullptr) < 0)
+        throw std::runtime_error("Could not inspect DirectLog audio source");
+    const int streamIndex = av_find_best_stream(
+        format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (streamIndex < 0) return {};
+    const auto* parameters = format->streams[streamIndex]->codecpar;
+    const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
+    if (!codec) throw std::runtime_error("Unsupported DirectLog audio codec");
+    std::unique_ptr<AVCodecContext, void(*)(AVCodecContext*)> decoder(
+        avcodec_alloc_context3(codec),
+        [](AVCodecContext* value) { avcodec_free_context(&value); });
+    if (!decoder || avcodec_parameters_to_context(decoder.get(), parameters) < 0 ||
+        avcodec_open2(decoder.get(), codec, nullptr) < 0)
+        throw std::runtime_error("Could not initialize DirectLog audio decoder");
+    if (decoder->sample_rate <= 0 || decoder->ch_layout.nb_channels <= 0)
+        throw std::runtime_error("Invalid DirectLog audio format");
+    SwrContext* rawResampler = nullptr;
+    if (swr_alloc_set_opts2(&rawResampler, &decoder->ch_layout,
+            AV_SAMPLE_FMT_S16, decoder->sample_rate, &decoder->ch_layout,
+            decoder->sample_fmt, decoder->sample_rate, 0, nullptr) < 0 ||
+        !rawResampler)
+        throw std::runtime_error("Could not configure DirectLog audio conversion");
+    std::unique_ptr<SwrContext, void(*)(SwrContext*)> resampler(
+        rawResampler, [](SwrContext* value) { swr_free(&value); });
+    if (swr_init(resampler.get()) < 0)
+        throw std::runtime_error("Could not initialize DirectLog audio conversion");
+    std::unique_ptr<AVPacket, void(*)(AVPacket*)> packet(
+        av_packet_alloc(), [](AVPacket* value) { av_packet_free(&value); });
+    std::unique_ptr<AVFrame, void(*)(AVFrame*)> frame(
+        av_frame_alloc(), [](AVFrame* value) { av_frame_free(&value); });
+    if (!packet || !frame) throw std::bad_alloc();
+    const auto fpsRational = av_d2q(fps > 0.0 ? fps : 24.0, 100000);
+    auto wav = std::make_shared<std::vector<uint8_t>>();
+    {
+        motioncam::AudioWriter writer(*wav, decoder->ch_layout.nb_channels,
+            decoder->sample_rate, fpsRational.num, fpsRational.den, 16);
+        const auto drain = [&] {
+            while (true) {
+                const int received = avcodec_receive_frame(decoder.get(), frame.get());
+                if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
+                if (received < 0) throw std::runtime_error("Could not decode DirectLog audio");
+                const int capacity = swr_get_out_samples(resampler.get(), frame->nb_samples);
+                std::vector<int16_t> samples(static_cast<size_t>(capacity) *
+                    decoder->ch_layout.nb_channels);
+                uint8_t* output[] = {reinterpret_cast<uint8_t*>(samples.data())};
+                const int count = swr_convert(resampler.get(), output, capacity,
+                    const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
+                if (count < 0) throw std::runtime_error("Could not convert DirectLog audio");
+                if (count > 0) writer.write(samples, count);
+                av_frame_unref(frame.get());
+            }
+        };
+        while (av_read_frame(format.get(), packet.get()) >= 0) {
+            if (packet->stream_index == streamIndex) {
+                const int sent = avcodec_send_packet(decoder.get(), packet.get());
+                if (sent < 0) throw std::runtime_error("Could not submit DirectLog audio packet");
+                drain();
+            }
+            av_packet_unref(packet.get());
+        }
+        if (avcodec_send_packet(decoder.get(), nullptr) < 0)
+            throw std::runtime_error("Could not finish DirectLog audio decode");
+        drain();
+        while (true) {
+            const int capacity = swr_get_out_samples(resampler.get(), 0);
+            if (capacity <= 0) break;
+            std::vector<int16_t> samples(static_cast<size_t>(capacity) *
+                decoder->ch_layout.nb_channels);
+            uint8_t* output[] = {reinterpret_cast<uint8_t*>(samples.data())};
+            const int count = swr_convert(resampler.get(), output, capacity, nullptr, 0);
+            if (count <= 0) break;
+            writer.write(samples, count);
+        }
+    }
+    return wav;
 }
 
 } // namespace
@@ -192,6 +280,14 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         // Calculate frame rate statistics from actual frame timestamps
         calculateFrameRateStats();
         analyzeSidecarExposure();
+        if (!mConfig.streamingPreview) {
+            try {
+                mAudioWav = decodeAudioWav(mSrcPath, mFps);
+            } catch (const std::exception& error) {
+                spdlog::warn("Could not project DirectLog audio for {}: {}",
+                             mSrcPath, error.what());
+            }
+        }
         
         spdlog::info("DirectLog video loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames, format: {}, HLG: {}", 
                      mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate, mTotalFrames, mPixelFormat, mIsHLG);
@@ -214,6 +310,13 @@ void VirtualFileSystemImpl_DirectLog::init() {
     mFiles.clear();
 
     vfs::appendDesktopIni(mFiles);
+    if (mAudioWav && !mAudioWav->empty()) {
+        Entry audioEntry;
+        audioEntry.type = EntryType::FILE_ENTRY;
+        audioEntry.name = "audio.wav";
+        audioEntry.size = mAudioWav->size();
+        mFiles.push_back(std::move(audioEntry));
+    }
 
     const auto& frames = mDecoder->getFrames();
     if (frames.empty()) {
@@ -985,8 +1088,15 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     return result;
 }
 
+std::function<std::shared_ptr<std::vector<uint8_t>>()>
+VirtualFileSystemImpl_DirectLog::staticMaterializer(const Entry& entry) {
+    if (entry.name != "audio.wav") return {};
+    return [this, entry] { return materializeFile(entry, false); };
+}
+
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materializeFile(
     const Entry& entry, bool jpegCompression) {
+    if (entry.name == "audio.wav") return mAudioWav;
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
         const auto materializeStart = std::chrono::steady_clock::now();
@@ -1147,9 +1257,9 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.metadata.iso = processed.metadata.iso;
         image.metadata.exposureTime = processed.metadata.shutterSpeed;
         image.metadata.hasExposure = processed.metadata.shutterSpeed > 0.0;
-        image.metadata.baselineExposure = processed.metadata.baselineExposure +
-            vfs::configuredExposureOffset(mConfig);
+        image.metadata.baselineExposure = processed.metadata.baselineExposure;
         image.metadata.hasBaselineExposure = true;
+        vfs::applyPreviewExposureOffset(image.metadata, mConfig);
         if (mCalibration && mCalibration->hasAsShotNeutral) {
             image.metadata.asShotNeutral = mCalibration->asShotNeutral;
             image.metadata.hasAsShotNeutral = true;
@@ -1181,36 +1291,6 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         vfs::mergeManualDngMetadata(
             image.metadata, mManualVignetteSidecars,
             mCalibration ? &*mCalibration : nullptr);
-        if (mCalibration) {
-            if (mCalibration->hasCalibrationIlluminant1)
-                image.metadata.calibrationIlluminant1 = mCalibration->calibrationIlluminant1;
-            if (mCalibration->hasCalibrationIlluminant2)
-                image.metadata.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
-            if (mCalibration->hasColorMatrix1) {
-                image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
-                image.metadata.hasColorMatrix1 = true;
-            }
-            if (mCalibration->hasColorMatrix2) {
-                image.metadata.colorMatrix2 = mCalibration->colorMatrix2;
-                image.metadata.hasColorMatrix2 = true;
-            }
-            if (mCalibration->hasForwardMatrix1) {
-                image.metadata.forwardMatrix1 = mCalibration->forwardMatrix1;
-                image.metadata.hasForwardMatrix1 = true;
-            }
-            if (mCalibration->hasForwardMatrix2) {
-                image.metadata.forwardMatrix2 = mCalibration->forwardMatrix2;
-                image.metadata.hasForwardMatrix2 = true;
-            }
-            if (mCalibration->hasCameraCalibration1) {
-                image.metadata.cameraCalibration1 = mCalibration->cameraCalibration1;
-                image.metadata.hasCameraCalibration1 = true;
-            }
-            if (mCalibration->hasCameraCalibration2) {
-                image.metadata.cameraCalibration2 = mCalibration->cameraCalibration2;
-                image.metadata.hasCameraCalibration2 = true;
-            }
-        }
         if (!image.metadata.calibrationIlluminant1)
             image.metadata.calibrationIlluminant1 = 21;
         if (!image.metadata.calibrationIlluminant2)
@@ -1309,6 +1389,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     FileInfo info = vfs::makeFileInfo(
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, outputWidth, outputHeight);
+    info.audioWav = mAudioWav;
     info.orientation = mDecoder->getVideoInfo().orientation;
     if (mCalibration && mCalibration->hasOrientation)
         info.orientation = mCalibration->orientation;

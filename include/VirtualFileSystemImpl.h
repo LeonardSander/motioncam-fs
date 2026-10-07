@@ -266,12 +266,14 @@ bool applyManualOpcodeSidecar(std::vector<uint8_t>& dng,
 bool manualVignetteSidecarGainMaps(
     const ManualVignetteSidecars& sidecars, const DNGImageLayout& targetLayout,
     std::vector<GainMap>& opcodeList2, std::vector<GainMap>& opcodeList3);
+bool manualSidecarsNeedPixelProcessing(const ManualVignetteSidecars& sidecars);
 bool applyManualDngMetadata(std::vector<uint8_t>& dng,
                             const ManualVignetteSidecars& sidecars,
                             const CalibrationData* jsonOverride);
 void mergeManualDngMetadata(DNGFrameMetadata& metadata,
                             const ManualVignetteSidecars& sidecars,
-                            const CalibrationData* jsonOverride);
+                            const CalibrationData* jsonOverride,
+                            bool applyJsonValues = true);
 std::array<int, 2> manualVignetteSensorResolution(
     const ManualVignetteSidecars& sidecars);
 size_t projectedDcpMetadataSize(const ManualVignetteSidecars& sidecars);
@@ -279,10 +281,6 @@ size_t projectedDcpMetadataSize(const ManualVignetteSidecars& sidecars);
 void processDngPixels(std::vector<uint8_t>& dng,
                       const RenderSettings& settings,
                       const DngPixelPipelineOptions& options);
-bool decodeProcessedDngPreview(
-    const std::shared_ptr<std::vector<uint8_t>>& dng, PreviewFrame& preview,
-    bool gainMapApplied = false, bool retainSourceSamples = false);
-
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
                  const DngFinalizeOptions& options);
 
@@ -299,6 +297,8 @@ Timestamp outputTimestamp(
     bool converted);
 
 float configuredExposureOffset(const RenderSettings& settings);
+void applyPreviewExposureOffset(DNGFrameMetadata& metadata,
+                                const RenderSettings& settings);
 
 struct CameraIdentity {
     std::string uniqueModel;

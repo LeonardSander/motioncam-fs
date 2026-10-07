@@ -3311,7 +3311,7 @@ bool DNGDecoder::cropImage(std::vector<uint8_t>& data,
                            uint32_t targetWidth, uint32_t targetHeight) {
     if (!targetWidth || !targetHeight || !ensureUncompressed(data)) return false;
     DecodedDNGImage decoded;
-    if (!decodeImage(data, decoded, false, false)) return false;
+    if (!decodeImageBorrowed(data, decoded, false, false)) return false;
     const uint32_t sourceWidth = decoded.layout.width;
     const uint32_t sourceHeight = decoded.layout.height;
     if (targetWidth > sourceWidth || targetHeight > sourceHeight) return false;
@@ -3592,7 +3592,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
             stripBytes < samples * sizeof(uint16_t) || stripBytes > data.size() - stripOffset)
             return false;
         DecodedDNGImage decoded;
-        if (!decodeImage(data, decoded, false, false) ||
+        if (!decodeImageBorrowed(data, decoded, false, false) ||
             decoded.layout.width != width || decoded.layout.height != height ||
             decoded.layout.samplesPerPixel != 3) return false;
         std::vector<uint16_t> rgb = std::move(decoded.samples);
@@ -3723,7 +3723,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     const bool profileTopology = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     const auto topologyStarted = std::chrono::steady_clock::now();
     DecodedDNGImage decoded;
-    if (!decodeImage(data, decoded, false, false) || decoded.layout.width != width ||
+    if (!decodeImageBorrowed(data, decoded, false, false) || decoded.layout.width != width ||
         decoded.layout.height != height || decoded.layout.samplesPerPixel != 1)
         return false;
     const auto decodedAt = std::chrono::steady_clock::now();
@@ -4458,12 +4458,48 @@ uint32_t DNGDecoder::getLinearizationTableCount(const std::vector<uint8_t>& data
 
 bool DNGDecoder::decodeImage(std::vector<uint8_t> data, DecodedDNGImage& image,
                              bool backgroundWork, bool applyLinearization) {
-    return decodeImageBorrowed(data, image, backgroundWork, applyLinearization);
+    return decodeImageInPlace(data, image, backgroundWork, applyLinearization);
 }
 
 bool DNGDecoder::decodeImageBorrowed(std::vector<uint8_t>& data,
-                                     DecodedDNGImage& image,
-                                     bool backgroundWork, bool applyLinearization) {
+                                     DecodedDNGImage& image, bool backgroundWork,
+                                     bool applyLinearization) {
+    // The pixel decoder only reads the input when these canonical tags are
+    // present. For valid TIFFs that omit a default tag, canonicalization
+    // inserts it; keep that rare mutation off the caller's buffer.
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_PHOTOMETRIC) continue;
+        const uint32_t value = entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + entry.valueOffset, little)
+            : read32(data.data() + entry.valueOffset, little);
+        if (value == TIFF_PHOTOMETRIC_CFA || value == 34892 || value == 2) {
+            photo = &entry;
+            break;
+        }
+    }
+    if (photo) {
+        auto has = [&](uint16_t tag) {
+            return std::any_of(entries.begin(), entries.end(), [&](const TiffEntry& entry) {
+                return entry.ifdOffset == photo->ifdOffset && entry.tag == tag;
+            });
+        };
+        if (!has(TIFF_TAG_COMPRESSION) || !has(TIFF_TAG_SAMPLES_PER_PIXEL) ||
+            ((has(TIFF_TAG_STRIP_OFFSETS) || has(TIFF_TAG_STRIP_BYTE_COUNTS)) &&
+             !has(TIFF_TAG_ROWS_PER_STRIP))) {
+            std::vector<uint8_t> canonicalized(data);
+            return decodeImageInPlace(canonicalized, image, backgroundWork,
+                                      applyLinearization);
+        }
+    }
+    return decodeImageInPlace(data, image, backgroundWork, applyLinearization);
+}
+
+bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
+                                    DecodedDNGImage& image,
+                                    bool backgroundWork, bool applyLinearization) {
     const bool profileDecode = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     const auto decodeStarted = std::chrono::steady_clock::now();
     image = {};
@@ -5030,7 +5066,7 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
 
 bool DNGDecoder::bakeIsoOverlay(std::vector<uint8_t>& data, double iso) {
     DecodedDNGImage image;
-    if (!decodeImage(data, image)) return false;
+    if (!decodeImageBorrowed(data, image)) return false;
     const uint16_t black = static_cast<uint16_t>(std::clamp(std::lround(
         image.metadata.blackLevelCount ? image.metadata.blackLevel[0] : 0.0f),
         0l, 65535l));
@@ -5787,7 +5823,7 @@ bool DNGDecoder::replaceNormalizedRGB16(std::vector<uint8_t>& data,
                                         const std::vector<uint8_t>& rgbData,
                                         uint32_t width, uint32_t height) {
     DecodedDNGImage image;
-    if (!decodeImage(data, image, false, false) ||
+    if (!decodeImageBorrowed(data, image, false, false) ||
         image.layout.pixels == DNGPixelLayout::CFA ||
         image.layout.width != width || image.layout.height != height ||
         image.layout.samplesPerPixel != 3 ||
@@ -6440,20 +6476,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
 
     const auto predecodeAt = std::chrono::steady_clock::now();
     DecodedDNGImage decodedImage;
-    // Canonical single strips are read-only during decode. Borrow the DNG
-    // vector in that case instead of copying the entire 16-bit RGB container.
-    // Other layouts retain the copy because canonicalization can move IFDs
-    // and invalidate the entry offsets collected above.
-    const auto planarE = find(TIFF_TAG_PLANAR_CONFIGURATION);
-    const bool borrowCanonicalStrip =
-        compression == TIFF_COMPRESSION_NONE &&
-        find(TIFF_TAG_ROWS_PER_STRIP) &&
-        !find(TIFF_TAG_TILE_OFFSETS) && !find(TIFF_TAG_TILE_BYTE_COUNTS) &&
-        (!planarE || scalar(*planarE) == 1);
-    const bool decoded = borrowCanonicalStrip
-        ? decodeImageBorrowed(data, decodedImage, false, true)
-        : decodeImage(data, decodedImage);
-    if (!decoded) {
+    if (!decodeImageBorrowed(data, decodedImage)) {
         spdlog::warn("Could not decode DNG image for gain-map bake");
         return false;
     }
@@ -7147,6 +7170,11 @@ bool DNGDecoder::hasOnlySinglePlaneGainMap(
         return channels == 1;
     }
     return false;
+}
+
+bool DNGDecoder::decodeGainMapOpcodes(const uint8_t* payload, size_t payloadSize,
+                                     std::vector<GainMap>& gainMaps) {
+    return parseOpcodeGainMaps(payload, payloadSize, gainMaps);
 }
 
 bool DNGDecoder::parseOpcodeGainMaps(const uint8_t* opcodeData, size_t opcodeSize,

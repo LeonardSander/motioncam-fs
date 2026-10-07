@@ -42,6 +42,8 @@ public:
                                  bool retainSourceSamples = false) override;
 
 private:
+    std::function<std::shared_ptr<std::vector<uint8_t>>()>
+        staticMaterializer(const Entry& entry) override;
     struct FrameMetadata {
         double iso = 0.0;
         double shutterSpeed = 0.0;
@@ -101,6 +103,7 @@ private:
     std::string mPixelFormat;
     bool mIsHLG;
     std::unique_ptr<DirectLogDecoder> mDecoder;
+    std::shared_ptr<std::vector<uint8_t>> mAudioWav;
     std::optional<CalibrationData> mCalibration;
     std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;

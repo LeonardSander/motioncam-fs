@@ -551,7 +551,6 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     const int workUnits = static_cast<uint64_t>(mWidth) * mHeight > 32'000'000 ? 4 : 1;
     DngFrameWorkSlot workSlot(mMaterializeMutex, mMaterializeAvailable,
                               mActiveMaterializeUnits, workUnits);
-    bool fallbackGainMapApplied = false;
     preview.rawSamples.reset();
     preview.rawWidth = preview.rawHeight = preview.rawChannels = 0;
     // Decode the source container once and run the shared in-memory preview
@@ -565,13 +564,6 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             if (!DNGDecoder::decodeImage(std::move(prepared.dng), image))
                 throw std::runtime_error("Could not decode source DNG preview");
             const auto decodedAt = std::chrono::steady_clock::now();
-            if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
-                fallbackGainMapApplied = !image.opcodeList2.empty();
-                if (!(mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR))
-                    fallbackGainMapApplied = fallbackGainMapApplied ||
-                        (image.opcodeList3.size() == 1 &&
-                         image.opcodeList3.front().channels == 1);
-            }
             // Sequence calibration can declare higher-CFA topology which the
             // individual DNG tags intentionally describe only as a Bayer
             // phase. Carry the resolved sequence topology into the shared
@@ -625,40 +617,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             vfs::mergeManualDngMetadata(
                 image.metadata, mManualVignetteSidecars,
                 mCalibration ? &*mCalibration : nullptr);
-            if (mCalibration) {
-                if (mCalibration->hasColorMatrix1) {
-                    image.metadata.colorMatrix1 = mCalibration->colorMatrix1;
-                    image.metadata.hasColorMatrix1 = true;
-                }
-                if (mCalibration->hasColorMatrix2) {
-                    image.metadata.colorMatrix2 = mCalibration->colorMatrix2;
-                    image.metadata.hasColorMatrix2 = true;
-                }
-                if (mCalibration->hasForwardMatrix1) {
-                    image.metadata.forwardMatrix1 = mCalibration->forwardMatrix1;
-                    image.metadata.hasForwardMatrix1 = true;
-                }
-                if (mCalibration->hasForwardMatrix2) {
-                    image.metadata.forwardMatrix2 = mCalibration->forwardMatrix2;
-                    image.metadata.hasForwardMatrix2 = true;
-                }
-                if (mCalibration->hasCameraCalibration1) {
-                    image.metadata.cameraCalibration1 = mCalibration->cameraCalibration1;
-                    image.metadata.hasCameraCalibration1 = true;
-                }
-                if (mCalibration->hasCameraCalibration2) {
-                    image.metadata.cameraCalibration2 = mCalibration->cameraCalibration2;
-                    image.metadata.hasCameraCalibration2 = true;
-                }
-                if (mCalibration->hasAsShotNeutral) {
-                    image.metadata.asShotNeutral = mCalibration->asShotNeutral;
-                    image.metadata.hasAsShotNeutral = true;
-                }
-                if (mCalibration->hasCalibrationIlluminant1)
-                    image.metadata.calibrationIlluminant1 = mCalibration->calibrationIlluminant1;
-                if (mCalibration->hasCalibrationIlluminant2)
-                    image.metadata.calibrationIlluminant2 = mCalibration->calibrationIlluminant2;
-            }
+            vfs::applyPreviewExposureOffset(image.metadata, mConfig);
             const auto pipelineStarted = std::chrono::steady_clock::now();
             if (DNGDecoder::decodePreview(
                     std::move(image), mConfig, preview, true, false)) {
@@ -710,12 +669,10 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                          entry.name, error.what());
         }
     }
-    workSlot.release();
-    renderLock.unlock();
-    try { return vfs::decodeProcessedDngPreview(
-        materializeFile(entry, false), preview, fallbackGainMapApplied,
-        retainSourceSamples); }
-    catch (const std::exception&) { return false; }
+    // Disabled mounted-DNG retry: releasing the locks, materializing the
+    // output DNG, then decoding that DNG hid direct-preview failures.
+    spdlog::warn("Direct DNG preview failed without mounted-DNG retry: {}", entry.name);
+    return false;
 }
 
 VirtualFileSystemImpl_DNG::PreparedFrame
@@ -792,6 +749,28 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         if (mCalibration->hasAsShotNeutral && !DNGDecoder::updateMetadata(
                 result.dng, nullptr, &mCalibration->asShotNeutral))
             throw std::runtime_error("Could not apply JSON white-balance override");
+    }
+    if ((mConfig.options & RENDER_OPT_CAMMODEL_OVERRIDE) &&
+        !mConfig.cameraModel.empty()) {
+        const auto identity = vfs::resolveCameraIdentity(
+            mConfig.cameraModel, result.sourceMetadata.uniqueCameraModel);
+        std::vector<DNGSidecarMetadataEntry> entries;
+        const auto addAscii = [&](uint16_t tag, const std::string& value) {
+            if (value.empty()) return;
+            DNGSidecarMetadataEntry entry;
+            entry.tag = tag;
+            entry.type = 2;
+            entry.value.assign(value.begin(), value.end());
+            entry.value.push_back(0);
+            entry.count = static_cast<uint32_t>(entry.value.size());
+            entries.push_back(std::move(entry));
+        };
+        addAscii(50708, identity.uniqueModel);
+        addAscii(271, identity.make);
+        addAscii(272, identity.model);
+        if (!entries.empty() &&
+            !DNGDecoder::replaceSidecarMetadata(result.dng, entries))
+            throw std::runtime_error("Could not apply DNG camera-model override");
     }
     if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude) {
         if (!DNGDecoder::replaceGainMaps(result.dng, 2, {}) ||

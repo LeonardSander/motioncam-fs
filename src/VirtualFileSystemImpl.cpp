@@ -156,7 +156,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         options.calibration->hasBadPixels &&
         badPixelTreatment != BadPixelTreatment::Disabled) {
         DecodedDNGImage decoded;
-        if (!DNGDecoder::decodeImage(dng, decoded, false, false) ||
+        if (!DNGDecoder::decodeImageBorrowed(dng, decoded, false, false) ||
             decoded.layout.pixels != DNGPixelLayout::CFA)
             throw std::runtime_error("Could not decode CFA DNG for bad-pixel treatment: " +
                                      source);
@@ -295,7 +295,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     if (badPixelTreatment == BadPixelTreatment::MarkPixels &&
         badPixelsWillDemosaic && !markedPixels.empty()) {
         DecodedDNGImage marked;
-        if (!DNGDecoder::decodeImage(dng, marked, false, false))
+        if (!DNGDecoder::decodeImageBorrowed(dng, marked, false, false))
             throw std::runtime_error("Could not decode transformed DNG for pixel marking: " + source);
         uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
         if (settings.options & RENDER_OPT_CROPPING)
@@ -322,21 +322,6 @@ void processDngPixels(std::vector<uint8_t>& dng,
                      std::chrono::duration<double, std::milli>(gainFinished-preTopologyFinished).count(),
                      std::chrono::duration<double, std::milli>(postTopologyFinished-gainFinished).count(),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-postTopologyFinished).count());
-}
-
-bool decodeProcessedDngPreview(
-        const std::shared_ptr<std::vector<uint8_t>>& dng, PreviewFrame& preview,
-        bool gainMapApplied, bool retainSourceSamples) {
-    if (!dng) return false;
-    // The decoder only consumes the byte vector by value; retain the cached
-    // mounted frame for future range reads and copy only on this fallback.
-    std::vector<uint8_t> bytes(*dng);
-    // All requested processing is already baked or represented in the
-    // canonical frame. Decode without applying a second crop/proxy/gain pass.
-    const bool decoded = DNGDecoder::decodePreview(
-        std::move(bytes), RenderSettings{}, preview, false, retainSourceSamples);
-    preview.gainMapApplied = decoded && gainMapApplied;
-    return decoded;
 }
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
@@ -576,6 +561,14 @@ float configuredExposureOffset(const RenderSettings& settings) {
             result += offset;
     }
     return result;
+}
+
+void applyPreviewExposureOffset(DNGFrameMetadata& metadata,
+                                const RenderSettings& settings) {
+    const float offset = configuredExposureOffset(settings);
+    if (offset == 0.0f) return;
+    metadata.baselineExposure += offset;
+    metadata.hasBaselineExposure = true;
 }
 
 CameraIdentity resolveCameraIdentity(
@@ -1094,7 +1087,7 @@ ManualVignetteSidecars loadManualVignetteSidecars(
         candidate.whiteImage = white;
         candidate.legacyGainMapName = legacyGainMapName;
         candidate.illuminant = std::move(illuminant);
-        if (bytes.empty() || !DNGDecoder::decodeImage(bytes, candidate.image, false, false)) {
+        if (bytes.empty() || !DNGDecoder::decodeImageBorrowed(bytes, candidate.image, false, false)) {
             spdlog::warn("Could not decode manual vignette sidecar {}", path.string());
             return false;
         }
@@ -1279,6 +1272,18 @@ bool manualVignetteSidecarGainMaps(
     return true;
 }
 
+bool manualSidecarsNeedPixelProcessing(const ManualVignetteSidecars& sidecars) {
+    if (sidecars.useDcpGainmap) return true;
+    return std::any_of(sidecars.candidates.begin(), sidecars.candidates.end(),
+        [](const ManualVignetteSidecars::Candidate& candidate) {
+            return candidate.whiteImage || !candidate.image.opcodeList2.empty() ||
+                !candidate.image.opcodeList3.empty() ||
+                std::any_of(candidate.nonGainMapOpcodes.begin(),
+                            candidate.nonGainMapOpcodes.end(),
+                            [](const auto& opcode) { return !opcode.empty(); });
+        });
+}
+
 bool applyManualVignetteSidecar(std::vector<uint8_t>& dng,
                                 const ManualVignetteSidecars& sidecars) {
     if (sidecars.candidates.empty() && !sidecars.useDcpGainmap) return true;
@@ -1376,8 +1381,36 @@ bool applyManualDngMetadata(std::vector<uint8_t>& dng,
 
 void mergeManualDngMetadata(DNGFrameMetadata& metadata,
                             const ManualVignetteSidecars& sidecars,
-                            const CalibrationData* jsonOverride) {
+                            const CalibrationData* jsonOverride,
+                            bool applyJsonValues) {
     const auto ordered = manualCandidateOrder(sidecars);
+    const auto applyCalibration = [&] {
+        if (!jsonOverride || !applyJsonValues) return;
+        auto overrideMatrix = [](bool present, const auto& source,
+                                 auto& destination, bool& destinationPresent) {
+            if (present) { destination = source; destinationPresent = true; }
+        };
+        overrideMatrix(jsonOverride->hasColorMatrix1, jsonOverride->colorMatrix1,
+                       metadata.colorMatrix1, metadata.hasColorMatrix1);
+        overrideMatrix(jsonOverride->hasColorMatrix2, jsonOverride->colorMatrix2,
+                       metadata.colorMatrix2, metadata.hasColorMatrix2);
+        overrideMatrix(jsonOverride->hasForwardMatrix1, jsonOverride->forwardMatrix1,
+                       metadata.forwardMatrix1, metadata.hasForwardMatrix1);
+        overrideMatrix(jsonOverride->hasForwardMatrix2, jsonOverride->forwardMatrix2,
+                       metadata.forwardMatrix2, metadata.hasForwardMatrix2);
+        overrideMatrix(jsonOverride->hasCameraCalibration1,
+                       jsonOverride->cameraCalibration1,
+                       metadata.cameraCalibration1, metadata.hasCameraCalibration1);
+        overrideMatrix(jsonOverride->hasCameraCalibration2,
+                       jsonOverride->cameraCalibration2,
+                       metadata.cameraCalibration2, metadata.hasCameraCalibration2);
+        overrideMatrix(jsonOverride->hasAsShotNeutral, jsonOverride->asShotNeutral,
+                       metadata.asShotNeutral, metadata.hasAsShotNeutral);
+        if (jsonOverride->hasCalibrationIlluminant1)
+            metadata.calibrationIlluminant1 = jsonOverride->calibrationIlluminant1;
+        if (jsonOverride->hasCalibrationIlluminant2)
+            metadata.calibrationIlluminant2 = jsonOverride->calibrationIlluminant2;
+    };
     if (sidecars.hasDcp) {
         const auto& profile = sidecars.dcpColor;
         if (profile.profileTables)
@@ -1409,7 +1442,7 @@ void mergeManualDngMetadata(DNGFrameMetadata& metadata,
             !(jsonOverride && jsonOverride->hasCalibrationIlluminant2))
             metadata.calibrationIlluminant2 = profile.calibrationIlluminant2;
     }
-    if (ordered.empty()) return;
+    if (ordered.empty()) { applyCalibration(); return; }
     const auto& sidecar = ordered.front()->image.metadata;
     if (!metadata.profileTables && sidecar.profileTables)
         metadata.profileTables = sidecar.profileTables;
@@ -1452,6 +1485,7 @@ void mergeManualDngMetadata(DNGFrameMetadata& metadata,
         metadata.calibrationIlluminant2 = sidecar.calibrationIlluminant2;
     if (metadata.uniqueCameraModel.empty())
         metadata.uniqueCameraModel = sidecar.uniqueCameraModel;
+    applyCalibration();
 }
 
 size_t projectedDcpMetadataSize(const ManualVignetteSidecars& sidecars) {
@@ -2491,7 +2525,8 @@ std::optional<Entry> MountedDngSource::findEntry(const std::string& fullPath) co
 }
 
 int MountedDngSource::readPriority(const Entry& entry) const {
-    return vfs::outputFrameNumber(entry);
+    return boost::algorithm::iends_with(entry.name, ".dng")
+        ? vfs::outputFrameNumber(entry) : 0;
 }
 
 std::function<std::shared_ptr<std::vector<uint8_t>>()>

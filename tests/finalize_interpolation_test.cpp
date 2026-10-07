@@ -242,6 +242,12 @@ int main() {
     assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) - 2.5f) < 1e-6f);
     exposureSettings.exposureCompensation = "0.8invalid";
     assert(motioncam::vfs::configuredExposureOffset(exposureSettings) == 0.0f);
+    exposureSettings.exposureCompensation = "0.75";
+    motioncam::DNGFrameMetadata galleryExposure;
+    galleryExposure.baselineExposure = 1.25; // Normalized or smoothed source value.
+    galleryExposure.hasBaselineExposure = true;
+    motioncam::vfs::applyPreviewExposureOffset(galleryExposure, exposureSettings);
+    assert(std::abs(galleryExposure.baselineExposure - 2.0) < 1e-6);
 
     const std::array<float, 4> black{64.0f, 64.0f, 64.0f, 64.0f};
     assert(motioncam::vfs::getDisplayDataLevels(
@@ -308,6 +314,19 @@ int main() {
     assert(std::abs(taggedMetadata.baselineExposure - 0.75) < 1e-5);
     assert(motioncam::DNGDecoder::imagePayloadsEqual(
         exposureTagged, uncompressedA));
+    auto normalizedExposureDng = uncompressedA;
+    const double normalizedBaseline = 1.25;
+    assert(motioncam::DNGDecoder::updateMetadata(
+        normalizedExposureDng, &normalizedBaseline, nullptr));
+    motioncam::vfs::finalizeDng(
+        normalizedExposureDng, taggedSettings, taggedFinalize);
+    motioncam::DNGFrameMetadata normalizedOutputMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        normalizedExposureDng, normalizedOutputMetadata));
+    assert(std::abs(normalizedOutputMetadata.baselineExposure -
+                    galleryExposure.baselineExposure) < 1e-5);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        normalizedExposureDng, uncompressedA));
     motioncam::CalibrationData badPixelCalibration;
     badPixelCalibration.hasBadPixels = true;
     motioncam::CalibrationData::BadPixel defect;
@@ -726,15 +745,6 @@ int main() {
     std::vector<motioncam::GainMap> consumedOrderedMap;
     assert(!motioncam::DNGDecoder::getGainMaps(
         orderedRgb, 3, consumedOrderedMap));
-    auto processedPreviewDng = std::make_shared<std::vector<uint8_t>>(
-        orderedRgb.begin(), orderedRgb.end());
-    motioncam::PreviewFrame processedPreview;
-    assert(motioncam::vfs::decodeProcessedDngPreview(
-        processedPreviewDng, processedPreview, true));
-    assert(processedPreview.gainMapApplied);
-    assert(motioncam::vfs::decodeProcessedDngPreview(
-        processedPreviewDng, processedPreview, false));
-    assert(!processedPreview.gainMapApplied);
     motioncam::DNGFrameMetadata logMetadata;
     const auto logDng = makeLogCfaDng(1023, 0);
     assert(motioncam::DNGDecoder::getColorMetadata(logDng, logMetadata));
@@ -817,6 +827,12 @@ int main() {
     manualMetadataCandidate.image.metadata.calibrationIlluminant1 = 23;
     manualMetadataCandidate.image.metadata.calibrationIlluminant2 = 17;
     manualMetadataSidecar.candidates.push_back(std::move(manualMetadataCandidate));
+    assert(!motioncam::vfs::manualSidecarsNeedPixelProcessing(
+        manualMetadataSidecar));
+    auto spatialSidecar = manualMetadataSidecar;
+    spatialSidecar.candidates.front().image.opcodeList2.push_back(
+        motioncam::GainMap{});
+    assert(motioncam::vfs::manualSidecarsNeedPixelProcessing(spatialSidecar));
     motioncam::DNGFrameMetadata previewMetadata;
     motioncam::vfs::mergeManualDngMetadata(
         previewMetadata, manualMetadataSidecar, nullptr);
@@ -830,6 +846,27 @@ int main() {
     motioncam::vfs::mergeManualDngMetadata(
         previewMetadata, manualMetadataSidecar, nullptr);
     assert(std::abs(previewMetadata.colorMatrix1[0] - 3.0f) < 0.0001f);
+    motioncam::CalibrationData previewCalibration;
+    previewCalibration.hasColorMatrix1 = true;
+    previewCalibration.colorMatrix1 = matrixOverrides.colorMatrix1;
+    previewCalibration.colorMatrix1[0] = 4.0f;
+    previewCalibration.hasAsShotNeutral = true;
+    previewCalibration.asShotNeutral = {0.8f, 1.0f, 0.9f};
+    motioncam::vfs::mergeManualDngMetadata(
+        previewMetadata, manualMetadataSidecar, &previewCalibration);
+    assert(std::abs(previewMetadata.colorMatrix1[0] - 4.0f) < 0.0001f);
+    assert(previewMetadata.asShotNeutral == previewCalibration.asShotNeutral);
+    motioncam::DNGFrameMetadata calibrationOnlyMetadata;
+    motioncam::vfs::mergeManualDngMetadata(
+        calibrationOnlyMetadata, {}, &previewCalibration);
+    assert(calibrationOnlyMetadata.hasColorMatrix1 &&
+           calibrationOnlyMetadata.hasAsShotNeutral);
+    motioncam::DNGFrameMetadata preprocessedMcrawMetadata;
+    preprocessedMcrawMetadata.asShotNeutral = {0.4f, 1.0f, 0.6f};
+    preprocessedMcrawMetadata.hasAsShotNeutral = true;
+    motioncam::vfs::mergeManualDngMetadata(
+        preprocessedMcrawMetadata, {}, &previewCalibration, false);
+    assert(preprocessedMcrawMetadata.asShotNeutral[0] == 0.4f);
 
     auto directLogTwelveBit = directLogLinear;
     directLogSettings.levels = "4095/Dynamic";
@@ -935,9 +972,24 @@ int main() {
     assert(tagValue(packedCrop, 258).value == 10);
     auto packedPattern = makeLogCfaDng(0, 0, true, 18, true);
     assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(packedPattern));
+    const auto packedPatternBytes = packedPattern;
     motioncam::DecodedDNGImage packedPatternImage;
     assert(motioncam::DNGDecoder::decodeImage(
         packedPattern, packedPatternImage, false, false));
+    motioncam::DecodedDNGImage borrowedPackedPattern;
+    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+        packedPattern, borrowedPackedPattern, false, false));
+    assert(packedPattern == packedPatternBytes);
+    assert(borrowedPackedPattern.samples == packedPatternImage.samples);
+    auto omittedDefaults = makeLogCfaDng(0, 0, true, 18, true);
+    assert(motioncam::DNGDecoder::removeMetadataTags(
+        omittedDefaults, {259, 277, 278}));
+    const auto omittedDefaultsBytes = omittedDefaults;
+    motioncam::DecodedDNGImage omittedDefaultsImage;
+    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+        omittedDefaults, omittedDefaultsImage, false, false));
+    assert(omittedDefaults == omittedDefaultsBytes);
+    assert(omittedDefaultsImage.samples == packedPatternImage.samples);
     for (uint32_t y = 0; y < 32; ++y)
         for (uint32_t x = 0; x < 18; ++x)
             assert(packedPatternImage.samples[static_cast<size_t>(y) * 18 + x] ==
@@ -1087,6 +1139,13 @@ int main() {
     assert(selectedProfile.dcpColor.profileTables &&
            selectedProfile.dcpColor.profileTables->hueSat1.values.size() == 12 &&
            selectedProfile.dcpColor.profileTables->look.values.size() == 12);
+    motioncam::DNGFrameMetadata directDcpPreviewColor;
+    motioncam::vfs::mergeManualDngMetadata(
+        directDcpPreviewColor, selectedProfile, nullptr);
+    assert(directDcpPreviewColor.profileTables &&
+           directDcpPreviewColor.profileTables->hueSat1.values.size() == 12);
+    assert(directDcpPreviewColor.hasColorMatrix1 &&
+           std::abs(directDcpPreviewColor.colorMatrix1[0] - 0.8f) < 1e-4f);
     const nlohmann::json enableDcpGain{{"useDcpGainmap", true}};
     const boost::filesystem::path profileClipJson((root / "profileclip.json").string());
     auto activeProfile = motioncam::vfs::loadManualVignetteSidecars(

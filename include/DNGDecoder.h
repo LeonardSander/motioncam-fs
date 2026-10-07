@@ -49,6 +49,8 @@ public:
     static bool setOrientation(std::vector<uint8_t>& dngData, int clockwiseDegrees);
     static bool getGainMaps(const std::vector<uint8_t>& dngData,
                             int opcodeList, std::vector<GainMap>& gainMaps);
+    static bool decodeGainMapOpcodes(const uint8_t* payload, size_t payloadSize,
+                                     std::vector<GainMap>& gainMaps);
     // Remove OpcodeList2/3 gain-map layers which are wholly neutral. A list is
     // retained intact when any sample differs from 1 so CFA map groups cannot
     // be made incomplete by filtering a single neutral plane.
@@ -131,6 +133,12 @@ public:
                             DecodedDNGImage& image,
                             bool backgroundWork = false,
                             bool applyLinearization = true);
+    // Decode pixels from an existing buffer without copying canonical frames.
+    // The input remains unchanged; uncommon omitted TIFF defaults use a copy.
+    static bool decodeImageBorrowed(std::vector<uint8_t>& dngData,
+                                    DecodedDNGImage& image,
+                                    bool backgroundWork = false,
+                                    bool applyLinearization = true);
     // Writes unpacked samples into an existing DNG metadata template. The
     // template's image topology must match; container canonicalization and
     // endian encoding are handled here.
@@ -200,10 +208,10 @@ public:
     static bool imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash);
 
 private:
-    static bool decodeImageBorrowed(std::vector<uint8_t>& dngData,
-                                    DecodedDNGImage& image,
-                                    bool backgroundWork,
-                                    bool applyLinearization);
+    static bool decodeImageInPlace(std::vector<uint8_t>& dngData,
+                                   DecodedDNGImage& image,
+                                   bool backgroundWork,
+                                   bool applyLinearization);
     void analyzeSequence();
     void findDNGFiles();
     void extractTimestampsFromFilenames();

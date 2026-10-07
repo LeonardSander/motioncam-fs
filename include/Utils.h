@@ -23,6 +23,7 @@ namespace motioncam {
 struct CameraFrameMetadata;
 struct CameraConfiguration;
 struct GainMap;
+struct DecodedDNGImage;
 
 struct DngFrameProcessingPlan {
     int cfaRepeatSize = 2;
@@ -213,7 +214,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     const std::optional<float>& baselineExposureOverride = std::nullopt,
     const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt,
     PreviewFrame* previewFrame = nullptr,
-    bool retainSourceSamples = false);
+    bool retainSourceSamples = false,
+    DecodedDNGImage* stagedImage = nullptr);
 
 // Draws a centered, outlined ISO label into unpacked 16-bit image samples.
 void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,

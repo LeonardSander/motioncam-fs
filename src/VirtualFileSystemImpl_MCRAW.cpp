@@ -88,6 +88,30 @@ std::string effectiveCfaArrangement(
     return sensorArrangement;
 }
 
+motioncam::RenderSettings canonicalMcrawGenerationSettings(
+        const motioncam::RenderSettings& settings, bool earlyProxy = false) {
+    auto canonical = settings;
+    canonical.options = static_cast<motioncam::FileRenderOptions>(
+        canonical.options &
+        ~(motioncam::RENDER_OPT_CROPPING | motioncam::RENDER_OPT_DRAFT |
+          motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+          motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR |
+          motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP |
+          motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS |
+          motioncam::RENDER_OPT_DEBUG_SHADING_MAP |
+          motioncam::RENDER_OPT_LOG_TRANSFORM |
+          motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
+          motioncam::RENDER_OPT_HIGHER_CFA_HQ |
+          motioncam::RENDER_OPT_BAKE_ISO));
+    if (earlyProxy)
+        canonical.options |= motioncam::RENDER_OPT_DRAFT;
+    canonical.quadBayerOption = motioncam::QuadBayerMode::CorrectQBCFAMetadata;
+    canonical.cameraNativeStaging = false;
+    canonical.streamingPreview = false;
+    canonical.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
+    return canonical;
+}
+
 void reorderNativeShadingMapToCfaPhases(
         motioncam::CameraFrameMetadata& metadata,
         std::string sensorArrangement) {
@@ -689,7 +713,6 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         // an otherwise canonical, uncompressed CFA DNG.
         // All source-independent pixel operations run below through the same
         // DNG pipeline used by imported DNG and DirectLog frames.
-        RenderSettings generationSettings = frameSettings;
         const bool earlyProxy = !jpegCompression && !frameSettings.streamingPreview &&
             renderPlan.scale > 1 &&
             !(frameSettings.options & (RENDER_OPT_CROPPING |
@@ -708,19 +731,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             (frameSettings.quadBayerOption == QuadBayerMode::Demosaic ||
              frameSettings.quadBayerOption == QuadBayerMode::DemosaicColor ||
              frameSettings.quadBayerOption == QuadBayerMode::DemosaicOCL);
-        generationSettings.options = static_cast<FileRenderOptions>(
-            generationSettings.options &
-            ~(RENDER_OPT_CROPPING | RENDER_OPT_DRAFT |
-              RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-              RENDER_OPT_VIGNETTE_ONLY_COLOR | RENDER_OPT_NORMALIZE_SHADING_MAP |
-              RENDER_OPT_OPTIMIZE_GAIN_MAPS | RENDER_OPT_DEBUG_SHADING_MAP |
-              RENDER_OPT_LOG_TRANSFORM | RENDER_OPT_REMOSAIC_TO_BAYER |
-              RENDER_OPT_HIGHER_CFA_HQ | RENDER_OPT_BAKE_ISO));
-        if (earlyProxy) generationSettings.options |= RENDER_OPT_DRAFT;
-        generationSettings.quadBayerOption = QuadBayerMode::CorrectQBCFAMetadata;
-        generationSettings.cameraNativeStaging = false;
-        generationSettings.streamingPreview = false;
-        generationSettings.badPixelTreatment = BadPixelTreatment::Disabled;
+        const auto generationSettings = canonicalMcrawGenerationSettings(
+            frameSettings, earlyProxy);
         auto output = utils::generateDng(
             frameData,
             frameMetadata,
@@ -816,33 +828,22 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
             decoder = std::make_unique<Decoder>(mSrcPath);
-        // The direct CameraFrameMetadata path can carry the normal Android lens
-        // shading map, but not a deferred OpcodeList3 map or a manual
-        // white/gain DNG. Preserve exact finalized ordering for those uncommon
-        // overrides. HQ previews keep the finalized DNG route for DCPs.
-        if (!mManualVignetteSidecars.candidates.empty() ||
-            mManualVignetteSidecars.useDcpGainmap ||
-            (mManualVignetteSidecars.hasDcp &&
-             (mSettings.options & RENDER_OPT_HIGHER_CFA_HQ)) ||
-            vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
-                                    "deferredGainMaps")) {
-            bool gainMapApplied = !mManualVignetteSidecars.candidates.empty() ||
-                mManualVignetteSidecars.useDcpGainmap;
-            if (!gainMapApplied) {
-                const auto deferred = vfs::loadSidecarGainMaps(
-                    mSidecarMetadata, frameIt->second, "deferredGainMaps");
-                const bool opcode2 = deferred.size() == 4 ||
-                    (deferred.size() == 1 && deferred.front().channels == 4);
-                const bool opcode3 = deferred.size() == 1 &&
-                    deferred.front().channels == 1;
-                gainMapApplied = opcode2 ||
-                    (opcode3 && !(mSettings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR));
-            }
-            gainMapApplied = gainMapApplied &&
-                (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
-            std::shared_ptr<const std::vector<uint16_t>> sourceSamples;
-            uint32_t sourceWidth = 0, sourceHeight = 0;
-            CameraFrameMetadata sourceFrameMetadata;
+        const bool hasNonGainMapSidecar = std::any_of(
+            mManualVignetteSidecars.candidates.begin(),
+            mManualVignetteSidecars.candidates.end(),
+            [](const auto& candidate) {
+                return std::any_of(candidate.nonGainMapOpcodes.begin(),
+                                   candidate.nonGainMapOpcodes.end(),
+                                   [](const auto& opcodes) { return !opcodes.empty(); });
+            });
+        if (hasNonGainMapSidecar) {
+            // These opcodes cannot be carried by DecodedDNGImage. Use the
+            // finalized container so the preview sees the mounted frame.
+            renderLock.unlock();
+            auto output = materializeFile(entry, false);
+            if (!output || !DNGDecoder::decodePreview(
+                    *output, RenderSettings{}, preview, false, false))
+                return false;
             if (retainSourceSamples) {
                 std::vector<uint8_t> sourceData;
                 nlohmann::json sourceMetadataJson;
@@ -852,51 +853,39 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                                            cropHeight, strideOverride);
                 decoder->loadFrame(timestamp, sourceData, sourceMetadataJson,
                                    static_cast<int>(strideOverride));
-                const auto sourceMetadata =
-                    CameraFrameMetadata::parse(sourceMetadataJson);
-                sourceFrameMetadata = sourceMetadata;
-                const size_t sampleCount =
-                    static_cast<size_t>(sourceMetadata.width) * sourceMetadata.height;
+                const auto sourceMetadata = CameraFrameMetadata::parse(sourceMetadataJson);
+                const size_t sampleCount = static_cast<size_t>(sourceMetadata.width) *
+                    sourceMetadata.height;
                 if (sourceData.size() >= sampleCount * sizeof(uint16_t)) {
-                    auto samples =
-                        std::make_shared<std::vector<uint16_t>>(sampleCount);
+                    auto samples = std::make_shared<std::vector<uint16_t>>(sampleCount);
                     std::memcpy(samples->data(), sourceData.data(),
                                 sampleCount * sizeof(uint16_t));
-                    sourceSamples = std::move(samples);
-                    sourceWidth = sourceMetadata.width;
-                    sourceHeight = sourceMetadata.height;
-                }
-            }
-            renderLock.unlock();
-            try {
-                const bool decoded = vfs::decodeProcessedDngPreview(
-                    materializeFile(entry, false), preview, gainMapApplied,
-                    false);
-                if (decoded && sourceSamples) {
-                    preview.rawSamples = std::move(sourceSamples);
-                    preview.rawWidth = sourceWidth;
-                    preview.rawHeight = sourceHeight;
+                    preview.rawSamples = std::move(samples);
+                    preview.rawWidth = sourceMetadata.width;
+                    preview.rawHeight = sourceMetadata.height;
                     preview.rawChannels = 1;
-                    auto cameraConfig = CameraConfiguration::parse(
+                    const auto cameraConfig = CameraConfiguration::parse(
                         decoder->getContainerMetadata());
-                    const auto histogramLevels = resolveDataLevels(
-                        mSettings.levels, sourceFrameMetadata.dynamicWhiteLevel,
-                        sourceFrameMetadata.dynamicBlackLevel,
+                    const auto levels = resolveDataLevels(
+                        mSettings.levels, sourceMetadata.dynamicWhiteLevel,
+                        sourceMetadata.dynamicBlackLevel,
                         cameraConfig.whiteLevel, cameraConfig.blackLevel);
-                    preview.rawBlack = histogramLevels.black[0];
-                    preview.rawBlackLevels = histogramLevels.black;
-                    preview.rawWhite = histogramLevels.white;
+                    preview.rawBlack = levels.black[0];
+                    preview.rawBlackLevels = levels.black;
+                    preview.rawWhite = levels.white;
                     preview.rawCfaSize = mCalibration && mCalibration->hasCfaSize
-                        ? mCalibration->cfaSize : sourceFrameMetadata.cfaSize;
+                        ? mCalibration->cfaSize : sourceMetadata.cfaSize;
                     preview.rawCfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
                         mSettings, mCalibration, cameraConfig.sensorArrangement));
                 }
-                if (decoded) cropPreviewRawToVisibleTopLeft(preview, mSettings);
-                return decoded;
-            } catch (const std::exception&) {
-                return false;
             }
+            cropPreviewRawToVisibleTopLeft(preview, mSettings);
+            return !preview.rgb.empty();
         }
+        const bool spatialSidecar =
+            vfs::manualSidecarsNeedPixelProcessing(mManualVignetteSidecars) ||
+            vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
+                                    "deferredGainMaps");
         std::vector<uint8_t> frameData;
         nlohmann::json metadata;
         uint32_t cropWidth = 0, cropHeight = 0, strideOverride = 0;
@@ -927,16 +916,76 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         std::optional<std::array<float, 3>> neutralOverride;
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
+        if (spatialSidecar) {
+            auto generationSettings = canonicalMcrawGenerationSettings(mSettings);
+            generationSettings.badPixelTreatment = mSettings.badPixelTreatment;
+            DecodedDNGImage image;
+            utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
+                               vfs::outputFrameNumber(entry), mBaselineExpValue,
+                               generationSettings, mCalibration, false,
+                               exposureOverride, neutralOverride, &preview,
+                               retainSourceSamples, &image);
+            auto sourceSamples = std::move(preview.rawSamples);
+            const auto sourceWidth = preview.rawWidth;
+            const auto sourceHeight = preview.rawHeight;
+            const auto sourceBlack = preview.rawBlack;
+            const auto sourceBlackLevels = preview.rawBlackLevels;
+            const auto sourceWhite = preview.rawWhite;
+            const auto sourceCfaSize = preview.rawCfaSize;
+            const auto sourceCfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
+                mSettings, mCalibration, cameraConfig.sensorArrangement));
+            vfs::mergeManualDngMetadata(image.metadata, mManualVignetteSidecars,
+                                        mCalibration ? &*mCalibration : nullptr, false);
+            vfs::applyPreviewExposureOffset(image.metadata, mSettings);
+            if (mSettings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
+                image.opcodeList2.clear();
+                image.opcodeList3.clear();
+            } else {
+                if (vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,
+                                            "deferredGainMaps"))
+                    image.opcodeList3 = vfs::loadSidecarGainMaps(
+                        mSidecarMetadata, frameIt->second, "deferredGainMaps");
+                std::vector<GainMap> manual2, manual3;
+                if (!vfs::manualVignetteSidecarGainMaps(
+                        mManualVignetteSidecars, image.layout, manual2, manual3))
+                    return false;
+                if (mManualVignetteSidecars.useDcpGainmap) {
+                    image.opcodeList2.clear();
+                    image.opcodeList3 = std::move(manual3);
+                } else {
+                    if (!manual2.empty()) image.opcodeList2 = std::move(manual2);
+                    if (!manual3.empty()) image.opcodeList3 = std::move(manual3);
+                }
+            }
+            if (!DNGDecoder::decodePreview(std::move(image), mSettings, preview,
+                                           true, false)) return false;
+            if (sourceSamples) {
+                preview.rawSamples = std::move(sourceSamples);
+                preview.rawWidth = sourceWidth;
+                preview.rawHeight = sourceHeight;
+                preview.rawChannels = 1;
+                preview.rawBlack = sourceBlack;
+                preview.rawBlackLevels = sourceBlackLevels;
+                preview.rawWhite = sourceWhite;
+                preview.rawCfaSize = sourceCfaSize;
+                preview.rawCfaPhase = sourceCfaPhase;
+            }
+            preview.timestamp = vfs::outputTimestamp(
+                entry, timestamp, mSourceFrames.front(), mFps,
+                mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
+            cropPreviewRawToVisibleTopLeft(preview, mSettings);
+            return !preview.rgb.empty();
+        }
         const auto generateStarted = std::chrono::steady_clock::now();
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
                            mSettings, mCalibration, false, exposureOverride,
                            neutralOverride, &preview, retainSourceSamples);
-        // A DCP used only for color metadata does not require constructing and
-        // decoding a full DNG. Apply its color tables to the direct preview.
-        if (mManualVignetteSidecars.hasDcp)
-            vfs::mergeManualDngMetadata(preview.metadata, mManualVignetteSidecars,
-                                         mCalibration ? &*mCalibration : nullptr);
+        // generateDng has already applied JSON calibration (including gain-map
+        // neutral scaling). Merge sidecar color data without applying it twice.
+        vfs::mergeManualDngMetadata(preview.metadata, mManualVignetteSidecars,
+                                     mCalibration ? &*mCalibration : nullptr, false);
+        vfs::applyPreviewExposureOffset(preview.metadata, mSettings);
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=mcraw_preview_stage source={} load_ms={:.3f} prepare_ms={:.3f} generate_ms={:.3f}",
                 mSrcPath,
@@ -1029,4 +1078,3 @@ FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
 }
 
 } // namespace motioncam
-

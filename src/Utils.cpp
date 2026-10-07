@@ -1552,7 +1552,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     const std::optional<float>& baselineExposureOverride,
     const std::optional<std::array<float, 3>>& asShotNeutralOverride,
     PreviewFrame* previewFrame,
-    bool retainSourceSamples)
+    bool retainSourceSamples,
+    DecodedDNGImage* stagedImage)
 {
     Measure m("generateDng");
     const auto previewProfileStarted = std::chrono::steady_clock::now();
@@ -1628,12 +1629,20 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
             floatBlack, floatWhite, previewFrame->clipping);
     };
 
-    CameraFrameMetadata gainMetadata = metadata;
+    // Reuse the source metadata for the common path. Its lens-shading grid can
+    // be large, and only exclusion or map optimization needs a writable copy.
+    std::optional<CameraFrameMetadata> adjustedGainMetadata;
+    if (settings.vignetteCorrection == VignetteCorrectionMode::Exclude ||
+        ((settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
+         !metadata.lensShadingMap.empty()))
+        adjustedGainMetadata.emplace(metadata);
     if (settings.vignetteCorrection == VignetteCorrectionMode::Exclude) {
-        gainMetadata.lensShadingMap.clear();
-        gainMetadata.lensShadingMapWidth = 0;
-        gainMetadata.lensShadingMapHeight = 0;
+        adjustedGainMetadata->lensShadingMap.clear();
+        adjustedGainMetadata->lensShadingMapWidth = 0;
+        adjustedGainMetadata->lensShadingMapHeight = 0;
     }
+    const CameraFrameMetadata& gainMetadata = adjustedGainMetadata
+        ? *adjustedGainMetadata : metadata;
     float gainMapExposureOffset = 0.0f;
     std::array<float, 3> gainMapNeutralScale{1.0f, 1.0f, 1.0f};
     if ((settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS) &&
@@ -1644,7 +1653,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
             std::array{&maps}, cfa);
         gainMapExposureOffset = static_cast<float>(adjustment.exposureOffset);
         gainMapNeutralScale = adjustment.neutralScale;
-        storeCanonicalGainMaps(maps, gainMetadata.lensShadingMap);
+        storeCanonicalGainMaps(maps, adjustedGainMetadata->lensShadingMap);
     }
 
     // Extract options from settings
@@ -1863,8 +1872,27 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
                 markCropWidth, markCropHeight, activeBadPixels);
     }
 
-    if (previewFrame) {
+    if (previewFrame || stagedImage) {
+      PreviewFrame stagedMetadata;
+      if (!previewFrame) previewFrame = &stagedMetadata;
+      if (stagedImage) {
+        const size_t expectedSamples = static_cast<size_t>(width) * height *
+            (demosaic && !remosaic ? 3u : 1u);
+        if (processedData.size() != expectedSamples * sizeof(uint16_t))
+          throw std::runtime_error("Invalid staged MCRAW sample size");
+        stagedImage->layout.width = width;
+        stagedImage->layout.height = height;
+        stagedImage->layout.bitsPerSample = 16;
+        stagedImage->layout.samplesPerPixel = demosaic && !remosaic ? 3 : 1;
+        stagedImage->layout.pixels = demosaic && !remosaic
+            ? DNGPixelLayout::LinearRGB : DNGPixelLayout::CFA;
+        stagedImage->layout.cfaRepeatSize = processedRepeatSize;
+        stagedImage->layout.cfaPhase = cfa;
+        stagedImage->samples.resize(expectedSamples);
+        std::memcpy(stagedImage->samples.data(), processedData.data(), processedData.size());
+      }
       const auto previewStarted = std::chrono::steady_clock::now();
+      if (!stagedImage) {
       std::vector<uint16_t> rgbSamples;
       const uint16_t* previewRgb = nullptr;
       size_t previewRgbSamples = 0;
@@ -1966,6 +1994,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
                     std::min(clippingWidth - 1,
                         x * reductionScale + sample)];
       }
+      }
       auto &color = previewFrame->metadata;
       color.iso = metadata.iso;
       color.exposureTime = metadata.exposureTime / 1e9;
@@ -1987,13 +2016,19 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         color.asShotNeutral[channel] *= gainMapNeutralScale[channel];
       color.hasAsShotNeutral = true;
       auto setMatrix = [&](auto calibrationPresent, auto calibrationValue,
-                           auto cameraValue, std::array<float, 9> &destination,
+                           auto framePresent, auto frameValue, auto cameraValue,
+                           std::array<float, 9> &destination,
                            bool &present) {
         if (calibration && (*calibration).*calibrationPresent) {
           if (!isIdentityMatrix((*calibration).*calibrationValue)) {
             destination = (*calibration).*calibrationValue;
             present = true;
           }
+        } else if (metadata.*framePresent &&
+                   !isZeroMatrix(metadata.*frameValue) &&
+                   !isIdentityMatrix(metadata.*frameValue)) {
+          destination = metadata.*frameValue;
+          present = true;
         } else if (!isZeroMatrix(cameraConfiguration.*cameraValue) &&
                    !isIdentityMatrix(cameraConfiguration.*cameraValue)) {
           destination = cameraConfiguration.*cameraValue;
@@ -2002,18 +2037,26 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
       };
       setMatrix(&CalibrationData::hasColorMatrix1,
                 &CalibrationData::colorMatrix1,
+                &CameraFrameMetadata::hasColorMatrix1,
+                &CameraFrameMetadata::colorMatrix1,
                 &CameraConfiguration::colorMatrix1, color.colorMatrix1,
                 color.hasColorMatrix1);
       setMatrix(&CalibrationData::hasColorMatrix2,
                 &CalibrationData::colorMatrix2,
+                &CameraFrameMetadata::hasColorMatrix2,
+                &CameraFrameMetadata::colorMatrix2,
                 &CameraConfiguration::colorMatrix2, color.colorMatrix2,
                 color.hasColorMatrix2);
       setMatrix(&CalibrationData::hasForwardMatrix1,
                 &CalibrationData::forwardMatrix1,
+                &CameraFrameMetadata::hasForwardMatrix1,
+                &CameraFrameMetadata::forwardMatrix1,
                 &CameraConfiguration::forwardMatrix1, color.forwardMatrix1,
                 color.hasForwardMatrix1);
       setMatrix(&CalibrationData::hasForwardMatrix2,
                 &CalibrationData::forwardMatrix2,
+                &CameraFrameMetadata::hasForwardMatrix2,
+                &CameraFrameMetadata::forwardMatrix2,
                 &CameraConfiguration::forwardMatrix2, color.forwardMatrix2,
                 color.hasForwardMatrix2);
       if (calibration) {
@@ -2034,6 +2077,35 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
           color.hasCameraCalibration2 = true;
         }
       }
+      auto fillCameraCalibration = [&](bool overridePresent,
+                                       bool framePresent,
+                                       const std::array<float, 9>& frameValue,
+                                       const std::array<float, 9>& cameraValue,
+                                       std::array<float, 9>& destination,
+                                       bool& present) {
+        if (overridePresent) return;
+        if (framePresent && !isZeroMatrix(frameValue) &&
+            !isIdentityMatrix(frameValue)) {
+          destination = frameValue;
+          present = true;
+        } else if (!isZeroMatrix(cameraValue) &&
+                   !isIdentityMatrix(cameraValue)) {
+          destination = cameraValue;
+          present = true;
+        }
+      };
+      fillCameraCalibration(calibration && calibration->hasCameraCalibration1,
+                            metadata.hasCalibrationMatrix1,
+                            metadata.calibrationMatrix1,
+                            cameraConfiguration.calibrationMatrix1,
+                            color.cameraCalibration1,
+                            color.hasCameraCalibration1);
+      fillCameraCalibration(calibration && calibration->hasCameraCalibration2,
+                            metadata.hasCalibrationMatrix2,
+                            metadata.calibrationMatrix2,
+                            cameraConfiguration.calibrationMatrix2,
+                            color.cameraCalibration2,
+                            color.hasCameraCalibration2);
       color.calibrationIlluminant1 =
           calibration && calibration->hasCalibrationIlluminant1
               ? calibration->calibrationIlluminant1
@@ -2059,6 +2131,27 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
       color.orientation = calibration && calibration->hasOrientation
                               ? calibration->orientation
                               : sourceOrientation();
+      if (stagedImage) {
+        stagedImage->metadata = color;
+        stagedImage->metadata.blackLevelCount = demosaic && !remosaic ? 3 : 4;
+        stagedImage->metadata.whiteLevelCount = demosaic && !remosaic ? 3 : 1;
+        for (size_t i = 0; i < 4; ++i)
+          stagedImage->metadata.blackLevel[i] = dstBlackLevel[i];
+        stagedImage->metadata.whiteLevel.fill(dstWhiteLevel);
+        stagedImage->metadata.inputBitDepth = 16;
+        auto copyGainMaps = [](const tinydngwriter::OpcodeList& opcodes,
+                               std::vector<GainMap>& maps) {
+          if (opcodes.IsEmpty()) return;
+          const auto serialized = opcodes.Serialize();
+          if (!DNGDecoder::decodeGainMapOpcodes(
+                  reinterpret_cast<const uint8_t*>(serialized.data()),
+                  serialized.size(), maps))
+            throw std::runtime_error("Could not stage MCRAW gain-map opcodes");
+        };
+        copyGainMaps(opcodeList2, stagedImage->opcodeList2);
+        copyGainMaps(opcodeList3, stagedImage->opcodeList3);
+        return nullptr;
+      }
       if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=mcraw_generate_stage width={} height={} setup_ms={:.3f} preprocess_ms={:.3f} intermediate_ms={:.3f} preview_ms={:.3f}",
             width, height,

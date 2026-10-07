@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1780</width>
-    <height>780</height> 
+    <height>830</height> 
    </rect>
   </property>
   <property name="windowTitle">
@@ -596,7 +596,7 @@
          <item>
           <widget class="QLabel" name="compressionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Save DNG sequences using JPEG/JPEG XL, archive original MCRAW source clips using multithreaded 7z LZMA2 Ultra, or save as Camera Native. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Save DNG sequences using JPEG/JPEG XL, save as Camera Native, or archive MCRAW as 7z LZMA2. Mounted sequences are unaffected.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -748,7 +748,7 @@
          <item>
           <widget class="QLabel" name="vignetteCorrectionLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Bake gainmaps into pixels, resample them for a cropped image, retain their uncropped geometry, or exclude them. Color reduction and optimization still apply in Resample and Uncropped modes.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Bake gainmaps into pixel values or store in metadata with optional resample for cropped frames.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -785,7 +785,7 @@
          <item>
           <widget class="QLabel" name="vignetteOnlyColorLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Only treat color imperfections to retain natural vignette and dynamic range in image corners.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Divide maps by local and global minima across color channels to isolate color gradient treatment and offset exp / WB respectively. These retain natural vignetting and dynamic range.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -823,7 +823,7 @@
          <item>
           <widget class="QLabel" name="normalizeGainMapsLabel">
            <property name="text">
-            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Normalize baked or output gainmaps. When baking, examine clipping in pink highlights or draw flat-field images with Gainmaps only.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
+            <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;span style=&quot; font-size:9pt; color:#888888;&quot;&gt;Debug Views: Scale gainmaps to avoid introduced clipping. Or draw flat-field images based on aligned gainmaps.&lt;/span&gt;&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>

@@ -578,7 +578,7 @@ public:
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
     mThumbnailDiskCache=std::make_unique<QTemporaryDir>();
-    setAttribute(Qt::WA_DeleteOnClose); setWindowTitle(tr("Mounted clip gallery")); resize(1100,720);
+    setAttribute(Qt::WA_DeleteOnClose); setWindowTitle(tr("Gallery")); resize(1100,720);
     setStyleSheet("QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
     setMouseTracking(true);
     auto* layout=new QVBoxLayout(this);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
