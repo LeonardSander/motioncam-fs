@@ -7,6 +7,7 @@
 ---
 
 <img width="2621" height="1396" alt="ui" src="https://github.com/user-attachments/assets/ec07e359-3d48-4322-b637-4351b21c7090" />
+<img width="2621" height="1396" alt="ui" src="https://github.com/user-attachments/assets/e5e465a0-e46b-4bcc-9833-c07214f6b082" />
 
 ---
 
