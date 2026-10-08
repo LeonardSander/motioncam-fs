@@ -393,7 +393,17 @@ vectorbuf::int_type vectorbuf::overflow(int_type c) {
 }
 
 std::streamsize vectorbuf::xsputn(const char* s, std::streamsize count) {
+    if (count <= 0) return 0;
     size_t old_size = vec_.size();
+    if (pptr() == epptr()) {
+        // Appending through insert constructs the incoming bytes directly in
+        // the vector, avoiding resize's zero-fill before the stream copy.
+        const auto* first = reinterpret_cast<const uint8_t*>(s);
+        vec_.insert(vec_.end(), first, first + count);
+        setp(reinterpret_cast<char*>(vec_.data()), reinterpret_cast<char*>(vec_.data() + vec_.size()));
+        pbump(static_cast<int>(vec_.size()));
+        return count;
+    }
     size_t available = epptr() - pptr();
 
     if (static_cast<size_t>(count) > available) {
@@ -402,7 +412,8 @@ std::streamsize vectorbuf::xsputn(const char* s, std::streamsize count) {
         pbump(static_cast<int>(old_size));
     }
 
-    std::copy(s, s + count, pptr());
+    // A prepopulated strip can already occupy this exact output range.
+    if (s != pptr()) std::copy(s, s + count, pptr());
     pbump(static_cast<int>(count));
 
     return count;
@@ -2577,7 +2588,11 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
 
     // Set image data AFTER all metadata is configured (including BitsPerSample and Compression)
     spdlog::debug("Calling SetImageData with {} bytes, compression={}", processedData.size(), writerCompression);
-    if (!dng.SetImageData(reinterpret_cast<const unsigned char*>(processedData.data()), processedData.size())) {
+    const auto* imageData = reinterpret_cast<const unsigned char*>(processedData.data());
+    const bool attached = writerCompression
+        ? dng.SetImageData(imageData, processedData.size())
+        : dng.SetImageDataBorrowed(imageData, processedData.size());
+    if (!attached) {
         spdlog::error("SetImageData failed: {}", dng.Error());
         throw std::runtime_error("Failed to set image data: " + dng.Error());
     }

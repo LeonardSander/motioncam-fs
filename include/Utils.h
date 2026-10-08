@@ -9,6 +9,7 @@
 #include <optional>
 #include <array>
 #include <cstdint>
+#include <functional>
 
 #include "Types.h"
 #include "CalibrationData.h"
@@ -218,6 +219,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     DecodedDNGImage* stagedImage = nullptr);
 
 // Draws a centered, outlined ISO label into unpacked 16-bit image samples.
+void forEachIsoOverlayPixel(uint32_t width, uint32_t height, double iso,
+                            const std::function<void(uint32_t, uint32_t, bool)>& paint);
 void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
                     uint32_t channels, double iso, uint16_t black, uint16_t white);
 

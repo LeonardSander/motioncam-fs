@@ -513,6 +513,32 @@ void DirectLogDecoder::analyzeVideo() {
 bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
                                     int outputWidth, int outputHeight,
                                     bool preserveLogEncoded, bool smoothChroma) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
+    if (width <= 0 || height <= 0) return false;
+    rgbData.resize(static_cast<size_t>(width) * height * 3);
+    return extractFrameInto(frameNumber, rgbData.data(), rgbData.size(),
+                            width, height, preserveLogEncoded, smoothChroma);
+}
+
+bool DirectLogDecoder::extractFrameIntoBytes(int frameNumber,
+        std::vector<uint8_t>& bytes, size_t pixelOffset,
+        int outputWidth, int outputHeight,
+        bool preserveLogEncoded, bool smoothChroma) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
+    if (width <= 0 || height <= 0 || (pixelOffset & 1u)) return false;
+    const size_t samples = static_cast<size_t>(width) * height * 3;
+    if (samples > (std::numeric_limits<size_t>::max() - pixelOffset) / 2) return false;
+    bytes.resize(pixelOffset + samples * sizeof(uint16_t));
+    return extractFrameInto(frameNumber,
+        reinterpret_cast<uint16_t*>(bytes.data() + pixelOffset), samples,
+        width, height, preserveLogEncoded, smoothChroma);
+}
+
+bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
+        size_t sampleCount, int outputWidth, int outputHeight,
+        bool preserveLogEncoded, bool smoothChroma) {
     std::lock_guard<std::mutex> lock(mMutex);
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto extractStart = std::chrono::steady_clock::now();
@@ -571,7 +597,7 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
                                  elapsedMilliseconds(extractStart));
                 AVFrame* conversionFrame = transferableFrame(mFrame);
                 if (!conversionFrame || !convertYUVToRGB(
-                        conversionFrame, rgbData, outputWidth, outputHeight,
+                        conversionFrame, rgbData, sampleCount, outputWidth, outputHeight,
                         preserveLogEncoded, smoothChroma)) return -1;
                 mLastDecodedFrame = frameNumber;
                 if (diagnostics)
@@ -627,7 +653,7 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
             const auto conversionStart = std::chrono::steady_clock::now();
             AVFrame* conversionFrame = transferableFrame(mFrame);
             if (!conversionFrame || !convertYUVToRGB(
-                    conversionFrame, rgbData, outputWidth, outputHeight,
+                    conversionFrame, rgbData, sampleCount, outputWidth, outputHeight,
                     preserveLogEncoded, smoothChroma)) break;
             mLastDecodedFrame = frameNumber;
             if (diagnostics)
@@ -714,12 +740,22 @@ AVPixelFormat DirectLogDecoder::selectPixelFormat(
 
 AVFrame* DirectLogDecoder::transferableFrame(AVFrame* frame) {
     if (frame->format != mHardwarePixelFormat || !mHardwareDeviceContext) return frame;
-    av_frame_unref(mTransferFrame);
+    if (mTransferFrame->buf[0] &&
+        (mTransferFrame->width != frame->width ||
+         mTransferFrame->height != frame->height))
+        av_frame_unref(mTransferFrame);
     if (av_hwframe_transfer_data(mTransferFrame, frame, 0) < 0) {
-        spdlog::error("DirectLogDecoder: hardware frame transfer failed");
-        return nullptr;
+        // A device format change can invalidate a previously allocated
+        // download buffer. Retry with a fresh destination in that case.
+        av_frame_unref(mTransferFrame);
+        if (av_hwframe_transfer_data(mTransferFrame, frame, 0) < 0) {
+            spdlog::error("DirectLogDecoder: hardware frame transfer failed");
+            return nullptr;
+        }
     }
-    av_frame_copy_props(mTransferFrame, frame);
+    // The converter only consumes color range from frame properties. Avoid
+    // accumulating copied side data while retaining the download allocation.
+    mTransferFrame->color_range = frame->color_range;
     return mTransferFrame;
 }
 
@@ -729,7 +765,8 @@ void DirectLogDecoder::setFullRangeOverride(std::optional<bool> fullRange) {
     mFullRange.reset();
 }
 
-bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData,
+bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
+                                       size_t sampleCount,
                                        int outputWidth, int outputHeight,
                                        bool preserveLogEncoded, bool smoothChroma) {
     const bool diagnostics = directLogDiagnosticsEnabled();
@@ -738,7 +775,8 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     const int height = mVideoInfo.height;
     if (outputWidth <= 0) outputWidth = width;
     if (outputHeight <= 0) outputHeight = height;
-    rgbData.resize(static_cast<size_t>(outputWidth) * outputHeight * 3);
+    if (!rgbData || sampleCount != static_cast<size_t>(outputWidth) * outputHeight * 3)
+        return false;
 
     if (!mFullRange.has_value()) {
         AVColorRange colorRange = yuvFrame->color_range;
@@ -816,7 +854,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     }
 
     const auto scaleStart = std::chrono::steady_clock::now();
-    uint8_t* output[] = {reinterpret_cast<uint8_t*>(rgbData.data())};
+    uint8_t* output[] = {reinterpret_cast<uint8_t*>(rgbData)};
     int outputStride[] = {outputWidth * 3 * static_cast<int>(sizeof(uint16_t))};
     const AVPixFmtDescriptor* scaleDescriptor = av_pix_fmt_desc_get(pixelFormat);
     if (mVerifiedBandFormat != pixelFormat || mVerifiedBandSmooth != smoothChroma ||
@@ -842,6 +880,8 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
             static_cast<int>(bandCount) + alignment - 1) / alignment * alignment;
         if (mBandSwsContexts.size() < bandCount)
             mBandSwsContexts.resize(bandCount, nullptr);
+        if (mBandRgbScratch.size() < bandCount)
+            mBandRgbScratch.resize(bandCount);
         std::atomic_bool failed{false};
         auto scaleBand = [&](unsigned band) {
             const int begin = static_cast<int>(band) * rowsPerBand;
@@ -866,7 +906,8 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
                 input[1] + static_cast<ptrdiff_t>(sourceBegin / alignment) * inputStride[1],
                 input[2] ? input[2] + static_cast<ptrdiff_t>(sourceBegin / alignment) * inputStride[2] : nullptr,
                 input[3]};
-            std::vector<uint16_t> converted(static_cast<size_t>(width) * localHeight * 3);
+            auto& converted = mBandRgbScratch[band];
+            converted.resize(static_cast<size_t>(width) * localHeight * 3);
             uint8_t* bandOutput[] = {reinterpret_cast<uint8_t*>(converted.data())};
             if (sws_scale(context, bandInput, inputStride, 0, localHeight,
                           bandOutput, outputStride) != localHeight) {
@@ -875,7 +916,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
             }
             const size_t offset = static_cast<size_t>(begin - sourceBegin) * width * 3;
             std::copy_n(converted.data() + offset, static_cast<size_t>(end - begin) * width * 3,
-                rgbData.data() + static_cast<size_t>(begin) * width * 3);
+                rgbData + static_cast<size_t>(begin) * width * 3);
         };
         std::vector<std::thread> threads;
         threads.reserve(bandCount - 1);
@@ -885,11 +926,12 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
         for (auto& thread : threads) thread.join();
         bandSuccess = !failed.load();
         if (bandSuccess && !(mVerifiedBandCounts & (1u << bandCount))) {
-            std::vector<uint16_t> reference(rgbData.size());
+            std::vector<uint16_t> reference(sampleCount);
             uint8_t* referenceOutput[] = {reinterpret_cast<uint8_t*>(reference.data())};
             bandSuccess = sws_scale(mSwsContext, input, inputStride, 0, height,
                                     referenceOutput, outputStride) == outputHeight;
-            const bool matches = bandSuccess && reference == rgbData;
+            const bool matches = bandSuccess &&
+                std::equal(reference.begin(), reference.end(), rgbData);
             if (matches) mVerifiedBandCounts |= static_cast<uint16_t>(1u << bandCount);
             else mBandConversionRejected = true;
             if (diagnostics)
@@ -918,9 +960,9 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
     
     // Apply HLG to linear conversion if needed
     if (mVideoInfo.isHLG) {
-        applyHLGToLinear(rgbData, encodedWhite);
+        applyHLGToLinear(rgbData, sampleCount, encodedWhite);
     } else if (mVideoInfo.isLOG60 && !preserveLogEncoded) {
-        applyLOG60ToLinear(rgbData, encodedWhite);
+        applyLOG60ToLinear(rgbData, sampleCount, encodedWhite);
     }
     if (diagnostics)
         spdlog::info("DirectLog diagnostic: transfer_and_conversion_total_ms={:.3f}",
@@ -930,7 +972,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>&
 }
 
 void DirectLogDecoder::applyHLGToLinear(
-        std::vector<uint16_t>& rgbData, uint32_t encodedWhite) {
+        uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite) {
     const auto makeLut = [](uint32_t white) {
         std::array<uint16_t, 65536> values{};
         for (size_t i = 0; i < values.size(); ++i) {
@@ -946,7 +988,7 @@ void DirectLogDecoder::applyHLGToLinear(
     static const auto fullLut = makeLut(65535u);
     static const auto limited8BitLut = makeLut(254u * 257u);
     const auto& lut = encodedWhite == 65535u ? fullLut : limited8BitLut;
-    parallelPixelRanges(rgbData.size(), [&](size_t begin, size_t end) {
+    parallelPixelRanges(sampleCount, [&](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) rgbData[i] = lut[rgbData[i]];
     });
 }
@@ -956,7 +998,7 @@ bool DirectLogDecoder::isHLGVideo(const std::string& filePath) {
 }
 
 void DirectLogDecoder::applyLOG60ToLinear(
-        std::vector<uint16_t>& rgbData, uint32_t encodedWhite) {
+        uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite) {
     const auto makeLut = [](uint32_t white) {
         std::array<uint16_t, 65536> values{};
         for (size_t i = 0; i < values.size(); ++i) {
@@ -970,7 +1012,7 @@ void DirectLogDecoder::applyLOG60ToLinear(
     static const auto fullLut = makeLut(65535u);
     static const auto limited8BitLut = makeLut(254u * 257u);
     const auto& lut = encodedWhite == 65535u ? fullLut : limited8BitLut;
-    parallelPixelRanges(rgbData.size(), [&](size_t begin, size_t end) {
+    parallelPixelRanges(sampleCount, [&](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) rgbData[i] = lut[rgbData[i]];
     });
 }
@@ -1015,6 +1057,7 @@ void DirectLogDecoder::cleanup() {
         context = nullptr;
     }
     mBandSwsContexts.clear();
+    mBandRgbScratch.clear();
     mVerifiedBandCounts = 0;
     mBandConversionRejected = false;
     mVerifiedBandFormat = AV_PIX_FMT_NONE;

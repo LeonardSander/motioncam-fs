@@ -116,6 +116,12 @@ inline double applyLinearGain(double sample, double gain,
         (destinationWhite - destinationBlack);
 }
 
+inline double linearGainScale(double sourceBlack, double sourceWhite,
+                              double destinationBlack, double destinationWhite) {
+    return (destinationWhite - destinationBlack) /
+        std::max(1.0, sourceWhite - sourceBlack);
+}
+
 inline uint16_t bakeLinearGainSample(
         uint16_t sample, float gain,
         double sourceBlack, double sourceWhite,

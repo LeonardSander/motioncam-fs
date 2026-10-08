@@ -34,6 +34,10 @@ using motioncam::Timestamp;
 
 namespace {
 
+// Leave space for TIFF metadata so decoded RGB can occupy its final strip
+// position before the writer runs. Keep this below the mounted size slack.
+constexpr size_t directLogStripOffset = 16 * 1024;
+
 bool isIdentityMatrix(const std::array<float, 9>& matrix) {
     for (size_t i = 0; i < matrix.size(); ++i) {
         const float expected = (i % 4) == 0 ? 1.0f : 0.0f;
@@ -649,7 +653,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     const FrameMetadata* sourceMetadata,
     const std::vector<GainMap>& opcodeList2Maps,
     const std::vector<GainMap>& opcodeList3Maps,
-    int decodedWidth, int decodedHeight) {
+    int decodedWidth, int decodedHeight, bool prepopulatedImage) {
 
     try {
         const bool diagnostics = directLogDiagnosticsEnabled();
@@ -660,23 +664,28 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // This adapter emits one canonical, uncompressed 16-bit linear RGB
         // DNG. Source-independent processing happens after construction.
-        std::vector<uint16_t> processedRgbData = std::move(rgbData);
-
         const auto outputLevels = directLogDataLevels(mConfig);
-        std::vector<uint16_t> imageSamples = std::move(processedRgbData);
+        std::vector<uint16_t> imageSamples = std::move(rgbData);
         constexpr int samplesPerPixel = 3;
         constexpr int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
+        const size_t expectedImageBytes = static_cast<size_t>(width) * height * 3 * sizeof(uint16_t);
+        if (prepopulatedImage &&
+            dngData.size() != directLogStripOffset + expectedImageBytes)
+            throw std::runtime_error("Invalid prepopulated DirectLog strip size");
 
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} process_ms={:.3f} samples={} channels={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage),
-                         imageSamples.size(),
+                         prepopulatedImage ? expectedImageBytes / 2 : imageSamples.size(),
                          samplesPerPixel);
             diagnosticStage = std::chrono::steady_clock::now();
         }
 
-        const uint8_t* imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
-        const size_t imageDataSize = imageSamples.size() * sizeof(uint16_t);
+        const uint8_t* imageData = prepopulatedImage
+            ? dngData.data() + directLogStripOffset
+            : reinterpret_cast<const uint8_t*>(imageSamples.data());
+        const size_t imageDataSize = prepopulatedImage
+            ? expectedImageBytes : imageSamples.size() * sizeof(uint16_t);
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} pack_ms={:.3f} image_bytes={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage), imageDataSize);
@@ -758,14 +767,6 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             blackLevel[channel] = static_cast<unsigned short>(std::clamp(
                 std::lround(outputLevels.black[channel]), 0l, 65535l));
         dng.SetBlackLevel(3, blackLevel);
-        
-        diagnosticStage = std::chrono::steady_clock::now();
-        if (!dng.SetImageData(imageData, imageDataSize)) {
-            throw std::runtime_error("Failed to attach DirectLog image data");
-        }
-        if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} attach_image_ms={:.3f}",
-                         frameNumber, elapsedMilliseconds(diagnosticStage));
         
         // Apply calibration if available
         if (mCalibration.has_value()) {
@@ -881,10 +882,25 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         const auto opcodeList3 = makeOpcodeList(opcodeList3Maps, false);
         if (!opcodeList2.IsEmpty()) dng.SetOpcodeList2(opcodeList2);
         if (!opcodeList3.IsEmpty()) dng.SetOpcodeList3(opcodeList3);
+        if (prepopulatedImage && !dng.PadImageDataOffset(directLogStripOffset - 8)) {
+            // An unusually large metadata payload needs the ordinary writer.
+            imageSamples.resize(expectedImageBytes / sizeof(uint16_t));
+            std::memcpy(imageSamples.data(), imageData, expectedImageBytes);
+            imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
+            prepopulatedImage = false;
+        }
+        diagnosticStage = std::chrono::steady_clock::now();
+        if (!dng.SetImageDataBorrowed(imageData, imageDataSize))
+            throw std::runtime_error("Failed to attach DirectLog image data");
+        if (diagnostics)
+            spdlog::info("DirectLog diagnostic: frame={} attach_image_ms={:.3f}",
+                         frameNumber, elapsedMilliseconds(diagnosticStage));
         // Use the same vector-backed writer as MCRAW. Avoid constructing an
         // intermediate string and copying the complete RGB DNG afterward.
-        dngData.clear();
-        dngData.reserve(imageDataSize + 512 * 1024);
+        if (!prepopulatedImage) {
+            dngData.clear();
+            dngData.reserve(imageDataSize + 512 * 1024);
+        }
         utils::vector_ostream stream(dngData);
         tinydngwriter::DNGWriter writer(false); // little-endian
         writer.AddImage(&dng);
@@ -938,7 +954,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 }
 
 VirtualFileSystemImpl_DirectLog::ProcessedFrame
-VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale) {
+VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale,
+                                               bool prepopulateDng) {
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
     const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
@@ -1001,8 +1018,14 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     // for remosaiced DNG output; RGB output and previews retain smoothing.
     const bool smoothChroma =
         !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) || mConfig.streamingPreview;
-    if (!mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
-                                result.height, false, smoothChroma))
+    const bool directStrip = prepopulateDng && previewScale == 1;
+    const bool extractedFrame = directStrip
+        ? mDecoder->extractFrameIntoBytes(result.frameNumber,
+              result.dngStripBuffer, directLogStripOffset,
+              result.width, result.height, false, smoothChroma)
+        : mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
+                                result.height, false, smoothChroma);
+    if (!extractedFrame)
         throw std::runtime_error("Could not decode DirectLog frame");
     const auto extracted = std::chrono::steady_clock::now();
     if (result.width <= 0) result.width = mWidth;
@@ -1018,13 +1041,26 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         const int top = centered ? (result.height - targetHeight) / 2 : 0;
         const double sourcePerPixelX = static_cast<double>(sourceWidth) / result.width;
         const double sourcePerPixelY = static_cast<double>(sourceHeight) / result.height;
-        std::vector<uint16_t> cropped(static_cast<size_t>(targetWidth) * targetHeight * 3);
-        for (int y = 0; y < targetHeight; ++y)
-            std::copy_n(result.rgb.begin() +
-                            (static_cast<size_t>(y + top) * result.width + left) * 3,
-                        static_cast<size_t>(targetWidth) * 3,
-                        cropped.begin() + static_cast<size_t>(y) * targetWidth * 3);
-        result.rgb = std::move(cropped);
+        if (directStrip) {
+            auto* pixels = result.dngStripBuffer.data() + directLogStripOffset;
+            const size_t rowBytes = static_cast<size_t>(targetWidth) * 3 * sizeof(uint16_t);
+            for (int y = 0; y < targetHeight; ++y) {
+                const size_t source =
+                    (static_cast<size_t>(y + top) * result.width + left) * 3 * sizeof(uint16_t);
+                std::memmove(pixels + static_cast<size_t>(y) * rowBytes,
+                             pixels + source, rowBytes);
+            }
+            result.dngStripBuffer.resize(
+                directLogStripOffset + static_cast<size_t>(targetHeight) * rowBytes);
+        } else {
+            std::vector<uint16_t> cropped(static_cast<size_t>(targetWidth) * targetHeight * 3);
+            for (int y = 0; y < targetHeight; ++y)
+                std::copy_n(result.rgb.begin() +
+                                (static_cast<size_t>(y + top) * result.width + left) * 3,
+                            static_cast<size_t>(targetWidth) * 3,
+                            cropped.begin() + static_cast<size_t>(y) * targetWidth * 3);
+            result.rgb = std::move(cropped);
+        }
         sourceLeft += static_cast<int>(std::lround(left * sourcePerPixelX));
         sourceTop += static_cast<int>(std::lround(top * sourcePerPixelY));
         sourceWidth = static_cast<int>(std::lround(targetWidth * sourcePerPixelX));
@@ -1110,26 +1146,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                                  RENDER_OPT_HIGHER_CFA_HQ)) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
-        const auto queueStarted = std::chrono::steady_clock::now();
-        struct DngWriterSlot {
-            VirtualFileSystemImpl_DirectLog& owner;
-            explicit DngWriterSlot(VirtualFileSystemImpl_DirectLog& value) : owner(value) {
-                std::unique_lock lock(owner.mDngWriterMutex);
-                owner.mDngWriterAvailable.wait(lock, [&] {
-                    return owner.mActiveDngWriters < 4;
-                });
-                ++owner.mActiveDngWriters;
-            }
-            ~DngWriterSlot() {
-                {
-                    std::lock_guard lock(owner.mDngWriterMutex);
-                    --owner.mActiveDngWriters;
-                }
-                owner.mDngWriterAvailable.notify_one();
-            }
-        } writerSlot(*this);
         const auto acquiredAt = std::chrono::steady_clock::now();
-        auto processed = processFrame(entry, directProxy ? configuredScale : 1);
+        // The per-clip center crop is applied later by processDngPixels().
+        // Keep the strip buffer here; only the source's left/top crop needs
+        // to compact rows before the DNG writer runs.
+        const bool prepopulateDng = !jpegCompression && !mConfig.streamingPreview &&
+            !directProxy;
+        auto processed = processFrame(entry, directProxy ? configuredScale : 1,
+                                      prepopulateDng);
         const auto decodedAt = std::chrono::steady_clock::now();
         const bool scaledInFfmpeg = directProxy &&
             processed.width == mWidth / configuredScale &&
@@ -1151,7 +1175,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                          frameNumber, elapsedMilliseconds(stageStart));
             stageStart = std::chrono::steady_clock::now();
         }
-        std::vector<uint8_t> dngData;
+        std::vector<uint8_t> dngData = std::move(processed.dngStripBuffer);
+        const bool prepopulatedImage = !dngData.empty();
         if (!convertRGBToDNG(std::move(processed.rgb), dngData, outputFrameNumber,
                              timestamp,
                              processed.metadata.iso, processed.metadata.shutterSpeed,
@@ -1161,7 +1186,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                              &processed.metadata,
                              processed.gainMaps.opcodeList2,
                              processed.gainMaps.opcodeList3,
-                             processed.width, processed.height))
+                             processed.width, processed.height, prepopulatedImage))
             throw std::runtime_error("Could not generate DirectLog DNG");
         const auto generatedAt = std::chrono::steady_clock::now();
         vfs::DngPixelPipelineOptions pixels;
@@ -1200,7 +1225,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                          processed.height);
             spdlog::info("GALLERY_PERF event=mounted_frame_stage source=DirectLog source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
                          mSrcPath, frameNumber,
-                         std::chrono::duration<double, std::milli>(acquiredAt-queueStarted).count(),
+                         0.0,
                          std::chrono::duration<double, std::milli>(decodedAt-acquiredAt).count(),
                          std::chrono::duration<double, std::milli>(generatedAt-decodedAt).count(),
                          std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
@@ -1210,7 +1235,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
                          frameNumber,
-                         std::chrono::duration<double, std::milli>(acquiredAt-queueStarted).count(),
+                         0.0,
                          std::chrono::duration<double, std::milli>(decodedAt-acquiredAt).count(),
                          std::chrono::duration<double, std::milli>(generatedAt-decodedAt).count(),
                          std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),

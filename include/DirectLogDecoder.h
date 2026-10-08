@@ -59,6 +59,11 @@ public:
                       int outputWidth = 0, int outputHeight = 0,
                       bool preserveLogEncoded = false,
                       bool smoothChroma = true);
+    bool extractFrameIntoBytes(int frameNumber, std::vector<uint8_t>& bytes,
+                               size_t pixelOffset, int outputWidth = 0,
+                               int outputHeight = 0,
+                               bool preserveLogEncoded = false,
+                               bool smoothChroma = true);
     void setFullRangeOverride(std::optional<bool> fullRange);
     
     static bool isHLGVideo(const std::string& filePath);
@@ -72,11 +77,14 @@ private:
     bool initHardwareDecoder();
     void analyzeVideo();
     void cleanup();
-    bool convertYUVToRGB(AVFrame* yuvFrame, std::vector<uint16_t>& rgbData,
+    bool extractFrameInto(int frameNumber, uint16_t* rgbData, size_t sampleCount,
+                          int outputWidth, int outputHeight,
+                          bool preserveLogEncoded, bool smoothChroma);
+    bool convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData, size_t sampleCount,
                          int outputWidth, int outputHeight, bool preserveLogEncoded,
                          bool smoothChroma);
-    void applyHLGToLinear(std::vector<uint16_t>& rgbData, uint32_t encodedWhite);
-    void applyLOG60ToLinear(std::vector<uint16_t>& rgbData, uint32_t encodedWhite);
+    void applyHLGToLinear(uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite);
+    void applyLOG60ToLinear(uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite);
     AVFrame* transferableFrame(AVFrame* frame);
     static AVPixelFormat selectPixelFormat(AVCodecContext* context,
                                            const AVPixelFormat* formats);
@@ -94,6 +102,7 @@ private:
     AVPacket* mPacket;
     SwsContext* mSwsContext;
     std::vector<SwsContext*> mBandSwsContexts;
+    std::vector<std::vector<uint16_t>> mBandRgbScratch;
     uint16_t mVerifiedBandCounts = 0;
     bool mBandConversionRejected = false;
     AVPixelFormat mVerifiedBandFormat = AV_PIX_FMT_NONE;

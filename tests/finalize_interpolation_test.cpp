@@ -482,6 +482,138 @@ int main() {
     assert(tagValue(keepInputGain, 50712).count == 1024);
     assert(motioncam::DNGDecoder::compressLosslessJPEG(keepInputGain));
     assert(motioncam::DNGDecoder::getLinearizationTableCount(keepInputGain) == 1024);
+    const std::array packedLogModes{
+        motioncam::LogTransformMode::ReduceBy2Bit,
+        motioncam::LogTransformMode::ReduceBy4Bit,
+        motioncam::LogTransformMode::ReduceBy6Bit,
+        motioncam::LogTransformMode::ReduceBy8Bit};
+    for (size_t modeIndex = 0; modeIndex < packedLogModes.size(); ++modeIndex) {
+        const auto mode = packedLogModes[modeIndex];
+        const uint32_t expectedBits = 14 - static_cast<uint32_t>(modeIndex) * 2;
+        auto fusedUnpacked = makeLogCfaDng(0, 0, false, 33, true);
+        assert(motioncam::DNGDecoder::replaceGainMaps(
+            fusedUnpacked, 2, constantPhaseMaps));
+        auto fusedPacked = fusedUnpacked;
+        bool logFused = false;
+        assert(motioncam::DNGDecoder::bakeGainMaps(
+            fusedUnpacked, false, false, false, false, 2, std::nullopt,
+            mode, 65535, true, &logFused));
+        assert(logFused);
+        assert(motioncam::DNGDecoder::bakeGainMaps(
+            fusedPacked, false, false, false, false, 2, std::nullopt,
+            mode, 65535, true, &logFused, true));
+        assert(logFused);
+        assert(tagValue(fusedUnpacked, 258).value == 16);
+        assert(tagValue(fusedPacked, 258).value == expectedBits);
+        assert(motioncam::DNGDecoder::applyLogTransform(
+            fusedUnpacked, mode, 65535, true, true));
+        assert(motioncam::DNGDecoder::applyLogTransform(
+            fusedPacked, mode, 65535, true, true));
+        assert(tagValue(fusedPacked, 50712).count == (1u << expectedBits));
+        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedUnpacked));
+        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedPacked));
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(fusedUnpacked, fusedPacked));
+    }
+    auto overlayPacked = makeLogCfaDng(500, 0, false, 128);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        overlayPacked, 2, constantPhaseMaps));
+    bool overlayLogFused = false;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        overlayPacked, false, false, false, false, 2, std::nullopt,
+        motioncam::LogTransformMode::ReduceBy6Bit, 65535, false,
+        &overlayLogFused, true));
+    assert(overlayLogFused);
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        overlayPacked, motioncam::LogTransformMode::ReduceBy6Bit,
+        65535, false, true));
+    std::vector<std::pair<uint32_t, uint32_t>> isoForeground;
+    std::pair<uint32_t, uint32_t> isoOutline{};
+    bool hasOutline = false;
+    motioncam::utils::forEachIsoOverlayPixel(128, 32, 100.0,
+        [&](uint32_t x, uint32_t y, bool foreground) {
+            if (foreground && isoForeground.size() < 2)
+                isoForeground.emplace_back(x, y);
+            if (!foreground && !hasOutline) {
+                isoOutline = {x, y};
+                hasOutline = true;
+            }
+        });
+    assert(isoForeground.size() == 2 && hasOutline);
+    std::vector<uint16_t> isoRgb(128 * 32 * 3, 1000);
+    const auto [protectedX, protectedY] = isoForeground.front();
+    const size_t protectedOffset = (static_cast<size_t>(protectedY) * 128 + protectedX) * 3;
+    isoRgb[protectedOffset] = isoRgb[protectedOffset + 1] =
+        isoRgb[protectedOffset + 2] = 0;
+    motioncam::utils::bakeIsoOverlay(
+        isoRgb.data(), 128, 32, 3, 100.0, 0, 65535);
+    const auto [whiteX, whiteY] = isoForeground.back();
+    const size_t whiteOffset = (static_cast<size_t>(whiteY) * 128 + whiteX) * 3;
+    const size_t outlineOffset =
+        (static_cast<size_t>(isoOutline.second) * 128 + isoOutline.first) * 3;
+    assert(isoRgb[whiteOffset] == 65535 &&
+           isoRgb[whiteOffset + 1] == 65535 &&
+           isoRgb[whiteOffset + 2] == 65535);
+    assert(isoRgb[outlineOffset] == 0 && isoRgb[protectedOffset] == 0);
+    const std::vector<motioncam::utils::ActiveBadPixel> protectedPackedMark{
+        {protectedY, protectedX}};
+    assert(motioncam::DNGDecoder::markBadPixels(
+        overlayPacked, 128, 32, 0, 0, protectedPackedMark, false));
+    auto beforeOverlay = overlayPacked;
+    assert(motioncam::DNGDecoder::bakeIsoOverlay(overlayPacked, 100.0));
+    assert(tagValue(overlayPacked, 258).value == 10);
+    assert(!motioncam::DNGDecoder::imagePayloadsEqual(beforeOverlay, overlayPacked));
+    motioncam::DecodedDNGImage isoPackedImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        overlayPacked, isoPackedImage, false, true));
+    assert(isoPackedImage.samples[static_cast<size_t>(whiteY) * 128 + whiteX] >= 65000);
+    assert(isoPackedImage.samples[
+        static_cast<size_t>(isoOutline.second) * 128 + isoOutline.first] == 0);
+    assert(isoPackedImage.samples[
+        static_cast<size_t>(protectedY) * 128 + protectedX] == 0);
+    const std::vector<motioncam::utils::ActiveBadPixel> packedMarks{{5, 5}};
+    assert(motioncam::DNGDecoder::markBadPixels(
+        overlayPacked, 128, 32, 0, 0, packedMarks, false));
+    motioncam::DecodedDNGImage markedPackedImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        overlayPacked, markedPackedImage, false, false));
+    assert(markedPackedImage.samples[5 * 128 + 5] == 0);
+    assert(tagValue(overlayPacked, 258).value == 10);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(overlayPacked));
+    assert(tagValue(overlayPacked, 258).value == 10);
+    auto unpackedIsoLog = makeLogCfaDng(500, 0, false, 128);
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        unpackedIsoLog, motioncam::LogTransformMode::ReduceBy6Bit, 65535));
+    assert(tagValue(unpackedIsoLog, 258).value == 16);
+    assert(tagValue(unpackedIsoLog, 50712).count == 1024);
+    auto compressedIsoLog = unpackedIsoLog;
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedIsoLog));
+    assert(motioncam::DNGDecoder::bakeIsoOverlay(compressedIsoLog, 100.0));
+    assert(tagValue(compressedIsoLog, 50712).count == 1024);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(compressedIsoLog));
+    assert(tagValue(compressedIsoLog, 258).value == 10);
+    motioncam::vfs::DngFinalizeOptions isoLogFinalize;
+    isoLogFinalize.writeTiming = false;
+    isoLogFinalize.isoOverlay = 100.0;
+    isoLogFinalize.packToWhiteLevel = true;
+    motioncam::RenderSettings isoLogSettings;
+    motioncam::vfs::finalizeDng(unpackedIsoLog, isoLogSettings, isoLogFinalize);
+    assert(tagValue(unpackedIsoLog, 258).value == 10);
+    assert(tagValue(unpackedIsoLog, 50712).count == 1024);
+    auto markedRgbPacked = makeDng(
+        1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
+    assert(motioncam::DNGDecoder::applyLogTransform(
+        markedRgbPacked, motioncam::LogTransformMode::ReduceBy6Bit, 65535));
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(markedRgbPacked));
+    assert(tagValue(markedRgbPacked, 258).value == 10);
+    assert(motioncam::DNGDecoder::markBadPixels(
+        markedRgbPacked, 8, 8, 0, 0, packedMarks, true));
+    motioncam::DecodedDNGImage markedRgbPackedImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        markedRgbPacked, markedRgbPackedImage, false, false));
+    const size_t rgbMarkOffset = (5 * 8 + 5) * 3;
+    assert(markedRgbPackedImage.samples[rgbMarkOffset] == 0 &&
+           markedRgbPackedImage.samples[rgbMarkOffset + 1] == 0 &&
+           markedRgbPackedImage.samples[rgbMarkOffset + 2] == 0);
     auto linearCfa = makeLogCfaDng(1023, 0, false);
     assert(tagValue(linearCfa, 50712).count == 0);
     motioncam::vfs::DngPixelPipelineOptions sourceDngPipeline;

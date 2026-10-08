@@ -7,10 +7,9 @@
 
 namespace motioncam::utils {
 
-void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
-                    uint32_t channels, double iso, uint16_t black, uint16_t white) {
-    if (!samples || width < 40 || height < 30 || channels == 0 || channels > 4 ||
-        !(iso > 0.0) || !std::isfinite(iso)) return;
+void forEachIsoOverlayPixel(uint32_t width, uint32_t height, double iso,
+                           const std::function<void(uint32_t, uint32_t, bool)>& paint) {
+    if (width < 40 || height < 30 || !(iso > 0.0) || !std::isfinite(iso)) return;
     static const std::array<std::array<uint8_t, 7>, 13> glyphs{{
         {{14,17,19,21,25,17,14}}, {{4,12,4,4,4,4,14}},
         {{14,17,1,2,4,8,31}}, {{30,1,1,14,1,1,30}},
@@ -27,19 +26,17 @@ void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
     if (textWidth + 4 * scale > width) return;
     const int originX = static_cast<int>((width - textWidth) / 2);
     const int originY = static_cast<int>(height * 7 / 8) - static_cast<int>(7 * scale / 2);
+    const int maskLeft = originX - static_cast<int>(scale);
+    const int maskTop = originY - static_cast<int>(scale);
+    const size_t maskWidth = static_cast<size_t>(textWidth) + 2 * scale;
+    const size_t maskHeight = 9 * static_cast<size_t>(scale);
+    std::vector<uint8_t> mask(maskWidth * maskHeight, 0);
     auto glyph = [&](char c) -> const std::array<uint8_t, 7>* {
         if (c >= '0' && c <= '9') return &glyphs[c - '0'];
         if (c == 'I') return &glyphs[10];
         if (c == 'S') return &glyphs[11];
         if (c == 'O') return &glyphs[12];
         return nullptr;
-    };
-    auto paint = [&](int x, int y, uint16_t value) {
-        if (x < 0 || y < 0 || x >= static_cast<int>(width) || y >= static_cast<int>(height)) return;
-        const size_t first = (static_cast<size_t>(y) * width + x) * channels;
-        if (std::all_of(samples + first, samples + first + channels,
-                        [](uint16_t sample) { return sample == 0; })) return;
-        for (uint32_t c = 0; c < channels; ++c) samples[first + c] = value;
     };
     for (int pass = 0; pass < 2; ++pass) {
         for (size_t i = 0; i < text.size(); ++i) {
@@ -52,10 +49,36 @@ void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
                 const int radius = pass == 0 ? static_cast<int>(scale) : 0;
                 for (int y = y0 - radius; y < y0 + static_cast<int>(scale) + radius; ++y)
                     for (int x = x0 - radius; x < x0 + static_cast<int>(scale) + radius; ++x)
-                        paint(x, y, pass == 0 ? black : white);
+                        mask[static_cast<size_t>(y - maskTop) * maskWidth +
+                             static_cast<size_t>(x - maskLeft)] = pass == 0 ? 1 : 2;
             }
         }
     }
+    for (size_t y = 0; y < maskHeight; ++y) {
+        const int imageY = maskTop + static_cast<int>(y);
+        if (imageY < 0 || imageY >= static_cast<int>(height)) continue;
+        for (size_t x = 0; x < maskWidth; ++x) {
+            const uint8_t stroke = mask[y * maskWidth + x];
+            if (!stroke) continue;
+            const int imageX = maskLeft + static_cast<int>(x);
+            if (imageX < 0 || imageX >= static_cast<int>(width)) continue;
+            paint(static_cast<uint32_t>(imageX), static_cast<uint32_t>(imageY),
+                  stroke == 2);
+        }
+    }
+}
+
+void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
+                    uint32_t channels, double iso, uint16_t black, uint16_t white) {
+    if (!samples || channels == 0 || channels > 4) return;
+    forEachIsoOverlayPixel(width, height, iso,
+        [&](uint32_t x, uint32_t y, bool foreground) {
+            const size_t first = (static_cast<size_t>(y) * width + x) * channels;
+            if (std::all_of(samples + first, samples + first + channels,
+                            [](uint16_t sample) { return sample == 0; })) return;
+            for (uint32_t c = 0; c < channels; ++c)
+                samples[first + c] = foreground ? white : black;
+        });
 }
 
 } // namespace motioncam::utils

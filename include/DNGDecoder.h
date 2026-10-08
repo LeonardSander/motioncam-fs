@@ -11,6 +11,8 @@
 
 namespace motioncam {
 
+namespace utils { struct ActiveBadPixel; }
+
 struct DNGFrameInfo {
     int frameNumber;
     std::string filePath;
@@ -124,8 +126,14 @@ public:
                           uint32_t targetWidth, uint32_t targetHeight);
     static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode,
                                   uint32_t quantizationWhite = 0,
-                                  bool highQuality = false);
+                                  bool highQuality = false,
+                                  bool samplesAlreadyEncoded = false);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
+    static bool markBadPixels(std::vector<uint8_t>& dngData,
+                              uint32_t sourceWidth, uint32_t sourceHeight,
+                              uint32_t cropWidth, uint32_t cropHeight,
+                              const std::vector<utils::ActiveBadPixel>& pixels,
+                              bool rgb);
     static bool getImageLayout(const std::vector<uint8_t>& dngData,
                                DNGImageLayout& layout);
     static uint32_t getLinearizationTableCount(const std::vector<uint8_t>& dngData);
@@ -179,7 +187,12 @@ public:
                              bool optimizeGainMaps = false,
                              bool debugGainMap = false,
                              int cfaRepeatSizeOverride = 0,
-                             std::optional<std::array<uint8_t, 4>> cfaPhaseOverride = std::nullopt);
+                             std::optional<std::array<uint8_t, 4>> cfaPhaseOverride = std::nullopt,
+                             LogTransformMode fusedLogMode = LogTransformMode::Disabled,
+                             uint32_t logQuantizationWhite = 0,
+                             bool logHighQuality = false,
+                             bool* logFused = nullptr,
+                             bool packFusedLog = false);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

@@ -9,7 +9,6 @@
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <shared_mutex>
-#include <condition_variable>
 #include <unordered_map>
 
 namespace BS {
@@ -68,13 +67,15 @@ private:
                          const FrameMetadata* sourceMetadata = nullptr,
                          const std::vector<GainMap>& opcodeList2 = {},
                          const std::vector<GainMap>& opcodeList3 = {},
-                         int decodedWidth = 0, int decodedHeight = 0);
+                         int decodedWidth = 0, int decodedHeight = 0,
+                         bool prepopulatedImage = false);
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
     struct PreparedSidecarGainMaps {
         std::vector<GainMap> opcodeList2, opcodeList3;
     };
     struct ProcessedFrame {
         std::vector<uint16_t> rgb;
+        std::vector<uint8_t> dngStripBuffer;
         FrameMetadata metadata;
         PreparedSidecarGainMaps gainMaps;
         Timestamp timestamp = 0;
@@ -82,7 +83,8 @@ private:
         int width = 0;
         int height = 0;
     };
-    ProcessedFrame processFrame(const Entry& entry, int previewScale = 1);
+    ProcessedFrame processFrame(const Entry& entry, int previewScale = 1,
+                                bool prepopulateDng = false);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
@@ -113,9 +115,6 @@ private:
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     mutable std::shared_mutex mRenderMutex;
-    mutable std::mutex mDngWriterMutex;
-    mutable std::condition_variable mDngWriterAvailable;
-    int mActiveDngWriters = 0;
 };
 
 } // namespace motioncam

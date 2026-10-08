@@ -242,6 +242,16 @@ void processDngPixels(std::vector<uint8_t>& dng,
     const auto preTopologyFinished = std::chrono::steady_clock::now();
     const bool normalizeGainMaps = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     const bool optimizeGainMaps = settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
+    const bool postTopologyAfterBake =
+        (!topologyBeforeBake &&
+         (options.cfaRepeatSize > 2 ||
+          (options.hasCfa && settings.cameraNativeStaging) ||
+          scale > 1 || remosaic)) ||
+        (topologyBeforeBake && options.hasCfa && scale > 1 &&
+         (settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
+         demosaics(mode) && !remosaic);
+    const bool packFusedLog = !settings.cameraNativeStaging;
+    bool logFused = false;
     if ((hasOpcode2 || (normalizeGainMaps && hasOpcode3Luma)) && !bakeGain &&
         (normalizeGainMaps || colorOnly || optimizeGainMaps) &&
         !DNGDecoder::transformGainMaps(
@@ -250,7 +260,11 @@ void processDngPixels(std::vector<uint8_t>& dng,
     if (bakeGain && !DNGDecoder::bakeGainMaps(
             dng, normalizeGainMaps, colorOnly, optimizeGainMaps,
             debugGainMap,
-            topologyBeforeBake ? 2 : options.cfaRepeatSize, options.cfaPhase))
+            topologyBeforeBake ? 2 : options.cfaRepeatSize, options.cfaPhase,
+            (settings.options & RENDER_OPT_LOG_TRANSFORM) && !postTopologyAfterBake
+                ? settings.logTransform : LogTransformMode::Disabled,
+            options.inputQuantizationWhite,
+            settings.options & RENDER_OPT_LOG_HQ, &logFused, packFusedLog))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = std::chrono::steady_clock::now();
     if (!topologyBeforeBake &&
@@ -290,29 +304,36 @@ void processDngPixels(std::vector<uint8_t>& dng,
         applyLog &&
         !DNGDecoder::applyLogTransform(
             dng, settings.logTransform, options.inputQuantizationWhite,
-            settings.options & RENDER_OPT_LOG_HQ))
+            settings.options & RENDER_OPT_LOG_HQ, logFused))
         throw std::runtime_error("Could not apply log transform to " + source);
     if (badPixelTreatment == BadPixelTreatment::MarkPixels &&
         badPixelsWillDemosaic && !markedPixels.empty()) {
-        DecodedDNGImage marked;
-        if (!DNGDecoder::decodeImageBorrowed(dng, marked, false, false))
-            throw std::runtime_error("Could not decode transformed DNG for pixel marking: " + source);
         uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
         if (settings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(settings.cropTarget, cropWidth, cropHeight, stride);
-        if (marked.layout.pixels == DNGPixelLayout::LinearRGB) {
-            utils::markBadPixelsRgb(marked.samples.data(), marked.layout.width,
-                marked.layout.height, markedSourceWidth, markedSourceHeight,
-                cropWidth, cropHeight, markedPixels);
-        } else if (remosaic && marked.layout.pixels == DNGPixelLayout::CFA) {
-            utils::markBadPixelsCfa(marked.samples.data(), marked.layout.width,
-                marked.layout.height, markedSourceWidth, markedSourceHeight,
-                cropWidth, cropHeight, markedPixels);
-        } else {
+        DNGImageLayout layout;
+        if (!DNGDecoder::getImageLayout(dng, layout) ||
+            (layout.pixels != DNGPixelLayout::LinearRGB &&
+             !(remosaic && layout.pixels == DNGPixelLayout::CFA)))
             throw std::runtime_error("Unexpected DNG layout for pixel marking: " + source);
+        const bool rgb = layout.pixels == DNGPixelLayout::LinearRGB;
+        if (!DNGDecoder::markBadPixels(
+                dng, markedSourceWidth, markedSourceHeight,
+                cropWidth, cropHeight, markedPixels, rgb)) {
+            DecodedDNGImage marked;
+            if (!DNGDecoder::decodeImageBorrowed(dng, marked, false, false))
+                throw std::runtime_error("Could not decode transformed DNG for pixel marking: " + source);
+            if (rgb)
+                utils::markBadPixelsRgb(marked.samples.data(), marked.layout.width,
+                    marked.layout.height, markedSourceWidth, markedSourceHeight,
+                    cropWidth, cropHeight, markedPixels);
+            else
+                utils::markBadPixelsCfa(marked.samples.data(), marked.layout.width,
+                    marked.layout.height, markedSourceWidth, markedSourceHeight,
+                    cropWidth, cropHeight, markedPixels);
+            if (!DNGDecoder::encodeImage(dng, marked))
+                throw std::runtime_error("Could not encode marked DNG: " + source);
         }
-        if (!DNGDecoder::encodeImage(dng, marked))
-            throw std::runtime_error("Could not encode marked DNG: " + source);
     }
     if (profile)
         spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
