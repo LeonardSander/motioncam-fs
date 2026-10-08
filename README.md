@@ -6,7 +6,7 @@
 **MotionCam Fuse** allows opening raw image and video files, such as MCRAW. These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options. 
 
 ---
-
+ 
 <img width="2621" height="1396" alt="ui" src="https://github.com/user-attachments/assets/3fed84d2-77e2-4380-80f3-2e7443df2947" />
 
 ---
