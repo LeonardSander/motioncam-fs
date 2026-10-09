@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <utility>
+#include <array>
 
 #include "Types.h"
 
@@ -15,10 +16,14 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/rational.h>
 #include <libavutil/display.h>
 #include <libswscale/swscale.h>
+#ifdef MOTIONCAM_HAS_AVFILTER
+#include <libavfilter/avfilter.h>
+#endif
 }
 
 namespace motioncam {
@@ -86,6 +91,9 @@ private:
     void applyHLGToLinear(uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite);
     void applyLOG60ToLinear(uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite);
     AVFrame* transferableFrame(AVFrame* frame);
+#ifdef MOTIONCAM_HAS_AVFILTER
+    AVFrame* scaledHardwareFrame(AVFrame* frame, int width, int height);
+#endif
     static AVPixelFormat selectPixelFormat(AVCodecContext* context,
                                            const AVPixelFormat* formats);
 
@@ -101,8 +109,27 @@ private:
     AVFrame* mTransferFrame;
     AVPacket* mPacket;
     SwsContext* mSwsContext;
+#ifdef MOTIONCAM_HAS_AVFILTER
+    AVFilterGraph* mProxyGpuGraph = nullptr;
+    AVFilterContext* mProxyGpuSource = nullptr;
+    AVFilterContext* mProxyGpuSink = nullptr;
+    AVFrame* mProxyGpuFrame = nullptr;
+    int mProxyGpuWidth = 0;
+    int mProxyGpuHeight = 0;
+    AVBufferRef* mProxyGpuInputFrames = nullptr;
+    bool mProxyGpuRejected = false;
+    int mProxyGpuRejectedWidth = 0;
+    int mProxyGpuRejectedHeight = 0;
+    AVPixelFormat mProxyGpuRejectedFormat = AV_PIX_FMT_NONE;
+    const void* mProxyGpuRejectedFrames = nullptr;
+#endif
     std::vector<SwsContext*> mBandSwsContexts;
     std::vector<std::vector<uint16_t>> mBandRgbScratch;
+    std::vector<SwsContext*> mProxySwsContexts;
+    std::vector<std::vector<uint16_t>> mProxyRgbScratch;
+    std::array<int, 8> mProxyBandKey{};
+    bool mProxyBandVerified = false;
+    bool mProxyBandRejected = false;
     uint16_t mVerifiedBandCounts = 0;
     bool mBandConversionRejected = false;
     AVPixelFormat mVerifiedBandFormat = AV_PIX_FMT_NONE;

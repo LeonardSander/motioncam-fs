@@ -14,6 +14,12 @@
 #include <functional>
 #include <thread>
 #include <unordered_map>
+#ifdef MOTIONCAM_HAS_AVFILTER
+extern "C" {
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
+}
+#endif
 
 namespace {
 
@@ -595,7 +601,12 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
                     spdlog::info("DirectLog diagnostic: frame={} target decoded packets={} decoded_frames={} elapsed_ms={:.3f}; conversion begin",
                                  frameNumber, packetsRead, framesDecoded,
                                  elapsedMilliseconds(extractStart));
-                AVFrame* conversionFrame = transferableFrame(mFrame);
+                AVFrame* hardwareFrame = mFrame;
+#ifdef MOTIONCAM_HAS_AVFILTER
+                if (AVFrame* scaled = scaledHardwareFrame(mFrame, outputWidth, outputHeight))
+                    hardwareFrame = scaled;
+#endif
+                AVFrame* conversionFrame = transferableFrame(hardwareFrame);
                 if (!conversionFrame || !convertYUVToRGB(
                         conversionFrame, rgbData, sampleCount, outputWidth, outputHeight,
                         preserveLogEncoded, smoothChroma)) return -1;
@@ -651,7 +662,12 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
         if (decodedPts == AV_NOPTS_VALUE) decodedPts = mFrame->pts;
         if (decodedPts == frameInfo.pts) {
             const auto conversionStart = std::chrono::steady_clock::now();
-            AVFrame* conversionFrame = transferableFrame(mFrame);
+            AVFrame* hardwareFrame = mFrame;
+#ifdef MOTIONCAM_HAS_AVFILTER
+            if (AVFrame* scaled = scaledHardwareFrame(mFrame, outputWidth, outputHeight))
+                hardwareFrame = scaled;
+#endif
+            AVFrame* conversionFrame = transferableFrame(hardwareFrame);
             if (!conversionFrame || !convertYUVToRGB(
                     conversionFrame, rgbData, sampleCount, outputWidth, outputHeight,
                     preserveLogEncoded, smoothChroma)) break;
@@ -738,6 +754,135 @@ AVPixelFormat DirectLogDecoder::selectPixelFormat(
     return formats[0];
 }
 
+#ifdef MOTIONCAM_HAS_AVFILTER
+AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int height) {
+    const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_PROXY");
+    if ((enabled && enabled[0] == '0') ||
+        frame->format != mHardwarePixelFormat || !mHardwareDeviceContext ||
+        !frame->hw_frames_ctx ||
+        width <= 0 || height <= 0 ||
+        (width == frame->width && height == frame->height))
+        return nullptr;
+    if (mProxyGpuRejected && mProxyGpuRejectedWidth == width &&
+        mProxyGpuRejectedHeight == height &&
+        mProxyGpuRejectedFormat == frame->format &&
+        mProxyGpuRejectedFrames == frame->hw_frames_ctx->data)
+        return nullptr;
+    mProxyGpuRejected = false;
+    auto reject = [&] {
+        mProxyGpuRejected = true;
+        mProxyGpuRejectedWidth = width;
+        mProxyGpuRejectedHeight = height;
+        mProxyGpuRejectedFormat = static_cast<AVPixelFormat>(frame->format);
+        mProxyGpuRejectedFrames = frame->hw_frames_ctx->data;
+    };
+
+    const auto* device = reinterpret_cast<const AVHWDeviceContext*>(
+        mHardwareDeviceContext->data);
+    const char* scaleName = nullptr;
+    const char* quality = nullptr;
+    switch (device->type) {
+    case AV_HWDEVICE_TYPE_CUDA:
+        scaleName = "scale_cuda";
+        quality = "interp_algo=bicubic";
+        break;
+    case AV_HWDEVICE_TYPE_VAAPI:
+        scaleName = "scale_vaapi";
+        quality = "mode=hq";
+        break;
+    case AV_HWDEVICE_TYPE_QSV:
+        scaleName = "scale_qsv";
+        quality = "mode=hq";
+        break;
+    case AV_HWDEVICE_TYPE_VULKAN:
+        scaleName = "scale_vulkan";
+        quality = "scaler=bilinear";
+        break;
+    case AV_HWDEVICE_TYPE_D3D11VA:
+        scaleName = "scale_d3d11";
+        quality = "";
+        break;
+    case AV_HWDEVICE_TYPE_VIDEOTOOLBOX:
+        scaleName = "scale_vt";
+        quality = "";
+        break;
+    default:
+        return nullptr;
+    }
+
+    if (mProxyGpuGraph &&
+        (mProxyGpuWidth != width || mProxyGpuHeight != height ||
+         mProxyGpuInputFrames->data != frame->hw_frames_ctx->data)) {
+        avfilter_graph_free(&mProxyGpuGraph);
+        mProxyGpuSource = mProxyGpuSink = nullptr;
+        av_buffer_unref(&mProxyGpuInputFrames);
+    }
+    if (!mProxyGpuGraph) {
+        auto fail = [&]() -> AVFrame* {
+            spdlog::warn("DirectLog GPU proxy unavailable; using CPU scaling");
+            avfilter_graph_free(&mProxyGpuGraph);
+            mProxyGpuSource = mProxyGpuSink = nullptr;
+            av_buffer_unref(&mProxyGpuInputFrames);
+            reject();
+            return nullptr;
+        };
+        const AVFilter* sourceFilter = avfilter_get_by_name("buffer");
+        const AVFilter* scaleFilter = avfilter_get_by_name(scaleName);
+        const AVFilter* sinkFilter = avfilter_get_by_name("buffersink");
+        if (!sourceFilter || !scaleFilter || !sinkFilter) return fail();
+        mProxyGpuGraph = avfilter_graph_alloc();
+        if (!mProxyGpuGraph) return fail();
+        mProxyGpuSource = avfilter_graph_alloc_filter(
+            mProxyGpuGraph, sourceFilter, "directlog_in");
+        if (!mProxyGpuSource) return fail();
+        AVBufferSrcParameters* parameters = av_buffersrc_parameters_alloc();
+        if (!parameters) return fail();
+        parameters->format = frame->format;
+        parameters->width = frame->width;
+        parameters->height = frame->height;
+        parameters->time_base = {1, 1000000};
+        parameters->sample_aspect_ratio = {1, 1};
+        parameters->hw_frames_ctx = av_buffer_ref(frame->hw_frames_ctx);
+        const int setResult = parameters->hw_frames_ctx
+            ? av_buffersrc_parameters_set(mProxyGpuSource, parameters) : AVERROR(ENOMEM);
+        av_buffer_unref(&parameters->hw_frames_ctx);
+        av_free(parameters);
+        if (setResult < 0 || avfilter_init_str(mProxyGpuSource, nullptr) < 0)
+            return fail();
+        AVFilterContext* scaleContext = nullptr;
+        const std::string scaleArgs = quality[0]
+            ? fmt::format("w={}:h={}:{}", width, height, quality)
+            : fmt::format("w={}:h={}", width, height);
+        if (avfilter_graph_create_filter(&scaleContext, scaleFilter,
+                "directlog_scale", scaleArgs.c_str(), nullptr, mProxyGpuGraph) < 0 ||
+            avfilter_graph_create_filter(&mProxyGpuSink, sinkFilter,
+                "directlog_out", nullptr, nullptr, mProxyGpuGraph) < 0 ||
+            avfilter_link(mProxyGpuSource, 0, scaleContext, 0) < 0 ||
+            avfilter_link(scaleContext, 0, mProxyGpuSink, 0) < 0 ||
+            avfilter_graph_config(mProxyGpuGraph, nullptr) < 0)
+            return fail();
+        mProxyGpuInputFrames = av_buffer_ref(frame->hw_frames_ctx);
+        if (!mProxyGpuInputFrames) return fail();
+        if (!mProxyGpuFrame) mProxyGpuFrame = av_frame_alloc();
+        if (!mProxyGpuFrame) return fail();
+        mProxyGpuWidth = width;
+        mProxyGpuHeight = height;
+        spdlog::info("DirectLog GPU proxy initialized backend={} {}x{} -> {}x{}",
+            av_hwdevice_get_type_name(device->type),
+            frame->width, frame->height, width, height);
+    }
+    av_frame_unref(mProxyGpuFrame);
+    if (av_buffersrc_add_frame_flags(mProxyGpuSource, frame,
+            AV_BUFFERSRC_FLAG_KEEP_REF) < 0 ||
+        av_buffersink_get_frame(mProxyGpuSink, mProxyGpuFrame) < 0) {
+        spdlog::warn("DirectLog GPU proxy failed; using CPU scaling");
+        reject();
+        return nullptr;
+    }
+    return mProxyGpuFrame;
+}
+#endif
+
 AVFrame* DirectLogDecoder::transferableFrame(AVFrame* frame) {
     if (frame->format != mHardwarePixelFormat || !mHardwareDeviceContext) return frame;
     if (mTransferFrame->buf[0] &&
@@ -771,8 +916,8 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
                                        bool preserveLogEncoded, bool smoothChroma) {
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto conversionStart = std::chrono::steady_clock::now();
-    const int width = mVideoInfo.width;
-    const int height = mVideoInfo.height;
+    const int width = yuvFrame->width;
+    const int height = yuvFrame->height;
     if (outputWidth <= 0) outputWidth = width;
     if (outputHeight <= 0) outputHeight = height;
     if (!rgbData || sampleCount != static_cast<size_t>(outputWidth) * outputHeight * 3)
@@ -790,11 +935,17 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
     }
     const bool fullRange = *mFullRange;
 
+    // Area filtering keeps the fast proxy path while averaging the source
+    // region. The override supports direct comparisons with point/bicubic.
+    const char* proxyScaler = std::getenv("MOTIONCAM_DIRECTLOG_PROXY_SCALER");
+    const int proxyFlags = proxyScaler && std::string(proxyScaler) == "point"
+        ? SWS_POINT : proxyScaler && std::string(proxyScaler) == "bicubic"
+            ? SWS_BICUBIC : SWS_AREA;
     mSwsContext = sws_getCachedContext(
         mSwsContext, width, height, static_cast<AVPixelFormat>(yuvFrame->format),
         outputWidth, outputHeight, AV_PIX_FMT_RGB48LE,
         smoothChroma && outputWidth == width && outputHeight == height
-            ? SWS_BICUBIC : SWS_POINT,
+            ? SWS_BICUBIC : proxyFlags,
         nullptr, nullptr, nullptr);
     if (!mSwsContext) return false;
 
@@ -874,7 +1025,93 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
     const unsigned bandCount = bandCandidate
         ? std::min(8u, motioncam::utils::availableCpuWorkers()) : 1u;
     bool bandSuccess = false;
-    if (bandCount > 1 && !mBandConversionRejected) {
+    const int proxyScale = outputWidth > 0 ? width / outputWidth : 0;
+    // Split only integer-scale proxies: aligned source bands then have the
+    // same sampling phase as one whole-frame sws_scale call. Four proxy rows
+    // of overlap cover the bicubic filter at each internal boundary.
+    const bool proxyBandCandidate = outputWidth < width && proxyScale >= 2 &&
+        width == outputWidth * proxyScale && height == outputHeight * proxyScale &&
+        scaleDescriptor && scaleDescriptor->log2_chroma_h <= 1 &&
+        (proxyScale % (1 << scaleDescriptor->log2_chroma_h)) == 0 &&
+        (scaleDescriptor->flags & AV_PIX_FMT_FLAG_PLANAR) &&
+        scaleDescriptor->nb_components == 3 && input[1] &&
+        outputHeight >= 64 && proxyFlags != SWS_POINT;
+    if (proxyBandCandidate) {
+        const unsigned workers = std::min(8u, motioncam::utils::availableCpuWorkers());
+        const std::array<int, 8> key{width, height, outputWidth, outputHeight,
+            static_cast<int>(pixelFormat), proxyFlags, fullRange ? 1 : 0,
+            static_cast<int>(workers)};
+        if (mProxyBandKey != key) {
+            mProxyBandKey = key;
+            mProxyBandVerified = false;
+            mProxyBandRejected = false;
+        }
+        if (!mProxyBandRejected) {
+            for (size_t index = workers; index < mProxySwsContexts.size(); ++index)
+                if (mProxySwsContexts[index])
+                    sws_freeContext(mProxySwsContexts[index]);
+            mProxySwsContexts.resize(workers, nullptr);
+            mProxyRgbScratch.resize(workers);
+            std::atomic_bool failed{false};
+            auto scaleBand = [&](unsigned worker) {
+                const int begin = outputHeight * worker / workers;
+                const int end = outputHeight * (worker + 1) / workers;
+                const int sourceBegin = std::max(0, begin - 4) * proxyScale;
+                const int sourceEnd = std::min(outputHeight, end + 4) * proxyScale;
+                const int localSourceHeight = sourceEnd - sourceBegin;
+                const int localOutputHeight = localSourceHeight / proxyScale;
+                auto& context = mProxySwsContexts[worker];
+                context = sws_getCachedContext(context, width, localSourceHeight,
+                    pixelFormat, outputWidth, localOutputHeight, AV_PIX_FMT_RGB48LE,
+                    proxyFlags, nullptr, nullptr, nullptr);
+                if (!context || sws_setColorspaceDetails(context, coefficients,
+                    fullRange ? 1 : 0, coefficients, 1, 0, 1 << 16, 1 << 16) < 0) {
+                    failed.store(true);
+                    return;
+                }
+                const int chromaBegin = sourceBegin >> scaleDescriptor->log2_chroma_h;
+                const uint8_t* bandInput[4] = {
+                    input[0] + static_cast<ptrdiff_t>(sourceBegin) * inputStride[0],
+                    input[1] + static_cast<ptrdiff_t>(chromaBegin) * inputStride[1],
+                    input[2] ? input[2] + static_cast<ptrdiff_t>(chromaBegin) * inputStride[2] : nullptr,
+                    input[3]};
+                auto& scratch = mProxyRgbScratch[worker];
+                scratch.resize(static_cast<size_t>(outputWidth) * localOutputHeight * 3);
+                uint8_t* bandOutput[4] = {reinterpret_cast<uint8_t*>(scratch.data())};
+                if (sws_scale(context, bandInput, inputStride, 0, localSourceHeight,
+                    bandOutput, outputStride) != localOutputHeight) {
+                    failed.store(true);
+                    return;
+                }
+                const size_t rowSamples = static_cast<size_t>(outputWidth) * 3;
+                const int localBegin = begin - sourceBegin / proxyScale;
+                std::copy_n(scratch.data() + static_cast<size_t>(localBegin) * rowSamples,
+                    static_cast<size_t>(end - begin) * rowSamples,
+                    rgbData + static_cast<size_t>(begin) * rowSamples);
+            };
+            std::vector<std::thread> threads;
+            threads.reserve(workers - 1);
+            for (unsigned worker = 1; worker < workers; ++worker)
+                threads.emplace_back(scaleBand, worker);
+            scaleBand(0);
+            for (auto& thread : threads) thread.join();
+            bandSuccess = !failed.load();
+            // Check the first frame for each layout/format/filter. If FFmpeg
+            // changes its edge behavior, use the whole-frame path for that
+            // configuration instead of risking seams in output images.
+            if (bandSuccess && !mProxyBandVerified) {
+                std::vector<uint16_t> reference(sampleCount);
+                uint8_t* referenceOutput[4] = {reinterpret_cast<uint8_t*>(reference.data())};
+                bandSuccess = sws_scale(mSwsContext, input, inputStride, 0, height,
+                    referenceOutput, outputStride) == outputHeight &&
+                    std::equal(reference.begin(), reference.end(), rgbData);
+                mProxyBandVerified = bandSuccess;
+                mProxyBandRejected = !bandSuccess;
+                spdlog::info("DirectLog proxy band conversion exact_match={}", bandSuccess);
+            }
+        }
+    }
+    if (!bandSuccess && bandCount > 1 && !mBandConversionRejected) {
         const int alignment = 1 << scaleDescriptor->log2_chroma_h;
         const int rowsPerBand = ((height + static_cast<int>(bandCount) - 1) /
             static_cast<int>(bandCount) + alignment - 1) / alignment * alignment;
@@ -1052,12 +1289,24 @@ void DirectLogDecoder::clearTimelineCache() {
 }
 
 void DirectLogDecoder::cleanup() {
+#ifdef MOTIONCAM_HAS_AVFILTER
+    avfilter_graph_free(&mProxyGpuGraph);
+    mProxyGpuSource = mProxyGpuSink = nullptr;
+    av_buffer_unref(&mProxyGpuInputFrames);
+    av_frame_free(&mProxyGpuFrame);
+#endif
     for (auto*& context : mBandSwsContexts) {
         if (context) sws_freeContext(context);
         context = nullptr;
     }
     mBandSwsContexts.clear();
     mBandRgbScratch.clear();
+    for (auto*& context : mProxySwsContexts) {
+        if (context) sws_freeContext(context);
+        context = nullptr;
+    }
+    mProxySwsContexts.clear();
+    mProxyRgbScratch.clear();
     mVerifiedBandCounts = 0;
     mBandConversionRejected = false;
     mVerifiedBandFormat = AV_PIX_FMT_NONE;
