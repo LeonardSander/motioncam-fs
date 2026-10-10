@@ -71,6 +71,10 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     frame.dynamicWhiteLevel = j.value("dynamicWhiteLevel", 0.0);
     frame.exposureCompensation = j.value("exposureCompensation", 0);
     frame.exposureTime = j.value("exposureTime", 0.0);
+    frame.aperture = j.value("aperture", 0.0);
+    frame.focalLength = j.value("focalLength", 0.0);
+    frame.equivalentFocalLength = j.value("equivalentFocalLength", 0.0);
+    frame.lensModel = j.value("lensModel", std::string{});
     frame.filename = j.value("filename", "");
     frame.focusDistance = j.value("focusDistance", 0.0f);
     frame.height = j.value("height", 0);

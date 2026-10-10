@@ -1546,6 +1546,7 @@ MainWindow::MainWindow(QWidget *parent)
             if (info.isDir()) return true;
             const QString name = info.fileName();
             return name.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                   name.endsWith(".unspektra", Qt::CaseInsensitive) ||
                    name.endsWith(".7z", Qt::CaseInsensitive) ||
                    name.endsWith(".dng", Qt::CaseInsensitive) ||
                    (name.contains("NATIVE", Qt::CaseInsensitive) &&
@@ -1933,6 +1934,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                 for (const auto& url : urls) {
                     auto filePath = url.toLocalFile();
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
+                        filePath.endsWith(".unspektra", Qt::CaseInsensitive) ||
                         filePath.endsWith(".7z", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
@@ -4147,7 +4149,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         const auto& calibration = sourceCalibration;
         const int cfaSizeOverride = calibration && calibration->hasCfaSize && calibration->cfaSize > 0
             ? calibration->cfaSize : 0;
-        if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive)) {
+        if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive) ||
+            srcFile.endsWith(".unspektra", Qt::CaseInsensitive)) {
             Decoder decoder(srcFile.toStdString());
             const auto frames = decoder.getFrames();
             if (!frames.empty()) {

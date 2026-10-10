@@ -1195,6 +1195,18 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
 
     // Calculate shading map offsets
     auto lensShadingMap = metadata.lensShadingMap;
+    // A missing or incomplete map cannot be baked into CFA pixels.
+    const size_t expectedShadingSamples =
+        metadata.lensShadingMapWidth > 0 && metadata.lensShadingMapHeight > 0
+            ? static_cast<size_t>(metadata.lensShadingMapWidth) *
+              static_cast<size_t>(metadata.lensShadingMapHeight) : 0;
+    if (!expectedShadingSamples || lensShadingMap.size() < 4 ||
+        std::any_of(lensShadingMap.begin(),
+                    lensShadingMap.begin() + std::min<size_t>(4, lensShadingMap.size()),
+                    [expectedShadingSamples](const auto& plane) {
+                        return plane.size() < expectedShadingSamples;
+                    }))
+        applyShadingMap = false;
 
     const int fullWidth = metadata.originalWidth;
     const int fullHeight = metadata.originalHeight;
@@ -2663,26 +2675,35 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
             captureMetadata.push_back(gpsAscii(29, date.str()));
         }
     }
-    if (!cameraConfiguration.apertures.empty() &&
-        cameraConfiguration.apertures.front() > 0.0f) {
-        const double aperture = cameraConfiguration.apertures.front();
+    const double aperture = std::isfinite(metadata.aperture) && metadata.aperture > 0.0
+        ? metadata.aperture
+        : (!cameraConfiguration.apertures.empty()
+            ? cameraConfiguration.apertures.front() : 0.0);
+    if (std::isfinite(aperture) && aperture > 0.0) {
         captureMetadata.push_back(rationalMetadata(33437, aperture, false)); // FNumber
         captureMetadata.push_back(rationalMetadata(
             37378, 2.0 * std::log2(aperture), false)); // ApertureValue
     }
-    if (!cameraConfiguration.focalLengths.empty() &&
-        std::isfinite(cameraConfiguration.focalLengths.front()) &&
-        cameraConfiguration.focalLengths.front() > 0.0f) {
-        const double focalLength35mm = cameraConfiguration.focalLengths.front();
-        // MCRAW provides only the 35 mm equivalent. Also use it for the EXIF
-        // focal length so applications that read only that tag show a value.
+    const double focalLength35mm =
+        std::isfinite(metadata.equivalentFocalLength) &&
+        metadata.equivalentFocalLength > 0.0
+            ? metadata.equivalentFocalLength
+            : (!cameraConfiguration.focalLengths.empty()
+                ? cameraConfiguration.focalLengths.front() : 0.0);
+    const double physicalFocalLength =
+        std::isfinite(metadata.focalLength) && metadata.focalLength > 0.0
+            ? metadata.focalLength : focalLength35mm;
+    if (std::isfinite(physicalFocalLength) && physicalFocalLength > 0.0)
         captureMetadata.push_back(rationalMetadata(
-            37386, focalLength35mm, false)); // FocalLength
+            37386, physicalFocalLength, false)); // FocalLength
+    if (std::isfinite(focalLength35mm) && focalLength35mm > 0.0) {
         captureMetadata.push_back(shortMetadata(
             41989, static_cast<uint16_t>(std::clamp<long>(
                 std::lround(focalLength35mm), 1, 65535)),
             true)); // FocalLengthIn35mmFilm
     }
+    if (!metadata.lensModel.empty())
+        captureMetadata.push_back(asciiMetadata(42036, metadata.lensModel, true)); // LensModel
     if (metadata.exposureCompensation != 0 &&
         cameraConfiguration.hasExposureCompensationStep) {
         const double step = cameraConfiguration.exposureCompensationStep;

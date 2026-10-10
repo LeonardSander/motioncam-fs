@@ -366,7 +366,7 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
 
     const std::string baseName = fs::path(dstPath).filename().string();
     std::unique_ptr<IVirtualFileSystem> filesystem;
-    if (boost::iequals(extension, ".mcraw")) {
+    if ((boost::iequals(extension, ".mcraw") || boost::iequals(extension, ".unspektra"))) {
         filesystem = std::make_unique<VirtualFileSystemImpl_MCRAW>(
             *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
             srcFile, baseName);

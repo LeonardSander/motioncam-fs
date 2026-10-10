@@ -244,6 +244,7 @@ endif()
 # Add motioncam decoder as static library
 add_library(motioncam-decoder STATIC
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Decoder.cpp
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Unspektra.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData_Legacy.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -296,6 +297,8 @@ endif()
 target_link_libraries(motioncam-decoder PRIVATE
   ${MOTIONCAM_SPDLOG_TARGET}
   ${MOTIONCAM_FMT_TARGET})
+find_package(ZLIB REQUIRED)
+target_link_libraries(motioncam-decoder PUBLIC ZLIB::ZLIB)
 
 if(MSVC)
   target_compile_options(motioncam-decoder PRIVATE /utf-8)

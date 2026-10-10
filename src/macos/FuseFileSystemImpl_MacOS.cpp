@@ -485,7 +485,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
         }
     }
 
-    if (boost::iequals(extension, ".mcraw") ||
+    if ((boost::iequals(extension, ".mcraw") || boost::iequals(extension, ".unspektra")) ||
         ((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4") ||
           boost::iequals(extension, ".mkv")) &&
          boost::icontains(fs::path(srcFile).filename().string(), "NATIVE")) ||
@@ -498,7 +498,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
             std::string baseName = dstPathObj.filename().string();
 
             std::unique_ptr<IVirtualFileSystem> filesystem;
-            if (boost::iequals(extension, ".mcraw")) {
+            if ((boost::iequals(extension, ".mcraw") || boost::iequals(extension, ".unspektra"))) {
                 filesystem = std::make_unique<VirtualFileSystemImpl_MCRAW>(
                     *mIoThreadPool,
                     *mProcessingThreadPool,

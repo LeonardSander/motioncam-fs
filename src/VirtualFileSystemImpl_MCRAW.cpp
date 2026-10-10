@@ -141,6 +141,24 @@ motioncam::RenderSettings canonicalMcrawGenerationSettings(
     return canonical;
 }
 
+bool hasUsableShadingMap(const motioncam::CameraFrameMetadata& frame) {
+    if (frame.lensShadingMapWidth <= 0 || frame.lensShadingMapHeight <= 0 ||
+        frame.lensShadingMap.size() < 4)
+        return false;
+    const size_t samples = static_cast<size_t>(frame.lensShadingMapWidth) *
+                           static_cast<size_t>(frame.lensShadingMapHeight);
+    return std::all_of(frame.lensShadingMap.begin(), frame.lensShadingMap.begin() + 4,
+        [samples](const auto& plane) { return plane.size() >= samples; });
+}
+
+void disableUnavailableVignetteBake(motioncam::RenderSettings& settings,
+                                    const motioncam::CameraFrameMetadata& frame) {
+    if (hasUsableShadingMap(frame)) return;
+    settings.options = static_cast<motioncam::FileRenderOptions>(
+        settings.options & ~(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+                             motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
+}
+
 void reorderNativeShadingMapToCfaPhases(
         motioncam::CameraFrameMetadata& metadata,
         std::string sensorArrangement) {
@@ -420,6 +438,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
         vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"),
         cfaColorsFromPhase(effectiveCfaArrangement(
             mSettings, mCalibration, cameraConfig.sensorArrangement)));
+    disableUnavailableVignetteBake(mSettings, cameraFrameMetadata);
 
     // Match DNG-sequence sizing by accounting for the metadata that will be
     // serialized alongside the pixels. JSON sidecars may store compressed gain
@@ -622,7 +641,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
-    mFileInfo.dataType = "MCRAW " + vfs::getDisplayDataType(false, displayCfaSize);
+    mFileInfo.dataType = (boost::algorithm::iends_with(mSrcPath, ".unspektra")
+        ? "UNSPK " : "MCRAW ") + vfs::getDisplayDataType(false, displayCfaSize);
     const auto displayPlan = utils::planDngFrameProcessing(
         mSettings, cameraFrameMetadata, mCalibration);
     mFileInfo.levelsInfo = vfs::getDisplayDataLevels(
@@ -735,6 +755,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             sidecarMaps,
             cfaColorsFromPhase(effectiveCfaArrangement(
                 frameSettings, mCalibration, cameraConfig.sensorArrangement)));
+        disableUnavailableVignetteBake(frameSettings, frameMetadata);
         // The native adapter performs CFA-only bad-pixel treatment and emits
         // an otherwise canonical, uncompressed CFA DNG.
         // All source-independent pixel operations run below through the same
@@ -806,6 +827,12 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "MCRAW";
         vfs::finalizeDng(timed, frameSettings, finalize);
+        if (boost::algorithm::iends_with(mSrcPath, ".unspektra")) {
+            const int orientationDegrees = frameSettings.orientation >= 0
+                ? frameSettings.orientation : mFileInfo.orientation;
+            if (!DNGDecoder::setOrientation(timed, orientationDegrees))
+                throw std::runtime_error("Could not set Unspektra DNG orientation");
+        }
         const auto finalizedAt = std::chrono::steady_clock::now();
         if (!jpegCompression && !mSettings.streamingPreview) {
             if (timed.size() > entry.size)
@@ -939,6 +966,8 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
             sidecarMaps,
             cfaColorsFromPhase(effectiveCfaArrangement(
                 mSettings, mCalibration, cameraConfig.sensorArrangement)));
+        auto previewSettings = mSettings;
+        disableUnavailableVignetteBake(previewSettings, frameMetadata);
         std::optional<float> exposureOverride;
         if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
             exposureOverride = mSmoothedExposureOffsets.at(timestamp);
@@ -946,7 +975,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         if (mSettings.options & RENDER_OPT_SMOOTH_WHITE_BALANCE)
             neutralOverride = mSmoothedAsShotNeutrals.at(timestamp);
         if (spatialSidecar) {
-            auto generationSettings = canonicalMcrawGenerationSettings(mSettings);
+            auto generationSettings = canonicalMcrawGenerationSettings(previewSettings);
             generationSettings.badPixelTreatment = mSettings.badPixelTreatment;
             DecodedDNGImage image;
             utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
@@ -1012,7 +1041,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         const auto generateStarted = std::chrono::steady_clock::now();
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
-                           mSettings, mCalibration, false, exposureOverride,
+                           previewSettings, mCalibration, false, exposureOverride,
                            neutralOverride, &preview, retainSourceSamples);
         // generateDng has already applied JSON calibration (including gain-map
         // neutral scaling). Merge sidecar color data without applying it twice.

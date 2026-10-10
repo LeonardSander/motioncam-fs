@@ -3,7 +3,9 @@
 
 > **Work in Progress**
 
-**MotionCam Fuse** allows opening raw image and video files, such as MCRAW. These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options. 
+**MotionCam Fuse** allows opening raw image and video files, such as MCRAW and Unspektra. These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options.
+
+Unspektra import supports the observed v2 container with UFR1 Bayer and Quad Bayer frames. Camera CFA phase defaults to RGGB and can be overridden; the samples do not carry DNG color matrices. See [format notes](docs/unspektra-format.md).
 
 ---
  

@@ -57,6 +57,10 @@ struct CameraFrameMetadata {
     bool hasForwardMatrix2 = false;
     bool hasCalibrationMatrix1 = false;
     bool hasCalibrationMatrix2 = false;
+    double aperture = 0.0;
+    double focalLength = 0.0;
+    double equivalentFocalLength = 0.0;
+    std::string lensModel;
 
     static CameraFrameMetadata parse(const std::string& jsonString);
     static CameraFrameMetadata parse(const nlohmann::json& j);
