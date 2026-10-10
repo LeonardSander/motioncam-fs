@@ -44,6 +44,7 @@ public:
     void renderPreview(MountId, const RenderSettings&, const PreviewOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(PreviewFrame&&)>&) override;
+    void releasePreviewResources(MountId mountId) override;
 
 private:
     MountId mNextMountId;

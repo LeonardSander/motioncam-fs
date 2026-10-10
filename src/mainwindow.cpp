@@ -34,6 +34,7 @@ using namespace motioncam;
 #include <QAction>
 #include <QMenuBar>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QProcess>
 #include <QUrl>
 #include <QPointer>
@@ -666,7 +667,6 @@ namespace {
     motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
         settings.options = static_cast<motioncam::FileRenderOptions>(
             settings.options & ~(
-                motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
                 motioncam::RENDER_OPT_LOG_TRANSFORM |
                 motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
         settings.cameraModel.clear();
@@ -1324,6 +1324,17 @@ MainWindow::MainWindow(QWidget *parent)
 #elif __linux__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Linux>();
 #endif
+
+    // Thumbnail and gallery previews can retain a decoder for every imported
+    // clip. Release those GPU contexts when playback moves to another
+    // application. In-flight renders retain their own shared renderer until
+    // the current frame finishes.
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState state) {
+                if (state != Qt::ApplicationInactive) return;
+                for (const auto& mounted : mMountedFiles)
+                    mFuseFilesystem->releasePreviewResources(mounted.mountId);
+            });
 
     // Enable drag and drop on the scroll area
     ui->dragAndDropScrollArea->setAcceptDrops(true);
@@ -2950,13 +2961,19 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     });
     connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
             [this](int id, double startSeconds) {
+                const auto previousMountId = mGalleryMountId;
                 mGalleryMountId = id;
+                if (previousMountId != motioncam::InvalidMountId &&
+                    previousMountId != id)
+                    mFuseFilesystem->releasePreviewResources(previousMountId);
                 startGalleryRender(id, startSeconds);
             });
     connect(mClipPlayer, &ClipPlayerDialog::playbackClosed, this, [this] {
         if (!mClipPlayer) return;
         ++mGalleryGeneration;
         mGalleryMountId = motioncam::InvalidMountId;
+        for (const auto& mounted : mMountedFiles)
+            mFuseFilesystem->releasePreviewResources(mounted.mountId);
     });
     connect(mClipPlayer,&ClipPlayerDialog::sourceFrameSelectionChanged,this,
         [this](int id,int frame,bool selected){

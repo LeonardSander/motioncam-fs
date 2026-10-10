@@ -52,6 +52,9 @@ public:
         const PreviewOptions& options,
         const std::function<bool(size_t, size_t, const std::string&)>& progress,
         const std::function<void(PreviewFrame&&)>& frameReady) = 0;
+    // Drop cached gallery decoders when the player closes. In-flight renders
+    // retain their own shared ownership until they finish.
+    virtual void releasePreviewResources(MountId mountId) = 0;
 
 protected:
     IFuseFileSystem() = default;

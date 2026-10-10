@@ -986,7 +986,11 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                     if (!manual3.empty()) image.opcodeList3 = std::move(manual3);
                 }
             }
-            if (!DNGDecoder::decodePreview(std::move(image), mSettings, preview,
+            auto previewSettings = mSettings;
+            if (image.layout.pixels == DNGPixelLayout::CFA)
+                previewSettings.options = static_cast<FileRenderOptions>(
+                    previewSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
+            if (!DNGDecoder::decodePreview(std::move(image), previewSettings, preview,
                                            true, false)) return false;
             if (sourceSamples) {
                 preview.rawSamples = std::move(sourceSamples);

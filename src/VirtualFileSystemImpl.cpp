@@ -335,9 +335,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
                 throw std::runtime_error("Could not encode marked DNG: " + source);
         }
     }
-    if (profile)
-        spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
-                     source, options.preScaledProxy, options.outputScale,
+    if (profile || (source == "DirectLog" && std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS")))
+        spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} log_fused={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
+                     source, options.preScaledProxy, options.outputScale, logFused,
                      std::chrono::duration<double, std::milli>(setupFinished-pipelineStarted).count(),
                      std::chrono::duration<double, std::milli>(preTopologyFinished-setupFinished).count(),
                      std::chrono::duration<double, std::milli>(gainFinished-preTopologyFinished).count(),

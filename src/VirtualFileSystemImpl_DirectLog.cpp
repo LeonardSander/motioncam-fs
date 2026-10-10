@@ -305,6 +305,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
 }
 
 VirtualFileSystemImpl_DirectLog::~VirtualFileSystemImpl_DirectLog() {
+    mDecoder.reset();
     spdlog::info("Destroying VirtualFileSystemImpl_DirectLog({})", mSrcPath);
 }
 
@@ -653,7 +654,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     const FrameMetadata* sourceMetadata,
     const std::vector<GainMap>& opcodeList2Maps,
     const std::vector<GainMap>& opcodeList3Maps,
-    int decodedWidth, int decodedHeight, bool prepopulatedImage) {
+    int decodedWidth, int decodedHeight, bool prepopulatedImage, bool inputBayer) {
 
     try {
         const bool diagnostics = directLogDiagnosticsEnabled();
@@ -666,9 +667,12 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         // DNG. Source-independent processing happens after construction.
         const auto outputLevels = directLogDataLevels(mConfig);
         std::vector<uint16_t> imageSamples = std::move(rgbData);
-        constexpr int samplesPerPixel = 3;
-        constexpr int photometric = tinydngwriter::PHOTOMETRIC_LINEARRAW;
-        const size_t expectedImageBytes = static_cast<size_t>(width) * height * 3 * sizeof(uint16_t);
+        const int samplesPerPixel = inputBayer ? 1 : 3;
+        const int photometric = inputBayer
+            ? tinydngwriter::PHOTOMETRIC_CFA
+            : tinydngwriter::PHOTOMETRIC_LINEARRAW;
+        const size_t expectedImageBytes = static_cast<size_t>(width) * height *
+            samplesPerPixel * sizeof(uint16_t);
         if (prepopulatedImage &&
             dngData.size() != directLogStripOffset + expectedImageBytes)
             throw std::runtime_error("Invalid prepopulated DirectLog strip size");
@@ -706,6 +710,11 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         
         // Photometric interpretation
         dng.SetPhotometric(photometric);
+        if (inputBayer) {
+            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            dng.SetCFARepeatPatternDim(2, 2);
+            dng.SetCFAPattern(4, phase.data());
+        }
         dng.SetPlanarConfig(1); // Chunky
         dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
         
@@ -766,7 +775,15 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         for (size_t channel = 0; channel < 3; ++channel)
             blackLevel[channel] = static_cast<unsigned short>(std::clamp(
                 std::lround(outputLevels.black[channel]), 0l, 65535l));
-        dng.SetBlackLevel(3, blackLevel);
+        if (inputBayer) {
+            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            unsigned short phaseBlack[4]{};
+            for (int i = 0; i < 4; ++i) phaseBlack[i] = blackLevel[phase[i]];
+            dng.SetBlackLevelRepeatDim(2, 2);
+            dng.SetBlackLevel(4, phaseBlack);
+        } else {
+            dng.SetBlackLevel(3, blackLevel);
+        }
         
         // Apply calibration if available
         if (mCalibration.has_value()) {
@@ -955,7 +972,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 
 VirtualFileSystemImpl_DirectLog::ProcessedFrame
 VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale,
-                                               bool prepopulateDng) {
+                                               bool prepopulateDng,
+                                               bool outputBayer) {
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
     const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
@@ -1017,9 +1035,13 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     // sampled back into a Bayer mosaic. Preserve the decoded chroma samples
     // for remosaiced DNG output; RGB output and previews retain smoothing.
     const bool smoothChroma =
-        !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) || mConfig.streamingPreview;
-    const bool directStrip = prepopulateDng && previewScale == 1;
-    const bool extractedFrame = directStrip
+        !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+    const bool directStrip = prepopulateDng && previewScale == 1 && !outputBayer;
+    result.bayer = outputBayer;
+    const bool extractedFrame = outputBayer
+        ? mDecoder->extractFrameBayer(result.frameNumber, result.rgb,
+                                     directLogCfaPhase(mConfig, mCalibration))
+        : directStrip
         ? mDecoder->extractFrameIntoBytes(result.frameNumber,
               result.dngStripBuffer, directLogStripOffset,
               result.width, result.height, false, smoothChroma)
@@ -1152,8 +1174,12 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         // to compact rows before the DNG writer runs.
         const bool prepopulateDng = !jpegCompression && !mConfig.streamingPreview &&
             !directProxy;
+        const bool outputBayer = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) &&
+            configuredScale == 1 && !mConfig.streamingPreview &&
+            !(mConfig.options & RENDER_OPT_CROPPING) &&
+            !(mCalibration && mCalibration->hasLeftTopCropStride);
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
-                                      prepopulateDng);
+                                      prepopulateDng, outputBayer);
         const auto decodedAt = std::chrono::steady_clock::now();
         const bool scaledInFfmpeg = directProxy &&
             processed.width == mWidth / configuredScale &&
@@ -1186,11 +1212,12 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                              &processed.metadata,
                              processed.gainMaps.opcodeList2,
                              processed.gainMaps.opcodeList3,
-                             processed.width, processed.height, prepopulatedImage))
+                             processed.width, processed.height, prepopulatedImage,
+                             processed.bayer))
             throw std::runtime_error("Could not generate DirectLog DNG");
         const auto generatedAt = std::chrono::steady_clock::now();
         vfs::DngPixelPipelineOptions pixels;
-        pixels.hasCfa = false;
+        pixels.hasCfa = processed.bayer;
         pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
         pixels.outputScale = renderPlan.scale;
         pixels.preScaledProxy = scaledInFfmpeg;
@@ -1198,7 +1225,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         pixels.linearInputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
         pixels.sourceName = "DirectLog";
-        vfs::processDngPixels(dngData, mConfig, pixels);
+        auto pixelSettings = mConfig;
+        // The decoder has already remosaiced this frame. Leaving the request
+        // set forces a redundant Bayer topology pass and prevents gain baking
+        // from fusing the log transform into its pixel traversal.
+        if (processed.bayer)
+            pixelSettings.options = static_cast<FileRenderOptions>(
+                pixelSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
+        vfs::processDngPixels(dngData, pixelSettings, pixels);
         const auto processedAt = std::chrono::steady_clock::now();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
@@ -1259,25 +1293,50 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                                  RENDER_OPT_HIGHER_CFA_HQ)) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
-        auto processed = processFrame(entry, directProxy ? configuredScale : 1);
+        const bool remosaic = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
+        const bool gpuBayer = remosaic &&
+            !(mConfig.options & RENDER_OPT_CROPPING) &&
+            !(mCalibration && mCalibration->hasLeftTopCropStride);
+        auto processed = processFrame(entry, directProxy ? configuredScale : 1,
+                                      false, gpuBayer);
+        if (remosaic && !processed.bayer) {
+            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            std::vector<uint16_t> bayer(
+                static_cast<size_t>(processed.width) * processed.height);
+            for (int y = 0; y < processed.height; ++y)
+                for (int x = 0; x < processed.width; ++x) {
+                    const size_t pixel = static_cast<size_t>(y) * processed.width + x;
+                    bayer[pixel] = processed.rgb[pixel * 3 +
+                        phase[(y & 1) * 2 + (x & 1)]];
+                }
+            processed.rgb = std::move(bayer);
+            processed.bayer = true;
+        }
         const auto processFinished = std::chrono::steady_clock::now();
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
         image.layout.width = static_cast<uint32_t>(processed.width);
         image.layout.height = static_cast<uint32_t>(processed.height);
         image.layout.bitsPerSample = 16;
-        image.layout.samplesPerPixel = 3;
-        image.layout.pixels = DNGPixelLayout::LinearRGB;
+        image.layout.samplesPerPixel = processed.bayer ? 1 : 3;
+        image.layout.pixels = processed.bayer
+            ? DNGPixelLayout::CFA : DNGPixelLayout::LinearRGB;
         image.layout.cfaRepeatSize = 2;
         image.layout.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
         image.opcodeList2 = std::move(processed.gainMaps.opcodeList2);
         image.opcodeList3 = std::move(processed.gainMaps.opcodeList3);
 
         const auto levels = directLogDataLevels(mConfig);
-        image.metadata.blackLevel = levels.black;
-        image.metadata.blackLevelCount = 3;
+        if (processed.bayer) {
+            for (size_t i = 0; i < 4; ++i)
+                image.metadata.blackLevel[i] = levels.black[image.layout.cfaPhase[i]];
+            image.metadata.blackLevelCount = 4;
+        } else {
+            image.metadata.blackLevel = levels.black;
+            image.metadata.blackLevelCount = 3;
+        }
         image.metadata.whiteLevel.fill(levels.white);
-        image.metadata.whiteLevelCount = 3;
+        image.metadata.whiteLevelCount = processed.bayer ? 4 : 3;
         image.metadata.inputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(levels.white), 1l, 65535l)));
         image.metadata.iso = processed.metadata.iso;
@@ -1323,7 +1382,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             image.metadata.calibrationIlluminant2 = 17;
         if ((mConfig.options & RENDER_OPT_BAKE_ISO) && image.metadata.iso > 0.0)
             utils::bakeIsoOverlay(image.samples.data(), image.layout.width,
-                image.layout.height, 3, image.metadata.iso,
+                image.layout.height, processed.bayer ? 1 : 3, image.metadata.iso,
                 static_cast<uint16_t>(std::clamp(std::lround(levels.black[0]), 0l, 65535l)),
                 static_cast<uint16_t>(std::clamp(std::lround(levels.white), 0l, 65535l)));
         image.timestamp = vfs::outputTimestamp(
@@ -1331,6 +1390,9 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
         const auto previewStarted = std::chrono::steady_clock::now();
         auto previewSettings = mConfig;
+        if (processed.bayer)
+            previewSettings.options = static_cast<FileRenderOptions>(
+                previewSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
         const bool scaledInFfmpeg = directProxy &&
             processed.width == mWidth / configuredScale &&
             processed.height == mHeight / configuredScale;

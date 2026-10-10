@@ -13,7 +13,10 @@
 #include <cctype>
 #include <cstring>
 #include <cmath>
+#include <deque>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <iomanip>
@@ -34,6 +37,7 @@ namespace motioncam {
 
 namespace {
 std::atomic_uint32_t foregroundDngWork{0};
+std::atomic_uint32_t activeGainBakeJobs{0};
 
 void writeSampleBytes(uint8_t* destination, const uint16_t* samples,
                       size_t count, bool littleEndian) {
@@ -6562,7 +6566,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool* logFused,
                               bool packFusedLog) {
     if (logFused) *logFused = false;
-    const bool profileBake = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const char* cpuOptSetting = std::getenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+    const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
+    const bool profileBake = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr ||
+        std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS") != nullptr;
     const auto bakeStarted = std::chrono::steady_clock::now();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -6830,14 +6837,45 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         effectiveOrigins.emplace_back(
             sharedScalarOrigin(map, true), sharedScalarOrigin(map, false));
 
-    std::vector<GainMapAxes> axes(maps.size());
+    // The clip's gain-map geometry normally stays fixed across frames. Keep
+    // the expensive per-pixel interpolation coordinates on each worker thread.
+    struct AxisCache {
+        std::string key;
+        std::vector<GainMapAxes> axes;
+    };
+    static thread_local AxisCache axisCache;
+    std::string axisKey;
+    auto appendKey = [&](const auto& value) {
+        axisKey.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    appendKey(width);
+    appendKey(height);
+    const size_t mapCount = maps.size();
+    appendKey(mapCount);
     for (size_t index = 0; index < maps.size(); ++index) {
         const auto& map = maps[index];
-        axes[index] = cacheGainMapAxes(map, width, height,
-            effectiveOrigins[index].first, effectiveOrigins[index].second,
-            [width](uint32_t x) { return (static_cast<double>(x) + 0.5) / width; },
-            [height](uint32_t y) { return (static_cast<double>(y) + 0.5) / height; });
+        appendKey(map.width); appendKey(map.height); appendKey(map.channels);
+        appendKey(map.rowPitch); appendKey(map.colPitch);
+        appendKey(map.top); appendKey(map.left);
+        appendKey(map.bottom); appendKey(map.right);
+        const size_t dataSize = map.data.size();
+        appendKey(dataSize);
+        appendKey(map.spacingH); appendKey(map.spacingV);
+        appendKey(effectiveOrigins[index].first);
+        appendKey(effectiveOrigins[index].second);
     }
+    if (!cpuOpt || axisCache.key != axisKey) {
+        axisCache.axes.resize(maps.size());
+        for (size_t index = 0; index < maps.size(); ++index) {
+            const auto& map = maps[index];
+            axisCache.axes[index] = cacheGainMapAxes(map, width, height,
+                effectiveOrigins[index].first, effectiveOrigins[index].second,
+                [width](uint32_t x) { return (static_cast<double>(x) + 0.5) / width; },
+                [height](uint32_t y) { return (static_cast<double>(y) + 0.5) / height; });
+        }
+        axisCache.key = std::move(axisKey);
+    }
+    const auto& axes = axisCache.axes;
 
     auto mapGain = [&](const GainMap& map, uint32_t x, uint32_t y,
                        uint32_t targetChannel = 0) {
@@ -6957,6 +6995,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const bool directRgbMap = sourceIsRgb && imageChannels == 3 &&
         maps.size() == 1 && maps.front().channels == 3 && axes.front().valid &&
         (!colorOnly || gridColorSeparated);
+    const bool directRgbScalarMap = cpuOpt && sourceIsRgb && imageChannels == 3 &&
+        maps.size() == 1 && maps.front().channels == 1 &&
+        maps.front().rowPitch == 1 && maps.front().colPitch == 1 &&
+        axes.front().valid && (!colorOnly || gridColorSeparated);
     const bool directCfaMaps = !sourceIsRgb && imageChannels == 1 &&
         phaseGroup == 1 && maps.size() == 4 &&
         (!colorOnly || gridColorSeparated) &&
@@ -6968,8 +7010,129 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         }) &&
         std::all_of(mapsByParity.begin(), mapsByParity.end(),
             [](const std::vector<size_t>& selected) { return selected.size() == 1; });
+    const bool directScalarMap = !sourceIsRgb && imageChannels == 1 &&
+        phaseGroup == 1 && maps.size() == 1 && !colorOnly &&
+        maps.front().channels == 1 && axes.front().valid;
+    const bool fastScalarMap = cpuOpt && directScalarMap &&
+        maps.front().rowPitch == 1 && maps.front().colPitch == 1;
+    // Build a full-resolution field only after seeing the same map twice.
+    // Variable maps can use the direct per-row interpolation below without
+    // allocating and writing another full-frame buffer on every frame.
+    std::shared_ptr<const std::vector<float>> cachedCfaGains;
+    bool gainFieldCacheHit = false;
+    bool gainFieldWarmup = false;
+    if (cpuOpt && (directCfaMaps || directScalarMap) &&
+        static_cast<uint64_t>(width) * height <= 16u * 1024u * 1024u) {
+        static std::mutex gainFieldMutex;
+        static std::deque<std::pair<std::string,
+            std::shared_ptr<const std::vector<float>>>> gainFields;
+        std::string key = axisCache.key;
+        for (const auto& map : maps)
+            key.append(reinterpret_cast<const char*>(map.data.data()),
+                       map.data.size() * sizeof(float));
+        std::lock_guard lock(gainFieldMutex);
+        const auto hit = std::find_if(gainFields.begin(), gainFields.end(),
+            [&](const auto& entry) { return entry.first == key; });
+        const bool seenBefore = hit != gainFields.end();
+        if (seenBefore) {
+            gainFieldCacheHit = static_cast<bool>(hit->second);
+            cachedCfaGains = hit->second;
+            auto entry = std::move(*hit);
+            gainFields.erase(hit);
+            gainFields.push_back(std::move(entry));
+        } else {
+            gainFieldWarmup = true;
+            gainFields.emplace_back(std::move(key), nullptr);
+            while (gainFields.size() > 2) gainFields.pop_front();
+        }
+        if (!cachedCfaGains && seenBefore) {
+            auto field = std::make_shared<std::vector<float>>(
+                static_cast<size_t>(width) * height);
+            auto prepareRows = [&](uint32_t first, uint32_t last) {
+                for (uint32_t y = first; y < last; ++y) {
+                    if (directScalarMap) {
+                        for (uint32_t x = 0; x < width; ++x)
+                            (*field)[static_cast<size_t>(y) * width + x] =
+                                effectiveGain(x, y, 0);
+                        continue;
+                    }
+                    for (uint32_t xParity = 0; xParity < 2; ++xParity) {
+                        const size_t index = mapsByParity[
+                            ((y & 1u) << 1u) | xParity][0];
+                        const auto& map = maps[index];
+                        const auto& sy = axes[index].y[y];
+                        const float* upper = map.data.data() +
+                            static_cast<size_t>(sy.first) * map.width;
+                        const float* lower = map.data.data() +
+                            static_cast<size_t>(sy.second) * map.width;
+                        for (uint32_t x = xParity; x < width; x += 2) {
+                            float gain = 1.0f;
+                            if (x >= map.left && x < map.right &&
+                                y >= map.top && y < map.bottom) {
+                                const auto& sx = axes[index].x[x];
+                                const float top = upper[sx.first] *
+                                    (1.0f - sx.fraction) +
+                                    upper[sx.second] * sx.fraction;
+                                const float bottom = lower[sx.first] *
+                                    (1.0f - sx.fraction) +
+                                    lower[sx.second] * sx.fraction;
+                                const float value = top *
+                                    (1.0f - sy.fraction) + bottom * sy.fraction;
+                                gain = std::isfinite(value) && value > 0.0f
+                                    ? value : 1.0f;
+                            }
+                            (*field)[static_cast<size_t>(y) * width + x] = gain;
+                        }
+                    }
+                }
+            };
+            const uint32_t gainWorkers = std::min<uint32_t>(8,
+                std::min<uint32_t>(utils::availableCpuWorkers(),
+                    std::max<uint32_t>(1, height / 128)));
+            std::vector<std::thread> threads;
+            threads.reserve(gainWorkers - 1);
+            for (uint32_t worker = 1; worker < gainWorkers; ++worker)
+                threads.emplace_back(prepareRows,
+                    height * worker / gainWorkers,
+                    height * (worker + 1) / gainWorkers);
+            prepareRows(0, height / gainWorkers);
+            for (auto& thread : threads) thread.join();
+            cachedCfaGains = field;
+            gainFields.back().second = std::move(field);
+        }
+    }
     auto bakeRows = [&](uint32_t first, uint32_t last) {
         for (uint32_t y = first; y < last; ++y) {
+            struct CfaRowMap {
+                const GainMap* map = nullptr;
+                const GainMapAxisSample* x = nullptr;
+                const float* upper = nullptr;
+                const float* lower = nullptr;
+                float yFraction = 0.0f;
+            };
+            std::array<CfaRowMap, 2> cfaRowMaps;
+            if (cpuOpt && directCfaMaps) {
+                for (uint32_t xParity = 0; xParity < 2; ++xParity) {
+                    const size_t index = mapsByParity[((y & 1u) << 1u) | xParity][0];
+                    const auto& map = maps[index];
+                    const auto& sy = axes[index].y[y];
+                    cfaRowMaps[xParity] = {
+                        &map, axes[index].x.data(),
+                        map.data.data() + static_cast<size_t>(sy.first) * map.width,
+                        map.data.data() + static_cast<size_t>(sy.second) * map.width,
+                        sy.fraction};
+                }
+            }
+            CfaRowMap scalarRowMap;
+            if ((fastScalarMap && !cachedCfaGains) || directRgbScalarMap) {
+                const auto& map = maps.front();
+                const auto& sy = axes.front().y[y];
+                scalarRowMap = {
+                    &map, axes.front().x.data(),
+                    map.data.data() + static_cast<size_t>(sy.first) * map.width,
+                    map.data.data() + static_cast<size_t>(sy.second) * map.width,
+                    sy.fraction};
+            }
             uint8_t* packedDestination = packDuringBake
                 ? packedOutput.data() + stripOffset +
                     static_cast<size_t>(y) * packedRowBytes : nullptr;
@@ -6997,6 +7160,25 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                     rgbXFraction = sx.fraction;
                     rgbYFraction = sy.fraction;
                 }
+                float rgbScalarGain = 1.0f;
+                if (directRgbScalarMap) {
+                    const auto& map = *scalarRowMap.map;
+                    if (x >= map.left && x < map.right &&
+                        y >= map.top && y < map.bottom) {
+                        const auto& sx = scalarRowMap.x[x];
+                        const float upper = scalarRowMap.upper[sx.first] *
+                            (1.0f - sx.fraction) +
+                            scalarRowMap.upper[sx.second] * sx.fraction;
+                        const float lower = scalarRowMap.lower[sx.first] *
+                            (1.0f - sx.fraction) +
+                            scalarRowMap.lower[sx.second] * sx.fraction;
+                        const float value = upper *
+                            (1.0f - scalarRowMap.yFraction) +
+                            lower * scalarRowMap.yFraction;
+                        rgbScalarGain = std::isfinite(value) && value > 0.0f
+                            ? value : 1.0f;
+                    }
+                }
                 for (uint32_t channel = 0; channel < imageChannels; ++channel) {
                     float gain;
                     if (rgbMapApplies) {
@@ -7010,9 +7192,13 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                         const float value = upper * (1.0f - rgbYFraction) +
                             lower * rgbYFraction;
                         gain = std::isfinite(value) && value > 0.0f ? value : 1.0f;
+                    } else if (directRgbScalarMap) {
+                        gain = rgbScalarGain;
                     } else {
-                        if (directRgbMap) gain = 1.0f;
-                        else if (directCfaMaps) {
+                        if (cachedCfaGains)
+                            gain = (*cachedCfaGains)[static_cast<size_t>(y) * width + x];
+                        else if (directRgbMap) gain = 1.0f;
+                        else if (directCfaMaps && !cpuOpt) {
                             const size_t mapIndex = mapsByParity[
                                 ((y & 1u) << 1u) | (x & 1u)][0];
                             const auto& map = maps[mapIndex];
@@ -7025,6 +7211,37 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                             static_cast<size_t>(sy) * map.width + sx];
                                     })
                                 : 1.0f;
+                        } else if (directCfaMaps) {
+                            const auto& row = cfaRowMaps[x & 1u];
+                            const auto& map = *row.map;
+                            if (x >= map.left && x < map.right &&
+                                y >= map.top && y < map.bottom) {
+                                const auto& sx = row.x[x];
+                                const float upper = row.upper[sx.first] * (1.0f - sx.fraction) +
+                                    row.upper[sx.second] * sx.fraction;
+                                const float lower = row.lower[sx.first] * (1.0f - sx.fraction) +
+                                    row.lower[sx.second] * sx.fraction;
+                                const float value = upper * (1.0f - row.yFraction) +
+                                    lower * row.yFraction;
+                                gain = std::isfinite(value) && value > 0.0f ? value : 1.0f;
+                            } else gain = 1.0f;
+                        } else if (fastScalarMap) {
+                            const auto& map = *scalarRowMap.map;
+                            if (x >= map.left && x < map.right &&
+                                y >= map.top && y < map.bottom) {
+                                const auto& sx = scalarRowMap.x[x];
+                                const float upper = scalarRowMap.upper[sx.first] *
+                                    (1.0f - sx.fraction) +
+                                    scalarRowMap.upper[sx.second] * sx.fraction;
+                                const float lower = scalarRowMap.lower[sx.first] *
+                                    (1.0f - sx.fraction) +
+                                    scalarRowMap.lower[sx.second] * sx.fraction;
+                                const float value = upper *
+                                    (1.0f - scalarRowMap.yFraction) +
+                                    lower * scalarRowMap.yFraction;
+                                gain = std::isfinite(value) && value > 0.0f
+                                    ? value : 1.0f;
+                            } else gain = 1.0f;
                         } else gain = effectiveGain(x, y, channel);
                     }
                     const size_t index =
@@ -7061,7 +7278,9 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                         baked = static_cast<uint16_t>(std::clamp(
                             std::lround(value), 0l, 65535l));
                     }
-                    if (packDuringBake) {
+                    if (packDuringBake && packedBits == 8) {
+                        *packedDestination++ = static_cast<uint8_t>(baked);
+                    } else if (packDuringBake) {
                         buffered = (buffered << packedBits) | baked;
                         bufferedBits += packedBits;
                         while (bufferedBits >= 8) {
@@ -7081,8 +7300,26 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 *packedDestination = static_cast<uint8_t>(buffered << (8 - bufferedBits));
         }
     };
+    // Divide the CPU budget among simultaneous frame bakes. The previous
+    // per-frame cap of eight could launch dozens of competing workers during
+    // mounted read-ahead, increasing latency for every frame.
+    const uint32_t concurrentBakes =
+        activeGainBakeJobs.fetch_add(1, std::memory_order_acq_rel) + 1;
+    struct ActiveBakeGuard {
+        bool active = true;
+        void release() {
+            if (!active) return;
+            activeGainBakeJobs.fetch_sub(1, std::memory_order_acq_rel);
+            active = false;
+        }
+        ~ActiveBakeGuard() {
+            release();
+        }
+    } activeBakeGuard;
+    const uint32_t workerBudget = std::max<uint32_t>(1,
+        utils::availableCpuWorkers() / concurrentBakes);
     const uint32_t workers = static_cast<uint64_t>(width) * height >= 1000000
-        ? std::min<uint32_t>(16, std::min<uint32_t>(utils::availableCpuWorkers(),
+        ? std::min<uint32_t>(cpuOpt ? 8 : 16, std::min<uint32_t>(workerBudget,
               std::max<uint32_t>(1, height / 128)))
         : 1;
     std::vector<std::thread> bakeThreads;
@@ -7092,6 +7329,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                  height * (worker + 1) / workers);
     bakeRows(0, height / workers);
     for (auto& thread : bakeThreads) thread.join();
+    activeBakeGuard.release();
     const auto bakedAt = std::chrono::steady_clock::now();
 
     const uint32_t newBytes = packDuringBake
@@ -7172,9 +7410,12 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                            &packedOutput, packedBytes)
         : inPlace || replaceTiffStrip(data, stripOffset, stripBytes, replacement, little);
     if (profileBake)
-        spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
+        spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} gain_field_cache={} workers={} concurrent_bakes={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
                      width, height, imageChannels, maps.size(), colorOnly,
                      gridColorSeparated,
+                     cachedCfaGains ? (gainFieldCacheHit ? "hit" : "miss")
+                         : (gainFieldWarmup ? "warmup" : "disabled"),
+                     workers, concurrentBakes,
                      std::chrono::duration<double, std::milli>(predecodeAt-bakeStarted).count(),
                      std::chrono::duration<double, std::milli>(decodedAt-predecodeAt).count(),
                      std::chrono::duration<double, std::milli>(bakedAt-decodedAt).count(),

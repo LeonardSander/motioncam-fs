@@ -8,6 +8,7 @@
 #include <optional>
 #include <utility>
 #include <array>
+#include <deque>
 
 #include "Types.h"
 
@@ -27,6 +28,7 @@ extern "C" {
 }
 
 namespace motioncam {
+class DirectLogGpuRgb;
 
 struct DirectLogFrameInfo {
     int frameNumber;
@@ -64,6 +66,8 @@ public:
                       int outputWidth = 0, int outputHeight = 0,
                       bool preserveLogEncoded = false,
                       bool smoothChroma = true);
+    bool extractFrameBayer(int frameNumber, std::vector<uint16_t>& bayerData,
+                           const std::array<uint8_t, 4>& cfaPhase);
     bool extractFrameIntoBytes(int frameNumber, std::vector<uint8_t>& bytes,
                                size_t pixelOffset, int outputWidth = 0,
                                int outputHeight = 0,
@@ -84,7 +88,12 @@ private:
     void cleanup();
     bool extractFrameInto(int frameNumber, uint16_t* rgbData, size_t sampleCount,
                           int outputWidth, int outputHeight,
-                          bool preserveLogEncoded, bool smoothChroma);
+                          bool preserveLogEncoded, bool smoothChroma,
+                          const std::array<uint8_t, 4>* cfaPhase = nullptr);
+    bool extractFrameIntoLocked(int frameNumber, uint16_t* rgbData, size_t sampleCount,
+                                int outputWidth, int outputHeight,
+                                bool preserveLogEncoded, bool smoothChroma,
+                                const std::array<uint8_t, 4>* cfaPhase);
     bool convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData, size_t sampleCount,
                          int outputWidth, int outputHeight, bool preserveLogEncoded,
                          bool smoothChroma);
@@ -93,6 +102,11 @@ private:
     AVFrame* transferableFrame(AVFrame* frame);
 #ifdef MOTIONCAM_HAS_AVFILTER
     AVFrame* scaledHardwareFrame(AVFrame* frame, int width, int height);
+    bool convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
+                               size_t sampleCount, int outputWidth,
+                               int outputHeight, bool preserveLogEncoded,
+                               bool smoothChroma,
+                               const std::array<uint8_t, 4>* cfaPhase);
 #endif
     static AVPixelFormat selectPixelFormat(AVCodecContext* context,
                                            const AVPixelFormat* formats);
@@ -122,6 +136,8 @@ private:
     int mProxyGpuRejectedHeight = 0;
     AVPixelFormat mProxyGpuRejectedFormat = AV_PIX_FMT_NONE;
     const void* mProxyGpuRejectedFrames = nullptr;
+    bool mGpuRgbRejected = false;
+    std::unique_ptr<DirectLogGpuRgb> mDirectGpuRgb;
 #endif
     std::vector<SwsContext*> mBandSwsContexts;
     std::vector<std::vector<uint16_t>> mBandRgbScratch;
@@ -139,12 +155,14 @@ private:
     AVPixelFormat mHardwarePixelFormat;
     bool mDecoderInitialized;
     bool mHardwareDecoderActive;
+    bool mForceSoftwareDecoder = false;
     
     int mVideoStreamIndex;
     AVRational mTimeBase;
     std::optional<bool> mFullRange;
     std::optional<bool> mFullRangeOverride;
     int mLastDecodedFrame;
+    std::deque<std::pair<int64_t, AVFrame*>> mDecodedFrameCache;
     std::vector<uint16_t> mLimitedRangeScratch;
     mutable std::mutex mMutex;
 };

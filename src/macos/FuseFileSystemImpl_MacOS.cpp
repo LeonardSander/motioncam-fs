@@ -630,4 +630,9 @@ void FuseFileSystemImpl_MacOs::renderPreview(
     renderer->render(settings, options, progress, frameReady);
 }
 
+void FuseFileSystemImpl_MacOs::releasePreviewResources(MountId mountId) {
+    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+    mPreviewRenderers.erase(mountId);
+}
+
 } // namespace motioncam

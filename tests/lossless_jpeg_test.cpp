@@ -6,6 +6,9 @@
 #include <jpeglib.h>
 
 #include <algorithm>
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
@@ -697,6 +700,125 @@ int main() {
     std::vector<uint8_t> scalarSpatialDng(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::replaceGainMaps(
         scalarSpatialDng, 2, scalarSpatialMaps));
+    auto scalarCachedBake = scalarSpatialDng;
+    auto scalarCachedBakeAgain = scalarSpatialDng;
+    auto scalarReferenceBake = scalarSpatialDng;
+    assert(motioncam::DNGDecoder::bakeGainMaps(scalarCachedBake, false, false));
+    assert(motioncam::DNGDecoder::bakeGainMaps(scalarCachedBakeAgain, false, false));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+#else
+    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+#endif
+    assert(motioncam::DNGDecoder::bakeGainMaps(scalarReferenceBake, false, false));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+#else
+    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+#endif
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        scalarCachedBake, scalarReferenceBake));
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        scalarCachedBakeAgain, scalarReferenceBake));
+    // RGB DirectLog frames can carry one scalar gain map shared by all three
+    // channels. The optimized path must match the generic channel loop.
+    tinydngwriter::DNGImage rgbScalarImage;
+    rgbScalarImage.SetBigEndian(false);
+    const unsigned short rgbBits[] = {16, 16, 16};
+    assert(rgbScalarImage.SetImageWidth(rgbWidth));
+    assert(rgbScalarImage.SetImageLength(rgbHeight));
+    assert(rgbScalarImage.SetRowsPerStrip(rgbHeight));
+    assert(rgbScalarImage.SetSamplesPerPixel(3));
+    assert(rgbScalarImage.SetBitsPerSample(3, rgbBits));
+    assert(rgbScalarImage.SetCompression(tinydngwriter::COMPRESSION_NONE));
+    assert(rgbScalarImage.SetPhotometric(tinydngwriter::PHOTOMETRIC_LINEARRAW));
+    assert(rgbScalarImage.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+    assert(rgbScalarImage.SetWhiteLevel(0x0fff));
+    assert(rgbScalarImage.SetImageData(
+        reinterpret_cast<const unsigned char*>(rgb.data()),
+        rgb.size() * sizeof(uint16_t)));
+    tinydngwriter::GainMapParams rgbScalarMap{};
+    rgbScalarMap.top = 0; rgbScalarMap.left = 0;
+    rgbScalarMap.bottom = rgbHeight; rgbScalarMap.right = rgbWidth;
+    rgbScalarMap.plane = 0; rgbScalarMap.planes = 3;
+    rgbScalarMap.row_pitch = 1; rgbScalarMap.col_pitch = 1;
+    rgbScalarMap.map_points_v = 2; rgbScalarMap.map_points_h = 2;
+    rgbScalarMap.map_spacing_v = 0.5; rgbScalarMap.map_spacing_h = 0.5;
+    rgbScalarMap.map_planes = 1;
+    rgbScalarMap.gain_data = {1.0f, 1.1f, 1.2f, 1.3f};
+    tinydngwriter::OpcodeList rgbScalarOpcodes;
+    rgbScalarOpcodes.AddGainMap(rgbScalarMap);
+    assert(rgbScalarImage.SetOpcodeList2(rgbScalarOpcodes));
+    tinydngwriter::DNGWriter rgbScalarWriter(false);
+    assert(rgbScalarWriter.AddImage(&rgbScalarImage));
+    std::ostringstream rgbScalarOutput(std::ios::binary);
+    assert(rgbScalarWriter.WriteToFile(rgbScalarOutput, &error));
+    const std::string rgbScalarDng = rgbScalarOutput.str();
+    std::vector<uint8_t> rgbScalarBaked(rgbScalarDng.begin(), rgbScalarDng.end());
+    std::vector<motioncam::GainMap> rgbScalarMaps;
+    assert(motioncam::DNGDecoder::getGainMaps(rgbScalarBaked, 2, rgbScalarMaps));
+    assert(rgbScalarMaps.size() == 1 && rgbScalarMaps.front().channels == 1);
+    auto rgbScalarReference = rgbScalarBaked;
+    assert(motioncam::DNGDecoder::bakeGainMaps(rgbScalarBaked, false, false));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+#else
+    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+#endif
+    assert(motioncam::DNGDecoder::bakeGainMaps(rgbScalarReference, false, false));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+#else
+    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+#endif
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        rgbScalarBaked, rgbScalarReference));
+    for (int variation = 0; variation < 3; ++variation) {
+        auto changedMaps = scalarSpatialMaps;
+        changedMaps.front().data.front() += 0.1f * (variation + 1);
+        auto changed = scalarSpatialDng;
+        assert(motioncam::DNGDecoder::replaceGainMaps(changed, 2, changedMaps));
+        auto changedReference = changed;
+        assert(motioncam::DNGDecoder::bakeGainMaps(changed, false, false));
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+#else
+        setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+#endif
+        assert(motioncam::DNGDecoder::bakeGainMaps(changedReference, false, false));
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+#else
+        unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+#endif
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(changed, changedReference));
+    }
+    auto packedScalarBake = scalarSpatialDng;
+    assert(motioncam::DNGDecoder::ensureUncompressed(packedScalarBake));
+    auto packedScalarReference = packedScalarBake;
+    bool packedLogFused = false;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        packedScalarBake, false, false, false, false, 0, std::nullopt,
+        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        &packedLogFused, true));
+    assert(packedLogFused);
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+#else
+    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+#endif
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        packedScalarReference, false, false, false, false, 0, std::nullopt,
+        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        &packedLogFused, true));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+#else
+    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+#endif
+    assert(packedLogFused);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        packedScalarBake, packedScalarReference));
     motioncam::RenderSettings fullPreviewSettings;
     fullPreviewSettings.options = motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
     motioncam::PreviewFrame fullPreview;
@@ -920,6 +1042,22 @@ int main() {
     assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorBaked));
     assert(motioncam::DNGDecoder::bakeGainMaps(scalarColorBaked, false, true));
     assert(motioncam::DNGDecoder::imagePayloadsEqual(colorBaked, scalarColorBaked));
+    // The 2x2 color-only CFA reuse path must match the unoptimized bake.
+    std::vector<uint8_t> scalarColorReference(gainMapDng.begin(), gainMapDng.end());
+    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorReference));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+#else
+    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+#endif
+    assert(motioncam::DNGDecoder::bakeGainMaps(scalarColorReference, false, true));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+#else
+    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+#endif
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        scalarColorBaked, scalarColorReference));
     std::vector<motioncam::GainMap> scalarLuminanceMaps;
     assert(motioncam::DNGDecoder::getGainMaps(
         scalarColorBaked, 3, scalarLuminanceMaps));

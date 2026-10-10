@@ -839,4 +839,9 @@ void FuseFileSystemImpl_Win::renderPreview(
     renderer->render(settings, options, progress, frameReady);
 }
 
+void FuseFileSystemImpl_Win::releasePreviewResources(MountId mountId) {
+    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+    mPreviewRenderers.erase(mountId);
+}
+
 }

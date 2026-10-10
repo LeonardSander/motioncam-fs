@@ -619,8 +619,12 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                 mCalibration ? &*mCalibration : nullptr);
             vfs::applyPreviewExposureOffset(image.metadata, mConfig);
             const auto pipelineStarted = std::chrono::steady_clock::now();
+            auto previewSettings = mConfig;
+            if (image.layout.pixels == DNGPixelLayout::CFA)
+                previewSettings.options = static_cast<FileRenderOptions>(
+                    previewSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
             if (DNGDecoder::decodePreview(
-                    std::move(image), mConfig, preview, true, false)) {
+                    std::move(image), previewSettings, preview, true, false)) {
                 if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
                     const auto completedAt = std::chrono::steady_clock::now();
                     spdlog::info(

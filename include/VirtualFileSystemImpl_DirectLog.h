@@ -68,7 +68,8 @@ private:
                          const std::vector<GainMap>& opcodeList2 = {},
                          const std::vector<GainMap>& opcodeList3 = {},
                          int decodedWidth = 0, int decodedHeight = 0,
-                         bool prepopulatedImage = false);
+                         bool prepopulatedImage = false,
+                         bool inputBayer = false);
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
     struct PreparedSidecarGainMaps {
         std::vector<GainMap> opcodeList2, opcodeList3;
@@ -82,9 +83,11 @@ private:
         int frameNumber = 0;
         int width = 0;
         int height = 0;
+        bool bayer = false;
     };
     ProcessedFrame processFrame(const Entry& entry, int previewScale = 1,
-                                bool prepopulateDng = false);
+                                bool prepopulateDng = false,
+                                bool outputBayer = false);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;

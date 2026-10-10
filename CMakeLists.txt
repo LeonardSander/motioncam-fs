@@ -56,6 +56,8 @@ set(PROJECT_SOURCES
         src/VirtualFileSystemImpl_DirectLog.cpp
         src/VirtualFileSystemImpl_DNG.cpp
         src/DirectLogDecoder.cpp
+        src/DirectLogGpuRgb.cpp
+        src/DirectLogPlaceboLibav.c
         src/DNGDecoder.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
@@ -490,6 +492,25 @@ endif()
 if(MOTIONCAM_AVFILTER_TARGET)
   target_link_libraries(${PROJECT_NAME} PRIVATE ${MOTIONCAM_AVFILTER_TARGET})
   target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_AVFILTER=1)
+endif()
+if(PkgConfig_FOUND)
+  pkg_check_modules(DIRECTLOG_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.0)
+  if(DIRECTLOG_PLACEBO_FOUND)
+    set(DIRECTLOG_PLACEBO_SAME_INSTALL TRUE)
+    foreach(PLACEBO_DIR IN LISTS DIRECTLOG_PLACEBO_LIBRARY_DIRS)
+      if(NOT PLACEBO_DIR IN_LIST FFMPEG_LIBRARY_DIRS AND
+         NOT PLACEBO_DIR STREQUAL MOTIONCAM_FFMPEG_LIBRARY_DIR)
+        set(DIRECTLOG_PLACEBO_SAME_INSTALL FALSE)
+      endif()
+    endforeach()
+    find_path(DIRECTLOG_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+      HINTS "${CMAKE_BINARY_DIR}/deps/vulkan-headers/include")
+    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
+      target_include_directories(${PROJECT_NAME} PRIVATE ${DIRECTLOG_VULKAN_INCLUDE_DIR})
+      target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::DIRECTLOG_PLACEBO)
+      target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+    endif()
+  endif()
 endif()
 if(TARGET Qt6::QuickWidgets)
   target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::QuickWidgets)

@@ -475,4 +475,9 @@ void FuseFileSystemImpl_Linux::renderPreview(
     }
     renderer->render(settings, options, progress, frameReady);
 }
+
+void FuseFileSystemImpl_Linux::releasePreviewResources(MountId mountId) {
+    std::lock_guard<std::mutex> lock(mMountedFilesMutex);
+    mPreviewRenderers.erase(mountId);
+}
 } // namespace motioncam
