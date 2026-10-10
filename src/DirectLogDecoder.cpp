@@ -15,6 +15,9 @@
 #include <functional>
 #include <thread>
 #include <unordered_map>
+extern "C" {
+#include <libavutil/error.h>
+}
 #ifdef MOTIONCAM_HAS_AVFILTER
 extern "C" {
 #include <libavfilter/buffersink.h>
@@ -23,6 +26,12 @@ extern "C" {
 #endif
 
 namespace {
+
+std::string ffmpegErrorString(int error) {
+    char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
+    av_strerror(error, buffer, sizeof(buffer));
+    return buffer;
+}
 
 bool directLogDiagnosticsEnabled() {
     static const bool enabled = [] {
@@ -797,7 +806,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         }
         if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
             spdlog::error("DirectLog frame {} receive failed: {}",
-                          frameNumber, av_err2str(receiveResult));
+                          frameNumber, ffmpegErrorString(receiveResult));
             mLastDecodedFrame = -1;
             return -1;
         }
@@ -831,7 +840,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             }
             if (sendResult < 0 && sendResult != AVERROR(EAGAIN)) {
                 spdlog::error("DirectLog frame {} packet submit failed: {}",
-                              frameNumber, av_err2str(sendResult));
+                              frameNumber, ffmpegErrorString(sendResult));
                 av_packet_unref(mPacket);
                 mLastDecodedFrame = -1;
                 if (sendResult == AVERROR(ENOMEM) && mHardwareDecoderActive &&
@@ -853,7 +862,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
 
     if (readResult != AVERROR_EOF) {
         spdlog::error("DirectLog frame {} packet read failed: {}",
-                      frameNumber, av_err2str(readResult));
+                      frameNumber, ffmpegErrorString(readResult));
         mLastDecodedFrame = -1;
         return false;
     }
@@ -861,7 +870,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     const int drainResult = avcodec_send_packet(mCodecContext, nullptr);
     if (drainResult < 0 && drainResult != AVERROR_EOF) {
         spdlog::error("DirectLog frame {} drain failed: {}",
-                      frameNumber, av_err2str(drainResult));
+                      frameNumber, ffmpegErrorString(drainResult));
         mLastDecodedFrame = -1;
         return false;
     }
@@ -878,7 +887,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     }
     if (receiveResult != AVERROR_EOF && receiveResult != AVERROR(EAGAIN))
         spdlog::error("DirectLog frame {} drain receive failed: {}",
-                      frameNumber, av_err2str(receiveResult));
+                      frameNumber, ffmpegErrorString(receiveResult));
 
     mLastDecodedFrame = -1;
     return false;
@@ -1545,8 +1554,8 @@ void DirectLogDecoder::cleanup() {
     for (auto& cached : mDecodedFrameCache)
         av_frame_free(&cached.second);
     mDecodedFrameCache.clear();
-    mDirectGpuRgb.reset();
 #ifdef MOTIONCAM_HAS_AVFILTER
+    mDirectGpuRgb.reset();
     av_frame_free(&mProxyGpuFrame);
     avfilter_graph_free(&mProxyGpuGraph);
     mProxyGpuSource = mProxyGpuSink = nullptr;
