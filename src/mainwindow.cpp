@@ -2454,12 +2454,15 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
               "QWidget#clipCard QWidget#statusContainer, QWidget#clipCard QCheckBox#clipSelection { background:transparent; }");
         updateSelectionUi();
     });
-    connect(localReset, &QPushButton::clicked, this, [this, mountId] {
+    connect(localReset, &QPushButton::clicked, this, [this, mountId, clipCheckBox] {
         mLocalSettings.remove(mountId);
         mFuseFilesystem->updateOptions(mountId, mGlobalRenderSettings);
         updateThumbnail(mountId);
         updateLocalBadge(mountId);
-        updateSelectionUi();
+        // The checkbox owns the selection state and refreshes the settings UI.
+        const bool wasSelected = clipCheckBox->isChecked();
+        clipCheckBox->setChecked(false);
+        if (!wasSelected) updateSelectionUi();
         autoSaveSession();
     });
 
