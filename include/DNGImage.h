@@ -25,6 +25,11 @@ struct DNGProfileTables {
 
 struct DNGFrameMetadata {
     size_t metadataBytes = 0;
+    // Reuse the image layout parsed alongside the color metadata during mount.
+    bool hasImageLayout = false;
+    bool imageHasCfa = false;
+    int imageCfaRepeatSize = 0;
+    std::array<uint8_t, 4> imageCfaPhase{};
     std::string uniqueCameraModel;
     double exposureTime = 0.0;
     double iso = 0.0;

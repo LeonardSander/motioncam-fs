@@ -209,6 +209,7 @@ private:
     QString mMountPathInProgress;
     QPointer<QProgressDialog> mImportBatchProgress;
     bool mImportBatchActive = false;
+    QList<motioncam::MountId> mDeferredImportThumbnails;
     bool mCancelImportBatch = false;
     bool mDeleteOnUnmount = false;
     motioncam::CachePolicy mCachePolicy = motioncam::CachePolicy::Quota;

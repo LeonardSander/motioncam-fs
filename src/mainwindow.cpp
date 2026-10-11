@@ -2503,11 +2503,12 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         });
     }
     updateClipIndices();
-    if (!mGalleryPerformanceTestActive) {
+    if (mImportBatchActive &&
+        (!mGalleryPerformanceTestActive || mPerformanceThumbnailRun)) {
+        mDeferredImportThumbnails.append(mountId);
+    } else if (!mGalleryPerformanceTestActive) {
         QTimer::singleShot(250, this, [this, mountId] { updateThumbnail(mountId); });
     } else if (mPerformanceThumbnailRun) {
-        // Exercise the responsive startup path: thumbnail work begins as soon
-        // as its mount is available and overlaps construction of later mounts.
         spdlog::info("GALLERY_PERF event=thumbnail_start mount={}", mountId);
         updateThumbnail(mountId);
     }
@@ -2611,6 +2612,13 @@ void MainWindow::mountFiles(
     progress.close();
     updateCalibrationButtonStates();
     if (!mGalleryPerformanceTestActive) autoSaveSession();
+    const auto thumbnails = std::move(mDeferredImportThumbnails);
+    mDeferredImportThumbnails.clear();
+    for (const auto mountId : thumbnails) {
+        if (mGalleryPerformanceTestActive)
+            spdlog::info("GALLERY_PERF event=thumbnail_start mount={}", mountId);
+        updateThumbnail(mountId);
+    }
 }
 
 motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
@@ -5784,6 +5792,11 @@ void MainWindow::onApplyAll() {
 }
 
 void MainWindow::updateThumbnail(motioncam::MountId mountId) {
+    if (mImportBatchActive) {
+        if (!mDeferredImportThumbnails.contains(mountId))
+            mDeferredImportThumbnails.append(mountId);
+        return;
+    }
     auto* card = fileWidgetForMount(mountId);
     auto* label = card ? card->findChild<QLabel*>("thumbnailLabel") : nullptr;
     if (!label) return;
@@ -5971,7 +5984,6 @@ void MainWindow::onOpenPreferences() {
     dialog.setCacheFolder(mCacheRootFolder);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog.setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
-    dialog.setGalleryHistogramEnabled(mGalleryHistogramEnabled);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
     dialog.setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
     dialog.setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
@@ -5991,8 +6003,6 @@ void MainWindow::onOpenPreferences() {
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mGalleryFpsIndicatorEnabled = dialog.getGalleryFpsIndicatorEnabled();
-    mGalleryHistogramEnabled = dialog.getGalleryHistogramEnabled();
-    if (mClipPlayer) mClipPlayer->setHistogramEnabled(mGalleryHistogramEnabled);
     if (mClipPlayer) mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();

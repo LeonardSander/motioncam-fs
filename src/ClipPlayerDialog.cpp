@@ -29,6 +29,7 @@
 #include <QSlider>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QCheckBox>
 #include <QStackedLayout>
 #include <QStandardPaths>
@@ -887,6 +888,16 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     const int requestedFrame=std::clamp(static_cast<int>(std::round(
         std::max(0.0,startSeconds)*std::max(1.0,requestedClip.fps))),0,requestedLastFrame);
     const double requestedSeconds=requestedFrame/std::max(1.0,requestedClip.fps);
+    // Direct presentation uses a GPU widget above mVideo. Before hiding it,
+    // copy the frame being shown into the fallback label. Otherwise the label
+    // can expose a much older clip (often the last still) during the handoff.
+    if(changingClip&&mGpuVideo&&mGpuVideo->isVisible()&&
+       !mLastPresentedImage.isNull()){
+        const bool directPresentation=mDirectSequencePresentation;
+        mDirectSequencePresentation=false;
+        updateDisplayedImage();
+        mDirectSequencePresentation=directPresentation;
+    }
     // Invalidate the producer before closing the pipe it may currently be
     // writing. The connected handler increments the gallery generation
     // synchronously; newly queued callbacks cannot run until this returns.
@@ -1565,6 +1576,7 @@ void ClipPlayerDialog::setHistogramEnabled(bool enabled){
     if(!enabled && mHistogramExpanded)setHistogramExpanded(false);
     mHistogramEnabled=enabled;
     if(!enabled)mPresentedRawFrame.samples.reset();
+    const QSignalBlocker toggleSignals(mHistogramToggle);
     mHistogramToggle->setChecked(enabled);
     mHistogramToggle->setToolTip(enabled?tr("Hide raw RGB histogram"):
         tr("Show raw RGB histogram"));
@@ -1579,6 +1591,7 @@ void ClipPlayerDialog::setPerformanceUncapped(bool enabled){
 
 void ClipPlayerDialog::setClippingEnabled(bool enabled){
     mClippingEnabled=enabled;
+    const QSignalBlocker toggleSignals(mClippingToggle);
     mClippingToggle->setChecked(enabled);
     mClippingToggle->setToolTip(enabled?tr("Hide raw clipping indication"):
         tr("Show raw clipping indication"));
@@ -2888,6 +2901,10 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
     updateVisibleThumbnailWidgets();
+    // A clip switch keeps the previous frame visible until the replacement
+    // arrives. Do not redraw that retained image using the new clip's size,
+    // orientation, or presenter while its first frame is still pending.
+    if(mWaitingForFirstFrame&&!mFirstFrameReady)return;
     // Keep the wheel accumulator aligned with the new fit geometry.
     if(mZoomPercent<=0.0&&mIndex>=0)
         mRequestedZoomPercent=fitScale()*100.0;

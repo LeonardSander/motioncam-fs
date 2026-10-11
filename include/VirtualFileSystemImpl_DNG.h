@@ -106,6 +106,13 @@ private:
     std::unordered_map<size_t, uint64_t> mPayloadHashes;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::vector<size_t> mSourceMetadataSizes;
+    struct SourceFrameLayout {
+        bool valid = false;
+        bool hasCfa = false;
+        int cfaRepeatSize = 0;
+        std::array<uint8_t, 4> cfaPhase{};
+    };
+    std::vector<SourceFrameLayout> mSourceFrameLayouts;
     std::vector<float> mSourceWhiteLevels;
     std::vector<uint32_t> mSourceInputBitDepths;
     uint32_t mSourceInputBitDepth = 16;

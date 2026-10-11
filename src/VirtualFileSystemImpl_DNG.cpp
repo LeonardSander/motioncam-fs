@@ -139,29 +139,6 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mTotalFrames = static_cast<int>(sequenceInfo.totalFrames);
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
-        mHasCfa = mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
-        std::vector<uint8_t> firstFrameBytes;
-        DNGImageLayout firstFrameLayout;
-        if (mDecoder->extractFrame(0, firstFrameBytes) &&
-            DNGDecoder::getImageLayout(firstFrameBytes, firstFrameLayout)) {
-            mHasCfa = firstFrameLayout.pixels == DNGPixelLayout::CFA;
-            mCfaSize = firstFrameLayout.cfaRepeatSize;
-            mCfaPhase = firstFrameLayout.cfaPhase;
-        }
-        if (mHasCfa && mCalibration && mCalibration->hasCfaSize &&
-            mCalibration->cfaSize > 0) {
-            mCfaSize = mCalibration->cfaSize;
-            mHasCfa = mCfaSize >= 2;
-        }
-        if (mCalibration && !mCalibration->cfaPhase.empty()) {
-            std::string phase = boost::algorithm::to_lower_copy(mCalibration->cfaPhase);
-            if (phase == "rggb") mCfaPhase = {0, 1, 1, 2};
-            else if (phase == "grbg") mCfaPhase = {1, 0, 2, 1};
-            else if (phase == "gbrg") mCfaPhase = {1, 2, 0, 1};
-            else if (phase == "bggr") mCfaPhase = {2, 1, 1, 0};
-            else spdlog::warn("Ignoring invalid sidecar CFA phase '{}'", mCalibration->cfaPhase);
-        }
-        
         // Calculate frame rate statistics
         calculateFrameRateStats();
 
@@ -173,6 +150,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         std::vector<vfs::ExposureSample> exposureSamples;
         std::vector<DNGFrameMetadata> metadata(frames.size());
         mSourceMetadataSizes.resize(frames.size());
+        mSourceFrameLayouts.resize(frames.size());
         mSourceWhiteLevels.resize(frames.size(), mSourceWhiteLevel);
         mSourceInputBitDepths.resize(frames.size(), mSourceInputBitDepth);
         exposureSamples.reserve(frames.size());
@@ -180,6 +158,9 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         for (size_t i = 0; i < frames.size(); ++i) {
             if (!mDecoder->getFrameMetadata(static_cast<int>(i), metadata[i]))
                 throw std::runtime_error("Could not read DNG frame metadata: " + frames[i].filePath);
+            mSourceFrameLayouts[i] = {metadata[i].hasImageLayout,
+                metadata[i].imageHasCfa, metadata[i].imageCfaRepeatSize,
+                metadata[i].imageCfaPhase};
             mSourceMetadataSizes[i] = metadata[i].metadataBytes;
             if (metadata[i].whiteLevelCount)
                 mSourceWhiteLevels[i] = metadata[i].whiteLevel[0];
@@ -202,6 +183,35 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 mSourceBlackLevel = metadata[0].blackLevel;
             if (metadata[0].inputBitDepth > 0)
                 mSourceInputBitDepth = metadata[0].inputBitDepth;
+        }
+        if (!mSourceFrameLayouts.empty() && mSourceFrameLayouts[0].valid) {
+            const auto& layout = mSourceFrameLayouts[0];
+            mHasCfa = layout.hasCfa;
+            mCfaSize = layout.cfaRepeatSize;
+            mCfaPhase = layout.cfaPhase;
+        } else {
+            mHasCfa = mDecoder->getCFAMetadata(0, mCfaSize, mCfaPhase);
+            std::vector<uint8_t> firstFrameBytes;
+            DNGImageLayout firstFrameLayout;
+            if (mDecoder->extractFrame(0, firstFrameBytes) &&
+                DNGDecoder::getImageLayout(firstFrameBytes, firstFrameLayout)) {
+                mHasCfa = firstFrameLayout.pixels == DNGPixelLayout::CFA;
+                mCfaSize = firstFrameLayout.cfaRepeatSize;
+                mCfaPhase = firstFrameLayout.cfaPhase;
+            }
+        }
+        if (mHasCfa && mCalibration && mCalibration->hasCfaSize &&
+            mCalibration->cfaSize > 0) {
+            mCfaSize = mCalibration->cfaSize;
+            mHasCfa = mCfaSize >= 2;
+        }
+        if (mCalibration && !mCalibration->cfaPhase.empty()) {
+            std::string phase = boost::algorithm::to_lower_copy(mCalibration->cfaPhase);
+            if (phase == "rggb") mCfaPhase = {0, 1, 1, 2};
+            else if (phase == "grbg") mCfaPhase = {1, 0, 2, 1};
+            else if (phase == "gbrg") mCfaPhase = {1, 2, 0, 1};
+            else if (phase == "bggr") mCfaPhase = {2, 1, 1, 0};
+            else spdlog::warn("Ignoring invalid sidecar CFA phase '{}'", mCalibration->cfaPhase);
         }
         if (!frames.empty()) {
             GainMap sourceGainMap;
@@ -312,15 +322,24 @@ void VirtualFileSystemImpl_DNG::init() {
             : static_cast<uint32_t>(mHeight);
         int frameCfaSize = mCfaSize;
         std::array<uint8_t, 4> frameCfaPhase = mCfaPhase;
-        bool frameHasCfa = mDecoder->getCFAMetadata(
-            static_cast<int>(frameIndex), frameCfaSize, frameCfaPhase);
-        std::vector<uint8_t> frameBytes;
-        DNGImageLayout frameLayout;
-        if (mDecoder->extractFrame(static_cast<int>(frameIndex), frameBytes) &&
-            DNGDecoder::getImageLayout(frameBytes, frameLayout)) {
-            frameHasCfa = frameLayout.pixels == DNGPixelLayout::CFA;
-            frameCfaSize = frameLayout.cfaRepeatSize;
-            frameCfaPhase = frameLayout.cfaPhase;
+        bool frameHasCfa = mHasCfa;
+        if (frameIndex < mSourceFrameLayouts.size() &&
+            mSourceFrameLayouts[frameIndex].valid) {
+            const auto& layout = mSourceFrameLayouts[frameIndex];
+            frameHasCfa = layout.hasCfa;
+            frameCfaSize = layout.cfaRepeatSize;
+            frameCfaPhase = layout.cfaPhase;
+        } else {
+            frameHasCfa = mDecoder->getCFAMetadata(
+                static_cast<int>(frameIndex), frameCfaSize, frameCfaPhase);
+            std::vector<uint8_t> frameBytes;
+            DNGImageLayout frameLayout;
+            if (mDecoder->extractFrame(static_cast<int>(frameIndex), frameBytes) &&
+                DNGDecoder::getImageLayout(frameBytes, frameLayout)) {
+                frameHasCfa = frameLayout.pixels == DNGPixelLayout::CFA;
+                frameCfaSize = frameLayout.cfaRepeatSize;
+                frameCfaPhase = frameLayout.cfaPhase;
+            }
         }
         if (frameHasCfa && mCalibration && mCalibration->hasCfaSize &&
             mCalibration->cfaSize > 0) {

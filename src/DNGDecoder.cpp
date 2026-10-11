@@ -37,6 +37,15 @@
 namespace motioncam {
 
 namespace {
+struct DngByteView {
+    const uint8_t* bytes;
+    size_t length;
+    DngByteView(const std::vector<uint8_t>& data) : bytes(data.data()), length(data.size()) {}
+    DngByteView(const uint8_t* data, size_t size) : bytes(data), length(size) {}
+    const uint8_t* data() const { return bytes; }
+    size_t size() const { return length; }
+};
+
 std::atomic_uint32_t foregroundDngWork{0};
 std::atomic_uint32_t activeGainBakeJobs{0};
 
@@ -799,9 +808,15 @@ namespace {
         size_t entryOffset;
     };
 
-    std::vector<TiffEntry> findTiffEntries(const std::vector<uint8_t>& data, bool& little) {
+    std::vector<TiffEntry> findTiffEntries(const DngByteView& data, bool& little,
+                                           size_t* scanNeeded = nullptr) {
         std::vector<TiffEntry> result;
         if (data.size() < 8) return result;
+        const auto available = [&](size_t end) {
+            if (end <= data.size()) return true;
+            if (scanNeeded) *scanNeeded = std::max(*scanNeeded, end);
+            return false;
+        };
         const uint16_t order = read16(data.data(), true);
         if (order != TIFF_LITTLE_ENDIAN && order != TIFF_BIG_ENDIAN) return result;
         little = order == TIFF_LITTLE_ENDIAN;
@@ -811,10 +826,11 @@ namespace {
         while (!pending.empty()) {
             const uint32_t ifd = pending.back();
             pending.pop_back();
-            if (!ifd || !visited.insert(ifd).second || ifd + 2 > data.size()) continue;
+            if (!ifd || !visited.insert(ifd).second ||
+                !available(static_cast<size_t>(ifd) + 2)) continue;
             const uint16_t count = read16(data.data() + ifd, little);
             const size_t entriesEnd = static_cast<size_t>(ifd) + 2 + static_cast<size_t>(count) * 12;
-            if (entriesEnd + 4 > data.size()) continue;
+            if (!available(entriesEnd + 4)) continue;
             for (uint16_t i = 0; i < count; ++i) {
                 const size_t pos = static_cast<size_t>(ifd) + 2 + i * 12;
                 const uint16_t tag = read16(data.data() + pos, little);
@@ -826,8 +842,17 @@ namespace {
                     std::numeric_limits<size_t>::max() / itemCount)) continue;
                 const size_t bytes = typeSize * static_cast<size_t>(itemCount);
                 const size_t valueOffset = bytes <= 4 ? pos + 8 : rawOffset;
-                if (valueOffset <= data.size() && bytes <= data.size() - valueOffset)
+                const bool scanTag = tag == TIFF_TAG_XMP || tag == TIFF_TAG_FRAME_RATE ||
+                    tag == TIFF_TAG_TIME_CODES || tag == TIFF_TAG_PHOTOMETRIC ||
+                    tag == TIFF_TAG_IMAGE_WIDTH || tag == TIFF_TAG_IMAGE_HEIGHT ||
+                    tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD ||
+                    tag == TIFF_TAG_SUB_IFDS;
+                if ((!scanNeeded || scanTag) && valueOffset <= data.size() &&
+                    bytes <= data.size() - valueOffset)
                     result.push_back({tag, type, itemCount, valueOffset, ifd, pos});
+                else if (scanNeeded && scanTag &&
+                         valueOffset <= std::numeric_limits<size_t>::max() - bytes)
+                    available(valueOffset + bytes);
                 if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD) &&
                     type == TIFF_TYPE_LONG && itemCount == 1)
                     pending.push_back(rawOffset);
@@ -1306,7 +1331,7 @@ namespace {
         return sortTiffIfdEntries(data, relocated(targetIfd), little);
     }
 
-    double readRational(const std::vector<uint8_t>& data, const TiffEntry& entry,
+    double readRational(const DngByteView& data, const TiffEntry& entry,
                         uint32_t index, bool little) {
         const size_t pos = entry.valueOffset + static_cast<size_t>(index) * 8;
         const uint32_t numerator = read32(data.data() + pos, little);
@@ -1491,7 +1516,7 @@ namespace {
                "</rdf:RDF></x:xmpmeta><?xpacket end='w'?>";
     }
 
-    bool readRelativePresentationTimestamp(const std::vector<uint8_t>& data,
+    bool readRelativePresentationTimestamp(const DngByteView& data,
                                            const TiffEntry& entry, Timestamp& timestamp) {
         if (entry.tag != TIFF_TAG_XMP || entry.type != TIFF_TYPE_BYTE || !entry.count) return false;
         const std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
@@ -1739,15 +1764,43 @@ void DNGDecoder::findDNGFiles() {
     // Image geometry belongs to the raw IFD and is independent of its
     // compression. Read it instead of exposing the old 1920x1080 placeholder.
     for (auto& frame : mFrames) {
+        // TIFF directory data is usually at the front of a DNG. Read only the
+        // prefix needed by its directory entries, expanding for remote IFDs
+        // or metadata values. A private buffer stays safe if the source file
+        // is truncated while an import is running.
+        std::ifstream file(frame.filePath, std::ios::binary | std::ios::ate);
+        if (!file) continue;
+        const auto end = file.tellg();
+        if (end < 8 || static_cast<uintmax_t>(end) >
+                static_cast<uintmax_t>(std::numeric_limits<size_t>::max())) continue;
+        const size_t fileSize = static_cast<size_t>(end);
         std::vector<uint8_t> bytes;
-        if (!readDNGFile(frame.filePath, bytes)) continue;
         bool little = true;
-        const auto entries = findTiffEntries(bytes, little);
+        std::vector<TiffEntry> entries;
+        size_t target = std::min(fileSize, size_t{64 * 1024});
+        bool readFailed = false;
+        for (;;) {
+            const size_t previous = bytes.size();
+            bytes.resize(target);
+            file.seekg(static_cast<std::streamoff>(previous));
+            file.read(reinterpret_cast<char*>(bytes.data() + previous),
+                      static_cast<std::streamsize>(target - previous));
+            if (file.gcount() != static_cast<std::streamsize>(target - previous)) {
+                readFailed = true;
+                break;
+            }
+            size_t needed = 0;
+            entries = findTiffEntries(bytes, little, &needed);
+            if (needed <= bytes.size() || needed > fileSize) break;
+            target = std::min(fileSize, std::max(needed, bytes.size() * 2));
+        }
+        if (readFailed) continue;
+        const DngByteView data(bytes);
         double frameRate = 0.0;
         for (const auto& entry : entries) {
             if (entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count &&
-                entry.valueOffset + entry.count <= bytes.size()) {
-                const std::string xmp(reinterpret_cast<const char*>(bytes.data() + entry.valueOffset),
+                entry.valueOffset + entry.count <= data.size()) {
+                const std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset),
                                       entry.count);
                 frame.duplicateFrame = xmp.find("rpt:DuplicateFrame='true'") != std::string::npos ||
                     xmp.find("rpt:DuplicateFrame=\"true\"") != std::string::npos;
@@ -1755,14 +1808,14 @@ void DNGDecoder::findDNGFiles() {
                     xmp.find("rpt:SyntheticFrame=\"true\"") != std::string::npos;
             }
             Timestamp embeddedTimestamp = 0;
-            if (readRelativePresentationTimestamp(bytes, entry, embeddedTimestamp)) {
+            if (readRelativePresentationTimestamp(data, entry, embeddedTimestamp)) {
                 frame.timestamp = embeddedTimestamp;
                 frame.hasExactPresentationTimestamp = true;
             }
             if (entry.tag == TIFF_TAG_FRAME_RATE &&
                 (entry.type == TIFF_TYPE_RATIONAL || entry.type == TIFF_TYPE_SRATIONAL) &&
                 entry.count) {
-                frameRate = readRational(bytes, entry, 0, little);
+                frameRate = readRational(data, entry, 0, little);
                 if (!(mSequenceInfo.fps > 0.0)) mSequenceInfo.fps = frameRate;
             }
         }
@@ -1770,7 +1823,7 @@ void DNGDecoder::findDNGFiles() {
             for (const auto& entry : entries) {
                 if (entry.tag != TIFF_TAG_TIME_CODES || entry.type != TIFF_TYPE_BYTE || entry.count < 8)
                     continue;
-                const auto* tc = bytes.data() + entry.valueOffset;
+                const auto* tc = data.data() + entry.valueOffset;
                 const int nominal = frameRate >= 47.0 && frameRate <= 61.0
                     ? static_cast<int>(std::lround(frameRate / 2.0))
                     : std::max(1, std::min(30, static_cast<int>(std::lround(frameRate))));
@@ -1798,8 +1851,8 @@ void DNGDecoder::findDNGFiles() {
         for (const auto& entry : entries) {
             if (entry.tag == TIFF_TAG_PHOTOMETRIC) {
                 const uint32_t value = entry.type == TIFF_TYPE_SHORT
-                    ? read16(bytes.data() + entry.valueOffset, little)
-                    : read32(bytes.data() + entry.valueOffset, little);
+                    ? read16(data.data() + entry.valueOffset, little)
+                    : read32(data.data() + entry.valueOffset, little);
                 if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
                     photo = &entry;
                     break;
@@ -1810,8 +1863,8 @@ void DNGDecoder::findDNGFiles() {
         for (const auto& entry : entries) {
             if (entry.ifdOffset != photo->ifdOffset) continue;
             const uint32_t value = entry.type == TIFF_TYPE_SHORT
-                ? read16(bytes.data() + entry.valueOffset, little)
-                : read32(bytes.data() + entry.valueOffset, little);
+                ? read16(data.data() + entry.valueOffset, little)
+                : read32(data.data() + entry.valueOffset, little);
             if (entry.tag == TIFF_TAG_IMAGE_WIDTH) frame.width = static_cast<int>(value);
             if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) frame.height = static_cast<int>(value);
         }
@@ -2554,6 +2607,13 @@ bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
     std::vector<uint8_t> data;
     if (!extractFrame(frameNumber, data)) return false;
     if (!getColorMetadata(data, metadata)) return false;
+    DNGImageLayout layout;
+    if (getImageLayout(data, layout)) {
+        metadata.hasImageLayout = true;
+        metadata.imageHasCfa = layout.pixels == DNGPixelLayout::CFA;
+        metadata.imageCfaRepeatSize = layout.cfaRepeatSize;
+        metadata.imageCfaPhase = layout.cfaPhase;
+    }
     metadata.hasExposure = metadata.iso > 0.0 && metadata.exposureTime > 0.0;
     if (!signature.empty()) {
         std::lock_guard lock(dngMetadataCacheMutex);
