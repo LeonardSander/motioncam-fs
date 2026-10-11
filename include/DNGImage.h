@@ -61,6 +61,7 @@ struct DNGFrameMetadata {
 
 struct PreviewFrame {
     std::vector<uint8_t> rgb;
+    uint32_t displayBitDepth = 16;
     bool clippingRequested = false;
     // 0 = normal, 1 = below black, 3..9 = clipped RGB channel bitmask + 2.
     std::vector<uint8_t> clipping;
@@ -124,10 +125,12 @@ struct DNGSidecarMetadataEntry {
 struct DecodedDNGImage {
     std::vector<uint16_t> samples;
     DNGImageLayout layout;
+    uint32_t storedBitsPerSample = 0;
     DNGFrameMetadata metadata;
     std::vector<GainMap> opcodeList2;
     std::vector<GainMap> opcodeList3;
     Timestamp timestamp = 0;
+    uint32_t ditherSeed = 0;
     bool linearizationApplied = false;
 };
 

@@ -216,6 +216,7 @@ struct DngPixelPipelineOptions {
     // Non-zero for sources which enter this pipeline as linear samples but
     // use KeepInput as a source-specific log ceiling (DirectLog: 12 bits).
     uint32_t linearInputBitDepth = 0;
+    uint32_t ditherSeed = 0;
     const CalibrationData* calibration = nullptr;
     double iso = 0.0;
     double exposureTime = 0.0;

@@ -2,6 +2,7 @@
 #include "DataLevels.h"
 #include "Utils.h"
 #include "GainMapBake.h"
+#include "RawLogTransform.h"
 #include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
@@ -3775,7 +3776,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     const uint32_t bits = scalar(*bitsE);
     const uint32_t compression = scalar(*compressionE), stripOffset = scalar(*offsetsE);
     const uint32_t stripBytes = scalar(*countsE);
-    if (!width || !height || bits < 8 || bits > 16 || stripOffset > data.size() ||
+    if (!width || !height || bits < 1 || bits > 16 || stripOffset > data.size() ||
         stripBytes > data.size() - stripOffset) return false;
     const bool profileTopology = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     const auto topologyStarted = std::chrono::steady_clock::now();
@@ -4088,7 +4089,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
     const auto planarE = find(TIFF_TAG_PLANAR_CONFIGURATION);
     const uint32_t planar = planarE ? scalar(*planarE) : 1;
     std::atomic_uint32_t turboAttempts{0}, turboSuccesses{0}, legacySuccesses{0};
-    if (!width || !height || !channels || channels > 4 || bits < 8 || bits > 16)
+    if (!width || !height || !channels || channels > 4 || bits < 1 || bits > 16)
         return false;
     if (planar != 1 && planar != 2) return false;
     size_t imageSamples = 0;
@@ -4555,6 +4556,7 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
     const auto decodeStarted = std::chrono::steady_clock::now();
     image = {};
     if (!getImageLayout(data, image.layout)) return false;
+    image.storedBitsPerSample = image.layout.bitsPerSample;
     getColorMetadata(data, image.metadata);
     getTimingMetadata(data, image.timestamp);
     getGainMaps(data, 2, image.opcodeList2);
@@ -4575,10 +4577,8 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
     if (!decodeOrCanonicalizeDng(data, backgroundWork, &image)) return false;
     const auto pixelsAt = std::chrono::steady_clock::now();
     if (applyLinearization && !linearization.empty()) {
-        for (uint16_t& sample : image.samples) {
-            const size_t index = std::min<size_t>(sample, linearization.size() - 1);
-            sample = linearization[index];
-        }
+        applyLinearizationTable(image.samples.data(), image.samples.size(),
+                                linearization);
         image.linearizationApplied = true;
     }
     if (profileDecode)
@@ -4968,10 +4968,7 @@ uint16_t logStoredWhite(LogTransformMode mode, uint32_t quantizationWhite,
     const uint32_t bitDepthWhite = quantizationWhite ? quantizationWhite : sourceWhite;
     uint32_t storedBits = utils::evenBitsNeeded(static_cast<uint16_t>(
         std::min<uint32_t>(bitDepthWhite, 65535)));
-    if (mode == LogTransformMode::ReduceBy2Bit) storedBits = std::max(1u, storedBits-2);
-    else if (mode == LogTransformMode::ReduceBy4Bit) storedBits = std::max(1u, storedBits-4);
-    else if (mode == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits-6);
-    else if (mode == LogTransformMode::ReduceBy8Bit) storedBits = std::max(1u, storedBits-8);
+    storedBits = logOutputBits(storedBits, mode);
     return static_cast<uint16_t>((uint32_t{1} << storedBits) - 1);
 }
 
@@ -4984,7 +4981,8 @@ uint32_t logStoredBits(uint16_t storedWhite) {
 
 bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode mode,
                                    uint32_t quantizationWhite, bool highQuality,
-                                   bool samplesAlreadyEncoded) {
+                                   bool samplesAlreadyEncoded,
+                                   uint32_t ditherSeed) {
     if (mode == LogTransformMode::Disabled) return true;
     bool little = true;
     auto entries = findTiffEntries(data, little);
@@ -5060,7 +5058,8 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
             }
         }
         utils::encodeLog60(logSamples, width, height, channels, black,
-                           sourceWhite, static_cast<uint16_t>(storedWhite), highQuality);
+                           sourceWhite, static_cast<uint16_t>(storedWhite),
+                           highQuality, ditherSeed);
         writeSampleBytes(data.data() + offset, logSamples.data(), samples, little);
     }
     if (inputLinearization)
@@ -5069,12 +5068,10 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
     if (data.size() & 1u) data.push_back(0);
     const uint32_t tableOffset=static_cast<uint32_t>(data.size());
     data.resize(data.size()+static_cast<size_t>(storedWhite+1)*2);
-    for (uint32_t i=0;i<=storedWhite;++i) {
-        const double encoded=static_cast<double>(i)/storedWhite;
-        const double linear=(std::pow(2.0,encoded*std::log2(61.0))-1.0)/60.0;
+    const auto logLinearization = makeLog60LinearizationTable(storedWhite);
+    for (uint32_t i=0;i<=storedWhite;++i)
         write16(data.data()+tableOffset+static_cast<size_t>(i)*2,
-                static_cast<uint16_t>(std::lround(std::clamp(linear,0.0,1.0)*65535.0)),little);
-    }
+                logLinearization[i],little);
     const uint32_t oldIfd=photo->ifdOffset;
     if (oldIfd+2>data.size()) return false;
     const uint16_t oldCount=read16(data.data()+oldIfd,little);
@@ -5214,7 +5211,7 @@ struct MutableUncompressedStrip {
         offset = scalar(*offsetsE);
         const size_t bytes = scalar(*countsE);
         if (!width || !height || (channels != 1 && channels != 3) ||
-            bits < 8 || bits > 16 || scalar(*compressionE) != TIFF_COMPRESSION_NONE ||
+            bits < 1 || bits > 16 || scalar(*compressionE) != TIFF_COMPRESSION_NONE ||
             offset > data.size() || bytes > data.size() - offset)
             return false;
         rowBytes = (static_cast<size_t>(width) * channels * bits + 7) / 8;
@@ -5353,7 +5350,7 @@ bool DNGDecoder::getImageLayout(const std::vector<uint8_t>& data,
     const bool tiles = find(TIFF_TAG_TILE_OFFSETS) && find(TIFF_TAG_TILE_BYTE_COUNTS);
     if (strips == tiles) return false;
     layout.storage = tiles ? DNGStorageLayout::Tiles : DNGStorageLayout::Strips;
-    if (!layout.width || !layout.height || layout.bitsPerSample < 8 ||
+    if (!layout.width || !layout.height || layout.bitsPerSample < 1 ||
         layout.bitsPerSample > 16 || !layout.samplesPerPixel ||
         layout.samplesPerPixel > 4 ||
         (layout.planarConfiguration != 1 && layout.planarConfiguration != 2)) return false;
@@ -5381,6 +5378,59 @@ struct GainMapAxes {
     std::vector<GainMapAxisSample> y;
     bool valid = false;
 };
+
+struct ScalarCfaGainRow {
+    const GainMap* map = nullptr;
+    const GainMapAxisSample* x = nullptr;
+    const float* upper = nullptr;
+    const float* lower = nullptr;
+    float yFraction = 0.0f;
+
+    float sample(uint32_t column, uint32_t row) const {
+        if (!map || column < map->left || column >= map->right ||
+            row < map->top || row >= map->bottom)
+            return 1.0f;
+        return sampleScalarGainMapRow(upper, lower, x[column], yFraction);
+    }
+};
+
+ScalarCfaGainRow makeScalarCfaGainRow(const GainMap& map,
+                                      const GainMapAxes& axes, uint32_t row) {
+    const auto& sample = axes.y[row];
+    return {&map, axes.x.data(),
+            map.data.data() + static_cast<size_t>(sample.first) * map.width,
+            map.data.data() + static_cast<size_t>(sample.second) * map.width,
+            sample.fraction};
+}
+
+
+std::array<ScalarCfaGainRow, 2> makeScalarCfaGainRows(
+        const std::vector<GainMap>& maps, const std::vector<GainMapAxes>& axes,
+        const std::array<size_t, 4>& byParity, uint32_t row) {
+    std::array<ScalarCfaGainRow, 2> result;
+    for (uint32_t parity = 0; parity < 2; ++parity) {
+        const size_t index = byParity[((row & 1u) << 1u) | parity];
+        result[parity] = makeScalarCfaGainRow(maps[index], axes[index], row);
+    }
+    return result;
+}
+
+std::optional<std::array<size_t, 4>> directScalarCfaMapIndices(
+        const std::vector<GainMap>& maps,
+        const std::vector<GainMapAxes>& axes) {
+    if (maps.size() != 4 || axes.size() != maps.size()) return std::nullopt;
+    std::array<size_t, 4> byParity{};
+    byParity.fill(maps.size());
+    for (size_t index = 0; index < maps.size(); ++index) {
+        const auto& map = maps[index];
+        const size_t parity = ((map.top & 1u) << 1u) | (map.left & 1u);
+        if (map.channels != 1 || map.rowPitch != 2 || map.colPitch != 2 ||
+            !axes[index].valid || byParity[parity] != maps.size())
+            return std::nullopt;
+        byParity[parity] = index;
+    }
+    return byParity;
+}
 
 template <typename XCoordinate, typename YCoordinate>
 GainMapAxes cacheGainMapAxes(const GainMap& map, uint32_t width, uint32_t height,
@@ -5426,20 +5476,46 @@ bool gainMapAppliesAt(const GainMap& map, uint32_t x, uint32_t y,
         (x - map.left) % map.colPitch == 0;
 }
 
+inline float samplePixelGain(const GainMap& map,
+                             const GainMapAxisSample& sx,
+                             const GainMapAxisSample& sy,
+                             uint32_t sourceX, uint32_t sourceY,
+                             uint32_t targetChannel, uint32_t phaseGroup,
+                             const std::array<uint8_t, 4>& cfaPhase, bool rgb,
+                             const std::optional<std::pair<uint32_t, uint32_t>>& scalarOrigin) {
+    if (!gainMapAppliesAt(map, sourceX, sourceY, phaseGroup, scalarOrigin))
+        return 1.0f;
+    const size_t pixelPhase = rgb ? 0 : gainMapPhaseChannel(
+        sourceX, sourceY, 0, 0, phaseGroup);
+    const size_t pixelColor = cfaPhase[pixelPhase];
+    return sampleGainMapBilinear(sx, sy,
+        [&](uint32_t mapX, uint32_t mapY) {
+            if (rgb)
+                return gainMapColorValueAt(
+                    map, mapX, mapY, targetChannel, cfaPhase);
+            if (map.channels == 3)
+                return gainMapColorValueAt(
+                    map, mapX, mapY, pixelColor, cfaPhase);
+            const size_t mapChannel = map.channels >= 4
+                ? std::min<size_t>(map.channels - 1, pixelPhase) : 0;
+            return map.data[(static_cast<size_t>(mapY) * map.width + mapX) *
+                            map.channels + mapChannel];
+        });
+}
+
 bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                                 const RenderSettings& settings,
                                 uint32_t sourceWidth = 0,
                                 uint32_t sourceHeight = 0,
                                 uint32_t sourceScale = 1,
-                                bool* gainMapApplied = nullptr) {
+                                bool* gainMapApplied = nullptr,
+                                uint16_t fusedLogWhite = 0) {
     if (gainMapApplied) *gainMapApplied = false;
     if (!(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) return true;
-    std::vector<GainMap> opcode2 = image.opcodeList2;
-    std::vector<GainMap> opcode3 = image.opcodeList3;
-    std::vector<GainMap> maps = opcode2;
+    std::vector<GainMap> maps = image.opcodeList2;
     if (!(settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
-        opcode3.size() == 1 && opcode3.front().channels == 1)
-        maps.insert(maps.end(), opcode3.begin(), opcode3.end());
+        image.opcodeList3.size() == 1 && image.opcodeList3.front().channels == 1)
+        maps.push_back(image.opcodeList3.front());
     if (maps.empty()) return true;
     if (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
         auto separation = separateGainMapLuminance(maps);
@@ -5504,31 +5580,24 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     for (const auto& map : maps)
         scalarPhaseGroups.push_back(phaseGroup > 1
             ? scalarCfaGroupOrigin(map, maps) : std::nullopt);
+    const auto scalarMapByParity = directScalarCfaMapIndices(maps, axes);
+    const bool directScalarCfa =
+        std::getenv("MOTIONCAM_GALLERY_PERF_DISABLE_DIRECT_GAIN") == nullptr &&
+        !rgb && channels == 1 && phaseGroup == 1 &&
+        sourceScale == 1 && sourceWidth == image.layout.width &&
+        sourceHeight == image.layout.height && scalarMapByParity.has_value();
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=preview_gain_path direct_scalar_cfa={} maps={} pixels={}",
+            directScalarCfa, maps.size(),
+            static_cast<size_t>(image.layout.width) * image.layout.height);
     auto gainsAt = [&](const GainMap& map, uint32_t sourceX, uint32_t sourceY,
                        const GainMapAxisSample& sx, const GainMapAxisSample& sy) {
         std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
         const size_t mapIndex = static_cast<size_t>(&map - maps.data());
-        if (!gainMapAppliesAt(map, sourceX, sourceY, phaseGroup,
-                              scalarPhaseGroups[mapIndex])) return gains;
-        const uint32_t pixelPhase = static_cast<uint32_t>(gainMapPhaseChannel(
-            sourceX, sourceY, 0, 0, phaseGroup));
-        const uint32_t pixelColor = cfaPhase[pixelPhase];
         const uint32_t sampledChannels = rgb ? channels : 1u;
-        for (uint32_t channel = 0; channel < sampledChannels; ++channel) {
-            gains[channel] = sampleGainMapBilinear(sx, sy,
-                [&](uint32_t mapX, uint32_t mapY) {
-                if (rgb)
-                    return gainMapColorValueAt(
-                        map, mapX, mapY, channel, cfaPhase);
-                if (map.channels == 3)
-                    return gainMapColorValueAt(
-                        map, mapX, mapY, pixelColor, cfaPhase);
-                const uint32_t mapChannel = map.channels >= 4
-                    ? std::min<uint32_t>(map.channels - 1, pixelPhase) : 0u;
-                return map.data[(static_cast<size_t>(mapY) * map.width + mapX) *
-                                map.channels + mapChannel];
-            });
-        }
+        for (uint32_t channel = 0; channel < sampledChannels; ++channel)
+            gains[channel] = samplePixelGain(map, sx, sy, sourceX, sourceY,
+                channel, phaseGroup, cfaPhase, rgb, scalarPhaseGroups[mapIndex]);
         return gains;
     };
     const double fallbackWhite = static_cast<double>(
@@ -5545,18 +5614,32 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
         normalizedRange[channel] = linearGainScale(
             sourceBlack[channel], white, 0.0, 65535.0);
     }
+    const auto logLookup = fusedLogWhite
+        ? makeLog60EncodeLookup(0.0, 65535.0, fusedLogWhite)
+        : std::vector<float>{};
+    const auto linearization = fusedLogWhite
+        ? makeLog60LinearizationTable(fusedLogWhite)
+        : std::vector<uint16_t>{};
+    const bool logHq = settings.options & RENDER_OPT_LOG_HQ;
     auto bakeRows = [&](uint32_t beginY, uint32_t endY) {
         for (uint32_t y = beginY; y < endY; ++y) {
             const uint32_t sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
+            const auto scalarRows = directScalarCfa
+                ? makeScalarCfaGainRows(maps, axes, *scalarMapByParity, y)
+                : std::array<ScalarCfaGainRow, 2>{};
             for (uint32_t x = 0; x < image.layout.width; ++x) {
                 const uint32_t sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
                 std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
-                for (size_t mapIndex = 0; mapIndex < maps.size(); ++mapIndex) {
-                    if (!axes[mapIndex].valid) continue;
-                    const auto sampled = gainsAt(maps[mapIndex], sourceX, sourceY,
-                        axes[mapIndex].x[x], axes[mapIndex].y[y]);
-                    for (uint32_t channel = 0; channel < channels; ++channel)
-                        gains[channel] *= sampled[channel];
+                if (directScalarCfa) {
+                    gains[0] = scalarRows[x & 1u].sample(x, y);
+                } else {
+                    for (size_t mapIndex = 0; mapIndex < maps.size(); ++mapIndex) {
+                        if (!axes[mapIndex].valid) continue;
+                        const auto sampled = gainsAt(maps[mapIndex], sourceX, sourceY,
+                            axes[mapIndex].x[x], axes[mapIndex].y[y]);
+                        for (uint32_t channel = 0; channel < channels; ++channel)
+                            gains[channel] *= sampled[channel];
+                    }
                 }
                 const size_t cfaLevelChannel = rgb ? 0 : gainMapPhaseChannel(
                     sourceX, sourceY, 0, 0, phaseGroup);
@@ -5566,11 +5649,17 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                     const size_t levelChannel = rgb ? channel : cfaLevelChannel;
                     const double value = debugGainMap
                         ? (gains[channel] > 0.0f ? 65535.0 / gains[channel] : 0.0)
-                        : gains[channel] *
-                            (image.samples[index] - sourceBlack[levelChannel]) *
-                            normalizedRange[levelChannel];
-                    image.samples[index] = static_cast<uint16_t>(
-                        std::clamp(std::lround(value), 0l, 65535l));
+                        : bakeLinearGainSample(image.samples[index], gains[channel],
+                            sourceBlack[levelChannel], 0.0,
+                            normalizedRange[levelChannel]);
+                    uint16_t baked = quantizeLinearGainSample(value);
+                    if (fusedLogWhite) {
+                        const auto code = encodeDitheredLog60(logLookup, baked,
+                            utils::logTriangularDither(x, y, logHq, image.ditherSeed),
+                            fusedLogWhite);
+                        baked = linearization[code];
+                    }
+                    image.samples[index] = baked;
                 }
             }
         }
@@ -5612,7 +5701,12 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                                PreviewFrame& frame,
                                bool applyPreviewScale,
                                bool retainSourceSamples) {
+    const uint32_t storedInputBits = image.storedBitsPerSample
+        ? image.storedBitsPerSample : image.layout.bitsPerSample;
     frame.clipping.clear();
+    frame.displayBitDepth = image.metadata.inputBitDepth
+        ? std::min(image.metadata.inputBitDepth, storedInputBits)
+        : storedInputBits;
     frame.rawSamples.reset();
     frame.rawWidth = 0;
     frame.rawHeight = 0;
@@ -5748,11 +5842,32 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             std::chrono::duration<double, std::milli>(topologyFinished - proxyStarted).count(),
             std::chrono::duration<double, std::milli>(proxyFinished - topologyFinished).count());
     }
+    const bool encodePreviewLog =
+        applyPreviewScale && (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
+        !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+        settings.logTransform != LogTransformMode::Disabled &&
+        (settings.logTransform != LogTransformMode::KeepInput ||
+         (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION));
+    const bool cfaLog = encodePreviewLog &&
+        image.layout.pixels == DNGPixelLayout::CFA;
+    const uint32_t cfaLogBits = cfaLog ? logOutputBits(
+        image.metadata.inputBitDepth ? image.metadata.inputBitDepth
+                                     : storedInputBits,
+        settings.logTransform) : 0;
+    const uint16_t cfaLogWhite = cfaLog ? static_cast<uint16_t>(
+        (uint32_t{1} << std::min(16u, cfaLogBits)) - 1u) : 0;
+    const bool fuseCfaLog = cfaLog && !frame.clippingRequested;
     const auto gainStarted = std::chrono::steady_clock::now();
     if (!bakeDecodedPreviewGainMaps(
             image, settings, sourceWidth, sourceHeight, gainMapSourceScale,
-            &frame.gainMapApplied)) return false;
+            &frame.gainMapApplied, fuseCfaLog ? cfaLogWhite : 0)) return false;
+    const bool cfaLogFused = fuseCfaLog && frame.gainMapApplied;
     const auto gainFinished = std::chrono::steady_clock::now();
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=preview_gain_bake pixels={} gain_ms={:.3f} applied={} log_fused={}",
+            static_cast<size_t>(image.layout.width) * image.layout.height,
+            std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
+            frame.gainMapApplied, cfaLogFused);
     // Classify the samples actually sent to demosaic, after proxy selection and
     // gain correction. A CFA cell reports each color once, including either
     // green position; a low sample takes precedence over highlight clipping.
@@ -5822,6 +5937,27 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     uint32_t preCropWidth = 0, preCropHeight = 0;
     std::vector<uint16_t> rgb;
     std::array<double, 3> outputBlack{};
+    if (cfaLog && !cfaLogFused) {
+        const uint16_t encodedWhite = cfaLogWhite;
+        const double white = image.metadata.whiteLevelCount
+            ? image.metadata.whiteLevel[0] : 65535.0;
+        utils::encodeLog60(image.samples, width, height, 1,
+                           {image.metadata.blackLevel[0],
+                            image.metadata.blackLevel[1],
+                            image.metadata.blackLevel[2],
+                            image.metadata.blackLevel[3]},
+                           white, encodedWhite,
+                           settings.options & RENDER_OPT_LOG_HQ,
+                           image.ditherSeed);
+        const auto table = makeLog60LinearizationTable(encodedWhite);
+        applyLinearizationTable(image.samples.data(), image.samples.size(), table);
+        image.metadata.blackLevel.fill(0.0f);
+        image.metadata.whiteLevel.fill(65535.0f);
+        image.metadata.blackLevelCount = 4;
+        image.metadata.whiteLevelCount = 4;
+    }
+    if (cfaLog) frame.displayBitDepth = cfaLogBits;
+    const bool postDemosaicLog = encodePreviewLog && !cfaLog;
     if (image.layout.pixels == DNGPixelLayout::CFA) {
         int repeatSize = image.layout.cfaRepeatSize;
         const bool highQuality = settings.options & RENDER_OPT_HIGHER_CFA_HQ;
@@ -5878,16 +6014,12 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         // processing at this point. Reconstruct and normalize directly into
         // the output buffer instead of allocating a full-size RGB16 frame.
         // Keep the two-pass path for operations that still need that frame.
-        const bool encodePreviewLog = applyPreviewScale &&
-            (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
-            settings.logTransform != LogTransformMode::Disabled &&
-            settings.logTransform != LogTransformMode::KeepInput;
         const bool directFastPreview = !highQuality && repeatSize == 2 &&
             (!applyPreviewScale ||
              !(settings.options & (RENDER_OPT_REMOSAIC_TO_BAYER |
                                    RENDER_OPT_CROPPING))) &&
             (fastCfaProxy || remainingPreviewScale == 1) &&
-            !encodePreviewLog && clippingWidth == width &&
+            !postDemosaicLog && clippingWidth == width &&
             clippingHeight == height;
         if (directFastPreview) {
             std::array<double, 3> outputWhite{};
@@ -6033,11 +6165,11 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                   channel, image.metadata.whiteLevelCount - 1)]
             : 65535.0;
     uint16_t encodedWhite = 65535;
-    const bool encodePreviewLog =
-        applyPreviewScale && (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
-        settings.logTransform != LogTransformMode::Disabled &&
-        settings.logTransform != LogTransformMode::KeepInput;
-    if (!encodePreviewLog) {
+    if (!postDemosaicLog) {
+        if (!cfaLog)
+            frame.displayBitDepth = image.metadata.inputBitDepth
+                ? std::min(image.metadata.inputBitDepth, storedInputBits)
+                : storedInputBits;
         // Normal gallery output can be normalized directly into the byte
         // buffer. Avoid a second full-size uint16 RGB allocation and the
         // subsequent copy (155 MiB each for a 27 MP Quad Bayer preview).
@@ -6056,25 +6188,23 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     if (!utils::normalizeRgb16(rgb, normalizedSamples, outputBlack, outputWhite))
         return false;
     frame.rgb.resize(normalizedSamples.size() * sizeof(uint16_t));
-    if (encodePreviewLog) {
-        int reduction = 0;
-        if (settings.logTransform == LogTransformMode::ReduceBy2Bit) reduction = 2;
-        else if (settings.logTransform == LogTransformMode::ReduceBy4Bit) reduction = 4;
-        else if (settings.logTransform == LogTransformMode::ReduceBy6Bit) reduction = 6;
-        else if (settings.logTransform == LogTransformMode::ReduceBy8Bit) reduction = 8;
-        const int bits = std::max(1, static_cast<int>(
+    if (postDemosaicLog) {
+        const uint32_t bits = logOutputBits(
             image.metadata.inputBitDepth ? image.metadata.inputBitDepth
-                                         : image.layout.bitsPerSample) - reduction);
+                                         : image.layout.bitsPerSample,
+            settings.logTransform);
         encodedWhite = static_cast<uint16_t>(
-            (uint32_t{1} << std::min(16, bits)) - 1);
+            (uint32_t{1} << std::min(16u, bits)) - 1);
+        frame.displayBitDepth = bits;
         utils::encodeLog60(normalizedSamples, width, height, 3,
                            {0.0, 0.0, 0.0, 0.0}, 65535.0, encodedWhite,
-                           settings.options & RENDER_OPT_LOG_HQ);
+                           settings.options & RENDER_OPT_LOG_HQ,
+                           image.ditherSeed);
     }
+    const auto linearization = makeLog60LinearizationTable(encodedWhite);
     for (size_t i = 0; i < normalizedSamples.size(); ++i) {
-        const uint16_t normalized = encodedWhite == 65535 ? normalizedSamples[i]
-            : static_cast<uint16_t>((static_cast<uint32_t>(normalizedSamples[i]) * 65535u +
-                                     encodedWhite / 2) / encodedWhite);
+        const uint16_t normalized = linearization[std::min<size_t>(
+            normalizedSamples[i], linearization.size() - 1)];
         frame.rgb[i * 2] = static_cast<uint8_t>(normalized & 0xff);
         frame.rgb[i * 2 + 1] = static_cast<uint8_t>(normalized >> 8);
     }
@@ -6564,7 +6694,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               uint32_t logQuantizationWhite,
                               bool logHighQuality,
                               bool* logFused,
-                              bool packFusedLog) {
+                              bool packFusedLog,
+                              uint32_t ditherSeed) {
     if (logFused) *logFused = false;
     const char* cpuOptSetting = std::getenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
     const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
@@ -6613,7 +6744,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const uint32_t bits = scalar(*bitsE), compression = scalar(*compressionE);
     const uint32_t imageChannels = scalar(*samplesPerPixelE);
     const uint32_t stripOffset = scalar(*offsetsE), stripBytes = scalar(*countsE);
-    if (!width || !height || bits < 8 || bits > 16 ||
+    if (!width || !height || bits < 1 || bits > 16 ||
         (sourceIsRgb ? imageChannels != 3 : imageChannels != 1) ||
         stripOffset > data.size() ||
         stripBytes > data.size() - stripOffset) return false;
@@ -6754,6 +6885,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         little == hostLittle && !linearizationE &&
         sampleCount <= std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) &&
         stripBytes == sampleCount * sizeof(uint16_t);
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE"))
+        inPlace = false;
     if (inPlace) {
         for (uint32_t i = 1; i < bitsE->count; ++i)
             if (scalar(*bitsE, i) != 16) inPlace = false;
@@ -6880,29 +7013,15 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     auto mapGain = [&](const GainMap& map, uint32_t x, uint32_t y,
                        uint32_t targetChannel = 0) {
         const size_t mapIndex = static_cast<size_t>(&map - maps.data());
-        if (!axes[mapIndex].valid || !map.rowPitch || !map.colPitch ||
-            !gainMapAppliesAt(map, x, y, phaseGroup, scalarPhaseGroups[mapIndex]))
+        if (!axes[mapIndex].valid || !map.rowPitch || !map.colPitch)
             return 1.0f;
         // Match dng_gain_map_interpolator from the Adobe DNG SDK. Gain-map
         // coordinates are evaluated at pixel centers within the image bounds;
         // using the integer pixel corner offsets the map on both axes and is
         // particularly visible between four interleaved CFA phase maps.
-        const size_t pixelPhase = gainMapPhaseChannel(
-            x, y, 0, 0, phaseGroup);
-        const size_t pixelColor = cfaPhase[pixelPhase];
-        return sampleGainMapBilinear(axes[mapIndex].x[x], axes[mapIndex].y[y],
-            [&](uint32_t sx, uint32_t sy) {
-                if (sourceIsRgb)
-                    return gainMapColorValueAt(
-                        map, sx, sy, targetChannel, cfaPhase);
-                if (map.channels == 3)
-                    return gainMapColorValueAt(
-                        map, sx, sy, pixelColor, cfaPhase);
-                const size_t channel = map.channels >= 4
-                    ? std::min<size_t>(map.channels - 1, pixelPhase) : 0;
-                return map.data[(static_cast<size_t>(sy) * map.width + sx) *
-                                map.channels + channel];
-            });
+        return samplePixelGain(map, axes[mapIndex].x[x], axes[mapIndex].y[y],
+            x, y, targetChannel, phaseGroup, cfaPhase, sourceIsRgb,
+            scalarPhaseGroups[mapIndex]);
     };
     const auto blackE = find(TIFF_TAG_BLACK_LEVEL), whiteE = find(TIFF_TAG_WHITE_LEVEL);
     std::array<double, 4> black{};
@@ -6937,15 +7056,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     if (fuseLog) {
         encodedWhite = logStoredWhite(fusedLogMode, logQuantizationWhite,
                                       static_cast<uint32_t>(destinationWhite));
-        logLookup.resize(65536);
-        const double logScale = encodedWhite / std::log2(61.0);
-        const double range = std::max(1.0, destinationWhite - destinationBlack[0]);
-        for (uint32_t sample = 0; sample < logLookup.size(); ++sample) {
-            const double normalized = std::clamp(
-                (sample - destinationBlack[0]) / range, 0.0, 1.0);
-            logLookup[sample] = static_cast<float>(
-                std::log2(1.0 + 60.0 * normalized) * logScale);
-        }
+        logLookup = makeLog60EncodeLookup(
+            destinationBlack[0], destinationWhite, encodedWhite);
     }
     const uint32_t packedBits = fuseLog && packFusedLog
         ? logStoredBits(encodedWhite) : 16;
@@ -6999,17 +7111,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         maps.size() == 1 && maps.front().channels == 1 &&
         maps.front().rowPitch == 1 && maps.front().colPitch == 1 &&
         axes.front().valid && (!colorOnly || gridColorSeparated);
+    const auto directCfaIndices = directScalarCfaMapIndices(maps, axes);
     const bool directCfaMaps = !sourceIsRgb && imageChannels == 1 &&
-        phaseGroup == 1 && maps.size() == 4 &&
-        (!colorOnly || gridColorSeparated) &&
-        std::all_of(maps.begin(), maps.end(), [](const GainMap& map) {
-            return map.channels == 1 && map.rowPitch == 2 && map.colPitch == 2;
-        }) &&
-        std::all_of(axes.begin(), axes.end(), [](const GainMapAxes& axis) {
-            return axis.valid;
-        }) &&
-        std::all_of(mapsByParity.begin(), mapsByParity.end(),
-            [](const std::vector<size_t>& selected) { return selected.size() == 1; });
+        phaseGroup == 1 && (!colorOnly || gridColorSeparated) &&
+        directCfaIndices.has_value();
     const bool directScalarMap = !sourceIsRgb && imageChannels == 1 &&
         phaseGroup == 1 && maps.size() == 1 && !colorOnly &&
         maps.front().channels == 1 && axes.front().valid;
@@ -7056,32 +7161,12 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                 effectiveGain(x, y, 0);
                         continue;
                     }
+                    const auto rows = makeScalarCfaGainRows(
+                        maps, axes, *directCfaIndices, y);
                     for (uint32_t xParity = 0; xParity < 2; ++xParity) {
-                        const size_t index = mapsByParity[
-                            ((y & 1u) << 1u) | xParity][0];
-                        const auto& map = maps[index];
-                        const auto& sy = axes[index].y[y];
-                        const float* upper = map.data.data() +
-                            static_cast<size_t>(sy.first) * map.width;
-                        const float* lower = map.data.data() +
-                            static_cast<size_t>(sy.second) * map.width;
                         for (uint32_t x = xParity; x < width; x += 2) {
-                            float gain = 1.0f;
-                            if (x >= map.left && x < map.right &&
-                                y >= map.top && y < map.bottom) {
-                                const auto& sx = axes[index].x[x];
-                                const float top = upper[sx.first] *
-                                    (1.0f - sx.fraction) +
-                                    upper[sx.second] * sx.fraction;
-                                const float bottom = lower[sx.first] *
-                                    (1.0f - sx.fraction) +
-                                    lower[sx.second] * sx.fraction;
-                                const float value = top *
-                                    (1.0f - sy.fraction) + bottom * sy.fraction;
-                                gain = std::isfinite(value) && value > 0.0f
-                                    ? value : 1.0f;
-                            }
-                            (*field)[static_cast<size_t>(y) * width + x] = gain;
+                            (*field)[static_cast<size_t>(y) * width + x] =
+                                rows[xParity].sample(x, y);
                         }
                     }
                 }
@@ -7103,35 +7188,12 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     }
     auto bakeRows = [&](uint32_t first, uint32_t last) {
         for (uint32_t y = first; y < last; ++y) {
-            struct CfaRowMap {
-                const GainMap* map = nullptr;
-                const GainMapAxisSample* x = nullptr;
-                const float* upper = nullptr;
-                const float* lower = nullptr;
-                float yFraction = 0.0f;
-            };
-            std::array<CfaRowMap, 2> cfaRowMaps;
-            if (cpuOpt && directCfaMaps) {
-                for (uint32_t xParity = 0; xParity < 2; ++xParity) {
-                    const size_t index = mapsByParity[((y & 1u) << 1u) | xParity][0];
-                    const auto& map = maps[index];
-                    const auto& sy = axes[index].y[y];
-                    cfaRowMaps[xParity] = {
-                        &map, axes[index].x.data(),
-                        map.data.data() + static_cast<size_t>(sy.first) * map.width,
-                        map.data.data() + static_cast<size_t>(sy.second) * map.width,
-                        sy.fraction};
-                }
-            }
-            CfaRowMap scalarRowMap;
+            const auto cfaRowMaps = cpuOpt && directCfaMaps
+                ? makeScalarCfaGainRows(maps, axes, *directCfaIndices, y)
+                : std::array<ScalarCfaGainRow, 2>{};
+            ScalarCfaGainRow scalarRowMap;
             if ((fastScalarMap && !cachedCfaGains) || directRgbScalarMap) {
-                const auto& map = maps.front();
-                const auto& sy = axes.front().y[y];
-                scalarRowMap = {
-                    &map, axes.front().x.data(),
-                    map.data.data() + static_cast<size_t>(sy.first) * map.width,
-                    map.data.data() + static_cast<size_t>(sy.second) * map.width,
-                    sy.fraction};
+                scalarRowMap = makeScalarCfaGainRow(maps.front(), axes.front(), y);
             }
             uint8_t* packedDestination = packDuringBake
                 ? packedOutput.data() + stripOffset +
@@ -7140,7 +7202,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             uint32_t bufferedBits = 0;
             for (uint32_t x = 0; x < width; ++x) {
                 const float dither = fuseLog
-                    ? utils::logTriangularDither(x, y, logHighQuality) : 0.0f;
+                    ? utils::logTriangularDither(x, y, logHighQuality,
+                                                 ditherSeed) : 0.0f;
                 const bool rgbMapApplies = directRgbMap &&
                     x >= maps.front().left && x < maps.front().right &&
                     y >= maps.front().top && y < maps.front().bottom;
@@ -7160,25 +7223,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                     rgbXFraction = sx.fraction;
                     rgbYFraction = sy.fraction;
                 }
-                float rgbScalarGain = 1.0f;
-                if (directRgbScalarMap) {
-                    const auto& map = *scalarRowMap.map;
-                    if (x >= map.left && x < map.right &&
-                        y >= map.top && y < map.bottom) {
-                        const auto& sx = scalarRowMap.x[x];
-                        const float upper = scalarRowMap.upper[sx.first] *
-                            (1.0f - sx.fraction) +
-                            scalarRowMap.upper[sx.second] * sx.fraction;
-                        const float lower = scalarRowMap.lower[sx.first] *
-                            (1.0f - sx.fraction) +
-                            scalarRowMap.lower[sx.second] * sx.fraction;
-                        const float value = upper *
-                            (1.0f - scalarRowMap.yFraction) +
-                            lower * scalarRowMap.yFraction;
-                        rgbScalarGain = std::isfinite(value) && value > 0.0f
-                            ? value : 1.0f;
-                    }
-                }
+                const float rgbScalarGain = directRgbScalarMap
+                    ? scalarRowMap.sample(x, y) : 1.0f;
                 for (uint32_t channel = 0; channel < imageChannels; ++channel) {
                     float gain;
                     if (rgbMapApplies) {
@@ -7212,36 +7258,9 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                     })
                                 : 1.0f;
                         } else if (directCfaMaps) {
-                            const auto& row = cfaRowMaps[x & 1u];
-                            const auto& map = *row.map;
-                            if (x >= map.left && x < map.right &&
-                                y >= map.top && y < map.bottom) {
-                                const auto& sx = row.x[x];
-                                const float upper = row.upper[sx.first] * (1.0f - sx.fraction) +
-                                    row.upper[sx.second] * sx.fraction;
-                                const float lower = row.lower[sx.first] * (1.0f - sx.fraction) +
-                                    row.lower[sx.second] * sx.fraction;
-                                const float value = upper * (1.0f - row.yFraction) +
-                                    lower * row.yFraction;
-                                gain = std::isfinite(value) && value > 0.0f ? value : 1.0f;
-                            } else gain = 1.0f;
+                            gain = cfaRowMaps[x & 1u].sample(x, y);
                         } else if (fastScalarMap) {
-                            const auto& map = *scalarRowMap.map;
-                            if (x >= map.left && x < map.right &&
-                                y >= map.top && y < map.bottom) {
-                                const auto& sx = scalarRowMap.x[x];
-                                const float upper = scalarRowMap.upper[sx.first] *
-                                    (1.0f - sx.fraction) +
-                                    scalarRowMap.upper[sx.second] * sx.fraction;
-                                const float lower = scalarRowMap.lower[sx.first] *
-                                    (1.0f - sx.fraction) +
-                                    scalarRowMap.lower[sx.second] * sx.fraction;
-                                const float value = upper *
-                                    (1.0f - scalarRowMap.yFraction) +
-                                    lower * scalarRowMap.yFraction;
-                                gain = std::isfinite(value) && value > 0.0f
-                                    ? value : 1.0f;
-                            } else gain = 1.0f;
+                            gain = scalarRowMap.sample(x, y);
                         } else gain = effectiveGain(x, y, channel);
                     }
                     const size_t index =
@@ -7255,28 +7274,21 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                     sizeof(sample));
                     else
                         sample = pixels[index];
-                    const double linear = destinationBlack[levelChannel] +
-                        gain * (sample - black[levelChannel]) * bakeScale[levelChannel];
+                    const double linear = bakeLinearGainSample(sample, gain,
+                        black[levelChannel], destinationBlack[levelChannel],
+                        bakeScale[levelChannel]);
                     uint16_t baked;
                     if (fuseLog) {
-                        const double clamped = std::clamp(linear, 0.0, 65535.0);
-                        const uint32_t lower = static_cast<uint32_t>(clamped);
-                        const uint32_t upper = std::min<uint32_t>(65535, lower + 1);
-                        const float fraction = static_cast<float>(clamped - lower);
-                        const float encoded = logLookup[lower] + fraction *
-                            (logLookup[upper] - logLookup[lower]) + dither;
-                        // The encoded code is bounded below after rounding;
-                        // for nonnegative values, truncating x + 0.5 matches
-                        // lround without a per-sample library call.
-                        baked = static_cast<uint16_t>(std::clamp(
-                            static_cast<long>(static_cast<double>(encoded) + 0.5),
-                            0l, static_cast<long>(encodedWhite)));
+                        // Match the standalone bake then LOG60 path at its
+                        // 16-bit linear boundary while keeping one pixel pass.
+                        const uint16_t linearCode = quantizeLinearGainSample(linear);
+                        baked = encodeDitheredLog60(
+                            logLookup, linearCode, dither, encodedWhite);
                     } else {
                         const double value = debugGainMap
                             ? (gain > 0.0f ? destinationWhite / gain : 0.0)
                             : linear;
-                        baked = static_cast<uint16_t>(std::clamp(
-                            std::lround(value), 0l, 65535l));
+                        baked = quantizeLinearGainSample(value);
                     }
                     if (packDuringBake && packedBits == 8) {
                         *packedDestination++ = static_cast<uint8_t>(baked);
@@ -7410,9 +7422,9 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                            &packedOutput, packedBytes)
         : inPlace || replaceTiffStrip(data, stripOffset, stripBytes, replacement, little);
     if (profileBake)
-        spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} gain_field_cache={} workers={} concurrent_bakes={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
+        spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} in_place={} fused_log={} gain_field_cache={} workers={} concurrent_bakes={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
                      width, height, imageChannels, maps.size(), colorOnly,
-                     gridColorSeparated,
+                     gridColorSeparated, inPlace, fuseLog,
                      cachedCfaGains ? (gainFieldCacheHit ? "hit" : "miss")
                          : (gainFieldWarmup ? "warmup" : "disabled"),
                      workers, concurrentBakes,

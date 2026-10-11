@@ -200,7 +200,9 @@ preprocessData(
     LogTransformMode logTransform,
     bool logHq,
     QuadBayerMode quadBayerOption,
-    bool includeOpcode);
+    bool includeOpcode,
+    uint32_t ditherSeed = 0,
+    bool linearizePreview = false);
 
 std::shared_ptr<std::vector<uint8_t>> generateDng(
     std::vector<uint8_t>& data,
@@ -216,7 +218,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     const std::optional<std::array<float, 3>>& asShotNeutralOverride = std::nullopt,
     PreviewFrame* previewFrame = nullptr,
     bool retainSourceSamples = false,
-    DecodedDNGImage* stagedImage = nullptr);
+    DecodedDNGImage* stagedImage = nullptr,
+    bool unpackedIntermediate = false);
 
 // Draws a centered, outlined ISO label into unpacked 16-bit image samples.
 void forEachIsoOverlayPixel(uint32_t width, uint32_t height, double iso,
@@ -271,11 +274,13 @@ void encodeLog60(
     const std::array<double, 4>& blackLevel,
     double whiteLevel,
     uint16_t encodedWhite,
-    bool highQuality = false);
+    bool highQuality = false,
+    uint32_t ditherSeed = 0);
 
 // Deterministic triangular dither in output-code units. HQ preserves the
 // original per-pixel hash; the fast path uses a cheaper spatial hash.
-float logTriangularDither(uint32_t x, uint32_t y, bool highQuality);
+float logTriangularDither(uint32_t x, uint32_t y, bool highQuality,
+                          uint32_t frameSeed = 0);
 
 // Averages each 2x2 same-colour block of a 4x4 quad-Bayer image into one
 // sample, producing an ordinary 2x2 Bayer mosaic at half resolution.

@@ -667,7 +667,6 @@ namespace {
     motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
         settings.options = static_cast<motioncam::FileRenderOptions>(
             settings.options & ~(
-                motioncam::RENDER_OPT_LOG_TRANSFORM |
                 motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
         settings.cameraModel.clear();
         if (settings.quadBayerOption == motioncam::QuadBayerMode::CorrectQBCFAMetadata ||
@@ -853,7 +852,9 @@ namespace {
 
     QImage previewImage(const std::vector<uint8_t>& rgb, uint32_t width, uint32_t height,
                         int orientation) {
-        if (!width || !height || rgb.size() < static_cast<size_t>(width) * height * 6)
+        const size_t pixels = static_cast<size_t>(width) * height;
+        const size_t stride = rgb.size() == pixels * 3 ? 3 : 6;
+        if (!width || !height || rgb.size() < pixels * stride)
             return {};
         orientation = normalizedGalleryOrientation(orientation);
         const uint32_t outputWidth = orientation == 90 || orientation == 270 ? height : width;
@@ -861,18 +862,29 @@ namespace {
         QImage image(static_cast<int>(outputWidth), static_cast<int>(outputHeight), QImage::Format_RGB888);
         for (uint32_t y = 0; y < height; ++y) {
             for (uint32_t x = 0; x < width; ++x) {
-                const size_t input = (static_cast<size_t>(y) * width + x) * 6;
+                const size_t input = (static_cast<size_t>(y) * width + x) * stride;
                 uint32_t outputX = x, outputY = y;
                 if (orientation == 90) { outputX = height - 1 - y; outputY = x; }
                 else if (orientation == 180) { outputX = width - 1 - x; outputY = height - 1 - y; }
                 else if (orientation == 270) { outputX = y; outputY = width - 1 - x; }
                 auto* destination = image.scanLine(static_cast<int>(outputY)) + outputX * 3;
-                destination[0] = rgb[input + 1];
-                destination[1] = rgb[input + 3];
-                destination[2] = rgb[input + 5];
+                destination[0] = rgb[input + (stride == 3 ? 0 : 1)];
+                destination[1] = rgb[input + (stride == 3 ? 1 : 3)];
+                destination[2] = rgb[input + (stride == 3 ? 2 : 5)];
             }
         }
         return image;
+    }
+
+    void packGalleryRgb24(std::vector<uint8_t>& rgb) {
+        if (rgb.size() % 6) return;
+        const size_t pixels = rgb.size() / 6;
+        for (size_t pixel = 0; pixel < pixels; ++pixel) {
+            rgb[pixel * 3] = rgb[pixel * 6 + 1];
+            rgb[pixel * 3 + 1] = rgb[pixel * 6 + 3];
+            rgb[pixel * 3 + 2] = rgb[pixel * 6 + 5];
+        }
+        rgb.resize(pixels * 3);
     }
 
     template<typename T>
@@ -2732,6 +2744,15 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings));
+                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW")) {
+                        uint64_t hash = 1469598103934665603ull;
+                        for (uint8_t value : preview.rgb) {
+                            hash ^= value;
+                            hash *= 1099511628211ull;
+                        }
+                        spdlog::info("GALLERY_PERF event=gallery_rgb_hash mount={} generation={} timestamp={} hash={}",
+                            mountId, generation, preview.timestamp, hash);
+                    }
                     const bool collectThumbnail = thumbnailCollectionEnabled->load();
                     const int rawOrientation = !isSequence
                         ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
@@ -2743,13 +2764,18 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             isSequence ? thumbnailOrientation : rawOrientation);
                     if (clippingEnabled)
                         applyGalleryClipping(preview.rgb, preview.clipping);
+                    const bool rgb24 = preview.displayBitDepth <= 8 &&
+                        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
+                    if (rgb24)
+                        packGalleryRgb24(preview.rgb);
                     if (!isSequence) {
                         const int orientation = rawOrientation;
                         if (orientation == 90 || orientation == 180 || orientation == 270) {
                             const uint32_t sourceWidth = preview.width;
                             const uint32_t sourceHeight = preview.height;
                             preview.rgb = rotateInterleaved(
-                                preview.rgb, sourceWidth, sourceHeight, 6, orientation);
+                                preview.rgb, sourceWidth, sourceHeight,
+                                rgb24 ? 3 : 6, orientation);
                             if (orientation == 90 || orientation == 270)
                                 std::swap(preview.width, preview.height);
                         }
@@ -2804,8 +2830,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             std::chrono::steady_clock::now() - taskStarted).count();
                         if (diagnostics)
                             spdlog::info(
-                                "GALLERY_PERF event=gallery_first_frame_ready mount={} generation={} width={} height={} latency_ms={:.3f}",
-                                mountId, generation, width, height, readyMs);
+                                "GALLERY_PERF event=gallery_first_frame_ready mount={} generation={} width={} height={} display_bpc={} latency_ms={:.3f}",
+                                mountId, generation, width, height,
+                                rgb24 ? 8 : 16, readyMs);
                         const auto presentationStarted = std::chrono::steady_clock::now();
                         QMetaObject::invokeMethod(this, [&, width, height] {
                             if (mGalleryGeneration.load() != generation) return;
@@ -3013,6 +3040,7 @@ void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sour
                     applyGalleryColorTransform(preview.rgb, preview.metadata,
                                                settings.ignoreForwardMat,
                                                gainMapOnlyDebug(settings));
+                    packGalleryRgb24(preview.rgb);
                     auto& rgb=preview.rgb;const uint32_t width=preview.width,height=preview.height;
                     delivered=true;
                     const QByteArray bytes(reinterpret_cast<const char*>(rgb.data()),static_cast<qsizetype>(rgb.size()));
@@ -5796,6 +5824,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
                     applyGalleryColorTransform(
                         preview.rgb, preview.metadata, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings));
+                    packGalleryRgb24(preview.rgb);
                     const int orientation = settings.orientation >= 0
                         ? settings.orientation : preview.metadata.orientation;
                     image = previewImage(preview.rgb, preview.width, preview.height,

@@ -196,6 +196,7 @@ private:
     RawFrame mPresentedRawFrame;
     QImage mLastPresentedImage;
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
+    int mInputBitsPerChannel=16;
     int mNextInputFrame=0;
     double mPositionSeconds=0.0, mStartSeconds=0.0;
     bool mPaused=false, mClosing=false, mPlaybackFailed=false;

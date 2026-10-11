@@ -61,12 +61,8 @@ int directLogBaseLogBits(const motioncam::RenderSettings& settings) {
 }
 
 int directLogLogBits(motioncam::LogTransformMode mode, int baseBits = 12) {
-    int reduction = 0;
-    if (mode == motioncam::LogTransformMode::ReduceBy2Bit) reduction = 2;
-    else if (mode == motioncam::LogTransformMode::ReduceBy4Bit) reduction = 4;
-    else if (mode == motioncam::LogTransformMode::ReduceBy6Bit) reduction = 6;
-    else if (mode == motioncam::LogTransformMode::ReduceBy8Bit) reduction = 8;
-    return std::max(1, baseBits - reduction);
+    return static_cast<int>(motioncam::logOutputBits(
+        static_cast<uint32_t>(baseBits), mode));
 }
 
 bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings) {
@@ -1225,6 +1221,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         pixels.linearInputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
         pixels.sourceName = "DirectLog";
+        pixels.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
         auto pixelSettings = mConfig;
         // The decoder has already remosaiced this frame. Leaving the request
         // set forces a redundant Bayer topology pass and prevents gain baking
@@ -1315,6 +1312,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const auto processFinished = std::chrono::steady_clock::now();
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
+        image.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
         image.layout.width = static_cast<uint32_t>(processed.width);
         image.layout.height = static_cast<uint32_t>(processed.height);
         image.layout.bitsPerSample = 16;

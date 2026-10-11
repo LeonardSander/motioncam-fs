@@ -824,6 +824,23 @@ int main() {
     motioncam::PreviewFrame fullPreview;
     assert(motioncam::DNGDecoder::decodePreview(
         scalarSpatialDng, fullPreviewSettings, fullPreview, false));
+    // KeepInput with a vignette bake still runs the log quantization and
+    // linearization path. The fast Bayer preview must not bypass it.
+    auto keepInputPreviewSettings = fullPreviewSettings;
+    keepInputPreviewSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+    keepInputPreviewSettings.logTransform = motioncam::LogTransformMode::KeepInput;
+    motioncam::PreviewFrame keepInputPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        scalarSpatialDng, keepInputPreviewSettings, keepInputPreview, true));
+    assert(keepInputPreview.rgb.size() == fullPreview.rgb.size());
+    assert(keepInputPreview.rgb != fullPreview.rgb);
+    auto twoBitPreviewSettings = keepInputPreviewSettings;
+    twoBitPreviewSettings.logTransform = motioncam::LogTransformMode::ReduceBy14Bit;
+    motioncam::PreviewFrame twoBitPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        scalarSpatialDng, twoBitPreviewSettings, twoBitPreview, true));
+    assert(twoBitPreview.displayBitDepth == 2);
+    assert(twoBitPreview.rgb.size() == fullPreview.rgb.size());
     auto colorPreviewSettings = fullPreviewSettings;
     colorPreviewSettings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
     motioncam::PreviewFrame colorPreview;

@@ -127,7 +127,8 @@ public:
     static bool applyLogTransform(std::vector<uint8_t>& dngData, LogTransformMode mode,
                                   uint32_t quantizationWhite = 0,
                                   bool highQuality = false,
-                                  bool samplesAlreadyEncoded = false);
+                                  bool samplesAlreadyEncoded = false,
+                                  uint32_t ditherSeed = 0);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
     static bool markBadPixels(std::vector<uint8_t>& dngData,
                               uint32_t sourceWidth, uint32_t sourceHeight,
@@ -192,7 +193,8 @@ public:
                              uint32_t logQuantizationWhite = 0,
                              bool logHighQuality = false,
                              bool* logFused = nullptr,
-                             bool packFusedLog = false);
+                             bool packFusedLog = false,
+                             uint32_t ditherSeed = 0);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

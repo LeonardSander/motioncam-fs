@@ -390,10 +390,7 @@ void VirtualFileSystemImpl_DNG::init() {
                 mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP).destinationBits;
         }
         if (logApplied) {
-            if (mConfig.logTransform == LogTransformMode::ReduceBy2Bit) storedBits = std::max(1u, storedBits - 2);
-            else if (mConfig.logTransform == LogTransformMode::ReduceBy4Bit) storedBits = std::max(1u, storedBits - 4);
-            else if (mConfig.logTransform == LogTransformMode::ReduceBy6Bit) storedBits = std::max(1u, storedBits - 6);
-            else if (mConfig.logTransform == LogTransformMode::ReduceBy8Bit) storedBits = std::max(1u, storedBits - 8);
+            storedBits = logOutputBits(storedBits, mConfig.logTransform);
         }
         const uint16_t storedWhite = storedBits >= 16
             ? std::numeric_limits<uint16_t>::max()
@@ -563,6 +560,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             DecodedDNGImage image;
             if (!DNGDecoder::decodeImage(std::move(prepared.dng), image))
                 throw std::runtime_error("Could not decode source DNG preview");
+            image.ditherSeed = static_cast<uint32_t>(frameIt->second + 1);
             const auto decodedAt = std::chrono::steady_clock::now();
             // Sequence calibration can declare higher-CFA topology which the
             // individual DNG tags intentionally describe only as a Bayer
@@ -943,6 +941,7 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     pixels.iso = resolved.iso;
     pixels.exposureTime = resolved.exposureTime;
     pixels.sourceName = frame.filePath;
+    pixels.ditherSeed = static_cast<uint32_t>(frameIndex + 1);
     vfs::processDngPixels(bytes, mConfig, pixels);
     logStage("topology/gain/log processing", bytes.size());
     if (timing) timing->processMs =

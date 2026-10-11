@@ -20,6 +20,14 @@ int main() {
             ((seed >> 16) & 0xffffu) / 65535.0f - 1.0f) * 0.5f;
         assert(motioncam::utils::logTriangularDither(x, y, true) == oldDither);
     }
+    for (bool highQuality : {false, true}) {
+        const auto first = motioncam::utils::logTriangularDither(
+            37, 91, highQuality, 1);
+        assert(first == motioncam::utils::logTriangularDither(
+            37, 91, highQuality, 1));
+        assert(first != motioncam::utils::logTriangularDither(
+            37, 91, highQuality, 2));
+    }
     const std::array<double, 4> logBlack{64.0, 130.5, 260.0, 512.25};
     for (uint32_t channels : {1u, 3u}) {
         constexpr uint32_t width = 256, height = 256;
@@ -54,8 +62,14 @@ int main() {
                        neutral[pixel * 3] == neutral[pixel * 3 + 2]);
         }
     std::vector<uint16_t> flat(256 * 256, 1000);
+    auto nextFrame = flat;
     motioncam::utils::encodeLog60(flat, 256, 256, 1,
-                                  {0.0, 0.0, 0.0, 0.0}, 16000.0, 1023);
+                                  {0.0, 0.0, 0.0, 0.0}, 16000.0, 1023,
+                                  false, 1);
+    motioncam::utils::encodeLog60(nextFrame, 256, 256, 1,
+                                  {0.0, 0.0, 0.0, 0.0}, 16000.0, 1023,
+                                  false, 2);
+    assert(flat != nextFrame);
     assert(*std::min_element(flat.begin(), flat.end()) <
            *std::max_element(flat.begin(), flat.end()));
     const auto rggb = motioncam::cfaColorsFromPhase("rggb");

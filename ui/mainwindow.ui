@@ -893,6 +893,10 @@
                <string>Reduce by 6bit</string>
               </property>
              </item>
+             <item><property name="text"><string>Reduce by 8bit</string></property></item>
+             <item><property name="text"><string>Reduce by 10bit</string></property></item>
+             <item><property name="text"><string>Reduce by 12bit</string></property></item>
+             <item><property name="text"><string>Reduce by 14bit</string></property></item>
             </widget>
            </item>
            <item>

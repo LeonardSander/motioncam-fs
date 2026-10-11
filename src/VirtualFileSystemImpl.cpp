@@ -264,7 +264,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
             (settings.options & RENDER_OPT_LOG_TRANSFORM) && !postTopologyAfterBake
                 ? settings.logTransform : LogTransformMode::Disabled,
             options.inputQuantizationWhite,
-            settings.options & RENDER_OPT_LOG_HQ, &logFused, packFusedLog))
+            settings.options & RENDER_OPT_LOG_HQ, &logFused, packFusedLog,
+            options.ditherSeed))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = std::chrono::steady_clock::now();
     if (!topologyBeforeBake &&
@@ -289,14 +290,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
             ? options.inputQuantizationWhite : 65535;
         while (outputBits < 16 && ((uint32_t{1} << outputBits) - 1) < quantizationWhite)
             ++outputBits;
-        if (settings.logTransform == LogTransformMode::ReduceBy2Bit)
-            outputBits = std::max(1u, outputBits - 2);
-        else if (settings.logTransform == LogTransformMode::ReduceBy4Bit)
-            outputBits = std::max(1u, outputBits - 4);
-        else if (settings.logTransform == LogTransformMode::ReduceBy6Bit)
-            outputBits = std::max(1u, outputBits - 6);
-        else if (settings.logTransform == LogTransformMode::ReduceBy8Bit)
-            outputBits = std::max(1u, outputBits - 8);
+        outputBits = logOutputBits(outputBits, settings.logTransform);
         applyLog = bakeGain || outputBits < options.linearInputBitDepth;
     }
     if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
@@ -304,7 +298,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
         applyLog &&
         !DNGDecoder::applyLogTransform(
             dng, settings.logTransform, options.inputQuantizationWhite,
-            settings.options & RENDER_OPT_LOG_HQ, logFused))
+            settings.options & RENDER_OPT_LOG_HQ, logFused,
+            options.ditherSeed))
         throw std::runtime_error("Could not apply log transform to " + source);
     if (badPixelTreatment == BadPixelTreatment::MarkPixels &&
         badPixelsWillDemosaic && !markedPixels.empty()) {
@@ -2527,15 +2522,15 @@ std::string getDisplayDataLevels(
                 dstBlackLevel[channel] = static_cast<float>(bakeLevels.destinationBlack[channel]);
         }
     } else {
-        if (logTransform == "Reduce by 2bit" || logTransform == "Reduce by 2bit lq")
-            useBits -= 2;
-        if (logTransform == "Reduce by 4bit" || logTransform == "Reduce by 4bit lq")
-            useBits -= 4;
-        if (logTransform == "Reduce by 6bit" || logTransform == "Reduce by 6bit lq")
-            useBits -= 6;
-        if (logTransform == "Reduce by 8bit" || logTransform == "Reduce by 8bit lq")
-            useBits -= 8;
-        useBits = std::clamp(useBits, 1, 16);
+        const auto lqSuffix = std::string(" lq");
+        const auto modeText = logTransform.size() > lqSuffix.size() &&
+            logTransform.compare(logTransform.size() - lqSuffix.size(),
+                                 lqSuffix.size(), lqSuffix) == 0
+            ? logTransform.substr(0, logTransform.size() - lqSuffix.size())
+            : logTransform;
+        useBits = static_cast<int>(logOutputBits(
+            static_cast<uint32_t>(useBits), stringToLogTransformMode(modeText)));
+        useBits = std::clamp(useBits, 2, 16);
         dstWhiteLevel = std::pow(2.0f, useBits) - 1;
         for (auto& v : dstBlackLevel)
             v = 0;

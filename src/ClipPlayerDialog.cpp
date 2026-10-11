@@ -903,6 +903,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
         mAudioSink->stop();mAudioClock.invalidate();
     }
     mIndex=index;
+    mInputBitsPerChannel=16;
     // Present sequence frames at source size so a larger viewport does not
     // increase the FFmpeg output pipe and copy cost.
     mDirectSequencePresentation=mClips[index].isSequence &&
@@ -1251,9 +1252,11 @@ void ClipPlayerDialog::startDecoder(){
     const int inputWidth=normalizeMixedFrames?mWidth:clip.width;
     const int inputHeight=normalizeMixedFrames?mHeight:clip.height;
     if(inputWidth<=0||inputHeight<=0){mPlaybackFailed=true;mFrameTimer.stop();if(mLastPresentedImage.isNull())mVideo->setText(tr("Invalid clip dimensions"));return;}
-    mInputFrameBytes=inputWidth*inputHeight*(normalizeMixedFrames?4:6);
+    mInputFrameBytes=inputWidth*inputHeight*(normalizeMixedFrames?4:
+        mInputBitsPerChannel==8?3:6);
     QStringList a{"-hide_banner","-loglevel","error"};
-    a<<"-f"<<"rawvideo"<<"-pixel_format"<<(normalizeMixedFrames?"rgba":"rgb48le")<<"-video_size"
+    a<<"-f"<<"rawvideo"<<"-pixel_format"<<(normalizeMixedFrames?"rgba":
+        mInputBitsPerChannel==8?"rgb24":"rgb48le")<<"-video_size"
      <<QString("%1x%2").arg(inputWidth).arg(inputHeight)<<"-framerate"
      <<QString::number(clip.fps,'g',9)<<"-i"<<"pipe:0";
     QString f;
@@ -2668,7 +2671,10 @@ void ClipPlayerDialog::decoderFinished(int code,QProcess::ExitStatus status){
     }
 }
 QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height)const{
-    if(width<=0||height<=0||frame.size()<qint64(width)*height*6)return {};
+    if(width<=0||height<=0)return {};
+    const qint64 pixels=qint64(width)*height;
+    const int stride=frame.size()==pixels*3?3:frame.size()>=pixels*6?6:0;
+    if(!stride)return {};
     const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
     const bool swap=orientation==90||orientation==270;
     QImage image(swap?height:width,swap?width:height,QImage::Format_RGB888);
@@ -2677,11 +2683,13 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
     if(orientation!=90&&orientation!=180&&orientation!=270){
         for(int y=0;y<height;++y){
             auto* destination=image.scanLine(y);
-            const auto* row=source+qsizetype(y)*width*6;
+            const auto* row=source+qsizetype(y)*width*stride;
             for(int x=0;x<width;++x){
-                const auto* input=row+qsizetype(x)*6;
+                const auto* input=row+qsizetype(x)*stride;
                 auto* output=destination+qsizetype(x)*3;
-                output[0]=input[1];output[1]=input[3];output[2]=input[5];
+                output[0]=input[stride==3?0:1];
+                output[1]=input[stride==3?1:3];
+                output[2]=input[stride==3?2:5];
             }
         }
     }else{
@@ -2693,16 +2701,18 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
         const qsizetype outputStride=image.bytesPerLine();
         auto convertRows=[&](int first,int last){
         for(int y=first;y<last;++y){
-            const auto* row=source+qsizetype(y)*width*6;
+            const auto* row=source+qsizetype(y)*width*stride;
             for(int x=0;x<width;++x){
                 int outputX=x,outputY=y;
                 if(orientation==90){outputX=height-1-y;outputY=x;}
                 else if(orientation==180){outputX=width-1-x;outputY=height-1-y;}
                 else {outputX=y;outputY=width-1-x;}
-                const auto* input=row+qsizetype(x)*6;
+                const auto* input=row+qsizetype(x)*stride;
                 auto* output=outputBits+qsizetype(outputY)*outputStride+
                     qsizetype(outputX)*3;
-                output[0]=input[1];output[1]=input[3];output[2]=input[5];
+                output[0]=input[stride==3?0:1];
+                output[1]=input[stride==3?1:3];
+                output[2]=input[stride==3?2:5];
             }
         }
         };
@@ -2730,7 +2740,10 @@ QImage ClipPlayerDialog::rgb48Thumbnail(const QByteArray& frame,int width,int he
 }
 QImage ClipPlayerDialog::makeRgb48Thumbnail(const uint8_t* source,qsizetype bytes,
                                              int width,int height,int orientation){
-    if(!source||width<=0||height<=0||bytes<qint64(width)*height*6)return {};
+    if(!source||width<=0||height<=0)return {};
+    const qint64 pixels=qint64(width)*height;
+    const int stride=bytes==pixels*3?3:bytes>=pixels*6?6:0;
+    if(!stride)return {};
     const bool swap=orientation==90||orientation==270;
     const int orientedWidth=swap?height:width,orientedHeight=swap?width:height;
     const QSize outputSize=frameThumbnailSize(width,height,orientation);
@@ -2745,10 +2758,10 @@ QImage ClipPlayerDialog::makeRgb48Thumbnail(const uint8_t* source,qsizetype byte
             if(orientation==90){sourceX=orientedY;sourceY=height-1-orientedX;}
             else if(orientation==180){sourceX=width-1-orientedX;sourceY=height-1-orientedY;}
             else if(orientation==270){sourceX=width-1-orientedY;sourceY=orientedX;}
-            const qsizetype input=(qsizetype(sourceY)*width+sourceX)*6;
-            destination[x*3]=source[input+1];
-            destination[x*3+1]=source[input+3];
-            destination[x*3+2]=source[input+5];
+            const qsizetype input=(qsizetype(sourceY)*width+sourceX)*stride;
+            destination[x*3]=source[input+(stride==3?0:1)];
+            destination[x*3+1]=source[input+(stride==3?1:3)];
+            destination[x*3+2]=source[input+(stride==3?2:5)];
         }
     }
     return image;
@@ -2797,7 +2810,8 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     if(mDecoder.bytesToWrite()>qint64(mInputFrameBytes)*2)return FramePushResult::Retry;
     if(mClips[mIndex].isSequence){
         if(width!=mClips[mIndex].width||height!=mClips[mIndex].height||
-           frame.size()!=qint64(width)*height*6)return FramePushResult::Stopped;
+           frame.size()!=qint64(width)*height*(mInputBitsPerChannel==8?3:6))
+            return FramePushResult::Stopped;
         if(mDecoder.write(frame)!=frame.size())return FramePushResult::Retry;
         mSubmittedFrames.push_back({mNextInputFrame,
             {std::move(rawSamples),rawWidth,rawHeight,rawChannels,rawBlack,rawWhite,
@@ -2811,9 +2825,13 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
         int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
         int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
         std::array<float,4> rawBlackLevels,int rawOrientation){
+    const int inputBits=frame.size()==qint64(width)*height*3?8:16;
+    const bool formatChanged=mInputBitsPerChannel!=inputBits;
+    if(formatChanged)mInputBitsPerChannel=inputBits;
     const bool dimensionsChanged=mIndex>=0&&
         (mClips[mIndex].width!=width||mClips[mIndex].height!=height);
-    if(dimensionsChanged&&mClips[mIndex].sourceFrames>1&&mClips[mIndex].isSequence){
+    if(mClips[mIndex].isSequence&&
+       (formatChanged||(dimensionsChanged&&mClips[mIndex].sourceFrames>1))){
         // Draft and other preprocessing modes may change the RGB staging
         // dimensions relative to FileInfo. Configure rawvideo from the first
         // actual frame so the producer can never retry a permanent mismatch.

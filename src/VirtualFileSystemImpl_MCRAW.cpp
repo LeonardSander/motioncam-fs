@@ -780,6 +780,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
              frameSettings.quadBayerOption == QuadBayerMode::DemosaicOCL);
         const auto generationSettings = canonicalMcrawGenerationSettings(
             frameSettings, earlyProxy);
+        const auto nativePlan = utils::planDngFrameProcessing(
+            frameSettings, frameMetadata, mCalibration);
+        const bool unpackedIntermediate =
+            (frameSettings.options &
+             (RENDER_OPT_APPLY_VIGNETTE_CORRECTION | RENDER_OPT_LOG_TRANSFORM |
+              RENDER_OPT_REMOSAIC_TO_BAYER)) ||
+            nativePlan.cfaRepeatSize > 2 || renderPlan.scale > 1 ||
+            frameSettings.cameraNativeStaging;
         auto output = utils::generateDng(
             frameData,
             frameMetadata,
@@ -791,14 +799,13 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             mCalibration,
             false,
             exposureOverride,
-            neutralOverride);
+            neutralOverride,
+            nullptr, false, nullptr, unpackedIntermediate);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
         const auto generatedAt = std::chrono::steady_clock::now();
         std::vector<uint8_t>& timed = *output;
         attachSidecarGainMapOpcodes(timed, frameIt->second);
-        const auto nativePlan = utils::planDngFrameProcessing(
-            frameSettings, frameMetadata, mCalibration);
         vfs::DngPixelPipelineOptions pixels;
         pixels.cfaRepeatSize = earlyProxy ? 2 : nativePlan.cfaRepeatSize;
         pixels.cfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
@@ -814,6 +821,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         pixels.iso = frameMetadata.iso;
         pixels.exposureTime = frameMetadata.exposureTime / 1.0e9;
         pixels.sourceName = "MCRAW";
+        pixels.ditherSeed = static_cast<uint32_t>(renderPlan.outputFrameNumber + 1);
         vfs::processDngPixels(timed, frameSettings, pixels);
         const auto processedAt = std::chrono::steady_clock::now();
         vfs::DngFinalizeOptions finalize;

@@ -253,7 +253,10 @@ enum class LogTransformMode {
     ReduceBy2Bit,
     ReduceBy4Bit,
     ReduceBy6Bit,
-    ReduceBy8Bit
+    ReduceBy8Bit,
+    ReduceBy10Bit,
+    ReduceBy12Bit,
+    ReduceBy14Bit
 };
 
 enum class CFRMode {
@@ -306,6 +309,9 @@ inline std::string logTransformModeToString(LogTransformMode mode) {
         case LogTransformMode::ReduceBy4Bit: return "Reduce by 4bit";
         case LogTransformMode::ReduceBy6Bit: return "Reduce by 6bit";
         case LogTransformMode::ReduceBy8Bit: return "Reduce by 8bit";
+        case LogTransformMode::ReduceBy10Bit: return "Reduce by 10bit";
+        case LogTransformMode::ReduceBy12Bit: return "Reduce by 12bit";
+        case LogTransformMode::ReduceBy14Bit: return "Reduce by 14bit";
         default: return "Keep Input";
     }
 }
@@ -313,11 +319,33 @@ inline std::string logTransformModeToString(LogTransformMode mode) {
 inline LogTransformMode stringToLogTransformMode(const std::string& str) {
     if (str.empty() || str == "") return LogTransformMode::Disabled;
     if (str == "Keep Input") return LogTransformMode::KeepInput;
-    if (str == "Reduce by 2bit") return LogTransformMode::ReduceBy2Bit;
-    if (str == "Reduce by 4bit") return LogTransformMode::ReduceBy4Bit;
-    if (str == "Reduce by 6bit") return LogTransformMode::ReduceBy6Bit;
-    if (str == "Reduce by 8bit") return LogTransformMode::ReduceBy8Bit;
+    if (str == "Reduce by 2bit" || str == "2") return LogTransformMode::ReduceBy2Bit;
+    if (str == "Reduce by 4bit" || str == "4") return LogTransformMode::ReduceBy4Bit;
+    if (str == "Reduce by 6bit" || str == "6") return LogTransformMode::ReduceBy6Bit;
+    if (str == "Reduce by 8bit" || str == "8") return LogTransformMode::ReduceBy8Bit;
+    if (str == "Reduce by 10bit" || str == "10") return LogTransformMode::ReduceBy10Bit;
+    if (str == "Reduce by 12bit" || str == "12") return LogTransformMode::ReduceBy12Bit;
+    if (str == "Reduce by 14bit" || str == "14") return LogTransformMode::ReduceBy14Bit;
     return LogTransformMode::KeepInput;
+}
+
+constexpr uint32_t logReductionBits(LogTransformMode mode) {
+    switch (mode) {
+        case LogTransformMode::ReduceBy2Bit: return 2;
+        case LogTransformMode::ReduceBy4Bit: return 4;
+        case LogTransformMode::ReduceBy6Bit: return 6;
+        case LogTransformMode::ReduceBy8Bit: return 8;
+        case LogTransformMode::ReduceBy10Bit: return 10;
+        case LogTransformMode::ReduceBy12Bit: return 12;
+        case LogTransformMode::ReduceBy14Bit: return 14;
+        default: return 0;
+    }
+}
+
+constexpr uint32_t logOutputBits(uint32_t inputBits, LogTransformMode mode) {
+    const uint32_t reduction = logReductionBits(mode);
+    return reduction ? std::max(2u, inputBits > reduction ? inputBits - reduction : 0u)
+                     : inputBits;
 }
 
 inline CFRTarget stringToCFRTarget(const std::string& str) {

@@ -486,33 +486,47 @@ int main() {
         motioncam::LogTransformMode::ReduceBy2Bit,
         motioncam::LogTransformMode::ReduceBy4Bit,
         motioncam::LogTransformMode::ReduceBy6Bit,
-        motioncam::LogTransformMode::ReduceBy8Bit};
+        motioncam::LogTransformMode::ReduceBy8Bit,
+        motioncam::LogTransformMode::ReduceBy10Bit,
+        motioncam::LogTransformMode::ReduceBy12Bit,
+        motioncam::LogTransformMode::ReduceBy14Bit};
+    assert(motioncam::stringToLogTransformMode("14") ==
+           motioncam::LogTransformMode::ReduceBy14Bit);
+    assert(motioncam::logOutputBits(10, motioncam::LogTransformMode::ReduceBy14Bit) == 2);
     for (size_t modeIndex = 0; modeIndex < packedLogModes.size(); ++modeIndex) {
         const auto mode = packedLogModes[modeIndex];
+        const uint32_t ditherSeed = static_cast<uint32_t>(modeIndex + 1);
         const uint32_t expectedBits = 14 - static_cast<uint32_t>(modeIndex) * 2;
         auto fusedUnpacked = makeLogCfaDng(0, 0, false, 33, true);
         assert(motioncam::DNGDecoder::replaceGainMaps(
             fusedUnpacked, 2, constantPhaseMaps));
         auto fusedPacked = fusedUnpacked;
+        auto separateBake = fusedUnpacked;
         bool logFused = false;
         assert(motioncam::DNGDecoder::bakeGainMaps(
             fusedUnpacked, false, false, false, false, 2, std::nullopt,
-            mode, 65535, true, &logFused));
+            mode, 65535, true, &logFused, false, ditherSeed));
         assert(logFused);
         assert(motioncam::DNGDecoder::bakeGainMaps(
             fusedPacked, false, false, false, false, 2, std::nullopt,
-            mode, 65535, true, &logFused, true));
+            mode, 65535, true, &logFused, true, ditherSeed));
         assert(logFused);
         assert(tagValue(fusedUnpacked, 258).value == 16);
         assert(tagValue(fusedPacked, 258).value == expectedBits);
         assert(motioncam::DNGDecoder::applyLogTransform(
-            fusedUnpacked, mode, 65535, true, true));
+            fusedUnpacked, mode, 65535, true, true, ditherSeed));
         assert(motioncam::DNGDecoder::applyLogTransform(
-            fusedPacked, mode, 65535, true, true));
+            fusedPacked, mode, 65535, true, true, ditherSeed));
         assert(tagValue(fusedPacked, 50712).count == (1u << expectedBits));
         assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedUnpacked));
         assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedPacked));
         assert(motioncam::DNGDecoder::imagePayloadsEqual(fusedUnpacked, fusedPacked));
+        assert(motioncam::DNGDecoder::bakeGainMaps(
+            separateBake, false, false, false, false, 2, std::nullopt));
+        assert(motioncam::DNGDecoder::applyLogTransform(
+            separateBake, mode, 65535, true, false, ditherSeed));
+        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(separateBake));
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(separateBake, fusedPacked));
     }
     auto overlayPacked = makeLogCfaDng(500, 0, false, 128);
     assert(motioncam::DNGDecoder::replaceGainMaps(

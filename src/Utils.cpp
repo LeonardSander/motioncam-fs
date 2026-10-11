@@ -7,6 +7,7 @@
 #include "VirtualFileSystemImpl.h"
 #include "DNGDecoder.h"
 #include "GainMapBake.h"
+#include "RawLogTransform.h"
 #include "CpuWorkerBudget.h"
 
 #include <algorithm>
@@ -353,22 +354,8 @@ void overrideLensShadingMap(
 }
 
 std::vector<unsigned short> makeLogLinearizationTable(unsigned int storedWhiteLevel) {
-    if (storedWhiteLevel == 0 || storedWhiteLevel >= 65536) return {};
-    std::vector<unsigned short> table(storedWhiteLevel + 1);
-    for (unsigned int i = 0; i <= storedWhiteLevel; ++i) {
-        float linear = 0.0f;
-        if (i == storedWhiteLevel) {
-            linear = 1.0f;
-        } else if (i != 0) {
-            const float encoded = static_cast<float>(i) / storedWhiteLevel;
-            linear = (std::pow(2.0f, encoded * std::log2(61.0f)) - 1.0f) / 60.0f;
-            linear = std::clamp(linear, 0.0f, 1.0f);
-        }
-        table[i] = static_cast<unsigned short>(linear * 65535.0f);
-    }
-    return table;
+    return makeLog60LinearizationTable(storedWhiteLevel);
 }
-
 
 // ============================================================================
 // vectorbuf and vector_ostream implementations
@@ -1122,7 +1109,9 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     LogTransformMode logTransform,
     bool logHq,
     QuadBayerMode quadBayerOption,
-    bool includeOpcode)
+    bool includeOpcode,
+    uint32_t ditherSeed,
+    bool linearizePreview)
 {
     scale = (scale > 1 ? (scale / 2) * 2 : 1); // Ensure even scale for downscaling
 
@@ -1311,12 +1300,31 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     // Dithering is always enabled for DNG log transforms.
     const bool disableDither = false;
 
-    // Process the image by copying and packing 2x2 Bayer blocks
+    // Full-size gallery CFA processing has enough samples to amortize the
+    // table build. Interpolation preserves the continuous gain result before
+    // log encoding; small proxies continue to use the direct calculation.
+    const bool useLogLookup = logTransform != LogTransformMode::Disabled &&
+        !logHq && (cfaSize < 2 || scale > 1) &&
+        static_cast<size_t>(newWidth) * newHeight >= 65536;
+    const auto logLookup = useLogLookup
+        ? makeLog60EncodeLookup(0.0, 65535.0,
+              static_cast<uint16_t>(dstWhiteLevel))
+        : std::vector<float>{};
+    const auto previewLinearization = linearizePreview
+        ? makeLog60LinearizationTable(static_cast<uint16_t>(dstWhiteLevel))
+        : std::vector<uint16_t>{};
+
+    // A full-size ordinary Bayer pass reads each 2x2 block before writing it.
+    // Reuse the decoder's input buffer in that case; the caller consumes the
+    // processed result and has no further use for the unprocessed bytes.
+    const bool inPlace = sourceScale == 1 && cfaSize == 1 &&
+        newWidth == originalWidth && newHeight == inOutHeight;
     std::vector<uint8_t> dst;
-    dst.resize(sizeof(uint16_t) * newWidth * newHeight);
-    uint16_t* dstData = reinterpret_cast<uint16_t*>(dst.data());
+    if (!inPlace) dst.resize(sizeof(uint16_t) * newWidth * newHeight);
+    uint16_t* dstData = reinterpret_cast<uint16_t*>(
+        inPlace ? data.data() : dst.data());
     
-    if (dst.empty() || dstData == nullptr) {
+    if (dstData == nullptr) {
         spdlog::error("Failed to allocate destination buffer");
         throw std::runtime_error("Destination buffer allocation failed");
     }
@@ -1350,11 +1358,13 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                 (x + left) * shadingMapScaleX,
                 (y + top) * shadingMapScaleY, channel, lensShadingMap,
                 metadata.lensShadingMapWidth, metadata.lensShadingMapHeight);
-        return sampleGainMapBilinear(shadingX[x], shadingY[y],
-            [&](uint32_t px, uint32_t py) {
-                return lensShadingMap[channel][
-                    static_cast<size_t>(py) * metadata.lensShadingMapWidth + px];
-            });
+        const auto& sy = shadingY[y];
+        const float* plane = lensShadingMap[channel].data();
+        const size_t rowWidth = static_cast<size_t>(metadata.lensShadingMapWidth);
+        return sampleScalarGainMapRow(
+            plane + static_cast<size_t>(sy.first) * rowWidth,
+            plane + static_cast<size_t>(sy.second) * rowWidth,
+            shadingX[x], sy.fraction);
     };
 
     // Each row group writes only its own rows in dst. Keep temporary gain
@@ -1428,18 +1438,26 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                     for (int i = 0; i < 4; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
                         if (!disableDither) {
                             dither[i] = logTriangularDither(
-                                x + (i & 1), y + (i >> 1), logHq);
+                                x + (i & 1), y + (i >> 1), logHq,
+                                ditherSeed);
                         } else {
                             dither[i] = 0.0f;
                         }
                         // Apply log2 transform that preserves black and white levels as identity points
-                        float logValue = std::log2(1.0f + 60.0f * std::max(0.0f, linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i])) / std::log2(61.0f);                  
-                        p[i] = (logValue) * dstWhiteLevel + dither[i]; // Scale by dstWhiteLevel to match what the linearization table expects
+                        const float normalized = std::max(0.0f,
+                            linear[i] * (s[i] - srcBlackLevel[i]) * shadingMapVals[i]);
+                        p[i] = (useLogLookup
+                            ? sampleLog60EncodeLookup(logLookup, normalized)
+                            : encodeLog60Normalized(normalized, dstWhiteLevel)) +
+                            dither[i];
                     }
                 }            
                 
                 for (int i = 0; i < 4; i++)
                     s[i] = std::clamp(std::round((p[i] + dstBlackLevel[i])), 0.f, dstWhiteLevel);
+                if (linearizePreview)
+                    for (uint16_t& sample : s)
+                        sample = previewLinearization[sample];
 
                 // Bounds check before writing
                 if (dstOffset + newWidth + 1 >= newWidth * newHeight) {
@@ -1485,21 +1503,27 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
                             dstBlackLevel[i/4], dstWhiteLevel) - dstBlackLevel[i/4]);
                 } else {
                     std::array<float, 16> dither; // Apply logarithmic tone mapping with triangular dithering. Generate improved triangular dither with better randomization                                    
-                    for (int i = 0; i < 16; i++) { // Use different seeds for each pixel in the 2x2 block to avoid correlation
+                    for (int i = 0; i < 16; i++) { // Each 2x2 phase group occupies its own part of the 4x4 block.
                         if (!disableDither) {
+                            const uint32_t localX = ((i / 4) & 1) * 2 + (i & 1);
+                            const uint32_t localY = ((i / 8) * 2) + ((i / 2) & 1);
                             dither[i] = logTriangularDither(
-                                x + (i & 1), y + (i >> 1), logHq);
+                                x + localX, y + localY, logHq,
+                                ditherSeed);
                         } else {
                             dither[i] = 0.0f;
                         }
                         // Apply log2 transform that preserves black and white levels as identity points
-                        float logValue = std::log2(1.0f + 60.0f * std::max(0.0f, p[i])) / std::log2(61.0f);                  
-                        p[i] = (logValue) * dstWhiteLevel + dither[i]; // Scale by dstWhiteLevel to match what the linearization table expects
+                        p[i] = encodeLog60Normalized(p[i], dstWhiteLevel) +
+                            dither[i];
                     }
                 }            
 
                 for (int i = 0; i < 16; i++)
                     s[i] = std::clamp(std::round((p[i] + dstBlackLevel[i/4])), 0.f, dstWhiteLevel);
+                if (linearizePreview)
+                    for (uint16_t& sample : s)
+                        sample = previewLinearization[sample];
                     
                 dstData[dstOffset]                      = static_cast<unsigned short>(s[0]); 
                 dstData[dstOffset + 1]                  = static_cast<unsigned short>(s[1]);
@@ -1523,7 +1547,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     }
     };
     const uint32_t rowGroups = newHeight / rowStep;
-    const unsigned workers = dst.size() >= 8 * 1024 * 1024
+    const unsigned workers = static_cast<size_t>(newWidth) * newHeight *
+            sizeof(uint16_t) >= 8 * 1024 * 1024
         ? std::min<unsigned>(8, std::min<unsigned>(
             availableCpuWorkers(), rowGroups)) : 1;
     std::vector<std::exception_ptr> errors(workers);
@@ -1548,6 +1573,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     for (auto& thread : threads) thread.join();
     for (const auto& error : errors)
         if (error) std::rethrow_exception(error);
+    if (inPlace) data.resize(sizeof(uint16_t) * newWidth * newHeight);
 
     // Update dimensions
     inOutWidth = newWidth;
@@ -1558,7 +1584,8 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
     for(auto i = 0; i < dstBlackLevel.size(); ++i)
         blackLevelResult[i] = static_cast<unsigned short>(std::round(dstBlackLevel[i]));
 
-    return std::make_tuple(dst, blackLevelResult, static_cast<unsigned short>(dstWhiteLevel),
+    return std::make_tuple(inPlace ? std::move(data) : std::move(dst),
+                           blackLevelResult, static_cast<unsigned short>(dstWhiteLevel),
                            opcodeList2, opcodeList3);
 }
 
@@ -1576,7 +1603,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     const std::optional<std::array<float, 3>>& asShotNeutralOverride,
     PreviewFrame* previewFrame,
     bool retainSourceSamples,
-    DecodedDNGImage* stagedImage)
+    DecodedDNGImage* stagedImage,
+    bool unpackedIntermediate)
 {
     Measure m("generateDng");
     const auto previewProfileStarted = std::chrono::steady_clock::now();
@@ -1726,6 +1754,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
             badPixelTreatment, demosaic);
     }
 
+    const bool linearizePreviewCfa = previewFrame && !stagedImage &&
+        effectiveLogTransform != LogTransformMode::Disabled && !debugShadingMap;
     const auto preprocessStarted = std::chrono::steady_clock::now();
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
@@ -1744,8 +1774,23 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         effectiveLogTransform,
         settings.options & RENDER_OPT_LOG_HQ,
         settings.quadBayerOption,
-        true // includeOpcode
+        true, // includeOpcode
+        static_cast<uint32_t>(frameNumber + 1),
+        linearizePreviewCfa
     );
+    const uint16_t previewLogStoredWhite = dstWhiteLevel;
+    if (previewFrame) {
+      previewFrame->displayBitDepth = 1;
+      while (previewFrame->displayBitDepth < 16 &&
+             ((1u << previewFrame->displayBitDepth) - 1u) < previewLogStoredWhite)
+        ++previewFrame->displayBitDepth;
+    }
+    // The gallery-only CFA pass has already applied the DNG linearization
+    // table while writing each block. Set the levels expected by demosaic.
+    if (linearizePreviewCfa) {
+      dstBlackLevel.fill(0);
+      dstWhiteLevel = 65535;
+    }
     const auto preprocessFinished = std::chrono::steady_clock::now();
 
     int processedRepeatSize = cfaRepeatSize;
@@ -2161,7 +2206,9 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         for (size_t i = 0; i < 4; ++i)
           stagedImage->metadata.blackLevel[i] = dstBlackLevel[i];
         stagedImage->metadata.whiteLevel.fill(dstWhiteLevel);
-        stagedImage->metadata.inputBitDepth = 16;
+        stagedImage->metadata.inputBitDepth = previewFrame->displayBitDepth;
+        stagedImage->storedBitsPerSample = previewFrame->displayBitDepth;
+        stagedImage->ditherSeed = static_cast<uint32_t>(frameNumber + 1);
         auto copyGainMaps = [](const tinydngwriter::OpcodeList& opcodes,
                                std::vector<GainMap>& maps) {
           if (opcodes.IsEmpty()) return;
@@ -2195,7 +2242,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
 
     // Compressed codecs consume unpacked uint16 samples.
     // The compression will handle the redundancy
-    if (!writerCompression && !settings.cameraNativeStaging && !lossyJpegDct) {
+    if (!writerCompression && !settings.cameraNativeStaging && !lossyJpegDct &&
+        !unpackedIntermediate) {
         encodeBits = dngPackedBits(dstWhiteLevel, demosaic && !remosaic, false);
         if (demosaic && !remosaic) {
             if (encodeBits <= 4) encodeRGBTo4Bit(processedData, width, height), encodeBits = 4;
@@ -2243,7 +2291,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     // sensor's 10/12/14-bit white level. Advertising that nominal depth makes
     // readers treat the uint16 buffer as tightly packed rows, producing a
     // resolution-dependent stride mismatch and a scrambled gallery image.
-    if (settings.cameraNativeStaging)
+    if (settings.cameraNativeStaging || unpackedIntermediate)
         encodeBits = 16;
     // Compressed codecs consume unpacked uint16 samples. Uncompressed output,
     // however, must advertise the bit depth of the buffer after packing. This
@@ -2821,17 +2869,15 @@ DngOutputLevels planDngOutputLevels(
         const int bits = std::clamp(
             static_cast<int>(evenBitsNeeded(static_cast<uint16_t>(result.white))) -
                 reduction + expansion,
-            1, 16);
+            2, 16);
         result.white = static_cast<double>((uint32_t{1} << bits) - 1);
     };
     if (applyShadingMap) {
         if (logTransform != LogTransformMode::Disabled) {
             if (!debugShadingMap) {
-                if (normalizeShadingMap) { /* Preserve the resolved white level. */ }
-                else if (logTransform == LogTransformMode::ReduceBy2Bit) reducedWhite(2);
-                else if (logTransform == LogTransformMode::ReduceBy4Bit) reducedWhite(4);
-                else if (logTransform == LogTransformMode::ReduceBy6Bit) reducedWhite(6);
-                else if (logTransform == LogTransformMode::ReduceBy8Bit) reducedWhite(8);
+                if (logReductionBits(logTransform))
+                    reducedWhite(static_cast<int>(logReductionBits(logTransform)));
+                else if (normalizeShadingMap) { /* Preserve the resolved white level. */ }
                 else if (logTransform == LogTransformMode::KeepInput) reducedWhite(0);
                 else reducedWhite(0, 2);
             }
@@ -2843,10 +2889,8 @@ DngOutputLevels planDngOutputLevels(
             result.black = planned.destinationBlack;
         }
     } else if (logTransform != LogTransformMode::Disabled) {
-        if (logTransform == LogTransformMode::ReduceBy2Bit) reducedWhite(2);
-        else if (logTransform == LogTransformMode::ReduceBy4Bit) reducedWhite(4);
-        else if (logTransform == LogTransformMode::ReduceBy6Bit) reducedWhite(6);
-        else if (logTransform == LogTransformMode::ReduceBy8Bit) reducedWhite(8);
+        if (logReductionBits(logTransform))
+            reducedWhite(static_cast<int>(logReductionBits(logTransform)));
         result.black.fill(0.0);
     }
     return result;

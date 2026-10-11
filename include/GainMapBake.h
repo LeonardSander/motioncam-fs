@@ -68,6 +68,32 @@ inline float sampleGainMapBilinear(const GainMapAxisSample& x,
     return std::isfinite(value) && value > 0.0f ? value : 1.0f;
 }
 
+// Reuse the row pointers and vertical fraction for every pixel in a scalar
+// gain-map row. Both DNG output and gallery preview use this hot path.
+inline float sampleScalarGainMapRow(const float* upper, const float* lower,
+                                    const GainMapAxisSample& x,
+                                    float yFraction) {
+    const float top = upper[x.first] * (1.0f - x.fraction) +
+                      upper[x.second] * x.fraction;
+    const float bottom = lower[x.first] * (1.0f - x.fraction) +
+                         lower[x.second] * x.fraction;
+    const float value = top * (1.0f - yFraction) + bottom * yFraction;
+    return std::isfinite(value) && value > 0.0f ? value : 1.0f;
+}
+
+// Keep the gain and level conversion identical for decoded gallery samples
+// and samples written directly into a DNG strip. Storage and log/packing are
+// handled by the caller, so this needs no intermediate pixel buffer.
+inline double bakeLinearGainSample(uint16_t sample, float gain,
+                                   double sourceBlack, double destinationBlack,
+                                   double scale) {
+    return destinationBlack + gain * (sample - sourceBlack) * scale;
+}
+
+inline uint16_t quantizeLinearGainSample(double value) {
+    return static_cast<uint16_t>(std::clamp(std::lround(value), 0l, 65535l));
+}
+
 struct LinearGainBakeLevels {
     uint32_t sourceBits = 1;
     uint32_t destinationBits = 1;
