@@ -1051,7 +1051,7 @@ void ClipPlayerDialog::updateVisibleThumbnailWidgets(){
             }
             else seekToFrame(output);
         };
-        auto* check=new QCheckBox(QString::number(source+1),item);
+        auto* check=new QCheckBox(QString::number(source),item);
         check->setStyleSheet("color:white;background:transparent;");
         check->setChecked(clip.selectedSourceFrames.contains(source));
         connect(check,&QCheckBox::toggled,this,[this,source](bool selected){
