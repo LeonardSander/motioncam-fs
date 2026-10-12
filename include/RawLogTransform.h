@@ -67,6 +67,11 @@ inline std::vector<uint16_t> makeLog60LinearizationTable(
 inline void applyLinearizationTable(uint16_t* samples, size_t count,
                                     const std::vector<uint16_t>& table) {
     if (!samples || table.empty()) return;
+    if (table.size() >= 65536) {
+        for (size_t i = 0; i < count; ++i)
+            samples[i] = table[samples[i]];
+        return;
+    }
     for (size_t i = 0; i < count; ++i)
         samples[i] = table[std::min<size_t>(samples[i], table.size() - 1)];
 }

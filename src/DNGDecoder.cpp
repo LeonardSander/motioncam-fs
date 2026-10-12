@@ -21,8 +21,10 @@
 #include <set>
 #include <sstream>
 #include <iomanip>
+#include <iterator>
 #include <setjmp.h>
 #include <thread>
+#include <type_traits>
 #include "liblj92/lj92.h"
 #include <jpeglib.h>
 #include <jxl/decode.h>
@@ -995,7 +997,7 @@ namespace {
                 ? static_cast<uint32_t>(value) : 0;
         };
         if (preparedOutput) {
-            // The strip is already packed at its final offset in this buffer.
+            // The replacement strip is already at its final offset.
             // Copy only the small prefix and trailing metadata around it.
             if (stripOffset)
                 std::memcpy(preparedOutput->data(), data.data(), stripOffset);
@@ -3990,9 +3992,6 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
 
     const auto convertedAt = std::chrono::steady_clock::now();
     const uint32_t newBytes = static_cast<uint32_t>(output.size() * sizeof(uint16_t));
-    std::vector<uint8_t> outputBytes(newBytes);
-    writeSampleBytes(outputBytes.data(), output.data(), output.size(), little);
-    const auto serializedAt = std::chrono::steady_clock::now();
     auto setScalar = [&](const TiffEntry& e, uint32_t value) {
         if (e.type == TIFF_TYPE_SHORT) write16(data.data() + e.valueOffset, value, little);
         else write32(data.data() + e.valueOffset, value, little);
@@ -4075,13 +4074,26 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
             for (size_t i = 0; i < 4; ++i) data[patternE->entryOffset + 8 + i] = phase[i];
         }
     }
-    const bool replaced = replaceTiffStrip(data, stripOffset, stripBytes, outputBytes, little);
+    // Write the converted samples at their final strip position. The TIFF
+    // replacement helper moves the buffer when the strip size changes.
+    const auto metadataFinishedAt = std::chrono::steady_clock::now();
+    std::vector<uint8_t> preparedOutput;
+    if (newBytes != stripBytes)
+        preparedOutput.resize(data.size() - stripBytes + newBytes);
+    uint8_t* destination = newBytes == stripBytes
+        ? data.data() + stripOffset : preparedOutput.data() + stripOffset;
+    writeSampleBytes(destination, output.data(), output.size(), little);
+    const auto serializedAt = std::chrono::steady_clock::now();
+    const bool replaced = newBytes == stripBytes ||
+        replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
+                         &preparedOutput, newBytes);
     if (profileTopology)
-        spdlog::info("GALLERY_PERF event=dng_cfa_topology width={} height={} repeat={} scale={} decode_ms={:.3f} convert_ms={:.3f} serialize_ms={:.3f} write_ms={:.3f}",
+        spdlog::info("GALLERY_PERF event=dng_cfa_topology width={} height={} repeat={} scale={} decode_ms={:.3f} convert_ms={:.3f} metadata_ms={:.3f} serialize_ms={:.3f} write_ms={:.3f}",
                      sourceWidth, sourceHeight, repeatSize, proxyScale,
                      std::chrono::duration<double, std::milli>(decodedAt-topologyStarted).count(),
                      std::chrono::duration<double, std::milli>(convertedAt-decodedAt).count(),
-                     std::chrono::duration<double, std::milli>(serializedAt-convertedAt).count(),
+                     std::chrono::duration<double, std::milli>(metadataFinishedAt-convertedAt).count(),
+                     std::chrono::duration<double, std::milli>(serializedAt-metadataFinishedAt).count(),
                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-serializedAt).count());
     return replaced;
 }
@@ -4637,6 +4649,10 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
     if (!decodeOrCanonicalizeDng(data, backgroundWork, &image)) return false;
     const auto pixelsAt = std::chrono::steady_clock::now();
     if (applyLinearization && !linearization.empty()) {
+        // Pixel samples are 16-bit. Extend short tables with their last entry
+        // once, instead of clamping every lookup across the full image.
+        if (linearization.size() < 65536)
+            linearization.resize(65536, linearization.back());
         applyLinearizationTable(image.samples.data(), image.samples.size(),
                                 linearization);
         image.linearizationApplied = true;
@@ -5452,6 +5468,26 @@ struct ScalarCfaGainRow {
             return 1.0f;
         return sampleScalarGainMapRow(upper, lower, x[column], yFraction);
     }
+
+    void blendVertical(std::vector<float>& values) const {
+        // Map-grid width is small; reuse this buffer for every sensor row.
+        values.resize(map->width);
+        const float upperWeight = 1.0f - yFraction;
+        for (uint32_t column = 0; column < map->width; ++column)
+            values[column] = upper[column] * upperWeight +
+                             lower[column] * yFraction;
+    }
+
+    float sampleBlended(uint32_t column, uint32_t row,
+                        const std::vector<float>& values) const {
+        if (!map || column < map->left || column >= map->right ||
+            row < map->top || row >= map->bottom)
+            return 1.0f;
+        const auto& axis = x[column];
+        const float value = values[axis.first] * (1.0f - axis.fraction) +
+                            values[axis.second] * axis.fraction;
+        return std::isfinite(value) && value > 0.0f ? value : 1.0f;
+    }
 };
 
 ScalarCfaGainRow makeScalarCfaGainRow(const GainMap& map,
@@ -5683,12 +5719,21 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     const bool logHq = settings.options & RENDER_OPT_LOG_HQ;
     auto bakeRows = [&](uint32_t beginY, uint32_t endY) {
         for (uint32_t y = beginY; y < endY; ++y) {
+            const utils::LogTriangularDitherRow<false> fastDitherRow(
+                y, image.ditherSeed);
+            const utils::LogTriangularDitherRow<true> highQualityDitherRow(
+                y, image.ditherSeed);
             const uint32_t sourceY = sourceCoordinate(y, sourceScale, sourceHeight);
+            const size_t cfaRowPhase = rgb ? 0u
+                : ((phaseGroup == 1 ? sourceY : sourceY / phaseGroup) & 1u) << 1u;
             const auto scalarRows = directScalarCfa
                 ? makeScalarCfaGainRows(maps, axes, *scalarMapByParity, y)
                 : std::array<ScalarCfaGainRow, 2>{};
             for (uint32_t x = 0; x < image.layout.width; ++x) {
                 const uint32_t sourceX = sourceCoordinate(x, sourceScale, sourceWidth);
+                const float dither = fusedLogWhite
+                    ? (logHq ? highQualityDitherRow(x) : fastDitherRow(x))
+                    : 0.0f;
                 std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
                 if (directScalarCfa) {
                     gains[0] = scalarRows[x & 1u].sample(x, y);
@@ -5701,8 +5746,9 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                             gains[channel] *= sampled[channel];
                     }
                 }
-                const size_t cfaLevelChannel = rgb ? 0 : gainMapPhaseChannel(
-                    sourceX, sourceY, 0, 0, phaseGroup);
+                const size_t cfaLevelChannel = rgb ? 0u
+                    : cfaRowPhase |
+                        ((phaseGroup == 1 ? sourceX : sourceX / phaseGroup) & 1u);
                 for (uint32_t channel = 0; channel < channels; ++channel) {
                     const size_t index =
                         (static_cast<size_t>(y) * image.layout.width + x) * channels + channel;
@@ -5715,8 +5761,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                     uint16_t baked = quantizeLinearGainSample(value);
                     if (fusedLogWhite) {
                         const auto code = encodeDitheredLog60(logLookup, baked,
-                            utils::logTriangularDither(x, y, logHq, image.ditherSeed),
-                            fusedLogWhite);
+                            dither, fusedLogWhite);
                         baked = linearization[code];
                     }
                     image.samples[index] = baked;
@@ -6845,9 +6890,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         for (size_t color = 0; color < 3; ++color)
             (*updatedNeutral)[color] *= adjustment.neutralScale[color];
     }
-    std::vector<GainMap> maps = opcode2Maps;
+    std::vector<GainMap> maps = std::move(opcode2Maps);
     if (consumeOpcode3)
-        maps.insert(maps.end(), opcode3Maps.begin(), opcode3Maps.end());
+        maps.insert(maps.end(), std::make_move_iterator(opcode3Maps.begin()),
+                    std::make_move_iterator(opcode3Maps.end()));
 
     bool motionCamProducer = false;
     for (const auto& entry : entries) {
@@ -6887,7 +6933,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         luminance.rowPitch = 1; luminance.colPitch = 1;
         gridColorSeparated = separation.colorSeparated;
         if (eligibleOpcode3) {
-            const GainMap existing = opcode3Maps.front();
+            const GainMap& existing = opcode3Maps.front();
             for (uint32_t y = 0; y < luminance.height; ++y) {
                 const double normalizedY = luminance.originV + y * luminance.spacingV;
                 const auto sy = sampleGainMapAxis(
@@ -7214,19 +7260,33 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             auto field = std::make_shared<std::vector<float>>(
                 static_cast<size_t>(width) * height);
             auto prepareRows = [&](uint32_t first, uint32_t last) {
+                std::array<std::vector<float>, 2> cfaVertical;
+                std::vector<float> scalarVertical;
                 for (uint32_t y = first; y < last; ++y) {
                     if (directScalarMap) {
-                        for (uint32_t x = 0; x < width; ++x)
-                            (*field)[static_cast<size_t>(y) * width + x] =
-                                effectiveGain(x, y, 0);
+                        if (fastScalarMap) {
+                            const auto row = makeScalarCfaGainRow(
+                                maps.front(), axes.front(), y);
+                            row.blendVertical(scalarVertical);
+                            for (uint32_t x = 0; x < width; ++x)
+                                (*field)[static_cast<size_t>(y) * width + x] =
+                                    row.sampleBlended(x, y, scalarVertical);
+                        } else {
+                            for (uint32_t x = 0; x < width; ++x)
+                                (*field)[static_cast<size_t>(y) * width + x] =
+                                    effectiveGain(x, y, 0);
+                        }
                         continue;
                     }
                     const auto rows = makeScalarCfaGainRows(
                         maps, axes, *directCfaIndices, y);
+                    for (size_t parity = 0; parity < cfaVertical.size(); ++parity)
+                        rows[parity].blendVertical(cfaVertical[parity]);
                     for (uint32_t xParity = 0; xParity < 2; ++xParity) {
                         for (uint32_t x = xParity; x < width; x += 2) {
                             (*field)[static_cast<size_t>(y) * width + x] =
-                                rows[xParity].sample(x, y);
+                                rows[xParity].sampleBlended(
+                                    x, y, cfaVertical[xParity]);
                         }
                     }
                 }
@@ -7246,57 +7306,85 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             gainFields.back().second = std::move(field);
         }
     }
-    auto bakeRows = [&](uint32_t first, uint32_t last) {
+    // Select the storage layout once per frame. All modes use the same gain
+    // calculation for RGB and CFA pixels.
+    enum class BakeOutputMode { Packed8, PackedBits, InPlace16, Decoded16 };
+    enum class BakeTransformMode { Linear, Log60Fast, Log60HighQuality, DebugGain };
+    auto bakeRows = [&](auto outputMode, auto transformMode,
+                        uint32_t first, uint32_t last) {
+        constexpr auto mode = decltype(outputMode)::value;
+        constexpr auto transform = decltype(transformMode)::value;
+        constexpr bool fuseLogSamples = transform == BakeTransformMode::Log60Fast ||
+            transform == BakeTransformMode::Log60HighQuality;
+        constexpr bool packed = mode == BakeOutputMode::Packed8 ||
+            mode == BakeOutputMode::PackedBits;
+        constexpr bool packed8 = mode == BakeOutputMode::Packed8;
+        constexpr bool readInPlace = mode != BakeOutputMode::Decoded16;
+        std::array<std::vector<float>, 2> cfaVertical;
+        std::vector<float> scalarVertical;
+        std::vector<float> rgbVertical;
         for (uint32_t y = first; y < last; ++y) {
-            const auto cfaRowMaps = cpuOpt && directCfaMaps
+            const utils::LogTriangularDitherRow<
+                transform == BakeTransformMode::Log60HighQuality> ditherRow(y, ditherSeed);
+            const uint32_t cfaRowPhase = sourceIsRgb ? 0u
+                : ((phaseGroup == 1 ? y : y / phaseGroup) & 1u) << 1u;
+            const auto cfaRowMaps = cpuOpt && directCfaMaps && !cachedCfaGains
                 ? makeScalarCfaGainRows(maps, axes, *directCfaIndices, y)
                 : std::array<ScalarCfaGainRow, 2>{};
             ScalarCfaGainRow scalarRowMap;
             if ((fastScalarMap && !cachedCfaGains) || directRgbScalarMap) {
                 scalarRowMap = makeScalarCfaGainRow(maps.front(), axes.front(), y);
+                scalarRowMap.blendVertical(scalarVertical);
             }
-            uint8_t* packedDestination = packDuringBake
-                ? packedOutput.data() + stripOffset +
-                    static_cast<size_t>(y) * packedRowBytes : nullptr;
+            if (cpuOpt && directCfaMaps && !cachedCfaGains)
+                for (size_t parity = 0; parity < cfaVertical.size(); ++parity)
+                    cfaRowMaps[parity].blendVertical(cfaVertical[parity]);
+            if (directRgbMap) {
+                const auto& map = maps.front();
+                const auto& sy = axes.front().y[y];
+                // The vertical coordinate is shared by every pixel in this row.
+                const float* upper = map.data.data() +
+                    static_cast<size_t>(sy.first) * map.width * 3;
+                const float* lower = map.data.data() +
+                    static_cast<size_t>(sy.second) * map.width * 3;
+                rgbVertical.resize(static_cast<size_t>(map.width) * 3);
+                const float upperWeight = 1.0f - sy.fraction;
+                for (size_t index = 0; index < rgbVertical.size(); ++index)
+                    rgbVertical[index] = upper[index] * upperWeight +
+                                         lower[index] * sy.fraction;
+            }
+            uint8_t* packedDestination = nullptr;
+            if constexpr (packed)
+                packedDestination = packedOutput.data() + stripOffset +
+                    static_cast<size_t>(y) * packedRowBytes;
             uint32_t buffered = 0;
             uint32_t bufferedBits = 0;
             for (uint32_t x = 0; x < width; ++x) {
-                const float dither = fuseLog
-                    ? utils::logTriangularDither(x, y, logHighQuality,
-                                                 ditherSeed) : 0.0f;
+                const uint32_t cfaLevelChannel = sourceIsRgb ? 0u
+                    : cfaRowPhase |
+                        ((phaseGroup == 1 ? x : x / phaseGroup) & 1u);
+                float dither = 0.0f;
+                if constexpr (fuseLogSamples)
+                    dither = ditherRow(x);
                 const bool rgbMapApplies = directRgbMap &&
                     x >= maps.front().left && x < maps.front().right &&
                     y >= maps.front().top && y < maps.front().bottom;
-                size_t rgbMapTopLeft = 0, rgbMapTopRight = 0;
-                size_t rgbMapBottomLeft = 0, rgbMapBottomRight = 0;
-                float rgbXFraction = 0.0f, rgbYFraction = 0.0f;
+                size_t rgbMapLeft = 0, rgbMapRight = 0;
+                float rgbXFraction = 0.0f;
                 if (rgbMapApplies) {
-                    const auto& map = maps.front();
                     const auto& sx = axes.front().x[x];
-                    const auto& sy = axes.front().y[y];
-                    const size_t top = static_cast<size_t>(sy.first) * map.width * 3;
-                    const size_t bottom = static_cast<size_t>(sy.second) * map.width * 3;
-                    rgbMapTopLeft = top + static_cast<size_t>(sx.first) * 3;
-                    rgbMapTopRight = top + static_cast<size_t>(sx.second) * 3;
-                    rgbMapBottomLeft = bottom + static_cast<size_t>(sx.first) * 3;
-                    rgbMapBottomRight = bottom + static_cast<size_t>(sx.second) * 3;
+                    rgbMapLeft = static_cast<size_t>(sx.first) * 3;
+                    rgbMapRight = static_cast<size_t>(sx.second) * 3;
                     rgbXFraction = sx.fraction;
-                    rgbYFraction = sy.fraction;
                 }
                 const float rgbScalarGain = directRgbScalarMap
-                    ? scalarRowMap.sample(x, y) : 1.0f;
+                    ? scalarRowMap.sampleBlended(x, y, scalarVertical) : 1.0f;
                 for (uint32_t channel = 0; channel < imageChannels; ++channel) {
                     float gain;
                     if (rgbMapApplies) {
-                        const auto& values = maps.front().data;
-                        const float upper =
-                            values[rgbMapTopLeft + channel] * (1.0f - rgbXFraction) +
-                            values[rgbMapTopRight + channel] * rgbXFraction;
-                        const float lower =
-                            values[rgbMapBottomLeft + channel] * (1.0f - rgbXFraction) +
-                            values[rgbMapBottomRight + channel] * rgbXFraction;
-                        const float value = upper * (1.0f - rgbYFraction) +
-                            lower * rgbYFraction;
+                        const float value =
+                            rgbVertical[rgbMapLeft + channel] * (1.0f - rgbXFraction) +
+                            rgbVertical[rgbMapRight + channel] * rgbXFraction;
                         gain = std::isfinite(value) && value > 0.0f ? value : 1.0f;
                     } else if (directRgbScalarMap) {
                         gain = rgbScalarGain;
@@ -7318,58 +7406,70 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                     })
                                 : 1.0f;
                         } else if (directCfaMaps) {
-                            gain = cfaRowMaps[x & 1u].sample(x, y);
+                            gain = cfaRowMaps[x & 1u].sampleBlended(
+                                x, y, cfaVertical[x & 1u]);
                         } else if (fastScalarMap) {
-                            gain = scalarRowMap.sample(x, y);
+                            gain = scalarRowMap.sampleBlended(x, y, scalarVertical);
                         } else gain = effectiveGain(x, y, channel);
                     }
                     const size_t index =
                         (static_cast<size_t>(y) * width + x) * imageChannels + channel;
                     const uint32_t levelChannel = sourceIsRgb ? channel
-                        : static_cast<uint32_t>(gainMapPhaseChannel(
-                            x, y, 0, 0, phaseGroup));
+                        : cfaLevelChannel;
                     uint16_t sample;
-                    if (inPlace)
+                    if constexpr (readInPlace)
                         std::memcpy(&sample, stripPixels + index * sizeof(uint16_t),
                                     sizeof(sample));
                     else
                         sample = pixels[index];
-                    const double linear = bakeLinearGainSample(sample, gain,
-                        black[levelChannel], destinationBlack[levelChannel],
-                        bakeScale[levelChannel]);
                     uint16_t baked;
-                    if (fuseLog) {
-                        // Match the standalone bake then LOG60 path at its
-                        // 16-bit linear boundary while keeping one pixel pass.
-                        const uint16_t linearCode = quantizeLinearGainSample(linear);
-                        baked = encodeDitheredLog60(
-                            logLookup, linearCode, dither, encodedWhite);
+                    if constexpr (transform == BakeTransformMode::DebugGain) {
+                        baked = quantizeLinearGainSample(
+                            gain > 0.0f ? destinationWhite / gain : 0.0);
                     } else {
-                        const double value = debugGainMap
-                            ? (gain > 0.0f ? destinationWhite / gain : 0.0)
-                            : linear;
-                        baked = quantizeLinearGainSample(value);
+                        const double linear = bakeLinearGainSample(sample, gain,
+                            black[levelChannel], destinationBlack[levelChannel],
+                            bakeScale[levelChannel]);
+                        if constexpr (fuseLogSamples) {
+                            // Match the standalone bake then LOG60 path at its
+                            // 16-bit linear boundary while keeping one pixel pass.
+                            const uint16_t linearCode = quantizeLinearGainSample(linear);
+                            baked = encodeDitheredLog60(
+                                logLookup, linearCode, dither, encodedWhite);
+                        } else {
+                            baked = quantizeLinearGainSample(linear);
+                        }
                     }
-                    if (packDuringBake && packedBits == 8) {
+                    if constexpr (packed8) {
                         *packedDestination++ = static_cast<uint8_t>(baked);
-                    } else if (packDuringBake) {
+                    } else if constexpr (packed) {
                         buffered = (buffered << packedBits) | baked;
                         bufferedBits += packedBits;
-                        while (bufferedBits >= 8) {
+                        // The residual is always below eight bits, so a new
+                        // sample can complete at most two bytes.
+                        if (bufferedBits >= 16) {
+                            bufferedBits -= 16;
+                            *packedDestination++ = static_cast<uint8_t>(
+                                buffered >> (bufferedBits + 8));
+                            *packedDestination++ = static_cast<uint8_t>(
+                                buffered >> bufferedBits);
+                        } else if (bufferedBits >= 8) {
                             bufferedBits -= 8;
                             *packedDestination++ = static_cast<uint8_t>(
                                 buffered >> bufferedBits);
-                            buffered &= (uint32_t{1} << bufferedBits) - 1;
                         }
-                    } else if (inPlace)
+                        buffered &= (uint32_t{1} << bufferedBits) - 1;
+                    } else if constexpr (readInPlace)
                         std::memcpy(stripPixels + index * sizeof(uint16_t), &baked,
                                     sizeof(baked));
                     else
                         pixels[index] = baked;
                 }
             }
-            if (packDuringBake && bufferedBits)
-                *packedDestination = static_cast<uint8_t>(buffered << (8 - bufferedBits));
+            if constexpr (packed && !packed8) {
+                if (bufferedBits)
+                    *packedDestination = static_cast<uint8_t>(buffered << (8 - bufferedBits));
+            }
         }
     };
     // Divide the CPU budget among simultaneous frame bakes. The previous
@@ -7391,27 +7491,58 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const uint32_t workerBudget = std::max<uint32_t>(1,
         utils::availableCpuWorkers() / concurrentBakes);
     const uint32_t workers = static_cast<uint64_t>(width) * height >= 1000000
-        ? std::min<uint32_t>(cpuOpt ? 8 : 16, std::min<uint32_t>(workerBudget,
+        ? std::min<uint32_t>(cpuOpt ? 12 : 16, std::min<uint32_t>(workerBudget,
               std::max<uint32_t>(1, height / 128)))
         : 1;
-    std::vector<std::thread> bakeThreads;
-    bakeThreads.reserve(workers - 1);
-    for (uint32_t worker = 1; worker < workers; ++worker)
-        bakeThreads.emplace_back(bakeRows, height * worker / workers,
-                                 height * (worker + 1) / workers);
-    bakeRows(0, height / workers);
-    for (auto& thread : bakeThreads) thread.join();
+    auto runBake = [&](auto outputMode, auto transformMode) {
+        std::vector<std::thread> bakeThreads;
+        bakeThreads.reserve(workers - 1);
+        auto workerRows = [&](uint32_t first, uint32_t last) {
+            bakeRows(outputMode, transformMode, first, last);
+        };
+        for (uint32_t worker = 1; worker < workers; ++worker)
+            bakeThreads.emplace_back(workerRows, height * worker / workers,
+                                     height * (worker + 1) / workers);
+        workerRows(0, height / workers);
+        for (auto& thread : bakeThreads) thread.join();
+    };
+    auto runLogBake = [&](auto outputMode) {
+        if (logHighQuality)
+            runBake(outputMode, std::integral_constant<BakeTransformMode,
+                BakeTransformMode::Log60HighQuality>{});
+        else
+            runBake(outputMode, std::integral_constant<BakeTransformMode,
+                BakeTransformMode::Log60Fast>{});
+    };
+    if (packDuringBake && packedBits == 8)
+        runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::Packed8>{});
+    else if (packDuringBake)
+        runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::PackedBits>{});
+    else if (inPlace) {
+        using Output = std::integral_constant<BakeOutputMode, BakeOutputMode::InPlace16>;
+        if (fuseLog)
+            runLogBake(Output{});
+        else if (debugGainMap)
+            runBake(Output{}, std::integral_constant<BakeTransformMode,
+                BakeTransformMode::DebugGain>{});
+        else
+            runBake(Output{}, std::integral_constant<BakeTransformMode,
+                BakeTransformMode::Linear>{});
+    } else {
+        using Output = std::integral_constant<BakeOutputMode, BakeOutputMode::Decoded16>;
+        if (debugGainMap)
+            runBake(Output{}, std::integral_constant<BakeTransformMode,
+                BakeTransformMode::DebugGain>{});
+        else
+            runBake(Output{}, std::integral_constant<BakeTransformMode,
+                BakeTransformMode::Linear>{});
+    }
     activeBakeGuard.release();
     const auto bakedAt = std::chrono::steady_clock::now();
 
     const uint32_t newBytes = packDuringBake
         ? static_cast<uint32_t>(packedBytes)
         : width * height * imageChannels * 2;
-    std::vector<uint8_t> replacement;
-    if (!inPlace) {
-        replacement.resize(newBytes);
-        writeSampleBytes(replacement.data(), pixels, sampleCount, little);
-    }
     const auto serializedAt = std::chrono::steady_clock::now();
     auto writeScalar = [&](const TiffEntry& e, uint32_t value, uint32_t index = 0) {
         const size_t pos = e.valueOffset + index * (e.type == TIFF_TYPE_SHORT ? 2 : 4);
@@ -7477,10 +7608,20 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         return false;
     if (packDuringBake)
         packedOutput.resize(data.size() - stripBytes + packedBytes);
+    std::vector<uint8_t> preparedOutput;
+    if (!inPlace) {
+        if (newBytes != stripBytes)
+            preparedOutput.resize(data.size() - stripBytes + newBytes);
+        uint8_t* destination = newBytes == stripBytes
+            ? data.data() + stripOffset : preparedOutput.data() + stripOffset;
+        writeSampleBytes(destination, pixels, sampleCount, little);
+    }
     const bool replaced = packDuringBake
         ? replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
                            &packedOutput, packedBytes)
-        : inPlace || replaceTiffStrip(data, stripOffset, stripBytes, replacement, little);
+        : inPlace || newBytes == stripBytes ||
+            replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
+                             &preparedOutput, newBytes);
     if (profileBake)
         spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} in_place={} fused_log={} gain_field_cache={} workers={} concurrent_bakes={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
                      width, height, imageChannels, maps.size(), colorOnly,

@@ -505,24 +505,9 @@ bool cropInterleaved(const std::vector<uint16_t>& input,
 
 float logTriangularDither(uint32_t x, uint32_t y, bool highQuality,
                           uint32_t frameSeed) {
-    uint32_t seed;
-    if (highQuality) {
-        seed = (x * 1664525u + y * 1013904223u) ^ 0xdeadbeefu ^
-               (frameSeed * 0x9e3779b9u);
-        seed ^= seed >> 16;
-        seed *= 0x85ebca6bu;
-        seed ^= seed >> 13;
-        seed *= 0xc2b2ae35u;
-        seed ^= seed >> 16;
-    } else {
-        seed = (x * 0x9e3779b1u) ^ (y * 0x85ebca77u) ^
-               (frameSeed * 0x9e3779b9u);
-        seed ^= seed >> 16;
-        seed *= 0x7feb352du;
-        seed ^= seed >> 15;
-    }
-    return ((seed & 0xffffu) / 65535.0f +
-            ((seed >> 16) & 0xffffu) / 65535.0f - 1.0f) * 0.5f;
+    return highQuality
+        ? LogTriangularDitherRow<true>(y, frameSeed)(x)
+        : LogTriangularDitherRow<false>(y, frameSeed)(x);
 }
 
 void encodeLog60(std::vector<uint16_t>& samples,

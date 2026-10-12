@@ -279,6 +279,36 @@ void encodeLog60(
 
 // Deterministic triangular dither in output-code units. HQ preserves the
 // original per-pixel hash; the fast path uses a cheaper spatial hash.
+template <bool HighQuality>
+struct LogTriangularDitherRow {
+    uint32_t rowTerm;
+    uint32_t frameTerm;
+
+    LogTriangularDitherRow(uint32_t y, uint32_t frameSeed)
+        : rowTerm(y * (HighQuality ? 1013904223u : 0x85ebca77u)),
+          frameTerm((HighQuality ? 0xdeadbeefu : 0u) ^
+                    (frameSeed * 0x9e3779b9u)) {}
+
+    float operator()(uint32_t x) const {
+        uint32_t seed;
+        if constexpr (HighQuality) {
+            seed = (x * 1664525u + rowTerm) ^ frameTerm;
+            seed ^= seed >> 16;
+            seed *= 0x85ebca6bu;
+            seed ^= seed >> 13;
+            seed *= 0xc2b2ae35u;
+            seed ^= seed >> 16;
+        } else {
+            seed = (x * 0x9e3779b1u) ^ rowTerm ^ frameTerm;
+            seed ^= seed >> 16;
+            seed *= 0x7feb352du;
+            seed ^= seed >> 15;
+        }
+        return ((seed & 0xffffu) / 65535.0f +
+                ((seed >> 16) & 0xffffu) / 65535.0f - 1.0f) * 0.5f;
+    }
+};
+
 float logTriangularDither(uint32_t x, uint32_t y, bool highQuality,
                           uint32_t frameSeed = 0);
 
