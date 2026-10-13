@@ -30,6 +30,27 @@ inline std::vector<float> makeLog60EncodeLookup(
     return lookup;
 }
 
+// A frame worker normally uses the same curve for every frame in a clip.
+// Keep the 65,536-entry table on that worker instead of rebuilding it.
+inline const std::vector<float>& cachedLog60EncodeLookup(
+        double black, double white, uint16_t encodedWhite) {
+    struct Cache {
+        double black = 0.0;
+        double white = 0.0;
+        uint16_t encodedWhite = 0;
+        std::vector<float> lookup;
+    };
+    static thread_local Cache cache;
+    if (cache.lookup.empty() || cache.black != black || cache.white != white ||
+        cache.encodedWhite != encodedWhite) {
+        cache.lookup = makeLog60EncodeLookup(black, white, encodedWhite);
+        cache.black = black;
+        cache.white = white;
+        cache.encodedWhite = encodedWhite;
+    }
+    return cache.lookup;
+}
+
 inline float sampleLog60EncodeLookup(const std::vector<float>& lookup,
                                      float normalized) {
     const float position = std::clamp(normalized, 0.0f, 1.0f) * 65535.0f;

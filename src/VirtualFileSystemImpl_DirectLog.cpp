@@ -932,7 +932,11 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         diagnosticStage = std::chrono::steady_clock::now();
         if (!vfs::applyManualOpcodeSidecar(dngData, mManualVignetteSidecars))
             throw std::runtime_error("Could not apply DirectLog opcode sidecar");
+        // A cropped frame already carries remapped gain maps from processFrame.
+        // Reapplying the sidecar here would replace them with maps whose CFA
+        // phase bounds have been lost during crop rebasing.
         if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
+            width == mWidth && height == mHeight &&
             !vfs::applyManualVignetteSidecar(dngData, mManualVignetteSidecars))
             throw std::runtime_error("Could not apply manual DirectLog vignette sidecar");
         if (!vfs::applyManualDngMetadata(
@@ -1008,7 +1012,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     // intact. RGB maps and scalar luminance maps can then be rebased to the
     // proxy geometry without changing which color each map affects.
     std::vector<GainMap> rgbMaps;
-    if (previewScale > 1)
+    if (!outputBayer || previewScale > 1)
         rgbMaps = collapseCfaGainMapsForRgb(
             result.gainMaps.opcodeList2, directLogCfaPhase(mConfig, mCalibration));
     const bool rgbMapsSafe = std::all_of(rgbMaps.begin(), rgbMaps.end(),
@@ -1023,7 +1027,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
                 map.rowPitch == 1 && map.colPitch == 1;
         });
     const bool scaleInFfmpeg = previewScale > 1 && rgbMapsSafe && luminanceMapsSafe;
-    if (scaleInFfmpeg)
+    if (rgbMapsSafe && (!outputBayer || scaleInFfmpeg))
         result.gainMaps.opcodeList2 = std::move(rgbMaps);
     result.width = scaleInFfmpeg ? mWidth / previewScale : 0;
     result.height = scaleInFfmpeg ? mHeight / previewScale : 0;

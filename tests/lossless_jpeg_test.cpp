@@ -773,6 +773,47 @@ int main() {
 #endif
     assert(motioncam::DNGDecoder::imagePayloadsEqual(
         rgbScalarBaked, rgbScalarReference));
+    // RGB maps may cover only part of the image. Pixels outside the map
+    // must keep unit gain even with fused, dithered LOG60 packing.
+    auto rgbUnitMap = rgbScalarMaps.front();
+    rgbUnitMap.channels = 3;
+    rgbUnitMap.data.assign(static_cast<size_t>(rgbUnitMap.width) *
+                           rgbUnitMap.height * 3, 1.0f);
+    auto rgbCropMap = rgbUnitMap;
+    rgbCropMap.left = 4; rgbCropMap.top = 3;
+    rgbCropMap.right = rgbWidth - 4; rgbCropMap.bottom = rgbHeight - 3;
+    std::fill(rgbCropMap.data.begin(), rgbCropMap.data.end(), 1.5f);
+    std::vector<uint8_t> rgbUnitDng(rgbScalarDng.begin(), rgbScalarDng.end());
+    auto rgbCropDng = rgbUnitDng;
+    assert(motioncam::DNGDecoder::replaceGainMaps(rgbUnitDng, 2, {rgbUnitMap}));
+    assert(motioncam::DNGDecoder::replaceGainMaps(rgbCropDng, 2, {rgbCropMap}));
+    bool rgbUnitFused = false, rgbCropFused = false;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        rgbUnitDng, false, false, false, false, 0, std::nullopt,
+        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        &rgbUnitFused, true, 17));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        rgbCropDng, false, false, false, false, 0, std::nullopt,
+        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        &rgbCropFused, true, 17));
+    assert(rgbUnitFused && rgbCropFused);
+    motioncam::DecodedDNGImage rgbUnitDecoded, rgbCropDecoded;
+    assert(motioncam::DNGDecoder::decodeImage(rgbUnitDng, rgbUnitDecoded));
+    assert(motioncam::DNGDecoder::decodeImage(rgbCropDng, rgbCropDecoded));
+    bool cropChanged = false;
+    for (uint32_t y = 0; y < rgbHeight; ++y)
+        for (uint32_t x = 0; x < rgbWidth; ++x)
+            for (uint32_t channel = 0; channel < 3; ++channel) {
+                const size_t index = (static_cast<size_t>(y) * rgbWidth + x) * 3 + channel;
+                if (x >= rgbCropMap.left && x < rgbCropMap.right &&
+                    y >= rgbCropMap.top && y < rgbCropMap.bottom)
+                    cropChanged |= rgbUnitDecoded.samples[index] !=
+                        rgbCropDecoded.samples[index];
+                else
+                    assert(rgbUnitDecoded.samples[index] ==
+                           rgbCropDecoded.samples[index]);
+            }
+    assert(cropChanged);
     for (int variation = 0; variation < 3; ++variation) {
         auto changedMaps = scalarSpatialMaps;
         changedMaps.front().data.front() += 0.1f * (variation + 1);
