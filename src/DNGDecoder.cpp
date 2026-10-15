@@ -3,6 +3,7 @@
 #include "Utils.h"
 #include "GainMapBake.h"
 #include "RawLogTransform.h"
+#include "VulkanGainBake.h"
 #include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
@@ -926,16 +927,17 @@ namespace {
     bool replaceTiffStrip(std::vector<uint8_t>& data, uint32_t stripOffset,
                           uint32_t stripBytes, const std::vector<uint8_t>& replacement,
                           bool little, std::vector<uint8_t>* preparedOutput = nullptr,
-                          size_t preparedStripBytes = 0) {
+                          size_t preparedStripBytes = 0,
+                          bool stripAlreadyReplaced = false) {
         const size_t oldEnd = static_cast<size_t>(stripOffset) + stripBytes;
         if (stripOffset > data.size() || oldEnd > data.size()) return false;
-        const size_t replacementBytes = preparedOutput
+        const size_t replacementBytes = preparedOutput || stripAlreadyReplaced
             ? preparedStripBytes : replacement.size();
         if (preparedOutput &&
             preparedOutput->size() != data.size() - stripBytes + replacementBytes)
             return false;
         if (replacementBytes == stripBytes && !preparedOutput) {
-            if (stripBytes)
+            if (stripBytes && !stripAlreadyReplaced)
                 std::memcpy(data.data() + stripOffset, replacement.data(), stripBytes);
             return true;
         }
@@ -1010,7 +1012,7 @@ namespace {
             // The packed strip is shorter. Keep the existing allocation and
             // move only the metadata following the strip; the pointer patches
             // below use the same offset delta as the rebuilding path.
-            if (replacementBytes)
+            if (replacementBytes && !stripAlreadyReplaced)
                 std::memcpy(data.data() + stripOffset,
                             replacement.data(), replacementBytes);
             const size_t tailBytes = data.size() - oldEnd;
@@ -4368,6 +4370,24 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
             const auto* source = data.data() + offset;
             for (size_t i = 0; i < imageSamples; ++i)
                 destination[i] = source[i];
+        } else if (bits == 12) {
+            for (uint32_t y = 0; y < height; ++y) {
+                const auto* source = data.data() + offset + y * rowBytes;
+                auto* row = destination + static_cast<size_t>(y) * rowSamples;
+                const uint64_t pairs = rowSamples / 2;
+                for (uint64_t x = 0; x < pairs; ++x) {
+                    const auto* packed = source + x * 3;
+                    row[x * 2] = static_cast<uint16_t>(
+                        (static_cast<uint16_t>(packed[0]) << 4) | (packed[1] >> 4));
+                    row[x * 2 + 1] = static_cast<uint16_t>(
+                        ((packed[1] & 15u) << 8) | packed[2]);
+                }
+                if (rowSamples & 1u) {
+                    const auto* packed = source + pairs * 3;
+                    row[rowSamples - 1] = static_cast<uint16_t>(
+                        (static_cast<uint16_t>(packed[0]) << 4) | (packed[1] >> 4));
+                }
+            }
         } else {
             const uint32_t mask = (1u << bits) - 1;
             for (uint32_t y = 0; y < height; ++y) {
@@ -6857,7 +6877,9 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool logHighQuality,
                               bool* logFused,
                               bool packFusedLog,
-                              uint32_t ditherSeed) {
+                              uint32_t ditherSeed,
+                              bool preferVulkan,
+                              const VulkanGainBakeTextureSource* textureSource) {
     if (logFused) *logFused = false;
     const char* cpuOptSetting = std::getenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
     const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
@@ -7054,10 +7076,20 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         for (uint32_t i = 1; i < bitsE->count; ++i)
             if (scalar(*bitsE, i) != 16) inPlace = false;
     }
+    const bool deferLinearization = preferVulkan && !inPlace && linearizationE;
+    std::vector<uint16_t> sourceLinearization;
+    if (deferLinearization) {
+        sourceLinearization.resize(linearizationE->count);
+        for (uint32_t index = 0; index < linearizationE->count; ++index)
+            sourceLinearization[index] = read16(data.data() +
+                linearizationE->valueOffset + static_cast<size_t>(index) * 2u,
+                little);
+    }
     const bool fuseLog = inPlace && logFused && !debugGainMap &&
         fusedLogMode != LogTransformMode::Disabled;
     if (!inPlace) {
-        if (!decodeImageBorrowed(data, decodedImage)) {
+        if (!decodeImageBorrowed(data, decodedImage, false,
+                                 !deferLinearization)) {
             spdlog::warn("Could not decode DNG image for gain-map bake");
             return false;
         }
@@ -7070,9 +7102,6 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const auto decodedAt = std::chrono::steady_clock::now();
     auto* stripPixels = inPlace ? data.data() + stripOffset : nullptr;
     auto* pixels = decodedImage.samples.data();
-    if (decodedImage.linearizationApplied && linearizationE)
-        write16(data.data() + linearizationE->entryOffset,
-                TIFF_TAG_UNUSED_LINEARIZATION_TABLE, little);
 
     const uint32_t phaseGroup = static_cast<uint32_t>(cfaRepeatSize / 2);
     // DNG writers use either one four-plane GainMap or complete groups of four
@@ -7230,8 +7259,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const size_t packedBytes = packedRowBytes * height;
     if (packDuringBake && packedBytes > std::numeric_limits<uint32_t>::max())
         return false;
+    const bool directGpuStrip = textureSource && inPlace;
+    const bool directGpuPacked = directGpuStrip && packDuringBake;
     std::vector<uint8_t> packedOutput;
-    if (packDuringBake)
+    if (packDuringBake && !directGpuPacked)
         packedOutput.resize(data.size() - stripBytes + packedBytes, 0);
     auto gainAt = [&](uint32_t x, uint32_t y, uint32_t channel) {
         float gain = 1.0f;
@@ -7292,7 +7323,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     std::shared_ptr<const std::vector<float>> cachedCfaGains;
     bool gainFieldCacheHit = false;
     bool gainFieldWarmup = false;
-    if (cpuOpt && (directCfaMaps || directScalarMap) &&
+    if (cpuOpt && !(preferVulkan && inPlace) &&
+        (directCfaMaps || directScalarMap) &&
         static_cast<uint64_t>(width) * height <= 16u * 1024u * 1024u) {
         static std::mutex gainFieldMutex;
         static std::deque<std::pair<std::string,
@@ -7513,6 +7545,138 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             }
         }
     };
+    // Map normalization, color separation, and metadata remain shared with
+    // the CPU bake. The Vulkan worker samples the prepared map, generates
+    // triangular dither, and writes packed output codes. CPU-backed sources
+    // use separate output storage. A failed texture-backed bake re-decodes its
+    // source in software before the CPU fallback runs.
+    bool gpuBaked = false;
+    bool gpuAttempted = false;
+    const bool gpuCfaFour = !sourceIsRgb && phaseGroup == 1 &&
+        directCfaMaps && maps.size() == 4;
+    const bool gpuCfaScalar = !sourceIsRgb && phaseGroup == 1 &&
+        maps.size() == 1 && maps.front().channels == 1 &&
+        maps.front().rowPitch == 1 && maps.front().colPitch == 1 &&
+        axes.front().valid && (!colorOnly || gridColorSeparated);
+    const bool gpuCfaFourPlane = !sourceIsRgb && phaseGroup == 1 &&
+        maps.size() == 1 && maps.front().channels == 4 &&
+        axes.front().valid && (!colorOnly || gridColorSeparated);
+    const bool gpuRgb = sourceIsRgb && imageChannels == 3 &&
+        (directRgbMap || directRgbScalarMap) && maps.size() == 1;
+    const bool gpuGeneric = phaseGroup == 1 && !maps.empty() &&
+        maps.size() <= 32 &&
+        std::all_of(maps.begin(), maps.end(), [&](const GainMap& map) {
+            const size_t index = static_cast<size_t>(&map - maps.data());
+            return validGainMap(map) && axes[index].valid &&
+                (map.channels == 1 || map.channels == 3 || map.channels == 4);
+        });
+    const bool gpuFast = gpuRgb || gpuCfaFour || gpuCfaScalar || gpuCfaFourPlane;
+    if (preferVulkan && (gpuFast || gpuGeneric) &&
+        (!colorOnly || gridColorSeparated)) {
+        gpuAttempted = true;
+        const GainMap& map = maps.front();
+        VulkanGainBakeParams gpuParams;
+        for (uint32_t channel = 0; channel < levelChannels; ++channel) {
+            gpuParams.black[channel] = static_cast<float>(black[channel]);
+            gpuParams.destinationBlack[channel] =
+                static_cast<float>(destinationBlack[channel]);
+            gpuParams.scale[channel] = static_cast<float>(bakeScale[channel]);
+        }
+        gpuParams.width = width;
+        gpuParams.height = height;
+        gpuParams.channels = imageChannels;
+        gpuParams.sourceNominalWhite = deferLinearization
+            ? static_cast<uint32_t>(sourceLinearization.size() - 1u)
+            : static_cast<uint32_t>(planningWhite);
+        if (deferLinearization)
+            gpuParams.linearization = &sourceLinearization;
+        gpuParams.outputBits = packedBits;
+        gpuParams.destinationWhite = static_cast<float>(destinationWhite);
+        gpuParams.encodedWhite = encodedWhite;
+        gpuParams.ditherSeed = ditherSeed;
+        gpuParams.textureSource = textureSource;
+        gpuParams.log60 = fuseLog;
+        gpuParams.logHighQuality = logHighQuality;
+        gpuParams.debugGain = debugGainMap;
+        auto gpuMap = [&](size_t index) {
+            const auto& selected = maps[index];
+            return VulkanRgbGainMap{selected.width, selected.height,
+                selected.channels, selected.left, selected.top,
+                selected.right, selected.bottom,
+                selected.rowPitch, selected.colPitch,
+                static_cast<float>(effectiveOrigins[index].first),
+                static_cast<float>(effectiveOrigins[index].second),
+                static_cast<float>(selected.spacingH),
+                static_cast<float>(selected.spacingV), &selected.data};
+        };
+        gpuParams.map = gpuMap(0);
+        if (!gpuFast) {
+            gpuParams.maps.reserve(maps.size());
+            for (size_t index = 0; index < maps.size(); ++index)
+                gpuParams.maps.push_back(gpuMap(index));
+            gpuParams.cfaPhase = cfaPhase;
+        } else if (!gpuRgb) {
+            gpuParams.cfaMapCount = gpuCfaFour ? 4 : 1;
+            for (uint32_t phase = 0; phase < gpuParams.cfaMapCount; ++phase)
+                gpuParams.cfaMaps[phase] = gpuMap(gpuCfaFour
+                    ? (*directCfaIndices)[phase] : 0);
+        }
+        // An in-place texture-backed source remains available if the GPU read
+        // fails, so its result can land directly in the DNG strip.
+        // CPU sources still need a separate destination for fallback.
+        std::vector<uint8_t> gpuBytes;
+        const size_t expectedBytes = packDuringBake ? packedBytes :
+            sampleCount * sizeof(uint16_t);
+        if (!packDuringBake && !directGpuStrip) gpuBytes.resize(expectedBytes);
+        uint8_t* gpuDestination = packDuringBake
+            ? directGpuPacked ? data.data() + stripOffset
+                              : packedOutput.data() + stripOffset
+            : directGpuStrip ? stripPixels : gpuBytes.data();
+        gpuBaked = sourceIsRgb
+            ? bakeRgbGainVulkan(inPlace
+                                ? reinterpret_cast<const uint16_t*>(stripPixels)
+                                : pixels,
+                                gpuParams, gpuDestination, expectedBytes)
+            : bakeCfaGainVulkan(inPlace
+                                ? reinterpret_cast<const uint16_t*>(stripPixels)
+                                : pixels,
+                                gpuParams, gpuDestination, expectedBytes);
+        if (!gpuBaked) {
+            static thread_local bool warned = false;
+            if (!warned) {
+                spdlog::warn("Vulkan gain bake failed; using CPU fallback");
+                warned = true;
+            }
+        }
+        if (gpuBaked) {
+            if (!packDuringBake && !directGpuStrip)
+                std::memcpy(inPlace ? static_cast<void*>(stripPixels)
+                                    : static_cast<void*>(pixels),
+                            gpuBytes.data(), gpuBytes.size());
+        }
+        if (profileBake)
+            spdlog::info("GALLERY_PERF event=gain_bake_vulkan used={} width={} height={} channels={} output_bits={}",
+                gpuBaked, width, height, imageChannels, packedBits);
+    }
+    if (textureSource && !gpuBaked) {
+        uint16_t* destination = inPlace
+            ? reinterpret_cast<uint16_t*>(stripPixels) : pixels;
+        const bool recovered = gpuAttempted && textureSource->recoverCpu
+            ? textureSource->recoverCpu(destination, sampleCount)
+            : textureSource->download &&
+              textureSource->download(destination, sampleCount);
+        if (!recovered) {
+            spdlog::warn("Could not recover DirectLog image for CPU gain-bake fallback");
+            return false;
+        }
+    }
+    if (directGpuPacked && !gpuBaked)
+        packedOutput.resize(data.size() - stripBytes + packedBytes, 0);
+    if (deferLinearization && !gpuBaked) {
+        if (sourceLinearization.size() < 65536u)
+            sourceLinearization.resize(65536u, sourceLinearization.back());
+        applyLinearizationTable(pixels, sampleCount, sourceLinearization);
+    }
     // Divide the CPU budget among simultaneous frame bakes. The previous
     // per-frame cap of eight could launch dozens of competing workers during
     // mounted read-ahead, increasing latency for every frame.
@@ -7558,28 +7722,30 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             runBake(outputMode, std::integral_constant<BakeTransformMode,
                 BakeTransformMode::Log60Fast>{});
     };
-    if (packDuringBake && packedBits == 8)
-        runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::Packed8>{});
-    else if (packDuringBake)
-        runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::PackedBits>{});
-    else if (inPlace) {
-        using Output = std::integral_constant<BakeOutputMode, BakeOutputMode::InPlace16>;
-        if (fuseLog)
-            runLogBake(Output{});
-        else if (debugGainMap)
-            runBake(Output{}, std::integral_constant<BakeTransformMode,
-                BakeTransformMode::DebugGain>{});
-        else
-            runBake(Output{}, std::integral_constant<BakeTransformMode,
-                BakeTransformMode::Linear>{});
-    } else {
-        using Output = std::integral_constant<BakeOutputMode, BakeOutputMode::Decoded16>;
-        if (debugGainMap)
-            runBake(Output{}, std::integral_constant<BakeTransformMode,
-                BakeTransformMode::DebugGain>{});
-        else
-            runBake(Output{}, std::integral_constant<BakeTransformMode,
-                BakeTransformMode::Linear>{});
+    if (!gpuBaked) {
+        if (packDuringBake && packedBits == 8)
+            runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::Packed8>{});
+        else if (packDuringBake)
+            runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::PackedBits>{});
+        else if (inPlace) {
+            using Output = std::integral_constant<BakeOutputMode, BakeOutputMode::InPlace16>;
+            if (fuseLog)
+                runLogBake(Output{});
+            else if (debugGainMap)
+                runBake(Output{}, std::integral_constant<BakeTransformMode,
+                    BakeTransformMode::DebugGain>{});
+            else
+                runBake(Output{}, std::integral_constant<BakeTransformMode,
+                    BakeTransformMode::Linear>{});
+        } else {
+            using Output = std::integral_constant<BakeOutputMode, BakeOutputMode::Decoded16>;
+            if (debugGainMap)
+                runBake(Output{}, std::integral_constant<BakeTransformMode,
+                    BakeTransformMode::DebugGain>{});
+            else
+                runBake(Output{}, std::integral_constant<BakeTransformMode,
+                    BakeTransformMode::Linear>{});
+        }
     }
     activeBakeGuard.release();
     const auto bakedAt = std::chrono::steady_clock::now();
@@ -7650,7 +7816,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         !updateMetadata(data, &*updatedBaseline,
                         updatedNeutral ? &*updatedNeutral : nullptr))
         return false;
-    if (packDuringBake)
+    if (packDuringBake && (!directGpuPacked || !gpuBaked))
         packedOutput.resize(data.size() - stripBytes + packedBytes);
     std::vector<uint8_t> preparedOutput;
     if (!inPlace) {
@@ -7661,11 +7827,26 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         writeSampleBytes(destination, pixels, sampleCount, little);
     }
     const bool replaced = packDuringBake
-        ? replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
-                           &packedOutput, packedBytes)
+        ? gpuBaked && directGpuPacked
+            ? replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
+                               nullptr, packedBytes, true)
+            : replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
+                               &packedOutput, packedBytes)
         : inPlace || newBytes == stripBytes ||
             replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
                              &preparedOutput, newBytes);
+    if (replaced && linearizationE &&
+        (decodedImage.linearizationApplied || deferLinearization)) {
+        // Strip replacement can relocate the IFD. Find the entry in the final
+        // DNG so a later decoder does not apply the table a second time.
+        bool updatedLittle = true;
+        for (const auto& entry : findTiffEntries(data, updatedLittle)) {
+            if (entry.tag == TIFF_TAG_LINEARIZATION_TABLE) {
+                write16(data.data() + entry.entryOffset,
+                        TIFF_TAG_UNUSED_LINEARIZATION_TABLE, updatedLittle);
+            }
+        }
+    }
     if (profileBake)
         spdlog::info("GALLERY_PERF event=gain_bake_stage width={} height={} channels={} maps={} color_only={} grid_separated={} in_place={} fused_log={} gain_field_cache={} workers={} concurrent_bakes={} map_prepare_ms={:.3f} decode_ms={:.3f} pixel_ms={:.3f} serialize_ms={:.3f} metadata_ms={:.3f}",
                      width, height, imageChannels, maps.size(), colorOnly,
@@ -7700,7 +7881,8 @@ bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGai
     if (!parseOpcodeGainMaps(data.data() + opcode->valueOffset, opcode->count, maps))
         return false;
     for (const auto& map : maps)
-        if (map.channels != 1 && map.channels != 4) return false;
+        if (map.channels != 1 && map.channels != 3 && map.channels != 4)
+            return false;
 
     // Keep the complete opcode list intact. parseOpcodeGainMaps deliberately
     // returns only GainMap opcodes, so remember the payload offsets separately

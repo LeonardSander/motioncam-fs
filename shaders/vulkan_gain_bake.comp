@@ -1,0 +1,209 @@
+#version 450
+layout(local_size_x = 256) in;
+#ifdef SOURCE_TEXTURE
+layout(binding = 0) uniform sampler2D sourceImage;
+#else
+layout(std430, binding = 0) readonly buffer Source { uint samples[]; } src;
+#endif
+#ifdef MULTI_MAP
+layout(std430, binding = 1) readonly buffer GainMaps {
+    uvec4 bounds[32];
+    vec4 axes[32];
+    uvec4 shape[32];
+    uvec4 pitch[32];
+    float gains[];
+} gainMaps;
+#else
+layout(std430, binding = 1) readonly buffer GainMap {
+    uvec4 bounds;
+    vec4 axes;
+    float gains[];
+} gainMap;
+#endif
+layout(std430, binding = 2) writeonly buffer Destination { uint words[]; } dst;
+layout(std430, binding = 3) readonly buffer Linearization { uint values[]; } linearization;
+layout(push_constant) uniform Constants {
+    vec4 black;
+    vec4 destinationBlack;
+    vec4 scale;
+    uvec4 dimensions; // width, height, channels, output bits
+    uvec4 mapShape; // width, height, channels, source bits
+    float destinationWhite;
+    uint encodedWhite;
+    uint ditherSeed;
+    uint flags; // log, HQ dither, debug gain
+    uint rowBytes;
+    uint wordsPerRow;
+} p;
+
+// @GAIN_MULTI@
+#ifndef MULTI_MAP
+float mapValue(uint x, uint y, uint channel) {
+    uint index = (y * p.mapShape.x + x) * p.mapShape.z +
+                 (p.mapShape.z == 1u ? 0u : channel);
+    return gainMap.gains[index];
+}
+float gainAt(uint x, uint y, uint channel) {
+    if (x < gainMap.bounds.x || y < gainMap.bounds.y ||
+        x >= gainMap.bounds.z || y >= gainMap.bounds.w) return 1.0;
+    vec2 normalized = (vec2(x, y) + vec2(0.5)) / vec2(p.dimensions.xy);
+    vec2 grid = (normalized - gainMap.axes.xy) / gainMap.axes.zw;
+    vec2 base = floor(grid);
+    vec2 t = clamp(grid - base, 0.0, 1.0);
+    uvec2 a = uvec2(clamp(base, vec2(0), vec2(p.mapShape.xy - uvec2(1))));
+    uvec2 b = min(a + uvec2(1), p.mapShape.xy - uvec2(1));
+    float upper = mix(mapValue(a.x, a.y, channel),
+                      mapValue(b.x, a.y, channel), t.x);
+    float lower = mix(mapValue(a.x, b.y, channel),
+                      mapValue(b.x, b.y, channel), t.x);
+    float gain = mix(upper, lower, t.y);
+    return !isnan(gain) && !isinf(gain) && gain > 0.0 ? gain : 1.0;
+}
+vec3 mapRgb(uint x, uint y) {
+    uint index = (y * p.mapShape.x + x) * p.mapShape.z;
+    if (p.mapShape.z == 1u) return vec3(gainMap.gains[index]);
+    return vec3(gainMap.gains[index], gainMap.gains[index + 1u],
+                gainMap.gains[index + 2u]);
+}
+vec3 gainRgb(uint x, uint y) {
+    if (x < gainMap.bounds.x || y < gainMap.bounds.y ||
+        x >= gainMap.bounds.z || y >= gainMap.bounds.w) return vec3(1.0);
+    vec2 normalized = (vec2(x, y) + vec2(0.5)) / vec2(p.dimensions.xy);
+    vec2 grid = (normalized - gainMap.axes.xy) / gainMap.axes.zw;
+    vec2 base = floor(grid);
+    vec2 t = clamp(grid - base, 0.0, 1.0);
+    uvec2 a = uvec2(clamp(base, vec2(0), vec2(p.mapShape.xy - uvec2(1))));
+    uvec2 b = min(a + uvec2(1), p.mapShape.xy - uvec2(1));
+    vec3 gain = mix(mix(mapRgb(a.x, a.y), mapRgb(b.x, a.y), t.x),
+                    mix(mapRgb(a.x, b.y), mapRgb(b.x, b.y), t.x), t.y);
+    return vec3(!isnan(gain.x) && !isinf(gain.x) && gain.x > 0.0 ? gain.x : 1.0,
+                !isnan(gain.y) && !isinf(gain.y) && gain.y > 0.0 ? gain.y : 1.0,
+                !isnan(gain.z) && !isinf(gain.z) && gain.z > 0.0 ? gain.z : 1.0);
+}
+#else
+float gainAt(uint x, uint y, uint channel) {
+    return multiGainAt(x, y, channel, true);
+}
+vec3 gainRgb(uint x, uint y) {
+    return vec3(multiGainAt(x, y, 0u, true),
+                multiGainAt(x, y, 1u, true),
+                multiGainAt(x, y, 2u, true));
+}
+#endif
+// @GAIN_COMMON@
+uint inputSample(uint index) {
+#ifdef SOURCE_TEXTURE
+    uint pixel = index / p.dimensions.z;
+    uint channel = index % p.dimensions.z;
+    ivec2 xy = ivec2(int(pixel % p.dimensions.x), int(pixel / p.dimensions.x));
+    return uint(floor(clamp(texelFetch(sourceImage, xy, 0)[channel], 0.0, 1.0) *
+                      65535.0 + 0.5));
+#else
+    return packedInputSample(index);
+#endif
+}
+uint codeAt(uint y, uint rowSample) {
+    uint channel = rowSample % 3u;
+    uint x = rowSample / 3u;
+    uint index = y * (p.dimensions.x * 3u) + rowSample;
+    uint inputCode = inputSample(index);
+    float gain = gainAt(x, y, channel);
+    float value;
+    if ((p.flags & 4u) != 0u) {
+        value = gain > 0.0 ? p.destinationWhite / gain : 0.0;
+    } else {
+        value = p.destinationBlack[channel] +
+                gain * (float(inputCode) - p.black[channel]) * p.scale[channel];
+        if ((p.flags & 1u) != 0u) {
+            float linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
+            float normalized = clamp((linear - p.destinationBlack.x) /
+                max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
+            value = log2(1.0 + 60.0 * normalized) / log2(61.0) *
+                    float(p.encodedWhite) + ditherAt(x, y);
+        }
+    }
+    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;
+    return uint(floor(clamp(value, 0.0, maximum) + 0.5));
+}
+float sourceCode(uint index) {
+    return float(inputSample(index));
+}
+uvec3 pixelCodes(uint x, uint y) {
+    uint index = (y * p.dimensions.x + x) * 3u;
+    vec3 gain = gainRgb(x, y);
+    vec3 value;
+    if ((p.flags & 4u) != 0u) {
+        value = p.destinationWhite / gain;
+    } else {
+#ifdef SOURCE_TEXTURE
+        vec3 inputCode = floor(clamp(
+            texelFetch(sourceImage, ivec2(int(x), int(y)), 0).rgb,
+            vec3(0.0), vec3(1.0)) * 65535.0 + 0.5);
+#else
+        vec3 inputCode = vec3(sourceCode(index), sourceCode(index + 1u),
+                              sourceCode(index + 2u));
+#endif
+        value = p.destinationBlack.xyz + gain * (inputCode - p.black.xyz) *
+                p.scale.xyz;
+        if ((p.flags & 1u) != 0u) {
+            vec3 linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
+            vec3 normalized = clamp((linear - p.destinationBlack.x) /
+                max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
+            value = log2(vec3(1.0) + 60.0 * normalized) / log2(61.0) *
+                    float(p.encodedWhite) + ditherAt(x, y);
+        }
+    }
+    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;
+    return uvec3(floor(clamp(value, 0.0, maximum) + 0.5));
+}
+void main() {
+    uint wordInRow = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (y >= p.dimensions.y) return;
+    if (p.dimensions.w == 8u && (p.dimensions.x & 3u) == 0u) {
+        if (wordInRow >= p.dimensions.x / 4u) return;
+        uint x = wordInRow * 4u;
+        uvec3 a = pixelCodes(x, y), b = pixelCodes(x + 1u, y);
+        uvec3 c = pixelCodes(x + 2u, y), d = pixelCodes(x + 3u, y);
+        uint offset = y * p.wordsPerRow + wordInRow * 3u;
+        dst.words[offset] = a.x | (a.y << 8) | (a.z << 16) | (b.x << 24);
+        dst.words[offset + 1u] = b.y | (b.z << 8) | (c.x << 16) | (c.y << 24);
+        dst.words[offset + 2u] = c.z | (d.x << 8) | (d.y << 16) | (d.z << 24);
+        return;
+    }
+    if (p.dimensions.w == 16u && (p.dimensions.x & 1u) == 0u) {
+        if (wordInRow >= p.dimensions.x / 2u) return;
+        uint x = wordInRow * 2u;
+        uvec3 a = pixelCodes(x, y), b = pixelCodes(x + 1u, y);
+        uint offset = y * p.wordsPerRow + wordInRow * 3u;
+        dst.words[offset] = a.x | (a.y << 16);
+        dst.words[offset + 1u] = a.z | (b.x << 16);
+        dst.words[offset + 2u] = b.y | (b.z << 16);
+        return;
+    }
+    if (wordInRow >= p.wordsPerRow) return;
+    uint wordIndex = y * p.wordsPerRow + wordInRow;
+    uint rowSamples = p.dimensions.x * 3u;
+    if (p.dimensions.w == 16u) {
+        uint first = wordInRow * 2u;
+        uint a = first < rowSamples ? codeAt(y, first) : 0u;
+        uint b = first + 1u < rowSamples ? codeAt(y, first + 1u) : 0u;
+        dst.words[wordIndex] = a | (b << 16);
+        return;
+    }
+    uint bitStart = wordInRow * 32u;
+    uint first = bitStart / p.dimensions.w;
+    uint last = min(rowSamples, (bitStart + 31u) / p.dimensions.w + 1u);
+    uint packed = 0u;
+    for (uint sampleIndex = first; sampleIndex < last; ++sampleIndex) {
+        uint code = codeAt(y, sampleIndex);
+        uint sampleBitStart = sampleIndex * p.dimensions.w;
+        int shift = int(32u - p.dimensions.w) -
+                    int(sampleBitStart - bitStart);
+        if (shift >= 0)
+            packed |= code << uint(shift);
+        else
+            packed |= code >> uint(-shift);
+    }
+    dst.words[wordIndex] = swapWordBytes(packed);
+}

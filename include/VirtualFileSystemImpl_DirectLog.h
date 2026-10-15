@@ -84,10 +84,12 @@ private:
         int width = 0;
         int height = 0;
         bool bayer = false;
+        bool gpuPending = false;
     };
     ProcessedFrame processFrame(const Entry& entry, int previewScale = 1,
                                 bool prepopulateDng = false,
-                                bool outputBayer = false);
+                                bool outputBayer = false,
+                                bool deferGpuDownload = false);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
@@ -108,6 +110,7 @@ private:
     std::string mPixelFormat;
     bool mIsHLG;
     std::unique_ptr<DirectLogDecoder> mDecoder;
+    std::mutex mGpuFrameMutex;
     std::shared_ptr<std::vector<uint8_t>> mAudioWav;
     std::optional<CalibrationData> mCalibration;
     std::optional<GyroflowLensProfile> mGyroflowLensProfile;

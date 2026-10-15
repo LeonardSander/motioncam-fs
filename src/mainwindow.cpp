@@ -834,6 +834,7 @@ namespace {
 
     motioncam::RenderSettings thumbnailRenderSettings(motioncam::RenderSettings settings) {
         settings = previewRenderSettings(std::move(settings));
+        settings.thumbnailPreview = true;
         // Card images are only 176x112. Run the same preprocessing pipeline on
         // a small proxy so full-resolution CFA demosaic and display conversion
         // do not dominate mount/settings updates. HQ proxy demosaic is useful

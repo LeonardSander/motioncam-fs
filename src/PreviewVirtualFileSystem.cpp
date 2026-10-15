@@ -28,7 +28,8 @@ bool sameSettings(const RenderSettings& a, const RenderSettings& b) {
            a.cfaPhase == b.cfaPhase &&
            a.jxlDistance == b.jxlDistance &&
            a.cameraNativeStaging == b.cameraNativeStaging &&
-           a.streamingPreview == b.streamingPreview;
+           a.streamingPreview == b.streamingPreview &&
+           a.thumbnailPreview == b.thumbnailPreview;
 }
 
 bool galleryDiagnosticsEnabled() {

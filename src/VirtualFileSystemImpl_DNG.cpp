@@ -4,6 +4,7 @@
 #include "CalibrationData.h"
 #include "DataLevels.h"
 #include "GainMapBake.h"
+#include "VulkanGainBake.h"
 #include "Utils.h"
 #include "LRUCache.h"
 #include "Types.h"
@@ -106,6 +107,8 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mWidth(0),
         mHeight(0),
         mConfig(config) {
+    if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        warmVulkanGainBake();
     
     // Load calibration JSON if it exists (for DNG folder)
     const auto& calibPath = mSidecarPath;
@@ -1029,6 +1032,8 @@ bool VirtualFileSystemImpl_DNG::sourceImagePayloadsEqual(const Entry& left,
 }
 
 void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
+    if (config.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        warmVulkanGainBake();
     std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);
 

@@ -1,0 +1,129 @@
+#version 450
+layout(local_size_x = 256) in;
+#ifdef SOURCE_TEXTURE
+layout(binding = 0) uniform sampler2D sourceImage;
+#else
+layout(std430, binding = 0) readonly buffer Source { uint samples[]; } src;
+#endif
+#ifdef MULTI_MAP
+layout(std430, binding = 1) readonly buffer GainMaps {
+    uvec4 bounds[32];
+    vec4 axes[32];
+    uvec4 shape[32];
+    uvec4 pitch[32];
+    float gains[];
+} gainMaps;
+#else
+layout(std430, binding = 1) readonly buffer GainMaps {
+    uvec4 bounds[4];
+    vec4 axes[4];
+    float gains[];
+} gainMaps;
+#endif
+layout(std430, binding = 2) writeonly buffer Destination { uint words[]; } dst;
+layout(std430, binding = 3) readonly buffer Linearization { uint values[]; } linearization;
+layout(push_constant) uniform Constants {
+    vec4 black;
+    vec4 destinationBlack;
+    vec4 scale;
+    uvec4 dimensions;
+    uvec4 mapShape; // grid width, grid height, map count, source bits
+    float destinationWhite;
+    uint encodedWhite;
+    uint ditherSeed;
+    uint flags;
+    uint rowBytes;
+    uint wordsPerRow;
+} p;
+// @GAIN_MULTI@
+#ifndef MULTI_MAP
+float gainAt(uint x, uint y) {
+    uint phase = ((y & 1u) << 1u) | (x & 1u);
+    uint index = p.mapShape.z == 4u ? phase : 0u;
+    bool fourPlane = (p.flags & 8u) != 0u;
+    uvec4 bounds = gainMaps.bounds[index];
+    if (x < bounds.x || y < bounds.y || x >= bounds.z || y >= bounds.w)
+        return 1.0;
+    vec4 axes = gainMaps.axes[index];
+    vec2 normalized = (vec2(x, y) + vec2(0.5)) / vec2(p.dimensions.xy);
+    vec2 grid = (normalized - axes.xy) / axes.zw;
+    vec2 base = floor(grid);
+    vec2 t = clamp(grid - base, 0.0, 1.0);
+    uvec2 a = uvec2(clamp(base, vec2(0), vec2(p.mapShape.xy - uvec2(1))));
+    uvec2 b = min(a + uvec2(1), p.mapShape.xy - uvec2(1));
+    uint offset = fourPlane ? phase : index * p.mapShape.x * p.mapShape.y;
+    uint stride = fourPlane ? 4u : 1u;
+    float upper = mix(gainMaps.gains[offset + (a.y * p.mapShape.x + a.x) * stride],
+                      gainMaps.gains[offset + (a.y * p.mapShape.x + b.x) * stride], t.x);
+    float lower = mix(gainMaps.gains[offset + (b.y * p.mapShape.x + a.x) * stride],
+                      gainMaps.gains[offset + (b.y * p.mapShape.x + b.x) * stride], t.x);
+    float gain = mix(upper, lower, t.y);
+    return !isnan(gain) && !isinf(gain) && gain > 0.0 ? gain : 1.0;
+}
+#else
+float gainAt(uint x, uint y) {
+    uint phase = ((y & 1u) << 1u) | (x & 1u);
+    return multiGainAt(x, y, phase, false);
+}
+#endif
+// @GAIN_COMMON@
+uint inputSample(uint index) {
+#ifdef SOURCE_TEXTURE
+    ivec2 xy = ivec2(int(index % p.dimensions.x), int(index / p.dimensions.x));
+    return uint(floor(clamp(texelFetch(sourceImage, xy, 0).r, 0.0, 1.0) *
+                      65535.0 + 0.5));
+#else
+    return packedInputSample(index);
+#endif
+}
+uint codeAt(uint y, uint x) {
+    uint index = y * p.dimensions.x + x;
+    uint inputCode = inputSample(index);
+    uint phase = ((y & 1u) << 1u) | (x & 1u);
+    float gain = gainAt(x, y);
+    float value;
+    if ((p.flags & 4u) != 0u) {
+        value = gain > 0.0 ? p.destinationWhite / gain : 0.0;
+    } else {
+        value = p.destinationBlack[phase] +
+                gain * (float(inputCode) - p.black[phase]) * p.scale[phase];
+        if ((p.flags & 1u) != 0u) {
+            float linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
+            float normalized = clamp((linear - p.destinationBlack.x) /
+                max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
+            value = log2(1.0 + 60.0 * normalized) / log2(61.0) *
+                    float(p.encodedWhite) + ditherAt(x, y);
+        }
+    }
+    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;
+    return uint(floor(clamp(value, 0.0, maximum) + 0.5));
+}
+void main() {
+    uint wordInRow = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (y >= p.dimensions.y || wordInRow >= p.wordsPerRow) return;
+    uint rowSamples = p.dimensions.x;
+    uint wordIndex = y * p.wordsPerRow + wordInRow;
+    if (p.dimensions.w == 16u) {
+        uint first = wordInRow * 2u;
+        uint a = first < rowSamples ? codeAt(y, first) : 0u;
+        uint b = first + 1u < rowSamples ? codeAt(y, first + 1u) : 0u;
+        dst.words[wordIndex] = a | (b << 16);
+        return;
+    }
+    uint bitStart = wordInRow * 32u;
+    uint first = bitStart / p.dimensions.w;
+    uint last = min(rowSamples, (bitStart + 31u) / p.dimensions.w + 1u);
+    uint packed = 0u;
+    for (uint sampleIndex = first; sampleIndex < last; ++sampleIndex) {
+        uint code = codeAt(y, sampleIndex);
+        uint sampleBitStart = sampleIndex * p.dimensions.w;
+        int shift = int(32u - p.dimensions.w) -
+                    int(sampleBitStart - bitStart);
+        if (shift >= 0)
+            packed |= code << uint(shift);
+        else
+            packed |= code >> uint(-shift);
+    }
+    dst.words[wordIndex] = swapWordBytes(packed);
+}

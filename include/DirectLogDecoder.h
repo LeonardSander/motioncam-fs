@@ -66,13 +66,34 @@ public:
                       int outputWidth = 0, int outputHeight = 0,
                       bool preserveLogEncoded = false,
                       bool smoothChroma = true);
+    bool extractFrameDeferred(int frameNumber, std::vector<uint16_t>& rgbData,
+                              int outputWidth, int outputHeight,
+                              bool smoothChroma);
     bool extractFrameBayer(int frameNumber, std::vector<uint16_t>& bayerData,
-                           const std::array<uint8_t, 4>& cfaPhase);
+                           const std::array<uint8_t, 4>& cfaPhase,
+                           int outputWidth = 0, int outputHeight = 0);
+    bool extractFrameBayerDeferred(int frameNumber, std::vector<uint16_t>& bayerData,
+                                   const std::array<uint8_t, 4>& cfaPhase,
+                                   int outputWidth = 0, int outputHeight = 0);
+    bool extractFrameBayerIntoBytes(int frameNumber, std::vector<uint8_t>& bytes,
+                                   size_t pixelOffset,
+                                   const std::array<uint8_t, 4>& cfaPhase,
+                                   int outputWidth, int outputHeight,
+                                   bool deferDownload);
     bool extractFrameIntoBytes(int frameNumber, std::vector<uint8_t>& bytes,
                                size_t pixelOffset, int outputWidth = 0,
                                int outputHeight = 0,
                                bool preserveLogEncoded = false,
                                bool smoothChroma = true);
+    bool extractFrameIntoBytesDeferred(int frameNumber,
+                               std::vector<uint8_t>& bytes, size_t pixelOffset,
+                               int outputWidth, int outputHeight,
+                               bool smoothChroma);
+    bool pendingGpuTexture(const void*& gpu, const void*& texture) const;
+    bool downloadPendingGpu(uint16_t* pixels, size_t samples);
+    bool recoverFrameInSoftware(int frameNumber, uint16_t* pixels, size_t samples,
+                                int outputWidth, int outputHeight, bool smoothChroma,
+                                const std::array<uint8_t, 4>* cfaPhase);
     void setFullRangeOverride(std::optional<bool> fullRange);
     
     static bool isHLGVideo(const std::string& filePath);
@@ -89,11 +110,13 @@ private:
     bool extractFrameInto(int frameNumber, uint16_t* rgbData, size_t sampleCount,
                           int outputWidth, int outputHeight,
                           bool preserveLogEncoded, bool smoothChroma,
-                          const std::array<uint8_t, 4>* cfaPhase = nullptr);
+                          const std::array<uint8_t, 4>* cfaPhase = nullptr,
+                          bool deferDownload = false);
     bool extractFrameIntoLocked(int frameNumber, uint16_t* rgbData, size_t sampleCount,
                                 int outputWidth, int outputHeight,
                                 bool preserveLogEncoded, bool smoothChroma,
-                                const std::array<uint8_t, 4>* cfaPhase);
+                                const std::array<uint8_t, 4>* cfaPhase,
+                                bool deferDownload);
     bool convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData, size_t sampleCount,
                          int outputWidth, int outputHeight, bool preserveLogEncoded,
                          bool smoothChroma);
@@ -106,7 +129,8 @@ private:
                                size_t sampleCount, int outputWidth,
                                int outputHeight, bool preserveLogEncoded,
                                bool smoothChroma,
-                               const std::array<uint8_t, 4>* cfaPhase);
+                               const std::array<uint8_t, 4>* cfaPhase,
+                               bool deferDownload);
 #endif
     static AVPixelFormat selectPixelFormat(AVCodecContext* context,
                                            const AVPixelFormat* formats);

@@ -57,6 +57,11 @@ set(PROJECT_SOURCES
         src/VirtualFileSystemImpl_DNG.cpp
         src/DirectLogDecoder.cpp
         src/DirectLogGpuRgb.cpp
+        src/VulkanGainBake.cpp
+        shaders/vulkan_gain_bake.comp
+        shaders/vulkan_cfa_gain_bake.comp
+        shaders/vulkan_gain_common.glsl
+        shaders/vulkan_gain_multi.glsl
         src/DirectLogPlaceboLibav.c
         src/DNGDecoder.cpp
         src/CameraMetadata.cpp
@@ -95,6 +100,30 @@ set(PROJECT_SOURCES
 
         ui/mainwindow.ui
 )
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_common.glsl"
+             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_multi.glsl"
+             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_bake.comp"
+             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_cfa_gain_bake.comp")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_common.glsl"
+     VULKAN_GAIN_COMMON_SHADER)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_multi.glsl"
+     VULKAN_GAIN_MULTI_SHADER)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_bake.comp"
+     VULKAN_GAIN_BAKE_SHADER)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_cfa_gain_bake.comp"
+     VULKAN_CFA_GAIN_BAKE_SHADER)
+string(REPLACE "// @GAIN_COMMON@" "${VULKAN_GAIN_COMMON_SHADER}"
+       VULKAN_GAIN_BAKE_SHADER "${VULKAN_GAIN_BAKE_SHADER}")
+string(REPLACE "// @GAIN_COMMON@" "${VULKAN_GAIN_COMMON_SHADER}"
+       VULKAN_CFA_GAIN_BAKE_SHADER "${VULKAN_CFA_GAIN_BAKE_SHADER}")
+string(REPLACE "// @GAIN_MULTI@" "${VULKAN_GAIN_MULTI_SHADER}"
+       VULKAN_GAIN_BAKE_SHADER "${VULKAN_GAIN_BAKE_SHADER}")
+string(REPLACE "// @GAIN_MULTI@" "${VULKAN_GAIN_MULTI_SHADER}"
+       VULKAN_CFA_GAIN_BAKE_SHADER "${VULKAN_CFA_GAIN_BAKE_SHADER}")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/include/VulkanGainBakeShader.h.in"
+               "${CMAKE_CURRENT_BINARY_DIR}/VulkanGainBakeShader.h" @ONLY)
 
 qt_add_resources(PROJECT_SOURCES
     resources.qrc
@@ -198,7 +227,7 @@ else()
     endif()
 endif()
 
-target_include_directories(${PROJECT_NAME} PRIVATE include)
+target_include_directories(${PROJECT_NAME} PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64)
 if(APPLE)
@@ -567,6 +596,20 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
+        add_executable(motioncam-vulkan-gain-layout-test
+            tests/vulkan_gain_layout_test.cpp src/VulkanGainBake.cpp)
+        target_include_directories(motioncam-vulkan-gain-layout-test PRIVATE
+            include "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
+        target_link_libraries(motioncam-vulkan-gain-layout-test PRIVATE
+            PkgConfig::DIRECTLOG_PLACEBO)
+        target_compile_definitions(motioncam-vulkan-gain-layout-test PRIVATE
+            MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+        add_test(NAME motioncam-vulkan-gain-layout-test
+            COMMAND motioncam-vulkan-gain-layout-test)
+        set_tests_properties(motioncam-vulkan-gain-layout-test PROPERTIES
+            SKIP_RETURN_CODE 77)
+    endif()
     add_executable(motioncam-archive-import-test
         tests/archive_import_test.cpp
         src/ArchiveImport.cpp)
@@ -595,6 +638,7 @@ if(BUILD_TESTING)
     add_executable(motioncam-lossless-jpeg-test
         tests/lossless_jpeg_test.cpp
         src/IsoOverlay.cpp
+        src/VulkanGainBake.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -610,6 +654,7 @@ if(BUILD_TESTING)
     add_executable(motioncam-jpeg-xl-test
         tests/jpeg_xl_test.cpp
         src/IsoOverlay.cpp
+        src/VulkanGainBake.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -628,6 +673,7 @@ if(BUILD_TESTING)
         src/VirtualFileSystemImpl.cpp
         src/CalibrationData.cpp
         src/CfaBadPixels.cpp
+        src/VulkanGainBake.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)

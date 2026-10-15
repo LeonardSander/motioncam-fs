@@ -8,6 +8,7 @@
 #include "LRUCache.h"
 #include "DNGDecoder.h"
 #include "GainMapBake.h"
+#include "VulkanGainBake.h"
 #include "DataLevels.h"
 
 #include <motioncam/Decoder.hpp>
@@ -303,6 +304,8 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mGyroflowSidecarPath(settings.sourceGyroflowSidecarPath.empty()
             ? vfs::gyroflowSidecarPath(file) : settings.sourceGyroflowSidecarPath),
         mSettings(settings) {
+    if (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        warmVulkanGainBake();
     const auto initializationStarted = std::chrono::steady_clock::now();
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
@@ -1122,6 +1125,8 @@ VirtualFileSystemImpl_MCRAW::staticMaterializer(const Entry& entry) {
 }
 
 void VirtualFileSystemImpl_MCRAW::updateOptions(const RenderSettings& settings) {
+    if (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        warmVulkanGainBake();
     std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);
     mSettings = settings;

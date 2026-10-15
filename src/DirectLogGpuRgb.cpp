@@ -1,4 +1,5 @@
 #include "DirectLogGpuRgb.h"
+#include "VulkanGainBake.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 extern "C" {
@@ -44,6 +45,11 @@ struct DirectLogGpuRgb::State {
     pl_vulkan vulkan = nullptr;
     pl_renderer renderer = nullptr;
     pl_tex textures[4] = {};
+    pl_tex sampleableOutput = nullptr;
+    pl_frame outputTarget = {};
+    bool outputTargetReady = false;
+    pl_frame pendingTarget = {};
+    bool pending = false;
     const pl_hook* hlgHook = nullptr;
     const pl_hook* log60Hook = nullptr;
     const pl_hook* limited10Hook = nullptr;
@@ -53,11 +59,24 @@ struct DirectLogGpuRgb::State {
     int width = 0;
     int height = 0;
 
+    bool prepareForSeek() {
+        if (!vulkan) return true;
+        pl_gpu_finish(vulkan->gpu);
+        pending = false;
+        pendingTarget = {};
+        pl_renderer_destroy(&renderer);
+        pl_gpu_finish(vulkan->gpu);
+        renderer = pl_renderer_create(log, vulkan->gpu);
+        return renderer != nullptr;
+    }
+
     ~State() {
+        if (vulkan) releaseVulkanGainBakeTextureDevice(vulkan->gpu);
         if (vulkan) pl_gpu_finish(vulkan->gpu);
         av_frame_free(&output);
         if (vulkan) {
             for (auto& texture : textures) pl_tex_destroy(vulkan->gpu, &texture);
+            pl_tex_destroy(vulkan->gpu, &sampleableOutput);
         }
         pl_mpv_user_shader_destroy(&hlgHook);
         pl_mpv_user_shader_destroy(&log60Hook);
@@ -168,7 +187,9 @@ vec4 hook() {
     bool render(const AVFrame* source, bool smoothChroma,
                 DirectLogGpuRgb::TransferCurve curve, bool fullRange,
                 uint16_t* packedRgb,
-                const std::array<uint8_t, 4>* cfaPhase) {
+                const std::array<uint8_t, 4>* cfaPhase,
+                bool deferDownload) {
+        pending = false;
         output->data[0] = reinterpret_cast<uint8_t*>(packedRgb);
         output->linesize[0] = width * (cfaPhase ? 1 : 3) * sizeof(uint16_t);
         AVFrame* tagged = av_frame_clone(source);
@@ -197,14 +218,36 @@ vec4 hook() {
         // clip display transform later; rotating here stretches a 4:3 frame.
         input.rotation = PL_ROTATION_0;
 
-        pl_frame target = {};
-        const bool targetReady = pl_frame_recreate_from_avframe(
-            vulkan->gpu, &target, textures, output);
+        if (!outputTargetReady) {
+            pl_frame target = {};
+            if (pl_frame_recreate_from_avframe(vulkan->gpu, &target,
+                                              textures, output) &&
+                target.num_planes == 1 && target.planes[0].texture) {
+                const auto* base = target.planes[0].texture;
+                pl_tex_params sampleable = {};
+                sampleable.w = base->params.w;
+                sampleable.h = base->params.h;
+                sampleable.format = base->params.format;
+                sampleable.renderable = true;
+                sampleable.sampleable = true;
+                sampleable.host_readable = true;
+                if (pl_tex_recreate(vulkan->gpu, &sampleableOutput, &sampleable)) {
+                    target.planes[0].texture = sampleableOutput;
+                    outputTarget = target;
+                    outputTargetReady = true;
+                    pl_tex_destroy(vulkan->gpu, &textures[0]);
+                }
+            }
+        }
+        pl_frame target = outputTarget;
         bool rendered = false;
-        if (targetReady) {
+        if (outputTargetReady) {
             pl_render_params params = pl_render_default_params;
             params.upscaler = smoothChroma ? &pl_filter_mitchell : &pl_filter_nearest;
-            params.downscaler = &pl_filter_mitchell;
+            // Proxy rendering averages the source area represented by each
+            // output pixel. This also avoids ringing at high-contrast edges.
+            params.downscaler = source->width > width || source->height > height
+                ? &pl_filter_box : &pl_filter_mitchell;
             params.plane_upscaler = params.upscaler;
             params.peak_detect_params = nullptr;
             params.deband_params = nullptr;
@@ -250,7 +293,12 @@ vec4 hook() {
             const auto renderStart = std::chrono::steady_clock::now();
             const bool renderOk = pl_render_image(renderer, &input, &target, &params);
             const auto downloadStart = std::chrono::steady_clock::now();
-            rendered = renderOk && pl_download_avframe(vulkan->gpu, &target, output);
+            rendered = renderOk && (deferDownload ||
+                pl_download_avframe(vulkan->gpu, &target, output));
+            if (rendered && deferDownload) {
+                pendingTarget = target;
+                pending = true;
+            }
             const auto downloadEnd = std::chrono::steady_clock::now();
             if (std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB_PROFILE")) {
                 const auto ms = [](auto a, auto b) {
@@ -275,7 +323,8 @@ DirectLogGpuRgb::~DirectLogGpuRgb() = default;
 bool DirectLogGpuRgb::render(const AVFrame* source, int width, int height,
                              bool smoothChroma, TransferCurve curve,
                              bool fullRange, uint16_t* packedRgb,
-                             const std::array<uint8_t, 4>* cfaPhase) {
+                             const std::array<uint8_t, 4>* cfaPhase,
+                             bool deferDownload) {
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
     if (!source || !source->hw_frames_ctx || !packedRgb) return false;
     auto* frames = reinterpret_cast<AVHWFramesContext*>(source->hw_frames_ctx->data);
@@ -288,11 +337,51 @@ bool DirectLogGpuRgb::render(const AVFrame* source, int width, int height,
         if (!mState->init(source, width, height, cfaPhase != nullptr)) return false;
     }
     return mState->render(source, smoothChroma, curve, fullRange, packedRgb,
-                          cfaPhase);
+                          cfaPhase, deferDownload);
 #else
     (void)source; (void)width; (void)height; (void)smoothChroma;
     (void)curve; (void)fullRange; (void)packedRgb; (void)cfaPhase;
+    (void)deferDownload;
     return false;
+#endif
+}
+
+bool DirectLogGpuRgb::pendingTexture(const void*& gpu, const void*& texture) const {
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+    if (!mState->pending || !mState->vulkan || !mState->pendingTarget.planes[0].texture)
+        return false;
+    gpu = mState->vulkan->gpu;
+    texture = mState->pendingTarget.planes[0].texture;
+    return true;
+#else
+    (void)gpu; (void)texture;
+    return false;
+#endif
+}
+
+bool DirectLogGpuRgb::downloadPending(uint16_t* pixels, size_t samples) {
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+    if (!mState->pending || !pixels || samples != static_cast<size_t>(mState->width) *
+        mState->height * (mState->bayer ? 1u : 3u)) return false;
+    mState->output->data[0] = reinterpret_cast<uint8_t*>(pixels);
+    mState->output->linesize[0] = mState->width * (mState->bayer ? 1 : 3) * sizeof(uint16_t);
+    const bool ok = pl_download_avframe(mState->vulkan->gpu,
+                                       &mState->pendingTarget, mState->output);
+    mState->output->data[0] = nullptr;
+    mState->output->linesize[0] = 0;
+    mState->pending = false;
+    return ok;
+#else
+    (void)pixels; (void)samples;
+    return false;
+#endif
+}
+
+bool DirectLogGpuRgb::prepareForSeek() {
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+    return mState->prepareForSeek();
+#else
+    return true;
 #endif
 }
 

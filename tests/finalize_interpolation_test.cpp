@@ -123,7 +123,8 @@ std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
 
 std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp,
                                    bool withLinearization = true,
-                                   uint32_t width = 32, bool patterned = false) {
+                                   uint32_t width = 32, bool patterned = false,
+                                   uint32_t repeatSize = 2) {
     constexpr uint32_t height = 32;
     std::vector<uint16_t> pixels(width * height, value);
     if (patterned)
@@ -135,7 +136,12 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
     for (size_t i = 0; i < linearization.size(); ++i)
         linearization[i] = static_cast<uint16_t>(std::min<size_t>(65535, i * 64));
     const unsigned short bits = 16, black[4] = {0, 0, 0, 0};
-    const unsigned char pattern[4] = {0, 1, 1, 2};
+    const unsigned char phase[4] = {0, 1, 1, 2};
+    std::vector<unsigned char> pattern(repeatSize * repeatSize);
+    for (uint32_t y = 0; y < repeatSize; ++y)
+        for (uint32_t x = 0; x < repeatSize; ++x)
+            pattern[y * repeatSize + x] = phase[
+                (y / (repeatSize / 2)) * 2 + x / (repeatSize / 2)];
     tinydngwriter::DNGImage image;
     image.SetBigEndian(false);
     assert(image.SetImageWidth(width) && image.SetImageLength(height));
@@ -144,7 +150,8 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
     assert(image.SetCompression(tinydngwriter::COMPRESSION_NONE));
     assert(image.SetPhotometric(tinydngwriter::PHOTOMETRIC_CFA));
     assert(image.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
-    assert(image.SetCFARepeatPatternDim(2, 2) && image.SetCFAPattern(4, pattern));
+    assert(image.SetCFARepeatPatternDim(repeatSize, repeatSize) &&
+           image.SetCFAPattern(pattern.size(), pattern.data()));
     assert(image.SetBlackLevelRepeatDim(2, 2) && image.SetBlackLevel(4, black));
     assert(image.SetWhiteLevel(1023));
     if (withLinearization)
@@ -843,9 +850,79 @@ int main() {
     assert(remosaicedMarkedImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
     assert(remosaicedMarkedImage.samples[
         1 * remosaicedMarkedImage.layout.width + 1] == 0);
-    // The common topology pipeline must crop and reduce/remosaic before it
-    // consumes gain metadata. This is the ordering shared by DNG, MCRAW and
-    // DirectLog adapters.
+    // Higher CFA phase maps belong to the original 4x4 pattern. The shared
+    // pipeline must bake them before CPU remosaic changes that pattern.
+    auto higherCfaInput = makeLogCfaDng(1000, 0, false, 32, true, 4);
+    auto higherCfaMaps = constantPhaseMaps;
+    for (size_t index = 0; index < higherCfaMaps.size(); ++index)
+        higherCfaMaps[index].data = {1.0f + static_cast<float>(index) * 0.5f};
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        higherCfaInput, 2, higherCfaMaps));
+    auto higherCfaReference = higherCfaInput;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        higherCfaReference, false, false, false, false, 4));
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        higherCfaReference, 4, {0, 1, 1, 2},
+        motioncam::QuadBayerMode::Demosaic, true, 1, false));
+    motioncam::RenderSettings phaseMapRemosaicSettings;
+    phaseMapRemosaicSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
+    phaseMapRemosaicSettings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+    auto higherCfaPipeline = cfaPipeline;
+    higherCfaPipeline.cfaRepeatSize = 4;
+    higherCfaPipeline.calibration = nullptr;
+    higherCfaPipeline.preferVulkan = true;
+    auto higherCfaActual = higherCfaInput;
+    motioncam::vfs::processDngPixels(
+        higherCfaActual, phaseMapRemosaicSettings, higherCfaPipeline);
+    motioncam::DecodedDNGImage higherCfaExpectedImage, higherCfaActualImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        higherCfaReference, higherCfaExpectedImage, false, false));
+    assert(motioncam::DNGDecoder::decodeImage(
+        higherCfaActual, higherCfaActualImage, false, false));
+    assert(higherCfaActualImage.samples == higherCfaExpectedImage.samples);
+    auto higherCfaWrongOrder = higherCfaInput;
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        higherCfaWrongOrder, 4, {0, 1, 1, 2},
+        motioncam::QuadBayerMode::Demosaic, true, 1, false,
+        false, true));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        higherCfaWrongOrder, false, false, false, false, 2));
+    motioncam::DecodedDNGImage higherCfaWrongImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        higherCfaWrongOrder, higherCfaWrongImage, false, false));
+    assert(higherCfaWrongImage.samples != higherCfaExpectedImage.samples);
+    int higherCfaOutputRepeat = 0;
+    std::array<uint8_t, 4> higherCfaOutputPhase{};
+    assert(motioncam::DNGDecoder::getCFAMetadata(
+        higherCfaActual, higherCfaOutputRepeat, higherCfaOutputPhase));
+    assert(higherCfaOutputRepeat == 2);
+    auto higherCfaProxyReference = higherCfaInput;
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        higherCfaProxyReference, false, false, false, false, 4));
+    assert(motioncam::DNGDecoder::processHigherCFA(
+        higherCfaProxyReference, 4, {0, 1, 1, 2},
+        motioncam::QuadBayerMode::Demosaic, true, 2, false));
+    auto higherCfaProxyActual = higherCfaInput;
+    auto higherCfaProxySettings = phaseMapRemosaicSettings;
+    higherCfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
+        higherCfaProxySettings.options | motioncam::RENDER_OPT_DRAFT);
+    auto higherCfaProxyPipeline = higherCfaPipeline;
+    higherCfaProxyPipeline.outputScale = 2;
+    motioncam::vfs::processDngPixels(
+        higherCfaProxyActual, higherCfaProxySettings,
+        higherCfaProxyPipeline);
+    motioncam::DecodedDNGImage higherCfaProxyExpectedImage,
+                               higherCfaProxyActualImage;
+    assert(motioncam::DNGDecoder::decodeImage(
+        higherCfaProxyReference, higherCfaProxyExpectedImage, false, false));
+    assert(motioncam::DNGDecoder::decodeImage(
+        higherCfaProxyActual, higherCfaProxyActualImage, false, false));
+    assert(higherCfaProxyActualImage.samples ==
+           higherCfaProxyExpectedImage.samples);
+    // RGB topology can crop and reduce/remosaic before consuming gain
+    // metadata. Higher CFA phase maps are handled above on their source grid.
     auto orderedRgb = makeDng(
         1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
     motioncam::GainMap lumaMap{};

@@ -10,6 +10,7 @@
 #include "DNGImage.h"
 
 namespace motioncam {
+struct VulkanGainBakeTextureSource;
 
 namespace utils { struct ActiveBadPixel; }
 
@@ -194,7 +195,9 @@ public:
                              bool logHighQuality = false,
                              bool* logFused = nullptr,
                              bool packFusedLog = false,
-                             uint32_t ditherSeed = 0);
+                             uint32_t ditherSeed = 0,
+                             bool preferVulkan = false,
+                             const VulkanGainBakeTextureSource* textureSource = nullptr);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

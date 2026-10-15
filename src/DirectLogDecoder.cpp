@@ -372,7 +372,7 @@ void DirectLogDecoder::initDecoder() {
          std::string(forceSoftwareValue) != "0");
     bool hardwareDecoder = !forceSoftware && initHardwareDecoder();
     if (forceSoftware)
-        spdlog::info("DirectLogDecoder: software decode forced by environment");
+        spdlog::info("DirectLogDecoder: software decoding forced");
     if (!hardwareDecoder && codecpar->codec_id == AV_CODEC_ID_AV1) {
         if (const AVCodec* dav1d = avcodec_find_decoder_by_name("libdav1d")) {
             avcodec_free_context(&mCodecContext);
@@ -587,15 +587,58 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
                             width, height, preserveLogEncoded, smoothChroma);
 }
 
+bool DirectLogDecoder::extractFrameDeferred(int frameNumber,
+        std::vector<uint16_t>& rgbData, int outputWidth, int outputHeight,
+        bool smoothChroma) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
+    if (width <= 0 || height <= 0) return false;
+    rgbData.resize(static_cast<size_t>(width) * height * 3);
+    return extractFrameInto(frameNumber, rgbData.data(), rgbData.size(),
+                            width, height, false, smoothChroma, nullptr, true);
+}
+
 bool DirectLogDecoder::extractFrameBayer(int frameNumber,
         std::vector<uint16_t>& bayerData,
-        const std::array<uint8_t, 4>& cfaPhase) {
-    const int width = mVideoInfo.width;
-    const int height = mVideoInfo.height;
+        const std::array<uint8_t, 4>& cfaPhase,
+        int outputWidth, int outputHeight) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
     if (width <= 0 || height <= 0) return false;
     bayerData.resize(static_cast<size_t>(width) * height);
     return extractFrameInto(frameNumber, bayerData.data(), bayerData.size(),
                             width, height, false, false, &cfaPhase);
+}
+
+bool DirectLogDecoder::extractFrameBayerDeferred(int frameNumber,
+        std::vector<uint16_t>& bayerData,
+        const std::array<uint8_t, 4>& cfaPhase,
+        int outputWidth, int outputHeight) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
+    if (width <= 0 || height <= 0) return false;
+    bayerData.resize(static_cast<size_t>(width) * height);
+    return extractFrameInto(frameNumber, bayerData.data(), bayerData.size(),
+                            width, height, false, false, &cfaPhase, true);
+}
+
+bool DirectLogDecoder::extractFrameBayerIntoBytes(int frameNumber,
+        std::vector<uint8_t>& bytes, size_t pixelOffset,
+        const std::array<uint8_t, 4>& cfaPhase,
+        int outputWidth, int outputHeight, bool deferDownload) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
+    if (width <= 0 || height <= 0 || (pixelOffset & 1u)) return false;
+    constexpr size_t ifdHeadroom = 512 * 1024;
+    const size_t samples = static_cast<size_t>(width) * height;
+    if (pixelOffset > std::numeric_limits<size_t>::max() - ifdHeadroom ||
+        samples > (std::numeric_limits<size_t>::max() - pixelOffset - ifdHeadroom) /
+            sizeof(uint16_t)) return false;
+    bytes.reserve(pixelOffset + samples * sizeof(uint16_t) + ifdHeadroom);
+    bytes.resize(pixelOffset + samples * sizeof(uint16_t));
+    return extractFrameInto(frameNumber,
+        reinterpret_cast<uint16_t*>(bytes.data() + pixelOffset), samples,
+        width, height, false, false, &cfaPhase, deferDownload);
 }
 
 bool DirectLogDecoder::extractFrameIntoBytes(int frameNumber,
@@ -606,17 +649,76 @@ bool DirectLogDecoder::extractFrameIntoBytes(int frameNumber,
     const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
     if (width <= 0 || height <= 0 || (pixelOffset & 1u)) return false;
     const size_t samples = static_cast<size_t>(width) * height * 3;
-    if (samples > (std::numeric_limits<size_t>::max() - pixelOffset) / 2) return false;
+    constexpr size_t ifdHeadroom = 512 * 1024;
+    if (pixelOffset > std::numeric_limits<size_t>::max() - ifdHeadroom ||
+        samples > (std::numeric_limits<size_t>::max() - pixelOffset - ifdHeadroom) /
+            sizeof(uint16_t)) return false;
+    // The DNG writer appends its IFD after the image. Reserve that tail now,
+    // while the vector is empty, so appending does not relocate the full RGB strip.
+    bytes.reserve(pixelOffset + samples * sizeof(uint16_t) + ifdHeadroom);
     bytes.resize(pixelOffset + samples * sizeof(uint16_t));
     return extractFrameInto(frameNumber,
         reinterpret_cast<uint16_t*>(bytes.data() + pixelOffset), samples,
         width, height, preserveLogEncoded, smoothChroma);
 }
 
+bool DirectLogDecoder::extractFrameIntoBytesDeferred(int frameNumber,
+        std::vector<uint8_t>& bytes, size_t pixelOffset,
+        int outputWidth, int outputHeight, bool smoothChroma) {
+    const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
+    const int height = outputHeight > 0 ? outputHeight : mVideoInfo.height;
+    if (width <= 0 || height <= 0 || (pixelOffset & 1u)) return false;
+    const size_t samples = static_cast<size_t>(width) * height * 3;
+    constexpr size_t ifdHeadroom = 512 * 1024;
+    if (pixelOffset > std::numeric_limits<size_t>::max() - ifdHeadroom ||
+        samples > (std::numeric_limits<size_t>::max() - pixelOffset - ifdHeadroom) /
+            sizeof(uint16_t)) return false;
+    bytes.reserve(pixelOffset + samples * sizeof(uint16_t) + ifdHeadroom);
+    bytes.resize(pixelOffset + samples * sizeof(uint16_t));
+    return extractFrameInto(frameNumber,
+        reinterpret_cast<uint16_t*>(bytes.data() + pixelOffset), samples,
+        width, height, false, smoothChroma, nullptr, true);
+}
+
+bool DirectLogDecoder::pendingGpuTexture(const void*& gpu, const void*& texture) const {
+#ifdef MOTIONCAM_HAS_AVFILTER
+    return mDirectGpuRgb && mDirectGpuRgb->pendingTexture(gpu, texture);
+#else
+    (void)gpu; (void)texture;
+    return false;
+#endif
+}
+
+bool DirectLogDecoder::downloadPendingGpu(uint16_t* pixels, size_t samples) {
+#ifdef MOTIONCAM_HAS_AVFILTER
+    return mDirectGpuRgb && mDirectGpuRgb->downloadPending(pixels, samples);
+#else
+    (void)pixels; (void)samples;
+    return false;
+#endif
+}
+
+bool DirectLogDecoder::recoverFrameInSoftware(int frameNumber, uint16_t* pixels,
+        size_t samples, int outputWidth, int outputHeight, bool smoothChroma,
+        const std::array<uint8_t, 4>* cfaPhase) {
+    std::lock_guard lock(mMutex);
+    try {
+        mForceSoftwareDecoder = true;
+        cleanup();
+        initFFmpeg();
+        return extractFrameIntoLocked(frameNumber, pixels, samples,
+            outputWidth, outputHeight, false, smoothChroma, cfaPhase, false);
+    } catch (const std::exception& error) {
+        spdlog::error("DirectLog software recovery failed: {}", error.what());
+        return false;
+    }
+}
+
 bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
-        const std::array<uint8_t, 4>* cfaPhase) {
+        const std::array<uint8_t, 4>* cfaPhase,
+        bool deferDownload) {
     const auto lockStarted = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(mMutex);
     if (directLogDiagnosticsEnabled())
@@ -624,13 +726,14 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
                      frameNumber, elapsedMilliseconds(lockStarted));
     return extractFrameIntoLocked(frameNumber, rgbData, sampleCount, outputWidth,
                                   outputHeight, preserveLogEncoded, smoothChroma,
-                                  cfaPhase);
+                                  cfaPhase, deferDownload);
 }
 
 bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
-        const std::array<uint8_t, 4>* cfaPhase) {
+        const std::array<uint8_t, 4>* cfaPhase,
+        bool deferDownload) {
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto extractStart = std::chrono::steady_clock::now();
 
@@ -649,11 +752,24 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         // Keep Vulkan import/render/download inside the decoder lock. A cloned
         // AVFrame still crashed in libplacebo when another request sought and
         // flushed this decoder while its image was being rendered.
+        const bool directProxyRender = decoded->format == AV_PIX_FMT_VULKAN &&
+            outputWidth > 0 && outputHeight > 0 &&
+            (outputWidth < decoded->width || outputHeight < decoded->height);
+        if (directProxyRender && convertVulkanYUVToRGB(decoded, rgbData, sampleCount,
+                outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
+                cfaPhase, deferDownload)) {
+            if (advanceDecoder) mLastDecodedFrame = frameNumber;
+            if (diagnostics)
+                spdlog::info("DirectLog diagnostic: frame={} direct_proxy_conversion_ms={:.3f} decoder_total_ms={:.3f}",
+                             frameNumber, elapsedMilliseconds(conversionStart),
+                             elapsedMilliseconds(extractStart));
+            return true;
+        }
         if (AVFrame* scaled = scaledHardwareFrame(decoded, outputWidth, outputHeight))
             hardwareFrame = scaled;
-        if (convertVulkanYUVToRGB(hardwareFrame, rgbData, sampleCount,
+        if (!directProxyRender && convertVulkanYUVToRGB(hardwareFrame, rgbData, sampleCount,
                 outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
-                cfaPhase)) {
+                cfaPhase, deferDownload)) {
             if (advanceDecoder) mLastDecodedFrame = frameNumber;
             if (diagnostics)
                 spdlog::info("DirectLog diagnostic: frame={} gpu_conversion_ms={:.3f} decoder_total_ms={:.3f}",
@@ -752,12 +868,11 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         spdlog::info("DirectLog diagnostic: frame={} decoder begin mode={} pts={}",
                      frameNumber, sequential ? "sequential" : "seek", frameInfo.pts);
     if (!sequential) {
-        // libplacebo may still retain imported Vulkan images from the last
-        // render. Finish and destroy that renderer before FFmpeg flushes or
-        // reuses decoder surfaces after a seek.
+        // Release libplacebo's imported images before FFmpeg reuses decoder
+        // surfaces. Keep the Vulkan device and gain buffers across seeks.
 #ifdef MOTIONCAM_HAS_AVFILTER
         if (mDirectGpuRgb) {
-            mDirectGpuRgb.reset();
+            if (!mDirectGpuRgb->prepareForSeek()) mDirectGpuRgb.reset();
             if (diagnostics)
                 spdlog::info("DirectLog diagnostic: frame={} gpu_renderer_reset_for_seek=true",
                              frameNumber);
@@ -852,7 +967,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
                     initFFmpeg();
                     return extractFrameIntoLocked(frameNumber, rgbData, sampleCount,
                         outputWidth, outputHeight, preserveLogEncoded,
-                        smoothChroma, cfaPhase);
+                        smoothChroma, cfaPhase, deferDownload);
                 }
                 return false;
             }
@@ -1101,11 +1216,12 @@ AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int he
 bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
-        const std::array<uint8_t, 4>* cfaPhase) {
+        const std::array<uint8_t, 4>* cfaPhase,
+        bool deferDownload) {
 #ifndef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
     (void)frame; (void)rgbData; (void)sampleCount; (void)outputWidth;
     (void)outputHeight; (void)preserveLogEncoded; (void)smoothChroma;
-    (void)cfaPhase;
+    (void)cfaPhase; (void)deferDownload;
     return false;
 #else
     const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
@@ -1131,7 +1247,7 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
             ? DirectLogGpuRgb::TransferCurve::LOG60
             : DirectLogGpuRgb::TransferCurve::None;
     if (!mDirectGpuRgb->render(frame, width, height, smoothChroma, curve,
-                               fullRange, rgbData, cfaPhase)) {
+                               fullRange, rgbData, cfaPhase, deferDownload)) {
         spdlog::warn("DirectLog direct GPU RGB conversion failed; using CPU conversion");
         mDirectGpuRgb.reset();
         mGpuRgbRejected = true;

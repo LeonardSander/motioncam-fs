@@ -1,4 +1,5 @@
 #include "VirtualFileSystemImpl.h"
+#include "VulkanGainBake.h"
 #include "DataLevels.h"
 #include "DNGDecoder.h"
 #include "LRUCache.h"
@@ -229,10 +230,30 @@ void processDngPixels(std::vector<uint8_t>& dng,
         demosaics(mode))
         mode = QuadBayerMode::CorrectQBCFAMetadata;
     const bool remosaic = settings.options & RENDER_OPT_REMOSAIC_TO_BAYER;
+    // Higher CFA phase maps describe the original block pattern. Remosaicing
+    // changes that pattern without rewriting the opcodes, so bake on the
+    // original CFA before converting it. This case stays on the CPU to avoid
+    // an upload followed immediately by a download for remosaic.
+    const bool bakeBeforeHigherCfaRemosaic = bakeGain && options.hasCfa &&
+        options.cfaRepeatSize > 2 && remosaic;
     const bool topologyBeforeBake = bakeGain &&
+        !bakeBeforeHigherCfaRemosaic &&
         (scale > 1 ||
+         (remosaic && !options.textureSource) ||
          (!options.hasCfa && remosaic) ||
          (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
+    const VulkanGainBakeTextureSource* textureSource = options.textureSource;
+    if (textureSource && (!bakeGain || topologyBeforeBake)) {
+        DecodedDNGImage decoded;
+        if (!DNGDecoder::decodeImageBorrowed(dng, decoded, false, false) ||
+            ((!textureSource->download ||
+              !textureSource->download(decoded.samples.data(), decoded.samples.size())) &&
+             (!textureSource->recoverCpu ||
+              !textureSource->recoverCpu(decoded.samples.data(), decoded.samples.size()))) ||
+            !DNGDecoder::encodeImage(dng, decoded))
+            throw std::runtime_error("Could not materialize DirectLog GPU source for " + source);
+        textureSource = nullptr;
+    }
     const auto setupFinished = std::chrono::steady_clock::now();
     if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
             dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
@@ -265,7 +286,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
                 ? settings.logTransform : LogTransformMode::Disabled,
             options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, &logFused, packFusedLog,
-            options.ditherSeed))
+            options.ditherSeed,
+            options.preferVulkan && !bakeBeforeHigherCfaRemosaic,
+            textureSource))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = std::chrono::steady_clock::now();
     if (!topologyBeforeBake &&

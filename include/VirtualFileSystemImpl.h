@@ -19,6 +19,7 @@ namespace BS { class thread_pool; }
 #include "IVirtualFileSystem.h"
 
 namespace motioncam {
+struct VulkanGainBakeTextureSource;
 
 struct AudioChunk;
 struct GainMap;
@@ -221,6 +222,8 @@ struct DngPixelPipelineOptions {
     double iso = 0.0;
     double exposureTime = 0.0;
     std::string_view sourceName;
+    const VulkanGainBakeTextureSource* textureSource = nullptr;
+    bool preferVulkan = true;
 };
 
 size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,

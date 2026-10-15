@@ -1,0 +1,5 @@
+#pragma once
+namespace motioncam {
+inline constexpr char vulkanGainBakeShader[] = R"shader(@VULKAN_GAIN_BAKE_SHADER@)shader";
+inline constexpr char vulkanCfaGainBakeShader[] = R"shader(@VULKAN_CFA_GAIN_BAKE_SHADER@)shader";
+}

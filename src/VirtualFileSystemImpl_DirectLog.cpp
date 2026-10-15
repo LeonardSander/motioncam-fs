@@ -6,6 +6,7 @@
 #include "DataLevels.h"
 #include "Utils.h"
 #include "GainMapBake.h"
+#include "VulkanGainBake.h"
 #include "LRUCache.h"
 #include "Types.h"
 #include "AudioWriter.h"
@@ -242,6 +243,9 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         vfs::referencedSidecarPath(vfs::gyroflowSidecarPath(mSrcPath),
             mSidecarMetadata, calibPath, "gyroflow"));
 
+    if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        warmVulkanGainBake();
+
     // Initialize DirectLogDecoder
     try {
         mDecoder = std::make_unique<DirectLogDecoder>(mSrcPath);
@@ -381,7 +385,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
         const uint32_t projectedChannels =
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? 1u : 3u;
         const auto levels = directLogDataLevels(mConfig);
-        const bool appliesLog = directLogAppliesLogTransform(mConfig);
+        const bool appliesLog = directLogAppliesLogTransform(mConfig) &&
+            !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
         const double sizingWhite = appliesLog
             ? static_cast<double>(directLogQuantizationWhite(mConfig))
             : levels.white;
@@ -866,6 +871,13 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 const size_t planeSize = static_cast<size_t>(map.width) * map.height;
                 if (!map.channels || map.data.size() != planeSize * map.channels)
                     throw std::runtime_error("Invalid DirectLog opcode gain-map payload");
+                // GainMap stores samples point-major; tinydngwriter expects
+                // each plane contiguous and interleaves them on disk.
+                params.gain_data.resize(map.data.size());
+                for (size_t point = 0; point < planeSize; ++point)
+                    for (uint32_t channel = 0; channel < map.channels; ++channel)
+                        params.gain_data[static_cast<size_t>(channel) * planeSize + point] =
+                            map.data[point * map.channels + channel];
                 if (cfaPhases && map.channels == 3) {
                     // The early proxy decode has already collapsed CFA phase
                     // maps to RGB. Keep the three channels in one RGB opcode;
@@ -873,19 +885,11 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                     // gains to every channel during the shared bake.
                     params.plane = 0;
                     params.planes = 3;
-                    params.gain_data = map.data;
                     result.AddGainMap(params);
                     continue;
                 }
                 if (cfaPhases && map.channels > 1 && map.channels != 4)
                     throw std::runtime_error("Unsupported DirectLog CFA gain-map channel count");
-                // Sidecars are point-major; the shared opcode helper accepts
-                // plane-major input and emits one opcode per channel.
-                params.gain_data.resize(map.data.size());
-                for (size_t point = 0; point < planeSize; ++point)
-                    for (uint32_t channel = 0; channel < map.channels; ++channel)
-                        params.gain_data[static_cast<size_t>(channel) * planeSize + point] =
-                            map.data[point * map.channels + channel];
                 utils::addSinglePlaneGainMaps(
                     result, params, cfaPhases && map.channels > 1);
             }
@@ -953,9 +957,17 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 vfs::manualVignetteSensorResolution(mManualVignetteSidecars);
             const auto sensorResolution = mCalibration && mCalibration->hasFullSensorResolution
                 ? mCalibration->fullSensorResolution : manualResolution;
-            if (sensorResolution[0] > 0 && sensorResolution[1] > 0 &&
+            // The gain maps above have already been rebased to the proxy
+            // image. Express the sensor extent in that same pixel space.
+            const uint32_t sensorWidth = sensorResolution[0] > 0
+                ? static_cast<uint32_t>(std::lround(
+                    static_cast<double>(sensorResolution[0]) * width / mWidth)) : 0;
+            const uint32_t sensorHeight = sensorResolution[1] > 0
+                ? static_cast<uint32_t>(std::lround(
+                    static_cast<double>(sensorResolution[1]) * height / mHeight)) : 0;
+            if (sensorWidth > 0 && sensorHeight > 0 &&
                 !DNGDecoder::cropGainMapsToFullSensor(
-                    dngData, sensorResolution[0], sensorResolution[1]))
+                    dngData, sensorWidth, sensorHeight))
                 throw std::runtime_error("Could not resample DirectLog gain maps for crop");
         }
         if (diagnostics)
@@ -973,7 +985,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 VirtualFileSystemImpl_DirectLog::ProcessedFrame
 VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale,
                                                bool prepopulateDng,
-                                               bool outputBayer) {
+                                               bool outputBayer,
+                                               bool deferGpuDownload) {
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
     const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
@@ -1026,29 +1039,59 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
             return validGainMap(map) && map.channels == 1 &&
                 map.rowPitch == 1 && map.colPitch == 1;
         });
-    const bool scaleInFfmpeg = previewScale > 1 && rgbMapsSafe && luminanceMapsSafe;
-    if (rgbMapsSafe && (!outputBayer || scaleInFfmpeg))
+    const bool preScaleProxy = previewScale > 1 && rgbMapsSafe && luminanceMapsSafe;
+    // A scaled CFA proxy can stay on the GPU only when no RGB opcode must be
+    // applied before sampling a single Bayer phase from each pixel.
+    const bool bayerOutput = outputBayer &&
+        (previewScale == 1 || (preScaleProxy &&
+            result.gainMaps.opcodeList2.empty()));
+    const bool keepGpuTexture = deferGpuDownload &&
+        (previewScale == 1 || preScaleProxy);
+    if (rgbMapsSafe && (!outputBayer || preScaleProxy))
         result.gainMaps.opcodeList2 = std::move(rgbMaps);
-    result.width = scaleInFfmpeg ? mWidth / previewScale : 0;
-    result.height = scaleInFfmpeg ? mHeight / previewScale : 0;
+    result.width = preScaleProxy ? mWidth / previewScale : 0;
+    result.height = preScaleProxy ? mHeight / previewScale : 0;
     // Interpolated chroma reconstruction softens colour detail before RGB is
     // sampled back into a Bayer mosaic. Preserve the decoded chroma samples
     // for remosaiced DNG output; RGB output and previews retain smoothing.
     const bool smoothChroma =
         !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
-    const bool directStrip = prepopulateDng && previewScale == 1 && !outputBayer;
-    result.bayer = outputBayer;
-    const bool extractedFrame = outputBayer
-        ? mDecoder->extractFrameBayer(result.frameNumber, result.rgb,
-                                     directLogCfaPhase(mConfig, mCalibration))
+    const bool directStrip = prepopulateDng &&
+        (previewScale == 1 || preScaleProxy);
+    result.bayer = bayerOutput;
+    const bool extractedFrame = bayerOutput && directStrip
+        ? mDecoder->extractFrameBayerIntoBytes(result.frameNumber,
+              result.dngStripBuffer, directLogStripOffset,
+              directLogCfaPhase(mConfig, mCalibration),
+              result.width, result.height, keepGpuTexture)
+        : bayerOutput
+        ? keepGpuTexture
+            ? mDecoder->extractFrameBayerDeferred(result.frameNumber, result.rgb,
+                                     directLogCfaPhase(mConfig, mCalibration),
+                                     result.width, result.height)
+            : mDecoder->extractFrameBayer(result.frameNumber, result.rgb,
+                                     directLogCfaPhase(mConfig, mCalibration),
+                                     result.width, result.height)
         : directStrip
-        ? mDecoder->extractFrameIntoBytes(result.frameNumber,
+        ? keepGpuTexture
+            ? mDecoder->extractFrameIntoBytesDeferred(result.frameNumber,
+              result.dngStripBuffer, directLogStripOffset,
+              result.width, result.height, smoothChroma)
+            : mDecoder->extractFrameIntoBytes(result.frameNumber,
               result.dngStripBuffer, directLogStripOffset,
               result.width, result.height, false, smoothChroma)
-        : mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
-                                result.height, false, smoothChroma);
+        : keepGpuTexture
+            ? mDecoder->extractFrameDeferred(result.frameNumber, result.rgb,
+                                             result.width, result.height, smoothChroma)
+            : mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
+                                     result.height, false, smoothChroma);
     if (!extractedFrame)
         throw std::runtime_error("Could not decode DirectLog frame");
+    if (keepGpuTexture) {
+        const void* gpu = nullptr;
+        const void* texture = nullptr;
+        result.gpuPending = mDecoder->pendingGpuTexture(gpu, texture);
+    }
     const auto extracted = std::chrono::steady_clock::now();
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;
@@ -1158,6 +1201,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
     if (entry.name == "audio.wav") return mAudioWav;
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
+        std::lock_guard gpuFrameLock(mGpuFrameMutex);
         const auto materializeStart = std::chrono::steady_clock::now();
         const auto& frames = mDecoder->getFrames();
         const int configuredScale = std::max(1,
@@ -1172,16 +1216,21 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         // The per-clip center crop is applied later by processDngPixels().
         // Keep the strip buffer here; only the source's left/top crop needs
         // to compact rows before the DNG writer runs.
-        const bool prepopulateDng = !jpegCompression && !mConfig.streamingPreview &&
-            !directProxy;
+        const bool prepopulateDng = !jpegCompression && !mConfig.streamingPreview;
         const bool outputBayer = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) &&
-            configuredScale == 1 && !mConfig.streamingPreview &&
+            !mConfig.streamingPreview &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
+        const bool deferGpuDownload = (configuredScale == 1 || directProxy) &&
+            !mConfig.streamingPreview &&
+            !(mConfig.options & RENDER_OPT_CROPPING) &&
+            !(mCalibration && mCalibration->hasLeftTopCropStride) &&
+            (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
-                                      prepopulateDng, outputBayer);
+                                      prepopulateDng, outputBayer,
+                                      deferGpuDownload);
         const auto decodedAt = std::chrono::steady_clock::now();
-        const bool scaledInFfmpeg = directProxy &&
+        const bool preScaledProxy = directProxy &&
             processed.width == mWidth / configuredScale &&
             processed.height == mHeight / configuredScale;
         const auto timestamp = processed.timestamp;
@@ -1220,12 +1269,33 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         pixels.hasCfa = processed.bayer;
         pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
         pixels.outputScale = renderPlan.scale;
-        pixels.preScaledProxy = scaledInFfmpeg;
+        pixels.preScaledProxy = preScaledProxy;
         pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
         pixels.linearInputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
             std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
         pixels.sourceName = "DirectLog";
         pixels.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
+        // A CPU preprocessing route has already downloaded the decoded image.
+        // Finish it on the CPU instead of uploading that image for a second pass.
+        pixels.preferVulkan = processed.gpuPending;
+        VulkanGainBakeTextureSource gpuTexture;
+        if (processed.gpuPending) {
+            if (!mDecoder->pendingGpuTexture(gpuTexture.gpu, gpuTexture.texture))
+                throw std::runtime_error("DirectLog GPU image unavailable");
+            gpuTexture.download = [this](uint16_t* samples, size_t count) {
+                return mDecoder->downloadPendingGpu(samples, count);
+            };
+            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            const bool smoothChroma =
+                !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
+            gpuTexture.recoverCpu = [this, frameNumber, width = processed.width,
+                    height = processed.height, bayer = processed.bayer,
+                    smoothChroma, phase](uint16_t* samples, size_t count) {
+                return mDecoder->recoverFrameInSoftware(frameNumber, samples, count,
+                    width, height, smoothChroma, bayer ? &phase : nullptr);
+            };
+            pixels.textureSource = &gpuTexture;
+        }
         auto pixelSettings = mConfig;
         // The decoder has already remosaiced this frame. Leaving the request
         // set forces a redundant Bayer topology pass and prevents gain baking
@@ -1255,8 +1325,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         }
         auto output = std::make_shared<std::vector<uint8_t>>(std::move(dngData));
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
-            spdlog::info("GALLERY_PERF event=directlog_mounted_proxy frame={} ffmpeg_proxy={} width={} height={}",
-                         frameNumber, scaledInFfmpeg, processed.width,
+            spdlog::info("GALLERY_PERF event=directlog_mounted_proxy frame={} pre_scaled_proxy={} width={} height={}",
+                         frameNumber, preScaledProxy, processed.width,
                          processed.height);
             spdlog::info("GALLERY_PERF event=mounted_frame_stage source=DirectLog source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
                          mSrcPath, frameNumber,
@@ -1283,6 +1353,35 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
 
 bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview, bool retainSourceSamples) {
+    RenderSettings currentSettings;
+    {
+        std::shared_lock renderLock(mRenderMutex);
+        currentSettings = mConfig;
+    }
+    if (!currentSettings.thumbnailPreview &&
+        (currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+        !(currentSettings.options & RENDER_OPT_REMOSAIC_TO_BAYER)) {
+        // Show the same baked samples in the gallery as in the mounted DNG.
+        // Demosaic and display conversion still use the CPU preview path.
+        try {
+            auto dng = materializeFile(entry, false);
+            if (dng) {
+                auto previewSettings = currentSettings;
+                previewSettings.options = static_cast<FileRenderOptions>(
+                    previewSettings.options &
+                    ~(RENDER_OPT_APPLY_VIGNETTE_CORRECTION | RENDER_OPT_LOG_TRANSFORM |
+                      RENDER_OPT_DRAFT));
+                // materializeFile() has already applied the requested draft
+                // scale to the baked DNG. Applying it again here would turn
+                // a 256x192 proxy DNG into a 16x12 preview.
+                if (DNGDecoder::decodePreview(*dng, previewSettings, preview,
+                                              true, retainSourceSamples))
+                    return true;
+            }
+        } catch (const std::exception& error) {
+            spdlog::warn("DirectLog baked gallery preview failed: {}", error.what());
+        }
+    }
     std::shared_lock renderLock(mRenderMutex);
     try {
         const auto processStarted = std::chrono::steady_clock::now();
@@ -1298,6 +1397,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const bool gpuBayer = remosaic &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
+        std::lock_guard gpuFrameLock(mGpuFrameMutex);
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
                                       false, gpuBayer);
         if (remosaic && !processed.bayer) {
@@ -1395,17 +1495,17 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         if (processed.bayer)
             previewSettings.options = static_cast<FileRenderOptions>(
                 previewSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
-        const bool scaledInFfmpeg = directProxy &&
+        const bool preScaledProxy = directProxy &&
             processed.width == mWidth / configuredScale &&
             processed.height == mHeight / configuredScale;
-        if (scaledInFfmpeg)
+        if (preScaledProxy)
             previewSettings.options = static_cast<FileRenderOptions>(
                 previewSettings.options & ~RENDER_OPT_DRAFT);
         const bool decoded = DNGDecoder::decodePreview(
             std::move(image), previewSettings, preview, true, retainSourceSamples);
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
-            spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} ffmpeg_proxy={} width={} height={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
-                mSrcPath, scaledInFfmpeg, processed.width, processed.height,
+            spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} pre_scaled_proxy={} width={} height={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
+                mSrcPath, preScaledProxy, processed.width, processed.height,
                 std::chrono::duration<double, std::milli>(processFinished-processStarted).count(),
                 std::chrono::duration<double, std::milli>(previewStarted-processFinished).count(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());
@@ -1419,6 +1519,8 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
 
     mCache.clear();
     mConfig = config;
+    if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+        warmVulkanGainBake();
     if (directLogDiagnosticsEnabled())
         spdlog::info("DirectLog diagnostic: settings updated options={} log={} draft_scale={}",
                      optionsToString(mConfig.options),

@@ -416,6 +416,8 @@ struct RenderSettings {
     // Internal gallery mode: materialized frames are consumed as a stream and
     // are not constrained by projected-file size estimates.
     bool streamingPreview;
+    // Internal gallery routing for clip cards and pre-generated frame thumbnails.
+    bool thumbnailPreview;
     // Internal source overrides used by temporary archive staging. These are
     // intentionally not serialized with user render settings.
     std::string sourceSidecarPath;
@@ -440,6 +442,7 @@ struct RenderSettings {
         , ignoreForwardMat(false)
         , cameraNativeStaging(false)
         , streamingPreview(false)
+        , thumbnailPreview(false)
     {}
 
     // Constructor with all parameters (strings for backward compatibility)
@@ -472,6 +475,7 @@ struct RenderSettings {
         , ignoreForwardMat(false)
         , cameraNativeStaging(false)
         , streamingPreview(false)
+        , thumbnailPreview(false)
     {}
 
     // Constructor with enum types directly
@@ -504,6 +508,7 @@ struct RenderSettings {
         , ignoreForwardMat(false)
         , cameraNativeStaging(false)
         , streamingPreview(false)
+        , thumbnailPreview(false)
     {}
 };
 
