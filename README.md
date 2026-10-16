@@ -1,7 +1,7 @@
 
 # MotionCam Fuse – Virtual File System
 
-> **Work in Progress**
+> **Ai-assisted work in progress**
 
 **MotionCam Fuse** allows opening raw image and video files, such as MCRAW and Unspektra. These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options.
 
