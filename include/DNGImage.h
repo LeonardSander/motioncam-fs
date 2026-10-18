@@ -4,10 +4,13 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace motioncam {
+struct VulkanGalleryGain;
+struct VulkanGalleryGpuBuffer;
 
 struct DNGProfileTable {
     uint32_t hueDivisions = 0;
@@ -65,7 +68,24 @@ struct DNGFrameMetadata {
 };
 
 struct PreviewFrame {
+    size_t sourceFrameIndex = 0;
     std::vector<uint8_t> rgb;
+    std::shared_ptr<const uint8_t> galleryDisplayPixels;
+    std::shared_ptr<VulkanGalleryGpuBuffer> galleryDisplayGpu;
+    std::shared_ptr<void> galleryRendererLease;
+    // Non-HQ Bayer preview can remain CFA until the gallery's final GPU pass.
+    // The CPU fallback reconstructs this when Vulkan is unavailable.
+    std::vector<uint16_t> galleryCfa;
+    std::array<uint8_t, 4> galleryCfaPhase{0, 1, 1, 2};
+    std::array<double, 3> galleryBlack{}, galleryWhite{};
+    // DirectLog can keep its decoded RGB texture until the gallery's final
+    // display pass. The lease protects the decoder texture through callback.
+    const void* galleryGpuDevice = nullptr;
+    const void* galleryGpuTexture = nullptr;
+    std::shared_ptr<void> galleryGpuLease;
+    std::function<bool(uint16_t*, size_t)> galleryGpuDownload;
+    std::array<double, 3> galleryGpuBlack{}, galleryGpuWhite{};
+    std::shared_ptr<VulkanGalleryGain> galleryGpuGain;
     uint32_t displayBitDepth = 16;
     bool clippingRequested = false;
     // 0 = normal, 1 = below black, 3..9 = clipped RGB channel bitmask + 2.

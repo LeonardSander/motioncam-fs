@@ -1,5 +1,6 @@
 #include "DirectLogGpuRgb.h"
 #include "VulkanGainBake.h"
+#include "VulkanGalleryPreview.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 extern "C" {
@@ -16,6 +17,7 @@ extern "C" {
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -71,7 +73,10 @@ struct DirectLogGpuRgb::State {
     }
 
     ~State() {
-        if (vulkan) releaseVulkanGainBakeTextureDevice(vulkan->gpu);
+        if (vulkan) {
+            releaseVulkanGainBakeTextureDevice(vulkan->gpu);
+            releaseVulkanGalleryTextureDevice(vulkan->gpu);
+        }
         if (vulkan) pl_gpu_finish(vulkan->gpu);
         av_frame_free(&output);
         if (vulkan) {
@@ -96,6 +101,19 @@ struct DirectLogGpuRgb::State {
         if (!device || device->type != AV_HWDEVICE_TYPE_VULKAN) return false;
         auto* hw = static_cast<AVVulkanDeviceContext*>(device->hwctx);
         if (!hw || !hw->lock_queue || !hw->unlock_queue) return false;
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+            bool swapchain = false, surface = false, wayland = false, xcb = false;
+            for (int i = 0; i < hw->nb_enabled_dev_extensions; ++i)
+                swapchain |= std::strcmp(hw->enabled_dev_extensions[i], "VK_KHR_swapchain") == 0;
+            for (int i = 0; i < hw->nb_enabled_inst_extensions; ++i) {
+                const char* ext = hw->enabled_inst_extensions[i];
+                surface |= std::strcmp(ext, "VK_KHR_surface") == 0;
+                wayland |= std::strcmp(ext, "VK_KHR_wayland_surface") == 0;
+                xcb |= std::strcmp(ext, "VK_KHR_xcb_surface") == 0;
+            }
+            std::fprintf(stderr, "GALLERY_PERF event=directlog_vulkan_present_caps swapchain=%d surface=%d wayland=%d xcb=%d\n",
+                swapchain, surface, wayland, xcb);
+        }
 
         log = pl_log_create(PL_API_VER, nullptr);
         if (!log) return false;

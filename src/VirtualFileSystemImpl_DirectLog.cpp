@@ -7,6 +7,8 @@
 #include "Utils.h"
 #include "GainMapBake.h"
 #include "VulkanGainBake.h"
+#include "VulkanGalleryPreview.h"
+#include "RawLogTransform.h"
 #include "LRUCache.h"
 #include "Types.h"
 #include "AudioWriter.h"
@@ -986,7 +988,8 @@ VirtualFileSystemImpl_DirectLog::ProcessedFrame
 VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale,
                                                bool prepopulateDng,
                                                bool outputBayer,
-                                               bool deferGpuDownload) {
+                                               bool deferGpuDownload,
+                                               bool textureOnly) {
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
     const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
@@ -1080,6 +1083,10 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
             : mDecoder->extractFrameIntoBytes(result.frameNumber,
               result.dngStripBuffer, directLogStripOffset,
               result.width, result.height, false, smoothChroma)
+        : textureOnly && keepGpuTexture && !outputBayer
+            ? mDecoder->extractFrameTextureDeferred(result.frameNumber,
+                result.width > 0 ? result.width : mWidth,
+                result.height > 0 ? result.height : mHeight, smoothChroma)
         : keepGpuTexture
             ? mDecoder->extractFrameDeferred(result.frameNumber, result.rgb,
                                              result.width, result.height, smoothChroma)
@@ -1216,13 +1223,17 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         // The per-clip center crop is applied later by processDngPixels().
         // Keep the strip buffer here; only the source's left/top crop needs
         // to compact rows before the DNG writer runs.
-        const bool prepopulateDng = !jpegCompression && !mConfig.streamingPreview;
+        const bool bakedGallery = mConfig.streamingPreview &&
+            (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+        const bool prepopulateDng = !jpegCompression &&
+            (!mConfig.streamingPreview || bakedGallery);
         const bool outputBayer = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) &&
             !mConfig.streamingPreview &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
         const bool deferGpuDownload = (configuredScale == 1 || directProxy) &&
-            !mConfig.streamingPreview &&
+            (!mConfig.streamingPreview ||
+             (bakedGallery && !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU"))) &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
@@ -1358,11 +1369,23 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         std::shared_lock renderLock(mRenderMutex);
         currentSettings = mConfig;
     }
-    if (!currentSettings.thumbnailPreview &&
-        (currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-        !(currentSettings.options & RENDER_OPT_REMOSAIC_TO_BAYER)) {
-        // Show the same baked samples in the gallery as in the mounted DNG.
-        // Demosaic and display conversion still use the CPU preview path.
+    const bool fastBakedGalleryCandidate =
+        !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        !currentSettings.thumbnailPreview &&
+        ((currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
+         directLogAppliesLogTransform(currentSettings)) &&
+        !(currentSettings.options & (RENDER_OPT_CROPPING |
+            RENDER_OPT_REMOSAIC_TO_BAYER |
+            RENDER_OPT_BAKE_ISO)) &&
+        (!mCalibration || (!mCalibration->hasLeftTopCropStride &&
+            (!mCalibration->hasBadPixels ||
+             currentSettings.badPixelTreatment == BadPixelTreatment::Disabled))) &&
+        (!directLogAppliesLogTransform(currentSettings) ||
+         directLogLogBits(currentSettings.logTransform,
+             directLogBaseLogBits(currentSettings)) <= 16);
+    const bool fastBakedGallery = fastBakedGalleryCandidate &&
+        mDecoder->canExtractFrameTexture() && waitVulkanGalleryPreviewReady();
+    auto bakedFallback = [&]() -> bool {
         try {
             auto dng = materializeFile(entry, false);
             if (dng) {
@@ -1371,16 +1394,20 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                     previewSettings.options &
                     ~(RENDER_OPT_APPLY_VIGNETTE_CORRECTION | RENDER_OPT_LOG_TRANSFORM |
                       RENDER_OPT_DRAFT));
-                // materializeFile() has already applied the requested draft
-                // scale to the baked DNG. Applying it again here would turn
-                // a 256x192 proxy DNG into a 16x12 preview.
                 if (DNGDecoder::decodePreview(*dng, previewSettings, preview,
-                                              true, retainSourceSamples))
+                                              true, retainSourceSamples)) {
                     return true;
+                }
             }
         } catch (const std::exception& error) {
             spdlog::warn("DirectLog baked gallery preview failed: {}", error.what());
         }
+        return false;
+    };
+    if (!fastBakedGallery && !currentSettings.thumbnailPreview &&
+        (currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+        !(currentSettings.options & RENDER_OPT_REMOSAIC_TO_BAYER)) {
+        if (bakedFallback()) return true;
     }
     std::shared_lock renderLock(mRenderMutex);
     try {
@@ -1389,17 +1416,39 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
         const bool directProxy = configuredScale > 1 &&
             !(mConfig.options & (RENDER_OPT_CROPPING |
-                                 RENDER_OPT_REMOSAIC_TO_BAYER |
-                                 RENDER_OPT_HIGHER_CFA_HQ)) &&
+                                 RENDER_OPT_REMOSAIC_TO_BAYER)) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
         const bool remosaic = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
         const bool gpuBayer = remosaic &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
-        std::lock_guard gpuFrameLock(mGpuFrameMutex);
+        const bool textureCandidate = !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+            !remosaic &&
+            !(mConfig.options & (RENDER_OPT_CROPPING |
+                                 RENDER_OPT_BAKE_ISO)) &&
+            (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
+                fastBakedGallery) &&
+            (!directLogAppliesLogTransform(mConfig) || fastBakedGallery) &&
+            !(mCalibration && (mCalibration->hasLeftTopCropStride ||
+                (mCalibration->hasBadPixels &&
+                 mConfig.badPixelTreatment != BadPixelTreatment::Disabled))) &&
+            (configuredScale == 1 || directProxy);
+        std::unique_lock gpuFrameLock(mGpuFrameMutex);
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
-                                      false, gpuBayer);
+                                      false, gpuBayer, textureCandidate,
+                                      fastBakedGallery);
+        const bool textureProxyReady = configuredScale == 1 ||
+            (directProxy && processed.width == mWidth / configuredScale &&
+             processed.height == mHeight / configuredScale);
+        if (processed.gpuPending && !textureProxyReady) {
+            processed.rgb.resize(static_cast<size_t>(processed.width) *
+                                 processed.height * 3u);
+            if (!mDecoder->downloadPendingGpu(processed.rgb.data(),
+                                                processed.rgb.size()))
+                return false;
+            processed.gpuPending = false;
+        }
         if (remosaic && !processed.bayer) {
             const auto phase = directLogCfaPhase(mConfig, mCalibration);
             std::vector<uint16_t> bayer(
@@ -1501,6 +1550,170 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         if (preScaledProxy)
             previewSettings.options = static_cast<FileRenderOptions>(
                 previewSettings.options & ~RENDER_OPT_DRAFT);
+        std::shared_ptr<VulkanGalleryGain> galleryGain;
+        if (fastBakedGallery) {
+            if (!processed.gpuPending || !textureProxyReady ||
+                image.opcodeList2.size() > 1 || image.opcodeList3.size() > 1 ||
+                (!image.opcodeList2.empty() &&
+                 image.opcodeList2.front().channels != 3))
+                throw std::runtime_error("DirectLog fused gallery gain unavailable");
+            auto maps = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+                ? image.opcodeList2 : std::vector<GainMap>{};
+            const bool colorOnly = mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+            const bool debugGainMap = mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP;
+            if (!colorOnly && (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+                !image.opcodeList3.empty()) {
+                if (image.opcodeList3.front().channels != 1)
+                    throw std::runtime_error("DirectLog fused gallery luminance map unavailable");
+                maps.push_back(image.opcodeList3.front());
+            }
+            if (!maps.empty() && (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS)) {
+                const auto adjustment = optimizeGainMapLayers<GainMap>(
+                    std::array<std::vector<GainMap>*, 1>{&maps},
+                    image.layout.cfaPhase);
+                image.metadata.baselineExposure += adjustment.exposureOffset;
+                for (size_t channel = 0; channel < 3; ++channel)
+                    image.metadata.asShotNeutral[channel] *=
+                        adjustment.neutralScale[channel];
+            }
+            galleryGain = std::make_shared<VulkanGalleryGain>();
+            if (debugGainMap && maps.empty())
+                throw std::runtime_error("DirectLog fused gain-map debug has no maps");
+            galleryGain->debugGainMap = debugGainMap;
+            if (!maps.empty()) {
+                if (colorOnly) {
+                    auto separation = separateGainMapLuminance(maps);
+                    if (!separation.valid)
+                        throw std::runtime_error("DirectLog fused gallery color map unavailable");
+                    if (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS)
+                        image.metadata.baselineExposure += std::log2(
+                            normalizePositiveGainMinimum(separation.luminance.data));
+                }
+                transformGainMapLayersForBake<GainMap>(
+                    std::array<std::vector<GainMap>*, 1>{&maps},
+                    mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP, false);
+                for (const auto& map : maps) {
+                    if (map.rowPitch != 1 || map.colPitch != 1 ||
+                        (map.channels != 1 && map.channels != 3) ||
+                        map.data.size() != static_cast<size_t>(map.width) *
+                            map.height * map.channels)
+                        throw std::runtime_error("DirectLog fused gallery gain geometry unavailable");
+                    if (map.channels == 3) {
+                        galleryGain->width = map.width;
+                        galleryGain->height = map.height;
+                        galleryGain->left = map.left; galleryGain->top = map.top;
+                        galleryGain->right = map.right; galleryGain->bottom = map.bottom;
+                        galleryGain->originH = static_cast<float>(map.originH);
+                        galleryGain->originV = static_cast<float>(map.originV);
+                        galleryGain->spacingH = static_cast<float>(map.spacingH);
+                        galleryGain->spacingV = static_cast<float>(map.spacingV);
+                        galleryGain->values = map.data;
+                    } else {
+                        galleryGain->secondaryWidth = map.width;
+                        galleryGain->secondaryHeight = map.height;
+                        galleryGain->secondaryLeft = map.left;
+                        galleryGain->secondaryTop = map.top;
+                        galleryGain->secondaryRight = map.right;
+                        galleryGain->secondaryBottom = map.bottom;
+                        galleryGain->secondaryOriginH = static_cast<float>(map.originH);
+                        galleryGain->secondaryOriginV = static_cast<float>(map.originV);
+                        galleryGain->secondarySpacingH = static_cast<float>(map.spacingH);
+                        galleryGain->secondarySpacingV = static_cast<float>(map.spacingV);
+                        galleryGain->secondaryValues = map.data;
+                    }
+                }
+            }
+            if (!galleryGain->width) {
+                // Log-only previews and scalar-only gain stacks use an
+                // identity RGB map; the scalar map remains in the second slot.
+                galleryGain->width = galleryGain->height = 1;
+                galleryGain->right = image.layout.width;
+                galleryGain->bottom = image.layout.height;
+                galleryGain->spacingH = galleryGain->spacingV = 1.0f;
+                galleryGain->values = {1.0f, 1.0f, 1.0f};
+            }
+            if (directLogAppliesLogTransform(mConfig) && !debugGainMap) {
+                const auto bits = directLogLogBits(mConfig.logTransform,
+                    directLogBaseLogBits(mConfig));
+                galleryGain->encodedWhite = (1u << bits) - 1u;
+                galleryGain->ditherSeed = image.ditherSeed;
+                galleryGain->highQualityDither = mConfig.options & RENDER_OPT_LOG_HQ;
+                image.metadata.inputBitDepth = bits;
+                image.metadata.blackLevel.fill(0.0f);
+                image.metadata.whiteLevel.fill(static_cast<float>(galleryGain->encodedWhite));
+            } else if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
+                image.metadata.blackLevel.fill(0.0f);
+                image.metadata.whiteLevel.fill(65535.0f);
+            }
+        }
+        if (processed.gpuPending && textureProxyReady) {
+            const void* gpu = nullptr;
+            const void* texture = nullptr;
+            if (!mDecoder->pendingGpuTexture(gpu, texture))
+                return false;
+            preview.width = processed.width;
+            preview.height = processed.height;
+            preview.displayBitDepth = image.metadata.inputBitDepth;
+            preview.metadata = image.metadata;
+            preview.timestamp = image.timestamp;
+            preview.galleryGpuDevice = gpu;
+            preview.galleryGpuTexture = texture;
+            preview.galleryGpuGain = galleryGain;
+            for (size_t channel = 0; channel < 3; ++channel) {
+                preview.galleryGpuBlack[channel] = galleryGain
+                    ? levels.black[channel] : image.metadata.blackLevel[channel];
+                preview.galleryGpuWhite[channel] = galleryGain
+                    ? levels.white : image.metadata.whiteLevel[channel];
+            }
+            preview.galleryGpuDownload = [this, frameNumber = processed.frameNumber,
+                                          width = processed.width, height = processed.height]
+                (uint16_t* dst, size_t count) {
+                    if (mDecoder->downloadPendingGpu(dst, count))
+                        return true;
+                    return mDecoder->recoverFrameInSoftware(
+                        frameNumber, dst, count, width, height, true, nullptr);
+                };
+            if(retainSourceSamples||preview.clippingRequested){
+                const size_t pixels=static_cast<size_t>(processed.width)*processed.height;
+                auto source=std::make_shared<std::vector<uint16_t>>(pixels*3u);
+                if(!preview.galleryGpuDownload(source->data(),source->size()))
+                    throw std::runtime_error("DirectLog gallery source readback failed");
+                preview.galleryGpuDownload=[source](uint16_t* dst,size_t count){
+                    if(count!=source->size())return false;
+                    std::memcpy(dst,source->data(),count*sizeof(uint16_t));
+                    return true;
+                };
+                if(retainSourceSamples){
+                    preview.rawSamples=source;
+                    preview.rawWidth=processed.width;
+                    preview.rawHeight=processed.height;
+                    preview.rawChannels=3;
+                    preview.rawBlack=levels.black[0];
+                    preview.rawBlackLevels=levels.black;
+                    preview.rawWhite=levels.white;
+                    preview.rawCfaSize=2;
+                }
+                if(preview.clippingRequested){
+                    preview.clipping.resize(pixels);
+                    for(size_t pixel=0;pixel<pixels;++pixel){
+                        uint8_t high=0;
+                        bool low=false;
+                        for(size_t channel=0;channel<3;++channel){
+                            const uint16_t code=(*source)[pixel*3u+channel];
+                            low|=code<levels.black[channel];
+                            if(code>=levels.white)high|=uint8_t(1u<<channel);
+                        }
+                        preview.clipping[pixel]=low?1u:high?uint8_t(2u+high):0u;
+                    }
+                }
+            }
+            preview.galleryGpuLease =
+                std::make_shared<std::unique_lock<std::mutex>>(std::move(gpuFrameLock));
+            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                spdlog::info("GALLERY_PERF event=directlog_texture_preview source={} width={} height={}",
+                    mSrcPath, processed.width, processed.height);
+            return true;
+        }
         const bool decoded = DNGDecoder::decodePreview(
             std::move(image), previewSettings, preview, true, retainSourceSamples);
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
@@ -1510,7 +1723,14 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 std::chrono::duration<double, std::milli>(previewStarted-processFinished).count(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());
         return decoded;
-    } catch (const std::exception&) { return false; }
+    } catch (const std::exception& error) {
+        if (fastBakedGallery) {
+            spdlog::warn("DirectLog fused gallery preview fell back: {}", error.what());
+            renderLock.unlock();
+            return bakedFallback();
+        }
+        return false;
+    }
 }
 
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {

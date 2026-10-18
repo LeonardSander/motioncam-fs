@@ -69,6 +69,9 @@ public:
     bool extractFrameDeferred(int frameNumber, std::vector<uint16_t>& rgbData,
                               int outputWidth, int outputHeight,
                               bool smoothChroma);
+    bool extractFrameTextureDeferred(int frameNumber, int outputWidth,
+                                     int outputHeight, bool smoothChroma);
+    bool canExtractFrameTexture();
     bool extractFrameBayer(int frameNumber, std::vector<uint16_t>& bayerData,
                            const std::array<uint8_t, 4>& cfaPhase,
                            int outputWidth = 0, int outputHeight = 0);
@@ -111,12 +114,12 @@ private:
                           int outputWidth, int outputHeight,
                           bool preserveLogEncoded, bool smoothChroma,
                           const std::array<uint8_t, 4>* cfaPhase = nullptr,
-                          bool deferDownload = false);
+                          bool deferDownload = false, bool textureOnly = false);
     bool extractFrameIntoLocked(int frameNumber, uint16_t* rgbData, size_t sampleCount,
                                 int outputWidth, int outputHeight,
                                 bool preserveLogEncoded, bool smoothChroma,
                                 const std::array<uint8_t, 4>* cfaPhase,
-                                bool deferDownload);
+                                bool deferDownload, bool textureOnly = false);
     bool convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData, size_t sampleCount,
                          int outputWidth, int outputHeight, bool preserveLogEncoded,
                          bool smoothChroma);

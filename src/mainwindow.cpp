@@ -8,6 +8,8 @@
 #include "CameraMetadata.h"
 #include "DNGDecoder.h"
 #include "GalleryColor.h"
+#include "VulkanGalleryPreview.h"
+#include "RawLogTransform.h"
 #include "Utils.h"
 #include "CpuWorkerBudget.h"
 #include "VirtualFileSystemImpl.h"
@@ -361,10 +363,19 @@ namespace {
     void applyGalleryColorTransform(std::vector<uint8_t>& bytes,
                                     const motioncam::DNGFrameMetadata& metadata,
                                     bool ignoreForwardMat,
-                                    bool gainMapOnlyDebug) {
+                                    bool gainMapOnlyDebug,
+                                    const motioncam::VulkanGalleryBayerSource* bayer = nullptr,
+                                    const motioncam::VulkanGalleryOutput* output = nullptr,
+                                    bool* gpuApplied = nullptr,
+                                    bool enableGpu = true,
+                                    const motioncam::VulkanGalleryTextureSource* texture = nullptr,
+                                    const std::function<bool(uint16_t*, size_t)>* textureDownload = nullptr) {
+        if (gpuApplied) *gpuApplied = false;
         if (bytes.size() % 6 != 0) return;
-        auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
-        const size_t pixelCount = bytes.size() / 6;
+        const size_t pixelCount = bayer
+            ? static_cast<size_t>(bayer->width) * bayer->height
+            : texture ? static_cast<size_t>(texture->width) * texture->height
+            : bytes.size() / 6;
         const auto transformStarted = std::chrono::steady_clock::now();
         static const std::array<uint16_t, 65536> srgbTransfer = [] {
             std::array<uint16_t, 65536> result{};
@@ -539,6 +550,156 @@ namespace {
                 hueSatTable = &blendedHueSat;
             }
         }
+        const bool validateGpu = enableGpu && !output &&
+            qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_VALIDATE_GPU");
+        std::vector<uint8_t> original;
+        if (validateGpu) original = bytes;
+        if (enableGpu && motioncam::colorGalleryRgbVulkan(
+                bytes, gains, cameraToDisplay, cameraToXyz, exposure,
+                useProfileTables ? hueSatTable : nullptr,
+                useProfileTables && !metadata.profileTables->look.values.empty()
+                    ? &metadata.profileTables->look : nullptr,
+                useMatrix, gainMapOnlyDebug, bayer, output, texture)) {
+            if (gpuApplied) *gpuApplied = true;
+            if (validateGpu) {
+                applyGalleryColorTransform(original, metadata, ignoreForwardMat,
+                                           gainMapOnlyDebug, bayer, nullptr,
+                                           nullptr, false, texture, textureDownload);
+                uint32_t maximum = 0;
+                uint64_t sum = 0, aboveTwo = 0, aboveEight = 0;
+                for (size_t index = 0; index < bytes.size() / 2; ++index) {
+                    uint16_t gpuCode, cpuCode;
+                    std::memcpy(&gpuCode, bytes.data() + index * 2, 2);
+                    std::memcpy(&cpuCode, original.data() + index * 2, 2);
+                    const uint32_t error = static_cast<uint32_t>(
+                        std::abs(int(gpuCode) - int(cpuCode)));
+                    maximum = std::max(maximum, error);
+                    sum += error;
+                    aboveTwo += error > 2;
+                    aboveEight += error > 8;
+                }
+                spdlog::info("GALLERY_PERF event=gallery_gpu_compare pixels={} tables={} max_error={} mean_error={:.4f} above_2={} above_8={}",
+                    pixelCount, useProfileTables, maximum,
+                    bytes.empty() ? 0.0 : double(sum) / (bytes.size() / 2),
+                    aboveTwo, aboveEight);
+            }
+            if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                spdlog::info("GALLERY_PERF event=gallery_color_stage pixels={} tables={} gpu=true final={} elapsed_ms={:.3f}",
+                    pixelCount, useProfileTables, output != nullptr,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - transformStarted).count());
+            return;
+        }
+        if (bayer && !motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                bayer->samples, bytes, bayer->width, bayer->height,
+                bayer->phase, bayer->black, bayer->white))
+            throw std::runtime_error("Could not reconstruct gallery Bayer preview");
+        if (texture) {
+            if (!textureDownload || !*textureDownload)
+                throw std::runtime_error("No DirectLog gallery CPU recovery path");
+            std::vector<uint16_t> samples(pixelCount * 3u);
+            if (!(*textureDownload)(samples.data(), samples.size()))
+                throw std::runtime_error("Could not recover DirectLog gallery preview");
+            if (texture->gain) {
+                const auto& map = *texture->gain;
+                const auto linearization = map.encodedWhite
+                    ? motioncam::makeLog60LinearizationTable(map.encodedWhite)
+                    : std::vector<uint16_t>{};
+                const auto* logLookup = map.encodedWhite
+                    ? &motioncam::cachedLog60EncodeLookup(
+                        0.0, 65535.0, static_cast<uint16_t>(map.encodedWhite))
+                    : nullptr;
+                bytes.resize(samples.size() * sizeof(uint16_t));
+                auto sample = [&](uint32_t x, uint32_t y, size_t channel) {
+                    return map.values[(static_cast<size_t>(y) * map.width + x) * 3u + channel];
+                };
+                for (uint32_t y = 0; y < texture->height; ++y) {
+                    const motioncam::utils::LogTriangularDitherRow<false> fastDither(
+                        y, map.ditherSeed);
+                    const motioncam::utils::LogTriangularDitherRow<true> hqDither(
+                        y, map.ditherSeed);
+                    for (uint32_t x = 0; x < texture->width; ++x) {
+                        std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
+                        if (x >= map.left && x < map.right &&
+                            y >= map.top && y < map.bottom) {
+                            const float gx = ((x + 0.5f) / texture->width -
+                                map.originH) / map.spacingH;
+                            const float gy = ((y + 0.5f) / texture->height -
+                                map.originV) / map.spacingV;
+                            const float bx = std::floor(gx), by = std::floor(gy);
+                            const float tx = std::clamp(gx - bx, 0.0f, 1.0f);
+                            const float ty = std::clamp(gy - by, 0.0f, 1.0f);
+                            const uint32_t x0 = static_cast<uint32_t>(std::clamp(
+                                bx, 0.0f, static_cast<float>(map.width - 1u)));
+                            const uint32_t y0 = static_cast<uint32_t>(std::clamp(
+                                by, 0.0f, static_cast<float>(map.height - 1u)));
+                            const uint32_t x1 = std::min(x0 + 1u, map.width - 1u);
+                            const uint32_t y1 = std::min(y0 + 1u, map.height - 1u);
+                            for (size_t channel = 0; channel < 3; ++channel) {
+                                const float upper = sample(x0, y0, channel) * (1.0f - tx) +
+                                    sample(x1, y0, channel) * tx;
+                                const float lower = sample(x0, y1, channel) * (1.0f - tx) +
+                                    sample(x1, y1, channel) * tx;
+                                gains[channel] = upper * (1.0f - ty) + lower * ty;
+                            }
+                        }
+                        if (map.secondaryWidth &&
+                            x >= map.secondaryLeft && x < map.secondaryRight &&
+                            y >= map.secondaryTop && y < map.secondaryBottom) {
+                            const float gx = ((x + 0.5f) / texture->width -
+                                map.secondaryOriginH) / map.secondarySpacingH;
+                            const float gy = ((y + 0.5f) / texture->height -
+                                map.secondaryOriginV) / map.secondarySpacingV;
+                            const float bx = std::floor(gx), by = std::floor(gy);
+                            const float tx = std::clamp(gx - bx, 0.0f, 1.0f);
+                            const float ty = std::clamp(gy - by, 0.0f, 1.0f);
+                            const uint32_t x0 = static_cast<uint32_t>(std::clamp(
+                                bx, 0.0f, static_cast<float>(map.secondaryWidth - 1u)));
+                            const uint32_t y0 = static_cast<uint32_t>(std::clamp(
+                                by, 0.0f, static_cast<float>(map.secondaryHeight - 1u)));
+                            const uint32_t x1 = std::min(x0 + 1u, map.secondaryWidth - 1u);
+                            const uint32_t y1 = std::min(y0 + 1u, map.secondaryHeight - 1u);
+                            const auto sampleSecondary = [&](uint32_t sx, uint32_t sy) {
+                                return map.secondaryValues[static_cast<size_t>(sy) *
+                                    map.secondaryWidth + sx];
+                            };
+                            const float upper = sampleSecondary(x0, y0) * (1.0f - tx) +
+                                sampleSecondary(x1, y0) * tx;
+                            const float lower = sampleSecondary(x0, y1) * (1.0f - tx) +
+                                sampleSecondary(x1, y1) * tx;
+                            const float luminance = upper * (1.0f - ty) + lower * ty;
+                            for (float& gain : gains) gain *= luminance;
+                        }
+                        const float dither = map.highQualityDither
+                            ? hqDither(x) : fastDither(x);
+                        const size_t first = (static_cast<size_t>(y) *
+                            texture->width + x) * 3u;
+                        for (size_t channel = 0; channel < 3; ++channel) {
+                            const float linear = map.debugGainMap
+                                ? std::clamp(1.0f / gains[channel], 0.0f, 1.0f)
+                                : std::clamp(
+                                    (samples[first + channel] - texture->black[channel]) /
+                                    (texture->white[channel] - texture->black[channel]) *
+                                    gains[channel], 0.0, 1.0);
+                            const auto code = static_cast<uint16_t>(std::lround(
+                                linear * 65535.0f));
+                            const auto normalized = logLookup
+                                ? linearization[motioncam::encodeDitheredLog60(
+                                    *logLookup, code, dither,
+                                    static_cast<uint16_t>(map.encodedWhite))]
+                                : code;
+                            std::memcpy(bytes.data() + (first + channel) * 2u,
+                                &normalized, sizeof(normalized));
+                        }
+                    }
+                }
+            } else if (!motioncam::utils::normalizeRgb16Bytes(
+                           samples.data(), samples.size(), bytes,
+                           texture->black, texture->white)) {
+                throw std::runtime_error("Could not normalize DirectLog gallery preview");
+            }
+        }
+        auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
         std::array<std::array<uint16_t, 65536>, 3> channelTransfer;
         if (!useMatrix) {
             for (size_t value = 0; value < 65536; ++value) {
@@ -662,6 +823,38 @@ namespace {
                 pixelCount, useProfileTables, workers,
                 std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - transformStarted).count());
+    }
+
+    void applyGalleryPreviewColorTransform(motioncam::PreviewFrame& preview,
+                                           bool ignoreForwardMat,
+                                           bool gainMapOnlyDebug,
+                                           const motioncam::VulkanGalleryOutput* output = nullptr,
+                                           bool* gpuApplied = nullptr) {
+        motioncam::VulkanGalleryBayerSource bayer;
+        motioncam::VulkanGalleryTextureSource texture;
+        if (!preview.galleryCfa.empty()) {
+            bayer.samples = preview.galleryCfa.data();
+            bayer.width = preview.width;
+            bayer.height = preview.height;
+            bayer.phase = preview.galleryCfaPhase;
+            bayer.black = preview.galleryBlack;
+            bayer.white = preview.galleryWhite;
+        }
+        if (preview.galleryGpuTexture) {
+            texture.gpu = preview.galleryGpuDevice;
+            texture.texture = preview.galleryGpuTexture;
+            texture.width = preview.width;
+            texture.height = preview.height;
+            texture.black = preview.galleryGpuBlack;
+            texture.white = preview.galleryGpuWhite;
+            texture.gain = preview.galleryGpuGain.get();
+        }
+        applyGalleryColorTransform(preview.rgb, preview.metadata,
+                                   ignoreForwardMat, gainMapOnlyDebug,
+                                   bayer.samples ? &bayer : nullptr,
+                                   output, gpuApplied, true,
+                                   texture.texture ? &texture : nullptr,
+                                   texture.texture ? &preview.galleryGpuDownload : nullptr);
     }
 
     motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
@@ -1316,6 +1509,7 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 {
     ui->setupUi(this);
+    motioncam::warmVulkanGalleryPreview();
 
 #ifdef _WIN32
     // Initialize COM for taskbar progress
@@ -2692,11 +2886,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const bool diagnostics = mGalleryPerformanceTestActive;
     const bool clippingEnabled = mGalleryClippingEnabled && !backfillThumbnails;
     const bool histogramEnabled = mClipPlayer->histogramEnabled() && !backfillThumbnails;
+    const bool nativePresenter = mClipPlayer->nativeVulkanPresenter();
     auto render = [this, mountId, settings, generation, firstFrame, isSequence,
                    thumbnailOrientation,
                    backfillThumbnails, player, playbackTarget, incomingFrame,
                    thumbnailCollectionEnabled, diagnostics, clippingEnabled,
-                   histogramEnabled] {
+                   histogramEnabled, nativePresenter] {
         const auto taskStarted = std::chrono::steady_clock::now();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
@@ -2746,48 +2941,126 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                  clippingEnabled,
                  backfillThumbnails, &presentedFirstFrame,
                  &deliveredFrames, &thumbnailFrames, &displayDecodeMs, &deliveryWaitMs,
-                 &taskStarted, diagnostics](
+                 &taskStarted, diagnostics, nativePresenter](
                     motioncam::PreviewFrame&& preview) {
                     // A materialization already in progress may complete after
                     // the gallery closes. Do not touch the dialog or process
                     // that frame once its preview generation is cancelled.
                     if (mGalleryGeneration.load() != generation) return;
                     const auto decodeStarted = std::chrono::steady_clock::now();
-                    applyGalleryColorTransform(
-                        preview.rgb, preview.metadata, settings.ignoreForwardMat,
-                        gainMapOnlyDebug(settings));
-                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW")) {
+                    const bool collectThumbnail = thumbnailCollectionEnabled->load();
+                    const int rawOrientation = !isSequence
+                        ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
+                    const bool rgb24 = preview.displayBitDepth <= 8 &&
+                        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
+                    const bool hashPreview =
+                        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
+                    motioncam::VulkanGalleryOutput gpuOutput;
+                    gpuOutput.width = preview.width;
+                    gpuOutput.height = preview.height;
+                    gpuOutput.orientation = isSequence
+                        ? (thumbnailOrientation < 0 ? 0 : thumbnailOrientation)
+                        : (rawOrientation < 0 ? 0 : rawOrientation);
+                    gpuOutput.clipping = clippingEnabled ? &preview.clipping : nullptr;
+                    gpuOutput.hostPixels = &preview.galleryDisplayPixels;
+                    const bool nativeGpuOutput=nativePresenter&&
+                        !collectThumbnail&&!hashPreview;
+                    gpuOutput.rgb24 = rgb24 || nativeGpuOutput;
+                    if(nativeGpuOutput){
+                        gpuOutput.gpuBuffer = &preview.galleryDisplayGpu;
+                        // Match the CPU gallery's clockwise 90-degree pixel
+                        // mapping. Rotating this case in the presenter mirrors
+                        // the image horizontally on some Vulkan drivers.
+                        gpuOutput.orientation=isSequence
+                            ?(thumbnailOrientation==90?90:0)
+                            :(rawOrientation<0?0:rawOrientation);
+                        gpuOutput.rgb10a2=true;
+                    }
+                    std::vector<uint8_t> unmarkedSource;
+                    if (clippingEnabled && collectThumbnail && !hashPreview)
+                        unmarkedSource = preview.rgb;
+                    bool gpuFinal = false;
+                    applyGalleryPreviewColorTransform(
+                        preview, settings.ignoreForwardMat,
+                        gainMapOnlyDebug(settings),
+                        hashPreview ? nullptr : &gpuOutput, &gpuFinal);
+                    const auto colorFinished = std::chrono::steady_clock::now();
+                    if (hashPreview) gpuFinal = false;
+                    const bool gpuPreOriented = gpuFinal && isSequence;
+                    if (hashPreview) {
                         uint64_t hash = 1469598103934665603ull;
+                        uint64_t sampledSum = 0, sampledWhite = 0, sampledCount = 0;
                         for (uint8_t value : preview.rgb) {
                             hash ^= value;
                             hash *= 1099511628211ull;
                         }
+                        for (size_t index = 0; index + 1 < preview.rgb.size(); index += 2048) {
+                            uint16_t code;
+                            std::memcpy(&code, preview.rgb.data() + index, sizeof(code));
+                            sampledSum += code;
+                            sampledWhite += code >= 64000;
+                            ++sampledCount;
+                        }
                         spdlog::info("GALLERY_PERF event=gallery_rgb_hash mount={} generation={} timestamp={} hash={}",
                             mountId, generation, preview.timestamp, hash);
+                        spdlog::info("GALLERY_PERF event=gallery_rgb_sample mean={} near_white={}/{}",
+                            sampledCount ? double(sampledSum) / sampledCount : 0.0,
+                            sampledWhite, sampledCount);
                     }
-                    const bool collectThumbnail = thumbnailCollectionEnabled->load();
-                    const int rawOrientation = !isSequence
-                        ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
                     QImage unmarkedThumbnail;
-                    if (clippingEnabled && collectThumbnail)
+                    if (clippingEnabled && collectThumbnail) {
+                        if (gpuFinal) {
+                            motioncam::VulkanGalleryBayerSource bayer;
+                            motioncam::VulkanGalleryTextureSource texture;
+                            if (!preview.galleryCfa.empty()) {
+                                bayer.samples = preview.galleryCfa.data();
+                                bayer.width = gpuOutput.width;
+                                bayer.height = gpuOutput.height;
+                                bayer.phase = preview.galleryCfaPhase;
+                                bayer.black = preview.galleryBlack;
+                                bayer.white = preview.galleryWhite;
+                            }
+                            if (preview.galleryGpuTexture) {
+                                texture.gpu = preview.galleryGpuDevice;
+                                texture.texture = preview.galleryGpuTexture;
+                                texture.width = gpuOutput.width;
+                                texture.height = gpuOutput.height;
+                                texture.black = preview.galleryGpuBlack;
+                                texture.white = preview.galleryGpuWhite;
+                                texture.gain = preview.galleryGpuGain.get();
+                            }
+                            applyGalleryColorTransform(
+                                unmarkedSource, preview.metadata,
+                                settings.ignoreForwardMat,
+                                gainMapOnlyDebug(settings),
+                                bayer.samples ? &bayer : nullptr,
+                                nullptr, nullptr, true,
+                                texture.texture ? &texture : nullptr,
+                                texture.texture ? &preview.galleryGpuDownload : nullptr);
+                        }
+                        const auto& unmarked = gpuFinal ? unmarkedSource : preview.rgb;
                         unmarkedThumbnail = ClipPlayerDialog::makeRgb48Thumbnail(
-                            preview.rgb.data(), static_cast<qsizetype>(preview.rgb.size()),
+                            unmarked.data(), static_cast<qsizetype>(unmarked.size()),
                             static_cast<int>(preview.width), static_cast<int>(preview.height),
                             isSequence ? thumbnailOrientation : rawOrientation);
-                    if (clippingEnabled)
-                        applyGalleryClipping(preview.rgb, preview.clipping);
-                    const bool rgb24 = preview.displayBitDepth <= 8 &&
-                        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
-                    if (rgb24)
-                        packGalleryRgb24(preview.rgb);
+                    }
+                    preview.galleryCfa = {};
+                    preview.galleryGpuLease.reset();
+                    if (!gpuFinal) {
+                        if (clippingEnabled)
+                            applyGalleryClipping(preview.rgb, preview.clipping);
+                        if (rgb24)
+                            packGalleryRgb24(preview.rgb);
+                    }
                     if (!isSequence) {
                         const int orientation = rawOrientation;
                         if (orientation == 90 || orientation == 180 || orientation == 270) {
                             const uint32_t sourceWidth = preview.width;
                             const uint32_t sourceHeight = preview.height;
-                            preview.rgb = rotateInterleaved(
-                                preview.rgb, sourceWidth, sourceHeight,
-                                rgb24 ? 3 : 6, orientation);
+                            if (!gpuFinal)
+                                preview.rgb = rotateInterleaved(
+                                    preview.rgb, sourceWidth, sourceHeight,
+                                    rgb24 ? 3 : 6, orientation);
                             if (orientation == 90 || orientation == 270)
                                 std::swap(preview.width, preview.height);
                         }
@@ -2804,10 +3077,23 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     // remains valid while Qt and FFmpeg consume it.
                     auto rgb = std::make_shared<std::vector<uint8_t>>(
                         std::move(preview.rgb));
+                    auto rgbPixels = std::move(preview.galleryDisplayPixels);
+                    auto gpuBuffer = std::move(preview.galleryDisplayGpu);
+                    if (gpuBuffer){
+                        gpuBuffer->sourceFrameIndex=static_cast<int>(preview.sourceFrameIndex);
+                        gpuBuffer->orientation=isSequence
+                            ?(thumbnailOrientation==90?0:thumbnailOrientation):0;
+                        gpuBuffer->staticFrame=!isSequence;
+                        gpuBuffer->resourceLease = std::move(preview.galleryRendererLease);
+                    }
+                    const auto* rgbData = gpuBuffer ? nullptr
+                        : rgbPixels ? rgbPixels.get() : rgb->data();
+                    const size_t rgbSize = gpuBuffer ? 0u : rgbPixels
+                        ? static_cast<size_t>(width) * height * 3u : rgb->size();
                     const QByteArray bytes = QByteArray::fromRawData(
-                        reinterpret_cast<const char*>(rgb->data()),
-                        static_cast<qsizetype>(rgb->size()));
-                    const int thumbnailOutputFrame=incomingFrame->load();
+                        reinterpret_cast<const char*>(rgbData),
+                        static_cast<qsizetype>(rgbSize));
+                    const int thumbnailOutputFrame=static_cast<int>(preview.sourceFrameIndex);
                     if(collectThumbnail && !unmarkedThumbnail.isNull()){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
@@ -2821,15 +3107,26 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     } else if(collectThumbnail && !clippingEnabled){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
-                                                        thumbnailCollectionEnabled,rgb,width,height,
-                                                        thumbnailOutputFrame]{
+                                                        thumbnailCollectionEnabled,rgb,rgbPixels,rgbData,rgbSize,width,height,
+                                                        thumbnailOutputFrame,gpuPreOriented,
+                                                        thumbnailOrientation]{
                             if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
                                player->currentMountId()==mountId&&thumbnailCollectionEnabled->load()) {
                                 const QByteArray view = QByteArray::fromRawData(
-                                    reinterpret_cast<const char*>(rgb->data()),
-                                    static_cast<qsizetype>(rgb->size()));
-                                player->setOutputFrameThumbnail(thumbnailOutputFrame,view,
-                                    static_cast<int>(width),static_cast<int>(height));
+                                    reinterpret_cast<const char*>(rgbData),
+                                    static_cast<qsizetype>(rgbSize));
+                                if (gpuPreOriented) {
+                                    const bool swap = thumbnailOrientation == 90 ||
+                                        thumbnailOrientation == 270;
+                                    player->setOutputFrameThumbnailImage(thumbnailOutputFrame,
+                                        ClipPlayerDialog::makeRgb48Thumbnail(
+                                            rgbData, static_cast<qsizetype>(rgbSize),
+                                            static_cast<int>(swap ? height : width),
+                                            static_cast<int>(swap ? width : height), 0));
+                                } else {
+                                    player->setOutputFrameThumbnail(thumbnailOutputFrame,view,
+                                        static_cast<int>(width),static_cast<int>(height));
+                                }
                             }
                         },Qt::QueuedConnection);
                     }
@@ -2855,7 +3152,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 static_cast<int>(preview.rawChannels),
                                 preview.rawBlack, preview.rawWhite,
                                 preview.rawCfaSize, preview.rawCfaPhase,
-                                preview.rawBlackLevels, rawOrientation);
+                                preview.rawBlackLevels, rawOrientation,
+                                rgb, gpuPreOriented, rgbPixels, gpuBuffer);
                         }, Qt::BlockingQueuedConnection);
                         presentedFirstFrame = true;
                         if (diagnostics)
@@ -2867,10 +3165,13 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - taskStarted).count());
                     }
+                    const auto pushStarted = std::chrono::steady_clock::now();
                     auto pushResult = ClipPlayerDialog::FramePushResult::Retry;
+                    size_t pushRetries = 0;
                     while (pushResult == ClipPlayerDialog::FramePushResult::Retry &&
                            mGalleryGeneration.load() == generation) {
                         QMetaObject::invokeMethod(this, [&] {
+                            const auto uiStarted = std::chrono::steady_clock::now();
                             if (mGalleryGeneration.load() != generation)
                                 pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                             else if (player) pushResult = player->pushRgb48Frame(
@@ -2880,12 +3181,26 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 static_cast<int>(preview.rawChannels),
                                 preview.rawBlack, preview.rawWhite,
                                 preview.rawCfaSize, preview.rawCfaPhase,
-                                preview.rawBlackLevels, rawOrientation);
+                                preview.rawBlackLevels, rawOrientation,
+                                rgb, gpuPreOriented, rgbPixels, gpuBuffer,
+                                static_cast<int>(preview.sourceFrameIndex));
                             else pushResult = ClipPlayerDialog::FramePushResult::Stopped;
+                            if (diagnostics)
+                                spdlog::info("GALLERY_PERF event=gallery_push_ui elapsed_ms={:.3f}",
+                                    std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now()-uiStarted).count());
                         }, Qt::BlockingQueuedConnection);
-                        if (pushResult == ClipPlayerDialog::FramePushResult::Retry)
+                        if (pushResult == ClipPlayerDialog::FramePushResult::Retry) {
+                            ++pushRetries;
                             QThread::msleep(5);
+                        }
                     }
+                    if (diagnostics)
+                        spdlog::info("GALLERY_PERF event=gallery_callback_detail color_ms={:.3f} prepare_ms={:.3f} push_ms={:.3f} push_retries={}",
+                            std::chrono::duration<double, std::milli>(colorFinished-decodeStarted).count(),
+                            std::chrono::duration<double, std::milli>(pushStarted-colorFinished).count(),
+                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-pushStarted).count(),
+                            pushRetries);
                     if (pushResult == ClipPlayerDialog::FramePushResult::Stopped)
                         throw std::runtime_error("Gallery decoder stopped accepting frames");
                     deliveryWaitMs += std::chrono::duration<double, std::milli>(
@@ -3049,9 +3364,8 @@ void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sour
                 [this,generation](size_t,size_t,const std::string&){return mGalleryGeneration.load()==generation;},
                 [this,generation,player,mountId,sourceFrame,&delivered,settings](motioncam::PreviewFrame&& preview){
                     if(delivered||mGalleryGeneration.load()!=generation)return;
-                    applyGalleryColorTransform(preview.rgb, preview.metadata,
-                                               settings.ignoreForwardMat,
-                                               gainMapOnlyDebug(settings));
+                    applyGalleryPreviewColorTransform(preview,
+                        settings.ignoreForwardMat, gainMapOnlyDebug(settings));
                     packGalleryRgb24(preview.rgb);
                     auto& rgb=preview.rgb;const uint32_t width=preview.width,height=preview.height;
                     delivered=true;
@@ -3404,8 +3718,11 @@ void MainWindow::startGalleryPerformanceTest(
         int clipIndex = 0;
         int playbackMs = 3000;
         int presentedFrames = 0;
-        qint64 firstPresentedMs = -1;
-        qint64 lastPresentedMs = -1;
+        int lastPresentedIndex = -1;
+        qint64 firstPresentedNs = -1;
+        qint64 lastPresentedNs = -1;
+        int firstPresentedIndex = -1;
+        std::vector<qint64> presentationIntervalsNs;
         int actionSerial = 0;
         Phase phase = Phase::Init;
         QElapsedTimer actionTimer;
@@ -3461,8 +3778,12 @@ void MainWindow::startGalleryPerformanceTest(
         QCoreApplication::exit(4);
         return;
     }
-    mClipPlayer->setPerformanceUncapped(true);
-    spdlog::info("GALLERY_PERF event=playback_cadence mode=uncapped timer_ms=1");
+    const bool cappedPlayback=qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CAPPED");
+    mClipPlayer->setPerformanceUncapped(!cappedPlayback);
+    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUDIO"))
+        mClipPlayer->setPerformanceAudioEnabled(true);
+    spdlog::info("GALLERY_PERF event=playback_cadence mode={}",
+                 cappedPlayback?"capped":"uncapped");
     if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING"))
         mClipPlayer->setClippingEnabled(true);
     mClipPlayer->setPerformanceOverlayPinned(true);
@@ -3519,6 +3840,9 @@ void MainWindow::startGalleryPerformanceTest(
         const auto mountId = state->mounts[state->clipIndex];
         state->phase = RunState::Phase::Init;
         state->presentedFrames = 0;
+        state->lastPresentedIndex = -1;
+        state->firstPresentedIndex = -1;
+        state->presentationIntervalsNs.clear();
         state->actionTimer.restart();
         const int serial = ++state->actionSerial;
         spdlog::info("GALLERY_PERF event=clip_init_start clip={} mount={}",
@@ -3543,8 +3867,11 @@ void MainWindow::startGalleryPerformanceTest(
         state->phase = afterSeek ? RunState::Phase::SeekPlayback
                                  : RunState::Phase::Playback;
         state->presentedFrames = 0;
-        state->firstPresentedMs = -1;
-        state->lastPresentedMs = -1;
+        state->lastPresentedIndex = -1;
+        state->firstPresentedNs = -1;
+        state->lastPresentedNs = -1;
+        state->firstPresentedIndex = -1;
+        state->presentationIntervalsNs.clear();
         state->sampleTimer.restart();
         const int serial = ++state->actionSerial;
         QTimer::singleShot(state->playbackMs, this,
@@ -3556,16 +3883,33 @@ void MainWindow::startGalleryPerformanceTest(
                     QCoreApplication::exit(9);
                     return;
                 }
-                const qint64 elapsed = std::max<qint64>(1, state->sampleTimer.elapsed());
-                const qint64 activeElapsed = state->firstPresentedMs >= 0 &&
-                                             state->lastPresentedMs > state->firstPresentedMs
-                    ? state->lastPresentedMs - state->firstPresentedMs : 0;
-                const double presentedFps = activeElapsed > 0
-                    ? (state->presentedFrames - 1) * 1000.0 / activeElapsed : 0.0;
+                const qint64 elapsedNs = std::max<qint64>(1, state->sampleTimer.nsecsElapsed());
+                const qint64 activeNs = state->firstPresentedNs >= 0 &&
+                                        state->lastPresentedNs > state->firstPresentedNs
+                    ? state->lastPresentedNs - state->firstPresentedNs : 0;
+                const double targetFps=mClipPlayer->currentFrameRate();
+                const double presentedFps=activeNs>0
+                    ?(state->presentedFrames-1)*1.0e9/activeNs:0.0;
+                const int sourceAdvance=state->firstPresentedIndex>=0
+                    ?state->lastPresentedIndex-state->firstPresentedIndex:0;
+                const double sourceFps=activeNs>0
+                    ?sourceAdvance*1.0e9/activeNs:0.0;
+                const double driftMs=targetFps>0&&activeNs>0
+                    ?(activeNs-sourceAdvance*1.0e9/targetFps)/1.0e6:0.0;
+                auto intervals=state->presentationIntervalsNs;
+                std::sort(intervals.begin(),intervals.end());
+                const auto percentile=[&](double fraction){
+                    return intervals.empty()?0.0:
+                        intervals[std::min(intervals.size()-1,
+                            static_cast<size_t>(fraction*(intervals.size()-1)))]+0.0;
+                };
                 spdlog::info(
-                    "GALLERY_PERF event=playback_sample clip={} mount={} after_seek={} elapsed_ms={} active_ms={} frames={} presented_fps={:.3f}",
+                    "GALLERY_PERF event=playback_sample clip={} mount={} after_seek={} elapsed_ms={:.3f} active_ms={:.3f} frames={} presented_fps={:.4f} source_fps={:.4f} target_fps={:.4f} drift_ms={:.3f} interval_p50_ms={:.3f} interval_p95_ms={:.3f} interval_max_ms={:.3f}",
                     state->clipIndex, mClipPlayer->currentMountId(), afterSeek,
-                    elapsed, activeElapsed, state->presentedFrames, presentedFps);
+                    elapsedNs/1.0e6, activeNs/1.0e6, state->presentedFrames,
+                    presentedFps, sourceFps, targetFps, driftMs,
+                    percentile(0.5)/1.0e6, percentile(0.95)/1.0e6,
+                    intervals.empty()?0.0:intervals.back()/1.0e6);
                 if (!afterSeek) {
                     state->phase = RunState::Phase::Seek;
                     state->actionTimer.restart();
@@ -3616,14 +3960,24 @@ void MainWindow::startGalleryPerformanceTest(
     };
 
     connect(mClipPlayer, &ClipPlayerDialog::framePresented, this,
-        [state](int mountId, int) {
+        [state](int mountId, int frameIndex) {
             if (state->clipIndex >= state->mounts.size() ||
                 mountId != state->mounts[state->clipIndex]) return;
             if (state->phase == RunState::Phase::Playback ||
                 state->phase == RunState::Phase::SeekPlayback) {
-                const qint64 presentedMs = state->sampleTimer.elapsed();
-                if (state->firstPresentedMs < 0) state->firstPresentedMs = presentedMs;
-                state->lastPresentedMs = presentedMs;
+                if (frameIndex <= state->lastPresentedIndex)
+                    spdlog::error("GALLERY_PERF event=frame_order_error clip={} previous={} current={}",
+                        state->clipIndex, state->lastPresentedIndex, frameIndex);
+                state->lastPresentedIndex = frameIndex;
+                const qint64 presentedNs=state->sampleTimer.nsecsElapsed();
+                if(state->firstPresentedNs<0){
+                    state->firstPresentedNs=presentedNs;
+                    state->firstPresentedIndex=frameIndex;
+                }
+                if(state->lastPresentedNs>=0)
+                    state->presentationIntervalsNs.push_back(
+                        presentedNs-state->lastPresentedNs);
+                state->lastPresentedNs=presentedNs;
                 ++state->presentedFrames;
             }
         });
@@ -3644,6 +3998,13 @@ void MainWindow::startGalleryPerformanceTest(
                 if (info && !info->isSequence) {
                     spdlog::info("GALLERY_PERF event=still_complete clip={} mount={}",
                                  state->clipIndex, mountId);
+                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_GESTURES")) {
+                        mClipPlayer->runPerformanceGestureTest([state, startClip] {
+                            ++state->clipIndex;
+                            (*startClip)();
+                        });
+                        return;
+                    }
                     ++state->clipIndex;
                     (*startClip)();
                     return;
@@ -4480,11 +4841,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             // Level 4 keeps preset/quality unchanged while bounding its frame
             // pipeline (148 PPCS in SVT-AV1 4.1).
             if (av1Encoder == "libsvtav1") {
+                // Keep seeks within two seconds even for short native clips.
                 QString svtParams =
-                    "lp=4:keyint=10s:tune=1:sharpness=0:enable-overlays=1:scd=1:scm=0";
+                    "lp=4:keyint=2s:tune=1:sharpness=0:enable-overlays=1:scd=1:scm=0";
                 if (hdrNoise)
                     svtParams =
-                        "lp=4:keyint=10s:tune=5:sharpness=0:noise=8:enable-overlays=1:scd=1:scm=0";
+                        "lp=4:keyint=2s:tune=5:sharpness=0:noise=8:enable-overlays=1:scd=1:scm=0";
                 args << "-c:v" << av1Encoder << "-crf" << QString::number(av1Crf)
                      << "-preset" << QString::number(av1Preset)
                      << "-svtav1-params" << svtParams;
@@ -5838,10 +6200,9 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
                 },
                 [&](motioncam::PreviewFrame&& preview) {
                     if (cancelled->load() || !image.isNull()) return;
-                    applyGalleryColorTransform(
-                        preview.rgb, preview.metadata, settings.ignoreForwardMat,
+                    applyGalleryPreviewColorTransform(
+                        preview, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings));
-                    packGalleryRgb24(preview.rgb);
                     const int orientation = settings.orientation >= 0
                         ? settings.orientation : preview.metadata.orientation;
                     image = previewImage(preview.rgb, preview.width, preview.height,

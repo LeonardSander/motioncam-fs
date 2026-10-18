@@ -2015,10 +2015,19 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
           const std::array<double, 3> previewWhite{
               static_cast<double>(dstWhiteLevel), static_cast<double>(dstWhiteLevel),
               static_cast<double>(dstWhiteLevel)};
-          previewReady = previewRepeatSize == 2 &&
-            demosaicBilinearBayerToRgb16Bytes(
-                cfaSamples, previewFrame->rgb, previewWidth, previewHeight,
-                cfa, previewBlack, previewWhite);
+          if (previewRepeatSize == 2 && settings.streamingPreview) {
+            previewFrame->galleryCfa.assign(
+                cfaSamples, cfaSamples + static_cast<size_t>(previewWidth) * previewHeight);
+            previewFrame->galleryCfaPhase = cfa;
+            previewFrame->galleryBlack = previewBlack;
+            previewFrame->galleryWhite = previewWhite;
+            previewReady = true;
+          } else {
+            previewReady = previewRepeatSize == 2 &&
+              demosaicBilinearBayerToRgb16Bytes(
+                  cfaSamples, previewFrame->rgb, previewWidth, previewHeight,
+                  cfa, previewBlack, previewWhite);
+          }
         } else {
           std::vector<uint16_t> source(cfaSamples,
                                        cfaSamples + static_cast<size_t>(width) * height);

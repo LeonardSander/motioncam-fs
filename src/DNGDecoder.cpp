@@ -5886,6 +5886,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     const uint32_t storedInputBits = image.storedBitsPerSample
         ? image.storedBitsPerSample : image.layout.bitsPerSample;
     frame.clipping.clear();
+    frame.galleryCfa.clear();
     frame.displayBitDepth = image.metadata.inputBitDepth
         ? std::min(image.metadata.inputBitDepth, storedInputBits)
         : storedInputBits;
@@ -5999,7 +6000,6 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     const bool fastRgbProxy = applyPreviewScale && remainingPreviewScale > 1 &&
         image.layout.pixels != DNGPixelLayout::CFA &&
         image.layout.samplesPerPixel == 3 &&
-        !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
         !(settings.options & RENDER_OPT_REMOSAIC_TO_BAYER) && !hasCrop;
     if (fastRgbProxy) {
         std::vector<uint16_t> reduced;
@@ -6210,10 +6210,18 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                     ? image.metadata.whiteLevel[std::min<size_t>(
                           channel, image.metadata.whiteLevelCount - 1)]
                     : 65535.0;
-            const bool reconstructed = repeatSize == 2 &&
-                utils::demosaicBilinearBayerToRgb16Bytes(
+            bool reconstructed = false;
+            if (settings.streamingPreview) {
+                frame.galleryCfa = std::move(image.samples);
+                frame.galleryCfaPhase = image.layout.cfaPhase;
+                frame.galleryBlack = outputBlack;
+                frame.galleryWhite = outputWhite;
+                reconstructed = true;
+            } else {
+                reconstructed = utils::demosaicBilinearBayerToRgb16Bytes(
                     image.samples.data(), frame.rgb, width, height,
                     image.layout.cfaPhase, outputBlack, outputWhite);
+            }
             if (!reconstructed) return false;
             frame.width = width;
             frame.height = height;

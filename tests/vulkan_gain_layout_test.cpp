@@ -1,6 +1,11 @@
 #include "VulkanGainBake.h"
+#include "VulkanGalleryPreview.h"
+#include "Utils.h"
+#include "GalleryColor.h"
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -8,6 +13,286 @@
 #include <vector>
 
 int main() {
+    // Compare the gallery compute pass with the established CPU fallback,
+    // including odd dimensions and all four Bayer phases.
+    for (const std::array<uint8_t, 4> phase : {
+             std::array<uint8_t, 4>{0, 1, 1, 2},
+             std::array<uint8_t, 4>{2, 1, 1, 0},
+             std::array<uint8_t, 4>{1, 0, 2, 1},
+             std::array<uint8_t, 4>{1, 2, 0, 1}}) {
+        constexpr uint32_t previewWidth = 33, previewHeight = 31;
+        std::vector<uint16_t> mosaic(previewWidth * previewHeight);
+        for (size_t index = 0; index < mosaic.size(); ++index)
+            mosaic[index] = static_cast<uint16_t>((index * 719u + index / 7u) % 16384u);
+        const std::array<double, 3> black{64.0, 72.0, 80.0};
+        const std::array<double, 3> white{16000.0, 16000.0, 16000.0};
+        std::vector<uint8_t> gpu, cpu;
+        if (!motioncam::demosaicGalleryBayerVulkan(
+                mosaic.data(), gpu, previewWidth, previewHeight,
+                phase, black, white)) {
+            std::fprintf(stderr, "Vulkan gallery demosaic unavailable; test skipped\n");
+            return 77;
+        }
+        if (!motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                mosaic.data(), cpu, previewWidth, previewHeight,
+                phase, black, white) || gpu.size() != cpu.size()) {
+            std::fprintf(stderr, "Gallery demosaic output size mismatch\n");
+            return 1;
+        }
+        for (size_t index = 0; index < gpu.size() / 2; ++index) {
+            uint16_t actual, expected;
+            std::memcpy(&actual, gpu.data() + index * 2, 2);
+            std::memcpy(&expected, cpu.data() + index * 2, 2);
+            if (std::abs(int(actual) - int(expected)) > 1) {
+                std::fprintf(stderr, "Gallery demosaic mismatch at %zu: %u versus %u\n",
+                             index, actual, expected);
+                return 1;
+            }
+        }
+        motioncam::VulkanGalleryBayerSource source;
+        source.samples = mosaic.data();
+        source.width = previewWidth;
+        source.height = previewHeight;
+        source.phase = phase;
+        source.black = black;
+        source.white = white;
+        const std::array<float, 3> gains{1.15f, 0.95f, 1.25f};
+        const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
+        auto separate = cpu;
+        std::vector<uint8_t> fused;
+        if (!motioncam::colorGalleryRgbVulkan(separate, gains, identity,
+                                               identity, 1.0f, nullptr, nullptr,
+                                               false, false) ||
+            !motioncam::colorGalleryRgbVulkan(fused, gains, identity,
+                                              identity, 1.0f, nullptr, nullptr,
+                                              false, false, &source) ||
+            fused.size() != separate.size()) {
+            std::fprintf(stderr, "Fused gallery Bayer color pass failed\n");
+            return 1;
+        }
+        for (size_t index = 0; index < fused.size() / 2; ++index) {
+            uint16_t actual, expected;
+            std::memcpy(&actual, fused.data() + index * 2, 2);
+            std::memcpy(&expected, separate.data() + index * 2, 2);
+            if (std::abs(int(actual) - int(expected)) > 4) {
+                std::fprintf(stderr, "Fused Bayer color mismatch at %zu\n", index);
+                return 1;
+            }
+        }
+    }
+    {
+        std::vector<uint8_t> pixels(257 * 6);
+        const std::array<float, 3> gains{1.3f, 0.8f, 1.1f};
+        const std::array<float, 9> unusedMatrix{};
+        std::vector<uint16_t> source(pixels.size() / 2);
+        for (size_t i = 0; i < source.size(); ++i)
+            source[i] = static_cast<uint16_t>((i * 7919u) & 65535u);
+        source[0] = 65535;
+        source[1] = 64000;
+        source[2] = 65000;
+        std::memcpy(pixels.data(), source.data(), pixels.size());
+        if (!motioncam::colorGalleryRgbVulkan(
+                pixels, gains, unusedMatrix, unusedMatrix, 1.0f,
+                nullptr, nullptr, false, false)) {
+            std::fprintf(stderr, "Vulkan gallery color transform unavailable\n");
+            return 1;
+        }
+        const auto encode = [](float value) {
+            const size_t index = static_cast<size_t>(
+                std::clamp(value, 0.0f, 1.0f) * 65535.0f + 0.5f);
+            const float linear = static_cast<float>(index) / 65535.0f;
+            const float encoded = linear <= 0.0031308f ? linear * 12.92f
+                : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+            return static_cast<uint16_t>(std::lround(
+                std::clamp(encoded, 0.0f, 1.0f) * 65535.0f));
+        };
+        for (size_t pixel = 0; pixel < source.size() / 3; ++pixel) {
+            const size_t first = pixel * 3;
+            const bool clipped = source[first] == 65535 ||
+                source[first + 1] == 65535 || source[first + 2] == 65535;
+            const float least = static_cast<float>(std::min({source[first],
+                source[first + 1], source[first + 2]})) / 65535.0f;
+            const float t = std::clamp((least - 0.90f) / 0.10f, 0.0f, 1.0f);
+            const float weight = t * t * (3.0f - 2.0f * t);
+            std::array<float, 3> display{};
+            for (size_t channel = 0; channel < 3; ++channel)
+                display[channel] = source[first + channel] / 65535.0f * gains[channel];
+            if (clipped)
+                display[1] = std::max(display[1], std::min(display[0], display[2]));
+            const float neutral = display[0] + display[1] + display[2] -
+                std::min({display[0], display[1], display[2]}) -
+                std::max({display[0], display[1], display[2]});
+            for (size_t channel = 0; channel < 3; ++channel) {
+                uint16_t actual;
+                std::memcpy(&actual, pixels.data() + (first + channel) * 2, 2);
+                const auto expected = encode(
+                    display[channel] * (1.0f - weight) + neutral * weight);
+                if (std::abs(int(actual) - int(expected)) > 2) {
+                    std::fprintf(stderr, "Gallery color mismatch at %zu: %u versus %u\n",
+                                 first + channel, actual, expected);
+                    return 1;
+                }
+            }
+        }
+    }
+    for (bool combined : {false, true}) {
+        constexpr size_t count = 97;
+        motioncam::DNGProfileTable hue, look;
+        hue.hueDivisions = look.hueDivisions = 4;
+        hue.saturationDivisions = look.saturationDivisions = 2;
+        hue.valueDivisions = combined ? 1 : 2;
+        look.valueDivisions = 2;
+        hue.encoding = combined ? 0 : 1;
+        look.encoding = 0;
+        auto fill = [](motioncam::DNGProfileTable& table, float amount) {
+            table.values.resize(static_cast<size_t>(table.hueDivisions) *
+                table.saturationDivisions * table.valueDivisions * 3);
+            for (size_t i = 0; i < table.values.size() / 3; ++i) {
+                table.values[i * 3] = float(int(i % 7) - 3) * amount * 10;
+                table.values[i * 3 + 1] = 1.0f + float(int(i % 5) - 2) * amount;
+                table.values[i * 3 + 2] = 1.0f + float(int(i % 3) - 1) * amount;
+            }
+        };
+        fill(hue, 0.01f);
+        fill(look, 0.015f);
+        std::vector<uint16_t> source(count * 3);
+        for (size_t pixel = 0; pixel < count; ++pixel) {
+            source[pixel * 3] = static_cast<uint16_t>(2000 + pixel * 311 % 37000);
+            source[pixel * 3 + 1] = static_cast<uint16_t>(1200 + pixel * 547 % 39000);
+            source[pixel * 3 + 2] = static_cast<uint16_t>(3000 + pixel * 773 % 35000);
+        }
+        std::vector<uint8_t> gpu(source.size() * 2);
+        std::memcpy(gpu.data(), source.data(), gpu.size());
+        const std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
+        const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
+        constexpr float exposure = 1.1f;
+        if (!motioncam::colorGalleryRgbVulkan(gpu, gains, identity, identity,
+                                               exposure, &hue, &look, true, false)) {
+            std::fprintf(stderr, "Vulkan profile color transform unavailable\n");
+            return 1;
+        }
+        for (size_t pixel = 0; pixel < count; ++pixel) {
+            std::array<float, 3> camera{
+                source[pixel * 3] / 65535.0f,
+                source[pixel * 3 + 1] / 65535.0f,
+                source[pixel * 3 + 2] / 65535.0f};
+            std::array<float, 3> proPhoto{
+                1.3459433f * camera[0] - 0.2556075f * camera[1] -
+                    0.0511118f * camera[2],
+               -0.5445989f * camera[0] + 1.5081673f * camera[1] +
+                    0.0205351f * camera[2],
+                1.2118128f * camera[2]};
+            if (combined)
+                motioncam::gallery::applyHueSatAndLook(proPhoto, hue, look, exposure);
+            else {
+                motioncam::gallery::applyProfileTable(proPhoto, hue);
+                for (auto& channel : proPhoto) channel *= exposure;
+                motioncam::gallery::applyProfileTable(proPhoto, look);
+            }
+            std::array<float, 3> xyz{
+                0.7976749f * proPhoto[0] + 0.1351917f * proPhoto[1] +
+                    0.0313534f * proPhoto[2],
+                0.2880402f * proPhoto[0] + 0.7118741f * proPhoto[1] +
+                    0.0000857f * proPhoto[2],
+                0.82521f * proPhoto[2]};
+            std::array<float, 3> display{
+                 3.1338561f * xyz[0] - 1.6168667f * xyz[1] - 0.4906146f * xyz[2],
+                -0.9787684f * xyz[0] + 1.9161415f * xyz[1] + 0.0334540f * xyz[2],
+                 0.0719453f * xyz[0] - 0.2289914f * xyz[1] + 1.4052427f * xyz[2]};
+            for (size_t channel = 0; channel < 3; ++channel) {
+                const size_t index = pixel * 3 + channel;
+                const size_t tableIndex = static_cast<size_t>(
+                    std::clamp(display[channel], 0.0f, 1.0f) * 65535.0f + 0.5f);
+                const float linear = static_cast<float>(tableIndex) / 65535.0f;
+                const float encoded = linear <= 0.0031308f ? linear * 12.92f
+                    : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+                const auto expected = static_cast<uint16_t>(std::lround(
+                    std::clamp(encoded, 0.0f, 1.0f) * 65535.0f));
+                uint16_t actual;
+                std::memcpy(&actual, gpu.data() + index * 2, 2);
+                if (std::abs(int(actual) - int(expected)) > 4) {
+                    std::fprintf(stderr,
+                        "Gallery profile mismatch combined=%d at %zu: %u versus %u\n",
+                        combined, index, actual, expected);
+                    return 1;
+                }
+            }
+        }
+    }
+    {
+        constexpr uint32_t width = 13, height = 7;
+        std::vector<uint16_t> samples(width * height * 3);
+        for (size_t i = 0; i < samples.size(); ++i)
+            samples[i] = static_cast<uint16_t>((i * 4001u) & 65535u);
+        std::vector<uint8_t> source(samples.size() * 2);
+        std::memcpy(source.data(), samples.data(), source.size());
+        std::vector<uint8_t> clipping(width * height);
+        for (size_t i = 0; i < clipping.size(); ++i)
+            clipping[i] = i % 11 == 0 ? 1 : i % 7 == 0
+                ? static_cast<uint8_t>(3 + i % 7) : 0;
+        const std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
+        const std::array<float, 9> matrix{1,0,0,0,1,0,0,0,1};
+        auto colored = source;
+        if (!motioncam::colorGalleryRgbVulkan(colored, gains, matrix,
+                                               matrix, 1.0f, nullptr, nullptr,
+                                               false, false)) return 1;
+        for (int orientation : {0, 90, 180, 270})
+            for (bool rgb24 : {false, true}) {
+                motioncam::VulkanGalleryOutput output;
+                output.width = width;
+                output.height = height;
+                output.orientation = orientation;
+                output.rgb24 = rgb24;
+                output.clipping = &clipping;
+                auto actual = source;
+                if (!motioncam::colorGalleryRgbVulkan(actual, gains, matrix,
+                        matrix, 1.0f, nullptr, nullptr, false, false,
+                        nullptr, &output)) return 1;
+                const uint32_t outputWidth = orientation == 90 || orientation == 270
+                    ? height : width;
+                const size_t stride = rgb24 ? 3u : 6u;
+                std::vector<uint8_t> expected(static_cast<size_t>(width) * height * stride);
+                for (uint32_t y = 0; y < height; ++y)
+                    for (uint32_t x = 0; x < width; ++x) {
+                        const size_t inputPixel = static_cast<size_t>(y) * width + x;
+                        uint32_t ox = x, oy = y;
+                        if (orientation == 90) { ox = height - 1 - y; oy = x; }
+                        else if (orientation == 180) {
+                            ox = width - 1 - x; oy = height - 1 - y;
+                        } else if (orientation == 270) {
+                            ox = y; oy = width - 1 - x;
+                        }
+                        std::array<uint16_t, 3> codes{};
+                        for (size_t channel = 0; channel < 3; ++channel)
+                            std::memcpy(&codes[channel],
+                                colored.data() + inputPixel * 6 + channel * 2, 2);
+                        const uint8_t indication = clipping[inputPixel];
+                        if (indication == 1) codes = {32768, 16384, 0};
+                        else if (indication > 1) {
+                            const uint8_t bits = indication - 2;
+                            codes = bits == 7 ? std::array<uint16_t, 3>{0, 0, 0}
+                                : std::array<uint16_t, 3>{
+                                    static_cast<uint16_t>(bits & 1 ? 65535 : 0),
+                                    static_cast<uint16_t>(bits & 2 ? 65535 : 0),
+                                    static_cast<uint16_t>(bits & 4 ? 65535 : 0)};
+                        }
+                        const size_t destination =
+                            (static_cast<size_t>(oy) * outputWidth + ox) * stride;
+                        for (size_t channel = 0; channel < 3; ++channel) {
+                            if (rgb24) expected[destination + channel] =
+                                static_cast<uint8_t>(codes[channel] >> 8);
+                            else std::memcpy(expected.data() + destination +
+                                             channel * 2, &codes[channel], 2);
+                        }
+                    }
+                if (actual != expected) {
+                    std::fprintf(stderr,
+                        "Gallery output mismatch orientation=%d rgb24=%d\n",
+                        orientation, rgb24);
+                    return 1;
+                }
+            }
+    }
     constexpr uint32_t width = 32, height = 32;
     const std::vector<float> cfaPhaseGrid(4, 1.25f);
     const std::vector<float> rightHalfGrid(4, 1.5f);

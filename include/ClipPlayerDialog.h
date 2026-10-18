@@ -3,6 +3,7 @@
 #include <QImage>
 #include <QPointF>
 #include <QProcess>
+#include <QPointer>
 #include <QTimer>
 #include <QVector>
 #include <QHash>
@@ -16,11 +17,13 @@
 #include <optional>
 #include <vector>
 #include <array>
+#include <functional>
 class QLabel; class QPushButton; class QSlider; class QScrollArea; class QCheckBox;
 class QEvent;
 class QBuffer;
 class QTemporaryDir;
 class GalleryGpuVideo;
+namespace motioncam { struct VulkanGalleryGpuBuffer; }
 class QGraphicsOpacityEffect; class QPropertyAnimation; class QWidget;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
 class QAudioSink;
@@ -38,6 +41,7 @@ public:
     bool selectMount(int mountId);
     void seekToSeconds(double seconds);
     double currentDurationSeconds() const;
+    double currentFrameRate() const;
     void setAutomaticAdvanceEnabled(bool enabled);
     void setPlaybackPaused(bool paused);
     bool isPlaybackPaused() const { return mPaused; }
@@ -46,6 +50,7 @@ public:
     void setFpsIndicatorEnabled(bool enabled);
     void setHistogramEnabled(bool enabled);
     void setPerformanceUncapped(bool enabled);
+    void setPerformanceAudioEnabled(bool enabled);
     void setHistogramExpanded(bool expanded);
     void setPerformancePixelOverlayEnabled(bool enabled);
     void setClippingEnabled(bool enabled);
@@ -54,6 +59,8 @@ public:
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     std::shared_ptr<std::atomic_bool> thumbnailCollectionEnabled() const { return mThumbnailCollectionEnabled; }
+    bool nativeVulkanPresenter() const;
+    void runPerformanceGestureTest(std::function<void()> finished);
     void reloadCurrentClip();
     void invalidateThumbnails(int mountId);
     void updateClipInfo(int mountId, double fps, double durationSeconds, int sourceFrames,
@@ -66,13 +73,22 @@ public:
         int rawWidth = 0, int rawHeight = 0, int rawChannels = 0,
         float rawBlack = 0.0f, float rawWhite = 65535.0f,
         int rawCfaSize = 2, std::array<uint8_t, 4> rawCfaPhase = {0, 1, 1, 2},
-        std::array<float, 4> rawBlackLevels = {}, int rawOrientation = 0);
+        std::array<float, 4> rawBlackLevels = {}, int rawOrientation = 0,
+        std::shared_ptr<const std::vector<uint8_t>> frameBacking = {},
+        bool framePreOriented = false,
+        std::shared_ptr<const uint8_t> framePixels = {},
+        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer = {},
+        int sourceFrameIndex = -1);
     void presentRgb48Frame(const QByteArray& frame, int width, int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
         int rawWidth = 0, int rawHeight = 0, int rawChannels = 0,
         float rawBlack = 0.0f, float rawWhite = 65535.0f,
         int rawCfaSize = 2, std::array<uint8_t, 4> rawCfaPhase = {0, 1, 1, 2},
-        std::array<float, 4> rawBlackLevels = {}, int rawOrientation = 0);
+        std::array<float, 4> rawBlackLevels = {}, int rawOrientation = 0,
+        std::shared_ptr<const std::vector<uint8_t>> frameBacking = {},
+        bool framePreOriented = false,
+        std::shared_ptr<const uint8_t> framePixels = {},
+        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer = {});
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
@@ -110,9 +126,19 @@ private:
         int orientation=0;
     };
     struct SubmittedFrame { int sourceFrame=0; RawFrame raw; };
-    struct QueuedFrame { QImage image; int sourceFrame=0; RawFrame raw; };
+    struct QueuedFrame {
+        QImage image;
+        int sourceFrame=0;
+        RawFrame raw;
+        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer;
+    };
+    bool hasPresentedFrame() const {
+        return !mLastPresentedImage.isNull() || bool(mLastPresentedGpuBuffer);
+    }
     void openClip(int, double startSeconds=0.0); void startDecoder();
     void stopDecoder();
+    void releaseGpuFrames(bool keepPresentedFrame=false);
+    void captureNativeOverlay(bool submit = true);
     void decoderFinished(int, QProcess::ExitStatus); void consumeOutput();
     void showNextFrame(); void advance(); QString ffmpegPath() const;
     int frameAtSliderPosition(int x) const;
@@ -125,6 +151,8 @@ private:
     static QByteArray sourceAudioWav(const Clip& clip, const QString& ffmpegExecutable,
                                      const std::shared_ptr<std::atomic_bool>& cancelled);
     void setAudioEnabled(bool enabled);
+    enum class AudioMode { CappedMuted, RealTimeAudio, UncappedMuted };
+    void cycleAudioMode();
     void updateButtonIcons();
     void revealOverlay();
     void setOverlayVisible(bool visible);
@@ -145,6 +173,7 @@ private:
     void updateFrameTimerInterval();
     void startAudioAt(double seconds);
     qint64 audioPositionMs() const;
+    qint64 audioPositionNs() const;
     QString framePositionText(int frame) const;
     static QString runtimeText(double seconds);
     void rebuildThumbnailStrip();
@@ -160,7 +189,10 @@ private:
     void updateCursorStyle();
     void centerCurrentThumbnail();
     int sourceFrameForOutput(int outputFrame) const;
-    QImage rgb48Image(const QByteArray& frame, int width, int height) const;
+    QImage rgb48Image(const QByteArray& frame, int width, int height,
+        std::shared_ptr<const std::vector<uint8_t>> backing = {},
+        bool preOriented = false,
+        std::shared_ptr<const uint8_t> pixels = {}) const;
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
     void setSourceFrameThumbnailImage(int sourceFrame, const QImage& image);
     QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; GalleryGpuVideo* mGpuVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
@@ -178,11 +210,16 @@ private:
     int mQueuedFrameStep = 0;
     QWidget* mOverlay=nullptr; QGraphicsOpacityEffect* mOverlayOpacity=nullptr;
     QPropertyAnimation* mOverlayAnimation=nullptr;
-    QTimer mOverlayTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
+    QTimer mOverlayTimer, mNativeOverlayCaptureTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
+    QImage mCapturedNativeOverlay;
+    QPointer<QWidget> mNativeMouseTarget;
     QElapsedTimer mZoomAnimationClock;
     QElapsedTimer mPresentationClock;
+    QElapsedTimer mCadenceClock;
+    int mCadenceStartFrame=-1;
+    int mCadenceLastFrame=-1;
     std::deque<qint64> mPresentationIntervals;
-    qint64 mLastPresentationMs=-1;
+    qint64 mLastPresentationNs=-1;
     QBuffer* mAudioBuffer=nullptr;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
     QAudioSink* mAudioSink=nullptr;
@@ -190,11 +227,12 @@ private:
     QAudioOutput* mAudioSink=nullptr;
 #endif
     QByteArray mAudioPcm; QElapsedTimer mAudioClock;
-    qint64 mAudioClockBaseMs=0; int mAudioBytesPerSecond=0, mAudioBlockAlign=1;
+    qint64 mAudioClockBaseNs=0; int mAudioBytesPerSecond=0, mAudioBlockAlign=1;
     QByteArray mBytes; qsizetype mBytesOffset=0;
     std::deque<QueuedFrame> mFrames; std::deque<SubmittedFrame> mSubmittedFrames;
     RawFrame mPresentedRawFrame;
     QImage mLastPresentedImage;
+    std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> mLastPresentedGpuBuffer;
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
     int mInputBitsPerChannel=16;
     int mNextInputFrame=0;
@@ -203,6 +241,7 @@ private:
     bool mFpsIndicatorEnabled=true;
     bool mHistogramEnabled=false;
     bool mPerformanceUncapped=false;
+    AudioMode mAudioMode=AudioMode::CappedMuted;
     bool mClippingEnabled=false;
     bool mHistogramExpanded=false;
     bool mPerformanceOverlayPinned=false;

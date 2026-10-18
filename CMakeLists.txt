@@ -49,6 +49,7 @@ set(PROJECT_SOURCES
         src/ArchiveImport.cpp
         src/FrameTimingDialog.cpp
         src/ClipPlayerDialog.cpp
+        src/GalleryVulkanVideo.cpp
         src/settingsdialog.cpp
         src/VirtualFileSystemImpl.cpp
         src/PreviewVirtualFileSystem.cpp
@@ -58,6 +59,7 @@ set(PROJECT_SOURCES
         src/DirectLogDecoder.cpp
         src/DirectLogGpuRgb.cpp
         src/VulkanGainBake.cpp
+        src/VulkanGalleryPreview.cpp
         shaders/vulkan_gain_bake.comp
         shaders/vulkan_cfa_gain_bake.comp
         shaders/vulkan_gain_common.glsl
@@ -598,9 +600,11 @@ include(CTest)
 if(BUILD_TESTING)
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
         add_executable(motioncam-vulkan-gain-layout-test
-            tests/vulkan_gain_layout_test.cpp src/VulkanGainBake.cpp)
+            tests/vulkan_gain_layout_test.cpp src/VulkanGainBake.cpp
+            src/VulkanGalleryPreview.cpp src/HigherCFADemosaic.cpp)
         target_include_directories(motioncam-vulkan-gain-layout-test PRIVATE
-            include "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
+            include deps/motioncam-decoder/thirdparty
+            "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
         target_link_libraries(motioncam-vulkan-gain-layout-test PRIVATE
             PkgConfig::DIRECTLOG_PLACEBO)
         target_compile_definitions(motioncam-vulkan-gain-layout-test PRIVATE

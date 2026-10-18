@@ -1,4 +1,6 @@
 #include "ClipPlayerDialog.h"
+#include "GalleryVulkanVideo.h"
+#include "VulkanGalleryPreview.h"
 #include <QCloseEvent>
 #include <QCursor>
 #include <QApplication>
@@ -492,6 +494,11 @@ protected:
     QSGNode* updatePaintNode(QSGNode* oldNode,
                             UpdatePaintNodeData*) override {
         const auto started = std::chrono::steady_clock::now();
+        if (!mLoggedRenderApi && window()) {
+            mLoggedRenderApi = true;
+            spdlog::info("Gallery active scene graph API: {}",
+                static_cast<int>(window()->rendererInterface()->graphicsApi()));
+        }
         if(mFrame.isNull()||!window()){
             delete oldNode;
             mUploadedFrameKey=0;
@@ -526,37 +533,67 @@ private:
     QRectF mTarget;
     bool mSmooth = true;
     qint64 mUploadedFrameKey=0;
+    bool mLoggedRenderApi=false;
 };
 
-class GalleryGpuVideo final : public QQuickWidget {
+class GalleryGpuVideo final : public QWidget {
 public:
-    explicit GalleryGpuVideo(QWidget* parent) : QQuickWidget(parent) {
-        connect(this,&QQuickWidget::sceneGraphError,this,
+    explicit GalleryGpuVideo(QWidget* parent) : QWidget(parent) {
+        auto* layout=new QVBoxLayout(this);
+        layout->setContentsMargins(0,0,0,0);
+#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && !defined(Q_OS_MACOS)
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_NATIVE_VULKAN")){
+            mNative=new GalleryVulkanVideo(this);
+            if(mNative->usable()){
+                layout->addWidget(mNative);
+                return;
+            }
+            delete mNative;
+            mNative=nullptr;
+        }
+#endif
+        mQuick=new QQuickWidget(this);
+        connect(mQuick,&QQuickWidget::sceneGraphError,this,
             [this](QQuickWindow::SceneGraphError,const QString& message){
                 mAvailable=false;
                 spdlog::warn("Gallery Vulkan presentation unavailable: {}",
                     message.toStdString());
             });
-        setResizeMode(SizeRootObjectToView);
-        setClearColor(QColor(96,96,96));
+        mQuick->setResizeMode(QQuickWidget::SizeRootObjectToView);
+        mQuick->setClearColor(QColor(96,96,96));
         mTextureItem=new GalleryTextureItem;
         mTextureItem->setSize(QSizeF(640,360));
-        setContent(QUrl(),nullptr,mTextureItem);
-        if(status()==QQuickWidget::Error||!rootObject()){
+        mQuick->setContent(QUrl(),nullptr,mTextureItem);
+        layout->addWidget(mQuick);
+        if(mQuick->status()==QQuickWidget::Error||!mQuick->rootObject()){
             mAvailable=false;
             spdlog::error("Gallery Vulkan scene initialization failed");
             return;
         }
         spdlog::info("Gallery scene graph API: {}",
-            static_cast<int>(quickWindow()->rendererInterface()->graphicsApi()));
+            static_cast<int>(mQuick->quickWindow()->rendererInterface()->graphicsApi()));
     }
 
     void setFrame(const QImage& image,const QRectF& target,bool smooth) {
+        if(mNative){mNative->setFrame(image,target,smooth);return;}
         if(mTextureItem)mTextureItem->setFrame(image,target,smooth);
     }
-    bool usable() const {return mAvailable;}
+    void setGpuFrame(std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame,
+                     const QRectF& target,bool smooth,
+                     const QImage& overlay = {}) {
+        if(mNative)mNative->setGpuFrame(std::move(frame),target,smooth,overlay);
+    }
+    void setOverlay(const QImage& image) {if(mNative)mNative->setOverlay(image);}
+    void drainGpuFrames() {if(mNative)mNative->drainGpuFrames();}
+    bool usable() const {return mNative?mNative->usable():mAvailable;}
+    bool native() const {return mNative!=nullptr;}
+    qreal nativePixelRatio() const {
+        return mNative ? mNative->pixelRatio() : devicePixelRatioF();
+    }
 
 private:
+    GalleryVulkanVideo* mNative=nullptr;
+    QQuickWidget* mQuick=nullptr;
     GalleryTextureItem* mTextureItem=nullptr;
     bool mAvailable=true;
 };
@@ -573,19 +610,84 @@ public:
         setPixmap(QPixmap::fromImage(canvas));
     }
     bool usable() const {return true;}
+    bool native() const {return false;}
+    qreal nativePixelRatio() const {return devicePixelRatioF();}
+    void setGpuFrame(std::shared_ptr<motioncam::VulkanGalleryGpuBuffer>,
+                     const QRectF&,bool,const QImage& = {}) {}
+    void setOverlay(const QImage&) {}
+    void drainGpuFrames() {}
 };
 #endif
+
+bool ClipPlayerDialog::nativeVulkanPresenter() const {
+    return mGpuVideo && mGpuVideo->native() && mGpuVideo->usable();
+}
+
+void ClipPlayerDialog::runPerformanceGestureTest(std::function<void()> finished) {
+    if (!hasPresentedFrame()) { finished(); return; }
+    setPlaybackPaused(true);
+    mZoomAnimationTimer.stop();
+    mSurfaceUpdateTimer.stop();
+    const double minimum = fitScale() * 100.0;
+    spdlog::info("GALLERY_PERF event=gesture_range start_percent={:.3f} end_percent=3200 zoom_steps=45 pan_steps=45",
+        minimum);
+    auto samples = std::make_shared<std::vector<double>>();
+    auto ticks = std::make_shared<int>(0);
+    auto timer = new QTimer(this);
+    timer->setTimerType(Qt::PreciseTimer);
+    timer->setInterval(16);
+    connect(timer, &QTimer::timeout, this,
+        [this, timer, ticks, samples, minimum, finished = std::move(finished)] {
+            const int tick = (*ticks)++;
+            if (tick == 90) {
+                timer->stop();
+                timer->deleteLater();
+                std::sort(samples->begin(), samples->end());
+                const auto percentile = [&](double fraction) {
+                    return (*samples)[std::min(samples->size() - 1,
+                        size_t(fraction * (samples->size() - 1)))];
+                };
+                spdlog::info("GALLERY_PERF event=gesture_sample frames={} update_p50_ms={:.3f} update_p95_ms={:.3f} update_max_ms={:.3f} native={}",
+                    samples->size(), percentile(0.5), percentile(0.95),
+                    samples->back(), nativeVulkanPresenter());
+                finished();
+                return;
+            }
+            if (tick < 45) {
+                const double progress = double(tick + 1) / 45.0;
+                mZoomPercent = minimum * std::exp(std::log(3200.0 / minimum) * progress);
+                mPanSourcePixels = {};
+            } else {
+                mZoomPercent = 3200.0;
+                mPanSourcePixels = QPointF((tick - 45) * 0.5, (tick - 45) * 0.25);
+                clampPanToZoom();
+            }
+            const auto started = std::chrono::steady_clock::now();
+            updateDisplayedImage();
+            samples->push_back(std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count());
+        });
+    QTimer::singleShot(1000, this, [timer] { timer->start(); });
+}
 
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
     mThumbnailDiskCache=std::make_unique<QTemporaryDir>();
     setAttribute(Qt::WA_DeleteOnClose); setWindowTitle(tr("Gallery")); resize(1100,720);
+    QPalette galleryPalette=palette();
+    galleryPalette.setColor(QPalette::Window,QColor(96,96,96));
+    setPalette(galleryPalette);
+    setAutoFillBackground(true);
     setStyleSheet("QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
     setMouseTracking(true);
     auto* layout=new QVBoxLayout(this);layout->setContentsMargins(0,0,0,0);layout->setSpacing(0);
     auto* stage=new QWidget(this);stage->setContentsMargins(0,0,0,0);stage->setStyleSheet("border:0;");
+    QPalette stagePalette=stage->palette();
+    stagePalette.setColor(QPalette::Window,QColor(96,96,96));
+    stage->setPalette(stagePalette);
+    stage->setAutoFillBackground(true);
     auto* stack=new QStackedLayout(stage);stack->setStackingMode(QStackedLayout::StackAll);stack->setContentsMargins(0,0,0,0);stack->setSpacing(0);
-    mVideo=new QLabel(tr("Preparing clip…"),this); mVideo->setAlignment(Qt::AlignCenter);
+    mVideo=new QLabel(tr("Preparing capture…"),this); mVideo->setAlignment(Qt::AlignCenter);
     // A retained surface must remain pixel-size stable while the window is
     // resized. QLabel will center and clip/pad this pixmap until the decoder
     // supplies a surface rendered for the new viewport.
@@ -618,14 +720,14 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     overlayLayout->addStretch(1);
     auto* controls=new QHBoxLayout;controls->setSpacing(8);auto* previous=new QPushButton(mOverlay);
     mPlayPause=new QPushButton(mOverlay); auto* next=new QPushButton(mOverlay);
-    mAudioButton=new QPushButton(mOverlay);mAudioButton->setCheckable(true);
+    mAudioButton=new QPushButton(mOverlay);
     mFullscreenButton=new QPushButton(mOverlay);mThumbnailToggle=new QPushButton(mOverlay);
     mHistogramToggle=new QPushButton(mOverlay);mHistogramToggle->setCheckable(true);
     mClippingToggle=new QPushButton(mOverlay);mClippingToggle->setCheckable(true);
     for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle,mHistogramToggle,mClippingToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)} QPushButton:checked{background:rgba(70,95,125,220)}");}
     previous->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));previous->setToolTip(tr("Previous clip"));
     next->setIcon(style()->standardIcon(QStyle::SP_MediaSkipForward));next->setToolTip(tr("Next clip"));
-    mPlayPause->setToolTip(tr("Play / pause"));mAudioButton->setToolTip(tr("Mute / unmute audio"));mFullscreenButton->setToolTip(tr("Toggle fullscreen"));
+    mPlayPause->setToolTip(tr("Play / pause"));mAudioButton->setToolTip(tr("Capped, muted — click for real-time audio"));mFullscreenButton->setToolTip(tr("Toggle fullscreen"));
     mFullscreenButton->setIcon(fullscreenIcon(false));
     mHistogramToggle->setIcon(histogramIcon());
     mHistogramToggle->setToolTip(tr("Show raw RGB histogram"));
@@ -657,13 +759,17 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlay->setGraphicsEffect(mOverlayOpacity);mOverlayOpacity->setOpacity(1.0);
     mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);mOverlayAnimation->setDuration(260);
     mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mPerformanceOverlayPinned&&!mHistogramExpanded&&!pointerOverThumbnailRow())setOverlayVisible(false);});
+    mNativeOverlayCaptureTimer.setInterval(50);
+    connect(&mNativeOverlayCaptureTimer,&QTimer::timeout,this,[this]{
+        if(mGpuVideo&&mGpuVideo->isVisible())captureNativeOverlay();
+    });
     mSurfaceUpdateTimer.setSingleShot(true);mSurfaceUpdateTimer.setInterval(300);
     connect(&mSurfaceUpdateTimer,&QTimer::timeout,this,[this]{
         // A later resize may arrive while a prior surface is still starting.
         // The retained image, rather than first-frame state, is the authority
         // for whether it is safe and necessary to restart at the final size.
-        if(mIndex<0||mLastPresentedImage.isNull())return;
-        if(mDirectSequencePresentation&&mClips[mIndex].isSequence){
+        if(mIndex<0||!hasPresentedFrame())return;
+        if(nativeVulkanPresenter()&&mLastImageIsSource){
             updateDisplayedImage();return;
         }
         // While zoom is animating, build the crop for its already-known final
@@ -699,10 +805,14 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         const QString decoderError=QString::fromUtf8(mDecoder.readAllStandardError()).trimmed();
         const QString detail=decoderError.isEmpty()?mDecoder.errorString():decoderError;
         mTitle->setText(tr("FFmpeg could not be started: %1").arg(detail));
-        if(mLastPresentedImage.isNull())mVideo->setText(tr("Playback unavailable"));
+        if(!hasPresentedFrame())mVideo->setText(tr("Playback unavailable"));
         spdlog::warn("Gallery FFmpeg could not be started: {}", detail.toStdString());
     });
-    connect(&mFrameTimer,&QTimer::timeout,this,&ClipPlayerDialog::showNextFrame);
+    connect(&mFrameTimer,&QTimer::timeout,this,[this]{
+        showNextFrame();
+        if(mFrameTimer.isActive()&&!mPerformanceUncapped)
+            updateFrameTimerInterval();
+    });
     connect(mPlayPause,&QPushButton::clicked,this,[this]{
         if(mPaused&&mThumbnailScroll&&mThumbnailScroll->isVisible()&&mPosition&&
            mPosition->value()>=mPosition->maximum()&&
@@ -713,9 +823,11 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             openClip(mIndex,0.0);return;
         }
         mPaused=!mPaused;updateButtonIcons();
-        if(!mPaused){mPresentationIntervals.clear();mLastPresentationMs=-1;mPresentationClock.restart();}
+        if(!mPaused){mPresentationIntervals.clear();mLastPresentationNs=-1;
+            mPresentationClock.restart();mCadenceStartFrame=-1;mCadenceLastFrame=-1;
+            mCadenceClock.invalidate();}
         updateFpsIndicator();
-        if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseMs=audioPositionMs();mAudioClock.invalidate();mAudioSink->suspend();}
+        if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseNs=audioPositionNs();mAudioClock.invalidate();mAudioSink->suspend();}
             if(mThumbnailScroll&&mThumbnailScroll->isVisible())
                 emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
         }
@@ -726,7 +838,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             else if(!mAudioStartPending){mAudioClock.start();mAudioSink->resume();}
         }}
     });
-    connect(mAudioButton,&QPushButton::toggled,this,&ClipPlayerDialog::setAudioEnabled);
+    connect(mAudioButton,&QPushButton::clicked,this,&ClipPlayerDialog::cycleAudioMode);
     connect(mHistogramToggle,&QPushButton::toggled,this,[this](bool enabled){
         setHistogramEnabled(enabled);
         emit histogramEnabledChanged(enabled);
@@ -788,6 +900,9 @@ void ClipPlayerDialog::seekToSeconds(double seconds){
 }
 double ClipPlayerDialog::currentDurationSeconds()const{
     return mIndex>=0&&mIndex<mClips.size()?mClips[mIndex].durationSeconds:0.0;
+}
+double ClipPlayerDialog::currentFrameRate()const{
+    return mIndex>=0&&mIndex<mClips.size()?mClips[mIndex].fps:0.0;
 }
 void ClipPlayerDialog::setAutomaticAdvanceEnabled(bool enabled){
     for(auto& clip:mClips)clip.autoAdvance=enabled&&clip.isSequence&&clip.sourceFrames>1;
@@ -863,6 +978,40 @@ void ClipPlayerDialog::stopDecoder(){
     mStoppingDecoder=false;
 }
 
+void ClipPlayerDialog::releaseGpuFrames(bool keepPresentedFrame){
+    if(mGpuVideo&&!keepPresentedFrame)mGpuVideo->drainGpuFrames();
+    mFrames.clear();
+    if(!keepPresentedFrame)mLastPresentedGpuBuffer.reset();
+}
+
+void ClipPlayerDialog::captureNativeOverlay(bool submit){
+    if(!mGpuVideo||!mGpuVideo->native())return;
+    const QSize logicalSize=mGpuVideo->size();
+    if(logicalSize.isEmpty())return;
+    const qreal ratio=mGpuVideo->nativePixelRatio();
+    const QSize size(std::max(1,qRound(logicalSize.width()*ratio)),
+                     std::max(1,qRound(logicalSize.height()*ratio)));
+    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+       mCapturedNativeOverlay.size()!=size)
+        spdlog::info("GALLERY_PERF event=native_overlay_pixels logical={}x{} dpr={:.3f} actual={}x{}",
+            logicalSize.width(),logicalSize.height(),double(ratio),
+            size.width(),size.height());
+    QImage canvas(size,QImage::Format_RGBA8888_Premultiplied);
+    canvas.fill(Qt::transparent);
+    QPainter painter(&canvas);
+    painter.scale(ratio,ratio);
+    if(mOverlay->isVisible())
+        mOverlay->render(&painter,mOverlay->pos()-mGpuVideo->pos(),
+            QRegion(),QWidget::DrawChildren);
+    if(mFpsLabel->isVisible())
+        mFpsLabel->render(&painter,mFpsLabel->pos()-mGpuVideo->pos(),
+            QRegion(),QWidget::DrawChildren);
+    painter.end();
+    mCapturedNativeOverlay=std::move(canvas);
+    if(submit)mGpuVideo->setOverlay(mCapturedNativeOverlay);
+}
+
+
 QString ClipPlayerDialog::ffmpegPath()const{
 #ifdef _WIN32
     const QString bundled=QDir(QCoreApplication::applicationDirPath()).filePath("ffmpeg.exe");
@@ -892,6 +1041,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     // copy the frame being shown into the fallback label. Otherwise the label
     // can expose a much older clip (often the last still) during the handoff.
     if(changingClip&&mGpuVideo&&mGpuVideo->isVisible()&&
+       !mGpuVideo->native()&&
        !mLastPresentedImage.isNull()){
         const bool directPresentation=mDirectSequencePresentation;
         mDirectSequencePresentation=false;
@@ -902,6 +1052,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     // writing. The connected handler increments the gallery generation
     // synchronously; newly queued callbacks cannot run until this returns.
     mPlaybackTarget->store(requestedFrame);mIncomingFrame->store(requestedFrame);
+    releaseGpuFrames(true);
     emit currentClipChanged(requestedClip.mountId,requestedSeconds);
     stopDecoder();mBytes.clear();mBytesOffset=0;mFrames.clear();mSubmittedFrames.clear();
     mPresentedRawFrame={};
@@ -921,7 +1072,9 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
         (mClips[index].directPresentation ||
          qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_DIRECT_PRESENT")) &&
         !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
-    if(mDirectSequencePresentation&&!mGpuVideo){
+    const bool nativeStillPresentation=!mClips[index].isSequence&&
+        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_NATIVE_VULKAN");
+    if((mDirectSequencePresentation||nativeStillPresentation)&&!mGpuVideo){
 #if defined(MOTIONCAM_HAS_QUICKWIDGETS)
         static const bool vulkanSelected=[] {
 #if !defined(Q_OS_MACOS)
@@ -933,15 +1086,33 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
 #endif
         auto* stage=mVideo->parentWidget();
         mGpuVideo=new GalleryGpuVideo(stage);
+        QPalette videoPalette=mGpuVideo->palette();
+        videoPalette.setColor(QPalette::Window,QColor(96,96,96));
+        mGpuVideo->setPalette(videoPalette);
+        mGpuVideo->setAutoFillBackground(true);
         mGpuVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
         mGpuVideo->setMouseTracking(true);
         static_cast<QStackedLayout*>(stage->layout())->insertWidget(1,mGpuVideo);
+#if defined(MOTIONCAM_HAS_QUICKWIDGETS)
+        if(mGpuVideo->native()){
+            mNativeOverlayCaptureTimer.start();
+            // Keep the grey preparation label visible until a processed GPU
+            // frame exists. Mapping an empty native surface exposes the
+            // compositor's undefined blue contents during startup.
+            mGpuVideo->hide();
+            mOverlay->raise();
+            mFpsLabel->raise();
+        }
+#endif
     }
-    if(mGpuVideo)mGpuVideo->hide();
+    if(mGpuVideo&&!mGpuVideo->native())
+        mGpuVideo->hide();
     if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=gallery_presenter mount={} mode={}",
             mClips[index].mountId,
-            mDirectSequencePresentation?"direct":"ffmpeg");
+            mDirectSequencePresentation?"direct":
+            nativeStillPresentation&&mGpuVideo&&mGpuVideo->native()
+                ?"native_still":"ffmpeg");
     if(changingClip)
         mRequestedZoomPercent=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     const auto& clip=mClips[index];
@@ -957,12 +1128,13 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     mCurrentThumbnailSource=sourceFrameForOutput(startFrame);
     if(mThumbnailScroll->isVisible())rebuildThumbnailStrip();
     mPlaybackFailed=false;mDirectFramesFinished=false;mPaused=preservePausedNavigation;
-    mPresentationIntervals.clear();mLastPresentationMs=-1;mPresentationClock.restart();
+    mPresentationIntervals.clear();mLastPresentationNs=-1;mPresentationClock.restart();
+    mCadenceStartFrame=-1;mCadenceLastFrame=-1;mCadenceClock.invalidate();
     updateFpsIndicator();
     mPlayPause->setEnabled(true);updateButtonIcons();
     mMouseSourcePosition=QPoint(-1,-1);updateTitle();
-    mWaitingForFirstFrame=!mLastPresentedImage.isNull();
-    if(!mWaitingForFirstFrame)mVideo->setText(tr("Preparing playback…"));
+    mWaitingForFirstFrame=hasPresentedFrame();
+    if(!mWaitingForFirstFrame)mVideo->setText(tr("Preparing capture…"));
     else if(!changingClip)updateDisplayedImage();
     // Refreshing the current video frame does not change its audio source.
     // In particular, keep a suspended sink untouched while the player is
@@ -1211,7 +1383,8 @@ void ClipPlayerDialog::presentDroppedSourceFrame(int sourceFrame,const QByteArra
     if(!mThumbnailCollectionEnabled->load()||mIndex<0)return;
     setSourceFrameThumbnail(sourceFrame,frame,width,height);
     const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
-    mLastPresentedImage=image;mLastImageIsSource=true;mWaitingForFirstFrame=false;
+    mLastPresentedImage=image;mLastPresentedGpuBuffer.reset();
+    mLastImageIsSource=true;mWaitingForFirstFrame=false;
     int cursor=0;const auto& map=mClips[mIndex].sourceFrameToOutput;
     if(map)for(int source=sourceFrame-1;source>=0;--source)
         if((*map)[source]>=0){cursor=(*map)[source];break;}
@@ -1249,7 +1422,7 @@ void ClipPlayerDialog::startDecoder(){
     if(mDirectSequencePresentation){
         updateFrameTimerInterval();mFrameTimer.start();return;
     }
-    const QString exe=ffmpegPath();if(exe.isEmpty()){mPlaybackFailed=true;mFrameTimer.stop();if(mLastPresentedImage.isNull())mVideo->setText(tr("FFmpeg was not found"));return;}
+    const QString exe=ffmpegPath();if(exe.isEmpty()){mPlaybackFailed=true;mFrameTimer.stop();if(!hasPresentedFrame())mVideo->setText(tr("FFmpeg was not found"));return;}
     // openClip can run from the constructor, before Qt has performed its first
     // automatic layout pass. Activate both layouts so the decoder is sized to
     // the requested player window rather than QLabel's 640x360 minimum.
@@ -1262,7 +1435,7 @@ void ClipPlayerDialog::startDecoder(){
     const bool normalizeMixedFrames=!clip.isSequence;
     const int inputWidth=normalizeMixedFrames?mWidth:clip.width;
     const int inputHeight=normalizeMixedFrames?mHeight:clip.height;
-    if(inputWidth<=0||inputHeight<=0){mPlaybackFailed=true;mFrameTimer.stop();if(mLastPresentedImage.isNull())mVideo->setText(tr("Invalid clip dimensions"));return;}
+    if(inputWidth<=0||inputHeight<=0){mPlaybackFailed=true;mFrameTimer.stop();if(!hasPresentedFrame())mVideo->setText(tr("Invalid clip dimensions"));return;}
     mInputFrameBytes=inputWidth*inputHeight*(normalizeMixedFrames?4:
         mInputBitsPerChannel==8?3:6);
     QStringList a{"-hide_banner","-loglevel","error"};
@@ -1365,6 +1538,7 @@ void ClipPlayerDialog::setZoomAnimationTarget(double target){
     }
     mMouseSourcePosition=QPoint(-1,-1);updateTitle();
     mSurfaceUpdateTimer.stop();
+    const bool sourceOnGpu=nativeVulkanPresenter()&&mLastImageIsSource;
     const bool wasAnimating=mZoomAnimationTimer.isActive();
     mZoomAnimationTarget=target;
     // Zooming out needs pixels outside the current efficient crop. Begin
@@ -1372,12 +1546,16 @@ void ClipPlayerDialog::setZoomAnimationTarget(double target){
     // for every event in the same wheel gesture. Zoom-in can safely continue
     // using the existing wider surface while input is coalesced.
     const bool zoomingOut=effectiveTarget<current;
-    if(zoomingOut){
-        if(!mSurfaceUpdateTimer.isActive()){
-            mSurfaceUpdateTimer.setInterval(32);mSurfaceUpdateTimer.start();
+    // A native source texture is complete; crop refreshes would decode the
+    // entire DNG after each wheel event.
+    if(!sourceOnGpu){
+        if(zoomingOut){
+            if(!mSurfaceUpdateTimer.isActive()){
+                mSurfaceUpdateTimer.setInterval(32);mSurfaceUpdateTimer.start();
+            }
+        }else{
+            mSurfaceUpdateTimer.setInterval(48);mSurfaceUpdateTimer.start();
         }
-    }else{
-        mSurfaceUpdateTimer.setInterval(48);mSurfaceUpdateTimer.start();
     }
     if(!wasAnimating){
         mZoomAnimationStartupDelay=true;
@@ -1419,7 +1597,7 @@ void ClipPlayerDialog::advanceZoomAnimation(){
             std::abs(mDecoderSurfaceScale.x()-desiredScale.x())<0.000001&&
             std::abs(mDecoderSurfaceScale.y()-desiredScale.y())<0.000001&&
             QLineF(mDecoderSurfacePan,desiredPan).length()<0.000001;
-        if(!cropAlreadyPrepared){
+        if(!cropAlreadyPrepared&&!(nativeVulkanPresenter()&&mLastImageIsSource)){
             mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
         }
     }
@@ -1568,7 +1746,7 @@ void ClipPlayerDialog::updateFpsIndicator(){
     const size_t index=sorted.size()-std::max<size_t>(1,(sorted.size()+99)/100);
     // The slowest 1% of presentation intervals determine the low frame rate.
     const qint64 slow=sorted[index];
-    mFpsLabel->setText(tr("%1 fps").arg(1000.0/std::max<qint64>(1,slow),0,'f',1));
+    mFpsLabel->setText(tr("%1 fps").arg(1.0e9/std::max<qint64>(1,slow),0,'f',1));
     positionLabel();
 }
 
@@ -1585,8 +1763,15 @@ void ClipPlayerDialog::setHistogramEnabled(bool enabled){
 }
 
 void ClipPlayerDialog::setPerformanceUncapped(bool enabled){
+    mAudioMode=enabled?AudioMode::UncappedMuted:AudioMode::CappedMuted;
     mPerformanceUncapped=enabled;
-    if(mIndex>=0)updateFrameTimerInterval();
+    setAudioEnabled(false);
+}
+
+void ClipPlayerDialog::setPerformanceAudioEnabled(bool enabled){
+    mAudioMode=enabled?AudioMode::RealTimeAudio:AudioMode::CappedMuted;
+    mPerformanceUncapped=false;
+    setAudioEnabled(enabled);
 }
 
 void ClipPlayerDialog::setClippingEnabled(bool enabled){
@@ -1966,7 +2151,15 @@ QPointF ClipPlayerDialog::surfaceScaleForZoom(double zoomPercent)const{
 
 void ClipPlayerDialog::updateButtonIcons(){
     mPlayPause->setIcon(style()->standardIcon(mPaused?QStyle::SP_MediaPlay:QStyle::SP_MediaPause));
-    mAudioButton->setIcon(style()->standardIcon(mAudioEnabled?QStyle::SP_MediaVolume:QStyle::SP_MediaVolumeMuted));
+    mAudioButton->setIcon(style()->standardIcon(
+        mAudioMode==AudioMode::UncappedMuted?QStyle::SP_MediaSeekForward:
+        mAudioMode==AudioMode::RealTimeAudio?QStyle::SP_MediaVolume:
+        QStyle::SP_MediaVolumeMuted));
+    mAudioButton->setToolTip(mAudioMode==AudioMode::UncappedMuted
+        ?tr("Uncapped, muted — click for capped playback"):
+        mAudioMode==AudioMode::RealTimeAudio
+        ?tr("Real-time audio — click for uncapped, muted playback"):
+        tr("Capped, muted — click for real-time audio"));
     if(mFullscreenButton)mFullscreenButton->setIcon(fullscreenIcon(isFullScreen()));
     updateFpsIndicator();
 }
@@ -1997,14 +2190,39 @@ void ClipPlayerDialog::updateDisplayedImage(){
     // The old surface remains the interactive fallback while a decoder
     // refresh is pending. Suppressing it here made all wheel/drag input appear
     // ignored until the replacement frame arrived, especially during play.
-    if(mLastPresentedImage.isNull())return;
-    if(mDirectSequencePresentation&&mGpuVideo&&mGpuVideo->usable()){
+    if(mLastPresentedImage.isNull()&&!mLastPresentedGpuBuffer)return;
+    // During a clip change the old GPU image remains the visible surface.
+    // Geometry and presenter selection already describe the incoming clip;
+    // applying either to the retained frame would expose the fallback label.
+    if(mWaitingForFirstFrame&&mGpuVideo&&mGpuVideo->native()&&
+       hasPresentedFrame())return;
+    if(mGpuVideo&&mGpuVideo->native()&&mGpuVideo->isVisible()&&
+       !mDirectSequencePresentation&&!mLastPresentedImage.isNull()&&
+       !mLastImageIsSource){
+        // FFmpeg already rendered this frame at viewport size. Keep the
+        // native surface mapped when crossing from a direct clip to this
+        // playback path; unmapping exposes the driver's blue clear frame.
+        mGpuVideo->setFrame(mLastPresentedImage,QRectF(mGpuVideo->rect()),true);
+        return;
+    }
+    if((mDirectSequencePresentation || mLastPresentedGpuBuffer ||
+        (mGpuVideo&&mGpuVideo->native()&&mGpuVideo->isVisible()&&
+         mLastImageIsSource))&&mGpuVideo&&mGpuVideo->usable()){
+        const int frameWidth=mLastPresentedGpuBuffer
+            ?int((mLastPresentedGpuBuffer->orientation==90||
+                  mLastPresentedGpuBuffer->orientation==270)
+                  ?mLastPresentedGpuBuffer->height:mLastPresentedGpuBuffer->width)
+            :mLastPresentedImage.width();
+        const int frameHeight=mLastPresentedGpuBuffer
+            ?int((mLastPresentedGpuBuffer->orientation==90||
+                  mLastPresentedGpuBuffer->orientation==270)
+                  ?mLastPresentedGpuBuffer->width:mLastPresentedGpuBuffer->height)
+            :mLastPresentedImage.height();
         QRectF target;
         bool smooth=true;
         if(mZoomPercent<=0.0){
             const double scale=fitScale();
-            const QSizeF size(mLastPresentedImage.width()*scale,
-                              mLastPresentedImage.height()*scale);
+            const QSizeF size(frameWidth*scale,frameHeight*scale);
             target=QRectF(QPointF((mGpuVideo->width()-size.width())/2.0,
                                   (mGpuVideo->height()-size.height())/2.0),size);
         }else{
@@ -2016,17 +2234,24 @@ void ClipPlayerDialog::updateDisplayedImage(){
             else if(orientation==180)displayPan=-mPanSourcePixels;
             else if(orientation==270)
                 displayPan=QPointF(mPanSourcePixels.y(),-mPanSourcePixels.x());
-            const QSizeF size(mLastPresentedImage.width()*zoom,
-                              mLastPresentedImage.height()*zoom);
-            target=QRectF(QPointF((mGpuVideo->width()-size.width())/2.0-
-                                       displayPan.x()*zoom,
-                                  (mGpuVideo->height()-size.height())/2.0-
-                                       displayPan.y()*zoom),size);
+            const int scaledWidth=std::max(1,qRound(frameWidth*zoom));
+            const int scaledHeight=std::max(1,qRound(frameHeight*zoom));
+            target=QRectF((mGpuVideo->width()-scaledWidth)/2-
+                              qRound(displayPan.x()*zoom),
+                          (mGpuVideo->height()-scaledHeight)/2-
+                              qRound(displayPan.y()*zoom),
+                          scaledWidth,scaledHeight);
             smooth=mZoomPercent<400.0 &&
                 std::abs(zoom-std::round(zoom))>=0.0001;
         }
-        mGpuVideo->setFrame(mLastPresentedImage,target,smooth);
+        if(mLastPresentedGpuBuffer)
+            mGpuVideo->setGpuFrame(mLastPresentedGpuBuffer,target,smooth,
+                                  mCapturedNativeOverlay);
+        else mGpuVideo->setFrame(mLastPresentedImage,target,smooth);
         if(!mGpuVideo->isVisible()){
+            if(mGpuVideo->native()){
+                captureNativeOverlay();
+            }
             mGpuVideo->show();
             mGpuVideo->raise();
             mOverlay->raise();
@@ -2109,41 +2334,56 @@ void ClipPlayerDialog::updateFrameTimerInterval(){
         mFrameTimer.setInterval(1);
         return;
     }
-    const double frameMs=1000.0/std::clamp(mClips[mIndex].fps,1.0,240.0);
-    // Audio frame boundaries are independent of the UI timer phase. Polling
-    // exactly once per frame can miss a boundary and hold a frame for another
-    // full period, especially when a coarse timer fires early. Half-period
-    // precise ticks bound that extra wait without the old 5 ms polling cost.
-    mFrameTimer.setTimerType(mAudioEnabled?Qt::PreciseTimer:Qt::CoarseTimer);
-    mFrameTimer.setInterval(std::max(1,qRound(frameMs/(mAudioEnabled?2.0:1.0))));
+    mFrameTimer.setTimerType(Qt::PreciseTimer);
+    const double fps=std::clamp(mClips[mIndex].fps,1.0,240.0);
+    qint64 remainingNs=0;
+    if(mAudioEnabled&&!mAudioStartPending&&mAudioClock.isValid()){
+        const qint64 now=audioPositionNs();
+        const qint64 nextFrame=static_cast<qint64>(
+            std::floor(static_cast<double>(now)*fps/1.0e9))+1;
+        remainingNs=static_cast<qint64>(
+            std::llround(static_cast<double>(nextFrame)*1.0e9/fps))-now;
+    }else if(mCadenceStartFrame>=0&&mCadenceClock.isValid()){
+        const int nextFrame=mFrames.empty()
+            ?mCadenceLastFrame+1:mFrames.front().sourceFrame;
+        remainingNs=static_cast<qint64>(std::llround(
+            static_cast<double>(nextFrame-mCadenceStartFrame)*1.0e9/fps))-
+            mCadenceClock.nsecsElapsed();
+    }else{
+        remainingNs=static_cast<qint64>(std::llround(1.0e9/fps));
+    }
+    // A millisecond timer may fire before the exact deadline. The frame
+    // check below uses nanoseconds and re-arms for the remaining fraction.
+    const int delay=mFrames.empty()?2:std::max<qint64>(1,
+        remainingNs>0 ? remainingNs/1000000 : 1);
+    mFrameTimer.setInterval(delay);
 }
 void ClipPlayerDialog::configureAudio(){
     if(mAudioSink){mAudioSink->stop();delete mAudioSink;mAudioSink=nullptr;}
-    delete mAudioBuffer;mAudioBuffer=nullptr;mAudioPcm.clear();mAudioBytesPerSecond=0;mAudioBlockAlign=1;mAudioClockBaseMs=0;mAudioClock.invalidate();
+    delete mAudioBuffer;mAudioBuffer=nullptr;mAudioPcm.clear();mAudioBytesPerSecond=0;mAudioBlockAlign=1;mAudioClockBaseNs=0;mAudioClock.invalidate();
     auto& clip=mClips[mIndex];
     const auto audio=clip.audioWav;
     const QByteArray sourceAudio=audio&&!audio->empty()
         ? QByteArray(reinterpret_cast<const char*>(audio->data()),static_cast<qsizetype>(audio->size()))
         : QByteArray();
-    const bool canLoadFromSource=!clip.sourceAudioChecked&&!clip.sourceFile.isEmpty();
+    const bool canLoadFromSource=clip.sourceFrames>1&&
+        !clip.sourceAudioChecked&&!clip.sourceFile.isEmpty();
     const bool available=!sourceAudio.isEmpty();
-    mAudioButton->setEnabled(available||canLoadFromSource);
+    mAudioEnabled=mAudioMode==AudioMode::RealTimeAudio&&
+        clip.sourceFrames>1&&(available||canLoadFromSource);
     // Opening the gallery must not synchronously initialize PipeWire/CoreAudio
     // or copy and parse a potentially large WAV while audio is muted. Keep the
     // capability visible and defer all device/buffer work until the user opts in.
     if(!mAudioEnabled){
-        updateButtonIcons();mAudioButton->setToolTip(tr("Unmute audio"));
+        updateButtonIcons();
         return;
     }
     if(!available){
-        if(!canLoadFromSource){mAudioButton->setChecked(false);updateButtonIcons();}
-        else {
-            mAudioButton->setToolTip(tr("Preparing audio…"));
-            if(mAudioEnabled&&!mAudioLoading)beginSourceAudioLoad();
-        }
+        mAudioButton->setToolTip(tr("Preparing audio…"));
+        if(!mAudioLoading)beginSourceAudioLoad();
         return;
     }
-    updateButtonIcons();mAudioButton->setToolTip(mAudioEnabled?tr("Mute audio"):tr("Unmute audio"));
+    updateButtonIcons();
     const auto* wav=reinterpret_cast<const uint8_t*>(sourceAudio.constData());const size_t size=static_cast<size_t>(sourceAudio.size());
     auto le16=[&](size_t at){return at+2<=size?uint16_t(wav[at]|uint16_t(wav[at+1])<<8):uint16_t(0);};
     auto le32=[&](size_t at){return at+4<=size?uint32_t(wav[at]|uint32_t(wav[at+1])<<8|uint32_t(wav[at+2])<<16|uint32_t(wav[at+3])<<24):uint32_t(0);};
@@ -2167,7 +2407,7 @@ void ClipPlayerDialog::configureAudio(){
         (bits==16&&validBits==16)||(bits==24&&validBits==24)||
         (bits==32&&(validBits==24||validBits==32)));
     const bool floatPcm=encoding==3&&bits==32;
-    if(!dataAt||!dataBytes||!channels||!sampleRate||!blockAlign||(!integerPcm&&!floatPcm)){mAudioButton->setEnabled(false);mAudioButton->setChecked(false);return;}
+    if(!dataAt||!dataBytes||!channels||!sampleRate||!blockAlign||(!integerPcm&&!floatPcm)){mAudioEnabled=false;updateButtonIcons();return;}
     mAudioPcm=QByteArray(reinterpret_cast<const char*>(wav+dataAt),static_cast<qsizetype>(dataBytes));
     QAudioFormat format;format.setSampleRate(static_cast<int>(sampleRate));format.setChannelCount(channels);
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
@@ -2293,11 +2533,18 @@ QByteArray ClipPlayerDialog::sourceAudioWav(const Clip& clip,const QString& ffmp
     if(!cancelled->load()&&!supportedPcm(output))output=extract(QStringLiteral("pcm_s16le"));
     return output;
 }
-qint64 ClipPlayerDialog::audioPositionMs()const{return mAudioClockBaseMs+(mAudioClock.isValid()?mAudioClock.elapsed():0);}
-void ClipPlayerDialog::startAudioAt(double seconds){if(!mAudioSink||!mAudioBuffer||mAudioBytesPerSecond<=0)return;mAudioSink->stop();qint64 byte=qBound<qint64>(0,qRound64(seconds*mAudioBytesPerSecond),mAudioPcm.size());byte-=byte%std::max(1,mAudioBlockAlign);mAudioBuffer->seek(byte);mAudioClockBaseMs=qRound64(double(byte)*1000.0/mAudioBytesPerSecond);mAudioClock.start();mAudioSink->start(mAudioBuffer);}
+qint64 ClipPlayerDialog::audioPositionNs()const{return mAudioClockBaseNs+(mAudioClock.isValid()?mAudioClock.nsecsElapsed():0);}
+qint64 ClipPlayerDialog::audioPositionMs()const{return audioPositionNs()/1000000;}
+void ClipPlayerDialog::startAudioAt(double seconds){if(!mAudioSink||!mAudioBuffer||mAudioBytesPerSecond<=0)return;mAudioSink->stop();qint64 byte=qBound<qint64>(0,qRound64(seconds*mAudioBytesPerSecond),mAudioPcm.size());byte-=byte%std::max(1,mAudioBlockAlign);mAudioBuffer->seek(byte);mAudioClockBaseNs=qRound64(double(byte)*1.0e9/mAudioBytesPerSecond);mAudioClock.start();mAudioSink->start(mAudioBuffer);}
 void ClipPlayerDialog::setAudioEnabled(bool enabled){
-    mAudioEnabled=enabled&&mAudioButton->isEnabled();
-    updateButtonIcons();mAudioButton->setToolTip(mAudioEnabled?tr("Mute audio"):tr("Unmute audio"));
+    mCadenceStartFrame=-1;mCadenceLastFrame=-1;mCadenceClock.invalidate();
+    const bool clipCanHaveAudio=mIndex>=0&&mIndex<mClips.size()&&
+        mClips[mIndex].sourceFrames>1&&
+        (mClips[mIndex].audioWav||
+         (!mClips[mIndex].sourceAudioChecked&&
+          !mClips[mIndex].sourceFile.isEmpty()));
+    mAudioEnabled=enabled&&clipCanHaveAudio;
+    updateButtonIcons();
     if(mIndex>=0)updateFrameTimerInterval();
     if(mAudioEnabled){
         if(!mAudioSink){
@@ -2313,6 +2560,14 @@ void ClipPlayerDialog::setAudioEnabled(bool enabled){
         if(mAudioLoading)mAudioLoadCancelled->store(true);
         if(mAudioSink){mAudioSink->stop();mAudioClock.invalidate();mAudioStartPending=false;}
     }
+}
+
+void ClipPlayerDialog::cycleAudioMode(){
+    mAudioMode=mAudioMode==AudioMode::CappedMuted?AudioMode::RealTimeAudio:
+        mAudioMode==AudioMode::RealTimeAudio?AudioMode::UncappedMuted:
+        AudioMode::CappedMuted;
+    mPerformanceUncapped=mAudioMode==AudioMode::UncappedMuted;
+    setAudioEnabled(mAudioMode==AudioMode::RealTimeAudio);
 }
 
 void ClipPlayerDialog::consumeOutput(){
@@ -2337,11 +2592,13 @@ void ClipPlayerDialog::consumeOutput(){
         QTimer::singleShot(0,this,&ClipPlayerDialog::showNextFrame);
 }
 void ClipPlayerDialog::showNextFrame(){
+    const auto showStarted=std::chrono::steady_clock::now();
     consumeOutput();
     if(mAudioEnabled&&!mAudioStartPending&&mAudioClock.isValid()&&mIndex>=0){
         const double fps=std::max(1.0,mClips[mIndex].fps);
         const int audioFrame=std::clamp(static_cast<int>(std::floor(
-            audioPositionMs()*fps/1000.0)),0,mPosition->maximum());
+            static_cast<double>(audioPositionNs())*fps/1.0e9)),
+            0,mPosition->maximum());
         mPlaybackTarget->store(audioFrame);
         // A frame that has already finished rendering is always useful: show
         // it immediately when late, or wait until its boundary when early.
@@ -2349,6 +2606,15 @@ void ClipPlayerDialog::showNextFrame(){
         // rendering itself exceeds one frame period, discarding here would
         // reject every completed frame forever.
         if(mFrames.empty()||mFrames.front().sourceFrame>audioFrame)return;
+    }
+    if(!mFrames.empty()&&!mPerformanceUncapped&&!mAudioEnabled&&
+       !mPaused&&!mFrameStepInProgress&&mCadenceStartFrame>=0&&
+       mCadenceClock.isValid()){
+        const double fps=std::max(1.0,mClips[mIndex].fps);
+        const qint64 dueNs=static_cast<qint64>(std::llround(
+            static_cast<double>(mFrames.front().sourceFrame-mCadenceStartFrame)*
+            1.0e9/fps));
+        if(mCadenceClock.nsecsElapsed()<dueNs)return;
     }
     if(!mFrames.empty()){
         const QSize viewport=mVideo->size().expandedTo(QSize(640,360));
@@ -2363,7 +2629,7 @@ void ClipPlayerDialog::showNextFrame(){
             // and resets the complete pipeline. Clearing only materialized
             // frames cannot relabel output still buffered inside FFmpeg.
             mFrames.clear();
-            mWaitingForFirstFrame=!mLastPresentedImage.isNull();
+            mWaitingForFirstFrame=hasPresentedFrame();
             if(!mSurfaceUpdateTimer.isActive()){
                 mSurfaceUpdateTimer.setInterval(300);mSurfaceUpdateTimer.start();
             }
@@ -2372,9 +2638,13 @@ void ClipPlayerDialog::showNextFrame(){
         const QueuedFrame queued=std::move(mFrames.front());mFrames.pop_front();
         if(!mClips[mIndex].isSequence){
             auto& clip=mClips[mIndex];
-            const bool dimensionsChanged=clip.width!=queued.image.width()||
-                clip.height!=queued.image.height();
-            clip.width=queued.image.width();clip.height=queued.image.height();
+            const int frameWidth=queued.gpuBuffer
+                ?int(queued.gpuBuffer->width):queued.image.width();
+            const int frameHeight=queued.gpuBuffer
+                ?int(queued.gpuBuffer->height):queued.image.height();
+            const bool dimensionsChanged=clip.width!=frameWidth||
+                clip.height!=frameHeight;
+            clip.width=frameWidth;clip.height=frameHeight;
             const bool rawSwap=queued.raw.orientation==90||queued.raw.orientation==270;
             clip.nativeWidth=queued.raw.width>0
                 ?(rawSwap?queued.raw.height:queued.raw.width):clip.width;
@@ -2398,6 +2668,7 @@ void ClipPlayerDialog::showNextFrame(){
             }
         }
         mLastPresentedImage=queued.image;
+        mLastPresentedGpuBuffer=queued.gpuBuffer;
         mPresentedRawFrame=queued.raw;
         updateHistogram();
         mWaitingForFirstFrame=false;
@@ -2405,14 +2676,6 @@ void ClipPlayerDialog::showNextFrame(){
         mLastSurfaceScale=mDecoderSurfaceScale;
         mLastSurfacePan=mDecoderSurfacePan;
         mLastSurfaceViewportPan=mDecoderSurfaceViewportPan;
-        updateDisplayedImage();
-        if(!mFirstFrameReady){
-            mFirstFrameReady=true;
-            emit firstFramePresented(currentMountId());
-            if(mPaused&&mThumbnailScroll&&mThumbnailScroll->isVisible())
-                emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
-            if(mAudioEnabled&&mAudioStartPending&&!mPaused){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
-        }
         const double fps=std::max(1.0,mClips[mIndex].fps);
         const int presentedFrame=std::clamp(queued.sourceFrame,0,mPosition->maximum());
         setDroppedCursorVisible(false);
@@ -2422,17 +2685,45 @@ void ClipPlayerDialog::showNextFrame(){
         if(!mPosition->isSliderDown())mPosition->setValue(presentedFrame);
         setCurrentThumbnailFrame(presentedFrame);
         updateTitle();
+        if(nativeVulkanPresenter()){
+            captureNativeOverlay(false);
+            mNativeOverlayCaptureTimer.start();
+        }
+        const auto displayUiStarted=std::chrono::steady_clock::now();
+        updateDisplayedImage();
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+           mDirectSequencePresentation)
+            spdlog::info("GALLERY_PERF event=gallery_display_ui elapsed_ms={:.3f}",
+                std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now()-displayUiStarted).count());
+        if(!mFirstFrameReady){
+            mFirstFrameReady=true;
+            emit firstFramePresented(currentMountId());
+            if(mPaused&&mThumbnailScroll&&mThumbnailScroll->isVisible())
+                emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
+            if(mAudioEnabled&&mAudioStartPending&&!mPaused){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
+        }
         if(!mPaused){
             if(!mPresentationClock.isValid())mPresentationClock.start();
-            const qint64 now=mPresentationClock.elapsed();
-            if(mLastPresentationMs>=0&&now>mLastPresentationMs){
-                mPresentationIntervals.push_back(now-mLastPresentationMs);
+            if(!mPerformanceUncapped&&!mAudioEnabled&&mCadenceStartFrame<0){
+                mCadenceStartFrame=presentedFrame;
+                mCadenceClock.start();
+            }
+            mCadenceLastFrame=presentedFrame;
+            const qint64 now=mPresentationClock.nsecsElapsed();
+            if(mLastPresentationNs>=0&&now>mLastPresentationNs){
+                mPresentationIntervals.push_back(now-mLastPresentationNs);
                 if(mPresentationIntervals.size()>20)mPresentationIntervals.pop_front();
             }
-            mLastPresentationMs=now;
+            mLastPresentationNs=now;
             updateFpsIndicator();
         }
         emit framePresented(currentMountId(),presentedFrame);
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+           mDirectSequencePresentation)
+            spdlog::info("GALLERY_PERF event=gallery_show_ui elapsed_ms={:.3f}",
+                std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now()-showStarted).count());
         mPositionSeconds=(presentedFrame+1)/fps;
         completeFrameStep();
         // A paused surface refresh still needs to consume and present its
@@ -2547,7 +2838,91 @@ QString ClipPlayerDialog::framePositionText(int frame)const{
 }
 bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     const auto* watchedWidget=qobject_cast<QWidget*>(watched);
-    const bool belongsToPlayer=watchedWidget&&watchedWidget->window()==this;
+    const bool nativeVideoSurface=watched&&
+        watched->property("galleryVulkanSurface").toBool();
+    if(mPanning&&(event->type()==QEvent::MouseButtonRelease||
+                  event->type()==QEvent::MouseMove||
+                  event->type()==QEvent::Enter)){
+        const auto* mouse=event->type()==QEvent::Enter?nullptr:
+            static_cast<QMouseEvent*>(event);
+        if((mouse&&event->type()==QEvent::MouseButtonRelease&&
+            mouse->button()==Qt::LeftButton)||
+           (mouse&&event->type()==QEvent::MouseMove&&
+            !(mouse->buttons()&Qt::LeftButton))||
+           (!mouse&&!(QApplication::mouseButtons()&Qt::LeftButton))){
+            mPanning=false;
+            unsetCursor();
+            if(!(nativeVulkanPresenter()&&mLastImageIsSource)){
+                mSurfaceUpdateTimer.setInterval(16);
+                mSurfaceUpdateTimer.start();
+            }
+            if(nativeVideoSurface||watched==mVideo||watched==mGpuVideo){
+                event->accept();
+                return true;
+            }
+        }
+    }
+    // A release outside the gallery may never reach the slider. The first
+    // subsequent mouse event then tells us whether its button is still down.
+    if(mSeeking&&(event->type()==QEvent::MouseButtonRelease||
+                  event->type()==QEvent::MouseMove||
+                  event->type()==QEvent::Enter)){
+        const auto* mouse=event->type()==QEvent::Enter?nullptr:
+            static_cast<QMouseEvent*>(event);
+        if((mouse&&event->type()==QEvent::MouseButtonRelease&&
+            mouse->button()==Qt::LeftButton)||
+           (mouse&&event->type()==QEvent::MouseMove&&
+            !(mouse->buttons()&Qt::LeftButton))||
+           (!mouse&&!(QApplication::mouseButtons()&Qt::LeftButton))){
+            QPoint global=QCursor::pos();
+            if(mouse){
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+                global=mouse->globalPosition().toPoint();
+#else
+                global=mouse->globalPos();
+#endif
+            }
+            updateSeekPosition(mPosition->mapFromGlobal(global).x());
+            mSeeking=false;
+            mPosition->setSliderDown(false);
+            mNativeMouseTarget=nullptr;
+            seekToFrame(mPosition->value());
+            if(watched==mPosition){event->accept();return true;}
+        }
+    }
+    if(nativeVideoSurface&&mOverlay&&mOverlay->isVisible()&&
+       (event->type()==QEvent::MouseMove||
+        event->type()==QEvent::MouseButtonPress||
+        event->type()==QEvent::MouseButtonRelease||
+        event->type()==QEvent::MouseButtonDblClick)){
+        auto* mouse=static_cast<QMouseEvent*>(event);
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+        const QPointF global=mouse->globalPosition();
+#else
+        const QPointF global=mouse->globalPos();
+#endif
+        QWidget* target=mNativeMouseTarget;
+        if(!target){
+            target=mOverlay->childAt(mOverlay->mapFromGlobal(global.toPoint()));
+            if(target==mTitle)target=nullptr;
+        }
+        if(target){
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+            QMouseEvent forwarded(event->type(),target->mapFromGlobal(global),
+                global,mouse->button(),mouse->buttons(),mouse->modifiers());
+#else
+            QMouseEvent forwarded(event->type(),target->mapFromGlobal(global.toPoint()),
+                global.toPoint(),mouse->button(),mouse->buttons(),mouse->modifiers());
+#endif
+            if(event->type()==QEvent::MouseButtonPress)mNativeMouseTarget=target;
+            QCoreApplication::sendEvent(target,&forwarded);
+            if(event->type()==QEvent::MouseButtonRelease)mNativeMouseTarget=nullptr;
+            event->accept();
+            return true;
+        }
+    }
+    const bool belongsToPlayer=nativeVideoSurface||
+        (watchedWidget&&watchedWidget->window()==this);
     if(mFpsLabel&&watched==mFpsLabel->parentWidget()&&event->type()==QEvent::Resize)
         updateFpsIndicator();
     if(belongsToPlayer&&event->type()==QEvent::Leave&&
@@ -2596,7 +2971,8 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
             ? wheel->pixelDelta().y()/40.0 : wheel->angleDelta().y()/120.0;
         changeZoom(steps);event->accept();return true;
     }
-    const bool panSurface=watched==mVideo||watched==mGpuVideo||watched==mOverlay;
+    const bool panSurface=nativeVideoSurface||watched==mVideo||
+        watched==mGpuVideo||watched==mOverlay;
     if(belongsToPlayer&&panSurface&&event->type()==QEvent::MouseButtonDblClick){
         auto* mouse=static_cast<QMouseEvent*>(event);
         if(mouse->button()==Qt::LeftButton){
@@ -2635,7 +3011,10 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         }
         if(mouse&&event->type()==QEvent::MouseButtonRelease&&mPanning&&mouse->button()==Qt::LeftButton){
             mPanning=false;unsetCursor();
-            mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();return true;
+            if(!(nativeVulkanPresenter()&&mLastImageIsSource)){
+                mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
+            }
+            return true;
         }
     }
     if(watched!=mPosition)return QDialog::eventFilter(watched,event);
@@ -2683,13 +3062,39 @@ void ClipPlayerDialog::decoderFinished(int code,QProcess::ExitStatus status){
                                         :tr("FFmpeg playback failed: %1").arg(detail));
     }
 }
-QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height)const{
+QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height,
+        std::shared_ptr<const std::vector<uint8_t>> backing,bool preOriented,
+        std::shared_ptr<const uint8_t> pixelsOwner)const{
     if(width<=0||height<=0)return {};
     const qint64 pixels=qint64(width)*height;
     const int stride=frame.size()==pixels*3?3:frame.size()>=pixels*6?6:0;
     if(!stride)return {};
     const int orientation=mIndex>=0?mClips[mIndex].orientation:-1;
     const bool swap=orientation==90||orientation==270;
+    if(pixelsOwner && stride==3 &&
+       (preOriented || (orientation!=90&&orientation!=180&&orientation!=270))){
+        auto* owner=new std::shared_ptr<const uint8_t>(std::move(pixelsOwner));
+        const int imageWidth=preOriented&&swap?height:width;
+        const int imageHeight=preOriented&&swap?width:height;
+        QImage view(reinterpret_cast<const uchar*>((*owner).get()),
+            imageWidth,imageHeight,imageWidth*3,QImage::Format_RGB888,
+            [](void* context){delete static_cast<std::shared_ptr<const uint8_t>*>(context);},
+            owner);
+        if(!view.isNull())return view;
+        delete owner;
+    }
+    if(backing && stride==3 && backing->size()==size_t(pixels*3) &&
+       (preOriented || (orientation!=90&&orientation!=180&&orientation!=270))){
+        auto* owner=new std::shared_ptr<const std::vector<uint8_t>>(std::move(backing));
+        const int imageWidth=preOriented&&swap?height:width;
+        const int imageHeight=preOriented&&swap?width:height;
+        QImage view(reinterpret_cast<const uchar*>((*owner)->data()),
+            imageWidth,imageHeight,imageWidth*3,QImage::Format_RGB888,
+            [](void* context){delete static_cast<std::shared_ptr<const std::vector<uint8_t>>*>(context);},
+            owner);
+        if(!view.isNull())return view;
+        delete owner;
+    }
     QImage image(swap?height:width,swap?width:height,QImage::Format_RGB888);
     if(image.isNull())return {};
     const auto* source=reinterpret_cast<const uchar*>(frame.constData());
@@ -2706,23 +3111,24 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
             }
         }
     }else{
-        // Rotated frames scatter into different output rows. Split the source
-        // rows across workers; every output pixel has one writer. Obtain the
-        // writable pointer before spawning workers so QImage never detaches
-        // while they are running.
+        // Give each worker complete destination rows. For 90/270-degree
+        // frames, splitting source rows makes all workers scatter writes into
+        // the same output rows and turns a 24-bit image into severe cache-line
+        // contention. Each output row has a single writer here.
         auto* outputBits=image.bits();
         const qsizetype outputStride=image.bytesPerLine();
+        const int outputWidth=image.width(),outputHeight=image.height();
         auto convertRows=[&](int first,int last){
-        for(int y=first;y<last;++y){
-            const auto* row=source+qsizetype(y)*width*stride;
-            for(int x=0;x<width;++x){
-                int outputX=x,outputY=y;
-                if(orientation==90){outputX=height-1-y;outputY=x;}
-                else if(orientation==180){outputX=width-1-x;outputY=height-1-y;}
-                else {outputX=y;outputY=width-1-x;}
-                const auto* input=row+qsizetype(x)*stride;
-                auto* output=outputBits+qsizetype(outputY)*outputStride+
-                    qsizetype(outputX)*3;
+        for(int outputY=first;outputY<last;++outputY){
+            auto* row=outputBits+qsizetype(outputY)*outputStride;
+            for(int outputX=0;outputX<outputWidth;++outputX){
+                int sourceX=outputX,sourceY=outputY;
+                if(orientation==90){sourceX=outputY;sourceY=height-1-outputX;}
+                else if(orientation==180){sourceX=width-1-outputX;sourceY=height-1-outputY;}
+                else {sourceX=width-1-outputY;sourceY=outputX;}
+                const auto* input=source+
+                    (qsizetype(sourceY)*width+sourceX)*stride;
+                auto* output=row+qsizetype(outputX)*3;
                 output[0]=input[stride==3?0:1];
                 output[1]=input[stride==3?1:3];
                 output[2]=input[stride==3?2:5];
@@ -2735,13 +3141,13 @@ QImage ClipPlayerDialog::rgb48Image(const QByteArray& frame,int width,int height
         threads.reserve(workers-1);
         try{
             for(unsigned worker=1;worker<workers;++worker)
-                threads.emplace_back(convertRows,int(qsizetype(height)*worker/workers),
-                    int(qsizetype(height)*(worker+1)/workers));
+                threads.emplace_back(convertRows,int(qsizetype(outputHeight)*worker/workers),
+                    int(qsizetype(outputHeight)*(worker+1)/workers));
         }catch(...){
             for(auto& thread:threads)thread.join();
             throw;
         }
-        convertRows(0,int(height/workers));
+        convertRows(0,int(outputHeight/workers));
         for(auto& thread:threads)thread.join();
     }
     return image;
@@ -2784,7 +3190,11 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         std::shared_ptr<const std::vector<uint16_t>> rawSamples,
         int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
         int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
-        std::array<float,4> rawBlackLevels,int rawOrientation){
+        std::array<float,4> rawBlackLevels,int rawOrientation,
+        std::shared_ptr<const std::vector<uint8_t>> frameBacking,
+        bool framePreOriented,std::shared_ptr<const uint8_t> framePixels,
+        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer,
+        int sourceFrameIndex){
     // Stills are presented directly from the processed RGB48 callback. Feeding
     // them through a timed FFmpeg graph would display the same image twice and
     // can apply the video surface's output aspect ratio to the second copy.
@@ -2793,30 +3203,42 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     if(mClips[mIndex].isSequence&&!mDirectSequencePresentation&&
        mDecoder.state()!=QProcess::Running)
         return FramePushResult::Retry;
-    if(mAudioEnabled&&mIncomingFrame->load()>mNextInputFrame){
-        mNextInputFrame=mIncomingFrame->load();
+    const int incomingSourceFrame=sourceFrameIndex>=0
+        ?sourceFrameIndex:mIncomingFrame->load();
+    if(mAudioEnabled&&incomingSourceFrame>mNextInputFrame){
+        mNextInputFrame=incomingSourceFrame;
         mPositionSeconds=mNextInputFrame/std::max(1.0,mClips[mIndex].fps);
     }
+    if(mClips[mIndex].isSequence&&incomingSourceFrame<mNextInputFrame)
+        return FramePushResult::Accepted;
+    if(mClips[mIndex].isSequence&&incomingSourceFrame>mNextInputFrame)
+        mNextInputFrame=incomingSourceFrame;
     // Bound frames accepted by the complete transform pipeline, including
     // data FFmpeg has already consumed from QProcess but not returned yet.
     // bytesToWrite() alone cannot observe that internal backlog.
-    const size_t maximumPending=rawSamples?2u:6u;
+    // Direct presentation needs only the next frame. A deeper queue lets a
+    // fast producer get several frame periods ahead of capped playback and
+    // keeps old GPU images in flight while the display catches up.
+    const size_t maximumPending=mDirectSequencePresentation
+        ? (mPerformanceUncapped ? 2u : 1u) : (rawSamples ? 2u : 6u);
     if(mSubmittedFrames.size()+mFrames.size()>=maximumPending)
         return FramePushResult::Retry;
     if(!mClips[mIndex].isSequence||mDirectSequencePresentation){
         const auto convertStarted=std::chrono::steady_clock::now();
-        const QImage image=rgb48Image(frame,width,height);
+        const QImage image=gpuBuffer ? QImage{} : rgb48Image(frame,width,height,
+            std::move(frameBacking),framePreOriented,std::move(framePixels));
         if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=direct_present_convert source={}x{} ms={:.3f}",
                 width,height,std::chrono::duration<double,std::milli>(
                     std::chrono::steady_clock::now()-convertStarted).count());
-        if(image.isNull())return FramePushResult::Stopped;
+        if(image.isNull()&&!gpuBuffer)return FramePushResult::Stopped;
         const int sourceFrame=mClips[mIndex].isSequence
-            ?mNextInputFrame:std::max(mNextInputFrame,mIncomingFrame->load());
+            ?incomingSourceFrame:std::max(mNextInputFrame,incomingSourceFrame);
         mFrames.push_back({image,sourceFrame,
             {std::move(rawSamples),rawWidth,rawHeight,rawChannels,rawBlack,rawWhite,
-                rawBlackLevels,rawCfaSize,rawCfaPhase,rawOrientation}});
+                rawBlackLevels,rawCfaSize,rawCfaPhase,rawOrientation},
+            std::move(gpuBuffer)});
         mNextInputFrame=sourceFrame+1;
         return FramePushResult::Accepted;
     }
@@ -2837,8 +3259,11 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
         std::shared_ptr<const std::vector<uint16_t>> rawSamples,
         int rawWidth,int rawHeight,int rawChannels,float rawBlack,float rawWhite,
         int rawCfaSize,std::array<uint8_t,4> rawCfaPhase,
-        std::array<float,4> rawBlackLevels,int rawOrientation){
-    const int inputBits=frame.size()==qint64(width)*height*3?8:16;
+        std::array<float,4> rawBlackLevels,int rawOrientation,
+        std::shared_ptr<const std::vector<uint8_t>> frameBacking,
+        bool framePreOriented,std::shared_ptr<const uint8_t> framePixels,
+        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer){
+    const int inputBits=gpuBuffer||frame.size()==qint64(width)*height*3?8:16;
     const bool formatChanged=mInputBitsPerChannel!=inputBits;
     if(formatChanged)mInputBitsPerChannel=inputBits;
     const bool dimensionsChanged=mIndex>=0&&
@@ -2864,8 +3289,11 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
         mClips[mIndex].nativeWidth=swap?rawHeight:rawWidth;
         mClips[mIndex].nativeHeight=swap?rawWidth:rawHeight;
     }
-    const QImage image=rgb48Image(frame,width,height);if(image.isNull())return;
+    const QImage image=gpuBuffer ? QImage{} : rgb48Image(frame,width,height,
+        std::move(frameBacking),framePreOriented,std::move(framePixels));
+    if(image.isNull()&&!gpuBuffer)return;
     mLastPresentedImage=image;mLastImageIsSource=true;
+    mLastPresentedGpuBuffer=std::move(gpuBuffer);
     mPresentedRawFrame={std::move(rawSamples),rawWidth,rawHeight,rawChannels,
         rawBlack,rawWhite,rawBlackLevels,rawCfaSize,rawCfaPhase,rawOrientation};
     updateHistogram();
@@ -2894,6 +3322,7 @@ void ClipPlayerDialog::failRgb48Frames(const QString& error){mPlaybackFailed=tru
 void ClipPlayerDialog::advance(){if(!mClips.isEmpty())openClip((mIndex+1)%mClips.size());}
 void ClipPlayerDialog::closeEvent(QCloseEvent* e){
     mClosing=true;
+    releaseGpuFrames();
     emit playbackClosed();
     stopDecoder();
     QDialog::closeEvent(e);
@@ -2908,8 +3337,8 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     // Keep the wheel accumulator aligned with the new fit geometry.
     if(mZoomPercent<=0.0&&mIndex>=0)
         mRequestedZoomPercent=fitScale()*100.0;
-    if(mDirectSequencePresentation&&mIndex>=0&&mClips[mIndex].isSequence){
-        if(!mLastPresentedImage.isNull())updateDisplayedImage();
+    if(nativeVulkanPresenter()&&mLastImageIsSource){
+        if(hasPresentedFrame())updateDisplayedImage();
         return;
     }
     // Never redraw the old frame into the new widget geometry here. Doing so
@@ -2918,8 +3347,8 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     // already buffered by the old decoder can arrive after this event and be
     // composed into the new geometry. Keep the existing pixmap centered at
     // its original pixel size until openClip() starts the replacement surface.
-    if(isVisible()&&mIndex>=0&&!mLastPresentedImage.isNull()){
-        mWaitingForFirstFrame=!mLastPresentedImage.isNull();
+    if(isVisible()&&mIndex>=0&&hasPresentedFrame()){
+        mWaitingForFirstFrame=hasPresentedFrame();
         // An established decoder must stop presenting old-size buffered
         // frames immediately. A decoder whose first frame is still pending
         // remains ticking so the size guard in showNextFrame() can reject it.

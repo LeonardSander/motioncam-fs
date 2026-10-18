@@ -17,6 +17,7 @@
 #include <unordered_map>
 extern "C" {
 #include <libavutil/error.h>
+#include <libavutil/dict.h>
 }
 #ifdef MOTIONCAM_HAS_AVFILTER
 extern "C" {
@@ -89,7 +90,17 @@ AVBufferRef* acquireHardwareDevice(AVHWDeviceType type) {
     std::lock_guard lock(directLogHardwareDeviceMutex);
     auto& shared = directLogHardwareDevices[static_cast<int>(type)];
     if (!shared.reference) {
-        if (av_hwdevice_ctx_create(&shared.reference, type, nullptr, nullptr, 0) < 0) {
+        AVDictionary* options = nullptr;
+        if (type == AV_HWDEVICE_TYPE_VULKAN &&
+            std::getenv("MOTIONCAM_GALLERY_PRESENT_EXTENSIONS")) {
+            av_dict_set(&options, "instance_extensions",
+                "VK_KHR_surface+VK_KHR_wayland_surface+VK_KHR_xcb_surface", 0);
+            av_dict_set(&options, "device_extensions", "VK_KHR_swapchain", 0);
+        }
+        const int created = av_hwdevice_ctx_create(
+            &shared.reference, type, nullptr, options, 0);
+        av_dict_free(&options);
+        if (created < 0) {
             directLogHardwareDevices.erase(static_cast<int>(type));
             return nullptr;
         }
@@ -598,6 +609,27 @@ bool DirectLogDecoder::extractFrameDeferred(int frameNumber,
                             width, height, false, smoothChroma, nullptr, true);
 }
 
+bool DirectLogDecoder::extractFrameTextureDeferred(int frameNumber,
+        int outputWidth, int outputHeight, bool smoothChroma) {
+    if (outputWidth <= 0 || outputHeight <= 0) return false;
+    uint16_t unused = 0;
+    return extractFrameInto(frameNumber, &unused,
+        static_cast<size_t>(outputWidth) * outputHeight * 3u,
+        outputWidth, outputHeight, false, smoothChroma, nullptr, true, true);
+}
+
+bool DirectLogDecoder::canExtractFrameTexture() {
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+    const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
+    if (enabled && enabled[0] == '0') return false;
+    initDecoder();
+    return mHardwarePixelFormat == AV_PIX_FMT_VULKAN && !mGpuRgbRejected &&
+        !mForceSoftwareDecoder;
+#else
+    return false;
+#endif
+}
+
 bool DirectLogDecoder::extractFrameBayer(int frameNumber,
         std::vector<uint16_t>& bayerData,
         const std::array<uint8_t, 4>& cfaPhase,
@@ -718,7 +750,7 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase,
-        bool deferDownload) {
+        bool deferDownload, bool textureOnly) {
     const auto lockStarted = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(mMutex);
     if (directLogDiagnosticsEnabled())
@@ -726,14 +758,14 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
                      frameNumber, elapsedMilliseconds(lockStarted));
     return extractFrameIntoLocked(frameNumber, rgbData, sampleCount, outputWidth,
                                   outputHeight, preserveLogEncoded, smoothChroma,
-                                  cfaPhase, deferDownload);
+                                  cfaPhase, deferDownload, textureOnly);
 }
 
 bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase,
-        bool deferDownload) {
+        bool deferDownload, bool textureOnly) {
     const bool diagnostics = directLogDiagnosticsEnabled();
     const auto extractStart = std::chrono::steady_clock::now();
 
@@ -778,6 +810,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             return true;
         }
 #endif
+        if (textureOnly) return false;
         AVFrame* conversionFrame = transferableFrame(hardwareFrame);
         std::vector<uint16_t> fallbackRgb;
         uint16_t* conversionOutput = rgbData;
@@ -861,9 +894,9 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     // when the caller skips more than a handful of displayed frames.
     const int forwardDistance = frameNumber - mLastDecodedFrame;
     const int seekDistance = frameNumber - precedingKeyFrame;
-    const bool sequential = mLastDecodedFrame >= precedingKeyFrame &&
-                            forwardDistance > 0 &&
-                            forwardDistance <= seekDistance;
+    const bool sequential = forwardDistance == 1 ||
+        (mLastDecodedFrame >= precedingKeyFrame && forwardDistance > 0 &&
+         forwardDistance <= seekDistance);
     if (diagnostics)
         spdlog::info("DirectLog diagnostic: frame={} decoder begin mode={} pts={}",
                      frameNumber, sequential ? "sequential" : "seek", frameInfo.pts);
@@ -934,7 +967,9 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     }
 
     int readResult = 0;
-    while ((readResult = av_read_frame(mFormatContext, mPacket)) >= 0) {
+    while (true) {
+        readResult = av_read_frame(mFormatContext, mPacket);
+        if (readResult < 0) break;
         ++packetsRead;
         if (mPacket->stream_index == mVideoStreamIndex) {
             int sendResult = avcodec_send_packet(mCodecContext, mPacket);

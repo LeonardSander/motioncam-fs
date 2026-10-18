@@ -89,7 +89,8 @@ private:
     ProcessedFrame processFrame(const Entry& entry, int previewScale = 1,
                                 bool prepopulateDng = false,
                                 bool outputBayer = false,
-                                bool deferGpuDownload = false);
+                                bool deferGpuDownload = false,
+                                bool textureOnly = false);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
