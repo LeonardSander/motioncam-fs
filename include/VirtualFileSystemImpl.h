@@ -223,6 +223,8 @@ struct DngPixelPipelineOptions {
     double exposureTime = 0.0;
     std::string_view sourceName;
     const VulkanGainBakeTextureSource* textureSource = nullptr;
+    // Called once the deferred source texture is no longer needed.
+    std::function<void()> textureMaterialized;
     bool preferVulkan = true;
 };
 

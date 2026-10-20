@@ -75,7 +75,44 @@ int main() {
             std::memcpy(&actual, fused.data() + index * 2, 2);
             std::memcpy(&expected, separate.data() + index * 2, 2);
             if (std::abs(int(actual) - int(expected)) > 4) {
-                std::fprintf(stderr, "Fused Bayer color mismatch at %zu\n", index);
+                std::fprintf(stderr, "Fused Bayer color mismatch at %zu: %u vs %u\n", index, actual, expected);
+                return 1;
+            }
+        }
+        motioncam::VulkanGalleryBayerGain bake;
+        bake.scale.fill(1.0f);
+        motioncam::VulkanGalleryBayerGainMap map;
+        map.width = map.height = 1;
+        map.channels = 4;
+        map.right = previewWidth;
+        map.bottom = previewHeight;
+        map.spacingH = map.spacingV = 1.0f;
+        map.values.assign(4, 2.0f);
+        bake.maps.push_back(map);
+        source.black = {0, 0, 0};
+        source.white = {65535, 65535, 65535};
+        source.gain = &bake;
+        std::vector<uint8_t> baked;
+        if (!motioncam::colorGalleryRgbVulkan(baked, gains, identity,
+                identity, 1.0f, nullptr, nullptr, false, false, &source)) {
+            std::fprintf(stderr, "Fused gallery gain pass failed\n");
+            return 1;
+        }
+        std::vector<uint16_t> doubled = mosaic;
+        for (auto& value : doubled) value = std::min<uint32_t>(65535, value * 2u);
+        source.samples = doubled.data();
+        source.gain = nullptr;
+        std::vector<uint8_t> reference;
+        if (!motioncam::colorGalleryRgbVulkan(reference, gains, identity,
+                identity, 1.0f, nullptr, nullptr, false, false, &source) ||
+            reference.size() != baked.size()) return 1;
+        for (size_t index = 0; index < baked.size() / 2; ++index) {
+            uint16_t actual, expected;
+            std::memcpy(&actual, baked.data() + index * 2, 2);
+            std::memcpy(&expected, reference.data() + index * 2, 2);
+            if (std::abs(int(actual) - int(expected)) > 4) {
+                std::fprintf(stderr, "Fused gallery gain mismatch at %zu: %u vs %u\n",
+                             index, actual, expected);
                 return 1;
             }
         }
@@ -244,6 +281,13 @@ int main() {
                 output.orientation = orientation;
                 output.rgb24 = rgb24;
                 output.clipping = &clipping;
+                std::vector<uint8_t> thumbnail;
+                if (rgb24) {
+                    output.thumbnailPixels = &thumbnail;
+                    output.thumbnailWidth = 5;
+                    output.thumbnailHeight = 3;
+                    output.thumbnailOrientation = orientation;
+                }
                 auto actual = source;
                 if (!motioncam::colorGalleryRgbVulkan(actual, gains, matrix,
                         matrix, 1.0f, nullptr, nullptr, false, false,
@@ -290,6 +334,41 @@ int main() {
                         "Gallery output mismatch orientation=%d rgb24=%d\n",
                         orientation, rgb24);
                     return 1;
+                }
+                if (rgb24) {
+                    std::vector<uint8_t> expectedThumbnail(5u * 3u * 3u);
+                    const uint32_t fullHeight = orientation == 90 || orientation == 270
+                        ? width : height;
+                    for (uint32_t ty = 0; ty < 3; ++ty)
+                        for (uint32_t tx = 0; tx < 5; ++tx) {
+                            const uint32_t ox = std::min(outputWidth - 1,
+                                (2u * tx + 1u) * outputWidth / 10u);
+                            const uint32_t oy = std::min(fullHeight - 1,
+                                (2u * ty + 1u) * fullHeight / 6u);
+                            uint32_t sx = ox, sy = oy;
+                            if (orientation == 90) {
+                                sx = oy; sy = height - 1u - ox;
+                            } else if (orientation == 180) {
+                                sx = width - 1u - ox; sy = height - 1u - oy;
+                            } else if (orientation == 270) {
+                                sx = width - 1u - oy; sy = ox;
+                            }
+                            for (uint32_t channel = 0; channel < 3; ++channel) {
+                                uint16_t code;
+                                std::memcpy(&code, colored.data() +
+                                    (static_cast<size_t>(sy) * width + sx) * 6u +
+                                    channel * 2u, 2u);
+                                expectedThumbnail[(ty * 5u + tx) * 3u + channel] =
+                                    static_cast<uint8_t>(code >> 8u);
+                            }
+                        }
+                    if (thumbnail != expectedThumbnail) {
+                        std::fprintf(stderr,
+                            "Gallery thumbnail mismatch orientation=%d size=%zu expected=%zu first=%u/%u\n",
+                            orientation, thumbnail.size(), expectedThumbnail.size(),
+                            thumbnail.empty()?0u:thumbnail[0],expectedThumbnail[0]);
+                        return 1;
+                    }
                 }
             }
     }

@@ -5,12 +5,14 @@
 #include "LRUCache.h"
 #include "VirtualFileSystemImpl.h"
 #include "Utils.h"
+#include "VulkanGalleryPreview.h"
 #include <BS_thread_pool.hpp>
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -535,6 +537,100 @@ int main() {
         assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(separateBake));
         assert(motioncam::DNGDecoder::imagePayloadsEqual(separateBake, fusedPacked));
     }
+    // Compressed input must take the decoded-source path, then fuse the gain
+    // and packed LOG bake without serializing an unused 16-bit intermediate.
+    auto compressedGainLog = makeLogCfaDng(0, 0, false, 32, true);
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        compressedGainLog, 2, constantPhaseMaps));
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedGainLog));
+    auto compressedGainCpu = compressedGainLog;
+    motioncam::DecodedDNGImage compressedGainImage, uncompressedGainImage;
+    motioncam::RenderSettings compressedGainSettings;
+    compressedGainSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        motioncam::RENDER_OPT_LOG_TRANSFORM | motioncam::RENDER_OPT_LOG_HQ);
+    compressedGainSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
+    auto compressedGainPipeline = cfaPipeline;
+    compressedGainPipeline.calibration = nullptr;
+    compressedGainPipeline.inputQuantizationWhite = 65535;
+    auto compressedCpuPipeline = compressedGainPipeline;
+    compressedCpuPipeline.preferVulkan = false;
+    motioncam::vfs::processDngPixels(
+        compressedGainLog, compressedGainSettings, compressedGainPipeline);
+    motioncam::vfs::processDngPixels(
+        compressedGainCpu, compressedGainSettings, compressedCpuPipeline);
+    assert(tagValue(compressedGainLog, 258).value == 8);
+    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+        compressedGainLog, compressedGainImage, false, false));
+    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+        compressedGainCpu, uncompressedGainImage, false, false));
+    assert(compressedGainImage.samples.size() == uncompressedGainImage.samples.size());
+    int largestDifference = 0;
+    for (size_t i = 0; i < compressedGainImage.samples.size(); ++i)
+        largestDifference = std::max(largestDifference,
+            std::abs(int(compressedGainImage.samples[i]) -
+                     int(uncompressedGainImage.samples[i])));
+    assert(largestDifference <= 1);
+    // These map transforms share one preparation path before CPU or Vulkan
+    // baking. Compare the combined options on compressed input, where the
+    // GPU also has to consume decoded pixels and produce packed DNG output.
+    for (unsigned variant = 0; variant < 16; ++variant) {
+        auto gpu = makeLogCfaDng(0, 0, false, 32, true);
+        assert(motioncam::DNGDecoder::replaceGainMaps(gpu, 2, constantPhaseMaps));
+        assert(motioncam::DNGDecoder::compressLosslessJPEG(gpu));
+        auto cpu = gpu;
+        motioncam::RenderSettings matrixSettings;
+        matrixSettings.options = motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+        if (variant & 1u) matrixSettings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+        if (variant & 2u) matrixSettings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
+        if (variant & 4u) matrixSettings.options |= motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
+        if (variant & 8u) {
+            matrixSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM |
+                                      motioncam::RENDER_OPT_LOG_HQ;
+            matrixSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
+        }
+        motioncam::vfs::processDngPixels(gpu, matrixSettings, compressedGainPipeline);
+        motioncam::vfs::processDngPixels(cpu, matrixSettings, compressedCpuPipeline);
+        assert(tagValue(gpu, 258).value == tagValue(cpu, 258).value);
+        motioncam::DecodedDNGImage gpuPixels, cpuPixels;
+        assert(motioncam::DNGDecoder::decodeImageBorrowed(gpu, gpuPixels, false, false));
+        assert(motioncam::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels, false, false));
+        assert(gpuPixels.samples.size() == cpuPixels.samples.size());
+        for (size_t sample = 0; sample < gpuPixels.samples.size(); ++sample)
+            assert(std::abs(int(gpuPixels.samples[sample]) -
+                            int(cpuPixels.samples[sample])) <= 1);
+    }
+    // The GPU strip path is optional on hosts without Vulkan. When present,
+    // compare the packed codes and metadata against the CPU encoder for both
+    // CFA and RGB sources across the supported output widths.
+    size_t gpuLogCases = 0;
+    for (const auto mode : packedLogModes) {
+        for (const bool rgb : {false, true}) {
+            auto gpu = rgb
+                ? makeDng(1000, 0.01f, 100, 0.0f, {1, 1, 1}, 0)
+                : makeLogCfaDng(0, 0, false, 32, true);
+            auto cpu = gpu;
+            if (!motioncam::DNGDecoder::bakeLogStripVulkan(
+                    gpu, mode, 65535, true, 17)) continue;
+            ++gpuLogCases;
+            assert(motioncam::DNGDecoder::applyLogTransform(
+                cpu, mode, 65535, true, false, 17));
+            assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(cpu));
+            assert(tagValue(gpu, 258).value == tagValue(cpu, 258).value);
+            assert(tagValue(gpu, 50712).count == tagValue(cpu, 50712).count);
+            motioncam::DecodedDNGImage gpuImage, cpuImage;
+            assert(motioncam::DNGDecoder::decodeImageBorrowed(
+                gpu, gpuImage, false, false));
+            assert(motioncam::DNGDecoder::decodeImageBorrowed(
+                cpu, cpuImage, false, false));
+            assert(gpuImage.samples.size() == cpuImage.samples.size());
+            for (size_t i = 0; i < gpuImage.samples.size(); ++i)
+                assert(std::abs(int(gpuImage.samples[i]) -
+                                int(cpuImage.samples[i])) <= 1);
+        }
+    }
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        std::fprintf(stderr, "GPU LOG comparison cases: %zu\n", gpuLogCases);
     auto overlayPacked = makeLogCfaDng(500, 0, false, 128);
     assert(motioncam::DNGDecoder::replaceGainMaps(
         overlayPacked, 2, constantPhaseMaps));
@@ -775,6 +871,60 @@ int main() {
     // The three valid samples in this 2x2 Quad Bayer group dominate the
     // surrounding same-colour groups: (median(100,110,120) * 4 + 200) / 5.
     assert(quadInterpolation[9] == 128);
+    auto directBadPixelDng = makeLogCfaDng(0, 0, false, 32, true);
+    auto decodedBadPixelDng = directBadPixelDng;
+    motioncam::RenderSettings badPixelBakeSettings;
+    badPixelBakeSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
+    auto badPixelPipeline = cfaPipeline;
+    badPixelPipeline.calibration = &interpolateOne;
+    motioncam::vfs::processDngPixels(
+        directBadPixelDng, badPixelBakeSettings, badPixelPipeline);
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE", "1");
+#else
+    setenv("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE", "1", 1);
+#endif
+    motioncam::vfs::processDngPixels(
+        decodedBadPixelDng, badPixelBakeSettings, badPixelPipeline);
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE", "");
+#else
+    unsetenv("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE");
+#endif
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        directBadPixelDng, decodedBadPixelDng));
+    // Exercise the dense 2x2 median cache with an offset active area and
+    // compare every output sample against the uncached interpolation path.
+    motioncam::CalibrationData densePattern;
+    densePattern.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel denseDefect;
+    denseDefect.x = denseDefect.y = 1;
+    denseDefect.repeatX = denseDefect.repeatY = 2;
+    densePattern.badPixels.push_back(denseDefect);
+    constexpr uint32_t denseSize = 640;
+    std::vector<uint16_t> denseCached(denseSize * denseSize);
+    for (size_t i = 0; i < denseCached.size(); ++i)
+        denseCached[i] = static_cast<uint16_t>((i * 31337u + i / denseSize * 97u) & 65535u);
+    auto denseUncached = denseCached;
+    motioncam::utils::applyCfaBadPixels(
+        denseCached.data(), denseSize, denseSize, denseSize + 2, denseSize + 2,
+        4, 65535.0f, {0, 0, 0, 0}, 100.0, 0.01, densePattern,
+        motioncam::BadPixelTreatment::Bake);
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE", "1");
+#else
+    setenv("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE", "1", 1);
+#endif
+    motioncam::utils::applyCfaBadPixels(
+        denseUncached.data(), denseSize, denseSize, denseSize + 2, denseSize + 2,
+        4, 65535.0f, {0, 0, 0, 0}, 100.0, 0.01, densePattern,
+        motioncam::BadPixelTreatment::Bake);
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE", "");
+#else
+    unsetenv("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE");
+#endif
+    assert(denseCached == denseUncached);
     std::vector<uint16_t> bayerInterpolation(8 * 8, 200);
     bayerInterpolation[9] = 65535;
     bayerInterpolation[1 * 8 + 3] = 400;
@@ -850,8 +1000,8 @@ int main() {
     assert(remosaicedMarkedImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
     assert(remosaicedMarkedImage.samples[
         1 * remosaicedMarkedImage.layout.width + 1] == 0);
-    // Higher CFA phase maps belong to the original 4x4 pattern. The shared
-    // pipeline must bake them before CPU remosaic changes that pattern.
+    // CPU higher-CFA remosaic now runs before the GPU gain stage. Its phase
+    // maps are interpreted on the resulting ordinary Bayer grid.
     auto higherCfaInput = makeLogCfaDng(1000, 0, false, 32, true, 4);
     auto higherCfaMaps = constantPhaseMaps;
     for (size_t index = 0; index < higherCfaMaps.size(); ++index)
@@ -859,11 +1009,12 @@ int main() {
     assert(motioncam::DNGDecoder::replaceGainMaps(
         higherCfaInput, 2, higherCfaMaps));
     auto higherCfaReference = higherCfaInput;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
-        higherCfaReference, false, false, false, false, 4));
     assert(motioncam::DNGDecoder::processHigherCFA(
         higherCfaReference, 4, {0, 1, 1, 2},
-        motioncam::QuadBayerMode::Demosaic, true, 1, false));
+        motioncam::QuadBayerMode::Demosaic, true, 1, false,
+        false, true));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        higherCfaReference, false, false, false, false, 2));
     motioncam::RenderSettings phaseMapRemosaicSettings;
     phaseMapRemosaicSettings.options = static_cast<motioncam::FileRenderOptions>(
         motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
@@ -882,28 +1033,18 @@ int main() {
     assert(motioncam::DNGDecoder::decodeImage(
         higherCfaActual, higherCfaActualImage, false, false));
     assert(higherCfaActualImage.samples == higherCfaExpectedImage.samples);
-    auto higherCfaWrongOrder = higherCfaInput;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        higherCfaWrongOrder, 4, {0, 1, 1, 2},
-        motioncam::QuadBayerMode::Demosaic, true, 1, false,
-        false, true));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
-        higherCfaWrongOrder, false, false, false, false, 2));
-    motioncam::DecodedDNGImage higherCfaWrongImage;
-    assert(motioncam::DNGDecoder::decodeImage(
-        higherCfaWrongOrder, higherCfaWrongImage, false, false));
-    assert(higherCfaWrongImage.samples != higherCfaExpectedImage.samples);
     int higherCfaOutputRepeat = 0;
     std::array<uint8_t, 4> higherCfaOutputPhase{};
     assert(motioncam::DNGDecoder::getCFAMetadata(
         higherCfaActual, higherCfaOutputRepeat, higherCfaOutputPhase));
     assert(higherCfaOutputRepeat == 2);
     auto higherCfaProxyReference = higherCfaInput;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
-        higherCfaProxyReference, false, false, false, false, 4));
     assert(motioncam::DNGDecoder::processHigherCFA(
         higherCfaProxyReference, 4, {0, 1, 1, 2},
-        motioncam::QuadBayerMode::Demosaic, true, 2, false));
+        motioncam::QuadBayerMode::Demosaic, true, 2, false,
+        false, true));
+    assert(motioncam::DNGDecoder::bakeGainMaps(
+        higherCfaProxyReference, false, false, false, false, 2));
     auto higherCfaProxyActual = higherCfaInput;
     auto higherCfaProxySettings = phaseMapRemosaicSettings;
     higherCfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
@@ -1552,6 +1693,162 @@ int main() {
     for (size_t index = 0; index < cfaPreviewImage.samples.size(); ++index)
         cfaPreviewImage.samples[index] = static_cast<uint16_t>(
             index % 53 == 0 ? 4095 : index % 47 == 0 ? 32 : (index * 37) % 4096);
+    auto gainPreviewImage = cfaPreviewImage;
+    gainPreviewImage.opcodeList2 = constantPhaseMaps;
+    motioncam::RenderSettings gainPreviewSettings;
+    gainPreviewSettings.streamingPreview = true;
+    gainPreviewSettings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    motioncam::PreviewFrame cpuGainPreview, gpuGainPreview;
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "1");
+#else
+    setenv("MOTIONCAM_GALLERY_FORCE_CPU", "1", 1);
+#endif
+    assert(motioncam::DNGDecoder::decodePreview(
+        gainPreviewImage, gainPreviewSettings, cpuGainPreview, true));
+#ifdef _WIN32
+    _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "");
+#else
+    unsetenv("MOTIONCAM_GALLERY_FORCE_CPU");
+#endif
+    assert(motioncam::DNGDecoder::decodePreview(
+        gainPreviewImage, gainPreviewSettings, gpuGainPreview, true));
+    assert(gpuGainPreview.galleryCfa.size() == cpuGainPreview.galleryCfa.size());
+    auto gpuGainSamples = gpuGainPreview.galleryCfa;
+    if (gpuGainPreview.galleryCfaGain)
+        assert(gpuGainPreview.galleryCfaRecoverCpu(gpuGainSamples));
+    for (size_t i = 0; i < gpuGainSamples.size(); ++i)
+        assert(std::abs(int(gpuGainSamples[i]) -
+                        int(cpuGainPreview.galleryCfa[i])) <= 1);
+    if (motioncam::waitVulkanGalleryPreviewReady()) {
+        motioncam::PreviewFrame deferredGainPreview;
+        assert(motioncam::DNGDecoder::decodePreview(
+            gainPreviewImage, gainPreviewSettings, deferredGainPreview, true));
+        assert(deferredGainPreview.galleryCfaGain);
+        assert(deferredGainPreview.galleryCfaRecoverCpu);
+        motioncam::VulkanGalleryBayerSource deferredSource;
+        deferredSource.samples = deferredGainPreview.galleryCfaSamples();
+        deferredSource.width = deferredGainPreview.width;
+        deferredSource.height = deferredGainPreview.height;
+        deferredSource.phase = deferredGainPreview.galleryCfaPhase;
+        deferredSource.black = deferredGainPreview.galleryBlack;
+        deferredSource.white = deferredGainPreview.galleryWhite;
+        deferredSource.gain = deferredGainPreview.galleryCfaGain.get();
+        auto cpuSource = deferredSource;
+        cpuSource.samples = cpuGainPreview.galleryCfaSamples();
+        cpuSource.gain = nullptr;
+        cpuSource.black = cpuGainPreview.galleryBlack;
+        cpuSource.white = cpuGainPreview.galleryWhite;
+        const std::array<float, 3> unity{1.0f, 1.0f, 1.0f};
+        const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
+        std::vector<uint8_t> deferredColor, referenceColor;
+        assert(motioncam::colorGalleryRgbVulkan(deferredColor, unity,
+            identity, identity, 1.0f, nullptr, nullptr, false, false,
+            &deferredSource));
+        assert(motioncam::colorGalleryRgbVulkan(referenceColor, unity,
+            identity, identity, 1.0f, nullptr, nullptr, false, false,
+            &cpuSource));
+        assert(deferredColor.size() == referenceColor.size());
+        for (size_t i = 0; i < deferredColor.size() / 2; ++i) {
+            uint16_t actual, expected;
+            std::memcpy(&actual, deferredColor.data() + i * 2, 2);
+            std::memcpy(&expected, referenceColor.data() + i * 2, 2);
+            assert(std::abs(int(actual) - int(expected)) <= 8);
+        }
+        auto overrideImage = cfaPreviewImage;
+        motioncam::GainMap rgbGrid{};
+        rgbGrid.top = rgbGrid.left = 0;
+        rgbGrid.bottom = overrideImage.layout.height;
+        rgbGrid.right = overrideImage.layout.width;
+        rgbGrid.rowPitch = rgbGrid.colPitch = 1;
+        rgbGrid.width = rgbGrid.height = 2;
+        rgbGrid.channels = 3;
+        rgbGrid.originH = rgbGrid.originV = 0.1;
+        rgbGrid.spacingH = rgbGrid.spacingV = 0.75;
+        rgbGrid.data = {0.8f, 1.0f, 1.4f,
+                        0.9f, 1.1f, 1.3f,
+                        1.0f, 0.9f, 1.2f,
+                        1.1f, 0.8f, 1.1f};
+        overrideImage.opcodeList2 = {rgbGrid};
+        auto overrideSettings = gainPreviewSettings;
+        overrideSettings.cfaPhase = "BGGR";
+        motioncam::PreviewFrame overrideGpu, overrideCpu;
+        assert(motioncam::DNGDecoder::decodePreview(
+            overrideImage, overrideSettings, overrideGpu, true));
+        assert(overrideGpu.galleryCfaGain);
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "1");
+#else
+        setenv("MOTIONCAM_GALLERY_FORCE_CPU", "1", 1);
+#endif
+        assert(motioncam::DNGDecoder::decodePreview(
+            overrideImage, overrideSettings, overrideCpu, true));
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "");
+#else
+        unsetenv("MOTIONCAM_GALLERY_FORCE_CPU");
+#endif
+        deferredSource.samples = overrideGpu.galleryCfaSamples();
+        deferredSource.gain = overrideGpu.galleryCfaGain.get();
+        cpuSource.samples = overrideCpu.galleryCfaSamples();
+        deferredColor.clear();
+        referenceColor.clear();
+        assert(motioncam::colorGalleryRgbVulkan(deferredColor, unity,
+            identity, identity, 1.0f, nullptr, nullptr, false, false,
+            &deferredSource));
+        assert(motioncam::colorGalleryRgbVulkan(referenceColor, unity,
+            identity, identity, 1.0f, nullptr, nullptr, false, false,
+            &cpuSource));
+        assert(deferredColor.size() == referenceColor.size());
+        for (size_t i = 0; i < deferredColor.size() / 2; ++i) {
+            uint16_t actual, expected;
+            std::memcpy(&actual, deferredColor.data() + i * 2, 2);
+            std::memcpy(&expected, referenceColor.data() + i * 2, 2);
+            assert(std::abs(int(actual) - int(expected)) <= 8);
+        }
+        auto logPreviewSettings = gainPreviewSettings;
+        logPreviewSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM |
+                                      motioncam::RENDER_OPT_LOG_HQ;
+        logPreviewSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
+        motioncam::PreviewFrame deferredLog, cpuLog;
+        assert(motioncam::DNGDecoder::decodePreview(
+            gainPreviewImage, logPreviewSettings, deferredLog, true));
+        assert(deferredLog.galleryCfaGain &&
+               deferredLog.galleryCfaGain->encodedWhite != 0);
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "1");
+#else
+        setenv("MOTIONCAM_GALLERY_FORCE_CPU", "1", 1);
+#endif
+        assert(motioncam::DNGDecoder::decodePreview(
+            gainPreviewImage, logPreviewSettings, cpuLog, true));
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "");
+#else
+        unsetenv("MOTIONCAM_GALLERY_FORCE_CPU");
+#endif
+        auto recoveredLog = deferredLog.galleryCfa;
+        assert(deferredLog.galleryCfaRecoverCpu(recoveredLog));
+        assert(recoveredLog == cpuLog.galleryCfa);
+        deferredSource.samples = deferredLog.galleryCfaSamples();
+        deferredSource.gain = deferredLog.galleryCfaGain.get();
+        cpuSource.samples = cpuLog.galleryCfaSamples();
+        deferredColor.clear();
+        referenceColor.clear();
+        assert(motioncam::colorGalleryRgbVulkan(deferredColor, unity,
+            identity, identity, 1.0f, nullptr, nullptr, false, false,
+            &deferredSource));
+        assert(motioncam::colorGalleryRgbVulkan(referenceColor, unity,
+            identity, identity, 1.0f, nullptr, nullptr, false, false,
+            &cpuSource));
+        assert(deferredColor.size() == referenceColor.size());
+        for (size_t i = 0; i < deferredColor.size() / 2; ++i) {
+            uint16_t actual, expected;
+            std::memcpy(&actual, deferredColor.data() + i * 2, 2);
+            std::memcpy(&expected, referenceColor.data() + i * 2, 2);
+            assert(std::abs(int(actual) - int(expected)) <= 8);
+        }
+    }
     motioncam::PreviewFrame directCfaPreview, twoPassCfaPreview;
     directCfaPreview.clippingRequested = true;
     twoPassCfaPreview.clippingRequested = true;

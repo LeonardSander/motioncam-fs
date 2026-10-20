@@ -5,6 +5,7 @@
 #include <QProcess>
 #include <QPointer>
 #include <QTimer>
+#include <QThreadPool>
 #include <QVector>
 #include <QHash>
 #include <QSet>
@@ -45,6 +46,7 @@ public:
     void setAutomaticAdvanceEnabled(bool enabled);
     void setPlaybackPaused(bool paused);
     bool isPlaybackPaused() const { return mPaused; }
+    bool directSequencePresentation() const { return mDirectSequencePresentation; }
     void requestThumbnailBackfill();
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
@@ -59,6 +61,7 @@ public:
     std::shared_ptr<std::atomic<int>> playbackTarget() const { return mPlaybackTarget; }
     std::shared_ptr<std::atomic<int>> incomingFrame() const { return mIncomingFrame; }
     std::shared_ptr<std::atomic_bool> thumbnailCollectionEnabled() const { return mThumbnailCollectionEnabled; }
+    std::shared_ptr<std::atomic_bool> thumbnailPrecacheEnabled() const { return mThumbnailPrecacheEnabled; }
     bool nativeVulkanPresenter() const;
     void runPerformanceGestureTest(std::function<void()> finished);
     void reloadCurrentClip();
@@ -92,7 +95,8 @@ public:
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
-    void setOutputFrameThumbnailImage(int outputFrame, const QImage& image);
+    void setOutputFrameThumbnailImage(int outputFrame, const QImage& image,
+                                      bool cacheWhenHidden = false);
     static QImage makeRgb48Thumbnail(const uint8_t* pixels, qsizetype bytes,
                                     int width, int height, int orientation);
     void setSourceFrameThumbnail(int sourceFrame, const QByteArray& frame, int width, int height);
@@ -116,6 +120,7 @@ protected:
     void keyPressEvent(QKeyEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 private:
+    bool hasReusableSourceFrame() const;
     struct RawFrame {
         std::shared_ptr<const std::vector<uint16_t>> samples;
         int width=0,height=0,channels=0;
@@ -194,7 +199,8 @@ private:
         bool preOriented = false,
         std::shared_ptr<const uint8_t> pixels = {}) const;
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
-    void setSourceFrameThumbnailImage(int sourceFrame, const QImage& image);
+    void setSourceFrameThumbnailImage(int sourceFrame, const QImage& image,
+                                      bool cacheWhenHidden = false);
     QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; GalleryGpuVideo* mGpuVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
     QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QPushButton* mClippingToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
@@ -203,6 +209,9 @@ private:
     QHash<int,QHash<int,QImage>> mThumbnailCache;
     QList<QPair<int,int>> mThumbnailCacheOrder;
     std::unique_ptr<QTemporaryDir> mThumbnailDiskCache;
+    std::shared_ptr<std::atomic<int>> mThumbnailWritesPending =
+        std::make_shared<std::atomic<int>>(0);
+    QThreadPool mThumbnailCacheWriter;
     int mCurrentThumbnailSource = -1;
     bool mDroppedCursorVisible = false;
     bool mDuplicateCursorVisible = false;
@@ -284,4 +293,6 @@ private:
     std::shared_ptr<std::atomic<int>> mIncomingFrame=std::make_shared<std::atomic<int>>(0);
     std::shared_ptr<std::atomic_bool> mThumbnailCollectionEnabled=
         std::make_shared<std::atomic_bool>(false);
+    std::shared_ptr<std::atomic_bool> mThumbnailPrecacheEnabled=
+        std::make_shared<std::atomic_bool>(true);
 };

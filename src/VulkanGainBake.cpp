@@ -321,6 +321,9 @@ bool bakeGainVulkan(const uint16_t* source,
     const bool hasLinearization = params.linearization &&
         !params.linearization->empty();
     if (hasLinearization && params.linearization->size() > 65536u) return false;
+    const bool hasLogLookup = params.logLookup != nullptr;
+    if (hasLogLookup && (!params.log60 || hasLinearization || cfa ||
+                         params.logLookup->size() != 65536u)) return false;
     const uint32_t mapCount = genericMaps
         ? static_cast<uint32_t>(params.maps.size())
         : cfa ? params.cfaMapCount : 1u;
@@ -469,7 +472,8 @@ bool bakeGainVulkan(const uint16_t* source,
                          : map.data->size()) * sizeof(float);
     }
     const size_t outputBytes = wordsPerRow * params.height * sizeof(uint32_t);
-    const size_t linearizationBytes = hasLinearization ? 65536u * 2u : 4u;
+    const size_t linearizationBytes = hasLogLookup ? 65536u * sizeof(float)
+        : hasLinearization ? 65536u * 2u : 4u;
     if (sourceWords > std::numeric_limits<uint32_t>::max() ||
         wordsPerRow * params.height > std::numeric_limits<uint32_t>::max() ||
         rowBytes > std::numeric_limits<uint32_t>::max() ||
@@ -501,7 +505,7 @@ bool bakeGainVulkan(const uint16_t* source,
     constants.flags = (params.log60 ? 1u : 0u) |
         (params.logHighQuality ? 2u : 0u) | (params.debugGain ? 4u : 0u) |
         (cfa && first.channels == 4 ? 8u : 0u) |
-        (hasLinearization ? 16u : 0u);
+        (hasLinearization ? 16u : 0u) | (hasLogLookup ? 32u : 0u);
     constants.rowBytes = static_cast<uint32_t>(rowBytes);
     constants.wordsPerRow = static_cast<uint32_t>(wordsPerRow);
     if (externalSource) {
@@ -581,7 +585,12 @@ bool bakeGainVulkan(const uint16_t* source,
                     device->sourceStage, 0, sourceBytes);
     pl_buf_copy(device->gpu, device->map, 0,
                 device->mapStage, 0, mapBytes);
-    if (hasLinearization) {
+    if (hasLogLookup) {
+        pl_buf_write(device->gpu, device->linearizationStage, 0,
+                     params.logLookup->data(), linearizationBytes);
+        pl_buf_copy(device->gpu, device->linearization, 0,
+                    device->linearizationStage, 0, linearizationBytes);
+    } else if (hasLinearization) {
         std::vector<uint32_t> packedTable(32768u);
         const auto& table = *params.linearization;
         for (uint32_t index = 0; index < 32768u; ++index) {

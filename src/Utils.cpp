@@ -1608,6 +1608,10 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
 {
     Measure m("generateDng");
     const auto previewProfileStarted = std::chrono::steady_clock::now();
+    if (previewFrame) {
+        previewFrame->galleryCfa.clear();
+        previewFrame->galleryCfaBytes.clear();
+    }
 
     unsigned int width = metadata.width;
     unsigned int height = metadata.height;
@@ -2016,8 +2020,10 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
               static_cast<double>(dstWhiteLevel), static_cast<double>(dstWhiteLevel),
               static_cast<double>(dstWhiteLevel)};
           if (previewRepeatSize == 2 && settings.streamingPreview) {
-            previewFrame->galleryCfa.assign(
-                cfaSamples, cfaSamples + static_cast<size_t>(previewWidth) * previewHeight);
+            if (previewCfa.empty())
+              previewFrame->galleryCfaBytes = std::move(processedData);
+            else
+              previewFrame->galleryCfa = std::move(previewCfa);
             previewFrame->galleryCfaPhase = cfa;
             previewFrame->galleryBlack = previewBlack;
             previewFrame->galleryWhite = previewWhite;

@@ -4,6 +4,7 @@
 #include "GainMapBake.h"
 #include "RawLogTransform.h"
 #include "VulkanGainBake.h"
+#include "VulkanGalleryPreview.h"
 #include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
@@ -4767,6 +4768,75 @@ bool DNGDecoder::encodeImage(std::vector<uint8_t>& data,
     return true;
 }
 
+bool DNGDecoder::fillUncompressedImageStrip(
+        std::vector<uint8_t>& data,
+        const std::function<bool(uint16_t*, size_t)>& fill) {
+    const uint16_t endianProbe = 1;
+    if (*reinterpret_cast<const uint8_t*>(&endianProbe) != 1 || !fill)
+        return false;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (!little) return false;
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_PHOTOMETRIC || !entry.count) continue;
+        const uint32_t value = entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + entry.valueOffset, little)
+            : entry.type == TIFF_TYPE_LONG
+                ? read32(data.data() + entry.valueOffset, little) : 0;
+        if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+            photo = &entry;
+            break;
+        }
+    }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag)
+                return &entry;
+        return nullptr;
+    };
+    const auto width = find(TIFF_TAG_IMAGE_WIDTH);
+    const auto height = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto channels = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    const auto bits = find(TIFF_TAG_BITS_PER_SAMPLE);
+    const auto compression = find(TIFF_TAG_COMPRESSION);
+    const auto offsets = find(TIFF_TAG_STRIP_OFFSETS);
+    const auto counts = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    if (!width || !height || !channels || !bits || !compression ||
+        !offsets || !counts || !width->count || !height->count ||
+        !channels->count || !bits->count || !compression->count ||
+        offsets->count != 1 || counts->count != 1)
+        return false;
+    auto scalar = [&](const TiffEntry& entry, uint32_t index = 0) -> uint32_t {
+        const size_t at = entry.valueOffset + static_cast<size_t>(index) *
+            (entry.type == TIFF_TYPE_SHORT ? 2u : 4u);
+        return entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + at, little)
+            : entry.type == TIFF_TYPE_LONG ? read32(data.data() + at, little) : 0;
+    };
+    const uint32_t w = scalar(*width), h = scalar(*height);
+    const uint32_t c = scalar(*channels), offset = scalar(*offsets);
+    const uint32_t bytes = scalar(*counts);
+    if (!w || !h || (c != 1 && c != 3) ||
+        scalar(*compression) != TIFF_COMPRESSION_NONE ||
+        (scalar(*photo) == TIFF_PHOTOMETRIC_CFA && c != 1) ||
+        (scalar(*photo) == 34892 && c != 3))
+        return false;
+    for (uint32_t i = 0; i < bits->count; ++i)
+        if (scalar(*bits, i) != 16) return false;
+    if (static_cast<size_t>(w) >
+        std::numeric_limits<size_t>::max() / h / c / sizeof(uint16_t))
+        return false;
+    const size_t samples = static_cast<size_t>(w) * h * c;
+    if (samples > std::numeric_limits<size_t>::max() / sizeof(uint16_t) ||
+        offset > data.size() || bytes != samples * sizeof(uint16_t) ||
+        bytes > data.size() - offset ||
+        (reinterpret_cast<uintptr_t>(data.data() + offset) % alignof(uint16_t)))
+        return false;
+    return fill(reinterpret_cast<uint16_t*>(data.data() + offset), samples);
+}
+
 bool DNGDecoder::removeThumbnails(std::vector<uint8_t>& data) {
     // Orientation is commonly stored only in IFD0 even when the full raw is a
     // SubIFD. Copy its resolved value to the image IFD we are about to retain.
@@ -5140,23 +5210,34 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
             ? readRational(data,*blackE,bi,little) : scalar(*blackE,bi);
     }
     if (!samplesAlreadyEncoded) {
-        std::vector<uint16_t> logSamples(samples);
-        if (!inputLinearization) {
-            readSampleBytes(logSamples.data(), data.data() + offset, samples, little);
+        const uint16_t endianProbe = 1;
+        const bool directStrip = little && !inputLinearization &&
+            *reinterpret_cast<const uint8_t*>(&endianProbe) == 1 &&
+            (reinterpret_cast<uintptr_t>(data.data() + offset) % alignof(uint16_t)) == 0;
+        if (directStrip) {
+            utils::encodeLog60(
+                reinterpret_cast<uint16_t*>(data.data() + offset), samples,
+                width, height, channels, black, sourceWhite,
+                static_cast<uint16_t>(storedWhite), highQuality, ditherSeed);
         } else {
-            for (size_t i = 0; i < samples; ++i) {
-                uint32_t value = read16(data.data() + offset + i * 2, little);
-                const uint32_t tableIndex = std::min<uint32_t>(
-                    value, inputLinearization->count - 1);
-                value = read16(data.data() + inputLinearization->valueOffset +
-                               static_cast<size_t>(tableIndex) * 2, little);
-                logSamples[i] = static_cast<uint16_t>(value);
+            std::vector<uint16_t> logSamples(samples);
+            if (!inputLinearization) {
+                readSampleBytes(logSamples.data(), data.data() + offset, samples, little);
+            } else {
+                for (size_t i = 0; i < samples; ++i) {
+                    uint32_t value = read16(data.data() + offset + i * 2, little);
+                    const uint32_t tableIndex = std::min<uint32_t>(
+                        value, inputLinearization->count - 1);
+                    value = read16(data.data() + inputLinearization->valueOffset +
+                                   static_cast<size_t>(tableIndex) * 2, little);
+                    logSamples[i] = static_cast<uint16_t>(value);
+                }
             }
+            utils::encodeLog60(logSamples, width, height, channels, black,
+                               sourceWhite, static_cast<uint16_t>(storedWhite),
+                               highQuality, ditherSeed);
+            writeSampleBytes(data.data() + offset, logSamples.data(), samples, little);
         }
-        utils::encodeLog60(logSamples, width, height, channels, black,
-                           sourceWhite, static_cast<uint16_t>(storedWhite),
-                           highQuality, ditherSeed);
-        writeSampleBytes(data.data() + offset, logSamples.data(), samples, little);
     }
     if (inputLinearization)
         write16(data.data()+inputLinearization->entryOffset,
@@ -5256,6 +5337,243 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
             }
         }
     }
+    return true;
+}
+
+bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
+        const VulkanGainBakeTextureSource& texture, LogTransformMode mode,
+        uint32_t quantizationWhite, bool highQuality, uint32_t ditherSeed) {
+    if (!texture.gpu || !texture.texture || !logReductionBits(mode))
+        return false;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (!little) return false;
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries)
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            entry.type == TIFF_TYPE_SHORT &&
+            read16(data.data() + entry.valueOffset, little) == 34892) {
+            photo = &entry;
+            break;
+        }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag)
+                return &entry;
+        return nullptr;
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH);
+    const auto heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto channelsE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE);
+    const auto compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS);
+    const auto countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto whiteE = find(TIFF_TAG_WHITE_LEVEL);
+    const auto blackE = find(TIFF_TAG_BLACK_LEVEL);
+    if (!widthE || !heightE || !channelsE || !bitsE || !compressionE ||
+        !offsetsE || !countsE || !whiteE || !bitsE->count ||
+        offsetsE->count != 1 || countsE->count != 1)
+        return false;
+    auto scalar = [&](const TiffEntry& entry, uint32_t index = 0) -> uint32_t {
+        const size_t at = entry.valueOffset + static_cast<size_t>(index) *
+            (entry.type == TIFF_TYPE_SHORT ? 2u : 4u);
+        return entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + at, little)
+            : entry.type == TIFF_TYPE_LONG ? read32(data.data() + at, little) : 0;
+    };
+    const uint32_t width = scalar(*widthE), height = scalar(*heightE);
+    const uint32_t channels = scalar(*channelsE);
+    const uint32_t offset = scalar(*offsetsE), oldBytes = scalar(*countsE);
+    const uint32_t sourceWhite = scalar(*whiteE);
+    if (!width || !height || channels != 3 || !sourceWhite ||
+        scalar(*compressionE) != TIFF_COMPRESSION_NONE ||
+        (blackE && blackE->type != TIFF_TYPE_SHORT))
+        return false;
+    if (blackE) for (uint32_t i = 0; i < blackE->count; ++i)
+        if (scalar(*blackE, i) != 0) return false;
+    const uint32_t encodedWhite = logStoredWhite(mode, quantizationWhite,
+                                                 sourceWhite);
+    const uint32_t packedBits = logStoredBits(static_cast<uint16_t>(encodedWhite));
+    if (packedBits != 8) return false;
+    const size_t packedBytes = static_cast<size_t>(width) * height * channels;
+    bool alreadyPacked = oldBytes == packedBytes;
+    for (uint32_t i = 0; i < bitsE->count; ++i)
+        if (scalar(*bitsE, i) != (alreadyPacked ? packedBits : 16)) return false;
+    if (packedBytes > std::numeric_limits<uint32_t>::max() ||
+        (countsE->type == TIFF_TYPE_SHORT && packedBytes > 65535u) ||
+        (!alreadyPacked && oldBytes != packedBytes * sizeof(uint16_t)) ||
+        offset > data.size() || oldBytes > data.size() - offset)
+        return false;
+    const std::vector<float> identity{1.0f, 1.0f, 1.0f};
+    VulkanGainBakeParams params;
+    params.width = width;
+    params.height = height;
+    params.channels = channels;
+    params.outputBits = packedBits;
+    params.sourceNominalWhite = 65535;
+    params.destinationWhite = static_cast<float>(sourceWhite);
+    params.encodedWhite = encodedWhite;
+    params.ditherSeed = ditherSeed;
+    params.log60 = true;
+    params.logHighQuality = highQuality;
+    params.logLookup = &cachedLog60EncodeLookup(
+        0.0, static_cast<double>(sourceWhite), encodedWhite);
+    params.scale.fill(1.0f);
+    params.textureSource = &texture;
+    params.map = VulkanRgbGainMap{1, 1, 3, 0, 0, width, height,
+                                 1, 1, 0.0f, 0.0f, 1.0f, 1.0f, &identity};
+    if (!bakeRgbGainVulkan(nullptr, params, data.data() + offset, packedBytes))
+        return false;
+    for (uint32_t i = 0; i < bitsE->count; ++i) {
+        const size_t at = bitsE->valueOffset + static_cast<size_t>(i) *
+            (bitsE->type == TIFF_TYPE_SHORT ? 2u : 4u);
+        if (bitsE->type == TIFF_TYPE_SHORT)
+            write16(data.data() + at, packedBits, little);
+        else if (bitsE->type == TIFF_TYPE_LONG)
+            write32(data.data() + at, packedBits, little);
+        else return false;
+    }
+    if (countsE->type == TIFF_TYPE_SHORT)
+        write16(data.data() + countsE->valueOffset, packedBytes, little);
+    else if (countsE->type == TIFF_TYPE_LONG)
+        write32(data.data() + countsE->valueOffset, packedBytes, little);
+    else return false;
+    if (!applyLogTransform(data, mode, quantizationWhite, highQuality, true,
+                           ditherSeed))
+        return false;
+    return alreadyPacked || replaceTiffStrip(data, offset, oldBytes, {}, little,
+                                             nullptr, packedBytes, true);
+}
+
+bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
+        LogTransformMode mode, uint32_t quantizationWhite,
+        bool highQuality, uint32_t ditherSeed) {
+    if (!logReductionBits(mode)) return false;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (!little) return false;
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_PHOTOMETRIC || !entry.count ||
+            entry.type != TIFF_TYPE_SHORT) continue;
+        const uint16_t value = read16(data.data() + entry.valueOffset, little);
+        if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+            photo = &entry;
+            break;
+        }
+    }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag)
+                return &entry;
+        return nullptr;
+    };
+    const auto widthE = find(TIFF_TAG_IMAGE_WIDTH);
+    const auto heightE = find(TIFF_TAG_IMAGE_HEIGHT);
+    const auto channelsE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE);
+    const auto compressionE = find(TIFF_TAG_COMPRESSION);
+    const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS);
+    const auto countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto whiteE = find(TIFF_TAG_WHITE_LEVEL);
+    const auto blackE = find(TIFF_TAG_BLACK_LEVEL);
+    if (!widthE || !heightE || !channelsE || !bitsE || !compressionE ||
+        !offsetsE || !countsE || !whiteE || offsetsE->count != 1 ||
+        countsE->count != 1 || !bitsE->count ||
+        (bitsE->type != TIFF_TYPE_SHORT && bitsE->type != TIFF_TYPE_LONG) ||
+        (countsE->type != TIFF_TYPE_SHORT && countsE->type != TIFF_TYPE_LONG) ||
+        find(TIFF_TAG_LINEARIZATION_TABLE)) return false;
+    auto scalar = [&](const TiffEntry& entry, uint32_t index = 0) -> uint32_t {
+        const size_t at = entry.valueOffset + static_cast<size_t>(index) *
+            (entry.type == TIFF_TYPE_SHORT ? 2u : 4u);
+        return entry.type == TIFF_TYPE_SHORT
+            ? read16(data.data() + at, little)
+            : entry.type == TIFF_TYPE_LONG ? read32(data.data() + at, little) : 0;
+    };
+    const uint32_t width = scalar(*widthE), height = scalar(*heightE);
+    const uint32_t channels = scalar(*channelsE);
+    const uint32_t offset = scalar(*offsetsE), oldBytes = scalar(*countsE);
+    const uint32_t sourceWhite = scalar(*whiteE);
+    if (!width || !height || (channels != 1 && channels != 3) ||
+        !sourceWhite || scalar(*compressionE) != TIFF_COMPRESSION_NONE ||
+        (blackE && blackE->type != TIFF_TYPE_SHORT &&
+         blackE->type != TIFF_TYPE_LONG)) return false;
+    const uint64_t pixelCount = static_cast<uint64_t>(width) * height;
+    if (pixelCount > std::numeric_limits<uint32_t>::max() /
+                         (channels * sizeof(uint16_t))) return false;
+    const uint64_t sampleCount = pixelCount * channels;
+    const uint32_t encodedWhite = logStoredWhite(mode, quantizationWhite,
+                                                 sourceWhite);
+    const uint32_t outputBits = logStoredBits(
+        static_cast<uint16_t>(encodedWhite));
+    const size_t rowBytes =
+        (static_cast<size_t>(width) * channels * outputBits + 7u) / 8u;
+    const size_t packedBytes = rowBytes * height;
+    if (packedBytes > std::numeric_limits<uint32_t>::max() ||
+        oldBytes != sampleCount * sizeof(uint16_t) ||
+        (offset & 1u) ||
+        offset > data.size() || oldBytes > data.size() - offset ||
+        (countsE->type == TIFF_TYPE_SHORT && packedBytes > 65535u)) return false;
+    for (uint32_t i = 0; i < bitsE->count; ++i)
+        if (scalar(*bitsE, i) != 16) return false;
+    const std::vector<float> identity(channels, 1.0f);
+    VulkanGainBakeParams params;
+    params.width = width;
+    params.height = height;
+    params.channels = channels;
+    params.outputBits = outputBits;
+    params.sourceNominalWhite = 65535;
+    params.destinationWhite = static_cast<float>(sourceWhite);
+    params.encodedWhite = encodedWhite;
+    params.ditherSeed = ditherSeed;
+    params.log60 = true;
+    params.logHighQuality = highQuality;
+    params.map = VulkanRgbGainMap{1, 1, channels, 0, 0, width, height,
+                                  1, 1, 0.0f, 0.0f, 1.0f, 1.0f, &identity};
+    if (channels == 1) {
+        params.cfaMapCount = 1;
+        params.cfaMaps[0] = params.map;
+    } else {
+        params.logLookup = &cachedLog60EncodeLookup(
+            0.0, static_cast<double>(sourceWhite), encodedWhite);
+    }
+    for (uint32_t channel = 0; channel < 4; ++channel) {
+        const uint32_t black = blackE && blackE->count
+            ? scalar(*blackE, std::min(channel, blackE->count - 1)) : 0;
+        if (black >= sourceWhite) return false;
+        params.black[channel] = static_cast<float>(black);
+        params.scale[channel] = static_cast<float>(sourceWhite) /
+            static_cast<float>(sourceWhite - black);
+    }
+    std::vector<uint8_t> packed(packedBytes);
+    const auto* source = reinterpret_cast<const uint16_t*>(data.data() + offset);
+    const bool baked = channels == 3
+        ? bakeRgbGainVulkan(source, params, packed.data(), packed.size())
+        : bakeCfaGainVulkan(source, params, packed.data(), packed.size());
+    if (!baked) return false;
+    std::memcpy(data.data() + offset, packed.data(), packedBytes);
+    for (uint32_t i = 0; i < bitsE->count; ++i) {
+        const size_t at = bitsE->valueOffset + static_cast<size_t>(i) *
+            (bitsE->type == TIFF_TYPE_SHORT ? 2u : 4u);
+        if (bitsE->type == TIFF_TYPE_SHORT)
+            write16(data.data() + at, outputBits, little);
+        else if (bitsE->type == TIFF_TYPE_LONG)
+            write32(data.data() + at, outputBits, little);
+        else return false;
+    }
+    if (countsE->type == TIFF_TYPE_SHORT)
+        write16(data.data() + countsE->valueOffset, packedBytes, little);
+    else if (countsE->type == TIFF_TYPE_LONG)
+        write32(data.data() + countsE->valueOffset, packedBytes, little);
+    else throw std::runtime_error("Invalid DNG strip count after GPU LOG bake");
+    if (!applyLogTransform(data, mode, quantizationWhite, highQuality, true,
+                           ditherSeed) ||
+        !replaceTiffStrip(data, offset, oldBytes, {}, little,
+                          nullptr, packedBytes, true))
+        throw std::runtime_error("Could not finalize GPU LOG DNG strip");
     return true;
 }
 
@@ -5667,7 +5985,9 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                                 uint32_t sourceHeight = 0,
                                 uint32_t sourceScale = 1,
                                 bool* gainMapApplied = nullptr,
-                                uint16_t fusedLogWhite = 0) {
+                                uint16_t fusedLogWhite = 0,
+                                PreviewFrame* deferredFrame = nullptr,
+                                bool preferVulkan = true) {
     if (gainMapApplied) *gainMapApplied = false;
     if (!(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) return true;
     std::vector<GainMap> maps = image.opcodeList2;
@@ -5691,9 +6011,6 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     }
     if (gainMapApplied) *gainMapApplied = true;
     const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
-    if (debugGainMap)
-        std::fill(image.samples.begin(), image.samples.end(),
-                  std::numeric_limits<uint16_t>::max());
     transformGainMapLayersForBake<GainMap>(
         std::array<std::vector<GainMap>*, 1>{&maps},
         settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
@@ -5708,6 +6025,126 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     if (!sourceWidth) sourceWidth = image.layout.width;
     if (!sourceHeight) sourceHeight = image.layout.height;
     sourceScale = std::max(1u, sourceScale);
+    // Both DNG and MCRAW previews arrive here as decoded samples. Use the
+    // same Vulkan gain kernel as mounted DNG output when the preview still
+    // addresses the original pixel grid. Keep the source untouched until the
+    // GPU succeeds so a device failure can fall through to the CPU bake.
+    const uint32_t phaseGroup = static_cast<uint32_t>(
+        std::max(1, image.layout.cfaRepeatSize / 2));
+    if (deferredFrame && !rgb && phaseGroup == 1 && sourceScale == 1 &&
+        sourceWidth == image.layout.width && sourceHeight == image.layout.height &&
+        maps.size() <= 32 &&
+        std::all_of(maps.begin(), maps.end(), [](const GainMap& map) {
+            return validGainMap(map) &&
+                (map.channels == 1 || map.channels == 3 || map.channels == 4);
+        })) {
+        auto prepared = std::make_shared<VulkanGalleryBayerGain>();
+        prepared->phase = cfaPhase;
+        prepared->encodedWhite = fusedLogWhite;
+        prepared->ditherSeed = image.ditherSeed;
+        prepared->highQualityDither = settings.options & RENDER_OPT_LOG_HQ;
+        prepared->debugGain = debugGainMap;
+        for (size_t channel = 0; channel < 4; ++channel) {
+            const float black = image.metadata.blackLevelCount
+                ? image.metadata.blackLevel[std::min<size_t>(
+                    channel, image.metadata.blackLevelCount - 1)] : 0.0f;
+            const float white = image.metadata.whiteLevelCount
+                ? image.metadata.whiteLevel[std::min<size_t>(
+                    channel, image.metadata.whiteLevelCount - 1)]
+                : static_cast<float>((uint32_t{1} <<
+                    std::min(16u, image.layout.bitsPerSample)) - 1u);
+            prepared->black[channel] = black;
+            prepared->scale[channel] = static_cast<float>(
+                linearGainScale(black, white, 0.0, 65535.0));
+        }
+        prepared->maps.reserve(maps.size());
+        for (const auto& map : maps)
+            prepared->maps.push_back(VulkanGalleryBayerGainMap{
+                map.width, map.height, map.channels, map.left, map.top,
+                map.right, map.bottom, map.rowPitch, map.colPitch,
+                static_cast<float>(map.originH), static_cast<float>(map.originV),
+                static_cast<float>(map.spacingH), static_cast<float>(map.spacingV),
+                map.data});
+        deferredFrame->galleryCfaGain = std::move(prepared);
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=preview_gain_deferred pixels={} maps={} log={}",
+                static_cast<size_t>(image.layout.width) * image.layout.height,
+                maps.size(), fusedLogWhite != 0);
+        image.metadata.blackLevel.fill(0.0f);
+        image.metadata.whiteLevel.fill(65535.0f);
+        image.metadata.blackLevelCount = 4;
+        image.metadata.whiteLevelCount = 4;
+        return true;
+    }
+    // A streaming preview that cannot defer gain into the final display pass
+    // still needs CPU topology or normalization. Baking it on a separate GPU
+    // device would force a full-frame readback followed by another upload.
+    if (preferVulkan && !settings.streamingPreview &&
+        !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        sourceScale == 1 && sourceWidth == image.layout.width &&
+        sourceHeight == image.layout.height && phaseGroup == 1 &&
+        !fusedLogWhite && (channels == 1 || channels == 3) &&
+        !maps.empty() && maps.size() <= 32 &&
+        std::all_of(maps.begin(), maps.end(), [](const GainMap& map) {
+            return validGainMap(map) &&
+                (map.channels == 1 || map.channels == 3 || map.channels == 4);
+        })) {
+        VulkanGainBakeParams gpu;
+        gpu.width = image.layout.width;
+        gpu.height = image.layout.height;
+        gpu.channels = channels;
+        gpu.outputBits = 16;
+        gpu.sourceNominalWhite =
+            (uint32_t{1} << std::min(16u, image.layout.bitsPerSample)) - 1u;
+        gpu.destinationWhite = 65535.0f;
+        gpu.debugGain = debugGainMap;
+        gpu.cfaPhase = cfaPhase;
+        for (size_t channel = 0; channel < gpu.black.size(); ++channel) {
+            const float black = image.metadata.blackLevelCount
+                ? image.metadata.blackLevel[std::min<size_t>(
+                    channel, image.metadata.blackLevelCount - 1)] : 0.0f;
+            const float white = image.metadata.whiteLevelCount
+                ? image.metadata.whiteLevel[std::min<size_t>(
+                    channel, image.metadata.whiteLevelCount - 1)]
+                : static_cast<float>(gpu.sourceNominalWhite);
+            gpu.black[channel] = black;
+            gpu.scale[channel] = static_cast<float>(
+                linearGainScale(black, white, 0.0, 65535.0));
+        }
+        gpu.maps.reserve(maps.size());
+        for (const auto& map : maps)
+            gpu.maps.push_back(VulkanRgbGainMap{
+                map.width, map.height, map.channels, map.left, map.top,
+                map.right, map.bottom, map.rowPitch, map.colPitch,
+                static_cast<float>(map.originH),
+                static_cast<float>(map.originV),
+                static_cast<float>(map.spacingH),
+                static_cast<float>(map.spacingV), &map.data});
+        gpu.map = gpu.maps.front();
+        std::vector<uint16_t> baked(image.samples.size());
+        const bool success = rgb
+            ? bakeRgbGainVulkan(image.samples.data(), gpu,
+                reinterpret_cast<uint8_t*>(baked.data()),
+                baked.size() * sizeof(uint16_t))
+            : bakeCfaGainVulkan(image.samples.data(), gpu,
+                reinterpret_cast<uint8_t*>(baked.data()),
+                baked.size() * sizeof(uint16_t));
+        if (success) {
+            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                spdlog::info("GALLERY_PERF event=preview_gain_gpu pixels={} channels={} maps={}",
+                    static_cast<size_t>(gpu.width) * gpu.height,
+                    channels, maps.size());
+            image.samples.swap(baked);
+            image.metadata.blackLevel.fill(0.0f);
+            image.metadata.whiteLevel.fill(65535.0f);
+            image.metadata.blackLevelCount = channels;
+            image.metadata.whiteLevelCount = channels;
+            return true;
+        }
+    }
+    if (debugGainMap)
+        std::fill(image.samples.begin(), image.samples.end(),
+                  std::numeric_limits<uint16_t>::max());
     auto sourceCoordinate = [rgb](uint32_t coordinate, uint32_t scale,
                                   uint32_t limit) {
         // Match reduceRGB's center sample for RGB; preserve Bayer phase for CFA.
@@ -5731,8 +6168,6 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
             });
     }
     if (channels != 1 && channels != 3) return false;
-    const uint32_t phaseGroup = static_cast<uint32_t>(
-        std::max(1, image.layout.cfaRepeatSize / 2));
     std::vector<std::optional<std::pair<uint32_t, uint32_t>>> scalarPhaseGroups;
     scalarPhaseGroups.reserve(maps.size());
     for (const auto& map : maps)
@@ -5887,6 +6322,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         ? image.storedBitsPerSample : image.layout.bitsPerSample;
     frame.clipping.clear();
     frame.galleryCfa.clear();
+    frame.galleryCfaBytes.clear();
+    frame.galleryCfaGain.reset();
+    frame.galleryCfaRecoverCpu = {};
     frame.displayBitDepth = image.metadata.inputBitDepth
         ? std::min(image.metadata.inputBitDepth, storedInputBits)
         : storedInputBits;
@@ -6040,9 +6478,44 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         (uint32_t{1} << std::min(16u, cfaLogBits)) - 1u) : 0;
     const bool fuseCfaLog = cfaLog && !frame.clippingRequested;
     const auto gainStarted = std::chrono::steady_clock::now();
+    const bool deferGalleryGain = settings.streamingPreview &&
+        !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        vulkanGalleryPreviewReady() &&
+        (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+        (!image.opcodeList2.empty() || !image.opcodeList3.empty()) &&
+        !frame.clippingRequested && !hasCrop &&
+        image.layout.pixels == DNGPixelLayout::CFA &&
+        image.layout.cfaRepeatSize == 2 && gainMapSourceScale == 1 &&
+        remainingPreviewScale == 1 &&
+        !(settings.options & (RENDER_OPT_REMOSAIC_TO_BAYER |
+                              RENDER_OPT_HIGHER_CFA_HQ));
+    DecodedDNGImage galleryFallbackTemplate;
+    if (deferGalleryGain) {
+        galleryFallbackTemplate.layout = image.layout;
+        galleryFallbackTemplate.storedBitsPerSample = image.storedBitsPerSample;
+        galleryFallbackTemplate.metadata = image.metadata;
+        galleryFallbackTemplate.opcodeList2 = image.opcodeList2;
+        galleryFallbackTemplate.opcodeList3 = image.opcodeList3;
+        galleryFallbackTemplate.ditherSeed = image.ditherSeed;
+    }
     if (!bakeDecodedPreviewGainMaps(
             image, settings, sourceWidth, sourceHeight, gainMapSourceScale,
-            &frame.gainMapApplied, fuseCfaLog ? cfaLogWhite : 0)) return false;
+            &frame.gainMapApplied, fuseCfaLog ? cfaLogWhite : 0,
+            deferGalleryGain ? &frame : nullptr)) return false;
+    if (frame.galleryCfaGain) {
+        frame.galleryCfaRecoverCpu =
+            [fallback = std::move(galleryFallbackTemplate), settings,
+             sourceWidth, sourceHeight, cfaLogWhite](
+                std::vector<uint16_t>& samples) mutable {
+                auto image = fallback;
+                image.samples = samples;
+                if (!bakeDecodedPreviewGainMaps(image, settings, sourceWidth,
+                        sourceHeight, 1, nullptr, cfaLogWhite, nullptr, false))
+                    return false;
+                samples = std::move(image.samples);
+                return true;
+            };
+    }
     const bool cfaLogFused = fuseCfaLog && frame.gainMapApplied;
     const auto gainFinished = std::chrono::steady_clock::now();
     if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
@@ -7074,15 +7547,20 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     const size_t sampleCount = static_cast<size_t>(width) * height * imageChannels;
     const uint16_t endianCheck = 1;
     const bool hostLittle = *reinterpret_cast<const uint8_t*>(&endianCheck) == 1;
-    bool inPlace = compression == TIFF_COMPRESSION_NONE && bits == 16 &&
+    const bool packedGpuPlaceholder = textureSource && sourceIsRgb &&
+        compression == TIFF_COMPRESSION_NONE && bits == 8 &&
+        fusedLogMode != LogTransformMode::Disabled && packFusedLog &&
+        stripBytes == sampleCount;
+    bool inPlace = compression == TIFF_COMPRESSION_NONE &&
+        (bits == 16 || packedGpuPlaceholder) &&
         little == hostLittle && !linearizationE &&
         sampleCount <= std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) &&
-        stripBytes == sampleCount * sizeof(uint16_t);
+        stripBytes == sampleCount * (packedGpuPlaceholder ? 1u : sizeof(uint16_t));
     if (std::getenv("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE"))
         inPlace = false;
     if (inPlace) {
         for (uint32_t i = 1; i < bitsE->count; ++i)
-            if (scalar(*bitsE, i) != 16) inPlace = false;
+            if (scalar(*bitsE, i) != (packedGpuPlaceholder ? 8u : 16u)) inPlace = false;
     }
     const bool deferLinearization = preferVulkan && !inPlace && linearizationE;
     std::vector<uint16_t> sourceLinearization;
@@ -7093,7 +7571,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 linearizationE->valueOffset + static_cast<size_t>(index) * 2u,
                 little);
     }
-    const bool fuseLog = inPlace && logFused && !debugGainMap &&
+    const bool fuseLog = logFused && !debugGainMap &&
         fusedLogMode != LogTransformMode::Disabled;
     if (!inPlace) {
         if (!decodeImageBorrowed(data, decodedImage, false,
@@ -7109,6 +7587,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     }
     const auto decodedAt = std::chrono::steady_clock::now();
     auto* stripPixels = inPlace ? data.data() + stripOffset : nullptr;
+    std::vector<uint16_t> recoveredGpuSamples;
     auto* pixels = decodedImage.samples.data();
 
     const uint32_t phaseGroup = static_cast<uint32_t>(cfaRepeatSize / 2);
@@ -7421,7 +7900,6 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         constexpr bool packed = mode == BakeOutputMode::Packed8 ||
             mode == BakeOutputMode::PackedBits;
         constexpr bool packed8 = mode == BakeOutputMode::Packed8;
-        constexpr bool readInPlace = mode != BakeOutputMode::Decoded16;
         std::array<std::vector<float>, 2> cfaVertical;
         std::vector<float> scalarVertical;
         std::vector<float> rgbVertical;
@@ -7498,7 +7976,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                     const uint32_t levelChannel = rgbImage ? channel
                         : cfaLevelChannel;
                     uint16_t sample;
-                    if constexpr (readInPlace)
+                    if (inPlace)
                         std::memcpy(&sample, stripPixels + index * sizeof(uint16_t),
                                     sizeof(sample));
                     else
@@ -7540,11 +8018,13 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                 buffered >> bufferedBits);
                         }
                         buffered &= (uint32_t{1} << bufferedBits) - 1;
-                    } else if constexpr (readInPlace)
-                        std::memcpy(stripPixels + index * sizeof(uint16_t), &baked,
-                                    sizeof(baked));
-                    else
-                        pixels[index] = baked;
+                    } else {
+                        if (inPlace)
+                            std::memcpy(stripPixels + index * sizeof(uint16_t), &baked,
+                                        sizeof(baked));
+                        else
+                            pixels[index] = baked;
+                    }
                 }
             }
             if constexpr (packed && !packed8) {
@@ -7667,6 +8147,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 gpuBaked, width, height, imageChannels, packedBits);
     }
     if (textureSource && !gpuBaked) {
+        if (packedGpuPlaceholder) {
+            recoveredGpuSamples.resize(sampleCount);
+            stripPixels = reinterpret_cast<uint8_t*>(recoveredGpuSamples.data());
+        }
         uint16_t* destination = inPlace
             ? reinterpret_cast<uint16_t*>(stripPixels) : pixels;
         const bool recovered = gpuAttempted && textureSource->recoverCpu
@@ -7827,7 +8311,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     if (packDuringBake && (!directGpuPacked || !gpuBaked))
         packedOutput.resize(data.size() - stripBytes + packedBytes);
     std::vector<uint8_t> preparedOutput;
-    if (!inPlace) {
+    if (!inPlace && !packDuringBake) {
         if (newBytes != stripBytes)
             preparedOutput.resize(data.size() - stripBytes + newBytes);
         uint8_t* destination = newBytes == stripBytes

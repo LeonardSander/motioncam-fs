@@ -307,8 +307,47 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
 }
 
 VirtualFileSystemImpl_DirectLog::~VirtualFileSystemImpl_DirectLog() {
+    if (mPrefetchFuture.valid()) mPrefetchFuture.wait();
     mDecoder.reset();
     spdlog::info("Destroying VirtualFileSystemImpl_DirectLog({})", mSrcPath);
+}
+
+int VirtualFileSystemImpl_DirectLog::readFile(
+        const Entry& entry, size_t pos, size_t len, void* dst,
+        std::function<void(size_t, int)> result, bool async) {
+    const int count = MountedDngSource::readFile(
+        entry, pos, len, dst, std::move(result), async);
+    if (async || count <= 0 ||
+        std::getenv("MOTIONCAM_DIRECTLOG_PREFETCH_DISABLE") ||
+        entry.name.size() < 4 ||
+        entry.name.compare(entry.name.size() - 4, 4, ".dng") != 0)
+        return count;
+    std::shared_lock renderLock(mRenderMutex);
+    if (mConfig.streamingPreview) return count;
+    const int frame = vfs::outputFrameNumber(entry);
+    const auto next = std::find_if(mFiles.begin(), mFiles.end(), [&](const Entry& item) {
+        return item.type == EntryType::FILE_ENTRY &&
+            item.name.size() >= 4 &&
+            item.name.compare(item.name.size() - 4, 4, ".dng") == 0 &&
+            vfs::outputFrameNumber(item) == frame + 1;
+    });
+    if (next == mFiles.end()) return count;
+    std::lock_guard prefetchLock(mPrefetchMutex);
+    if (mLastPrefetchFrame == frame ||
+        (mPrefetchFuture.valid() &&
+         mPrefetchFuture.wait_for(std::chrono::seconds(0)) != std::future_status::ready))
+        return count;
+    mLastPrefetchFrame = frame;
+    const Entry nextEntry = *next;
+    mPrefetchFuture = std::async(std::launch::async, [this, nextEntry] {
+        try {
+            materializeFile(nextEntry, false);
+        } catch (const std::exception& error) {
+            spdlog::warn("DirectLog read-ahead failed for {}: {}",
+                         nextEntry.name, error.what());
+        }
+    });
+    return count;
 }
 
 void VirtualFileSystemImpl_DirectLog::init() {
@@ -676,7 +715,10 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             : tinydngwriter::PHOTOMETRIC_LINEARRAW;
         const size_t expectedImageBytes = static_cast<size_t>(width) * height *
             samplesPerPixel * sizeof(uint16_t);
-        if (prepopulatedImage &&
+        const size_t packedImageBytes = expectedImageBytes / sizeof(uint16_t);
+        const bool packedGpuStrip = prepopulatedImage && !inputBayer &&
+            dngData.size() == directLogStripOffset + packedImageBytes;
+        if (prepopulatedImage && !packedGpuStrip &&
             dngData.size() != directLogStripOffset + expectedImageBytes)
             throw std::runtime_error("Invalid prepopulated DirectLog strip size");
 
@@ -692,7 +734,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             ? dngData.data() + directLogStripOffset
             : reinterpret_cast<const uint8_t*>(imageSamples.data());
         const size_t imageDataSize = prepopulatedImage
-            ? expectedImageBytes : imageSamples.size() * sizeof(uint16_t);
+            ? (packedGpuStrip ? packedImageBytes : expectedImageBytes)
+            : imageSamples.size() * sizeof(uint16_t);
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} pack_ms={:.3f} image_bytes={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage), imageDataSize);
@@ -709,6 +752,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         dng.SetRowsPerStrip(height);
         
         unsigned short bitsPerSample[3] = {16, 16, 16};
+        if (packedGpuStrip) bitsPerSample[0] = bitsPerSample[1] = bitsPerSample[2] = 8;
         dng.SetBitsPerSample(samplesPerPixel, bitsPerSample);
         
         // Photometric interpretation
@@ -902,6 +946,8 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         if (!opcodeList2.IsEmpty()) dng.SetOpcodeList2(opcodeList2);
         if (!opcodeList3.IsEmpty()) dng.SetOpcodeList3(opcodeList3);
         if (prepopulatedImage && !dng.PadImageDataOffset(directLogStripOffset - 8)) {
+            if (packedGpuStrip)
+                throw std::runtime_error("Packed DirectLog metadata exceeds strip headroom");
             // An unusually large metadata payload needs the ordinary writer.
             imageSamples.resize(expectedImageBytes / sizeof(uint16_t));
             std::memcpy(imageSamples.data(), imageData, expectedImageBytes);
@@ -989,7 +1035,8 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
                                                bool prepopulateDng,
                                                bool outputBayer,
                                                bool deferGpuDownload,
-                                               bool textureOnly) {
+                                               bool textureOnly,
+                                               bool packedGpuDng) {
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
     const auto processStarted = std::chrono::steady_clock::now();
     ProcessedFrame result;
@@ -1059,7 +1106,9 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     // for remosaiced DNG output; RGB output and previews retain smoothing.
     const bool smoothChroma =
         !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
-    const bool directStrip = prepopulateDng &&
+    const bool packedGpuStrip = packedGpuDng && prepopulateDng &&
+        keepGpuTexture && previewScale == 1 && !bayerOutput;
+    const bool directStrip = prepopulateDng && !packedGpuStrip &&
         (previewScale == 1 || preScaleProxy);
     result.bayer = bayerOutput;
     const bool extractedFrame = bayerOutput && directStrip
@@ -1083,7 +1132,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
             : mDecoder->extractFrameIntoBytes(result.frameNumber,
               result.dngStripBuffer, directLogStripOffset,
               result.width, result.height, false, smoothChroma)
-        : textureOnly && keepGpuTexture && !outputBayer
+        : (textureOnly && keepGpuTexture && !outputBayer) || packedGpuStrip
             ? mDecoder->extractFrameTextureDeferred(result.frameNumber,
                 result.width > 0 ? result.width : mWidth,
                 result.height > 0 ? result.height : mHeight, smoothChroma)
@@ -1092,6 +1141,9 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
                                              result.width, result.height, smoothChroma)
             : mDecoder->extractFrame(result.frameNumber, result.rgb, result.width,
                                      result.height, false, smoothChroma);
+    if (!extractedFrame && packedGpuStrip)
+        return processFrame(entry, previewScale, prepopulateDng, outputBayer,
+                            deferGpuDownload, textureOnly, false);
     if (!extractedFrame)
         throw std::runtime_error("Could not decode DirectLog frame");
     if (keepGpuTexture) {
@@ -1099,9 +1151,20 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         const void* texture = nullptr;
         result.gpuPending = mDecoder->pendingGpuTexture(gpu, texture);
     }
+    if (packedGpuStrip && !result.gpuPending)
+        return processFrame(entry, previewScale, prepopulateDng, outputBayer,
+                            deferGpuDownload, textureOnly, false);
     const auto extracted = std::chrono::steady_clock::now();
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;
+    if (packedGpuStrip && result.gpuPending) {
+        const size_t stripBytes = directLogStripOffset +
+            static_cast<size_t>(result.width) * result.height * 3u;
+        // The writer appends TIFF directories after the image. Keep space for
+        // them so an append does not relocate the entire populated strip.
+        result.dngStripBuffer.reserve(stripBytes + 512 * 1024);
+        result.dngStripBuffer.resize(stripBytes);
+    }
 
     int sourceLeft = 0, sourceTop = 0;
     int sourceWidth = mWidth, sourceHeight = mHeight;
@@ -1208,7 +1271,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
     if (entry.name == "audio.wav") return mAudioWav;
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
-        std::lock_guard gpuFrameLock(mGpuFrameMutex);
+        std::unique_lock gpuFrameLock(mGpuFrameMutex);
         const auto materializeStart = std::chrono::steady_clock::now();
         const auto& frames = mDecoder->getFrames();
         const int configuredScale = std::max(1,
@@ -1237,9 +1300,22 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+        const uint32_t inputBits = utils::evenBitsNeeded(
+            static_cast<uint16_t>(std::min<uint32_t>(
+                directLogQuantizationWhite(mConfig), 65535u)));
+        const bool packedGpuDng = prepopulateDng && deferGpuDownload &&
+            !std::getenv("MOTIONCAM_DIRECTLOG_PACKED_GPU_DISABLE") &&
+            !std::getenv("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE") &&
+            !mConfig.streamingPreview && !directProxy && !outputBayer &&
+            !mConfig.cameraNativeStaging &&
+            !(mConfig.options & (RENDER_OPT_BAKE_ISO |
+                                 RENDER_OPT_DEBUG_SHADING_MAP)) &&
+            (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
+            logReductionBits(mConfig.logTransform) > 0 &&
+            logOutputBits(inputBits, mConfig.logTransform) == 8;
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
                                       prepopulateDng, outputBayer,
-                                      deferGpuDownload);
+                                      deferGpuDownload, false, packedGpuDng);
         const auto decodedAt = std::chrono::steady_clock::now();
         const bool preScaledProxy = directProxy &&
             processed.width == mWidth / configuredScale &&
@@ -1286,9 +1362,9 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
         pixels.sourceName = "DirectLog";
         pixels.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
-        // A CPU preprocessing route has already downloaded the decoded image.
-        // Finish it on the CPU instead of uploading that image for a second pass.
-        pixels.preferVulkan = processed.gpuPending;
+        // CPU topology processing produces the input for the shared GPU
+        // gain/LOG bake. Upload it once, then read back only the DNG output.
+        pixels.preferVulkan = true;
         VulkanGainBakeTextureSource gpuTexture;
         if (processed.gpuPending) {
             if (!mDecoder->pendingGpuTexture(gpuTexture.gpu, gpuTexture.texture))
@@ -1306,6 +1382,12 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                     width, height, smoothChroma, bayer ? &phase : nullptr);
             };
             pixels.textureSource = &gpuTexture;
+            pixels.textureMaterialized = [&gpuFrameLock] {
+                gpuFrameLock.unlock();
+            };
+        } else {
+            // CPU pixels and metadata are private to this frame from here on.
+            gpuFrameLock.unlock();
         }
         auto pixelSettings = mConfig;
         // The decoder has already remosaiced this frame. Leaving the request
@@ -1315,6 +1397,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             pixelSettings.options = static_cast<FileRenderOptions>(
                 pixelSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
         vfs::processDngPixels(dngData, pixelSettings, pixels);
+        if (gpuFrameLock.owns_lock()) gpuFrameLock.unlock();
         const auto processedAt = std::chrono::steady_clock::now();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
@@ -1736,6 +1819,10 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
 void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
     std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);
+    {
+        std::lock_guard prefetchLock(mPrefetchMutex);
+        mLastPrefetchFrame = -1;
+    }
 
     mCache.clear();
     mConfig = config;

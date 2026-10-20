@@ -8,6 +8,7 @@
 #include <Types.h>
 #include <nlohmann/json.hpp>
 #include <memory>
+#include <future>
 #include <shared_mutex>
 #include <unordered_map>
 
@@ -37,6 +38,9 @@ public:
     FileInfo getFileInfo() const override;
     std::shared_ptr<std::vector<uint8_t>> materializeFile(
         const Entry& entry, bool jpegCompression = false) override;
+    int readFile(const Entry& entry, size_t pos, size_t len, void* dst,
+                 std::function<void(size_t, int)> result,
+                 bool async = true) override;
     bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame,
                                  bool retainSourceSamples = false) override;
 
@@ -90,7 +94,8 @@ private:
                                 bool prepopulateDng = false,
                                 bool outputBayer = false,
                                 bool deferGpuDownload = false,
-                                bool textureOnly = false);
+                                bool textureOnly = false,
+                                bool packedGpuDng = false);
     PreparedSidecarGainMaps prepareSidecarGainMaps(int frameNumber) const;
     void analyzeSidecarExposure();
     FrameMetadata frameMetadata(int frameNumber) const;
@@ -122,6 +127,9 @@ private:
     std::map<Timestamp, float> mSmoothedExposureOffsets;
     std::map<Timestamp, std::array<float, 3>> mSmoothedAsShotNeutrals;
     mutable std::shared_mutex mRenderMutex;
+    std::mutex mPrefetchMutex;
+    std::future<void> mPrefetchFuture;
+    int mLastPrefetchFrame = -1;
 };
 
 } // namespace motioncam

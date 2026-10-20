@@ -29,6 +29,7 @@ struct VulkanGainBakeParams {
     uint32_t encodedWhite = 0, ditherSeed = 0;
     bool log60 = false, logHighQuality = false, debugGain = false;
     const std::vector<uint16_t>* linearization = nullptr;
+    const std::vector<float>* logLookup = nullptr;
     const VulkanGainBakeTextureSource* textureSource = nullptr;
     VulkanRgbGainMap map;
     std::array<VulkanRgbGainMap, 4> cfaMaps{};

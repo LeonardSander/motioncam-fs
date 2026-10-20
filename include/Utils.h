@@ -277,6 +277,18 @@ void encodeLog60(
     bool highQuality = false,
     uint32_t ditherSeed = 0);
 
+void encodeLog60(
+    uint16_t* samples,
+    size_t sampleCount,
+    uint32_t width,
+    uint32_t height,
+    uint32_t channels,
+    const std::array<double, 4>& blackLevel,
+    double whiteLevel,
+    uint16_t encodedWhite,
+    bool highQuality = false,
+    uint32_t ditherSeed = 0);
+
 // Deterministic triangular dither in output-code units. HQ preserves the
 // original per-pixel hash; the fast path uses a cheaper spatial hash.
 template <bool HighQuality>

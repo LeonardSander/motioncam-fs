@@ -156,13 +156,6 @@ void processDngPixels(std::vector<uint8_t>& dng,
     if (options.hasCfa && options.calibration &&
         options.calibration->hasBadPixels &&
         badPixelTreatment != BadPixelTreatment::Disabled) {
-        DecodedDNGImage decoded;
-        if (!DNGDecoder::decodeImageBorrowed(dng, decoded, false, false) ||
-            decoded.layout.pixels != DNGPixelLayout::CFA)
-            throw std::runtime_error("Could not decode CFA DNG for bad-pixel treatment: " +
-                                     source);
-        const float white = decoded.metadata.whiteLevelCount
-            ? decoded.metadata.whiteLevel[0] : 65535.0f;
         const bool streamingKeepsCfa = settings.streamingPreview &&
             scale == 1 &&
             !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
@@ -172,26 +165,62 @@ void processDngPixels(std::vector<uint8_t>& dng,
             (options.cfaRepeatSize > 2 || settings.cameraNativeStaging ||
              scale > 1);
         badPixelsWillDemosaic = willDemosaic;
-        markedSourceWidth = decoded.layout.width;
-        markedSourceHeight = decoded.layout.height;
-        const int originalWidth = options.calibration->hasFullSensorResolution
-            ? options.calibration->fullSensorResolution[0]
-            : static_cast<int>(decoded.layout.width);
-        const int originalHeight = options.calibration->hasFullSensorResolution
-            ? options.calibration->fullSensorResolution[1]
-            : static_cast<int>(decoded.layout.height);
-        const auto active = utils::applyCfaBadPixels(
-            decoded.samples.data(), decoded.layout.width, decoded.layout.height,
-            originalWidth, originalHeight, options.cfaRepeatSize, white,
-            decoded.metadata.blackLevel, options.iso, options.exposureTime,
-            *options.calibration, badPixelTreatment, willDemosaic);
+        auto treatSamples = [&](uint16_t* samples, uint32_t width,
+                                uint32_t height,
+                                const DNGFrameMetadata& metadata) {
+            markedSourceWidth = width;
+            markedSourceHeight = height;
+            const int originalWidth = options.calibration->hasFullSensorResolution
+                ? options.calibration->fullSensorResolution[0]
+                : static_cast<int>(width);
+            const int originalHeight = options.calibration->hasFullSensorResolution
+                ? options.calibration->fullSensorResolution[1]
+                : static_cast<int>(height);
+            const float white = metadata.whiteLevelCount
+                ? metadata.whiteLevel[0] : 65535.0f;
+            return utils::applyCfaBadPixels(
+                samples, width, height, originalWidth, originalHeight,
+                options.cfaRepeatSize, white, metadata.blackLevel,
+                options.iso, options.exposureTime, *options.calibration,
+                badPixelTreatment, willDemosaic);
+        };
+        std::vector<utils::ActiveBadPixel> active;
+        DNGImageLayout stripLayout;
+        DNGFrameMetadata stripMetadata;
+        const bool directStrip =
+            !std::getenv("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE") &&
+            DNGDecoder::getImageLayout(dng, stripLayout) &&
+            stripLayout.pixels == DNGPixelLayout::CFA &&
+            DNGDecoder::getColorMetadata(dng, stripMetadata) &&
+            DNGDecoder::fillUncompressedImageStrip(dng,
+                [&](uint16_t* samples, size_t count) {
+                    if (count != static_cast<size_t>(stripLayout.width) *
+                                 stripLayout.height) return false;
+                    active = treatSamples(samples, stripLayout.width,
+                                          stripLayout.height, stripMetadata);
+                    return true;
+                });
+        if (!directStrip) {
+            DecodedDNGImage decoded;
+            if (!DNGDecoder::decodeImageBorrowed(dng, decoded, false, false) ||
+                decoded.layout.pixels != DNGPixelLayout::CFA)
+                throw std::runtime_error("Could not decode CFA DNG for bad-pixel treatment: " +
+                                         source);
+            active = treatSamples(decoded.samples.data(), decoded.layout.width,
+                                  decoded.layout.height, decoded.metadata);
+            if (badPixelTreatment == BadPixelTreatment::Bake ||
+                badPixelTreatment == BadPixelTreatment::MarkPixels || willDemosaic)
+                if (!DNGDecoder::encodeImage(dng, decoded))
+                    throw std::runtime_error("Could not encode corrected CFA DNG: " + source);
+        }
+        if (profile)
+            spdlog::info("GALLERY_PERF event=dng_bad_pixel_storage source={} direct_strip={}",
+                         source, directStrip);
         if (badPixelTreatment == BadPixelTreatment::MarkPixels)
             markedPixels = active;
-        if (badPixelTreatment == BadPixelTreatment::Bake ||
-            badPixelTreatment == BadPixelTreatment::MarkPixels || willDemosaic) {
-            if (!DNGDecoder::encodeImage(dng, decoded))
-                throw std::runtime_error("Could not encode corrected CFA DNG: " + source);
-        } else if (!active.empty()) {
+        if (badPixelTreatment != BadPixelTreatment::Bake &&
+            badPixelTreatment != BadPixelTreatment::MarkPixels &&
+            !willDemosaic && !active.empty()) {
             tinydngwriter::FixBadPixelsParams params;
             for (const auto& pixel : active)
                 params.bad_pixels.push_back({pixel.row, pixel.column});
@@ -230,19 +259,38 @@ void processDngPixels(std::vector<uint8_t>& dng,
         demosaics(mode))
         mode = QuadBayerMode::CorrectQBCFAMetadata;
     const bool remosaic = settings.options & RENDER_OPT_REMOSAIC_TO_BAYER;
-    // Higher CFA phase maps describe the original block pattern. Remosaicing
-    // changes that pattern without rewriting the opcodes, so bake on the
-    // original CFA before converting it. This case stays on the CPU to avoid
-    // an upload followed immediately by a download for remosaic.
-    const bool bakeBeforeHigherCfaRemosaic = bakeGain && options.hasCfa &&
-        options.cfaRepeatSize > 2 && remosaic;
     const bool topologyBeforeBake = bakeGain &&
-        !bakeBeforeHigherCfaRemosaic &&
         (scale > 1 ||
          (remosaic && !options.textureSource) ||
          (!options.hasCfa && remosaic) ||
          (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
+    const auto texturePreparationStarted = std::chrono::steady_clock::now();
     const VulkanGainBakeTextureSource* textureSource = options.textureSource;
+    bool logFused = false;
+    bool logMetadataDone = false;
+    if (!std::getenv("MOTIONCAM_DIRECTLOG_GPU_LOG_DISABLE") && textureSource &&
+        !bakeGain && !topologyBeforeBake && !options.hasCfa && scale == 1 &&
+        (settings.options & RENDER_OPT_LOG_TRANSFORM) && !debugGainMap &&
+        logReductionBits(settings.logTransform) > 0 &&
+        DNGDecoder::bakeLogTexture(dng, *textureSource, settings.logTransform,
+            options.inputQuantizationWhite,
+            settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed)) {
+        textureSource = nullptr;
+        logFused = true;
+        logMetadataDone = true;
+        if (options.textureMaterialized) options.textureMaterialized();
+    }
+    if (textureSource && (!bakeGain || topologyBeforeBake) &&
+        DNGDecoder::fillUncompressedImageStrip(dng,
+            [&](uint16_t* samples, size_t count) {
+                return (textureSource->download &&
+                        textureSource->download(samples, count)) ||
+                       (textureSource->recoverCpu &&
+                        textureSource->recoverCpu(samples, count));
+            })) {
+        textureSource = nullptr;
+        if (options.textureMaterialized) options.textureMaterialized();
+    }
     if (textureSource && (!bakeGain || topologyBeforeBake)) {
         DecodedDNGImage decoded;
         if (!DNGDecoder::decodeImageBorrowed(dng, decoded, false, false) ||
@@ -253,6 +301,15 @@ void processDngPixels(std::vector<uint8_t>& dng,
             !DNGDecoder::encodeImage(dng, decoded))
             throw std::runtime_error("Could not materialize DirectLog GPU source for " + source);
         textureSource = nullptr;
+        if (options.textureMaterialized) options.textureMaterialized();
+    }
+    if (profile && options.textureSource) {
+        const auto textureFinished = std::chrono::steady_clock::now();
+        spdlog::info("GALLERY_PERF event=dng_texture_setup source={} metadata_ms={:.3f} materialize_ms={:.3f} deferred={}",
+            source,
+            std::chrono::duration<double, std::milli>(texturePreparationStarted-pipelineStarted).count(),
+            std::chrono::duration<double, std::milli>(textureFinished-texturePreparationStarted).count(),
+            textureSource != nullptr);
     }
     const auto setupFinished = std::chrono::steady_clock::now();
     if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
@@ -272,7 +329,6 @@ void processDngPixels(std::vector<uint8_t>& dng,
          (settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
          demosaics(mode) && !remosaic);
     const bool packFusedLog = !settings.cameraNativeStaging;
-    bool logFused = false;
     if ((hasOpcode2 || (normalizeGainMaps && hasOpcode3Luma)) && !bakeGain &&
         (normalizeGainMaps || colorOnly || optimizeGainMaps) &&
         !DNGDecoder::transformGainMaps(
@@ -287,7 +343,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
             options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, &logFused, packFusedLog,
             options.ditherSeed,
-            options.preferVulkan && !bakeBeforeHigherCfaRemosaic,
+            options.preferVulkan,
             textureSource))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = std::chrono::steady_clock::now();
@@ -318,7 +374,18 @@ void processDngPixels(std::vector<uint8_t>& dng,
     }
     if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
-        applyLog &&
+        applyLog && !logFused && !logMetadataDone &&
+        !std::getenv("MOTIONCAM_GPU_LOG_STRIP_DISABLE") &&
+        DNGDecoder::bakeLogStripVulkan(
+            dng, settings.logTransform, options.inputQuantizationWhite,
+            settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed)) {
+        logMetadataDone = true;
+        if (profile)
+            spdlog::info("GALLERY_PERF event=dng_gpu_log_strip source={}", source);
+    }
+    if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
+        !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+        applyLog && !logMetadataDone &&
         !DNGDecoder::applyLogTransform(
             dng, settings.logTransform, options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, logFused,
@@ -1812,9 +1879,10 @@ int readMountedEntry(
         result(0, -1);
         return -1;
     }
-    auto future = processingThreadPool.submit_task(
+    if (!async) return static_cast<int>(copyRange());
+    [[maybe_unused]] auto future = processingThreadPool.submit_task(
         copyRange, static_cast<BS::priority_t>(std::clamp(priority, -32768, 32767)));
-    return async ? 0 : static_cast<int>(future.get());
+    return 0;
 }
 
 void finalize(

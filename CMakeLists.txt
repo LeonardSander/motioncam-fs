@@ -63,6 +63,7 @@ set(PROJECT_SOURCES
         shaders/vulkan_gain_bake.comp
         shaders/vulkan_cfa_gain_bake.comp
         shaders/vulkan_gain_common.glsl
+        shaders/vulkan_gain_display_math.glsl
         shaders/vulkan_gain_multi.glsl
         src/DirectLogPlaceboLibav.c
         src/DNGDecoder.cpp
@@ -105,17 +106,24 @@ set(PROJECT_SOURCES
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
              "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_common.glsl"
+             "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_display_math.glsl"
              "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_multi.glsl"
              "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_bake.comp"
              "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_cfa_gain_bake.comp")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_common.glsl"
      VULKAN_GAIN_COMMON_SHADER)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_display_math.glsl"
+     VULKAN_GAIN_DISPLAY_MATH_SHADER)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_multi.glsl"
      VULKAN_GAIN_MULTI_SHADER)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_gain_bake.comp"
      VULKAN_GAIN_BAKE_SHADER)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan_cfa_gain_bake.comp"
      VULKAN_CFA_GAIN_BAKE_SHADER)
+string(REPLACE "// @DISPLAY_MATH@" "${VULKAN_GAIN_DISPLAY_MATH_SHADER}"
+       VULKAN_GAIN_BAKE_SHADER "${VULKAN_GAIN_BAKE_SHADER}")
+string(REPLACE "// @DISPLAY_MATH@" "${VULKAN_GAIN_DISPLAY_MATH_SHADER}"
+       VULKAN_CFA_GAIN_BAKE_SHADER "${VULKAN_CFA_GAIN_BAKE_SHADER}")
 string(REPLACE "// @GAIN_COMMON@" "${VULKAN_GAIN_COMMON_SHADER}"
        VULKAN_GAIN_BAKE_SHADER "${VULKAN_GAIN_BAKE_SHADER}")
 string(REPLACE "// @GAIN_COMMON@" "${VULKAN_GAIN_COMMON_SHADER}"
@@ -678,6 +686,7 @@ if(BUILD_TESTING)
         src/CalibrationData.cpp
         src/CfaBadPixels.cpp
         src/VulkanGainBake.cpp
+        src/VulkanGalleryPreview.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -690,6 +699,19 @@ if(BUILD_TESTING)
     target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
         TINY_DNG_ENABLE_JPEG_XL
         RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:motioncam-rife-fake>")
+    if(MSVC)
+        target_compile_options(motioncam-finalize-interpolation-test PRIVATE /UNDEBUG)
+    else()
+        target_compile_options(motioncam-finalize-interpolation-test PRIVATE -UNDEBUG)
+    endif()
+    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
+        target_include_directories(motioncam-finalize-interpolation-test PRIVATE
+            "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
+        target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
+            PkgConfig::DIRECTLOG_PLACEBO)
+        target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
+            MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+    endif()
     add_dependencies(motioncam-finalize-interpolation-test motioncam-rife-fake)
     add_test(NAME motioncam-finalize-interpolation-test
         COMMAND motioncam-finalize-interpolation-test)

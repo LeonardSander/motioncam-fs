@@ -2,7 +2,9 @@
 #include "CalibrationData.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <spdlog/spdlog.h>
 
 namespace motioncam::utils {
@@ -22,8 +24,10 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                 return pixel.action != CalibrationData::BadPixelAction::Interpolate;
             }))
         spdlog::warn("DNG bad-pixel opcodes only represent interpolation; brighten/dampen entries require a baked CFA stage");
+    const auto started = std::chrono::steady_clock::now();
     const std::vector<uint16_t> source(
         samples, samples + static_cast<size_t>(width) * height);
+    const auto copiedAt = std::chrono::steady_clock::now();
     const int group = std::max(1, cfaRepeatSize / 2);
     const int sensorLeft = std::max(0, (originalWidth - static_cast<int>(width)) / 2);
     const int sensorTop = std::max(0, (originalHeight - static_cast<int>(height)) / 2);
@@ -71,6 +75,7 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                     active.push_back({static_cast<uint32_t>(y), static_cast<uint32_t>(x)});
             }
     }
+    const auto enumeratedAt = std::chrono::steady_clock::now();
 
     auto median = [](std::vector<uint16_t>& values) -> uint16_t {
         if (values.empty()) return 0;
@@ -83,6 +88,73 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
     };
     std::vector<uint16_t> blockValues;
     blockValues.reserve(static_cast<size_t>(group) * group);
+    // Dense higher-CFA defect lattices revisit the same neighbouring blocks
+    // millions of times. Cache each original, defect-masked 2x2 block median
+    // once; sparse patterns keep the lower-memory on-demand path below.
+    const bool cacheBlocks = group == 2 && eligible.size() >= 100000 &&
+        !std::getenv("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE");
+    const uint32_t firstBlockX = static_cast<uint32_t>(sensorLeft / group);
+    const uint32_t firstBlockY = static_cast<uint32_t>(sensorTop / group);
+    const uint32_t blockWidth =
+        static_cast<uint32_t>((sensorLeft + static_cast<int>(width) - 1) / group) -
+        firstBlockX + 1;
+    const uint32_t blockHeight =
+        static_cast<uint32_t>((sensorTop + static_cast<int>(height) - 1) / group) -
+        firstBlockY + 1;
+    std::vector<uint16_t> cachedMedians;
+    std::vector<uint64_t> cachedValid;
+    if (cacheBlocks) {
+        const size_t blocks = static_cast<size_t>(blockWidth) * blockHeight;
+        cachedMedians.resize(blocks);
+        cachedValid.resize((blocks + 63) / 64, 0);
+        std::vector<uint64_t> needed((blocks + 63) / 64, 0);
+        for (const auto& pixel : eligible) {
+            const int bx = (pixel.x + sensorLeft) / group -
+                static_cast<int>(firstBlockX);
+            const int by = (pixel.y + sensorTop) / group -
+                static_cast<int>(firstBlockY);
+            for (int dy = -2; dy <= 2; dy += 2)
+                for (int dx = -2; dx <= 2; dx += 2) {
+                    const int x = bx + dx, y = by + dy;
+                    if (x < 0 || y < 0 || x >= static_cast<int>(blockWidth) ||
+                        y >= static_cast<int>(blockHeight)) continue;
+                    const size_t index = static_cast<size_t>(y) * blockWidth + x;
+                    needed[index / 64] |= uint64_t{1} << (index % 64);
+                }
+        }
+        for (uint32_t by = 0; by < blockHeight; ++by)
+            for (uint32_t bx = 0; bx < blockWidth; ++bx) {
+                const size_t index = static_cast<size_t>(by) * blockWidth + bx;
+                if (!(needed[index / 64] & (uint64_t{1} << (index % 64))))
+                    continue;
+                const int blockX = static_cast<int>((firstBlockX + bx) * group);
+                const int blockY = static_cast<int>((firstBlockY + by) * group);
+                std::array<uint16_t, 4> values{};
+                uint32_t count = 0;
+                for (int dy = 0; dy < 2; ++dy)
+                    for (int dx = 0; dx < 2; ++dx) {
+                        const int x = blockX + dx - sensorLeft;
+                        const int y = blockY + dy - sensorTop;
+                        if (x < 0 || y < 0 || x >= static_cast<int>(width) ||
+                            y >= static_cast<int>(height)) continue;
+                        const size_t sample = static_cast<size_t>(y) * width + x;
+                        if (isInterpolationDefect(sample)) continue;
+                        const uint16_t value = source[sample];
+                        uint32_t slot = count++;
+                        while (slot && values[slot - 1] > value) {
+                            values[slot] = values[slot - 1];
+                            --slot;
+                        }
+                        values[slot] = value;
+                    }
+                if (!count) continue;
+                cachedMedians[index] = count & 1u ? values[count / 2]
+                    : static_cast<uint16_t>((static_cast<uint32_t>(values[count / 2 - 1]) +
+                                             values[count / 2] + 1) / 2);
+                cachedValid[index / 64] |= uint64_t{1} << (index % 64);
+            }
+    }
+    const auto cachedAt = std::chrono::steady_clock::now();
     auto interpolate = [&](int x, int y) {
         const int absoluteX = x + sensorLeft;
         const int absoluteY = y + sensorTop;
@@ -90,6 +162,20 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
         const int blockY = (absoluteY / group) * group;
         auto blockMedian = [&](int absoluteBlockX, int absoluteBlockY,
                                uint16_t& value) {
+            if (cacheBlocks) {
+                if (absoluteBlockX < 0 || absoluteBlockY < 0) return false;
+                const uint32_t bx = static_cast<uint32_t>(absoluteBlockX / group);
+                const uint32_t by = static_cast<uint32_t>(absoluteBlockY / group);
+                if (bx < firstBlockX || by < firstBlockY ||
+                    bx - firstBlockX >= blockWidth ||
+                    by - firstBlockY >= blockHeight) return false;
+                const size_t index = static_cast<size_t>(by - firstBlockY) *
+                    blockWidth + bx - firstBlockX;
+                if (!(cachedValid[index / 64] & (uint64_t{1} << (index % 64))))
+                    return false;
+                value = cachedMedians[index];
+                return true;
+            }
             blockValues.clear();
             for (int ay = absoluteBlockY; ay < absoluteBlockY + group; ++ay)
                 for (int ax = absoluteBlockX; ax < absoluteBlockX + group; ++ax) {
@@ -160,6 +246,16 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                 std::lround(black + std::max(0.0f, source[index] - black) * factor),
                 0l, 65535l));
         }
+    }
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+        const auto finished = std::chrono::steady_clock::now();
+        const auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        spdlog::info("GALLERY_PERF event=cfa_bad_pixels width={} height={} group={} eligible={} cached={} copy_ms={:.3f} enumerate_ms={:.3f} cache_ms={:.3f} apply_ms={:.3f}",
+            width, height, group, eligible.size(), cacheBlocks,
+            ms(started, copiedAt), ms(copiedAt, enumeratedAt),
+            ms(enumeratedAt, cachedAt), ms(cachedAt, finished));
     }
     return active;
 }

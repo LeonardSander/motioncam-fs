@@ -473,11 +473,7 @@ void FuseFileSystemImpl_Linux::renderPreview(
         }
         renderer = cached;
     }
-    renderer->render(settings, options, progress,
-        [renderer, &frameReady](PreviewFrame&& frame) {
-            frame.galleryRendererLease = renderer;
-            frameReady(std::move(frame));
-        });
+    renderer->render(settings, options, progress, frameReady);
 }
 
 void FuseFileSystemImpl_Linux::releasePreviewResources(MountId mountId) {

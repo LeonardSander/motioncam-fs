@@ -1,4 +1,5 @@
 #version 450
+// @DISPLAY_MATH@
 layout(local_size_x = 256) in;
 #ifdef SOURCE_TEXTURE
 layout(binding = 0) uniform sampler2D sourceImage;
@@ -91,8 +92,7 @@ uint codeAt(uint y, uint x) {
             float linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
             float normalized = clamp((linear - p.destinationBlack.x) /
                 max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
-            value = log2(1.0 + 60.0 * normalized) / log2(61.0) *
-                    float(p.encodedWhite) + ditherAt(x, y);
+            value = motioncamLog60(normalized, p.encodedWhite) + ditherAt(x, y);
         }
     }
     float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;

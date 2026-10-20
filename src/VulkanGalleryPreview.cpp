@@ -1,6 +1,7 @@
 #include "VulkanGalleryPreview.h"
 #include "DNGImage.h"
 #include "RawLogTransform.h"
+#include "VulkanGainBakeShader.h"
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -24,6 +25,7 @@ VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
 #include <cstdlib>
 #include <atomic>
 #include <future>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 #include <cstring>
@@ -119,6 +121,17 @@ layout(std430, binding = 4) readonly buffer GalleryGain {
 } galleryGain;
 #else
 layout(std430, binding = 0) readonly buffer Source { uint words[]; } src;
+layout(std430, binding = 4) readonly buffer GalleryBayerGain {
+    uvec4 header; // map count, LOG white, dither seed, flags
+    vec4 black;
+    vec4 scale;
+    uvec4 lookup; // first float in values used by LOG linearization
+    uvec4 bounds[32];
+    vec4 axes[32];
+    uvec4 shape[32]; // width, height, channels, float offset
+    uvec4 pitch[32];
+    float values[];
+} bayerGain;
 #endif
 layout(std430, binding = 1) writeonly buffer Destination { uint words[]; } dst;
 layout(std430, binding = 2) readonly buffer Profiles {
@@ -138,7 +151,9 @@ layout(push_constant) uniform Constants {
     uvec4 geometry; // input width, input height, rotation, flags
     vec4 textureBlack;
     vec4 textureInverseRange;
+    uvec4 thumbnail; // output width, output height, enabled, unused
 } p;
+// @DISPLAY_MATH@
 uint packedCode(uint sampleIndex) {
 #ifdef SOURCE_TEXTURE
     uint pixel = sampleIndex / 3u, channel = sampleIndex % 3u;
@@ -163,9 +178,10 @@ uint packedCode(uint sampleIndex) {
             uint ib = a.y * stride + b.x * 3u + channel;
             uint ic = b.y * stride + a.x * 3u + channel;
             uint id = b.y * stride + b.x * 3u + channel;
-            gain = mix(mix(galleryGain.values[ia], galleryGain.values[ib], t.x),
-                       mix(galleryGain.values[ic], galleryGain.values[id], t.x), t.y);
-            if (isnan(gain) || isinf(gain) || gain <= 0.0) gain = 1.0;
+            gain = MOTIONCAM_GAIN_BILERP(
+                galleryGain.values[ia], galleryGain.values[ib],
+                galleryGain.values[ic], galleryGain.values[id], t);
+            gain = motioncamGainOrIdentity(gain);
         }
         if (galleryGain.flags.z != 0u &&
             x >= galleryGain.secondaryBounds.x && y >= galleryGain.secondaryBounds.y &&
@@ -182,8 +198,9 @@ uint packedCode(uint sampleIndex) {
             uint ib = start + a.y * stride + b.x;
             uint ic = start + b.y * stride + a.x;
             uint id = start + b.y * stride + b.x;
-            float luminance = mix(mix(galleryGain.values[ia], galleryGain.values[ib], t.x),
-                                  mix(galleryGain.values[ic], galleryGain.values[id], t.x), t.y);
+            float luminance = MOTIONCAM_GAIN_BILERP(
+                galleryGain.values[ia], galleryGain.values[ib],
+                galleryGain.values[ic], galleryGain.values[id], t);
             if (!isnan(luminance) && !isinf(luminance) && luminance > 0.0)
                 gain *= luminance;
         }
@@ -191,24 +208,9 @@ uint packedCode(uint sampleIndex) {
             ? floor(clamp(1.0 / gain, 0.0, 1.0) * 65535.0 + 0.5)
             : floor(clamp(normalized * gain, 0.0, 1.0) * 65535.0 + 0.5);
         if (galleryGain.shape.z == 0u) return uint(linear);
-        uint rowTerm = y * (galleryGain.flags.x != 0u ? 1013904223u : 0x85ebca77u);
-        uint frameTerm = (galleryGain.flags.x != 0u ? 0xdeadbeefu : 0u) ^
-                         (galleryGain.shape.w * 0x9e3779b9u);
-        uint seed;
-        if (galleryGain.flags.x != 0u) {
-            seed = (x * 1664525u + rowTerm) ^ frameTerm;
-            seed ^= seed >> 16; seed *= 0x85ebca6bu;
-            seed ^= seed >> 13; seed *= 0xc2b2ae35u;
-            seed ^= seed >> 16;
-        } else {
-            seed = (x * 0x9e3779b1u) ^ rowTerm ^ frameTerm;
-            seed ^= seed >> 16; seed *= 0x7feb352du;
-            seed ^= seed >> 15;
-        }
-        float dither = (float(seed & 65535u) / 65535.0 +
-            float((seed >> 16) & 65535u) / 65535.0 - 1.0) * 0.5;
-        float encoded = log2(1.0 + 60.0 * linear / 65535.0) / log2(61.0) *
-            float(galleryGain.shape.z);
+        float dither = motioncamDither(x, y, galleryGain.shape.w,
+                                      galleryGain.flags.x != 0u);
+        float encoded = motioncamLog60(linear / 65535.0, galleryGain.shape.z);
         uint logCode = uint(floor(clamp(encoded + dither, 0.0,
             float(galleryGain.shape.z)) + 0.5));
         return uint(galleryGain.values[galleryGain.flags.y + logCode]);
@@ -224,7 +226,52 @@ uint bayerColor(int x, int y) {
     return (p.bayer.z >> shift) & 3u;
 }
 uint bayerCode(int x, int y) {
-    return packedCode(uint(y) * p.bayer.x + uint(x));
+    uint raw = packedCode(uint(y) * p.bayer.x + uint(x));
+#ifdef SOURCE_TEXTURE
+    return raw;
+#else
+    if (p.bayer.w != 2u) return raw;
+    uint phase = uint(((y & 1) << 1) | (x & 1));
+    uint color = (bayerGain.header.w >> (8u + phase * 2u)) & 3u;
+    float gain = 1.0;
+    for (uint mapIndex = 0u; mapIndex < bayerGain.header.x; ++mapIndex) {
+        uvec4 bounds = bayerGain.bounds[mapIndex];
+        if (uint(x) < bounds.x || uint(y) < bounds.y ||
+            uint(x) >= bounds.z || uint(y) >= bounds.w) continue;
+        uvec4 shape = bayerGain.shape[mapIndex];
+        uvec4 pitch = bayerGain.pitch[mapIndex];
+        if (shape.z == 1u &&
+            ((uint(y) - bounds.y) % pitch.x != 0u ||
+             (uint(x) - bounds.x) % pitch.y != 0u)) continue;
+        vec4 axes = bayerGain.axes[mapIndex];
+        vec2 grid = ((vec2(x, y) + vec2(0.5)) / vec2(p.bayer.xy) -
+                     axes.xy) / axes.zw;
+        vec2 base = floor(grid), fraction = clamp(grid - base, 0.0, 1.0);
+        uvec2 a = uvec2(clamp(base, vec2(0), vec2(shape.xy - uvec2(1))));
+        uvec2 b = min(a + uvec2(1), shape.xy - uvec2(1));
+        uint channel = shape.z == 1u ? 0u : shape.z == 3u ? color : phase;
+        uint ia = shape.w + (a.y * shape.x + a.x) * shape.z + channel;
+        uint ib = shape.w + (a.y * shape.x + b.x) * shape.z + channel;
+        uint ic = shape.w + (b.y * shape.x + a.x) * shape.z + channel;
+        uint id = shape.w + (b.y * shape.x + b.x) * shape.z + channel;
+        gain *= motioncamGainOrIdentity(MOTIONCAM_GAIN_BILERP(
+            bayerGain.values[ia], bayerGain.values[ib],
+            bayerGain.values[ic], bayerGain.values[id], fraction));
+    }
+    float linear = (bayerGain.header.w & 2u) != 0u
+        ? clamp(1.0 / gain, 0.0, 1.0) * 65535.0
+        : (float(raw) - bayerGain.black[phase]) *
+          bayerGain.scale[phase] * gain;
+    uint code = uint(floor(clamp(linear, 0.0, 65535.0) + 0.5));
+    if (bayerGain.header.y == 0u) return code;
+    float encoded = motioncamLog60(float(code) / 65535.0,
+                                   bayerGain.header.y);
+    encoded += motioncamDither(uint(x), uint(y), bayerGain.header.z,
+                              (bayerGain.header.w & 1u) != 0u);
+    uint logCode = uint(floor(clamp(encoded, 0.0,
+                         float(bayerGain.header.y)) + 0.5));
+    return uint(bayerGain.values[bayerGain.lookup.x + logCode]);
+#endif
 }
 uint bayerAverage(int x, int y, uint channel) {
     uint native = bayerColor(x, y);
@@ -426,6 +473,16 @@ uint sourcePixel(uint outputPixel) {
     uint outputWidth = (p.geometry.z == 90u || p.geometry.z == 270u)
         ? p.geometry.y : p.geometry.x;
     uint x = outputPixel % outputWidth, y = outputPixel / outputWidth;
+    if (p.thumbnail.z != 0u) {
+        uint outputHeight = (p.geometry.z == 90u || p.geometry.z == 270u)
+            ? p.geometry.x : p.geometry.y;
+        x = min(outputWidth - 1u,
+            ((2u * (outputPixel % p.thumbnail.x) + 1u) * outputWidth) /
+            (2u * p.thumbnail.x));
+        y = min(outputHeight - 1u,
+            ((2u * (outputPixel / p.thumbnail.x) + 1u) * outputHeight) /
+            (2u * p.thumbnail.y));
+    }
     if (p.geometry.z == 90u)
         return (p.geometry.y - 1u - x) * p.geometry.x + y;
     if (p.geometry.z == 180u)
@@ -433,7 +490,7 @@ uint sourcePixel(uint outputPixel) {
             (p.geometry.x - 1u - x);
     if (p.geometry.z == 270u)
         return x * p.geometry.x + (p.geometry.x - 1u - y);
-    return outputPixel;
+    return y * p.geometry.x + x;
 }
 uvec3 outputColor(uint outputPixel) {
     uint source = sourcePixel(outputPixel);
@@ -493,6 +550,20 @@ void main() {
 }
 )glsl";
 
+std::string galleryColorShader(bool textureSource) {
+    const char* newline = std::strchr(colorShader, '\n');
+    if (!newline) return {};
+    std::string source = textureSource
+        ? std::string(colorShader, newline + 1) +
+            "#define SOURCE_TEXTURE 1\n" + (newline + 1)
+        : std::string(colorShader);
+    constexpr char marker[] = "// @DISPLAY_MATH@";
+    const auto position = source.find(marker);
+    if (position == std::string::npos) return {};
+    source.replace(position, sizeof(marker) - 1, vulkanGainDisplayMathShader);
+    return source;
+}
+
 struct Constants {
     uint32_t dimensions[4];
     float black[4];
@@ -509,6 +580,7 @@ struct ColorConstants {
     uint32_t geometry[4];
     float textureBlack[4];
     float textureInverseRange[4];
+    uint32_t thumbnail[4];
 };
 
 struct Device {
@@ -523,9 +595,11 @@ struct Device {
     bool textureSource = false;
     pl_pass pass = nullptr, colorPass = nullptr;
     pl_buf source = nullptr, upload = nullptr, output = nullptr, download = nullptr;
+    pl_buf thumbnailOutput = nullptr, thumbnailDownload = nullptr;
     pl_buf profiles = nullptr, profilesUpload = nullptr;
     pl_buf clipping = nullptr, clippingUpload = nullptr;
     pl_buf gain = nullptr, gainUpload = nullptr;
+    pl_buf emptyGain = nullptr;
     std::vector<HostFrame> hostFrames;
     ~Device() {
         if (gpu) {
@@ -536,12 +610,15 @@ struct Device {
             pl_buf_destroy(gpu, &upload);
             pl_buf_destroy(gpu, &output);
             pl_buf_destroy(gpu, &download);
+            pl_buf_destroy(gpu, &thumbnailOutput);
+            pl_buf_destroy(gpu, &thumbnailDownload);
             pl_buf_destroy(gpu, &profiles);
             pl_buf_destroy(gpu, &profilesUpload);
             pl_buf_destroy(gpu, &clipping);
             pl_buf_destroy(gpu, &clippingUpload);
             pl_buf_destroy(gpu, &gain);
             pl_buf_destroy(gpu, &gainUpload);
+            pl_buf_destroy(gpu, &emptyGain);
             pl_pass_destroy(gpu, &pass);
             pl_pass_destroy(gpu, &colorPass);
         }
@@ -554,7 +631,16 @@ struct Device {
         vk = pl_vulkan_create(log, nullptr);
         if (!vk || !vk->gpu->glsl.compute) return false;
         gpu = vk->gpu;
-        pl_desc descriptors[4] = {};
+        pl_buf_params emptyGainParams = {};
+        emptyGainParams.size = 2112u;
+        emptyGainParams.storable = true;
+        emptyGainParams.host_writable = true;
+        emptyGainParams.memory_type = PL_BUF_MEM_HOST;
+        emptyGain = pl_buf_create(gpu, &emptyGainParams);
+        if (!emptyGain) return false;
+        const std::array<uint8_t, 2112> zeroGain{};
+        pl_buf_write(gpu, emptyGain, 0, zeroGain.data(), zeroGain.size());
+        pl_desc descriptors[5] = {};
         descriptors[0] = {"src", PL_DESC_BUF_STORAGE, 0, PL_DESC_ACCESS_READONLY};
         descriptors[1] = {"dst", PL_DESC_BUF_STORAGE, 1, PL_DESC_ACCESS_WRITEONLY};
         pl_pass_params params = {};
@@ -566,8 +652,11 @@ struct Device {
         pass = pl_pass_create(gpu, &params);
         descriptors[2] = {"profiles", PL_DESC_BUF_STORAGE, 2, PL_DESC_ACCESS_READONLY};
         descriptors[3] = {"clipping", PL_DESC_BUF_STORAGE, 3, PL_DESC_ACCESS_READONLY};
-        params.glsl_shader = colorShader;
-        params.num_descriptors = 4;
+        descriptors[4] = {"bayerGain", PL_DESC_BUF_STORAGE, 4, PL_DESC_ACCESS_READONLY};
+        const std::string colorSource = galleryColorShader(false);
+        if (colorSource.empty()) return false;
+        params.glsl_shader = colorSource.c_str();
+        params.num_descriptors = 5;
         params.push_constants_size = sizeof(ColorConstants);
         colorPass = pl_pass_create(gpu, &params);
         return pass && colorPass;
@@ -587,10 +676,8 @@ struct Device {
                           3, PL_DESC_ACCESS_READONLY};
         descriptors[4] = {"galleryGain", PL_DESC_BUF_STORAGE,
                           4, PL_DESC_ACCESS_READONLY};
-        const char* newline = std::strchr(colorShader, '\n');
-        if (!newline) return false;
-        const std::string source = std::string(colorShader, newline + 1) +
-            "#define SOURCE_TEXTURE 1\n" + (newline + 1);
+        const std::string source = galleryColorShader(true);
+        if (source.empty()) return false;
         pl_pass_params params = {};
         params.type = PL_PASS_COMPUTE;
         params.descriptors = descriptors;
@@ -623,6 +710,18 @@ struct Device {
         params.host_readable = true;
         params.memory_type = PL_BUF_MEM_HOST;
         return pl_buf_recreate(gpu, &download, &params);
+    }
+    bool reserveThumbnail(size_t bytes) {
+        if (bytes > gpu->limits.max_ssbo_size) return false;
+        pl_buf_params outputParams = {}, readParams = {};
+        outputParams.size = bytes;
+        outputParams.storable = true;
+        outputParams.memory_type = PL_BUF_MEM_DEVICE;
+        readParams.size = bytes;
+        readParams.host_readable = true;
+        readParams.memory_type = PL_BUF_MEM_HOST;
+        return pl_buf_recreate(gpu, &thumbnailOutput, &outputParams) &&
+            pl_buf_recreate(gpu, &thumbnailDownload, &readParams);
     }
     bool acquireHostFrame(size_t bytes, pl_buf& buffer,
                           std::shared_ptr<uint8_t>& memory) {
@@ -985,6 +1084,69 @@ bool colorGalleryRgbVulkan(
                  profileData.data(), profileBytes);
     pl_buf_copy(selected->gpu, selected->profiles, 0,
                 selected->profilesUpload, 0, profileBytes);
+    if (bayer && bayer->gain) {
+        const auto* gain = bayer->gain;
+        if (gain->maps.size() > 32) return false;
+        size_t values = 0;
+        for (const auto& map : gain->maps) {
+            if (map.values.size() > UINT32_MAX - values) return false;
+            values += map.values.size();
+        }
+        const size_t lookup = gain->encodedWhite
+            ? gain->encodedWhite + 1u : 0u;
+        constexpr size_t headerBytes = 2112u;
+        if (values + lookup > (std::numeric_limits<size_t>::max() -
+                               headerBytes) / sizeof(float)) return false;
+        const size_t gainBytes = headerBytes + (values + lookup) * sizeof(float);
+        if (!selected->reserveGain(gainBytes)) return false;
+        std::vector<uint8_t> data(gainBytes);
+        const uint32_t packedPhase = gain->phase[0] |
+            (gain->phase[1] << 2u) | (gain->phase[2] << 4u) |
+            (gain->phase[3] << 6u);
+        const uint32_t header[4] = {
+            static_cast<uint32_t>(gain->maps.size()), gain->encodedWhite,
+            gain->ditherSeed,
+            (gain->highQualityDither ? 1u : 0u) |
+            (gain->debugGain ? 2u : 0u) | (packedPhase << 8u)};
+        const uint32_t lookupOffset[4] = {
+            static_cast<uint32_t>(values), 0u, 0u, 0u};
+        std::memcpy(data.data(), header, sizeof(header));
+        std::memcpy(data.data() + 16u, gain->black.data(), 16u);
+        std::memcpy(data.data() + 32u, gain->scale.data(), 16u);
+        std::memcpy(data.data() + 48u, lookupOffset, sizeof(lookupOffset));
+        uint32_t offset = 0;
+        for (size_t index = 0; index < gain->maps.size(); ++index) {
+            const auto& map = gain->maps[index];
+            const uint32_t bounds[4] = {
+                map.left, map.top, map.right, map.bottom};
+            const float axes[4] = {
+                map.originH, map.originV, map.spacingH, map.spacingV};
+            const uint32_t shape[4] = {
+                map.width, map.height, map.channels, offset};
+            const uint32_t pitch[4] = {
+                map.rowPitch, map.colPitch, 0u, 0u};
+            std::memcpy(data.data() + 64u + index * 16u, bounds, 16u);
+            std::memcpy(data.data() + 576u + index * 16u, axes, 16u);
+            std::memcpy(data.data() + 1088u + index * 16u, shape, 16u);
+            std::memcpy(data.data() + 1600u + index * 16u, pitch, 16u);
+            std::memcpy(data.data() + headerBytes + offset * sizeof(float),
+                map.values.data(), map.values.size() * sizeof(float));
+            offset += static_cast<uint32_t>(map.values.size());
+        }
+        if (lookup) {
+            const auto table = makeLog60LinearizationTable(
+                static_cast<uint16_t>(gain->encodedWhite));
+            for (size_t index = 0; index < lookup; ++index) {
+                const float code = static_cast<float>(table[index]);
+                std::memcpy(data.data() + headerBytes +
+                    (values + index) * sizeof(float), &code, sizeof(code));
+            }
+        }
+        pl_buf_write(selected->gpu, selected->gainUpload, 0,
+                     data.data(), gainBytes);
+        pl_buf_copy(selected->gpu, selected->gain, 0,
+                    selected->gainUpload, 0, gainBytes);
+    }
     if (texture) {
         const auto* gain = texture->gain;
         const size_t primaryValues = gain ? gain->values.size() : 0u;
@@ -1081,7 +1243,7 @@ bool colorGalleryRgbVulkan(
         constants.bayer[1] = bayer->height;
         constants.bayer[2] = bayer->phase[0] | (bayer->phase[1] << 2u) |
             (bayer->phase[2] << 4u) | (bayer->phase[3] << 6u);
-        constants.bayer[3] = 1u;
+        constants.bayer[3] = bayer->gain ? 2u : 1u;
         for (size_t channel = 0; channel < 3; ++channel) {
             constants.bayerBlack[channel] =
                 static_cast<float>(bayer->black[channel]);
@@ -1115,7 +1277,8 @@ bool colorGalleryRgbVulkan(
     bindings[1].object = exported ? exported : selected->output;
     bindings[2].object = selected->profiles;
     bindings[3].object = selected->clipping;
-    if (texture) bindings[4].object = selected->gain;
+    bindings[4].object = texture || (bayer && bayer->gain)
+        ? selected->gain : selected->emptyGain;
     pl_pass_run_params run = {};
     run.pass = selected->colorPass;
     run.desc_bindings = bindings;
@@ -1130,6 +1293,46 @@ bool colorGalleryRgbVulkan(
         return false;
     }
     pl_pass_run(selected->gpu, &run);
+    if (output && output->thumbnailPixels && output->thumbnailWidth &&
+        output->thumbnailHeight) {
+        auto& thumbnail = *output->thumbnailPixels;
+        thumbnail.clear();
+        const size_t count = static_cast<size_t>(output->thumbnailWidth) *
+            output->thumbnailHeight;
+        if (count <= pixels && count <= std::numeric_limits<uint32_t>::max() / 3u) {
+            const size_t bytes = count * 3u;
+            const size_t padded = (bytes + 3u) & ~size_t{3};
+            if (selected->reserveThumbnail(padded)) {
+                ColorConstants thumbnailConstants = constants;
+                thumbnailConstants.dimensions[0] = static_cast<uint32_t>(count);
+                thumbnailConstants.dimensions[1] = static_cast<uint32_t>(padded / 4u);
+                thumbnailConstants.geometry[3] =
+                    (thumbnailConstants.geometry[3] | 1u) & ~(4u | 2u);
+                thumbnailConstants.geometry[2] =
+                    static_cast<uint32_t>(output->thumbnailOrientation);
+                thumbnailConstants.thumbnail[0] = output->thumbnailWidth;
+                thumbnailConstants.thumbnail[1] = output->thumbnailHeight;
+                thumbnailConstants.thumbnail[2] = 1u;
+                pl_desc_binding thumbnailBindings[5];
+                std::copy(std::begin(bindings), std::end(bindings),
+                    thumbnailBindings);
+                thumbnailBindings[1].object = selected->thumbnailOutput;
+                auto thumbnailRun = run;
+                thumbnailRun.desc_bindings = thumbnailBindings;
+                thumbnailRun.push_constants = &thumbnailConstants;
+                thumbnailRun.compute_groups[0] = static_cast<int>(
+                    (((count + 3u) / 4u) + 255u) / 256u);
+                thumbnail.resize(padded);
+                pl_pass_run(selected->gpu, &thumbnailRun);
+                pl_buf_copy(selected->gpu, selected->thumbnailDownload, 0,
+                    selected->thumbnailOutput, 0, padded);
+                if (pl_buf_read(selected->gpu, selected->thumbnailDownload, 0,
+                        thumbnail.data(), padded))
+                    thumbnail.resize(bytes);
+                else thumbnail.clear();
+            }
+        }
+    }
 #ifndef _WIN32
     if (exported) {
         const uint64_t debugSampleHash =

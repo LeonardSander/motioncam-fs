@@ -8,6 +8,20 @@
 
 namespace motioncam {
 struct DNGProfileTable;
+struct VulkanGalleryBayerGainMap {
+    uint32_t width = 0, height = 0, channels = 0;
+    uint32_t left = 0, top = 0, right = 0, bottom = 0;
+    uint32_t rowPitch = 1, colPitch = 1;
+    float originH = 0, originV = 0, spacingH = 0, spacingV = 0;
+    std::vector<float> values;
+};
+struct VulkanGalleryBayerGain {
+    std::vector<VulkanGalleryBayerGainMap> maps;
+    std::array<float, 4> black{}, scale{};
+    std::array<uint8_t, 4> phase{0, 1, 1, 2};
+    uint32_t encodedWhite = 0, ditherSeed = 0;
+    bool highQualityDither = false, debugGain = false;
+};
 struct VulkanGalleryGpuBuffer {
     int fd = -1;
     int sourceFrameIndex = -1;
@@ -29,6 +43,8 @@ struct VulkanGalleryBayerSource {
     uint32_t width = 0, height = 0;
     std::array<uint8_t, 4> phase{0, 1, 1, 2};
     std::array<double, 3> black{}, white{};
+    const VulkanGalleryBayerGain* gain = nullptr;
+    std::function<bool(std::vector<uint16_t>&)> recoverCpu;
 };
 struct VulkanGalleryOutput {
     uint32_t width = 0, height = 0;
@@ -38,6 +54,9 @@ struct VulkanGalleryOutput {
     const std::vector<uint8_t>* clipping = nullptr;
     std::shared_ptr<const uint8_t>* hostPixels = nullptr;
     std::shared_ptr<VulkanGalleryGpuBuffer>* gpuBuffer = nullptr;
+    std::vector<uint8_t>* thumbnailPixels = nullptr;
+    uint32_t thumbnailWidth = 0, thumbnailHeight = 0;
+    int thumbnailOrientation = 0;
 };
 struct VulkanGalleryTextureSource {
     const void* gpu = nullptr;

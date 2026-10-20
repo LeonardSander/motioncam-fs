@@ -116,6 +116,9 @@ void PreviewRenderer::render(
                 entries[index], frame, options.retainSourceSamples))
             throw std::runtime_error("Could not render preview " + entries[index].name);
         const auto materializeFinished = std::chrono::steady_clock::now();
+        // A queued GPU frame may outlive this render and a later settings
+        // change. Keep the exact filesystem/decoder state that owns its GPU.
+        frame.galleryStateLease = state;
         frameReady(std::move(frame));
         if (profileFrames)
             spdlog::info(

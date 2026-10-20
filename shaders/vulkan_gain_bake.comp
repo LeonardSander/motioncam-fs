@@ -1,4 +1,5 @@
 #version 450
+// @DISPLAY_MATH@
 layout(local_size_x = 256) in;
 #ifdef SOURCE_TEXTURE
 layout(binding = 0) uniform sampler2D sourceImage;
@@ -52,12 +53,10 @@ float gainAt(uint x, uint y, uint channel) {
     vec2 t = clamp(grid - base, 0.0, 1.0);
     uvec2 a = uvec2(clamp(base, vec2(0), vec2(p.mapShape.xy - uvec2(1))));
     uvec2 b = min(a + uvec2(1), p.mapShape.xy - uvec2(1));
-    float upper = mix(mapValue(a.x, a.y, channel),
-                      mapValue(b.x, a.y, channel), t.x);
-    float lower = mix(mapValue(a.x, b.y, channel),
-                      mapValue(b.x, b.y, channel), t.x);
-    float gain = mix(upper, lower, t.y);
-    return !isnan(gain) && !isinf(gain) && gain > 0.0 ? gain : 1.0;
+    float gain = MOTIONCAM_GAIN_BILERP(
+        mapValue(a.x, a.y, channel), mapValue(b.x, a.y, channel),
+        mapValue(a.x, b.y, channel), mapValue(b.x, b.y, channel), t);
+    return motioncamGainOrIdentity(gain);
 }
 vec3 mapRgb(uint x, uint y) {
     uint index = (y * p.mapShape.x + x) * p.mapShape.z;
@@ -74,8 +73,8 @@ vec3 gainRgb(uint x, uint y) {
     vec2 t = clamp(grid - base, 0.0, 1.0);
     uvec2 a = uvec2(clamp(base, vec2(0), vec2(p.mapShape.xy - uvec2(1))));
     uvec2 b = min(a + uvec2(1), p.mapShape.xy - uvec2(1));
-    vec3 gain = mix(mix(mapRgb(a.x, a.y), mapRgb(b.x, a.y), t.x),
-                    mix(mapRgb(a.x, b.y), mapRgb(b.x, b.y), t.x), t.y);
+    vec3 gain = MOTIONCAM_GAIN_BILERP(mapRgb(a.x, a.y), mapRgb(b.x, a.y),
+                                      mapRgb(a.x, b.y), mapRgb(b.x, b.y), t);
     return vec3(!isnan(gain.x) && !isinf(gain.x) && gain.x > 0.0 ? gain.x : 1.0,
                 !isnan(gain.y) && !isinf(gain.y) && gain.y > 0.0 ? gain.y : 1.0,
                 !isnan(gain.z) && !isinf(gain.z) && gain.z > 0.0 ? gain.z : 1.0);
@@ -118,8 +117,9 @@ uint codeAt(uint y, uint rowSample) {
             float linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
             float normalized = clamp((linear - p.destinationBlack.x) /
                 max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
-            value = log2(1.0 + 60.0 * normalized) / log2(61.0) *
-                    float(p.encodedWhite) + ditherAt(x, y);
+            value = ((p.flags & 32u) != 0u
+                ? uintBitsToFloat(linearization.values[uint(linear)])
+                : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
         }
     }
     float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;
@@ -149,8 +149,11 @@ uvec3 pixelCodes(uint x, uint y) {
             vec3 linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
             vec3 normalized = clamp((linear - p.destinationBlack.x) /
                 max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
-            value = log2(vec3(1.0) + 60.0 * normalized) / log2(61.0) *
-                    float(p.encodedWhite) + ditherAt(x, y);
+            value = ((p.flags & 32u) != 0u
+                ? vec3(uintBitsToFloat(linearization.values[uint(linear.r)]),
+                       uintBitsToFloat(linearization.values[uint(linear.g)]),
+                       uintBitsToFloat(linearization.values[uint(linear.b)]))
+                : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
         }
     }
     float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;

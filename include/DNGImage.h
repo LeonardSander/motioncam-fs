@@ -10,6 +10,7 @@
 
 namespace motioncam {
 struct VulkanGalleryGain;
+struct VulkanGalleryBayerGain;
 struct VulkanGalleryGpuBuffer;
 
 struct DNGProfileTable {
@@ -72,10 +73,23 @@ struct PreviewFrame {
     std::vector<uint8_t> rgb;
     std::shared_ptr<const uint8_t> galleryDisplayPixels;
     std::shared_ptr<VulkanGalleryGpuBuffer> galleryDisplayGpu;
-    std::shared_ptr<void> galleryRendererLease;
+    std::shared_ptr<void> galleryStateLease;
     // Non-HQ Bayer preview can remain CFA until the gallery's final GPU pass.
     // The CPU fallback reconstructs this when Vulkan is unavailable.
     std::vector<uint16_t> galleryCfa;
+    // MCRAW preprocessing already owns its CFA as little-endian bytes. Move
+    // that allocation here instead of copying a full frame to galleryCfa.
+    std::vector<uint8_t> galleryCfaBytes;
+    std::shared_ptr<VulkanGalleryBayerGain> galleryCfaGain;
+    std::function<bool(std::vector<uint16_t>&)> galleryCfaRecoverCpu;
+    bool hasGalleryCfa() const {
+        return !galleryCfa.empty() || !galleryCfaBytes.empty();
+    }
+    const uint16_t* galleryCfaSamples() const {
+        return galleryCfa.empty()
+            ? reinterpret_cast<const uint16_t*>(galleryCfaBytes.data())
+            : galleryCfa.data();
+    }
     std::array<uint8_t, 4> galleryCfaPhase{0, 1, 1, 2};
     std::array<double, 3> galleryBlack{}, galleryWhite{};
     // DirectLog can keep its decoded RGB texture until the gallery's final

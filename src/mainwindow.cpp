@@ -590,10 +590,21 @@ namespace {
                         std::chrono::steady_clock::now() - transformStarted).count());
             return;
         }
-        if (bayer && !motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
-                bayer->samples, bytes, bayer->width, bayer->height,
-                bayer->phase, bayer->black, bayer->white))
-            throw std::runtime_error("Could not reconstruct gallery Bayer preview");
+        if (bayer) {
+            std::vector<uint16_t> recovered;
+            const uint16_t* samples = bayer->samples;
+            if (bayer->gain) {
+                const size_t count = static_cast<size_t>(bayer->width) * bayer->height;
+                recovered.assign(samples, samples + count);
+                if (!bayer->recoverCpu || !bayer->recoverCpu(recovered))
+                    throw std::runtime_error("Could not recover gallery Bayer gain");
+                samples = recovered.data();
+            }
+            if (!motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                    samples, bytes, bayer->width, bayer->height,
+                    bayer->phase, bayer->black, bayer->white))
+                throw std::runtime_error("Could not reconstruct gallery Bayer preview");
+        }
         if (texture) {
             if (!textureDownload || !*textureDownload)
                 throw std::runtime_error("No DirectLog gallery CPU recovery path");
@@ -832,13 +843,15 @@ namespace {
                                            bool* gpuApplied = nullptr) {
         motioncam::VulkanGalleryBayerSource bayer;
         motioncam::VulkanGalleryTextureSource texture;
-        if (!preview.galleryCfa.empty()) {
-            bayer.samples = preview.galleryCfa.data();
+        if (preview.hasGalleryCfa()) {
+            bayer.samples = preview.galleryCfaSamples();
             bayer.width = preview.width;
             bayer.height = preview.height;
             bayer.phase = preview.galleryCfaPhase;
             bayer.black = preview.galleryBlack;
             bayer.white = preview.galleryWhite;
+            bayer.gain = preview.galleryCfaGain.get();
+            bayer.recoverCpu = preview.galleryCfaRecoverCpu;
         }
         if (preview.galleryGpuTexture) {
             texture.gpu = preview.galleryGpuDevice;
@@ -2883,15 +2896,18 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const auto playbackTarget=mClipPlayer->playbackTarget();
     const auto incomingFrame=mClipPlayer->incomingFrame();
     const auto thumbnailCollectionEnabled=mClipPlayer->thumbnailCollectionEnabled();
+    const auto thumbnailPrecacheEnabled=mClipPlayer->thumbnailPrecacheEnabled();
     const bool diagnostics = mGalleryPerformanceTestActive;
     const bool clippingEnabled = mGalleryClippingEnabled && !backfillThumbnails;
     const bool histogramEnabled = mClipPlayer->histogramEnabled() && !backfillThumbnails;
     const bool nativePresenter = mClipPlayer->nativeVulkanPresenter();
+    const bool directPresenter = mClipPlayer->directSequencePresentation();
     auto render = [this, mountId, settings, generation, firstFrame, isSequence,
                    thumbnailOrientation,
                    backfillThumbnails, player, playbackTarget, incomingFrame,
-                   thumbnailCollectionEnabled, diagnostics, clippingEnabled,
-                   histogramEnabled, nativePresenter] {
+                   thumbnailCollectionEnabled, thumbnailPrecacheEnabled,
+                   diagnostics, clippingEnabled,
+                   histogramEnabled, nativePresenter, directPresenter] {
         const auto taskStarted = std::chrono::steady_clock::now();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
@@ -2937,8 +2953,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     return mGalleryGeneration.load() == generation;
                 },
                 [this, generation, player, mountId, settings, isSequence, incomingFrame, thumbnailCollectionEnabled,
+                 thumbnailPrecacheEnabled,
                  thumbnailOrientation,
-                 clippingEnabled,
+                 clippingEnabled, directPresenter,
                  backfillThumbnails, &presentedFirstFrame,
                  &deliveredFrames, &thumbnailFrames, &displayDecodeMs, &deliveryWaitMs,
                  &taskStarted, diagnostics, nativePresenter](
@@ -2951,21 +2968,50 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     const bool collectThumbnail = thumbnailCollectionEnabled->load();
                     const int rawOrientation = !isSequence
                         ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
-                    const bool rgb24 = preview.displayBitDepth <= 8 &&
+                    // Direct presentation displays RGB888. Keep its output
+                    // packed while collecting thumbnails, but preserve the
+                    // full playback depth for FFmpeg sequences.
+                    const bool rgb24 = (preview.displayBitDepth <= 8 ||
+                        (collectThumbnail && directPresenter)) &&
                         !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
                     const bool hashPreview =
                         qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
                     motioncam::VulkanGalleryOutput gpuOutput;
                     gpuOutput.width = preview.width;
                     gpuOutput.height = preview.height;
+                    // Direct presentation can use the GPU's rotated RGB24
+                    // rows directly. FFmpeg expects source-oriented rows and
+                    // performs its own rotation in the video filter graph.
                     gpuOutput.orientation = isSequence
-                        ? (thumbnailOrientation < 0 ? 0 : thumbnailOrientation)
+                        ? (directPresenter && rgb24 && thumbnailOrientation >= 0
+                            ? thumbnailOrientation : 0)
                         : (rawOrientation < 0 ? 0 : rawOrientation);
                     gpuOutput.clipping = clippingEnabled ? &preview.clipping : nullptr;
                     gpuOutput.hostPixels = &preview.galleryDisplayPixels;
+                    // The GPU widget can remain allocated after switching to
+                    // an FFmpeg sequence. That sequence still needs host rows.
                     const bool nativeGpuOutput=nativePresenter&&
-                        !collectThumbnail&&!hashPreview;
+                        (!isSequence||directPresenter)&&!hashPreview;
+                    const bool cacheLiveThumbnail=isSequence&&directPresenter&&
+                        !backfillThumbnails&&thumbnailPrecacheEnabled->load();
                     gpuOutput.rgb24 = rgb24 || nativeGpuOutput;
+                    std::vector<uint8_t> nativeThumbnail;
+                    if(cacheLiveThumbnail||collectThumbnail){
+                        gpuOutput.thumbnailOrientation=isSequence
+                            ?(thumbnailOrientation<0?0:thumbnailOrientation)
+                            :(rawOrientation<0?0:rawOrientation);
+                        const bool swap=gpuOutput.thumbnailOrientation==90||
+                            gpuOutput.thumbnailOrientation==270;
+                        const uint32_t orientedWidth=swap?preview.height:preview.width;
+                        const uint32_t orientedHeight=swap?preview.width:preview.height;
+                        const double scale=std::min(176.0/orientedWidth,
+                                                    112.0/orientedHeight);
+                        gpuOutput.thumbnailWidth=std::max(1u,static_cast<uint32_t>(
+                            std::lround(orientedWidth*scale)));
+                        gpuOutput.thumbnailHeight=std::max(1u,static_cast<uint32_t>(
+                            std::lround(orientedHeight*scale)));
+                        gpuOutput.thumbnailPixels=&nativeThumbnail;
+                    }
                     if(nativeGpuOutput){
                         gpuOutput.gpuBuffer = &preview.galleryDisplayGpu;
                         // Match the CPU gallery's clockwise 90-degree pixel
@@ -2986,7 +3032,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         hashPreview ? nullptr : &gpuOutput, &gpuFinal);
                     const auto colorFinished = std::chrono::steady_clock::now();
                     if (hashPreview) gpuFinal = false;
-                    const bool gpuPreOriented = gpuFinal && isSequence;
+                    const bool gpuPreOriented = gpuFinal && isSequence &&
+                        gpuOutput.orientation != 0;
                     if (hashPreview) {
                         uint64_t hash = 1469598103934665603ull;
                         uint64_t sampledSum = 0, sampledWhite = 0, sampledCount = 0;
@@ -3008,17 +3055,32 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             sampledWhite, sampledCount);
                     }
                     QImage unmarkedThumbnail;
-                    if (clippingEnabled && collectThumbnail) {
+                    if(!nativeThumbnail.empty())
+                        unmarkedThumbnail=ClipPlayerDialog::makeRgb48Thumbnail(
+                            nativeThumbnail.data(),
+                            static_cast<qsizetype>(nativeThumbnail.size()),
+                            static_cast<int>(gpuOutput.thumbnailWidth),
+                            static_cast<int>(gpuOutput.thumbnailHeight),0);
+                    if(cacheLiveThumbnail&&unmarkedThumbnail.isNull()&&
+                       !preview.rgb.empty())
+                        unmarkedThumbnail=ClipPlayerDialog::makeRgb48Thumbnail(
+                            preview.rgb.data(),static_cast<qsizetype>(preview.rgb.size()),
+                            static_cast<int>(preview.width),
+                            static_cast<int>(preview.height),thumbnailOrientation);
+                    if ((clippingEnabled || nativeGpuOutput) && collectThumbnail &&
+                        unmarkedThumbnail.isNull()) {
                         if (gpuFinal) {
                             motioncam::VulkanGalleryBayerSource bayer;
                             motioncam::VulkanGalleryTextureSource texture;
-                            if (!preview.galleryCfa.empty()) {
-                                bayer.samples = preview.galleryCfa.data();
+                            if (preview.hasGalleryCfa()) {
+                                bayer.samples = preview.galleryCfaSamples();
                                 bayer.width = gpuOutput.width;
                                 bayer.height = gpuOutput.height;
                                 bayer.phase = preview.galleryCfaPhase;
                                 bayer.black = preview.galleryBlack;
                                 bayer.white = preview.galleryWhite;
+                                bayer.gain = preview.galleryCfaGain.get();
+                                bayer.recoverCpu = preview.galleryCfaRecoverCpu;
                             }
                             if (preview.galleryGpuTexture) {
                                 texture.gpu = preview.galleryGpuDevice;
@@ -3045,6 +3107,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             isSequence ? thumbnailOrientation : rawOrientation);
                     }
                     preview.galleryCfa = {};
+                    preview.galleryCfaBytes = {};
                     preview.galleryGpuLease.reset();
                     if (!gpuFinal) {
                         if (clippingEnabled)
@@ -3084,7 +3147,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         gpuBuffer->orientation=isSequence
                             ?(thumbnailOrientation==90?0:thumbnailOrientation):0;
                         gpuBuffer->staticFrame=!isSequence;
-                        gpuBuffer->resourceLease = std::move(preview.galleryRendererLease);
+                        gpuBuffer->resourceLease = std::move(preview.galleryStateLease);
                     }
                     const auto* rgbData = gpuBuffer ? nullptr
                         : rgbPixels ? rgbPixels.get() : rgb->data();
@@ -3094,15 +3157,18 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         reinterpret_cast<const char*>(rgbData),
                         static_cast<qsizetype>(rgbSize));
                     const int thumbnailOutputFrame=static_cast<int>(preview.sourceFrameIndex);
-                    if(collectThumbnail && !unmarkedThumbnail.isNull()){
+                    if((collectThumbnail || cacheLiveThumbnail) &&
+                       !unmarkedThumbnail.isNull()){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
-                                                        thumbnailCollectionEnabled,unmarkedThumbnail,
+                                                        thumbnailCollectionEnabled,cacheLiveThumbnail,unmarkedThumbnail,
                                                         thumbnailOutputFrame]{
                             if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
-                               player->currentMountId()==mountId&&thumbnailCollectionEnabled->load())
+                               player->currentMountId()==mountId&&
+                               (thumbnailCollectionEnabled->load()||cacheLiveThumbnail))
                                 player->setOutputFrameThumbnailImage(
-                                    thumbnailOutputFrame,unmarkedThumbnail);
+                                    thumbnailOutputFrame,unmarkedThumbnail,
+                                    cacheLiveThumbnail);
                         },Qt::QueuedConnection);
                     } else if(collectThumbnail && !clippingEnabled){
                         ++thumbnailFrames;
@@ -3603,6 +3669,16 @@ void MainWindow::startGalleryPerformanceTest(
                 if (midpoint > 2) positions.push_back({"seek", midpoint});
                 if (midpoint + 1 < files.size() && midpoint > 2)
                     positions.push_back({"after_seek", midpoint + 1});
+                bool sequentialCountValid = false;
+                const int sequentialCount = qEnvironmentVariableIntValue(
+                    "MOTIONCAM_GALLERY_PERF_MOUNTED_SEQUENTIAL_COUNT",
+                    &sequentialCountValid);
+                if (sequentialCountValid && sequentialCount > 0) {
+                    positions.clear();
+                    for (int frame = 0; frame < std::min(sequentialCount,
+                                                         static_cast<int>(files.size())); ++frame)
+                        positions.push_back({"sequential", frame});
+                }
                 for (const auto& [access, frame] : positions) {
                     QElapsedTimer timer;
                     timer.start();
@@ -3644,10 +3720,12 @@ void MainWindow::startGalleryPerformanceTest(
                         }
                     }
                     motioncam::PreviewFrame preview;
-                    const bool decoded = complete &&
+                    const bool skipPreview = qEnvironmentVariableIsSet(
+                        "MOTIONCAM_GALLERY_PERF_SKIP_PREVIEW_DECODE");
+                    const bool decoded = complete && (skipPreview ||
                         motioncam::DNGDecoder::decodePreview(
                             std::move(dng), motioncam::RenderSettings{},
-                            preview, false);
+                            preview, false));
                     uint64_t pixelHash = 1469598103934665603ull;
                     if (decoded) for (const uint8_t value : preview.rgb) {
                         pixelHash ^= value;
@@ -3797,7 +3875,8 @@ void MainWindow::startGalleryPerformanceTest(
     // The optional decode-focused run excludes thumbnail collection and row
     // layout work. The ordinary performance run includes both.
     const bool showThumbnailStrip = !qEnvironmentVariableIsSet(
-        "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS");
+        "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS") &&
+        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK");
     mClipPlayer->setThumbnailStripVisible(showThumbnailStrip);
     spdlog::info("GALLERY_PERF event=thumbnail_strip enabled={}", showThumbnailStrip);
     // Playback samples target the most demanding normal UI geometry. Keep the
@@ -3874,6 +3953,15 @@ void MainWindow::startGalleryPerformanceTest(
         state->presentationIntervalsNs.clear();
         state->sampleTimer.restart();
         const int serial = ++state->actionSerial;
+        if (!afterSeek && qEnvironmentVariableIsSet(
+                "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK"))
+            QTimer::singleShot(std::max(0, qEnvironmentVariableIntValue(
+                "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK")),
+                this, [this, state, serial] {
+                if (state->actionSerial != serial || !mClipPlayer) return;
+                spdlog::info("GALLERY_PERF event=thumbnail_open_during_playback");
+                mClipPlayer->setThumbnailStripVisible(true);
+            });
         QTimer::singleShot(state->playbackMs, this,
             [this, state, startClip, startSample, afterSeek, serial] {
                 if (state->actionSerial != serial || !mClipPlayer) return;

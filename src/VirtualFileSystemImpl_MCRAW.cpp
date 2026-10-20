@@ -944,7 +944,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                 }
             }
             cropPreviewRawToVisibleTopLeft(preview, mSettings);
-            return !preview.rgb.empty() || !preview.galleryCfa.empty();
+            return !preview.rgb.empty() || preview.hasGalleryCfa();
         }
         const bool spatialSidecar =
             vfs::manualSidecarsNeedPixelProcessing(mManualVignetteSidecars) ||
@@ -1047,7 +1047,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                 entry, timestamp, mSourceFrames.front(), mFps,
                 mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
             cropPreviewRawToVisibleTopLeft(preview, mSettings);
-            return !preview.rgb.empty() || !preview.galleryCfa.empty();
+            return !preview.rgb.empty() || preview.hasGalleryCfa();
         }
         const auto generateStarted = std::chrono::steady_clock::now();
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
@@ -1073,7 +1073,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
             entry, timestamp, mSourceFrames.front(), mFps,
             mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);
         cropPreviewRawToVisibleTopLeft(preview, mSettings);
-        return !preview.rgb.empty() || !preview.galleryCfa.empty();
+        return !preview.rgb.empty() || preview.hasGalleryCfa();
     } catch (const std::exception& error) {
         spdlog::warn("Direct MCRAW preview preparation failed for {}: {}",
                      entry.name, error.what());

@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
+#include <QEasingCurve>
 #include <QEvent>
 #include <QFile>
 #include <QFileInfo>
@@ -28,6 +29,7 @@
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QSaveFile>
 #include <QSlider>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -44,6 +46,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <thread>
 #include <vector>
@@ -623,6 +626,13 @@ bool ClipPlayerDialog::nativeVulkanPresenter() const {
     return mGpuVideo && mGpuVideo->native() && mGpuVideo->usable();
 }
 
+bool ClipPlayerDialog::hasReusableSourceFrame() const {
+    return mLastImageIsSource &&
+        (mDirectSequencePresentation || nativeVulkanPresenter() ||
+         (mIndex >= 0 && mIndex < mClips.size() &&
+          !mClips[mIndex].isSequence));
+}
+
 void ClipPlayerDialog::runPerformanceGestureTest(std::function<void()> finished) {
     if (!hasPresentedFrame()) { finished(); return; }
     setPlaybackPaused(true);
@@ -673,6 +683,7 @@ void ClipPlayerDialog::runPerformanceGestureTest(std::function<void()> finished)
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
     mThumbnailDiskCache=std::make_unique<QTemporaryDir>();
+    mThumbnailCacheWriter.setMaxThreadCount(1);
     setAttribute(Qt::WA_DeleteOnClose); setWindowTitle(tr("Gallery")); resize(1100,720);
     QPalette galleryPalette=palette();
     galleryPalette.setColor(QPalette::Window,QColor(96,96,96));
@@ -757,7 +768,16 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     auto* seekLayout=new QVBoxLayout;seekLayout->setContentsMargins(10,10,10,10);seekLayout->addWidget(mPosition);
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlay->setGraphicsEffect(mOverlayOpacity);mOverlayOpacity->setOpacity(1.0);
-    mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);mOverlayAnimation->setDuration(260);
+    mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);
+    mOverlayAnimation->setDuration(260);
+    QEasingCurve fadeCurve;
+    fadeCurve.setCustomType([](qreal progress) -> qreal {
+        constexpr qreal steepness=10.0;
+        const qreal lower=1.0/(1.0+std::exp(steepness/2.0));
+        const qreal value=1.0/(1.0+std::exp(-steepness*(progress-0.5)));
+        return (value-lower)/(1.0-2.0*lower);
+    });
+    mOverlayAnimation->setEasingCurve(fadeCurve);
     mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mPerformanceOverlayPinned&&!mHistogramExpanded&&!pointerOverThumbnailRow())setOverlayVisible(false);});
     mNativeOverlayCaptureTimer.setInterval(50);
     connect(&mNativeOverlayCaptureTimer,&QTimer::timeout,this,[this]{
@@ -769,7 +789,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         // The retained image, rather than first-frame state, is the authority
         // for whether it is safe and necessary to restart at the final size.
         if(mIndex<0||!hasPresentedFrame())return;
-        if(nativeVulkanPresenter()&&mLastImageIsSource){
+        if(hasReusableSourceFrame()){
             updateDisplayedImage();return;
         }
         // While zoom is animating, build the crop for its already-known final
@@ -851,8 +871,17 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
     connect(mThumbnailToggle,&QPushButton::clicked,this,[this]{
         const bool show=!mThumbnailScroll->isVisible();mThumbnailScroll->setVisible(show);
-        if(!show)revealOverlay();
+        if(!show){
+            mThumbnailCacheWriter.clear();
+            const auto items=mThumbnailContent->findChildren<QWidget*>(
+                QString(),Qt::FindDirectChildrenOnly);
+            for(auto* item:items)delete item;
+            mThumbnailLabels.clear();
+            mThumbnailItems.clear();
+            revealOverlay();
+        }
         mThumbnailCollectionEnabled->store(show);
+        mThumbnailPrecacheEnabled->store(show);
         mThumbnailToggle->setIcon(thumbnailChevronIcon(!show));
         mThumbnailToggle->setToolTip(show?tr("Hide frame thumbnails"):tr("Show frame thumbnails"));
         const double seconds=mIndex>=0?mPosition->value()/std::max(1.0,mClips[mIndex].fps):0.0;
@@ -922,6 +951,8 @@ void ClipPlayerDialog::reloadCurrentClip(){
     }
 }
 void ClipPlayerDialog::invalidateThumbnails(int mountId){
+    mThumbnailCacheWriter.clear();
+    mThumbnailCacheWriter.waitForDone();
     mThumbnailCache.remove(mountId);
     for(auto it=mThumbnailCacheOrder.begin();it!=mThumbnailCacheOrder.end();)
         if(it->first==mountId)it=mThumbnailCacheOrder.erase(it);else ++it;
@@ -1000,9 +1031,17 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
     canvas.fill(Qt::transparent);
     QPainter painter(&canvas);
     painter.scale(ratio,ratio);
-    if(mOverlay->isVisible())
+    if(mOverlay->isVisible()){
+        // Render the controls without their QWidget effect. The native
+        // presenter needs the animation opacity in the captured pixels;
+        // rendering an effect-bearing widget can skip intermediate frames.
+        mOverlayOpacity->setEnabled(false);
+        painter.setOpacity(mOverlayOpacity->opacity());
         mOverlay->render(&painter,mOverlay->pos()-mGpuVideo->pos(),
             QRegion(),QWidget::DrawChildren);
+        painter.setOpacity(1.0);
+        mOverlayOpacity->setEnabled(true);
+    }
     if(mFpsLabel->isVisible())
         mFpsLabel->render(&painter,mFpsLabel->pos()-mGpuVideo->pos(),
             QRegion(),QWidget::DrawChildren);
@@ -1177,7 +1216,9 @@ void ClipPlayerDialog::rebuildThumbnailStrip(){
     mThumbnailContent->setFixedSize(contentWidth,156);
     mThumbnailScroll->setFixedHeight(170);
     updateVisibleThumbnailWidgets();
-    QTimer::singleShot(0,this,[this]{if(!mPaused)centerCurrentThumbnail();});
+    centerCurrentThumbnail();
+    // QScrollArea may update its range only after the new content is laid out.
+    QTimer::singleShot(0,this,[this]{centerCurrentThumbnail();});
 }
 
 void ClipPlayerDialog::updateVisibleThumbnailWidgets(){
@@ -1208,7 +1249,6 @@ void ClipPlayerDialog::updateVisibleThumbnailWidgets(){
             item->setGeometry(positions[source],7,thumbnailSize.width()+8,thumbnailSize.height()+30);
             frameBackground->setFixedSize(thumbnailSize.width()+8,thumbnailSize.height()+8);
             if(auto* label=mThumbnailLabels.value(source))label->setFixedSize(thumbnailSize);
-            refreshThumbnailLabel(source);
             continue;
         }
         const int output=clip.sourceFrameToOutput&&source<static_cast<int>(clip.sourceFrameToOutput->size())
@@ -1316,7 +1356,8 @@ void ClipPlayerDialog::updateCursorStyle(){
         "width:16px;margin:-5px 0;border-radius:8px;}").arg(color,border));
 }
 void ClipPlayerDialog::centerCurrentThumbnail(){
-    if(!mThumbnailScroll||!mThumbnailScroll->isVisible())return;
+    if(!mThumbnailScroll||!mThumbnailScroll->isVisible()||
+       mCurrentThumbnailSource<0)return;
     auto* bar=mThumbnailScroll->horizontalScrollBar();
     if(mIndex<0||mIndex>=mClips.size())return;
     int left=8;
@@ -1328,7 +1369,8 @@ void ClipPlayerDialog::centerCurrentThumbnail(){
             left+=thumbnailSizeForSource(source).width()+16;
     }
     const int center=left+(thumbnailSizeForSource(mCurrentThumbnailSource).width()+8)/2;
-    bar->setValue(std::clamp(center-mThumbnailScroll->viewport()->width()/2,
+    const int viewport=std::max(1,mThumbnailScroll->viewport()->width());
+    bar->setValue(std::clamp(center-viewport/2,
         bar->minimum(),bar->maximum()));
     // A changed scroll position emits valueChanged and updates visible items.
     // When it is unchanged, only the previous/current highlight needs work.
@@ -1345,8 +1387,25 @@ void ClipPlayerDialog::cacheThumbnail(int mountId,int sourceFrame,const QImage& 
     constexpr int maximumCachedFrames=512;
     if(persistToDisk&&mThumbnailDiskCache&&mThumbnailDiskCache->isValid()){
         const QString path=thumbnailCachePath(mountId,sourceFrame);
-        if(!QFileInfo::exists(path)&&!image.save(path,"JPG",80))
-            spdlog::warn("Could not persist gallery thumbnail cache entry");
+        if(!QFileInfo::exists(path)){
+            constexpr int maximumPendingWrites=16;
+            const auto pending=mThumbnailWritesPending;
+            if(pending->fetch_add(1,std::memory_order_relaxed)<maximumPendingWrites){
+                // The ticket also releases a queued task discarded by clear().
+                const auto ticket=std::shared_ptr<void>(nullptr,[pending](void*){
+                    pending->fetch_sub(1,std::memory_order_relaxed);
+                });
+                mThumbnailCacheWriter.start([path,image,ticket]{
+                    if(QFileInfo::exists(path))return;
+                    QSaveFile file(path);
+                    if(!file.open(QIODevice::WriteOnly)||
+                       !image.save(&file,"JPG",80)||!file.commit())
+                        spdlog::warn("Could not persist gallery thumbnail cache entry");
+                });
+            }else{
+                pending->fetch_sub(1,std::memory_order_relaxed);
+            }
+        }
     }
     auto& cache=mThumbnailCache[mountId];const QPair<int,int> key{mountId,sourceFrame};
     mThumbnailCacheOrder.removeAll(key);mThumbnailCacheOrder.append(key);
@@ -1365,19 +1424,29 @@ void ClipPlayerDialog::setSourceFrameThumbnail(int sourceFrame,const QByteArray&
     setSourceFrameThumbnailImage(sourceFrame,rgb48Thumbnail(frame,width,height));
 }
 
-void ClipPlayerDialog::setSourceFrameThumbnailImage(int sourceFrame,const QImage& image){
-    if(!mThumbnailCollectionEnabled->load()||image.isNull())return;
-    cacheThumbnail(currentMountId(),sourceFrame,image);
-    if(mIndex>=0&&!mClips[mIndex].isSequence)updateVisibleThumbnailWidgets();
-    else refreshThumbnailLabel(sourceFrame);
+void ClipPlayerDialog::setSourceFrameThumbnailImage(int sourceFrame,const QImage& image,
+        bool cacheWhenHidden){
+    const bool visible=mThumbnailCollectionEnabled->load();
+    if((!visible&&!cacheWhenHidden)||image.isNull())return;
+    cacheThumbnail(currentMountId(),sourceFrame,image,visible);
+    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+       (sourceFrame<10 || sourceFrame%30==0))
+        spdlog::info("GALLERY_PERF event=thumbnail_applied source={} current={} visible={}",
+            sourceFrame,mCurrentThumbnailSource,
+            mThumbnailScroll&&mThumbnailScroll->isVisible());
+    if(visible){
+        if(mIndex>=0&&!mClips[mIndex].isSequence)updateVisibleThumbnailWidgets();
+        else refreshThumbnailLabel(sourceFrame);
+    }
 }
 
 void ClipPlayerDialog::setOutputFrameThumbnail(int outputFrame,const QByteArray& frame,int width,int height){
     const int source=sourceFrameForOutput(outputFrame);if(source>=0)setSourceFrameThumbnail(source,frame,width,height);
 }
-void ClipPlayerDialog::setOutputFrameThumbnailImage(int outputFrame,const QImage& image){
+void ClipPlayerDialog::setOutputFrameThumbnailImage(int outputFrame,const QImage& image,
+        bool cacheWhenHidden){
     const int source=sourceFrameForOutput(outputFrame);
-    if(source>=0)setSourceFrameThumbnailImage(source,image);
+    if(source>=0)setSourceFrameThumbnailImage(source,image,cacheWhenHidden);
 }
 void ClipPlayerDialog::presentDroppedSourceFrame(int sourceFrame,const QByteArray& frame,int width,int height){
     if(!mThumbnailCollectionEnabled->load()||mIndex<0)return;
@@ -1538,7 +1607,7 @@ void ClipPlayerDialog::setZoomAnimationTarget(double target){
     }
     mMouseSourcePosition=QPoint(-1,-1);updateTitle();
     mSurfaceUpdateTimer.stop();
-    const bool sourceOnGpu=nativeVulkanPresenter()&&mLastImageIsSource;
+    const bool reusableSource=hasReusableSourceFrame();
     const bool wasAnimating=mZoomAnimationTimer.isActive();
     mZoomAnimationTarget=target;
     // Zooming out needs pixels outside the current efficient crop. Begin
@@ -1546,9 +1615,9 @@ void ClipPlayerDialog::setZoomAnimationTarget(double target){
     // for every event in the same wheel gesture. Zoom-in can safely continue
     // using the existing wider surface while input is coalesced.
     const bool zoomingOut=effectiveTarget<current;
-    // A native source texture is complete; crop refreshes would decode the
+    // A retained source frame is complete; crop refreshes would decode the
     // entire DNG after each wheel event.
-    if(!sourceOnGpu){
+    if(!reusableSource){
         if(zoomingOut){
             if(!mSurfaceUpdateTimer.isActive()){
                 mSurfaceUpdateTimer.setInterval(32);mSurfaceUpdateTimer.start();
@@ -1597,7 +1666,7 @@ void ClipPlayerDialog::advanceZoomAnimation(){
             std::abs(mDecoderSurfaceScale.x()-desiredScale.x())<0.000001&&
             std::abs(mDecoderSurfaceScale.y()-desiredScale.y())<0.000001&&
             QLineF(mDecoderSurfacePan,desiredPan).length()<0.000001;
-        if(!cropAlreadyPrepared&&!(nativeVulkanPresenter()&&mLastImageIsSource)){
+        if(!cropAlreadyPrepared&&!hasReusableSourceFrame()){
             mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
         }
     }
@@ -2852,7 +2921,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
            (!mouse&&!(QApplication::mouseButtons()&Qt::LeftButton))){
             mPanning=false;
             unsetCursor();
-            if(!(nativeVulkanPresenter()&&mLastImageIsSource)){
+            if(!hasReusableSourceFrame()){
                 mSurfaceUpdateTimer.setInterval(16);
                 mSurfaceUpdateTimer.start();
             }
@@ -2895,6 +2964,9 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         event->type()==QEvent::MouseButtonPress||
         event->type()==QEvent::MouseButtonRelease||
         event->type()==QEvent::MouseButtonDblClick)){
+        if(event->type()==QEvent::MouseMove||
+           event->type()==QEvent::MouseButtonPress)
+            revealOverlay();
         auto* mouse=static_cast<QMouseEvent*>(event);
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
         const QPointF global=mouse->globalPosition();
@@ -3011,7 +3083,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         }
         if(mouse&&event->type()==QEvent::MouseButtonRelease&&mPanning&&mouse->button()==Qt::LeftButton){
             mPanning=false;unsetCursor();
-            if(!(nativeVulkanPresenter()&&mLastImageIsSource)){
+            if(!hasReusableSourceFrame()){
                 mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
             }
             return true;
@@ -3337,7 +3409,7 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     // Keep the wheel accumulator aligned with the new fit geometry.
     if(mZoomPercent<=0.0&&mIndex>=0)
         mRequestedZoomPercent=fitScale()*100.0;
-    if(nativeVulkanPresenter()&&mLastImageIsSource){
+    if(hasReusableSourceFrame()){
         if(hasPresentedFrame())updateDisplayedImage();
         return;
     }

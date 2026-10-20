@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <array>
+#include <functional>
 #include "DNGImage.h"
 
 namespace motioncam {
@@ -154,6 +155,19 @@ public:
     // endian encoding are handled here.
     static bool encodeImage(std::vector<uint8_t>& dngTemplate,
                             const DecodedDNGImage& image);
+    // Fill a canonical, little-endian 16-bit image strip in place. The
+    // callback may write directly into the DNG's pixel storage.
+    static bool fillUncompressedImageStrip(
+        std::vector<uint8_t>& dngData,
+        const std::function<bool(uint16_t*, size_t)>& fill);
+    static bool bakeLogTexture(std::vector<uint8_t>& dngData,
+                               const VulkanGainBakeTextureSource& texture,
+                               LogTransformMode mode, uint32_t quantizationWhite,
+                               bool highQuality, uint32_t ditherSeed);
+    static bool bakeLogStripVulkan(std::vector<uint8_t>& dngData,
+                                   LogTransformMode mode,
+                                   uint32_t quantizationWhite,
+                                   bool highQuality, uint32_t ditherSeed);
     static bool decodePreview(std::vector<uint8_t> dngData,
                               const RenderSettings& settings,
                               PreviewFrame& frame,
