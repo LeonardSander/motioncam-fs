@@ -28,7 +28,9 @@ public:
     void drainGpuFrames();
 
 private:
+#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && QT_CONFIG(vulkan)
     std::unique_ptr<QVulkanInstance> mInstance;
+#endif
     GalleryVulkanSurface* mSurface = nullptr;
     QWidget* mContainer = nullptr;
 };

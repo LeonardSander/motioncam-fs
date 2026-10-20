@@ -691,6 +691,7 @@ if(BUILD_TESTING)
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
     target_include_directories(motioncam-finalize-interpolation-test PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}"
         ${bs_thread_pool_SOURCE_DIR}/include
         include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
     target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
@@ -706,7 +707,7 @@ if(BUILD_TESTING)
     endif()
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
         target_include_directories(motioncam-finalize-interpolation-test PRIVATE
-            "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
+            ${DIRECTLOG_VULKAN_INCLUDE_DIR})
         target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
             PkgConfig::DIRECTLOG_PLACEBO)
         target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
