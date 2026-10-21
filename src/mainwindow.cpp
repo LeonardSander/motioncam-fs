@@ -2632,7 +2632,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
             dialog = new FrameTimingDialog(
                 fileInfo.baseName(), *info->presentationTimestamps,
                 info->timingTimeBaseNum, info->timingTimeBaseDen, info->fps,
-                info->timingUsesCfrMapping, this);
+                info->timingUsesCfrMapping, info->frameRateInfo, this);
             mTimingDialogs.insert(mountId, dialog);
             connect(dialog, &QObject::destroyed, this, [this, mountId] {
                 mTimingDialogs.remove(mountId);
@@ -2640,7 +2640,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         } else {
             dialog->updateTiming(*info->presentationTimestamps,
                                  info->timingTimeBaseNum, info->timingTimeBaseDen,
-                                 info->fps, info->timingUsesCfrMapping);
+                                 info->fps, info->timingUsesCfrMapping,
+                                 info->frameRateInfo);
         }
         dialog->show();
         dialog->raise();
@@ -5889,7 +5890,8 @@ void MainWindow::updateFpsLabels() {
         if (!info || !info->presentationTimestamps) continue;
         it.value()->updateTiming(*info->presentationTimestamps,
                                  info->timingTimeBaseNum, info->timingTimeBaseDen,
-                                 info->fps, info->timingUsesCfrMapping);
+                                 info->fps, info->timingUsesCfrMapping,
+                                 info->frameRateInfo);
     }
 }
 

@@ -1,4 +1,5 @@
 #include "FrameTimingDialog.h"
+#include "VirtualFileSystemImpl.h"
 
 #include <QLabel>
 #include <QPainter>
@@ -215,6 +216,7 @@ FrameTimingDialog::FrameTimingDialog(const QString& clipName,
                                      const std::vector<std::int64_t>& pts,
                                      int timeBaseNum, int timeBaseDen,
                                      double targetFps, bool useCfrMapping,
+                                     const motioncam::FrameRateInfo& frameRateInfo,
                                      QWidget* parent)
     : QDialog(parent)
 {
@@ -229,17 +231,26 @@ FrameTimingDialog::FrameTimingDialog(const QString& clipName,
     mSummary = new QLabel(this);
     mSummary->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(mSummary);
-    updateTiming(pts, timeBaseNum, timeBaseDen, targetFps, useCfrMapping);
+    updateTiming(pts, timeBaseNum, timeBaseDen, targetFps, useCfrMapping, frameRateInfo);
 }
 
 void FrameTimingDialog::updateTiming(const std::vector<std::int64_t>& pts,
                                      int timeBaseNum, int timeBaseDen,
-                                     double targetFps, bool useCfrMapping)
+                                     double targetFps, bool useCfrMapping,
+                                     const motioncam::FrameRateInfo& frameRateInfo)
 {
     const double ticksPerSecond = timeBaseNum > 0
         ? static_cast<double>(timeBaseDen) / timeBaseNum : 0.0;
+    const QString maxFrameRate = frameRateInfo.maxFrameRate >= 1000.0f
+        ? tr("%1 ms").arg(1000.0 / frameRateInfo.maxFrameRate, 0, 'f', 1)
+        : tr("%1 fps").arg(frameRateInfo.maxFrameRate, 0, 'f', 2);
     mSummary->setText(
-        tr("Target: %1 fps   •   Time base: %2/%3 s (tbn %4)   •   Frames: %5   •   %6")
+        tr("Max: %1   •   Median: %2 fps   •   Average: %3 fps   •   Min: %4 fps<br>"
+           "Target: %5 fps   •   Time base: %6/%7 s (tbn %8)   •   Frames: %9   •   %10")
+            .arg(maxFrameRate)
+            .arg(frameRateInfo.medianFrameRate, 0, 'f', 2)
+            .arg(frameRateInfo.averageFrameRate, 0, 'f', 2)
+            .arg(frameRateInfo.minFrameRate, 0, 'f', 2)
             .arg(targetFps, 0, 'g', 8).arg(timeBaseNum).arg(timeBaseDen)
             .arg(ticksPerSecond, 0, 'g', 10).arg(pts.size())
             .arg(useCfrMapping ? tr("CFR nearest-frame mapping")
