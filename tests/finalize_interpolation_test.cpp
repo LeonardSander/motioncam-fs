@@ -275,6 +275,10 @@ int main() {
         15408.0f, black, 15408.0f, black,
         "Dynamic", "", true, false, 16) == "15408/64 -> 65535/256 16b");
     const std::array<float, 4> zeroBlack{0.0f, 0.0f, 0.0f, 0.0f};
+    const std::array<float, 4> pro18Black{132.0f, 132.0f, 132.0f, 132.0f};
+    assert(motioncam::vfs::getDisplayDataLevels(
+        1024.0f, pro18Black, 1024.0f, pro18Black,
+        "Dynamic", "", true, false) == "1024/132 -> 4095/256 12b");
     assert(motioncam::vfs::getDisplayDataLevels(
         32000.0f, zeroBlack, 32000.0f, zeroBlack,
         "Dynamic", "", false, false) == "32000/0 16b");
@@ -282,6 +286,20 @@ int main() {
         32000.0f, zeroBlack, 32000.0f, zeroBlack,
         "Dynamic", "Reduce by 2bit", false, false) ==
         "32000/0 -> 16383/0 14b log");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        2047.0f, zeroBlack, 2047.0f, zeroBlack,
+        "Dynamic", "", true, false) == "2047/0 -> 16383/0 14b");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        2047.0f, zeroBlack, 2047.0f, zeroBlack,
+        "Dynamic", "", false, false) == "2047/0 12b");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        46915.0f, zeroBlack, 46915.0f, zeroBlack,
+        "Dynamic", "", true, false, 16) ==
+        "46915/0 -> 65535/0 16b");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        65535.0f, zeroBlack, 65535.0f, zeroBlack,
+        "46915/0", "", true, false, 16) ==
+        "46915/0 -> 65535/0 16b");
     assert(motioncam::utils::evenBitsNeeded(32000) == 16);
     assert(motioncam::vfs::getDisplayDataType(false, 2) == "2x2");
     assert(motioncam::vfs::getDisplayDataType(false, 8) == "8x8");
@@ -320,6 +338,15 @@ int main() {
     motioncam::DNGFrameMetadata packedMetadata;
     assert(motioncam::DNGDecoder::getColorMetadata(uncompressedA, packedMetadata));
     assert(packedMetadata.inputBitDepth == 16);
+    auto oddWhiteDng = makeLogCfaDng(1023, 0, false);
+    assert(motioncam::DNGDecoder::overrideDataLevels(oddWhiteDng, "2047/0"));
+    motioncam::DNGFrameMetadata oddWhiteMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(oddWhiteDng, oddWhiteMetadata));
+    assert(oddWhiteMetadata.inputBitDepth == 12);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(oddWhiteDng));
+    motioncam::DecodedDNGImage oddWhiteImage;
+    assert(motioncam::DNGDecoder::decodeImage(oddWhiteDng, oddWhiteImage));
+    assert(oddWhiteImage.layout.bitsPerSample == 12);
     // Configured exposure compensation is a metadata-only operation. Gallery
     // applies BaselineExposure while color-transforming its decoded preview;
     // the DNG sample payload itself must remain byte-for-byte equivalent.
@@ -408,6 +435,18 @@ int main() {
         map.spacingV = map.spacingH = 1.0;
         map.data = {1.25f + static_cast<float>(phaseIndex) * 0.25f};
     }
+    auto pro18BakedDng = makeLogCfaDng(512, 0, false);
+    assert(motioncam::DNGDecoder::overrideDataLevels(pro18BakedDng, "1024/132"));
+    assert(motioncam::DNGDecoder::replaceGainMaps(
+        pro18BakedDng, 2, constantPhaseMaps));
+    assert(motioncam::DNGDecoder::bakeGainMaps(pro18BakedDng, false, false));
+    motioncam::DNGFrameMetadata pro18BakedMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(
+        pro18BakedDng, pro18BakedMetadata));
+    assert(pro18BakedMetadata.whiteLevel[0] == 4095.0f);
+    assert(pro18BakedMetadata.blackLevel[0] == 256.0f);
+    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(pro18BakedDng));
+    assert(tagValue(pro18BakedDng, 258).value == 12);
     assert(motioncam::DNGDecoder::replaceGainMaps(
         debugRgb, 2, constantPhaseMaps));
     auto debugRgbSettings = debugBadPixelSettings;
@@ -1086,6 +1125,22 @@ int main() {
         neutralGainDng, 2, {neutralMap}));
     assert(motioncam::DNGDecoder::replaceGainMaps(
         neutralGainDng, 3, {neutralMap}));
+    motioncam::RenderSettings neutralPreviewSettings;
+    neutralPreviewSettings.options = static_cast<motioncam::FileRenderOptions>(
+        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        motioncam::RENDER_OPT_LOG_TRANSFORM);
+    neutralPreviewSettings.logTransform = motioncam::LogTransformMode::KeepInput;
+    motioncam::PreviewFrame neutralPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        neutralGainDng, neutralPreviewSettings, neutralPreview, true));
+    assert(!neutralPreview.gainMapApplied);
+    auto noMapPreviewDng = neutralGainDng;
+    assert(motioncam::DNGDecoder::replaceGainMaps(noMapPreviewDng, 2, {}));
+    assert(motioncam::DNGDecoder::replaceGainMaps(noMapPreviewDng, 3, {}));
+    motioncam::PreviewFrame noMapPreview;
+    assert(motioncam::DNGDecoder::decodePreview(
+        noMapPreviewDng, neutralPreviewSettings, noMapPreview, true));
+    assert(neutralPreview.rgb == noMapPreview.rgb);
     motioncam::RenderSettings neutralSettings;
     motioncam::vfs::DngPixelPipelineOptions neutralPipeline;
     neutralPipeline.hasCfa = false;

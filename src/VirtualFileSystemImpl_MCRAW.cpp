@@ -142,19 +142,51 @@ motioncam::RenderSettings canonicalMcrawGenerationSettings(
     return canonical;
 }
 
-bool hasUsableShadingMap(const motioncam::CameraFrameMetadata& frame) {
+bool hasNonNeutralShadingMap(const motioncam::CameraFrameMetadata& frame) {
     if (frame.lensShadingMapWidth <= 0 || frame.lensShadingMapHeight <= 0 ||
         frame.lensShadingMap.size() < 4)
         return false;
     const size_t samples = static_cast<size_t>(frame.lensShadingMapWidth) *
                            static_cast<size_t>(frame.lensShadingMapHeight);
-    return std::all_of(frame.lensShadingMap.begin(), frame.lensShadingMap.begin() + 4,
-        [samples](const auto& plane) { return plane.size() >= samples; });
+    if (!std::all_of(frame.lensShadingMap.begin(), frame.lensShadingMap.begin() + 4,
+        [samples](const auto& plane) { return plane.size() >= samples; }))
+        return false;
+    return std::any_of(frame.lensShadingMap.begin(), frame.lensShadingMap.begin() + 4,
+        [samples](const auto& plane) {
+            return std::any_of(plane.begin(), plane.begin() + samples,
+                [](float gain) { return gain != 1.0f; });
+        });
+}
+
+bool hasNonNeutralGainMaps(const std::vector<motioncam::GainMap>& maps) {
+    return std::any_of(maps.begin(), maps.end(), [](const auto& map) {
+        return std::any_of(map.data.begin(), map.data.end(),
+            [](float gain) { return gain != 1.0f; });
+    });
+}
+
+bool hasExternalGainToBake(const motioncam::vfs::ManualVignetteSidecars& manual,
+                           const nlohmann::json& sidecar, size_t frameIndex) {
+    if (hasNonNeutralGainMaps(motioncam::vfs::loadSidecarGainMaps(
+            sidecar, frameIndex, "gainMaps")) ||
+        hasNonNeutralGainMaps(motioncam::vfs::loadSidecarGainMaps(
+            sidecar, frameIndex, "deferredGainMaps")))
+        return true;
+    if (manual.useDcpGainmap && manual.dcpSpatialGainMap &&
+        hasNonNeutralGainMaps({*manual.dcpSpatialGainMap}))
+        return true;
+    return std::any_of(manual.candidates.begin(), manual.candidates.end(),
+        [](const auto& candidate) {
+            return candidate.whiteImage ||
+                hasNonNeutralGainMaps(candidate.image.opcodeList2) ||
+                hasNonNeutralGainMaps(candidate.image.opcodeList3);
+        });
 }
 
 void disableUnavailableVignetteBake(motioncam::RenderSettings& settings,
-                                    const motioncam::CameraFrameMetadata& frame) {
-    if (hasUsableShadingMap(frame)) return;
+                                    const motioncam::CameraFrameMetadata& frame,
+                                    bool externalGain) {
+    if (hasNonNeutralShadingMap(frame) || externalGain) return;
     settings.options = static_cast<motioncam::FileRenderOptions>(
         settings.options & ~(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
                              motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
@@ -441,7 +473,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
         vfs::loadSidecarGainMaps(mSidecarMetadata, 0, "gainMaps"),
         cfaColorsFromPhase(effectiveCfaArrangement(
             mSettings, mCalibration, cameraConfig.sensorArrangement)));
-    disableUnavailableVignetteBake(mSettings, cameraFrameMetadata);
+    disableUnavailableVignetteBake(mSettings, cameraFrameMetadata,
+        hasExternalGainToBake(mManualVignetteSidecars, mSidecarMetadata, 0));
 
     // Match DNG-sequence sizing by accounting for the metadata that will be
     // serialized alongside the pixels. JSON sidecars may store compressed gain
@@ -758,7 +791,9 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             sidecarMaps,
             cfaColorsFromPhase(effectiveCfaArrangement(
                 frameSettings, mCalibration, cameraConfig.sensorArrangement)));
-        disableUnavailableVignetteBake(frameSettings, frameMetadata);
+        disableUnavailableVignetteBake(frameSettings, frameMetadata,
+            hasExternalGainToBake(mManualVignetteSidecars, mSidecarMetadata,
+                                  frameIt->second));
         // The native adapter performs CFA-only bad-pixel treatment and emits
         // an otherwise canonical, uncompressed CFA DNG.
         // All source-independent pixel operations run below through the same
@@ -978,7 +1013,9 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
             cfaColorsFromPhase(effectiveCfaArrangement(
                 mSettings, mCalibration, cameraConfig.sensorArrangement)));
         auto previewSettings = mSettings;
-        disableUnavailableVignetteBake(previewSettings, frameMetadata);
+        disableUnavailableVignetteBake(previewSettings, frameMetadata,
+            hasExternalGainToBake(mManualVignetteSidecars, mSidecarMetadata,
+                                  frameIt->second));
         std::optional<float> exposureOverride;
         if (mSettings.options & RENDER_OPT_SMOOTH_EXPOSURE)
             exposureOverride = mSmoothedExposureOffsets.at(timestamp);

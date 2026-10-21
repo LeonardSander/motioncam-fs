@@ -109,9 +109,16 @@ inline LinearGainBakeLevels planLinearGainBake(
     LinearGainBakeLevels result;
     result.sourceWhite = sourceWhite;
     result.sourceBlack = sourceBlack;
+    // Samples below the smallest phase black level do not carry image signal.
+    // Size the expanded range from the largest usable white-to-black span.
+    const double usableRange = std::max(1.0, sourceWhite -
+        *std::min_element(sourceBlack.begin(), sourceBlack.end()));
     while (result.sourceBits < 16 &&
-           (static_cast<double>((uint32_t{1} << result.sourceBits) - 1) < sourceWhite))
+           (static_cast<double>((uint32_t{1} << result.sourceBits) - 1) < usableRange))
         ++result.sourceBits;
+    const uint32_t nominalSourceBits = result.sourceBits;
+    if (result.sourceBits & 1u)
+        result.sourceBits = std::min<uint32_t>(16, result.sourceBits + 1u);
     result.destinationBits = std::min<uint32_t>(
         16, result.sourceBits + (normalizeGainMaps ? 4u : 2u));
     result.destinationWhite = static_cast<double>(
@@ -119,7 +126,7 @@ inline LinearGainBakeLevels planLinearGainBake(
     // Baking subtracts each source phase's black level before scaling. The
     // encoded offset can therefore be common to every output phase.
     const double scale = std::ldexp(
-        1.0, static_cast<int>(result.destinationBits - result.sourceBits));
+        1.0, static_cast<int>(result.destinationBits - nominalSourceBits));
     double scaledBlack = 0.0;
     for (double black : sourceBlack) scaledBlack += black * scale / sourceBlack.size();
     double standardBlack = 0.0;

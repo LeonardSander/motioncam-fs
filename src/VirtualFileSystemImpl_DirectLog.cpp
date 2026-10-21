@@ -1926,7 +1926,13 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
             std::to_string((1 << outputBits) - 1) + "/0 " +
             std::to_string(outputBits) + "b log";
     } else {
-        info.levelsInfo += " " + std::to_string(inputBits) + "b";
+        info.levelsInfo = vfs::getDisplayDataLevels(
+            displayLevels.white, displayLevels.black,
+            displayLevels.white, displayLevels.black,
+            mConfig.levels, "",
+            mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
+            mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+            static_cast<uint32_t>(inputBits));
     }
     
     // Calculate runtime from video duration

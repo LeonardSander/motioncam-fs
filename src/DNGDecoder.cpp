@@ -2828,6 +2828,8 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
     if (reportedWhiteLevelMax) includeDepth(bitsForMaximum(reportedWhiteLevelMax));
     includeDepth(packedBitDepth);
     if (hasLinearization) includeDepth(bitsForMaximum(linearizationInputMax));
+    if (metadata.inputBitDepth & 1u)
+        metadata.inputBitDepth = std::min(16u, metadata.inputBitDepth + 1u);
     std::vector<std::pair<size_t, size_t>> imageRanges;
     for (const auto& offsetEntry : entries) {
         if (offsetEntry.tag != TIFF_TAG_STRIP_OFFSETS &&
@@ -5045,8 +5047,8 @@ bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
     if (const auto linearization = find(TIFF_TAG_LINEARIZATION_TABLE);
         linearization && linearization->count > 1)
         white = linearization->count - 1;
-    uint32_t packedBits = 1;
-    while (packedBits < 16 && ((uint32_t{1} << packedBits) - 1) < white) ++packedBits;
+    const uint32_t packedBits = utils::evenBitsNeeded(
+        static_cast<uint16_t>(std::min<uint32_t>(white, 65535)));
     if (sourceBits != 16 || packedBits >= 16) return true;
     const uint32_t width = scalar(*widthE), height = scalar(*heightE), channels = scalar(*sppE);
     const uint32_t oldOffset = scalar(*offsetsE), oldBytes = scalar(*countsE);
@@ -5979,6 +5981,25 @@ inline float samplePixelGain(const GainMap& map,
         });
 }
 
+bool previewHasGainToBake(const DecodedDNGImage& image,
+                          const RenderSettings& settings) {
+    if (!(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) return false;
+    const auto nonIdentity = [](const GainMap& map) {
+        return map.data.empty() ||
+            std::any_of(map.data.begin(), map.data.end(),
+                        [](float gain) { return gain != 1.0f; });
+    };
+    const bool colorOnly = settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    if (colorOnly) {
+        auto maps = image.opcodeList2;
+        return separateGainMapLuminance(maps).valid &&
+            std::any_of(maps.begin(), maps.end(), nonIdentity);
+    }
+    return std::any_of(image.opcodeList2.begin(), image.opcodeList2.end(), nonIdentity) ||
+        (image.opcodeList3.size() == 1 && image.opcodeList3.front().channels == 1 &&
+         nonIdentity(image.opcodeList3.front()));
+}
+
 bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                                 const RenderSettings& settings,
                                 uint32_t sourceWidth = 0,
@@ -5989,12 +6010,11 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                                 PreviewFrame* deferredFrame = nullptr,
                                 bool preferVulkan = true) {
     if (gainMapApplied) *gainMapApplied = false;
-    if (!(settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) return true;
+    if (!previewHasGainToBake(image, settings)) return true;
     std::vector<GainMap> maps = image.opcodeList2;
     if (!(settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) &&
         image.opcodeList3.size() == 1 && image.opcodeList3.front().channels == 1)
         maps.push_back(image.opcodeList3.front());
-    if (maps.empty()) return true;
     if (settings.options & RENDER_OPT_VIGNETTE_ONLY_COLOR) {
         auto separation = separateGainMapLuminance(maps);
         // A scalar/luminance-only map has no color component. Treat reduction
@@ -6320,14 +6340,15 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                                bool retainSourceSamples) {
     const uint32_t storedInputBits = image.storedBitsPerSample
         ? image.storedBitsPerSample : image.layout.bitsPerSample;
+    const uint32_t sourceDisplayBits = image.metadata.inputBitDepth
+        ? std::min(image.metadata.inputBitDepth, storedInputBits)
+        : storedInputBits;
     frame.clipping.clear();
     frame.galleryCfa.clear();
     frame.galleryCfaBytes.clear();
     frame.galleryCfaGain.reset();
     frame.galleryCfaRecoverCpu = {};
-    frame.displayBitDepth = image.metadata.inputBitDepth
-        ? std::min(image.metadata.inputBitDepth, storedInputBits)
-        : storedInputBits;
+    frame.displayBitDepth = std::min(16u, (sourceDisplayBits + 1u) & ~1u);
     frame.rawSamples.reset();
     frame.rawWidth = 0;
     frame.rawHeight = 0;
@@ -6462,12 +6483,12 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             std::chrono::duration<double, std::milli>(topologyFinished - proxyStarted).count(),
             std::chrono::duration<double, std::milli>(proxyFinished - topologyFinished).count());
     }
+    const bool previewGainBake = previewHasGainToBake(image, settings);
     const bool encodePreviewLog =
         applyPreviewScale && (settings.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
         settings.logTransform != LogTransformMode::Disabled &&
-        (settings.logTransform != LogTransformMode::KeepInput ||
-         (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION));
+        (settings.logTransform != LogTransformMode::KeepInput || previewGainBake);
     const bool cfaLog = encodePreviewLog &&
         image.layout.pixels == DNGPixelLayout::CFA;
     const uint32_t cfaLogBits = cfaLog ? logOutputBits(
@@ -6481,8 +6502,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     const bool deferGalleryGain = settings.streamingPreview &&
         !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
         vulkanGalleryPreviewReady() &&
-        (settings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-        (!image.opcodeList2.empty() || !image.opcodeList3.empty()) &&
+        previewGainBake &&
         !frame.clippingRequested && !hasCrop &&
         image.layout.pixels == DNGPixelLayout::CFA &&
         image.layout.cfaRepeatSize == 2 && gainMapSourceScale == 1 &&
@@ -6830,9 +6850,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     uint16_t encodedWhite = 65535;
     if (!postDemosaicLog) {
         if (!cfaLog)
-            frame.displayBitDepth = image.metadata.inputBitDepth
-                ? std::min(image.metadata.inputBitDepth, storedInputBits)
-                : storedInputBits;
+            frame.displayBitDepth = std::min(16u, (sourceDisplayBits + 1u) & ~1u);
         // Normal gallery output can be normalized directly into the byte
         // buffer. Avoid a second full-size uint16 RGB allocation and the
         // subsequent copy (155 MiB each for a 27 MP Quad Bayer preview).

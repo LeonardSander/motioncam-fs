@@ -27,6 +27,19 @@ int main() {
             bake.destinationBlack[phase], bake.destinationWhite) == 256);
     assert((planLinearGainBake(1023.0, {0.0, 0.0, 0.0, 0.0}, false).destinationBlack ==
         std::array<double, 4>{0.0, 0.0, 0.0, 0.0}));
+    const auto oddBake = planLinearGainBake(2047.0, {0.0, 0.0, 0.0, 0.0}, false);
+    assert(oddBake.sourceBits == 12 && oddBake.destinationBits == 14);
+    const auto oddBlackBake = planLinearGainBake(
+        2047.0, {132.0, 132.0, 132.0, 132.0}, false);
+    assert((oddBlackBake.destinationBlack ==
+        std::array<double, 4>{1024.0, 1024.0, 1024.0, 1024.0}));
+    const auto pro18Bake = planLinearGainBake(
+        1024.0, {132.0, 132.0, 132.0, 132.0}, false);
+    assert(pro18Bake.sourceBits == 10 && pro18Bake.destinationBits == 12);
+    assert(pro18Bake.destinationWhite == 4095.0);
+    assert((pro18Bake.destinationBlack ==
+        std::array<double, 4>{256.0, 256.0, 256.0, 256.0}));
+    assert(planLinearGainBake(1024.0, {0.0, 0.0, 0.0, 0.0}, false).destinationBits == 14);
 
     const auto levelsCalibration = CalibrationData::parse(std::string(R"({"dataLevels":"full"})"));
     assert(levelsCalibration.has_value());
