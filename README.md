@@ -194,6 +194,17 @@ the midpoint, then reads the next frame for each clip. Its
 decode time separately. Mounted reads run on a worker thread so the UI event
 loop remains available to service mounts. Each invocation runs only one mode;
 mounted mode also disables thumbnail generation.
+Set `MOTIONCAM_GALLERY_PERF_MOUNTED_SEQUENTIAL_COUNT=5` to sample a fixed
+number of consecutive frames per clip. Set
+`MOTIONCAM_GALLERY_PERF_COMPRESS_JXL=1` to pass each mounted DNG through the
+JPEG XL compression stage of `finalizeDng` using the clip's configured distance
+before preview decoding. `jxl_encode_sample` records compression time and DNG
+sizes; `mounted_sequence_sample` then records decode time for that output.
+This measures per-frame finalization compression without writing a finalized
+clip to disk.
+Set `MOTIONCAM_GALLERY_PERF_JXL_WORKERS=N` (0–16) to compare libjxl worker
+counts during profiling. The normal caps are eight workers for decode and
+three for encode, limited by the available CPU threads.
 Set `MOTIONCAM_GALLERY_PERF_PARALLEL_READS=1` in mounted mode to add four
 simultaneous cold reads per clip; the `mounted_parallel_sample` events expose
 queueing that sequential reads cannot measure.

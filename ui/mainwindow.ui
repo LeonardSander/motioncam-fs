@@ -577,7 +577,7 @@
              <item><property name="text"><string>JPEG 92 Lossless</string></property></item>
              <item><property name="text"><string>JPEG DCT 12b</string></property></item>
              <item><property name="text"><string>JPEG XL Lossless</string></property></item>
-             <item><property name="text"><string>JPEG XL DCT 0.3</string></property></item>
+             <item><property name="text"><string>JPEG XL DCT 0.1</string></property></item>
              <item><property name="text"><string>HEVC 420 slow 14</string></property></item>
              <item><property name="text"><string>AV1 420 3 7</string></property></item>
              <item><property name="text"><string>AV1 420 2 12 synth noise</string></property></item>

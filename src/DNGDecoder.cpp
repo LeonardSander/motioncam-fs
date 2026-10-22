@@ -6,6 +6,8 @@
 #include "VulkanGainBake.h"
 #include "VulkanGalleryPreview.h"
 #include "CpuWorkerBudget.h"
+#include "JxlParallelRunner.h"
+#include "DngCfaInterleave.h"
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -379,6 +381,8 @@ namespace {
     constexpr uint16_t TIFF_COMPRESSION_JPEG = 7;
     constexpr uint16_t TIFF_COMPRESSION_LOSSY_JPEG = 34892;
     constexpr uint16_t TIFF_COMPRESSION_JPEG_XL = 52546;
+    constexpr uint16_t TIFF_TAG_ROW_INTERLEAVE_FACTOR = 50975;
+    constexpr uint16_t TIFF_TAG_COLUMN_INTERLEAVE_FACTOR = 52547;
 
     struct JpegErrorManager {
         jpeg_error_mgr base;
@@ -484,16 +488,16 @@ namespace {
         return true;
     }
 
-    bool decodeLosslessJPEG(const uint8_t* encoded, size_t encodedSize,
-                            uint32_t width, uint32_t height, uint32_t channels,
-                            std::vector<uint16_t>& pixels) {
-        if (!encoded || !encodedSize || !width || !height || !channels || channels > 4)
+    bool decodeLosslessJPEGTo(const uint8_t* encoded, size_t encodedSize,
+                              uint32_t width, uint32_t height, uint32_t channels,
+                              uint16_t* pixels, size_t rowStride) {
+        if (!encoded || !encodedSize || !width || !height || !channels || channels > 4 ||
+            !pixels || rowStride < static_cast<size_t>(width) * channels)
             return false;
         jpeg_decompress_struct codec{};
         JpegErrorManager error{};
         std::vector<uint8_t> row8;
         std::vector<J12SAMPLE> row12;
-        std::vector<J16SAMPLE> row16;
         codec.err = jpeg_std_error(&error.base);
         error.base.error_exit = jpegErrorExit;
         if (setjmp(error.jump)) { jpeg_destroy_decompress(&codec); return false; }
@@ -513,36 +517,102 @@ namespace {
             return false;
         }
         const size_t rowSamples = static_cast<size_t>(width) * channels;
-        pixels.resize(rowSamples * height);
         const int precision = codec.data_precision;
         if (precision <= 8) row8.resize(rowSamples);
         else if (precision <= 12) row12.resize(rowSamples);
-        else row16.resize(rowSamples);
         while (codec.output_scanline < codec.output_height) {
-            const size_t output = static_cast<size_t>(codec.output_scanline) * rowSamples;
+            uint16_t* output = pixels + static_cast<size_t>(codec.output_scanline) * rowStride;
             if (precision <= 8) {
                 JSAMPROW rows[]{row8.data()};
                 if (jpeg_read_scanlines(&codec, rows, 1) != 1) {
                     jpeg_destroy_decompress(&codec); return false;
                 }
-                std::copy(row8.begin(), row8.end(), pixels.begin() + output);
+                std::copy(row8.begin(), row8.end(), output);
             } else if (precision <= 12) {
                 J12SAMPROW rows[]{row12.data()};
                 if (jpeg12_read_scanlines(&codec, rows, 1) != 1) {
                     jpeg_destroy_decompress(&codec); return false;
                 }
-                std::copy(row12.begin(), row12.end(), pixels.begin() + output);
+                std::copy(row12.begin(), row12.end(), output);
             } else {
-                J16SAMPROW rows[]{row16.data()};
+                J16SAMPROW rows[]{reinterpret_cast<J16SAMPROW>(output)};
                 if (jpeg16_read_scanlines(&codec, rows, 1) != 1) {
                     jpeg_destroy_decompress(&codec); return false;
                 }
-                std::copy(row16.begin(), row16.end(), pixels.begin() + output);
             }
         }
         const bool ok = jpeg_finish_decompress(&codec) == TRUE;
         jpeg_destroy_decompress(&codec);
         return ok;
+    }
+
+    bool decodeLosslessJPEG(const uint8_t* encoded, size_t encodedSize,
+                            uint32_t width, uint32_t height, uint32_t channels,
+                            std::vector<uint16_t>& pixels) {
+        if (!width || !height || !channels ||
+            static_cast<size_t>(width) >
+                std::numeric_limits<size_t>::max() / height / channels) return false;
+        pixels.resize(static_cast<size_t>(width) * height * channels);
+        return decodeLosslessJPEGTo(encoded, encodedSize, width, height, channels,
+                                     pixels.data(), static_cast<size_t>(width) * channels);
+    }
+
+    bool encodeLosslessJPEGTurbo(const uint16_t* pixels, uint32_t width,
+                                 uint32_t height, uint32_t channels,
+                                 uint32_t bits, int predictor,
+                                 unsigned char** output,
+                                 unsigned long* outputSize) {
+        if (!pixels || !output || !outputSize || !width || !height ||
+            width > JPEG_MAX_DIMENSION || height > JPEG_MAX_DIMENSION ||
+            (channels != 1 && channels != 3) || bits < 9 || bits > 16)
+            return false;
+        *output = nullptr;
+        *outputSize = 0;
+        jpeg_compress_struct codec{};
+        JpegErrorManager error{};
+        codec.err = jpeg_std_error(&error.base);
+        error.base.error_exit = jpegErrorExit;
+        if (setjmp(error.jump)) {
+            jpeg_destroy_compress(&codec);
+            free(*output);
+            *output = nullptr;
+            return false;
+        }
+        jpeg_create_compress(&codec);
+        jpeg_mem_dest(&codec, output, outputSize);
+        codec.image_width = width;
+        codec.image_height = height;
+        codec.input_components = channels;
+        codec.in_color_space = channels == 1 ? JCS_GRAYSCALE : JCS_UNKNOWN;
+        codec.data_precision = bits;
+        jpeg_set_defaults(&codec);
+        codec.optimize_coding = TRUE;
+        jpeg_enable_lossless(&codec, predictor, 0);
+        jpeg_start_compress(&codec, TRUE);
+        const size_t rowSamples = static_cast<size_t>(width) * channels;
+        while (codec.next_scanline < codec.image_height) {
+            const uint16_t* source = pixels +
+                static_cast<size_t>(codec.next_scanline) * rowSamples;
+            JDIMENSION written = 0;
+            if (bits <= 12) {
+                J12SAMPROW row = const_cast<J12SAMPROW>(
+                    reinterpret_cast<const J12SAMPLE*>(source));
+                written = jpeg12_write_scanlines(&codec, &row, 1);
+            } else {
+                J16SAMPROW row = const_cast<J16SAMPROW>(
+                    reinterpret_cast<const J16SAMPLE*>(source));
+                written = jpeg16_write_scanlines(&codec, &row, 1);
+            }
+            if (written != 1) {
+                jpeg_destroy_compress(&codec);
+                free(*output);
+                *output = nullptr;
+                return false;
+            }
+        }
+        jpeg_finish_compress(&codec);
+        jpeg_destroy_compress(&codec);
+        return *output && *outputSize > 0;
     }
 
     bool encodeDctJPEG12(const std::vector<uint16_t>& pixels, uint32_t width,
@@ -594,20 +664,46 @@ namespace {
         return !encoded.empty();
     }
 
-    bool decodeJPEGXL(const uint8_t* encoded, size_t encodedSize,
-                      uint32_t width, uint32_t height, uint32_t components,
-                      std::vector<uint16_t>& pixels) {
-        if (!encoded || !encodedSize || !width || !height ||
-            (components != 1 && components != 3)) return false;
+    bool decodeJPEGXLTo(const uint8_t* encoded, size_t encodedSize,
+                        uint32_t width, uint32_t height, uint32_t components,
+                        uint16_t* pixels, size_t rowStride,
+                        uint32_t rowFactor = 1, uint32_t columnFactor = 1) {
+        if (!encoded || !encodedSize || !pixels || !width || !height ||
+            (components != 1 && components != 3) || !rowFactor || !columnFactor ||
+            rowFactor > height || columnFactor > width ||
+            rowStride < static_cast<size_t>(width) * components) return false;
         const size_t sampleCount = static_cast<size_t>(width) * height * components;
-        pixels.resize(sampleCount);
+        struct InterleavedOutput {
+            size_t rowStride;
+            uint32_t components;
+            uint16_t* pixels;
+            bool interleaved;
+            std::vector<uint32_t> rows, columns;
+        } output{rowStride, components, pixels,
+                 rowFactor != 1 || columnFactor != 1, {}, {}};
+        const bool scatter = rowFactor != 1 || columnFactor != 1 ||
+                             rowStride != static_cast<size_t>(width) * components;
+        if (output.interleaved) {
+            output.rows.resize(height);
+            output.columns.resize(width);
+            uint32_t index = 0;
+            for (uint32_t phase = 0; phase < rowFactor; ++phase)
+                for (uint32_t y = phase; y < height; y += rowFactor)
+                    output.rows[index++] = y;
+            index = 0;
+            for (uint32_t phase = 0; phase < columnFactor; ++phase)
+                for (uint32_t x = phase; x < width; x += columnFactor)
+                    output.columns[index++] = x;
+        }
         JxlDecoder* decoder = JxlDecoderCreate(nullptr);
         if (!decoder) return false;
+        JxlParallelRunner runner(sampleCount, 8);
         auto finish = [&](bool result) {
             JxlDecoderDestroy(decoder);
             return result;
         };
-        if (JxlDecoderSubscribeEvents(decoder, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS ||
+        if (!runner.attach(decoder) ||
+            JxlDecoderSubscribeEvents(decoder, JXL_DEC_BASIC_INFO | JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS ||
             JxlDecoderSetInput(decoder, encoded, encodedSize) != JXL_DEC_SUCCESS)
             return finish(false);
         JxlDecoderCloseInput(decoder);
@@ -624,11 +720,35 @@ namespace {
                     return finish(false);
                 basicInfoSeen = true;
             } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
-                size_t required = 0;
-                if (JxlDecoderImageOutBufferSize(decoder, &format, &required) != JXL_DEC_SUCCESS ||
-                    required != pixels.size() * sizeof(uint16_t) ||
-                    JxlDecoderSetImageOutBuffer(decoder, &format, pixels.data(), required) != JXL_DEC_SUCCESS)
-                    return finish(false);
+                if (scatter) {
+                    const auto writePixels = [](void* opaque, size_t x, size_t y,
+                                                size_t count, const void* source) {
+                        auto& out = *static_cast<InterleavedOutput*>(opaque);
+                        const auto* samples = static_cast<const uint16_t*>(source);
+                        if (!out.interleaved) {
+                            std::copy_n(samples, count * out.components,
+                                        out.pixels + y * out.rowStride +
+                                        x * out.components);
+                            return;
+                        }
+                        const size_t targetRow = static_cast<size_t>(out.rows[y]) * out.rowStride;
+                        for (size_t i = 0; i < count; ++i) {
+                            uint16_t* target = out.pixels +
+                                targetRow + out.columns[x + i] * out.components;
+                            for (uint32_t c = 0; c < out.components; ++c)
+                                target[c] = samples[i * out.components + c];
+                        }
+                    };
+                    if (JxlDecoderSetImageOutCallback(decoder, &format,
+                                                      writePixels, &output) != JXL_DEC_SUCCESS)
+                        return finish(false);
+                } else {
+                    size_t required = 0;
+                    if (JxlDecoderImageOutBufferSize(decoder, &format, &required) != JXL_DEC_SUCCESS ||
+                        required != sampleCount * sizeof(uint16_t) ||
+                        JxlDecoderSetImageOutBuffer(decoder, &format, pixels, required) != JXL_DEC_SUCCESS)
+                        return finish(false);
+                }
             } else if (status == JXL_DEC_FULL_IMAGE) {
                 imageSeen = true;
             } else if (status == JXL_DEC_SUCCESS) {
@@ -639,18 +759,36 @@ namespace {
         }
     }
 
-    bool encodeJPEGXL(const std::vector<uint16_t>& pixels, uint32_t width,
+    bool decodeJPEGXL(const uint8_t* encoded, size_t encodedSize,
+                      uint32_t width, uint32_t height, uint32_t components,
+                      std::vector<uint16_t>& pixels,
+                      uint32_t rowFactor = 1, uint32_t columnFactor = 1) {
+        if (!width || !height || (components != 1 && components != 3) ||
+            static_cast<size_t>(width) >
+                std::numeric_limits<size_t>::max() / height / components) return false;
+        pixels.resize(static_cast<size_t>(width) * height * components);
+        return decodeJPEGXLTo(encoded, encodedSize, width, height, components,
+                              pixels.data(), static_cast<size_t>(width) * components,
+                              rowFactor, columnFactor);
+    }
+
+    bool encodeJPEGXL(const uint8_t* pixels, size_t pixelBytes, uint32_t width,
                       uint32_t height, uint32_t components, float distance,
-                      std::vector<uint8_t>& output) {
+                      std::vector<uint8_t>& output, size_t outputOffset,
+                      size_t& encodedBytes) {
         if (!width || !height || (components != 1 && components != 3) || distance < 0.0f ||
-            pixels.size() != static_cast<size_t>(width) * height * components) return false;
+            !pixels || pixelBytes != static_cast<size_t>(width) * height * components * sizeof(uint16_t))
+            return false;
         JxlEncoder* encoder = JxlEncoderCreate(nullptr);
         if (!encoder) return false;
+        JxlParallelRunner runner(pixelBytes / sizeof(uint16_t));
         auto finish = [&](bool result) { JxlEncoderDestroy(encoder); return result; };
+        if (!runner.attach(encoder)) return finish(false);
         JxlBasicInfo info;
         JxlEncoderInitBasicInfo(&info);
         info.xsize = width; info.ysize = height; info.bits_per_sample = 16;
-        info.num_color_channels = components; info.uses_original_profile = JXL_TRUE;
+        info.num_color_channels = components;
+        info.uses_original_profile = distance == 0.0f ? JXL_TRUE : JXL_FALSE;
         JxlColorEncoding color;
         JxlColorEncodingSetToLinearSRGB(&color, components == 1 ? JXL_TRUE : JXL_FALSE);
         if (JxlEncoderSetBasicInfo(encoder, &info) != JXL_ENC_SUCCESS ||
@@ -670,21 +808,32 @@ namespace {
             (distance > 0.0f && JxlEncoderSetFrameDistance(frame, distance) != JXL_ENC_SUCCESS))
             return finish(false);
         const JxlPixelFormat format = {components, JXL_TYPE_UINT16, JXL_NATIVE_ENDIAN, 0};
-        if (JxlEncoderAddImageFrame(frame, &format, pixels.data(),
-                pixels.size() * sizeof(uint16_t)) != JXL_ENC_SUCCESS) return finish(false);
+        if (JxlEncoderAddImageFrame(frame, &format, pixels,
+                pixelBytes) != JXL_ENC_SUCCESS) return finish(false);
         JxlEncoderCloseInput(encoder);
-        output.resize(std::max<size_t>(4096, pixels.size()));
-        uint8_t* next = output.data(); size_t available = output.size();
+        // Lossy CFA frames are typically far smaller than half the uint16
+        // input. Avoid clearing a multi-megabyte buffer for every frame;
+        // the loop below still grows it for less compressible images.
+        const size_t initialCapacity = std::max<size_t>(4096,
+            distance > 0.0f ? pixelBytes / 16 : pixelBytes / 2);
+        if (outputOffset > std::numeric_limits<size_t>::max() - initialCapacity)
+            return finish(false);
+        output.resize(outputOffset + initialCapacity);
+        uint8_t* next = output.data() + outputOffset;
+        size_t available = initialCapacity;
         for (;;) {
             const auto status = JxlEncoderProcessOutput(encoder, &next, &available);
             if (status == JXL_ENC_SUCCESS) break;
             if (status != JXL_ENC_NEED_MORE_OUTPUT) return finish(false);
             const size_t used = static_cast<size_t>(next - output.data());
+            if (output.size() > std::numeric_limits<size_t>::max() / 2)
+                return finish(false);
             output.resize(output.size() * 2); next = output.data() + used;
             available = output.size() - used;
         }
-        output.resize(static_cast<size_t>(next - output.data()));
-        return finish(!output.empty());
+        encodedBytes = static_cast<size_t>(next - (output.data() + outputOffset));
+        output.resize(outputOffset + encodedBytes);
+        return finish(encodedBytes != 0);
     }
 
     uint16_t read16(const uint8_t* p, bool little) {
@@ -926,20 +1075,21 @@ namespace {
     }
 
     bool replaceTiffStrip(std::vector<uint8_t>& data, uint32_t stripOffset,
-                          uint32_t stripBytes, const std::vector<uint8_t>& replacement,
+                          uint32_t stripBytes, const uint8_t* replacement,
+                          size_t replacementSize,
                           bool little, std::vector<uint8_t>* preparedOutput = nullptr,
                           size_t preparedStripBytes = 0,
                           bool stripAlreadyReplaced = false) {
         const size_t oldEnd = static_cast<size_t>(stripOffset) + stripBytes;
         if (stripOffset > data.size() || oldEnd > data.size()) return false;
         const size_t replacementBytes = preparedOutput || stripAlreadyReplaced
-            ? preparedStripBytes : replacement.size();
+            ? preparedStripBytes : replacementSize;
         if (preparedOutput &&
             preparedOutput->size() != data.size() - stripBytes + replacementBytes)
             return false;
         if (replacementBytes == stripBytes && !preparedOutput) {
             if (stripBytes && !stripAlreadyReplaced)
-                std::memcpy(data.data() + stripOffset, replacement.data(), stripBytes);
+                std::memcpy(data.data() + stripOffset, replacement, stripBytes);
             return true;
         }
         const auto entries = findTiffEntries(data, little);
@@ -1015,7 +1165,7 @@ namespace {
             // below use the same offset delta as the rebuilding path.
             if (replacementBytes && !stripAlreadyReplaced)
                 std::memcpy(data.data() + stripOffset,
-                            replacement.data(), replacementBytes);
+                            replacement, replacementBytes);
             const size_t tailBytes = data.size() - oldEnd;
             if (tailBytes)
                 std::memmove(data.data() + stripOffset + replacementBytes,
@@ -1025,7 +1175,9 @@ namespace {
             std::vector<uint8_t> rebuilt;
             rebuilt.reserve(data.size() - stripBytes + replacementBytes);
             rebuilt.insert(rebuilt.end(), data.begin(), data.begin() + stripOffset);
-            rebuilt.insert(rebuilt.end(), replacement.begin(), replacement.end());
+            if (replacementBytes)
+                rebuilt.insert(rebuilt.end(), replacement,
+                               replacement + replacementBytes);
             rebuilt.insert(rebuilt.end(), data.begin() + oldEnd, data.end());
             data = std::move(rebuilt);
         }
@@ -1073,6 +1225,17 @@ namespace {
                     static_cast<size_t>(count) * 12, relocated(oldNext), little);
         }
         return true;
+    }
+
+    bool replaceTiffStrip(std::vector<uint8_t>& data, uint32_t stripOffset,
+                          uint32_t stripBytes, const std::vector<uint8_t>& replacement,
+                          bool little, std::vector<uint8_t>* preparedOutput = nullptr,
+                          size_t preparedStripBytes = 0,
+                          bool stripAlreadyReplaced = false) {
+        return replaceTiffStrip(data, stripOffset, stripBytes,
+                                replacement.data(), replacement.size(), little,
+                                preparedOutput, preparedStripBytes,
+                                stripAlreadyReplaced);
     }
 
     bool removeTiffRanges(std::vector<uint8_t>& data,
@@ -4165,10 +4328,16 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
     const uint32_t bits = scalar(*bitsE), channels = scalar(*sppE);
     const auto planarE = find(TIFF_TAG_PLANAR_CONFIGURATION);
     const uint32_t planar = planarE ? scalar(*planarE) : 1;
+    const auto rowInterleaveE = find(TIFF_TAG_ROW_INTERLEAVE_FACTOR);
+    const auto columnInterleaveE = find(TIFF_TAG_COLUMN_INTERLEAVE_FACTOR);
+    const uint32_t rowFactor = rowInterleaveE ? scalar(*rowInterleaveE) : 1;
+    const uint32_t columnFactor = columnInterleaveE ? scalar(*columnInterleaveE) : 1;
+    const bool interleaved = rowFactor != 1 || columnFactor != 1;
     std::atomic_uint32_t turboAttempts{0}, turboSuccesses{0}, legacySuccesses{0};
     if (!width || !height || !channels || channels > 4 || bits < 1 || bits > 16)
         return false;
-    if (planar != 1 && planar != 2) return false;
+    if ((planar != 1 && planar != 2) || !rowFactor || !columnFactor ||
+        rowFactor > height || columnFactor > width) return false;
     size_t imageSamples = 0;
     if (!checkedImageSamples(width, height, channels, imageSamples) ||
         imageSamples > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) ||
@@ -4184,6 +4353,14 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
             write16(data.data() + entry.valueOffset, static_cast<uint16_t>(value), little);
         else
             write32(data.data() + entry.valueOffset, value, little);
+    };
+    auto restoreInterleave = [&](std::vector<uint16_t>& samples) {
+        if (!interleaved) return true;
+        std::vector<uint16_t> restored;
+        if (!reorderDngSamples(samples, restored, width, height, channels,
+                               rowFactor, columnFactor, false)) return false;
+        samples = std::move(restored);
+        return true;
     };
 
     auto arrayValue = [&](const TiffEntry& entry, uint32_t index,
@@ -4311,6 +4488,8 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         }
         setScalar(*compressionE, TIFF_COMPRESSION_NONE);
         if (planarE) setScalar(*planarE, 1);
+        if (rowInterleaveE) setScalar(*rowInterleaveE, 1);
+        if (columnInterleaveE) setScalar(*columnInterleaveE, 1);
         return sortTiffIfdEntries(data, photo->ifdOffset, little);
     };
     auto discardSourceChunks = [&](std::vector<std::pair<uint32_t, uint32_t>> chunks) {
@@ -4337,8 +4516,9 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         // run. Coalescing first turns thousands of vector erases and complete
         // TIFF rescans into a single relocation operation.
         if (!removeTiffRanges(data, ranges, little)) return false;
-        spdlog::info("DNG decode trace: coalesced {} source chunks into {} removal range(s)",
-                     chunks.size(), ranges.size());
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("DNG decode trace: coalesced {} source chunks into {} removal range(s)",
+                         chunks.size(), ranges.size());
         return true;
     };
 
@@ -4347,7 +4527,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
     // samples one bit at a time.
     if (!tileOffsetsE && !tileCountsE && stripOffsetsE && stripCountsE &&
         stripOffsetsE->count == 1 && stripCountsE->count == 1 &&
-        compression == TIFF_COMPRESSION_NONE && planar == 1 &&
+        compression == TIFF_COMPRESSION_NONE && planar == 1 && !interleaved &&
         decodedImage) {
         uint32_t offset = 0, byteCount = 0;
         const uint64_t rowSamples = static_cast<uint64_t>(width) * channels;
@@ -4416,6 +4596,22 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         stripOffsetsE->count == 1 && stripCountsE->count == 1 &&
         compression == TIFF_COMPRESSION_NONE && planar == 1 && !decodedImage) return true;
 
+    // Finalized JPEG XL DNGs commonly have one chunky strip. Decode directly
+    // into the image instead of copying a full temporary image afterward.
+    if (decodedImage && compression == TIFF_COMPRESSION_JPEG_XL &&
+        !tileOffsetsE && !tileCountsE && stripOffsetsE && stripCountsE &&
+        stripOffsetsE->count == 1 && stripCountsE->count == 1 && planar == 1 &&
+        bits == 16) {
+        uint32_t offset = 0, byteCount = 0;
+        if (!arrayValue(*stripOffsetsE, 0, offset) ||
+            !arrayValue(*stripCountsE, 0, byteCount) ||
+            offset > data.size() || byteCount > data.size() - offset ||
+            !decodeJPEGXL(data.data() + offset, byteCount, width, height,
+                          channels, decodedImage->samples, rowFactor,
+                          columnFactor)) return false;
+        return true;
+    }
+
     const auto parsedAt = std::chrono::steady_clock::now();
     std::vector<uint16_t> pixels(imageSamples, 0);
     const auto allocatedAt = std::chrono::steady_clock::now();
@@ -4466,6 +4662,51 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
             const uint32_t copyWidth = std::min(tileWidth, width - originX);
             const uint32_t copyHeight = std::min(tileHeight, height - originY);
             const uint32_t chunkChannels = planar == 2 ? 1 : channels;
+            if (compression == TIFF_COMPRESSION_JPEG_XL && bits == 16 &&
+                planar == 1 &&
+                offset <= data.size() && byteCount <= data.size() - offset &&
+                copyWidth == tileWidth && copyHeight == tileHeight) {
+                uint16_t* destination = pixels.data() +
+                    (static_cast<size_t>(originY) * width + originX) * channels;
+                if (decodeJPEGXLTo(data.data() + offset, byteCount,
+                                   tileWidth, tileHeight, channels,
+                                   destination, static_cast<size_t>(width) * channels))
+                    continue;
+            }
+            // Complete chunky JPEG tiles can decode into their final rows.
+            // Partial/padded tiles retain the general temporary-buffer path.
+            if (compression == TIFF_COMPRESSION_JPEG && planar == 1 &&
+                offset <= data.size() && byteCount <= data.size() - offset &&
+                copyWidth == tileWidth && copyHeight == tileHeight) {
+                uint16_t* destination = pixels.data() +
+                    (static_cast<size_t>(originY) * width + originX) * channels;
+                const size_t stride = static_cast<size_t>(width) * channels;
+                turboAttempts.fetch_add(1, std::memory_order_relaxed);
+                if (decodeLosslessJPEGTo(data.data() + offset, byteCount,
+                                         tileWidth, tileHeight, channels,
+                                         destination, stride)) {
+                    turboSuccesses.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                lj92 decoder = nullptr;
+                int dw = 0, dh = 0, db = 0, dc = 0;
+                if (lj92_open(&decoder, data.data() + offset, byteCount,
+                              &dw, &dh, &db, &dc) == LJ92_ERROR_NONE) {
+                    const bool compatible = dw == static_cast<int>(tileWidth) &&
+                        dh == static_cast<int>(tileHeight) &&
+                        db == static_cast<int>(bits) && dc == static_cast<int>(channels) &&
+                        stride <= static_cast<size_t>(INT_MAX);
+                    const bool decoded = compatible &&
+                        lj92_decode(decoder, destination, dw * dc,
+                                    static_cast<int>(stride) - dw * dc,
+                                    nullptr, 0) == LJ92_ERROR_NONE;
+                    lj92_close(decoder);
+                    if (decoded) {
+                        legacySuccesses.fetch_add(1, std::memory_order_relaxed);
+                        continue;
+                    }
+                }
+            }
             std::vector<uint16_t> tile;
             uint32_t decodedWidth = 0, decodedHeight = 0;
             const bool padded = compression == TIFF_COMPRESSION_NONE;
@@ -4495,6 +4736,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(decodeTiles);
         for (auto& worker : workers) worker.join();
         if (decodeFailed.load(std::memory_order_relaxed)) return false;
+        if (!restoreInterleave(pixels)) return false;
         const auto decodedAt = std::chrono::steady_clock::now();
         if (decodedImage) {
             decodedImage->samples = std::move(pixels);
@@ -4506,7 +4748,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         const auto canonicalAt = std::chrono::steady_clock::now();
         if (!discardSourceChunks(std::move(sourceChunks))) return false;
         const auto completedAt = std::chrono::steady_clock::now();
-        spdlog::info(
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) spdlog::info(
             "DNG decode trace: {}x{} bits={} channels={} tiles={} tile={}x{} "
             "workers={} background={} turbo={}/{} legacy={} parse={:.1f} ms "
             "allocate={:.1f} ms decode={:.1f} ms canonical={:.1f} ms discard={:.1f} ms total={:.1f} ms",
@@ -4564,6 +4806,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
                         decoded[(static_cast<size_t>(y) * decodedWidth + x) * chunkChannels + c];
                 }
     }
+    if (!restoreInterleave(pixels)) return false;
     if (decodedImage) {
         decodedImage->samples = std::move(pixels);
         return true;
@@ -7075,19 +7318,95 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
     const size_t rowBytes = (static_cast<size_t>(width) * channels * bits + 7u) / 8u;
     if (rowBytes > std::numeric_limits<size_t>::max() / height ||
         rowBytes * height > stripBytes) return false;
-    std::vector<uint16_t> pixels(sampleCount);
-    for (uint32_t y = 0; y < height; ++y) {
-        size_t bit = static_cast<size_t>(y) * rowBytes * 8;
-        for (uint32_t x = 0; x < width * channels; ++x) {
-            uint16_t value = 0;
-            for (uint32_t b = 0; b < bits; ++b, ++bit)
-                value = static_cast<uint16_t>((value << 1) |
-                    ((data[stripOffset + bit / 8] >> (7 - bit % 8)) & 1));
-            pixels[static_cast<size_t>(y) * width * channels + x] = value;
+    const bool interleaveCfa = distance > 0.0f && channels == 1 &&
+        scalar(*photo) == TIFF_PHOTOMETRIC_CFA && width > 1 && height > 1;
+    uint32_t rowFactor = 1, columnFactor = 1;
+    bool reorderCfa = false;
+    if (interleaveCfa) {
+        const auto existingRow = find(TIFF_TAG_ROW_INTERLEAVE_FACTOR);
+        const auto existingColumn = find(TIFF_TAG_COLUMN_INTERLEAVE_FACTOR);
+        rowFactor = columnFactor = 2;
+        if (const auto dim = find(TIFF_TAG_CFA_REPEAT_PATTERN_DIM);
+            dim && dim->type == TIFF_TYPE_SHORT && dim->count >= 2) {
+            const uint32_t repeatRows = read16(data.data() + dim->valueOffset, little);
+            const uint32_t repeatColumns = read16(data.data() + dim->valueOffset + 2, little);
+            if (repeatRows >= 2 && repeatRows <= height &&
+                repeatColumns >= 2 && repeatColumns <= width) {
+                rowFactor = repeatRows;
+                columnFactor = repeatColumns;
+            }
+        }
+        const uint32_t storedRow = existingRow ? scalar(*existingRow) : 1;
+        const uint32_t storedColumn = existingColumn ? scalar(*existingColumn) : 1;
+        if (!storedRow || storedRow > height ||
+            !storedColumn || storedColumn > width) return false;
+        if (storedRow > 1 || storedColumn > 1) {
+            rowFactor = storedRow;
+            columnFactor = storedColumn;
+        } else {
+            reorderCfa = true;
         }
     }
+    const uint16_t endianProbe = 1;
+    const bool nativeLittle = *reinterpret_cast<const uint8_t*>(&endianProbe) == 1;
+    const uint8_t* input = data.data() + stripOffset;
+    std::vector<uint16_t> pixels;
+    // A native-endian 16-bit strip can go straight to libjxl when its CFA is
+    // already interleaved (or interleaving is not required).
+    if (bits != 16 || little != nativeLittle || reorderCfa) {
+        pixels.resize(sampleCount);
+        std::vector<uint32_t> rowMap, columnMap;
+        if (reorderCfa) {
+            rowMap.resize(height);
+            columnMap.resize(width);
+            uint32_t index = 0;
+            for (uint32_t phase = 0; phase < rowFactor; ++phase)
+                for (uint32_t y = phase; y < height; y += rowFactor)
+                    rowMap[y] = index++;
+            index = 0;
+            for (uint32_t phase = 0; phase < columnFactor; ++phase)
+                for (uint32_t x = phase; x < width; x += columnFactor)
+                    columnMap[x] = index++;
+        }
+        const size_t rowSamples = static_cast<size_t>(width) * channels;
+        const uint32_t mask = (1u << bits) - 1;
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint8_t* row = input + static_cast<size_t>(y) * rowBytes;
+            for (uint32_t x = 0; x < width; ++x)
+                for (uint32_t channel = 0; channel < channels; ++channel) {
+                    const size_t sourceSample = static_cast<size_t>(x) * channels + channel;
+                    uint16_t value;
+                    if (bits == 16) {
+                        value = read16(row + sourceSample * 2, little);
+                    } else {
+                        const size_t bit = sourceSample * bits;
+                        const size_t byte = bit / 8;
+                        const uint32_t shift = static_cast<uint32_t>(bit % 8);
+                        uint32_t packed = static_cast<uint32_t>(row[byte]) << 16;
+                        if (byte + 1 < rowBytes)
+                            packed |= static_cast<uint32_t>(row[byte + 1]) << 8;
+                        if (byte + 2 < rowBytes) packed |= row[byte + 2];
+                        value = static_cast<uint16_t>((packed >> (24 - bits - shift)) & mask);
+                    }
+                    const size_t destination = reorderCfa
+                        ? (static_cast<size_t>(rowMap[y]) * width + columnMap[x]) * channels + channel
+                        : static_cast<size_t>(y) * rowSamples + sourceSample;
+                    pixels[destination] = value;
+                }
+        }
+        input = reinterpret_cast<const uint8_t*>(pixels.data());
+    }
     std::vector<uint8_t> encoded;
-    if (!encodeJPEGXL(pixels, width, height, channels, distance, encoded)) return false;
+    size_t encodedBytes = 0;
+    if (!encodeJPEGXL(input, sampleCount * sizeof(uint16_t),
+                      width, height, channels, distance, encoded,
+                      stripOffset, encodedBytes)) return false;
+    if (encodedBytes > std::numeric_limits<uint32_t>::max() ||
+        (countsE->type == TIFF_TYPE_SHORT && encodedBytes > UINT16_MAX) ||
+        data.size() - stripBytes > std::numeric_limits<uint32_t>::max() - encodedBytes)
+        return false;
+    const size_t tailBytes = data.size() - static_cast<size_t>(stripOffset) - stripBytes;
+    encoded.resize(stripOffset + encodedBytes + tailBytes);
     bool dngVersionWritten = false, backwardVersionWritten = false;
     for (const auto& entry : entries) {
         if (entry.type != TIFF_TYPE_BYTE || entry.count < 4) continue;
@@ -7095,7 +7414,7 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
             entry.tag != TIFF_TAG_DNG_BACKWARD_VERSION) continue;
         data[entry.valueOffset] = 1;
         data[entry.valueOffset + 1] = 7;
-        data[entry.valueOffset + 2] = 0;
+        data[entry.valueOffset + 2] = interleaveCfa ? 1 : 0;
         data[entry.valueOffset + 3] = 0;
         dngVersionWritten |= entry.tag == TIFF_TAG_DNG_VERSION;
         backwardVersionWritten |= entry.tag == TIFF_TAG_DNG_BACKWARD_VERSION;
@@ -7108,9 +7427,39 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
     else write32(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG_XL, little);
     if (offsetsE->type == TIFF_TYPE_SHORT) write16(data.data() + offsetsE->valueOffset, stripOffset, little);
     else write32(data.data() + offsetsE->valueOffset, stripOffset, little);
-    if (countsE->type == TIFF_TYPE_SHORT) write16(data.data() + countsE->valueOffset, encoded.size(), little);
-    else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(encoded.size()), little);
-    return replaceTiffStrip(data, stripOffset, stripBytes, encoded, little);
+    if (countsE->type == TIFF_TYPE_SHORT) write16(data.data() + countsE->valueOffset, encodedBytes, little);
+    else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(encodedBytes), little);
+    if (!replaceTiffStrip(data, stripOffset, stripBytes, nullptr, 0, little,
+                          &encoded, encodedBytes)) return false;
+    if (!interleaveCfa) return true;
+    for (const auto [tag, value] : {
+            std::pair<uint16_t, uint32_t>{TIFF_TAG_ROW_INTERLEAVE_FACTOR, rowFactor},
+            std::pair<uint16_t, uint32_t>{TIFF_TAG_COLUMN_INTERLEAVE_FACTOR, columnFactor}}) {
+        const auto current = findTiffEntries(data, little);
+        uint32_t rawIfd = 0;
+        bool exists = false;
+        for (const auto& entry : current) {
+            if (entry.tag == TIFF_TAG_PHOTOMETRIC &&
+                (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG) &&
+                (entry.type == TIFF_TYPE_SHORT
+                    ? read16(data.data() + entry.valueOffset, little)
+                    : read32(data.data() + entry.valueOffset, little)) == TIFF_PHOTOMETRIC_CFA)
+                rawIfd = entry.ifdOffset;
+        }
+        if (!rawIfd) return false;
+        for (const auto& entry : current)
+            if (entry.ifdOffset == rawIfd && entry.tag == tag) {
+                if (entry.type != TIFF_TYPE_SHORT && entry.type != TIFF_TYPE_LONG)
+                    return false;
+                if (entry.type == TIFF_TYPE_SHORT)
+                    write16(data.data() + entry.valueOffset, value, little);
+                else write32(data.data() + entry.valueOffset, value, little);
+                exists = true;
+            }
+        if (!exists && !insertTiffScalarEntry(data, rawIfd, tag,
+                                              TIFF_TYPE_LONG, value, little)) return false;
+    }
+    return true;
 }
 
 bool DNGDecoder::compressLossyJPEG(std::vector<uint8_t>& data, int quality) {
@@ -7187,7 +7536,8 @@ bool DNGDecoder::compressLossyJPEG(std::vector<uint8_t>& data, int quality) {
     const bool cfa = scalar(*photo) == TIFF_PHOTOMETRIC_CFA;
     // Blackmagic row deinterleaving is a reshape without moving samples: two
     // consecutive TIFF rows become one JPEG row. JPEG vertical neighbours are
-    // therefore two CFA rows apart and share the same color phase.
+    // two CFA rows apart. This matches Bayer row parity, but does not isolate
+    // the phases of CFA patterns with a repeat period larger than two.
     const uint32_t jpegWidth = cfa ? width * 2 : width;
     const uint32_t jpegHeight = cfa ? height / 2 : height;
     if ((cfa && ((height & 1u) != 0 || width > JPEG_MAX_DIMENSION / 2u)) ||
@@ -7333,35 +7683,86 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
     const uint32_t stripOffset = scalar(*offsetsE), stripBytes = scalar(*countsE);
     if (!width || !height || bits < 8 || bits > 16 || (channels != 1 && channels != 3) ||
         stripOffset > data.size() || stripBytes > data.size() - stripOffset) return false;
-    const size_t rowBytes = (static_cast<size_t>(width) * channels * bits + 7) / 8;
-    if (rowBytes * height > stripBytes) return false;
-    std::vector<uint16_t> pixels(static_cast<size_t>(width) * height * channels);
-    for (uint32_t y = 0; y < height; ++y) {
-        size_t bit = static_cast<size_t>(y) * rowBytes * 8;
-        for (uint32_t x = 0; x < width * channels; ++x) {
-            uint16_t value = 0;
-            for (uint32_t b = 0; b < bits; ++b, ++bit)
-                value = static_cast<uint16_t>((value << 1) |
-                    ((data[stripOffset + bit / 8] >> (7 - bit % 8)) & 1));
-            pixels[static_cast<size_t>(y) * width * channels + x] = value;
+    size_t sampleCount = 0;
+    if (!checkedImageSamples(width, height, channels, sampleCount) ||
+        static_cast<size_t>(width) >
+            (std::numeric_limits<size_t>::max() - 7u) / channels / bits) return false;
+    const size_t rowSamples = static_cast<size_t>(width) * channels;
+    const size_t rowBytes = (rowSamples * bits + 7u) / 8u;
+    if (rowBytes > stripBytes / height) return false;
+    const uint16_t endianProbe = 1;
+    const bool nativeLittle = *reinterpret_cast<const uint8_t*>(&endianProbe) == 1;
+    const uint8_t* input = data.data() + stripOffset;
+    const bool borrow16 = bits == 16 && little == nativeLittle &&
+        reinterpret_cast<uintptr_t>(input) % alignof(uint16_t) == 0;
+    std::vector<uint16_t> unpacked;
+    const uint16_t* pixels = nullptr;
+    if (borrow16) {
+        pixels = reinterpret_cast<const uint16_t*>(input);
+    } else {
+        unpacked.resize(sampleCount);
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint8_t* row = input + static_cast<size_t>(y) * rowBytes;
+            for (size_t x = 0; x < rowSamples; ++x) {
+                uint16_t value;
+                if (bits == 16) {
+                    value = read16(row + x * 2, little);
+                } else {
+                    const size_t bit = x * bits;
+                    const size_t byte = bit / 8;
+                    const uint32_t shift = static_cast<uint32_t>(bit % 8);
+                    uint32_t window = static_cast<uint32_t>(row[byte]) << 16;
+                    if (byte + 1 < rowBytes)
+                        window |= static_cast<uint32_t>(row[byte + 1]) << 8;
+                    if (byte + 2 < rowBytes) window |= row[byte + 2];
+                    value = static_cast<uint16_t>(
+                        (window >> (24u - bits - shift)) & ((1u << bits) - 1u));
+                }
+                unpacked[static_cast<size_t>(y) * rowSamples + x] = value;
+            }
         }
+        pixels = unpacked.data();
     }
     uint8_t* encodedBuffer = nullptr;
-    int encodedLength = 0;
-    if (lj92_encode(pixels.data(), width, height, bits, channels, width * channels, 0,
-                    nullptr, 0, &encodedBuffer, &encodedLength) != LJ92_ERROR_NONE ||
-        !encodedBuffer || encodedLength <= 0) {
+    size_t encodedLength = 0;
+    const char* encoderSetting = std::getenv("MOTIONCAM_LOSSLESS_JPEG_ENCODER");
+    const bool useTurbo = bits > 8 && encoderSetting &&
+        std::strcmp(encoderSetting, "turbo") == 0;
+    if (useTurbo) {
+        unsigned long turboLength = 0;
+        int predictor = channels == 3 ? 4 : 6;
+        if (const char* setting = std::getenv("MOTIONCAM_LOSSLESS_JPEG_PREDICTOR"))
+            predictor = std::clamp(std::atoi(setting), 1, 7);
+        if (encodeLosslessJPEGTurbo(pixels, width, height, channels, bits, predictor,
+                                   &encodedBuffer, &turboLength))
+            encodedLength = turboLength;
+    }
+    if (!encodedBuffer) {
+        int lj92Length = 0;
+        // liblj92 takes a mutable pointer but only reads image samples.
+        if (lj92_encode(const_cast<uint16_t*>(pixels), width, height, bits, channels,
+                        width * channels, 0, nullptr, 0,
+                        &encodedBuffer, &lj92Length) != LJ92_ERROR_NONE ||
+            !encodedBuffer || lj92Length <= 0) {
+            free(encodedBuffer);
+            return false;
+        }
+        encodedLength = static_cast<size_t>(lj92Length);
+    }
+    if (encodedLength > std::numeric_limits<uint32_t>::max() ||
+        (countsE->type == TIFF_TYPE_SHORT && encodedLength > UINT16_MAX)) {
         free(encodedBuffer);
         return false;
     }
-    std::vector<uint8_t> encoded(encodedBuffer, encodedBuffer + encodedLength);
-    free(encodedBuffer);
     if (compressionE->type == TIFF_TYPE_SHORT)
         write16(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG, little);
     else write32(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG, little);
-    if (countsE->type == TIFF_TYPE_SHORT) write16(data.data() + countsE->valueOffset, encoded.size(), little);
-    else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(encoded.size()), little);
-    return replaceTiffStrip(data, stripOffset, stripBytes, encoded, little);
+    if (countsE->type == TIFF_TYPE_SHORT) write16(data.data() + countsE->valueOffset, encodedLength, little);
+    else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(encodedLength), little);
+    const bool replaced = replaceTiffStrip(data, stripOffset, stripBytes,
+                                           encodedBuffer, encodedLength, little);
+    free(encodedBuffer);
+    return replaced;
 }
 
 bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,

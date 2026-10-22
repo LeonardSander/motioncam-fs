@@ -2034,7 +2034,7 @@ void MainWindow::restoreSettings() {
     else
         ui->dngCompressionModeComboBox->setCurrentText(restoredNativeText);
     if (!restoredNativeMode && mRenderSettings.jxlDistance > 0.0f &&
-        std::abs(mRenderSettings.jxlDistance - 0.3f) > 0.0001f) {
+        std::abs(mRenderSettings.jxlDistance - 0.1f) > 0.0001f) {
         ui->dngCompressionModeComboBox->setCurrentText(
             QString("JPEG XL DCT %1").arg(mRenderSettings.jxlDistance));
     }
@@ -3504,7 +3504,7 @@ void MainWindow::finalizeSelectedFrames(){
         }
         if(!dngFinalizeCompressionDistance(compressionMode,compressionDistance)){
             QMessageBox::warning(this,tr("Invalid finalize format"),
-                tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.3’."));
+                tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.1’."));
             return;
         }
     }
@@ -3637,13 +3637,15 @@ void MainWindow::startGalleryPerformanceTest(
             int index;
             motioncam::MountId mount;
             QString path;
+            float jxlDistance;
         };
         QVector<MountedSampleClip> clips;
         for (int i = 0; i < mMountedFiles.size(); ++i) {
             const auto mount = mMountedFiles[i].mountId;
             auto* card = fileWidgetForMount(mount);
             clips.push_back({i, mount,
-                card ? card->property("mountPath").toString() : QString()});
+                card ? card->property("mountPath").toString() : QString(),
+                settingsForMount(mount).jxlDistance});
         }
         QPointer<MainWindow> window(this);
         QThreadPool::globalInstance()->start([clips = std::move(clips), window] {
@@ -3703,6 +3705,29 @@ void MainWindow::startGalleryPerformanceTest(
                         dng.resize(received);
                     }
                     const qint64 readMs = timer.elapsed();
+                    if (complete && qEnvironmentVariableIsSet(
+                            "MOTIONCAM_GALLERY_PERF_COMPRESS_JXL")) {
+                        const size_t inputBytes = dng.size();
+                        timer.restart();
+                        bool compressed = true;
+                        try {
+                            motioncam::RenderSettings settings;
+                            settings.jxlDistance = clip.jxlDistance;
+                            motioncam::vfs::DngFinalizeOptions options;
+                            options.writeTiming = false;
+                            options.compression = true;
+                            options.sourceName = "gallery_perf_jxl";
+                            motioncam::vfs::finalizeDng(dng, settings, options);
+                        } catch (const std::exception& error) {
+                            spdlog::error("GALLERY_PERF event=jxl_encode_failed clip={} frame={} reason={}",
+                                          clip.index, frame, error.what());
+                            compressed = false;
+                        }
+                        spdlog::info("GALLERY_PERF event=jxl_encode_sample clip={} frame={} success={} distance={} input_bytes={} output_bytes={} encode_ms={}",
+                                     clip.index, frame, compressed, clip.jxlDistance,
+                                     inputBytes, dng.size(), timer.elapsed());
+                        complete = compressed;
+                    }
                     timer.restart();
                     const size_t bytes = dng.size();
                     motioncam::DNGImageLayout layout;
@@ -5358,7 +5383,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             float distance = 0.0f;
             if (!dngFinalizeCompressionDistance(compressionMode, distance)) {
                 QMessageBox::warning(this, tr("Invalid finalize format"),
-                    tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.3’."));
+                    tr("Enter a complete JPEG XL format such as ‘JPEG XL DCT 0.1’."));
                 return;
             }
             mRenderSettings.jxlDistance = distance;
@@ -6106,7 +6131,7 @@ void MainWindow::updateSelectionUi() {
             ui->dngCompressionModeComboBox->setCurrentIndex(0);
         else if (settings.jxlDistance == 0.0f)
             ui->dngCompressionModeComboBox->setCurrentIndex(2);
-        else if (std::abs(settings.jxlDistance - 0.3f) <= 0.0001f)
+        else if (std::abs(settings.jxlDistance - 0.1f) <= 0.0001f)
             ui->dngCompressionModeComboBox->setCurrentIndex(3);
         else
             ui->dngCompressionModeComboBox->setCurrentText(

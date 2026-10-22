@@ -2254,6 +2254,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     auto encodeBits = utils::bitsNeeded(dstWhiteLevel);
     const bool writerCompression = compressionEnabled && !lossyJpegDct;
     const bool jpegXlCompression = writerCompression && settings.jxlDistance >= 0.0f;
+    const bool interleaveLossyCfa = jpegXlCompression && settings.jxlDistance > 0.0f &&
+        !(demosaic && !remosaic);
 
     // Compressed codecs consume unpacked uint16 samples.
     // The compression will handle the redundancy
@@ -2318,7 +2320,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     tinydngwriter::DNGImage dng;
 
     dng.SetBigEndian(false);
-    dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4, 0, 0);
+    dng.SetDNGVersion(1, jpegXlCompression ? 7 : 4,
+                      interleaveLossyCfa ? 1 : 0, 0);
     tinydngwriter::OpcodeList opcodeList1;
     if (badPixelTreatment == BadPixelTreatment::OpcodeOnly && !demosaic &&
         preprocessScale == 1 && cropTarget == "0x0" && !activeBadPixels.empty()) {
@@ -2338,7 +2341,8 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     }
     const bool hasStageOpcodes = !opcodeList1.IsEmpty() || !opcodeList2.IsEmpty() || !opcodeList3.IsEmpty();
     dng.SetDNGBackwardVersion(
-        1, jpegXlCompression ? 7 : (hasStageOpcodes ? 3 : 1), 0, 0);
+        1, jpegXlCompression ? 7 : (hasStageOpcodes ? 3 : 1),
+        interleaveLossyCfa ? 1 : 0, 0);
     
     // Set image dimensions and format FIRST (before image data)
     dng.SetImageWidth(width);
@@ -2366,6 +2370,17 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         } else if (!dng.SetCompression(tinydngwriter::COMPRESSION_JPEG_XL) ||
                    !dng.SetJXLDistance(settings.jxlDistance))
             throw std::runtime_error("Failed to enable JPEG XL compression");
+        if (interleaveLossyCfa) {
+            const unsigned factor =
+                (explicitBinning || settings.streamingPreview) && !demosaic &&
+                draftScale == 1 && processedRepeatSize > 2
+                    ? static_cast<unsigned>(processedRepeatSize)
+                : higherCFA && !demosaic && draftScale == 1 &&
+                  settings.quadBayerOption == QuadBayerMode::CorrectQBCFAMetadata
+                    ? static_cast<unsigned>(cfaRepeatSize) : 2u;
+            if (!dng.SetJXLInterleaveCFA(factor, factor))
+                throw std::runtime_error("Failed to enable JPEG XL CFA interleaving");
+        }
     } else {
         dng.SetCompression(tinydngwriter::COMPRESSION_NONE);
     }

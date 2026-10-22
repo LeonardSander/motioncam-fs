@@ -2,6 +2,7 @@
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
 #include "GainMapBake.h"
+#include "DngCfaInterleave.h"
 
 #include <jxl/decode.h>
 
@@ -22,6 +23,55 @@ static std::vector<uint8_t> writeDng(tinydngwriter::DNGImage& image) {
     assert(writer.WriteToFile(stream, &error));
     const std::string bytes = stream.str();
     return {bytes.begin(), bytes.end()};
+}
+
+static std::vector<uint8_t> tiledJxlDng(const std::vector<uint16_t>& samples,
+                                         uint32_t width, uint32_t height,
+                                         uint32_t tileWidth, uint32_t tileHeight) {
+    const uint32_t across = width / tileWidth, down = height / tileHeight;
+    const uint32_t tileCount = across * down;
+    constexpr uint32_t arrays = 8 + 2 + 11 * 12 + 4;
+    std::vector<uint8_t> dng(arrays + tileCount * 8, 0);
+    auto put16 = [&](size_t at, uint16_t value) {
+        dng[at] = value; dng[at + 1] = value >> 8;
+    };
+    auto put32 = [&](size_t at, uint32_t value) {
+        for (int i = 0; i < 4; ++i) dng[at + i] = value >> (i * 8);
+    };
+    dng[0] = 'I'; dng[1] = 'I'; put16(2, 42); put32(4, 8);
+    put16(8, 11);
+    size_t entry = 10;
+    auto scalar = [&](uint16_t tag, uint16_t type, uint32_t value) {
+        put16(entry, tag); put16(entry + 2, type); put32(entry + 4, 1);
+        if (type == 3) put16(entry + 8, value);
+        else put32(entry + 8, value);
+        entry += 12;
+    };
+    scalar(256, 4, width); scalar(257, 4, height); scalar(258, 3, 16);
+    scalar(259, 3, 52546); scalar(262, 3, 32803); scalar(277, 3, 1);
+    scalar(322, 4, tileWidth); scalar(323, 4, tileHeight);
+    put16(entry, 324); put16(entry + 2, 4); put32(entry + 4, tileCount);
+    put32(entry + 8, arrays); entry += 12;
+    put16(entry, 325); put16(entry + 2, 4); put32(entry + 4, tileCount);
+    put32(entry + 8, arrays + tileCount * 4); entry += 12;
+    scalar(50717, 4, 65535);
+    for (uint32_t tile = 0; tile < tileCount; ++tile) {
+        std::vector<uint16_t> block(static_cast<size_t>(tileWidth) * tileHeight);
+        const uint32_t ox = tile % across * tileWidth;
+        const uint32_t oy = tile / across * tileHeight;
+        for (uint32_t y = 0; y < tileHeight; ++y)
+            std::copy_n(samples.data() + static_cast<size_t>(oy + y) * width + ox,
+                        tileWidth, block.data() + static_cast<size_t>(y) * tileWidth);
+        std::vector<uint8_t> encoded;
+        std::string error;
+        assert(tinydngwriter::CompressJPEGXL(
+            reinterpret_cast<const uint8_t*>(block.data()), block.size() * 2,
+            tileWidth, tileHeight, 1, 0.0f, encoded, &error));
+        put32(arrays + tile * 4, static_cast<uint32_t>(dng.size()));
+        put32(arrays + (tileCount + tile) * 4, static_cast<uint32_t>(encoded.size()));
+        dng.insert(dng.end(), encoded.begin(), encoded.end());
+    }
+    return dng;
 }
 
 static std::vector<uint16_t> decode(const std::vector<unsigned char>& encoded,
@@ -307,6 +357,69 @@ static void setTiffByteTag(std::vector<uint8_t>& dng, uint16_t wantedTag,
 }
 
 int main() {
+    {
+        const std::vector<uint16_t> mosaic = {
+            0, 1, 2, 3,
+            4, 5, 6, 7,
+            8, 9, 10, 11,
+            12, 13, 14, 15};
+        const std::vector<uint16_t> expected = {
+            0, 2, 1, 3,
+            8, 10, 9, 11,
+            4, 6, 5, 7,
+            12, 14, 13, 15};
+        std::vector<uint16_t> grouped, restored;
+        assert(motioncam::reorderDngSamples(mosaic, grouped, 4, 4, 1, 2, 2, true));
+        assert(grouped == expected);
+        assert(motioncam::reorderDngSamples(grouped, restored, 4, 4, 1, 2, 2, false));
+        assert(restored == mosaic);
+    }
+    {
+        constexpr uint32_t width = 8, height = 6;
+        std::vector<uint16_t> samples(width * height);
+        for (size_t i = 0; i < samples.size(); ++i)
+            samples[i] = static_cast<uint16_t>(i * 137);
+        auto tiled = tiledJxlDng(samples, width, height, 4, 3);
+        motioncam::DecodedDNGImage decoded;
+        assert(motioncam::DNGDecoder::decodeImageBorrowed(tiled, decoded));
+        assert(decoded.samples == samples);
+    }
+    // Cross the parallel-runner threshold with a full-size raw plane.
+    {
+        constexpr unsigned int width = 1024, height = 1024;
+        std::vector<uint16_t> pixels(width * height);
+        for (size_t i = 0; i < pixels.size(); ++i)
+            pixels[i] = static_cast<uint16_t>((i * 37 + (i / width) * 109) & 0xffff);
+        std::vector<unsigned char> encoded;
+        std::string error;
+        assert(tinydngwriter::CompressJPEGXL(
+            reinterpret_cast<const unsigned char*>(pixels.data()),
+            pixels.size() * sizeof(uint16_t), width, height, 1, 0.0f,
+            encoded, &error));
+        assert(decode(encoded, width, height) == pixels);
+    }
+    // Neutral shadow detail must not gain the colored block artifacts produced
+    // by lossy VarDCT with uses_original_profile enabled.
+    {
+        constexpr unsigned int width = 256, height = 256;
+        std::vector<uint16_t> rgb(width * height * 3);
+        for (size_t i = 0; i < width * height; ++i) {
+            const uint16_t value = static_cast<uint16_t>(256 +
+                ((i / width * 17 + i % width * 11) & 1023));
+            rgb[i * 3] = rgb[i * 3 + 1] = rgb[i * 3 + 2] = value;
+        }
+        std::vector<unsigned char> encoded;
+        std::string error;
+        assert(tinydngwriter::CompressJPEGXL(
+            reinterpret_cast<const unsigned char*>(rgb.data()),
+            rgb.size() * sizeof(uint16_t), width, height, 3, 0.3f,
+            encoded, &error));
+        const auto result = decode(encoded, width, height, 3);
+        for (size_t i = 0; i < result.size(); i += 3) {
+            assert(std::abs(int(result[i]) - int(result[i + 1])) <= 64);
+            assert(std::abs(int(result[i + 2]) - int(result[i + 1])) <= 64);
+        }
+    }
     // Codec input remains a single raw plane; CFA repeat geometry stays in DNG
     // metadata and therefore works identically for Bayer and higher CFAs.
     for (const unsigned int repeat : {2u, 4u, 6u, 8u}) {
@@ -380,6 +493,10 @@ int main() {
         auto jpeg92Dng = losslessDng;
         assert(motioncam::DNGDecoder::compressLosslessJPEG(jpeg92Dng));
         assert(tiffTagValue(jpeg92Dng, 259) == 7);
+        motioncam::DecodedDNGImage jpeg92Decoded;
+        assert(motioncam::DNGDecoder::decodeImage(jpeg92Dng, jpeg92Decoded));
+        assert(jpeg92Decoded.layout.cfaRepeatSize == repeat);
+        assert(jpeg92Decoded.samples == cfa);
         assert(motioncam::DNGDecoder::ensureUncompressed(jpeg92Dng));
         assert(tiffTagValue(jpeg92Dng, 277) == 1);
 
@@ -394,6 +511,10 @@ int main() {
         assert(tiffTagValue(dctDng, 322) == width);
         assert(tiffTagValue(dctDng, 323) == height);
         assert(tiffTagValue(dctDng, 324) > 0);
+        motioncam::DecodedDNGImage dctDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(dctDng, dctDecoded));
+        assert(dctDecoded.layout.cfaRepeatSize == repeat);
+        assert(dctDecoded.samples.size() == cfa.size());
         // Adding TileLength must not consume the existing resolution metadata.
         assert(tiffTagValue(dctDng, 283) > 0);
         assert(motioncam::DNGDecoder::ensureUncompressed(dctDng));
@@ -410,20 +531,40 @@ int main() {
         assert(lossyImage.SetBitsPerSample(1, &bits));
         assert(lossyImage.SetCompression(tinydngwriter::COMPRESSION_JPEG_XL));
         assert(lossyImage.SetJXLDistance(0.5f));
+        assert(lossyImage.SetJXLInterleaveCFA(repeat, repeat));
         assert(lossyImage.SetPhotometric(tinydngwriter::PHOTOMETRIC_CFA));
         assert(lossyImage.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
         assert(lossyImage.SetCFARepeatPatternDim(repeat, repeat));
         assert(lossyImage.SetCFAPattern(static_cast<unsigned int>(pattern.size()), pattern.data()));
         assert(lossyImage.SetWhiteLevel(16383));
-        assert(lossyImage.SetDNGVersion(1, 7, 0, 0));
-        assert(lossyImage.SetDNGBackwardVersion(1, 7, 0, 0));
+        assert(lossyImage.SetDNGVersion(1, 7, 1, 0));
+        assert(lossyImage.SetDNGBackwardVersion(1, 7, 1, 0));
         assert(lossyImage.SetImageData(reinterpret_cast<const unsigned char*>(cfa.data()),
                                        cfa.size() * sizeof(uint16_t)));
         auto lossyDng = writeDng(lossyImage);
         assert(tiffTagValue(lossyDng, 259) == 52546);
+        assert(tiffTagValue(lossyDng, 50975) == repeat);
+        assert(tiffTagValue(lossyDng, 52547) == repeat);
+        motioncam::DecodedDNGImage lossyDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(lossyDng, lossyDecoded));
+        assert(lossyDecoded.samples.size() == cfa.size());
         assert(motioncam::DNGDecoder::ensureUncompressed(lossyDng));
         assert(tiffTagValue(lossyDng, 259) == 1);
+        assert(tiffTagValue(lossyDng, 50975) == 1);
+        assert(tiffTagValue(lossyDng, 52547) == 1);
+        motioncam::DecodedDNGImage canonicalDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(lossyDng, canonicalDecoded));
+        assert(canonicalDecoded.samples == lossyDecoded.samples);
         assert(tiffTagValue(lossyDng, 277) == 1);
+        // Canonicalization leaves factor-1 tags in place. A later lossy
+        // finalization must group the CFA again and update those tags.
+        assert(motioncam::DNGDecoder::compressJPEGXL(lossyDng, 0.5f));
+        assert(tiffTagValue(lossyDng, 50975) == repeat);
+        assert(tiffTagValue(lossyDng, 52547) == repeat);
+        motioncam::DecodedDNGImage recompressed;
+        assert(motioncam::DNGDecoder::decodeImage(lossyDng, recompressed));
+        assert(recompressed.layout.cfaRepeatSize == repeat);
+        assert(recompressed.samples.size() == cfa.size());
     }
 
     constexpr unsigned int higherWidth = 64, higherHeight = 48, higherRepeat = 4;
@@ -1084,9 +1225,15 @@ int main() {
     auto lossyFinalized = remosaicedRgb;
     assert(motioncam::DNGDecoder::compressJPEGXL(lossyFinalized, 0.5f));
     assert(tiffTagValue(lossyFinalized, 259) == 52546);
+    assert(tiffTagValue(lossyFinalized, 50975) == 2);
+    assert(tiffTagValue(lossyFinalized, 52547) == 2);
+    assert(tiffByteTag(lossyFinalized, 50707) ==
+           (std::array<uint8_t, 4>{1, 7, 1, 0}));
     assert(tiffTagValue(lossyFinalized, 258) == 16);
     assert(motioncam::DNGDecoder::ensureUncompressed(lossyFinalized));
     assert(tiffTagValue(lossyFinalized, 259) == 1);
+    assert(tiffTagValue(lossyFinalized, 50975) == 1);
+    assert(tiffTagValue(lossyFinalized, 52547) == 1);
     assert(tiffTagValue(lossyFinalized, 277) == 1);
 
     assert(motioncam::DNGDecoder::compressJPEGXL(remosaicedRgb, 0.0f));

@@ -11,6 +11,7 @@
 #endif
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <cstdlib>
 #include <sstream>
 #include <string>
@@ -473,6 +474,8 @@ int main() {
     assert(image.SetImageData(
         reinterpret_cast<const unsigned char*>(pixels.data()),
         pixels.size() * sizeof(uint16_t)));
+    assert(image.SetImageDescription("metadata added after compression"));
+    assert((image.GetStripOffset() & 1u) == 0);
     assert(image.GetStripBytes() > 0);
     assert(image.GetStripBytes() < pixels.size() * sizeof(uint16_t));
 
@@ -518,6 +521,31 @@ int main() {
     lj92_close(decoder);
     assert(decoded == pixels);
 
+    // The writer also accepts byte buffers without uint16_t alignment.
+    std::vector<uint8_t> unaligned(pixels.size() * sizeof(uint16_t) + 1);
+    std::memcpy(unaligned.data() + 1, pixels.data(), pixels.size() * sizeof(uint16_t));
+    unsigned char *alignedJpeg = nullptr, *unalignedJpeg = nullptr;
+    int alignedJpegSize = 0, unalignedJpegSize = 0;
+    std::string jpegError;
+    assert(tinydngwriter::CompressJPEGLossless(
+        reinterpret_cast<const uint8_t*>(pixels.data()), pixels.size() * sizeof(uint16_t),
+        width, height, 1, bits, &alignedJpeg, &alignedJpegSize, &jpegError));
+    assert(tinydngwriter::CompressJPEGLossless(
+        unaligned.data() + 1, pixels.size() * sizeof(uint16_t),
+        width, height, 1, bits, &unalignedJpeg, &unalignedJpegSize, &jpegError));
+    assert(alignedJpegSize == unalignedJpegSize);
+    assert(std::memcmp(alignedJpeg, unalignedJpeg, alignedJpegSize) == 0);
+    std::free(alignedJpeg);
+    std::free(unalignedJpeg);
+    pixels[0] = 1u << bits;
+    unsigned char* invalidJpeg = nullptr;
+    int invalidJpegSize = 0;
+    assert(!tinydngwriter::CompressJPEGLossless(
+        reinterpret_cast<const uint8_t*>(pixels.data()), pixels.size() * sizeof(uint16_t),
+        width, height, 1, bits, &invalidJpeg, &invalidJpegSize, &jpegError));
+    assert(invalidJpeg == nullptr);
+    pixels[0] = 0;
+
     // Camera DNGs commonly store lossless JPEG as independently coded tiles.
     // Include partial right/bottom tiles and verify canonical row placement.
     {
@@ -526,6 +554,11 @@ int main() {
         for (uint32_t y = 0; y < tiledHeight; ++y)
             for (uint32_t x = 0; x < tiledWidth; ++x)
                 tiledPixels[y * tiledWidth + x] = static_cast<uint16_t>(y * 100 + x);
+        auto directTiles = tiledLosslessJpegDng(
+            tiledPixels, tiledWidth, tiledHeight, 4, 3, bits);
+        motioncam::DecodedDNGImage directDecoded;
+        assert(motioncam::DNGDecoder::decodeImageBorrowed(directTiles, directDecoded));
+        assert(directDecoded.samples == tiledPixels);
         auto tiled = tiledLosslessJpegDng(
             tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2);
         const size_t compressedTiledSize = tiled.size();
@@ -622,6 +655,44 @@ int main() {
     lj92_close(decoder);
     free(rgbEncoded);
     assert(decodedRgb == rgb);
+
+    // Exercise the JPEG lossless category-16 difference and byte stuffing.
+    std::vector<uint16_t> extreme(32 * 8);
+    for (size_t i = 0; i < extreme.size(); ++i)
+        extreme[i] = (i & 1) ? 65535 : 0;
+    uint8_t* extremeEncoded = nullptr;
+    int extremeSize = 0;
+    assert(lj92_encode(extreme.data(), 32, 8, 16, 1, 32, 0,
+                       nullptr, 0, &extremeEncoded, &extremeSize) == LJ92_ERROR_NONE);
+    decoder = nullptr;
+    assert(lj92_open(&decoder, extremeEncoded, extremeSize,
+                     &decodedWidth, &decodedHeight, &decodedBits,
+                     &decodedComponents) == LJ92_ERROR_NONE);
+    std::vector<uint16_t> decodedExtreme(extreme.size());
+    assert(lj92_decode(decoder, decodedExtreme.data(), 32, 0,
+                       nullptr, 0) == LJ92_ERROR_NONE);
+    lj92_close(decoder);
+    free(extremeEncoded);
+    assert(decodedExtreme == extreme);
+
+    // A category seen only outside the predictor sample must still have a
+    // Huffman code in the large-image path.
+    std::vector<uint16_t> rareCategory(1024 * 1024, 1000);
+    rareCategory[2] = 65535;
+    uint8_t* rareEncoded = nullptr;
+    int rareSize = 0;
+    assert(lj92_encode(rareCategory.data(), 1024, 1024, 16, 1, 1024, 0,
+                       nullptr, 0, &rareEncoded, &rareSize) == LJ92_ERROR_NONE);
+    decoder = nullptr;
+    assert(lj92_open(&decoder, rareEncoded, rareSize,
+                     &decodedWidth, &decodedHeight, &decodedBits,
+                     &decodedComponents) == LJ92_ERROR_NONE);
+    std::vector<uint16_t> decodedRare(rareCategory.size());
+    assert(lj92_decode(decoder, decodedRare.data(), 1024, 0,
+                       nullptr, 0) == LJ92_ERROR_NONE);
+    lj92_close(decoder);
+    free(rareEncoded);
+    assert(decodedRare == rareCategory);
 
     // Alternating mosaiced data can be strongly correlated diagonally. The
     // former hard-coded JPEG predictor 6 compares unlike neighboring samples
@@ -754,6 +825,31 @@ int main() {
     std::ostringstream rgbScalarOutput(std::ios::binary);
     assert(rgbScalarWriter.WriteToFile(rgbScalarOutput, &error));
     const std::string rgbScalarDng = rgbScalarOutput.str();
+    std::vector<uint8_t> rgbLosslessDng(rgbScalarDng.begin(), rgbScalarDng.end());
+    assert(motioncam::DNGDecoder::compressLosslessJPEG(rgbLosslessDng));
+    motioncam::DecodedDNGImage rgbLosslessDecoded;
+    assert(motioncam::DNGDecoder::decodeImage(rgbLosslessDng, rgbLosslessDecoded));
+    assert(rgbLosslessDecoded.samples == rgb);
+    const uint8_t soi[] = {0xff, 0xd8};
+    const uint8_t eoi[] = {0xff, 0xd9};
+    const auto jpegBegin = std::search(rgbLosslessDng.begin(), rgbLosslessDng.end(),
+                                       std::begin(soi), std::end(soi));
+    assert(jpegBegin != rgbLosslessDng.end());
+    const auto jpegEnd = std::search(jpegBegin + 2, rgbLosslessDng.end(),
+                                     std::begin(eoi), std::end(eoi));
+    assert(jpegEnd != rgbLosslessDng.end());
+    lj92 rgbIndependentDecoder = nullptr;
+    int jpegWidth = 0, jpegHeight = 0, jpegBits = 0, jpegChannels = 0;
+    assert(lj92_open(&rgbIndependentDecoder, const_cast<uint8_t*>(&*jpegBegin),
+                     static_cast<int>(jpegEnd + 2 - jpegBegin), &jpegWidth,
+                     &jpegHeight, &jpegBits, &jpegChannels) == LJ92_ERROR_NONE);
+    assert(jpegWidth == rgbWidth && jpegHeight == rgbHeight &&
+           jpegBits == 16 && jpegChannels == 3);
+    std::vector<uint16_t> rgbIndependent(rgb.size());
+    assert(lj92_decode(rgbIndependentDecoder, rgbIndependent.data(),
+                       rgbWidth * 3, 0, nullptr, 0) == LJ92_ERROR_NONE);
+    lj92_close(rgbIndependentDecoder);
+    assert(rgbIndependent == rgb);
     std::vector<uint8_t> rgbScalarBaked(rgbScalarDng.begin(), rgbScalarDng.end());
     std::vector<motioncam::GainMap> rgbScalarMaps;
     assert(motioncam::DNGDecoder::getGainMaps(rgbScalarBaked, 2, rgbScalarMaps));
