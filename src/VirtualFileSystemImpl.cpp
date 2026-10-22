@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 #include <tinydng/tiny_dng_writer.h>
 #include <cstring>
+#include <cstdlib>
 #include <BS_thread_pool.hpp>
 
 namespace motioncam {
@@ -464,7 +465,10 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
         !DNGDecoder::setTimingMetadata(dng, options.frameRate, options.timestamp))
         throw std::runtime_error("Could not update " + source + " DNG timing metadata");
     profileStage("timing_metadata");
-    if (options.packToWhiteLevel && !DNGDecoder::packUncompressedToWhiteLevel(dng))
+    const bool fusedJxlPacking = options.packToWhiteLevel && options.compression &&
+        !isLossyJpegDct(settings.jxlDistance) && settings.jxlDistance >= 0.0f;
+    if (options.packToWhiteLevel && !fusedJxlPacking &&
+        !DNGDecoder::packUncompressedToWhiteLevel(dng))
         throw std::runtime_error("Could not pack " + source + " DNG to its sensor bit depth");
     profileStage("bit_packing");
     if (options.gyroflowLensProfile)
@@ -476,7 +480,7 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
         ? DNGDecoder::compressLossyJPEG(dng)
         : settings.jxlDistance < 0.0f
             ? DNGDecoder::compressLosslessJPEG(dng)
-            : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance);
+            : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance, fusedJxlPacking);
     if (!compressed)
         throw std::runtime_error("Could not compress " + source + " DNG");
     profileStage("compression");

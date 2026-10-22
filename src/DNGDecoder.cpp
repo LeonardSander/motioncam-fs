@@ -7280,7 +7280,10 @@ bool DNGDecoder::interpolateFrameMetadata(std::vector<uint8_t>& data,
     return exposureWritten && isoWritten;
 }
 
-bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
+bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance,
+                                bool clampToWhiteLevel) {
+    const bool profileJxl = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto startedAt = std::chrono::steady_clock::now();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     auto scalar = [&](const TiffEntry& entry) -> uint32_t {
@@ -7303,8 +7306,10 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
     const auto bitsE = find(TIFF_TAG_BITS_PER_SAMPLE), compressionE = find(TIFF_TAG_COMPRESSION);
     const auto offsetsE = find(TIFF_TAG_STRIP_OFFSETS), countsE = find(TIFF_TAG_STRIP_BYTE_COUNTS);
     const auto sppE = find(TIFF_TAG_SAMPLES_PER_PIXEL);
+    const auto whiteE = clampToWhiteLevel ? find(TIFF_TAG_WHITE_LEVEL) : nullptr;
     if (!widthE || !heightE || !bitsE || !compressionE || !offsetsE || !countsE ||
-        !sppE || offsetsE->count != 1 || countsE->count != 1 ||
+        !sppE || (clampToWhiteLevel && !whiteE) ||
+        offsetsE->count != 1 || countsE->count != 1 ||
         scalar(*compressionE) != TIFF_COMPRESSION_NONE) return false;
     const uint32_t width = scalar(*widthE), height = scalar(*heightE);
     const uint32_t bits = scalar(*bitsE), channels = scalar(*sppE);
@@ -7318,6 +7323,17 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
     const size_t rowBytes = (static_cast<size_t>(width) * channels * bits + 7u) / 8u;
     if (rowBytes > std::numeric_limits<size_t>::max() / height ||
         rowBytes * height > stripBytes) return false;
+    uint16_t clampMaximum = UINT16_MAX;
+    if (clampToWhiteLevel && bits == 16) {
+        uint32_t white = scalar(*whiteE);
+        if (const auto linearization = find(TIFF_TAG_LINEARIZATION_TABLE);
+            linearization && linearization->count > 1)
+            white = linearization->count - 1;
+        const uint32_t packedBits = utils::evenBitsNeeded(
+            static_cast<uint16_t>(std::min<uint32_t>(white, 65535)));
+        if (packedBits < 16)
+            clampMaximum = static_cast<uint16_t>((uint32_t{1} << packedBits) - 1);
+    }
     const bool interleaveCfa = distance > 0.0f && channels == 1 &&
         scalar(*photo) == TIFF_PHOTOMETRIC_CFA && width > 1 && height > 1;
     uint32_t rowFactor = 1, columnFactor = 1;
@@ -7353,7 +7369,79 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
     std::vector<uint16_t> pixels;
     // A native-endian 16-bit strip can go straight to libjxl when its CFA is
     // already interleaved (or interleaving is not required).
-    if (bits != 16 || little != nativeLittle || reorderCfa) {
+    const bool alignedInput =
+        reinterpret_cast<uintptr_t>(input) % alignof(uint16_t) == 0;
+    if (reorderCfa && bits == 16 && little == nativeLittle && alignedInput) {
+        if (!reorderDngSamples(reinterpret_cast<const uint16_t*>(input),
+                               sampleCount, pixels, width, height, channels,
+                               rowFactor, columnFactor, true,
+                               clampMaximum)) return false;
+        input = reinterpret_cast<const uint8_t*>(pixels.data());
+    } else if ((bits == 10 || bits == 12 || bits == 14) &&
+               (static_cast<size_t>(width) * channels) % (bits == 12 ? 2u : 4u) == 0 &&
+               (!reorderCfa || (channels == 1 && rowFactor == 2 &&
+                                columnFactor == 2 && !(width & 1u) && !(height & 1u)))) {
+        // Packed strips use MSB-first sample groups. Decode each group once,
+        // placing CFA phases directly in their grouped positions when needed.
+        // The generic per-sample bit reader remains for odd dimensions and
+        // other packing depths or CFA layouts.
+        pixels.resize(sampleCount);
+        const size_t rowSamples = static_cast<size_t>(width) * channels;
+        const uint32_t halfWidth = width / 2, halfHeight = height / 2;
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint32_t sourceY = reorderCfa
+                ? (y % halfHeight) * 2 + y / halfHeight : y;
+            const uint8_t* source = input + static_cast<size_t>(sourceY) * rowBytes;
+            uint16_t* destination = pixels.data() + static_cast<size_t>(y) * rowSamples;
+            if (bits == 10) {
+                for (size_t x = 0; x < rowSamples; x += 4, source += 5) {
+                    const uint16_t a = static_cast<uint16_t>((source[0] << 2) | (source[1] >> 6));
+                    const uint16_t b = static_cast<uint16_t>(((source[1] & 63u) << 4) | (source[2] >> 4));
+                    const uint16_t c = static_cast<uint16_t>(((source[2] & 15u) << 6) | (source[3] >> 2));
+                    const uint16_t d = static_cast<uint16_t>(((source[3] & 3u) << 8) | source[4]);
+                    if (reorderCfa) {
+                        destination[x / 2] = a;
+                        destination[halfWidth + x / 2] = b;
+                        destination[x / 2 + 1] = c;
+                        destination[halfWidth + x / 2 + 1] = d;
+                    } else {
+                        destination[x] = a; destination[x + 1] = b;
+                        destination[x + 2] = c; destination[x + 3] = d;
+                    }
+                }
+            } else if (bits == 12) {
+                for (size_t x = 0; x < rowSamples; x += 2, source += 3) {
+                    const uint16_t a = static_cast<uint16_t>((source[0] << 4) | (source[1] >> 4));
+                    const uint16_t b = static_cast<uint16_t>(((source[1] & 15u) << 8) | source[2]);
+                    if (reorderCfa) {
+                        destination[x / 2] = a;
+                        destination[halfWidth + x / 2] = b;
+                    } else {
+                        destination[x] = a; destination[x + 1] = b;
+                    }
+                }
+            } else {
+                for (size_t x = 0; x < rowSamples; x += 4, source += 7) {
+                    const uint16_t a = static_cast<uint16_t>((source[0] << 6) | (source[1] >> 2));
+                    const uint16_t b = static_cast<uint16_t>(((source[1] & 3u) << 12) |
+                        (source[2] << 4) | (source[3] >> 4));
+                    const uint16_t c = static_cast<uint16_t>(((source[3] & 15u) << 10) |
+                        (source[4] << 2) | (source[5] >> 6));
+                    const uint16_t d = static_cast<uint16_t>(((source[5] & 63u) << 8) | source[6]);
+                    if (reorderCfa) {
+                        destination[x / 2] = a;
+                        destination[halfWidth + x / 2] = b;
+                        destination[x / 2 + 1] = c;
+                        destination[halfWidth + x / 2 + 1] = d;
+                    } else {
+                        destination[x] = a; destination[x + 1] = b;
+                        destination[x + 2] = c; destination[x + 3] = d;
+                    }
+                }
+            }
+        }
+        input = reinterpret_cast<const uint8_t*>(pixels.data());
+    } else if (bits != 16 || little != nativeLittle || reorderCfa) {
         pixels.resize(sampleCount);
         std::vector<uint32_t> rowMap, columnMap;
         if (reorderCfa) {
@@ -7362,19 +7450,21 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
             uint32_t index = 0;
             for (uint32_t phase = 0; phase < rowFactor; ++phase)
                 for (uint32_t y = phase; y < height; y += rowFactor)
-                    rowMap[y] = index++;
+                    rowMap[index++] = y;
             index = 0;
             for (uint32_t phase = 0; phase < columnFactor; ++phase)
                 for (uint32_t x = phase; x < width; x += columnFactor)
-                    columnMap[x] = index++;
+                    columnMap[index++] = x;
         }
         const size_t rowSamples = static_cast<size_t>(width) * channels;
         const uint32_t mask = (1u << bits) - 1;
         for (uint32_t y = 0; y < height; ++y) {
-            const uint8_t* row = input + static_cast<size_t>(y) * rowBytes;
+            const uint32_t sourceY = reorderCfa ? rowMap[y] : y;
+            const uint8_t* row = input + static_cast<size_t>(sourceY) * rowBytes;
             for (uint32_t x = 0; x < width; ++x)
                 for (uint32_t channel = 0; channel < channels; ++channel) {
-                    const size_t sourceSample = static_cast<size_t>(x) * channels + channel;
+                    const uint32_t sourceX = reorderCfa ? columnMap[x] : x;
+                    const size_t sourceSample = static_cast<size_t>(sourceX) * channels + channel;
                     uint16_t value;
                     if (bits == 16) {
                         value = read16(row + sourceSample * 2, little);
@@ -7388,19 +7478,42 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
                         if (byte + 2 < rowBytes) packed |= row[byte + 2];
                         value = static_cast<uint16_t>((packed >> (24 - bits - shift)) & mask);
                     }
-                    const size_t destination = reorderCfa
-                        ? (static_cast<size_t>(rowMap[y]) * width + columnMap[x]) * channels + channel
-                        : static_cast<size_t>(y) * rowSamples + sourceSample;
-                    pixels[destination] = value;
+                    const size_t destination = static_cast<size_t>(y) * rowSamples +
+                        static_cast<size_t>(x) * channels + channel;
+                    pixels[destination] = std::min(value, clampMaximum);
                 }
         }
         input = reinterpret_cast<const uint8_t*>(pixels.data());
     }
+    if (clampMaximum != UINT16_MAX && pixels.empty()) {
+        pixels.resize(sampleCount);
+        const auto* source = reinterpret_cast<const uint16_t*>(input);
+        if (alignedInput && little == nativeLittle) {
+            for (size_t i = 0; i < sampleCount; ++i)
+                pixels[i] = std::min(source[i], clampMaximum);
+        } else {
+            for (size_t i = 0; i < sampleCount; ++i)
+                pixels[i] = std::min(read16(input + i * 2, little), clampMaximum);
+        }
+        input = reinterpret_cast<const uint8_t*>(pixels.data());
+    }
+    const auto preparedAt = std::chrono::steady_clock::now();
     std::vector<uint8_t> encoded;
     size_t encodedBytes = 0;
     if (!encodeJPEGXL(input, sampleCount * sizeof(uint16_t),
                       width, height, channels, distance, encoded,
                       stripOffset, encodedBytes)) return false;
+    const auto encodedAt = std::chrono::steady_clock::now();
+    const auto reportJxlStages = [&] {
+        if (!profileJxl) return;
+        const auto completedAt = std::chrono::steady_clock::now();
+        spdlog::info("GALLERY_PERF event=jxl_compress_stage width={} height={} channels={} bits={} distance={} reorder={} clamp={} prepare_ms={:.3f} codec_ms={:.3f} finalize_ms={:.3f}",
+                     width, height, channels, bits, distance, reorderCfa,
+                     clampMaximum != UINT16_MAX,
+                     std::chrono::duration<double, std::milli>(preparedAt - startedAt).count(),
+                     std::chrono::duration<double, std::milli>(encodedAt - preparedAt).count(),
+                     std::chrono::duration<double, std::milli>(completedAt - encodedAt).count());
+    };
     if (encodedBytes > std::numeric_limits<uint32_t>::max() ||
         (countsE->type == TIFF_TYPE_SHORT && encodedBytes > UINT16_MAX) ||
         data.size() - stripBytes > std::numeric_limits<uint32_t>::max() - encodedBytes)
@@ -7431,7 +7544,10 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
     else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(encodedBytes), little);
     if (!replaceTiffStrip(data, stripOffset, stripBytes, nullptr, 0, little,
                           &encoded, encodedBytes)) return false;
-    if (!interleaveCfa) return true;
+    if (!interleaveCfa) {
+        reportJxlStages();
+        return true;
+    }
     for (const auto [tag, value] : {
             std::pair<uint16_t, uint32_t>{TIFF_TAG_ROW_INTERLEAVE_FACTOR, rowFactor},
             std::pair<uint16_t, uint32_t>{TIFF_TAG_COLUMN_INTERLEAVE_FACTOR, columnFactor}}) {
@@ -7459,6 +7575,7 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance) {
         if (!exists && !insertTiffScalarEntry(data, rawIfd, tag,
                                               TIFF_TYPE_LONG, value, little)) return false;
     }
+    reportJxlStages();
     return true;
 }
 

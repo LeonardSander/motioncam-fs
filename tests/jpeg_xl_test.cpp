@@ -10,6 +10,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -373,6 +375,31 @@ int main() {
         assert(grouped == expected);
         assert(motioncam::reorderDngSamples(grouped, restored, 4, 4, 1, 2, 2, false));
         assert(restored == mosaic);
+    }
+    // A CFA pattern may leave incomplete phase groups at the right or bottom
+    // edge. Reordering must preserve every sample for those dimensions too.
+    {
+        constexpr uint32_t width = 7, height = 5;
+        std::vector<uint16_t> source(width * height), grouped, restored;
+        for (size_t i = 0; i < source.size(); ++i)
+            source[i] = static_cast<uint16_t>(i * 97);
+        assert(motioncam::reorderDngSamples(
+            source, grouped, width, height, 1, 3, 2, true));
+        assert(motioncam::reorderDngSamples(
+            grouped, restored, width, height, 1, 3, 2, false));
+        assert(restored == source);
+    }
+    {
+        constexpr uint32_t width = 8, height = 8;
+        std::vector<uint16_t> source(width * height), grouped, clipped;
+        for (size_t i = 0; i < source.size(); ++i)
+            source[i] = static_cast<uint16_t>(i * 79);
+        assert(motioncam::reorderDngSamples(
+            source, grouped, width, height, 1, 4, 4, true));
+        assert(motioncam::reorderDngSamples(
+            source, clipped, width, height, 1, 4, 4, true, 1023));
+        for (size_t i = 0; i < source.size(); ++i)
+            assert(clipped[i] == std::min<uint16_t>(grouped[i], 1023));
     }
     {
         constexpr uint32_t width = 8, height = 6;
@@ -1212,6 +1239,7 @@ int main() {
         true, 1, true));
     assert(tiffTagValue(remosaicedRgb, 262) == 32803);
     assert(tiffTagValue(remosaicedRgb, 277) == 1);
+    auto unpackedForFusedJxl = remosaicedRgb;
     assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(remosaicedRgb));
     assert(tiffTagValue(remosaicedRgb, 258) == 10);
     assert(tiffTagValue(remosaicedRgb, 279) ==
@@ -1220,10 +1248,19 @@ int main() {
     // compression 52546, rather than retaining stale version metadata.
     setTiffByteTag(remosaicedRgb, 50706, {1, 4, 0, 0});
     setTiffByteTag(remosaicedRgb, 50707, {1, 4, 0, 0});
+    setTiffByteTag(unpackedForFusedJxl, 50706, {1, 4, 0, 0});
+    setTiffByteTag(unpackedForFusedJxl, 50707, {1, 4, 0, 0});
     assert(tiffByteTag(remosaicedRgb, 50706) ==
            (std::array<uint8_t, 4>{1, 4, 0, 0}));
     auto lossyFinalized = remosaicedRgb;
     assert(motioncam::DNGDecoder::compressJPEGXL(lossyFinalized, 0.5f));
+    auto fusedLossy = unpackedForFusedJxl;
+    assert(motioncam::DNGDecoder::compressJPEGXL(fusedLossy, 0.5f, true));
+    motioncam::DecodedDNGImage legacyLossyDecoded, fusedLossyDecoded;
+    assert(motioncam::DNGDecoder::decodeImage(lossyFinalized, legacyLossyDecoded));
+    assert(motioncam::DNGDecoder::decodeImage(fusedLossy, fusedLossyDecoded));
+    assert(fusedLossyDecoded.samples == legacyLossyDecoded.samples);
+    assert(fusedLossy == lossyFinalized);
     assert(tiffTagValue(lossyFinalized, 259) == 52546);
     assert(tiffTagValue(lossyFinalized, 50975) == 2);
     assert(tiffTagValue(lossyFinalized, 52547) == 2);
@@ -1237,6 +1274,13 @@ int main() {
     assert(tiffTagValue(lossyFinalized, 277) == 1);
 
     assert(motioncam::DNGDecoder::compressJPEGXL(remosaicedRgb, 0.0f));
+    auto fusedLossless = unpackedForFusedJxl;
+    assert(motioncam::DNGDecoder::compressJPEGXL(fusedLossless, 0.0f, true));
+    motioncam::DecodedDNGImage legacyLosslessDecoded, fusedLosslessDecoded;
+    assert(motioncam::DNGDecoder::decodeImage(remosaicedRgb, legacyLosslessDecoded));
+    assert(motioncam::DNGDecoder::decodeImage(fusedLossless, fusedLosslessDecoded));
+    assert(fusedLosslessDecoded.samples == legacyLosslessDecoded.samples);
+    assert(fusedLossless == remosaicedRgb);
     assert(tiffTagValue(remosaicedRgb, 259) == 52546);
     assert(tiffByteTag(remosaicedRgb, 50706) ==
            (std::array<uint8_t, 4>{1, 7, 0, 0}));
@@ -1244,4 +1288,66 @@ int main() {
            (std::array<uint8_t, 4>{1, 7, 0, 0}));
     assert(tiffTagValue(remosaicedRgb, 258) == 16);
     assert(tiffTagValue(remosaicedRgb, 277) == 1);
+    {
+        const bool benchmark = std::getenv("MOTIONCAM_JXL_PACK_BENCH") != nullptr;
+        const uint32_t benchWidth = benchmark ? 4032 : 64;
+        const uint32_t benchHeight = benchmark ? 3024 : 48;
+        for (const uint16_t white : {uint16_t{1023}, uint16_t{4095}, uint16_t{16383}}) {
+            for (const uint32_t channels : {1u, 3u}) {
+                if (benchmark && channels == 3) continue;
+                std::vector<uint16_t> benchSamples(
+                    static_cast<size_t>(benchWidth) * benchHeight * channels);
+                for (size_t i = 0; i < benchSamples.size(); ++i)
+                    benchSamples[i] = static_cast<uint16_t>((i * 137u) &
+                        ((static_cast<uint32_t>(white) << 1u) | 1u));
+                tinydngwriter::DNGImage benchImage;
+                const unsigned short benchBits[3] = {16, 16, 16};
+                const unsigned char benchPattern[4] = {0, 1, 1, 2};
+                benchImage.SetBigEndian(false);
+                assert(benchImage.SetImageWidth(benchWidth) &&
+                       benchImage.SetImageLength(benchHeight));
+                assert(benchImage.SetRowsPerStrip(benchHeight) &&
+                       benchImage.SetSamplesPerPixel(channels));
+                assert(benchImage.SetBitsPerSample(channels, benchBits));
+                assert(benchImage.SetCompression(tinydngwriter::COMPRESSION_NONE));
+                assert(benchImage.SetPhotometric(channels == 1
+                    ? tinydngwriter::PHOTOMETRIC_CFA : tinydngwriter::PHOTOMETRIC_LINEARRAW));
+                assert(benchImage.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+                if (channels == 1) {
+                    assert(benchImage.SetCFARepeatPatternDim(2, 2));
+                    assert(benchImage.SetCFAPattern(4, benchPattern));
+                }
+                assert(benchImage.SetWhiteLevel(white));
+                assert(benchImage.SetDNGVersion(1, 7, 0, 0));
+                assert(benchImage.SetDNGBackwardVersion(1, 7, 0, 0));
+                assert(benchImage.SetImageData(
+                    reinterpret_cast<const unsigned char*>(benchSamples.data()),
+                    benchSamples.size() * sizeof(uint16_t)));
+                const auto original = writeDng(benchImage);
+                for (float distance : {0.0f, 0.5f}) {
+                    auto legacy = original, fused = original;
+                    const auto start = std::chrono::steady_clock::now();
+                    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(legacy));
+                    const auto packed = std::chrono::steady_clock::now();
+                    assert(motioncam::DNGDecoder::compressJPEGXL(legacy, distance));
+                    const auto legacyDone = std::chrono::steady_clock::now();
+                    assert(motioncam::DNGDecoder::compressJPEGXL(fused, distance, true));
+                    const auto fusedDone = std::chrono::steady_clock::now();
+                    motioncam::DecodedDNGImage a, b;
+                    assert(motioncam::DNGDecoder::decodeImage(legacy, a));
+                    assert(motioncam::DNGDecoder::decodeImage(fused, b));
+                    assert(a.samples == b.samples);
+                    assert(legacy == fused);
+                    auto ms = [](auto end, auto begin) {
+                        return std::chrono::duration<double, std::milli>(end - begin).count();
+                    };
+                    if (benchmark)
+                        std::printf("pack_bench bits=%u distance=%.1f pack_ms=%.2f legacy_encode_ms=%.2f fused_encode_ms=%.2f legacy_bytes=%zu fused_bytes=%zu\n",
+                                    white == 1023 ? 10u : white == 4095 ? 12u : 14u, distance,
+                                    ms(packed, start), ms(legacyDone, packed),
+                                    ms(fusedDone, legacyDone), legacy.size(), fused.size());
+                }
+            }
+        }
+    }
 }

@@ -12,11 +12,12 @@
 namespace motioncam {
 
 // libjxl uses Highway to dispatch its SIMD kernels on x86 and ARM64. Give
-// large images a bounded per-operation thread pool as well. Encoding can run
-// on several frames concurrently, so callers use a smaller cap for it.
+// large images a bounded per-operation thread pool as well. The eight-worker
+// cap improves single-frame latency and concurrent encode throughput on the
+// tested 24-thread CPU without changing codestream contents.
 class JxlParallelRunner {
 public:
-    explicit JxlParallelRunner(size_t sampleCount, size_t maxWorkers = 3) {
+    explicit JxlParallelRunner(size_t sampleCount, size_t maxWorkers = 8) {
         if (sampleCount < 1024 * 1024) return;
         const unsigned int cores = std::thread::hardware_concurrency();
         size_t workers = std::min<size_t>(cores > 0 ? cores - 1 : 0, maxWorkers);

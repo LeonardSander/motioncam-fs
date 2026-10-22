@@ -202,9 +202,21 @@ before preview decoding. `jxl_encode_sample` records compression time and DNG
 sizes; `mounted_sequence_sample` then records decode time for that output.
 This measures per-frame finalization compression without writing a finalized
 clip to disk.
+Set `MOTIONCAM_GALLERY_PERF_PACK_TO_WHITE_LEVEL=1` to include sensor bit-depth
+packing in that comparison. The JXL path normally fuses clipping with input
+preparation. With profiling enabled,
+`jxl_compress_stage` separates TIFF parsing and sample preparation, libjxl
+encoding, and DNG strip replacement. Packed 10-, 12-, and 14-bit CFA and
+LinearRaw strips use grouped sample decoding before libjxl encoding.
+`mounted_decode_breakdown` separates DNG layout, optional dump, preview decode, and the
+optional validation hash. Set `MOTIONCAM_GALLERY_PERF_HASH_PREVIEW=1` when
+comparing decoded pixels; the hash is omitted by default because it is much
+slower than the decode on full-size frames.
+`MOTIONCAM_JXL_PACK_BENCH=1 ./build-linux-release/motioncam-jpeg-xl-test`
+compares both paths on 12 MP synthetic 10-, 12-, and 14-bit DNGs.
 Set `MOTIONCAM_GALLERY_PERF_JXL_WORKERS=N` (0–16) to compare libjxl worker
-counts during profiling. The normal caps are eight workers for decode and
-three for encode, limited by the available CPU threads.
+counts during profiling. The normal cap is eight workers for both decode and
+encode, limited by the available CPU threads.
 Set `MOTIONCAM_GALLERY_PERF_PARALLEL_READS=1` in mounted mode to add four
 simultaneous cold reads per clip; the `mounted_parallel_sample` events expose
 queueing that sequential reads cannot measure.

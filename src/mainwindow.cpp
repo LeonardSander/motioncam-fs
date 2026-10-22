@@ -3716,6 +3716,8 @@ void MainWindow::startGalleryPerformanceTest(
                             motioncam::vfs::DngFinalizeOptions options;
                             options.writeTiming = false;
                             options.compression = true;
+                            options.packToWhiteLevel = qEnvironmentVariableIsSet(
+                                "MOTIONCAM_GALLERY_PERF_PACK_TO_WHITE_LEVEL");
                             options.sourceName = "gallery_perf_jxl";
                             motioncam::vfs::finalizeDng(dng, settings, options);
                         } catch (const std::exception& error) {
@@ -3735,6 +3737,7 @@ void MainWindow::startGalleryPerformanceTest(
                         motioncam::DNGDecoder::getImageLayout(dng, layout);
                     const uint32_t linearizationEntries = complete
                         ? motioncam::DNGDecoder::getLinearizationTableCount(dng) : 0;
+                    const qint64 layoutMs = timer.elapsed();
                     if (clip.index == 0 && frame == 0) {
                         const QString dumpPath = qEnvironmentVariable(
                             "MOTIONCAM_GALLERY_PERF_DUMP_DNG");
@@ -3745,6 +3748,7 @@ void MainWindow::startGalleryPerformanceTest(
                                            static_cast<qint64>(dng.size()));
                         }
                     }
+                    const qint64 previewStartedMs = timer.elapsed();
                     motioncam::PreviewFrame preview;
                     const bool skipPreview = qEnvironmentVariableIsSet(
                         "MOTIONCAM_GALLERY_PERF_SKIP_PREVIEW_DECODE");
@@ -3752,12 +3756,21 @@ void MainWindow::startGalleryPerformanceTest(
                         motioncam::DNGDecoder::decodePreview(
                             std::move(dng), motioncam::RenderSettings{},
                             preview, false));
-                    uint64_t pixelHash = 1469598103934665603ull;
-                    if (decoded) for (const uint8_t value : preview.rgb) {
-                        pixelHash ^= value;
-                        pixelHash *= 1099511628211ull;
-                    }
+                    const qint64 previewMs = timer.elapsed() - previewStartedMs;
+                    const bool hashPreview = qEnvironmentVariableIsSet(
+                        "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
+                    uint64_t pixelHash = hashPreview ? 1469598103934665603ull : 0;
+                    if (decoded && hashPreview)
+                        for (const uint8_t value : preview.rgb) {
+                            pixelHash ^= value;
+                            pixelHash *= 1099511628211ull;
+                        }
                     const qint64 decodeMs = timer.elapsed();
+                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                        spdlog::info("GALLERY_PERF event=mounted_decode_breakdown clip={} frame={} layout_ms={} dump_ms={} preview_ms={} hash_ms={} total_ms={}",
+                                     clip.index, frame, layoutMs,
+                                     previewStartedMs - layoutMs, previewMs,
+                                     decodeMs - previewStartedMs - previewMs, decodeMs);
                     ++samples;
                     if (!complete) ++readFailures;
                     if (complete && !decoded) ++previewFailures;

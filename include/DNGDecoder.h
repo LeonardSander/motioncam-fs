@@ -194,7 +194,8 @@ public:
                                          double ratio);
     static bool getCFAMetadata(const std::vector<uint8_t>& dngData,
                                int& repeatSize, std::array<uint8_t, 4>& phase);
-    static bool compressJPEGXL(std::vector<uint8_t>& dngData, float distance);
+    static bool compressJPEGXL(std::vector<uint8_t>& dngData, float distance,
+                               bool clampToWhiteLevel = false);
     static bool compressLossyJPEG(std::vector<uint8_t>& dngData, int quality = 90);
     static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,
