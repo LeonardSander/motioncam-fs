@@ -84,6 +84,7 @@ using namespace motioncam;
 #include <QTimer>
 #include <QtConcurrent>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <spdlog/spdlog.h>
 
@@ -1209,6 +1210,10 @@ namespace {
         return mode.trimmed().compare("7z LZMA2 Ultra", Qt::CaseInsensitive) == 0;
     }
 
+    bool isMetadataOnlyFinalizeFormat(const QString& mode) {
+        return mode.trimmed().compare("Audio, GCSV, JSON Only", Qt::CaseInsensitive) == 0;
+    }
+
     QString finalizeAudioCodec(QString& mode) {
         mode=mode.trimmed();
         for(const QString& codec:{QStringLiteral("flac"),QStringLiteral("opus")}){
@@ -1614,10 +1619,12 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     ui->dngCompressionModeComboBox->addItems({
         "JPEG XL Lossless flac", "JPEG XL Lossless opus",
-        "HEVC 420 slow 14 flac", "HEVC 420 slow 14 opus"});
+        "HEVC 420 slow 14 flac", "HEVC 420 slow 14 opus",
+        "Audio, GCSV, JSON Only"});
     ui->dngCompressionModeComboBox->setToolTip(
         tr("Append flac or opus to a DNG or Camera Native format to encode audio. "
-           "Without a suffix, existing audio is copied unchanged."));
+           "Without a suffix, existing audio is copied unchanged. "
+           "Audio, GCSV, JSON Only exports audio, gyro data, and per-clip metadata without video."));
     motioncam::warmVulkanGalleryPreview();
 
 #ifdef _WIN32
@@ -3574,7 +3581,8 @@ void MainWindow::finalizeSelectedFrames(){
     const QString compressionMode=ui->dngCompressionModeComboBox->currentText();
     float compressionDistance=mRenderSettings.jxlDistance;
     if(compressionEnabled){
-        if(isCameraNativeFormat(compressionMode)||isSevenZipFinalizeFormat(compressionMode)){
+        if(isCameraNativeFormat(compressionMode)||isSevenZipFinalizeFormat(compressionMode)||
+           isMetadataOnlyFinalizeFormat(compressionMode)){
             QMessageBox::warning(this,tr("Finalize Selected Frames"),
                 tr("The selected finalize format cannot represent an individual DNG frame "
                    "selection. Choose a JPEG or JPEG XL DNG format."));
@@ -4654,7 +4662,8 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
     return runtimeRoot;
 }
 
-void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& requestedMode) {
+void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& requestedMode,
+                                      bool metadataOnly) {
     QString mode=requestedMode;
     const QString audioCodec=finalizeAudioCodec(mode);
     const QStringList modeParts = mode.simplified().split(' ', Qt::SkipEmptyParts);
@@ -4808,11 +4817,13 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     else if (mode.contains("ProRes XQ")) codecSuffix = "_PRORES_XQ";
     else if (cineFormRgb) codecSuffix = "_CINEFORM_RGB";
     else if (cineForm) codecSuffix = "_CINEFORM_422";
-    const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
+    const QString outputBase = metadataOnly
+        ? sourceInfo.completeBaseName() + "_METADATA"
+        : sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
     const bool compressedSourceAudio=QFile::exists(QDir(mountPath).absoluteFilePath("audio.flac"))||
         QFile::exists(QDir(mountPath).absoluteFilePath("audio.opus"));
     const bool compressedOutputAudio=!audioCodec.isEmpty()||compressedSourceAudio;
-    if(compressedOutputAudio&&(proRes||cineForm)){
+    if(!metadataOnly && compressedOutputAudio&&(proRes||cineForm)){
         QMessageBox::warning(this,tr("Unsupported audio and video combination"),
             tr("This FFmpeg build cannot embed FLAC or Opus with ProRes or CineForm "
                "in MOV or MP4. Select an HEVC or AV1 format, or use uncompressed "
@@ -4824,9 +4835,16 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     const QString outputPath = outputDir.absoluteFilePath(outputBase + containerExtension);
     const QString jsonPath = outputDir.absoluteFilePath(outputBase + ".json");
     const QString outputGyroflowPath = outputDir.absoluteFilePath(outputBase + "_gyroflow.json");
-    if ((QFile::exists(outputPath) || QFile::exists(jsonPath) ||
-         (QFile::exists(gyroflowPath) && QFile::exists(outputGyroflowPath))) &&
-        QMessageBox::question(this, "Replace Camera Native output?",
+    const QString gcsvPath = outputDir.absoluteFilePath(outputBase + ".gcsv");
+    const QString audioBasePath = outputDir.absoluteFilePath(outputBase);
+    bool hasExistingAudio = false;
+    for (const char* extension : {"wav", "flac", "opus", "aac"})
+        hasExistingAudio |= QFile::exists(audioBasePath + "." + extension);
+    if (((!metadataOnly && QFile::exists(outputPath)) || QFile::exists(jsonPath) ||
+         (metadataOnly && (QFile::exists(gcsvPath) || hasExistingAudio)) ||
+         (!metadataOnly && QFile::exists(gyroflowPath) && QFile::exists(outputGyroflowPath))) &&
+        QMessageBox::question(this, metadataOnly ? "Replace metadata output?"
+                                                : "Replace Camera Native output?",
             QString("Replace existing output for %1?").arg(outputBase),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
         mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
@@ -4851,7 +4869,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         return;
     }
 
-    QProgressDialog progress("Rendering linear RGB sequence...", "Cancel", 0,
+    QProgressDialog progress(metadataOnly ? "Collecting per-clip metadata..."
+                                          : "Rendering linear RGB sequence...", "Cancel", 0,
         std::max(1, info->totalFrames - info->droppedFrames + info->duplicatedFrames), this);
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
@@ -4873,7 +4892,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 #endif
         if (QFileInfo(bundled).isExecutable()) ffmpeg = bundled;
         else ffmpeg = QStandardPaths::findExecutable("ffmpeg");
-        if (ffmpeg.isEmpty())
+        if (!metadataOnly && ffmpeg.isEmpty())
             throw std::runtime_error(
                 "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
         auto probeEncoder = [&ffmpeg](const QString& name, QByteArray* help = nullptr) {
@@ -4891,7 +4910,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         };
         QString av1Encoder;
         QString requiredEncoder = proRes ? "prores_ks" : cineForm ? "cfhd" : QString{};
-        if (av1) {
+        if (!metadataOnly && av1) {
             QByteArray svtHelp;
             const bool hasSvt = probeEncoder("libsvtav1", &svtHelp);
             const QByteArray requiredPixelFormat =
@@ -4911,7 +4930,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                      " at 10-bit. Install an FFmpeg build with a compatible libsvtav1 or libaom-av1.")
                         .toStdString());
             }
-        } else if (!requiredEncoder.isEmpty() && !probeEncoder(requiredEncoder)) {
+        } else if (!metadataOnly && !requiredEncoder.isEmpty() && !probeEncoder(requiredEncoder)) {
             throw std::runtime_error(
                 ("This FFmpeg executable does not provide the " + requiredEncoder +
                  " encoder. Install a compatible FFmpeg build or place it beside MotionCam Fuse.")
@@ -4962,7 +4981,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                             decoded.width != static_cast<uint32_t>(info->width) ||
                             decoded.height != static_cast<uint32_t>(info->height))
                             throw std::runtime_error("Could not extract RGB16 from rendered frame");
-                        frame.rgb = std::move(decoded.rgb);
+                        if (!metadataOnly) frame.rgb = std::move(decoded.rgb);
                         frame.colorMetadata = std::move(decoded.metadata);
                         DNGDecoder::getGainMaps(dng, 2, frame.gainMaps);
                         DNGDecoder::getGainMaps(dng, 3, frame.deferredGainMaps);
@@ -5029,7 +5048,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         const QString partialPath = stageDir.absoluteFilePath(outputBase + containerExtension);
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
         const QString partialGyroflowPath = stageDir.absoluteFilePath(outputBase + "_gyroflow.json");
-        if (QFile::exists(gyroflowPath) && !QFile::copy(gyroflowPath, partialGyroflowPath))
+        if (!metadataOnly && QFile::exists(gyroflowPath) &&
+            !QFile::copy(gyroflowPath, partialGyroflowPath))
             throw std::runtime_error("Could not stage the Gyroflow lens profile");
         for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
             const QString source=QDir(mountPath).absoluteFilePath(name);
@@ -5140,13 +5160,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 
         progress.setRange(0, frameCount);
         progress.setValue(0);
-        progress.setLabelText("Encoding LOG60 Camera Native frame 1...");
+        progress.setLabelText(metadataOnly ? "Collecting per-clip metadata..."
+                                           : "Encoding LOG60 Camera Native frame 1...");
         progress.show();
         QApplication::processEvents();
         QProcess encoder;
         encoder.setProcessChannelMode(QProcess::MergedChannels);
-        encoder.start(ffmpeg, args, QIODevice::ReadWrite);
-        if (!encoder.waitForStarted())
+        if (!metadataOnly) encoder.start(ffmpeg, args, QIODevice::ReadWrite);
+        if (!metadataOnly && !encoder.waitForStarted())
             throw std::runtime_error("Could not start FFmpeg: " + encoder.errorString().toStdString());
         QByteArray diagnostic;
         // SVT-AV1 needs a sane nominal rate, but FFmpeg must not use the VFR
@@ -5154,7 +5175,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         // authority in passthrough mode.
         const double encoderNominalFps = convertToCfr
             ? info->fps : info->frameRateInfo.medianFrameRate;
-        NutVideoPipe videoPipe(encoder, diagnostic, info->width, info->height, encoderNominalFps);
+        std::unique_ptr<NutVideoPipe> videoPipe;
+        if (!metadataOnly)
+            videoPipe = std::make_unique<NutVideoPipe>(
+                encoder, diagnostic, info->width, info->height, encoderNominalFps);
         DNGFrameMetadata colorMetadata;
         nlohmann::json dynamicFrames = nlohmann::json::array();
         nlohmann::json gainMapFormats = nlohmann::json::array();
@@ -5323,7 +5347,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 if (!pendingFrame) colorMetadata = frame.colorMetadata;
                 if (pendingFrame) {
                     const int64_t duration = frame.timestamp - pendingFrame->timestamp;
-                    videoPipe.writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
+                    if (videoPipe) videoPipe->writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
                         std::max<int64_t>(1, duration));
                     appendDynamicMetadata(*pendingFrame);
                     ++frameIndex;
@@ -5338,23 +5362,25 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             progress.setMaximum(std::max(frameCount, static_cast<int>(count)));
             if (!haveFrame) progress.setValue(static_cast<int>(completed));
             progress.setLabelText(haveFrame
-                ? QString("Rendering and encoding LOG60 Camera Native frame %1 of %2...")
+                ? QString(metadataOnly ? "Collecting metadata for frame %1 of %2..."
+                                       : "Rendering and encoding LOG60 Camera Native frame %1 of %2...")
                     .arg(frameIndex + 1).arg(frameCount)
                 : QString::fromStdString(label));
             QApplication::processEvents();
         }
-        if (!pendingFrame) throw std::runtime_error("The rendered sequence contains no video frames");
-        videoPipe.writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
+        if (!pendingFrame) throw std::runtime_error("The rendered sequence contains no frames");
+        if (videoPipe) videoPipe->writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
             std::max<int64_t>(1, static_cast<int64_t>(std::llround(1e9 / info->fps))));
         appendDynamicMetadata(*pendingFrame);
         ++frameIndex;
         if (frameIndex != frameCount)
             throw std::runtime_error("Rendered frame count did not match the clip metadata");
-        videoPipe.finish();
-        encoder.closeWriteChannel();
-        progress.setLabelText(QString("Finishing LOG60 Camera Native %1...")
+        if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+        if (videoPipe) videoPipe->finish();
+        if (!metadataOnly) encoder.closeWriteChannel();
+        if (!metadataOnly) progress.setLabelText(QString("Finishing LOG60 Camera Native %1...")
             .arg(containerExtension==".mp4" ? "MP4" : "MOV"));
-        while (encoder.state() != QProcess::NotRunning) {
+        while (!metadataOnly && encoder.state() != QProcess::NotRunning) {
             encoder.waitForFinished(100);
             QApplication::processEvents();
             diagnostic += encoder.readAll();
@@ -5365,7 +5391,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 throw std::runtime_error("Finalization cancelled");
             }
         }
-        if (encoder.exitStatus() != QProcess::NormalExit || encoder.exitCode() != 0) {
+        if (!metadataOnly && (encoder.exitStatus() != QProcess::NormalExit || encoder.exitCode() != 0)) {
             diagnostic += encoder.readAll();
             throw std::runtime_error(("FFmpeg failed:\n" +
                 QString::fromUtf8(diagnostic.right(4000))).toStdString());
@@ -5407,13 +5433,15 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         }
 
         nlohmann::json sidecar;
-        sidecar["transferFunction"] = "LOG60";
-        sidecar["dataLevels"] = "Full";
-        sidecar["videoCodec"] = av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
-        sidecar["encoder"] = av1 ? av1Encoder.toStdString()
-            : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
-        sidecar["pixelFormat"] = pixelFormat.toStdString();
-        if (hdrNoise) sidecar["noiseSynthesis"] = 8;
+        if (!metadataOnly) {
+            sidecar["transferFunction"] = "LOG60";
+            sidecar["dataLevels"] = "Full";
+            sidecar["videoCodec"] = av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
+            sidecar["encoder"] = av1 ? av1Encoder.toStdString()
+                : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
+            sidecar["pixelFormat"] = pixelFormat.toStdString();
+            if (hdrNoise) sidecar["noiseSynthesis"] = 8;
+        }
         if (colorMetadata.hasColorMatrix1 && !identityMatrix(colorMetadata.colorMatrix1)) sidecar["colorMatrix1"] = colorMetadata.colorMatrix1;
         if (colorMetadata.hasColorMatrix2 && !identityMatrix(colorMetadata.colorMatrix2)) sidecar["colorMatrix2"] = colorMetadata.colorMatrix2;
         if (colorMetadata.hasForwardMatrix1 && !identityMatrix(colorMetadata.forwardMatrix1)) sidecar["forwardMatrix1"] = colorMetadata.forwardMatrix1;
@@ -5447,6 +5475,90 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         if (!jsonFile)
             throw std::runtime_error("Could not write Camera Native JSON sidecar");
         jsonFile.close();
+
+        if (metadataOnly) {
+            const QString sourceGcsv = sourceInfo.absolutePath() + "/" +
+                sourceInfo.completeBaseName() + ".gcsv";
+            const QString partialGcsv = stageDir.absoluteFilePath(outputBase + ".gcsv");
+            if (QFile::exists(sourceGcsv)) {
+                copyFileAtomically(sourceGcsv, partialGcsv);
+            } else if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive)) {
+                Decoder decoder(srcFile.toStdString());
+                if (decoder.hasGyroData()) {
+                    std::vector<MotionSample> samples;
+                    decoder.loadGyroData(samples);
+                    if (!samples.empty()) {
+                        std::ofstream gcsv(partialGcsv.toStdString(), std::ios::trunc);
+                        if (!gcsv) throw std::runtime_error("Could not create GCSV sidecar");
+                        gcsv << "GYROFLOW IMU LOG\nversion,1.2\nid,MotionCam\n"
+                             << "orientation,XYZ\nvendor,MotionCam\n"
+                             << "tscale,0.000000001\ngscale,1\nt,gx,gy,gz\n"
+                             << std::setprecision(9);
+                        const auto& sourceFrames = decoder.getFrames();
+                        if (sourceFrames.empty())
+                            throw std::runtime_error("Could not find the first source frame for GCSV timing");
+                        const int64_t firstTimestamp = sourceFrames.front();
+                        for (const auto& sample : samples)
+                            gcsv << sample.timestampNs - firstTimestamp << ','
+                                 << sample.x << ',' << sample.y << ',' << sample.z << '\n';
+                        if (!gcsv) throw std::runtime_error("Could not write GCSV sidecar");
+                    }
+                }
+            }
+
+            QString partialAudio;
+            QString outputAudio;
+            for (const QString& extension : {QStringLiteral("wav"), QStringLiteral("flac"),
+                                             QStringLiteral("opus"), QStringLiteral("aac")}) {
+                const QString candidate = stageDir.absoluteFilePath("audio." + extension);
+                if (QFile::exists(candidate)) {
+                    partialAudio = stageDir.absoluteFilePath(outputBase + "." + extension);
+                    outputAudio = audioBasePath + "." + extension;
+                    copyFileAtomically(candidate, partialAudio);
+                    break;
+                }
+            }
+
+            std::vector<std::pair<QString, QString>> outputs{{partialJsonPath, jsonPath}};
+            if (QFile::exists(partialGcsv)) outputs.emplace_back(partialGcsv, gcsvPath);
+            if (!partialAudio.isEmpty()) outputs.emplace_back(partialAudio, outputAudio);
+            if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+
+            // Treat all files produced by this mode as one replacement set.
+            // A rerun may switch audio extensions or have no gyro data.
+            QStringList oldPaths{jsonPath, gcsvPath};
+            for (const char* extension : {"wav", "flac", "opus", "aac"})
+                oldPaths << audioBasePath + "." + extension;
+            const QString backupId = ".metadata-backup-" +
+                QUuid::createUuid().toString(QUuid::WithoutBraces);
+            std::vector<std::pair<QString, QString>> backups;
+            std::vector<QString> committed;
+            try {
+                for (const QString& destination : oldPaths) {
+                    if (!QFile::exists(destination)) continue;
+                    const QString backup = destination + backupId;
+                    if (!QFile::rename(destination, backup))
+                        throw std::runtime_error("Could not preserve existing metadata output");
+                    backups.emplace_back(backup, destination);
+                }
+                for (const auto& [partial, destination] : outputs) {
+                    if (!QFile::rename(partial, destination))
+                        throw std::runtime_error("Could not commit metadata output");
+                    committed.push_back(destination);
+                }
+            } catch (...) {
+                for (const auto& destination : committed) QFile::remove(destination);
+                for (const auto& [backup, destination] : backups)
+                    QFile::rename(backup, destination);
+                throw;
+            }
+            for (const auto& [backup, destination] : backups) QFile::remove(backup);
+            progress.close();
+            QMessageBox::information(this, "Metadata finalization",
+                QString("Created %1 output file(s) beside the source clip.").arg(outputs.size()));
+            mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+            return;
+        }
 
         // Commit the pair together. Existing outputs are retained until both
         // temporary files are complete and are restored if either rename fails.
@@ -5505,8 +5617,10 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     const bool archiveDngs = ui->dngCompressionCheckBox->isChecked() &&
         isSevenZipFinalizeFormat(compressionMode);
     if (ui->dngCompressionCheckBox->isChecked()) {
-        if (isCameraNativeFormat(compressionMode)) {
-            finalizeCameraNative(fileWidget, requestedMode);
+        if (isCameraNativeFormat(compressionMode) ||
+            isMetadataOnlyFinalizeFormat(compressionMode)) {
+            finalizeCameraNative(fileWidget, requestedMode,
+                                 isMetadataOnlyFinalizeFormat(compressionMode));
             return;
         }
         if (archiveDngs) {
@@ -6308,6 +6422,7 @@ void MainWindow::updateSelectionUi() {
     // Camera Native modes are global finalization choices rather than fields
     // in RenderSettings. Preserve them while clip selection changes.
     if (!isCameraNativeFormat(ui->dngCompressionModeComboBox->currentText()) &&
+        !isMetadataOnlyFinalizeFormat(ui->dngCompressionModeComboBox->currentText()) &&
         !isSevenZipFinalizeFormat(ui->dngCompressionModeComboBox->currentText())) {
         if (motioncam::isLossyJpegDct(settings.jxlDistance))
             ui->dngCompressionModeComboBox->setCurrentIndex(1);
