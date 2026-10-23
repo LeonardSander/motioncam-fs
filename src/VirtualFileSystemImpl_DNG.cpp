@@ -252,8 +252,9 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             const boost::filesystem::path source(mSrcPath);
             const auto sourceDirectory = boost::filesystem::is_directory(source)
                 ? source : source.parent_path();
-            const auto audioPath = sourceDirectory / "audio.wav";
-            if (boost::filesystem::is_regular_file(audioPath)) {
+            for (const char* name : {"audio.wav", "audio.flac", "audio.opus"}) {
+                const auto audioPath = sourceDirectory / name;
+                if (!boost::filesystem::is_regular_file(audioPath)) continue;
                 std::ifstream audio(audioPath.string(), std::ios::binary);
                 std::vector<uint8_t> bytes(
                     std::istreambuf_iterator<char>(audio), {});
@@ -261,8 +262,10 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                     throw std::runtime_error("Could not read DNG sequence audio: " +
                                              audioPath.string());
                 if (!bytes.empty())
-                    mAudioWav = std::make_shared<const std::vector<uint8_t>>(
+                    mAudioData = std::make_shared<const std::vector<uint8_t>>(
                         std::move(bytes));
+                mAudioFileName = name;
+                break;
             }
         }
     }
@@ -298,11 +301,11 @@ void VirtualFileSystemImpl_DNG::init() {
 
     vfs::appendDesktopIni(mFiles);
 
-    if (mAudioWav) {
+    if (mAudioData) {
         Entry audioEntry;
         audioEntry.type = EntryType::FILE_ENTRY;
-        audioEntry.size = mAudioWav->size();
-        audioEntry.name = "audio.wav";
+        audioEntry.size = mAudioData->size();
+        audioEntry.name = mAudioFileName;
         mFiles.emplace_back(std::move(audioEntry));
     }
 
@@ -489,15 +492,15 @@ int VirtualFileSystemImpl_DNG::readPriority(const Entry& entry) const {
 
 std::function<std::shared_ptr<std::vector<uint8_t>>()>
 VirtualFileSystemImpl_DNG::staticMaterializer(const Entry& entry) {
-    if (entry.name != "audio.wav") return {};
+    if (entry.name != mAudioFileName) return {};
     return [this, entry] { return materializeFile(entry, false); };
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile(
     const Entry& entry, bool jpegCompression, bool savedOutput) {
     std::shared_lock renderLock(mRenderMutex);
-    if (entry.name == "audio.wav" && mAudioWav)
-        return std::make_shared<std::vector<uint8_t>>(mAudioWav->begin(), mAudioWav->end());
+    if (entry.name == mAudioFileName && mAudioData)
+        return std::make_shared<std::vector<uint8_t>>(mAudioData->begin(), mAudioData->end());
 
     return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
         const auto materializeStarted = std::chrono::steady_clock::now();
@@ -1115,7 +1118,7 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
             names->push_back(boost::filesystem::path(frame.filePath).filename().string());
         info.stillFrameNames = std::move(names);
     }
-    info.audioWav = mAudioWav;
+    if (mAudioFileName == "audio.wav") info.audioWav = mAudioData;
     if (!mDecoder->getFrames().empty()) {
         DNGFrameMetadata metadata;
         if (mDecoder->getFrameMetadata(0, metadata)) info.orientation = metadata.orientation;

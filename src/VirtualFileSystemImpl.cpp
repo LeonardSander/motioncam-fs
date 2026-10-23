@@ -1977,16 +1977,16 @@ void finalize(
             return false;
         };
         for (size_t i = 1; i + 1 < entries.size();) {
-            if (entries[i].name == "audio.wav" || entries[i - 1].name == "audio.wav" ||
+            if (!isDng(entries[i]) || !isDng(entries[i - 1]) ||
                 !duplicated(i, i - 1)) {
                 ++i;
                 continue;
             }
             Gap gap{i - 1, i + 1, {}};
-            while (gap.right < entries.size() && entries[gap.right].name != "audio.wav" &&
+            while (gap.right < entries.size() && isDng(entries[gap.right]) &&
                    duplicated(gap.right, gap.right - 1))
                 ++gap.right;
-            if (gap.right == entries.size() || entries[gap.right].name == "audio.wav") break;
+            if (gap.right == entries.size() || !isDng(entries[gap.right])) break;
             for (size_t frame = i; frame < gap.right; ++frame) gap.frames.push_back(frame);
             const size_t right = gap.right;
             if (gap.frames.size() <= maxInterpolatedGapFrames) {

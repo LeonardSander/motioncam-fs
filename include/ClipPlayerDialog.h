@@ -158,6 +158,8 @@ private:
     void setAudioEnabled(bool enabled);
     enum class AudioMode { CappedMuted, RealTimeAudio, UncappedMuted };
     void cycleAudioMode();
+    void setVolumePanelVisible(bool visible);
+    void positionVolumePanel();
     void updateButtonIcons();
     void revealOverlay();
     void setOverlayVisible(bool visible);
@@ -222,6 +224,7 @@ private:
     QTimer mOverlayTimer, mNativeOverlayCaptureTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
     QImage mCapturedNativeOverlay;
     QPointer<QWidget> mNativeMouseTarget;
+    QPointer<QWidget> mNativeHoverTarget;
     QElapsedTimer mZoomAnimationClock;
     QElapsedTimer mPresentationClock;
     QElapsedTimer mCadenceClock;
@@ -230,6 +233,18 @@ private:
     std::deque<qint64> mPresentationIntervals;
     qint64 mLastPresentationNs=-1;
     QBuffer* mAudioBuffer=nullptr;
+    QTimer mAudioFadeTimer;
+    QElapsedTimer mAudioFadeClock;
+    bool mAudioFadeOut=false;
+    qreal mAudioFadeStartVolume=0.0;
+    QWidget* mVolumePanel=nullptr;
+    QSlider* mVolumeSlider=nullptr;
+    QPropertyAnimation* mVolumeAnimation=nullptr;
+    QTimer mVolumeHideTimer;
+    bool mVolumePanelWanted=false;
+    QTimer mVuTimer;
+    float mVuLevel=0.0f;
+    int mVolumePercent=50;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
     QAudioSink* mAudioSink=nullptr;
 #else

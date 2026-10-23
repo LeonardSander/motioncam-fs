@@ -1175,6 +1175,18 @@ namespace {
         return mode.trimmed().compare("7z LZMA2 Ultra", Qt::CaseInsensitive) == 0;
     }
 
+    QString finalizeAudioCodec(QString& mode) {
+        mode=mode.trimmed();
+        for(const QString& codec:{QStringLiteral("flac"),QStringLiteral("opus")}){
+            const QString suffix=" "+codec;
+            if(mode.endsWith(suffix,Qt::CaseInsensitive)){
+                mode.chop(suffix.size());
+                return codec;
+            }
+        }
+        return {};
+    }
+
     QString sevenZipExecutable() {
         for (const QString& name : {QStringLiteral("7zz"), QStringLiteral("7z"), QStringLiteral("7za")}) {
             const QString bundled = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(
@@ -1227,7 +1239,8 @@ namespace {
     }
 
     bool dngFinalizeCompressionDistance(const QString& mode, float& distance) {
-        const QString trimmed = mode.trimmed();
+        QString trimmed = mode.trimmed();
+        finalizeAudioCodec(trimmed);
         if (trimmed.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
             distance = -1.0f;
             return true;
@@ -1564,6 +1577,12 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 {
     ui->setupUi(this);
+    ui->dngCompressionModeComboBox->addItems({
+        "JPEG XL Lossless flac", "JPEG XL Lossless opus",
+        "HEVC 420 slow 14 flac", "HEVC 420 slow 14 opus"});
+    ui->dngCompressionModeComboBox->setToolTip(
+        tr("Append flac or opus to a DNG or Camera Native format to encode audio. "
+           "Without a suffix, existing audio is copied unchanged."));
     motioncam::warmVulkanGalleryPreview();
 
 #ifdef _WIN32
@@ -4618,7 +4637,9 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
     return runtimeRoot;
 }
 
-void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) {
+void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& requestedMode) {
+    QString mode=requestedMode;
+    const QString audioCodec=finalizeAudioCodec(mode);
     const QStringList modeParts = mode.simplified().split(' ', Qt::SkipEmptyParts);
     const bool hevc = !modeParts.isEmpty() &&
         modeParts.front().compare("HEVC", Qt::CaseInsensitive) == 0;
@@ -4771,7 +4792,17 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
     else if (cineFormRgb) codecSuffix = "_CINEFORM_RGB";
     else if (cineForm) codecSuffix = "_CINEFORM_422";
     const QString outputBase = sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
-    const QString containerExtension = av1 ? ".mp4" : ".mov";
+    const bool compressedSourceAudio=QFile::exists(QDir(mountPath).absoluteFilePath("audio.flac"))||
+        QFile::exists(QDir(mountPath).absoluteFilePath("audio.opus"));
+    const bool compressedOutputAudio=!audioCodec.isEmpty()||compressedSourceAudio;
+    if(compressedOutputAudio&&(proRes||cineForm)){
+        QMessageBox::warning(this,tr("Unsupported audio and video combination"),
+            tr("This FFmpeg build cannot embed FLAC or Opus with ProRes or CineForm "
+               "in MOV or MP4. Select an HEVC or AV1 format, or use uncompressed "
+               "audio with this video format."));
+        return;
+    }
+    const QString containerExtension = (av1||compressedOutputAudio) ? ".mp4" : ".mov";
     const QDir outputDir(QFileInfo(mountPath).absolutePath());
     const QString outputPath = outputDir.absoluteFilePath(outputBase + containerExtension);
     const QString jsonPath = outputDir.absoluteFilePath(outputBase + ".json");
@@ -4981,6 +5012,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         const QString partialGyroflowPath = stageDir.absoluteFilePath(outputBase + "_gyroflow.json");
         if (QFile::exists(gyroflowPath) && !QFile::copy(gyroflowPath, partialGyroflowPath))
             throw std::runtime_error("Could not stage the Gyroflow lens profile");
+        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus")}){
+            const QString source=QDir(mountPath).absoluteFilePath(name);
+            if(QFile::exists(source)){
+                const QString target=stageDir.absoluteFilePath(name);
+                if(!QFile::copy(source,target))throw std::runtime_error("Could not stage source audio");
+                break;
+            }
+        }
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
         QStringList args{"-hide_banner", "-y"};
@@ -4991,8 +5030,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
             args << "-display_rotation:v:0" << QString::number(-outputOrientation)
                  << "-noautorotate";
         args << "-f" << "nut" << "-i" << "pipe:0";
-        const QString audioPath = stageDir.absoluteFilePath("audio.wav");
-        if (QFile::exists(audioPath))
+        QString audioPath;
+        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus")}){
+            const QString candidate=stageDir.absoluteFilePath(name);
+            if(QFile::exists(candidate)){audioPath=candidate;break;}
+        }
+        if (!audioPath.isEmpty())
             args << "-i" << audioPath;
         const QString log60Lut =
             "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:"
@@ -5010,8 +5053,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
                 ",zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=ordered,format=" +
                 pixelFormat;
         args << "-map" << "0:v:0";
-        if (QFile::exists(audioPath))
-            args << "-map" << "1:a:0" << "-c:a" << "copy";
+        if (!audioPath.isEmpty()){
+            args << "-map" << "1:a:0" << "-c:a"
+                 << (audioCodec.isEmpty()?QStringLiteral("copy"):
+                     audioCodec=="flac"?QStringLiteral("flac"):QStringLiteral("libopus"));
+            if(audioCodec=="opus")args << "-b:a" << "288k";
+        }
         args << "-vf" << videoFilter;
         if (av1) {
             // SVT 4 defaults to parallelism level 6 (305 PPCS at 4K), which
@@ -5287,7 +5334,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
         videoPipe.finish();
         encoder.closeWriteChannel();
         progress.setLabelText(QString("Finishing LOG60 Camera Native %1...")
-            .arg(av1 ? "MP4" : "MOV"));
+            .arg(containerExtension==".mp4" ? "MP4" : "MOV"));
         while (encoder.state() != QProcess::NotRunning) {
             encoder.waitForFinished(100);
             QApplication::processEvents();
@@ -5432,12 +5479,15 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& mode) 
 }
 
 void MainWindow::finalizeFile(QWidget* fileWidget) {
-    const QString compressionMode = ui->dngCompressionModeComboBox->currentText();
+    QString compressionMode = ui->dngCompressionModeComboBox->currentText();
+    const QString requestedMode = compressionMode;
+    const QString audioCodec=ui->dngCompressionCheckBox->isChecked()
+        ?finalizeAudioCodec(compressionMode):QString{};
     const bool archiveDngs = ui->dngCompressionCheckBox->isChecked() &&
         isSevenZipFinalizeFormat(compressionMode);
     if (ui->dngCompressionCheckBox->isChecked()) {
         if (isCameraNativeFormat(compressionMode)) {
-            finalizeCameraNative(fileWidget, compressionMode);
+            finalizeCameraNative(fileWidget, requestedMode);
             return;
         }
         if (archiveDngs) {
@@ -5611,6 +5661,39 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                     QApplication::processEvents();
                     return !progress.wasCanceled();
                 });
+            if(!audioCodec.isEmpty()&&!progress.wasCanceled()){
+                QString sourceAudio;
+                for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus")}){
+                    const QString candidate=QDir(tempPath).absoluteFilePath(name);
+                    if(QFile::exists(candidate)){sourceAudio=candidate;break;}
+                }
+                if(!sourceAudio.isEmpty()&&!sourceAudio.endsWith("."+audioCodec,Qt::CaseInsensitive)){
+                    QString ffmpeg=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(
+#ifdef _WIN32
+                        "ffmpeg.exe");
+#else
+                        "ffmpeg");
+#endif
+                    if(!QFileInfo(ffmpeg).isExecutable())ffmpeg=QStandardPaths::findExecutable("ffmpeg");
+                    if(ffmpeg.isEmpty())throw std::runtime_error("FFmpeg is required to encode finalized audio");
+                    const QString target=QDir(tempPath).absoluteFilePath("audio."+audioCodec);
+                    QProcess encoder;encoder.setProcessChannelMode(QProcess::MergedChannels);
+                    QStringList args{"-hide_banner","-y","-i",sourceAudio,"-map","0:a:0","-vn","-c:a",
+                        audioCodec=="flac"?"flac":"libopus"};
+                    if(audioCodec=="opus")args << "-b:a" << "288k";
+                    args << target;
+                    encoder.start(ffmpeg,args);
+                    if(!encoder.waitForStarted())throw std::runtime_error("Could not start FFmpeg audio encoder");
+                    progress.setLabelText("Encoding "+audioCodec.toUpper()+" audio...");
+                    while(encoder.state()!=QProcess::NotRunning){
+                        encoder.waitForFinished(100);QApplication::processEvents();
+                        if(progress.wasCanceled()){encoder.kill();encoder.waitForFinished();throw std::runtime_error("Finalization cancelled");}
+                    }
+                    if(encoder.exitCode()!=0)throw std::runtime_error(
+                        ("Audio encoding failed: "+QString::fromUtf8(encoder.readAll().right(4000))).toStdString());
+                    QFile::remove(sourceAudio);
+                }
+            }
         }
 
         if (!progress.wasCanceled()) {

@@ -6,6 +6,9 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+#include <QEnterEvent>
+#endif
 #include <QEasingCurve>
 #include <QEvent>
 #include <QFile>
@@ -30,6 +33,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSaveFile>
+#include <QSettings>
 #include <QSlider>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -62,6 +66,106 @@
 #endif
 
 namespace {
+struct PreparedGalleryAudio { QByteArray pcm; int sampleRate=0; };
+PreparedGalleryAudio prepareGalleryAudio(const std::shared_ptr<const std::vector<uint8_t>>& audio,
+                                         const std::shared_ptr<std::atomic_bool>& cancelled){
+    PreparedGalleryAudio result;
+    if(!audio||audio->empty()||cancelled->load())return result;
+    const auto* wav=reinterpret_cast<const uint8_t*>(audio->data());const size_t size=static_cast<size_t>(audio->size());
+    auto le16=[&](size_t at){return at+2<=size?uint16_t(wav[at]|uint16_t(wav[at+1])<<8):uint16_t(0);};
+    auto le32=[&](size_t at){return at+4<=size?uint32_t(wav[at]|uint32_t(wav[at+1])<<8|uint32_t(wav[at+2])<<16|uint32_t(wav[at+3])<<24):uint32_t(0);};
+    uint16_t encoding=0,channels=0,bits=0,validBits=0,blockAlign=0;uint32_t sampleRate=0;size_t dataAt=0,dataBytes=0;
+    if(size>=12&&(std::memcmp(wav,"RIFF",4)==0||std::memcmp(wav,"RF64",4)==0)&&std::memcmp(wav+8,"WAVE",4)==0){
+        for(size_t at=12;at+8<=size;){const uint32_t bytes=le32(at+4);const size_t payload=at+8;
+            if(std::memcmp(wav+at,"data",4)==0){dataAt=payload;dataBytes=bytes==0xffffffffu?size-payload:std::min<size_t>(bytes,size-payload);break;}
+            if(payload+bytes>size)break;
+            if(std::memcmp(wav+at,"fmt ",4)==0&&bytes>=16){
+                encoding=le16(payload);channels=le16(payload+2);sampleRate=le32(payload+4);blockAlign=le16(payload+12);bits=le16(payload+14);validBits=bits;
+                // WAVE_FORMAT_EXTENSIBLE stores PCM/float in the first DWORD
+                // of its subtype GUID and may carry 24 valid bits in a 32-bit container.
+                if(encoding==0xfffe&&bytes>=40&&le16(payload+16)>=22){
+                    validBits=le16(payload+18);const uint32_t subtype=le32(payload+24);
+                    if(subtype==1||subtype==3)encoding=static_cast<uint16_t>(subtype);
+                }
+            }
+            at=payload+bytes+(bytes&1u);}
+    }
+    const bool integerPcm=encoding==1&&(
+        (bits==16&&validBits==16)||(bits==24&&validBits==24)||
+        (bits==32&&(validBits==24||validBits==32)));
+    const bool floatPcm=encoding==3&&bits==32;
+    if(!dataAt||!dataBytes||!channels||!sampleRate||!blockAlign||
+       blockAlign<channels*(bits/8)||(!integerPcm&&!floatPcm)){
+        return result;
+    }
+    const int sourceStride=bits/8;
+    const qsizetype frames=static_cast<qsizetype>(dataBytes/blockAlign);
+    result.pcm.resize(frames*2*static_cast<qsizetype>(sizeof(float)));
+    auto* stereo=reinterpret_cast<float*>(result.pcm.data());
+    auto sampleAt=[&](qsizetype frame,int channel){
+        const size_t offset=dataAt+static_cast<size_t>(frame)*blockAlign+
+            static_cast<size_t>(channel)*sourceStride;
+        if(offset+sourceStride>size)return 0.0f;
+        if(floatPcm){
+            const uint32_t bitsValue=le32(offset);
+            float value;std::memcpy(&value,&bitsValue,sizeof(value));return value;
+        }
+        int32_t value=0;
+        if(bits==16){
+            const uint16_t raw=le16(offset);
+            value=(raw<0x8000u?int32_t(raw):int32_t(raw)-0x10000)*65536;
+        }else if(bits==24){
+            const uint32_t raw=uint32_t(wav[offset])|
+                uint32_t(wav[offset+1])<<8|uint32_t(wav[offset+2])<<16;
+            value=(raw<0x800000u?int32_t(raw):int32_t(raw)-0x1000000)*256;
+        }else{
+            const uint32_t raw=le32(offset);
+            value=raw<0x80000000u?int32_t(raw):int32_t(int64_t(raw)-0x100000000LL);
+        }
+        // WAVE_FORMAT_EXTENSIBLE stores valid bits left-aligned in the container.
+        return static_cast<float>(double(value)/2147483648.0);
+    };
+    if(floatPcm&&channels==2&&blockAlign==2*sizeof(float)){
+        std::memcpy(stereo,wav+dataAt,static_cast<size_t>(result.pcm.size()));
+    }else{
+        for(qsizetype frame=0;frame<frames;++frame){
+            if((frame&4095)==0&&cancelled->load())return {};
+            stereo[frame*2]=sampleAt(frame,0);
+            stereo[frame*2+1]=sampleAt(frame,channels>1?1:0);
+        }
+    }
+    if(cancelled->load())return {};
+    result.sampleRate=static_cast<int>(sampleRate);
+    return result;
+}
+class VuVolumeSlider final : public QSlider {
+public:
+    explicit VuVolumeSlider(QWidget* parent):QSlider(Qt::Vertical,parent) { setRange(0,100); }
+    void setLevel(float level) { mLevel=std::clamp(level,0.0f,1.0f); update(); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);p.setRenderHint(QPainter::Antialiasing);
+        const QRectF rail(width()/2.0-4,8,8,height()-16);
+        p.setPen(Qt::NoPen);p.setBrush(QColor(8,12,9,240));p.drawRoundedRect(rail,4,4);
+        QLinearGradient colors(rail.topLeft(),rail.bottomLeft());
+        colors.setColorAt(0,QColor(225,42,40));
+        colors.setColorAt(0.38,QColor(230,170,34));
+        colors.setColorAt(1,QColor(48,210,75));
+        p.save();
+        QPainterPath clip;clip.addRoundedRect(rail,4,4);p.setClipPath(clip);
+        const qreal top=rail.bottom()-mLevel*rail.height();
+        p.fillRect(QRectF(rail.left(),top,rail.width(),rail.bottom()-top),colors);
+        p.restore();
+        const qreal y=rail.bottom()-value()/100.0*rail.height();
+        p.setPen(Qt::NoPen);p.setBrush(QColor(255,255,255,128));
+        p.drawRoundedRect(QRectF(width()/2.0-12,y-5,24,10),5,5);
+    }
+    void mousePressEvent(QMouseEvent* event) override { setFromY(event->pos().y()); event->accept(); }
+    void mouseMoveEvent(QMouseEvent* event) override { if(event->buttons()&Qt::LeftButton)setFromY(event->pos().y());event->accept(); }
+private:
+    void setFromY(int y){setValue(qBound(0,qRound(100.0*(height()-7-y)/std::max(1,height()-14)),100));}
+    float mLevel=0;
+};
 QIcon fullscreenIcon(bool restore) {
     QPixmap pixmap(24,24);pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);painter.setRenderHint(QPainter::Antialiasing);
@@ -682,6 +786,10 @@ void ClipPlayerDialog::runPerformanceGestureTest(std::function<void()> finished)
 
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
+    QSettings gallerySettings("com.motioncam","MotionCam FS");
+    mAudioMode=static_cast<AudioMode>(qBound(0,gallerySettings.value("gallery/audioMode",0).toInt(),2));
+    mPerformanceUncapped=mAudioMode==AudioMode::UncappedMuted;
+    mVolumePercent=qBound(0,gallerySettings.value("gallery/volume",50).toInt(),100);
     mThumbnailDiskCache=std::make_unique<QTemporaryDir>();
     mThumbnailCacheWriter.setMaxThreadCount(1);
     setAttribute(Qt::WA_DeleteOnClose); setWindowTitle(tr("Gallery")); resize(1100,720);
@@ -735,7 +843,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mFullscreenButton=new QPushButton(mOverlay);mThumbnailToggle=new QPushButton(mOverlay);
     mHistogramToggle=new QPushButton(mOverlay);mHistogramToggle->setCheckable(true);
     mClippingToggle=new QPushButton(mOverlay);mClippingToggle->setCheckable(true);
-    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle,mHistogramToggle,mClippingToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(70,70,70,210)} QPushButton:checked{background:rgba(70,95,125,220)}");}
+    for(auto* button:{previous,mPlayPause,next,mAudioButton,mFullscreenButton,mThumbnailToggle,mHistogramToggle,mClippingToggle}){button->setFixedSize(38,38);button->setFlat(true);button->setMouseTracking(true);button->setStyleSheet("QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(45,45,45,185)} QPushButton:checked{background:rgba(70,95,125,220)}");}
     previous->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));previous->setToolTip(tr("Previous clip"));
     next->setIcon(style()->standardIcon(QStyle::SP_MediaSkipForward));next->setToolTip(tr("Next clip"));
     mPlayPause->setToolTip(tr("Play / pause"));mAudioButton->setToolTip(tr("Capped, muted — click for real-time audio"));mFullscreenButton->setToolTip(tr("Toggle fullscreen"));
@@ -746,7 +854,61 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mClippingToggle->setToolTip(tr("Show raw clipping indication"));
     mThumbnailToggle->setToolTip(tr("Show frame thumbnails"));
     mThumbnailToggle->setIcon(thumbnailChevronIcon(true));mThumbnailToggle->setIconSize(QSize(22,22));
+    mVolumePanel=new QWidget(mOverlay);mVolumePanel->setFixedWidth(38);
+    mVolumePanel->setAttribute(Qt::WA_StyledBackground,true);
+    mVolumePanel->setStyleSheet("background:rgba(0,0,0,145);border-radius:19px;");
+    mVolumeSlider=new VuVolumeSlider(mVolumePanel);mVolumeSlider->setFixedWidth(28);
+    mVolumeSlider->setValue(mVolumePercent);
+    mVolumeSlider->setToolTip(tr("Gallery volume: %1%").arg(mVolumePercent));
+    mVolumeSlider->hide();
     controls->addStretch();controls->addWidget(previous);controls->addWidget(mPlayPause);controls->addWidget(next);controls->addWidget(mThumbnailToggle);controls->addWidget(mAudioButton);controls->addWidget(mHistogramToggle);controls->addWidget(mClippingToggle);controls->addWidget(mFullscreenButton);controls->addStretch();overlayLayout->addLayout(controls);
+    mVolumePanel->hide();
+    mVolumeAnimation=new QPropertyAnimation(mVolumePanel,"geometry",this);
+    mVolumeAnimation->setDuration(180);mVolumeAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(mVolumeAnimation,&QPropertyAnimation::valueChanged,this,[this](const QVariant& value){
+        const int available=value.toRect().height()-46;
+        mVolumeSlider->setGeometry(5,8,28,std::max(0,available));
+        mVolumeSlider->setVisible(available>12);
+    });
+    mVolumeHideTimer.setSingleShot(true);mVolumeHideTimer.setInterval(2200);
+    connect(&mVolumeHideTimer,&QTimer::timeout,this,[this]{setVolumePanelVisible(false);});
+    connect(mVolumeAnimation,&QPropertyAnimation::finished,this,[this]{
+        if(mVolumePanel&&!mVolumePanelWanted){mVolumePanel->hide();updateButtonIcons();}
+    });
+    connect(mVolumeSlider,&QSlider::valueChanged,this,[this](int value){
+        mVolumePercent=value;mVolumeSlider->setToolTip(tr("Gallery volume: %1%").arg(value));
+        if(mAudioSink&&!mAudioFadeTimer.isActive())mAudioSink->setVolume(value/100.0);
+        QSettings("com.motioncam","MotionCam FS").setValue("gallery/volume",value);
+    });
+    mVuTimer.setInterval(50);
+    connect(&mVuTimer,&QTimer::timeout,this,[this]{
+        float peak=0.0f;
+        if(mAudioEnabled&&mAudioClock.isValid()&&mAudioBytesPerSecond>0){
+            const qint64 begin=qBound<qint64>(0,audioPositionNs()*mAudioBytesPerSecond/1000000000LL,mAudioPcm.size());
+            const qint64 end=std::min<qint64>(mAudioPcm.size(),begin+mAudioBytesPerSecond/20);
+            const float* samples=reinterpret_cast<const float*>(mAudioPcm.constData());
+            for(qint64 i=begin/4;i<end/4;++i)peak=std::max(peak,std::abs(samples[i]));
+        }
+        mVuLevel=std::max(peak,mVuLevel*0.72f);
+        static_cast<VuVolumeSlider*>(mVolumeSlider)->setLevel(mVuLevel);
+    });
+    mAudioFadeTimer.setInterval(15);
+    connect(&mAudioFadeTimer,&QTimer::timeout,this,[this]{
+        if(!mAudioSink){mAudioFadeTimer.stop();return;}
+        constexpr qreal fadeMs=120.0;
+        const qreal fraction=std::clamp(mAudioFadeClock.elapsed()/fadeMs,0.0,1.0);
+        const qreal level=mAudioFadeOut
+            ?mAudioFadeStartVolume*(1.0-fraction)
+            :mVolumePercent/100.0*fraction;
+        mAudioSink->setVolume(level);
+        if(fraction<1.0)return;
+        mAudioFadeTimer.stop();
+        if(mAudioFadeOut&&mPaused){
+            mAudioSink->suspend();
+            mAudioClockBaseNs=qRound64(mPositionSeconds*1.0e9);
+            mAudioClock.invalidate();
+        }
+    });
     mThumbnailScroll=new QScrollArea(mOverlay);mThumbnailScroll->setWidgetResizable(true);
     mThumbnailScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     mThumbnailScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -778,7 +940,8 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         return (value-lower)/(1.0-2.0*lower);
     });
     mOverlayAnimation->setEasingCurve(fadeCurve);
-    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mPerformanceOverlayPinned&&!mHistogramExpanded&&!pointerOverThumbnailRow())setOverlayVisible(false);});
+    mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{if(!mPerformanceOverlayPinned&&!mHistogramExpanded&&!pointerOverThumbnailRow()&&
+        !(mAudioButton&&mAudioButton->underMouse())&&!(mVolumePanel&&mVolumePanel->underMouse()))setOverlayVisible(false);});
     mNativeOverlayCaptureTimer.setInterval(50);
     connect(&mNativeOverlayCaptureTimer,&QTimer::timeout,this,[this]{
         if(mGpuVideo&&mGpuVideo->isVisible())captureNativeOverlay();
@@ -847,15 +1010,18 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             mPresentationClock.restart();mCadenceStartFrame=-1;mCadenceLastFrame=-1;
             mCadenceClock.invalidate();}
         updateFpsIndicator();
-        if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){mAudioClockBaseNs=audioPositionNs();mAudioClock.invalidate();mAudioSink->suspend();}
+        if(mPaused){mFrameTimer.stop();if(mAudioEnabled&&mAudioSink){
+                mAudioFadeOut=true;
+                mAudioFadeStartVolume=mAudioSink->volume();
+                mAudioFadeClock.restart();mAudioFadeTimer.start();
+            }
             if(mThumbnailScroll&&mThumbnailScroll->isVisible())
                 emit thumbnailBackfillRequested(currentMountId(),mPositionSeconds);
         }
         else {updateFrameTimerInterval();mFrameTimer.start();if(mThumbnailScroll&&mThumbnailScroll->isVisible())
                 emit currentClipChanged(currentMountId(),mPositionSeconds);
             if(mAudioEnabled&&mAudioSink){
-            if(mAudioStartPending&&mFirstFrameReady){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
-            else if(!mAudioStartPending){mAudioClock.start();mAudioSink->resume();}
+            if(mFirstFrameReady){startAudioAt(mPositionSeconds);mAudioStartPending=false;}
         }}
     });
     connect(mAudioButton,&QPushButton::clicked,this,&ClipPlayerDialog::cycleAudioMode);
@@ -1094,6 +1260,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     releaseGpuFrames(true);
     emit currentClipChanged(requestedClip.mountId,requestedSeconds);
     stopDecoder();mBytes.clear();mBytesOffset=0;mFrames.clear();mSubmittedFrames.clear();
+    if(changingClip)mAudioFadeTimer.stop();
     mPresentedRawFrame={};
     updateHistogram();
     mAudioLoadCancelled->store(true);
@@ -1101,6 +1268,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     ++mAudioLoadGeneration;mAudioLoading=false;
     mFirstFrameReady=false;mAudioStartPending=mAudioEnabled;
     if(!changingClip&&!mPaused&&mAudioEnabled&&mAudioSink){
+        mAudioFadeTimer.stop();
         mAudioSink->stop();mAudioClock.invalidate();
     }
     mIndex=index;
@@ -2220,6 +2388,16 @@ QPointF ClipPlayerDialog::surfaceScaleForZoom(double zoomPercent)const{
 
 void ClipPlayerDialog::updateButtonIcons(){
     mPlayPause->setIcon(style()->standardIcon(mPaused?QStyle::SP_MediaPlay:QStyle::SP_MediaPause));
+    const bool pillVisible=mVolumePanel&&mVolumePanel->isVisible();
+    const int audioStyle=pillVisible?2:mAudioMode==AudioMode::RealTimeAudio?1:0;
+    if(mAudioButton->property("galleryAudioStyle").toInt()!=audioStyle){
+        mAudioButton->setProperty("galleryAudioStyle",audioStyle);
+        mAudioButton->setStyleSheet(audioStyle==2
+            ?"QPushButton{color:white;background:transparent;border:0;border-radius:19px} QPushButton:hover{background:transparent;}"
+            :audioStyle==1
+            ?"QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(0,0,0,145);}"
+            :"QPushButton{color:white;background:rgba(0,0,0,145);border:0;border-radius:19px} QPushButton:hover{background:rgba(45,45,45,185);}");
+    }
     mAudioButton->setIcon(style()->standardIcon(
         mAudioMode==AudioMode::UncappedMuted?QStyle::SP_MediaSeekForward:
         mAudioMode==AudioMode::RealTimeAudio?QStyle::SP_MediaVolume:
@@ -2428,21 +2606,18 @@ void ClipPlayerDialog::updateFrameTimerInterval(){
     mFrameTimer.setInterval(delay);
 }
 void ClipPlayerDialog::configureAudio(){
+    mAudioFadeTimer.stop();
     if(mAudioSink){mAudioSink->stop();delete mAudioSink;mAudioSink=nullptr;}
     delete mAudioBuffer;mAudioBuffer=nullptr;mAudioPcm.clear();mAudioBytesPerSecond=0;mAudioBlockAlign=1;mAudioClockBaseNs=0;mAudioClock.invalidate();
     auto& clip=mClips[mIndex];
     const auto audio=clip.audioWav;
-    const QByteArray sourceAudio=audio&&!audio->empty()
-        ? QByteArray(reinterpret_cast<const char*>(audio->data()),static_cast<qsizetype>(audio->size()))
-        : QByteArray();
     const bool canLoadFromSource=clip.sourceFrames>1&&
         !clip.sourceAudioChecked&&!clip.sourceFile.isEmpty();
-    const bool available=!sourceAudio.isEmpty();
+    const bool available=audio&&!audio->empty();
     mAudioEnabled=mAudioMode==AudioMode::RealTimeAudio&&
         clip.sourceFrames>1&&(available||canLoadFromSource);
-    // Opening the gallery must not synchronously initialize PipeWire/CoreAudio
-    // or copy and parse a potentially large WAV while audio is muted. Keep the
-    // capability visible and defer all device/buffer work until the user opts in.
+    // Keep muted clips free of audio work. For active audio, sample conversion
+    // runs in a worker so the video decoder can start without waiting for it.
     if(!mAudioEnabled){
         updateButtonIcons();
         return;
@@ -2453,58 +2628,47 @@ void ClipPlayerDialog::configureAudio(){
         return;
     }
     updateButtonIcons();
-    const auto* wav=reinterpret_cast<const uint8_t*>(sourceAudio.constData());const size_t size=static_cast<size_t>(sourceAudio.size());
-    auto le16=[&](size_t at){return at+2<=size?uint16_t(wav[at]|uint16_t(wav[at+1])<<8):uint16_t(0);};
-    auto le32=[&](size_t at){return at+4<=size?uint32_t(wav[at]|uint32_t(wav[at+1])<<8|uint32_t(wav[at+2])<<16|uint32_t(wav[at+3])<<24):uint32_t(0);};
-    uint16_t encoding=0,channels=0,bits=0,validBits=0,blockAlign=0;uint32_t sampleRate=0;size_t dataAt=0,dataBytes=0;
-    if(size>=12&&(std::memcmp(wav,"RIFF",4)==0||std::memcmp(wav,"RF64",4)==0)&&std::memcmp(wav+8,"WAVE",4)==0){
-        for(size_t at=12;at+8<=size;){const uint32_t bytes=le32(at+4);const size_t payload=at+8;
-            if(std::memcmp(wav+at,"data",4)==0){dataAt=payload;dataBytes=bytes==0xffffffffu?size-payload:std::min<size_t>(bytes,size-payload);break;}
-            if(payload+bytes>size)break;
-            if(std::memcmp(wav+at,"fmt ",4)==0&&bytes>=16){
-                encoding=le16(payload);channels=le16(payload+2);sampleRate=le32(payload+4);blockAlign=le16(payload+12);bits=le16(payload+14);validBits=bits;
-                // WAVE_FORMAT_EXTENSIBLE stores PCM/float in the first DWORD
-                // of its subtype GUID and may carry 24 valid bits in a 32-bit container.
-                if(encoding==0xfffe&&bytes>=40&&le16(payload+16)>=22){
-                    validBits=le16(payload+18);const uint32_t subtype=le32(payload+24);
-                    if(subtype==1||subtype==3)encoding=static_cast<uint16_t>(subtype);
-                }
-            }
-            at=payload+bytes+(bytes&1u);}
-    }
-    const bool integerPcm=encoding==1&&(
-        (bits==16&&validBits==16)||(bits==24&&validBits==24)||
-        (bits==32&&(validBits==24||validBits==32)));
-    const bool floatPcm=encoding==3&&bits==32;
-    if(!dataAt||!dataBytes||!channels||!sampleRate||!blockAlign||(!integerPcm&&!floatPcm)){mAudioEnabled=false;updateButtonIcons();return;}
-    mAudioPcm=QByteArray(reinterpret_cast<const char*>(wav+dataAt),static_cast<qsizetype>(dataBytes));
-    QAudioFormat format;format.setSampleRate(static_cast<int>(sampleRate));format.setChannelCount(channels);
-#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
-    if(bits==24){
-        // Qt 6 has no packed Int24 sample format. Losslessly sign-extend each
-        // sample into its Int32 container; no resampling or level conversion.
-        QByteArray expanded;expanded.resize(static_cast<qsizetype>(dataBytes/3*4));
-        const auto* input=reinterpret_cast<const uchar*>(mAudioPcm.constData());
-        auto* output=reinterpret_cast<uchar*>(expanded.data());
-        for(qsizetype sample=0;sample<mAudioPcm.size()/3;++sample){
-            output[sample*4]=0;output[sample*4+1]=input[sample*3];
-            output[sample*4+2]=input[sample*3+1];output[sample*4+3]=input[sample*3+2];
+    if(mAudioLoadCancelled->load())
+        mAudioLoadCancelled=std::make_shared<std::atomic_bool>(false);
+    mAudioLoading=true;
+    const int index=mIndex,generation=mAudioLoadGeneration;
+    const auto cancelled=mAudioLoadCancelled;
+    auto* watcher=new QFutureWatcher<PreparedGalleryAudio>(this);
+    connect(watcher,&QFutureWatcher<PreparedGalleryAudio>::finished,this,
+        [this,watcher,index,generation,cancelled]{
+        PreparedGalleryAudio prepared=watcher->result();watcher->deleteLater();
+        if(mClosing||generation!=mAudioLoadGeneration||index!=mIndex)return;
+        mAudioLoading=false;
+        if(cancelled->load()){
+            if(mAudioMode==AudioMode::RealTimeAudio)configureAudio();
+            return;
         }
-        mAudioPcm=std::move(expanded);mAudioBlockAlign=channels*4;
-        format.setSampleFormat(QAudioFormat::Int32);
-    }else{
-        mAudioBlockAlign=blockAlign;
-        format.setSampleFormat(floatPcm?QAudioFormat::Float:
-            (bits==32?QAudioFormat::Int32:QAudioFormat::Int16));
-    }
-    mAudioSink=new QAudioSink(QMediaDevices::defaultAudioOutput(),format,this);
+        if(prepared.sampleRate<=0||prepared.pcm.isEmpty()){
+            mAudioEnabled=false;updateButtonIcons();return;
+        }
+        mAudioPcm=std::move(prepared.pcm);
+        QAudioFormat format;format.setSampleRate(prepared.sampleRate);format.setChannelCount(2);
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+        format.setSampleFormat(QAudioFormat::Float);
+        mAudioSink=new QAudioSink(QMediaDevices::defaultAudioOutput(),format,this);
 #else
-    mAudioBlockAlign=blockAlign;format.setCodec("audio/pcm");format.setSampleSize(bits);format.setByteOrder(QAudioFormat::LittleEndian);format.setSampleType(floatPcm?QAudioFormat::Float:QAudioFormat::SignedInt);mAudioSink=new QAudioOutput(QAudioDeviceInfo::defaultOutputDevice(),format,this);
+        format.setCodec("audio/pcm");format.setSampleSize(32);format.setByteOrder(QAudioFormat::LittleEndian);format.setSampleType(QAudioFormat::Float);
+        mAudioSink=new QAudioOutput(QAudioDeviceInfo::defaultOutputDevice(),format,this);
 #endif
-    mAudioBytesPerSecond=static_cast<int>(sampleRate)*mAudioBlockAlign;
-    mAudioBuffer=new QBuffer(&mAudioPcm,this);mAudioBuffer->open(QIODevice::ReadOnly);
-    if(mAudioEnabled)mAudioStartPending=true;
+        mAudioSink->setVolume(mVolumePercent/100.0);
+        mAudioBlockAlign=2*sizeof(float);
+        mAudioBytesPerSecond=prepared.sampleRate*mAudioBlockAlign;
+        mAudioBuffer=new QBuffer(&mAudioPcm,this);mAudioBuffer->open(QIODevice::ReadOnly);
+        if(mAudioEnabled&&mFirstFrameReady&&!mPaused){
+            mCadenceStartFrame=-1;mCadenceLastFrame=-1;mCadenceClock.invalidate();
+            startAudioAt(mPositionSeconds);mAudioStartPending=false;
+        }else mAudioStartPending=mAudioEnabled;
+    });
+    watcher->setFuture(QtConcurrent::run([audio,cancelled]{
+        return prepareGalleryAudio(audio,cancelled);
+    }));
 }
+
 void ClipPlayerDialog::beginSourceAudioLoad(){
     if(mIndex<0||mIndex>=mClips.size()||mAudioLoading)return;
     if(mAudioLoadCancelled->load())
@@ -2555,6 +2719,21 @@ QByteArray ClipPlayerDialog::sourceAudioWav(const Clip& clip,const QString& ffmp
                 return cancelled->load()?QByteArray():result;
             }
         }
+        for(const QString& extension:{QStringLiteral("flac"),QStringLiteral("opus")}){
+            const QString path=directory.absoluteFilePath("audio."+extension);
+            if(!QFileInfo::exists(path)||ffmpegExecutable.isEmpty())continue;
+            QProcess process;
+            process.start(ffmpegExecutable,{"-hide_banner","-loglevel","error","-i",path,
+                "-ac","2","-c:a","pcm_f32le","-f","wav","pipe:1"},QIODevice::ReadOnly);
+            if(!process.waitForStarted(5000))continue;
+            QByteArray output;QElapsedTimer timeout;timeout.start();
+            while(process.state()!=QProcess::NotRunning){
+                process.waitForFinished(100);output+=process.readAllStandardOutput();
+                if(cancelled->load()||timeout.elapsed()>60000){process.kill();process.waitForFinished();return {};}
+            }
+            output+=process.readAllStandardOutput();
+            if(process.exitCode()==0)return output;
+        }
         return {};
     }
     if(suffix!=QStringLiteral("mov")&&suffix!=QStringLiteral("mp4")&&suffix!=QStringLiteral("mkv"))return {};
@@ -2563,7 +2742,7 @@ QByteArray ClipPlayerDialog::sourceAudioWav(const Clip& clip,const QString& ffmp
         QProcess process;process.setProcessChannelMode(QProcess::SeparateChannels);
         process.start(exe,{QStringLiteral("-hide_banner"),QStringLiteral("-loglevel"),QStringLiteral("error"),
             QStringLiteral("-i"),source.absoluteFilePath(),QStringLiteral("-map"),QStringLiteral("0:a:0?"),
-            QStringLiteral("-vn"),QStringLiteral("-c:a"),codec,
+            QStringLiteral("-vn"),QStringLiteral("-ac"),QStringLiteral("2"),QStringLiteral("-c:a"),codec,
             QStringLiteral("-f"),QStringLiteral("wav"),QStringLiteral("pipe:1")},QIODevice::ReadOnly);
         QElapsedTimer timeout;timeout.start();
         while(process.state()==QProcess::Starting&&!cancelled->load()&&timeout.elapsed()<5000)
@@ -2580,9 +2759,7 @@ QByteArray ClipPlayerDialog::sourceAudioWav(const Clip& clip,const QString& ffmp
         output+=process.readAllStandardOutput();
         return process.exitStatus()==QProcess::NormalExit&&process.exitCode()==0?output:QByteArray();
     };
-    // Preserve embedded PCM (including Int24/Float32) without re-encoding.
-    // Compressed tracks cannot be sent to QAudioSink and fall back to PCM16 decode.
-    QByteArray output=extract(QStringLiteral("copy"));
+    QByteArray output=extract(QStringLiteral("pcm_f32le"));
     auto supportedPcm=[](const QByteArray& bytes){
         if(bytes.size()<36)return false;
         const auto* p=reinterpret_cast<const uchar*>(bytes.constData());
@@ -2599,12 +2776,22 @@ QByteArray ClipPlayerDialog::sourceAudioWav(const Clip& clip,const QString& ffmp
         }
         return false;
     };
-    if(!cancelled->load()&&!supportedPcm(output))output=extract(QStringLiteral("pcm_s16le"));
+    if(!cancelled->load()&&!supportedPcm(output))output.clear();
     return output;
 }
 qint64 ClipPlayerDialog::audioPositionNs()const{return mAudioClockBaseNs+(mAudioClock.isValid()?mAudioClock.nsecsElapsed():0);}
 qint64 ClipPlayerDialog::audioPositionMs()const{return audioPositionNs()/1000000;}
-void ClipPlayerDialog::startAudioAt(double seconds){if(!mAudioSink||!mAudioBuffer||mAudioBytesPerSecond<=0)return;mAudioSink->stop();qint64 byte=qBound<qint64>(0,qRound64(seconds*mAudioBytesPerSecond),mAudioPcm.size());byte-=byte%std::max(1,mAudioBlockAlign);mAudioBuffer->seek(byte);mAudioClockBaseNs=qRound64(double(byte)*1.0e9/mAudioBytesPerSecond);mAudioClock.start();mAudioSink->start(mAudioBuffer);}
+void ClipPlayerDialog::startAudioAt(double seconds){
+    if(!mAudioSink||!mAudioBuffer||mAudioBytesPerSecond<=0)return;
+    mAudioFadeTimer.stop();mAudioFadeOut=false;
+    mAudioSink->stop();mAudioSink->setVolume(0.0);
+    qint64 byte=qBound<qint64>(0,qRound64(seconds*mAudioBytesPerSecond),mAudioPcm.size());
+    byte-=byte%std::max(1,mAudioBlockAlign);
+    mAudioBuffer->seek(byte);
+    mAudioClockBaseNs=qRound64(double(byte)*1.0e9/mAudioBytesPerSecond);
+    mAudioClock.start();mAudioSink->start(mAudioBuffer);
+    mAudioFadeClock.restart();mAudioFadeTimer.start();
+}
 void ClipPlayerDialog::setAudioEnabled(bool enabled){
     mCadenceStartFrame=-1;mCadenceLastFrame=-1;mCadenceClock.invalidate();
     const bool clipCanHaveAudio=mIndex>=0&&mIndex<mClips.size()&&
@@ -2616,6 +2803,7 @@ void ClipPlayerDialog::setAudioEnabled(bool enabled){
     updateButtonIcons();
     if(mIndex>=0)updateFrameTimerInterval();
     if(mAudioEnabled){
+        if(mAudioLoading)return;
         if(!mAudioSink){
             if(mIndex>=0&&mIndex<mClips.size()&&mClips[mIndex].audioWav)
                 configureAudio();
@@ -2627,6 +2815,7 @@ void ClipPlayerDialog::setAudioEnabled(bool enabled){
         else mAudioStartPending=true;
     }else{
         if(mAudioLoading)mAudioLoadCancelled->store(true);
+        mAudioFadeTimer.stop();
         if(mAudioSink){mAudioSink->stop();mAudioClock.invalidate();mAudioStartPending=false;}
     }
 }
@@ -2636,7 +2825,46 @@ void ClipPlayerDialog::cycleAudioMode(){
         mAudioMode==AudioMode::RealTimeAudio?AudioMode::UncappedMuted:
         AudioMode::CappedMuted;
     mPerformanceUncapped=mAudioMode==AudioMode::UncappedMuted;
+    QSettings("com.motioncam","MotionCam FS").setValue("gallery/audioMode",static_cast<int>(mAudioMode));
+    setVolumePanelVisible(mAudioMode==AudioMode::RealTimeAudio&&mAudioButton->underMouse());
     setAudioEnabled(mAudioMode==AudioMode::RealTimeAudio);
+}
+
+void ClipPlayerDialog::positionVolumePanel(){
+    if(!mVolumePanel||!mAudioButton||!mVolumePanel->isVisible())return;
+    const QPoint button=mAudioButton->mapTo(mOverlay,QPoint(0,0));
+    const int height=mVolumePanel->height();
+    mVolumePanel->setGeometry(button.x(),button.y()+38-height,38,height);
+}
+
+void ClipPlayerDialog::setVolumePanelVisible(bool visible){
+    if(!mVolumePanel||!mVolumeAnimation)return;
+    visible=visible&&mAudioMode==AudioMode::RealTimeAudio;
+    if(visible)mVolumeHideTimer.stop();
+    if(visible==mVolumePanelWanted&&(!visible||mVolumePanel->isVisible()))return;
+    mVolumePanelWanted=visible;
+    if(visible)mVuTimer.start();
+    else{
+        mVuTimer.stop();
+        mVuLevel=0.0f;
+        static_cast<VuVolumeSlider*>(mVolumeSlider)->setLevel(0.0f);
+    }
+    if(!visible&&!mVolumePanel->isVisible())return;
+    const QPoint button=mAudioButton->mapTo(mOverlay,QPoint(0,0));
+    const int bottom=button.y()+38;
+    const int height=mVolumePanel->isVisible()?mVolumePanel->height():38;
+    const QRect start(button.x(),bottom-height,38,height);
+    const int target=visible?150:38;
+    const QRect end(button.x(),bottom-target,38,target);
+    mVolumeAnimation->stop();
+    mVolumePanel->setGeometry(start);
+    if(visible){
+        mVolumePanel->show();mVolumePanel->stackUnder(mAudioButton);
+        updateButtonIcons();
+    }
+    mVolumeAnimation->setStartValue(start);
+    mVolumeAnimation->setEndValue(end);
+    mVolumeAnimation->start();
 }
 
 void ClipPlayerDialog::consumeOutput(){
@@ -2663,6 +2891,14 @@ void ClipPlayerDialog::consumeOutput(){
 void ClipPlayerDialog::showNextFrame(){
     const auto showStarted=std::chrono::steady_clock::now();
     consumeOutput();
+    if(!mPaused&&mAudioEnabled&&!mAudioStartPending&&mAudioClock.isValid()&&
+       mIndex>=0&&mClips[mIndex].autoAdvance&&mThumbnailScroll&&
+       !mThumbnailScroll->isVisible()&&mFrames.empty()&&mBytes.isEmpty()&&
+       audioPositionNs()>=qint64(double(mClips[mIndex].sourceFrames)*1.0e9/
+           std::max(1.0,mClips[mIndex].fps))&&
+       (mDirectFramesFinished||mDecoder.state()==QProcess::NotRunning)){
+        advance();return;
+    }
     if(mAudioEnabled&&!mAudioStartPending&&mAudioClock.isValid()&&mIndex>=0){
         const double fps=std::max(1.0,mClips[mIndex].fps);
         const int audioFrame=std::clamp(static_cast<int>(std::floor(
@@ -2676,7 +2912,7 @@ void ClipPlayerDialog::showNextFrame(){
         // reject every completed frame forever.
         if(mFrames.empty()||mFrames.front().sourceFrame>audioFrame)return;
     }
-    if(!mFrames.empty()&&!mPerformanceUncapped&&!mAudioEnabled&&
+    if(!mFrames.empty()&&!mPerformanceUncapped&&!mAudioClock.isValid()&&
        !mPaused&&!mFrameStepInProgress&&mCadenceStartFrame>=0&&
        mCadenceClock.isValid()){
         const double fps=std::max(1.0,mClips[mIndex].fps);
@@ -2774,7 +3010,7 @@ void ClipPlayerDialog::showNextFrame(){
         }
         if(!mPaused){
             if(!mPresentationClock.isValid())mPresentationClock.start();
-            if(!mPerformanceUncapped&&!mAudioEnabled&&mCadenceStartFrame<0){
+            if(!mPerformanceUncapped&&!mAudioClock.isValid()&&mCadenceStartFrame<0){
                 mCadenceStartFrame=presentedFrame;
                 mCadenceClock.start();
             }
@@ -2906,6 +3142,20 @@ QString ClipPlayerDialog::framePositionText(int frame)const{
         .arg(runtimeText(std::max(0.0,clip.durationSeconds)));
 }
 bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
+    if(watched==mAudioButton){
+        if(event->type()==QEvent::Enter&&mAudioMode==AudioMode::RealTimeAudio)
+            setVolumePanelVisible(true);
+        else if(event->type()==QEvent::Leave&&mVolumePanel->isVisible())
+            mVolumeHideTimer.start();
+        else if(event->type()==QEvent::Move||event->type()==QEvent::Resize)
+            positionVolumePanel();
+    }else if(watched==mVolumePanel||watched==mVolumeSlider){
+        if(event->type()==QEvent::Enter)mVolumeHideTimer.stop();
+        else if(event->type()==QEvent::Leave&&
+                !mAudioButton->underMouse()&&!mVolumePanel->underMouse()&&
+                !mVolumeSlider->underMouse())
+            mVolumeHideTimer.start();
+    }
     const auto* watchedWidget=qobject_cast<QWidget*>(watched);
     const bool nativeVideoSurface=watched&&
         watched->property("galleryVulkanSurface").toBool();
@@ -2959,6 +3209,11 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
             if(watched==mPosition){event->accept();return true;}
         }
     }
+    if(nativeVideoSurface&&event->type()==QEvent::Leave&&mNativeHoverTarget){
+        auto* old=mNativeHoverTarget.data();mNativeHoverTarget=nullptr;
+        old->setAttribute(Qt::WA_UnderMouse,false);
+        QEvent leave(QEvent::Leave);QCoreApplication::sendEvent(old,&leave);
+    }
     if(nativeVideoSurface&&mOverlay&&mOverlay->isVisible()&&
        (event->type()==QEvent::MouseMove||
         event->type()==QEvent::MouseButtonPress||
@@ -2973,11 +3228,27 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
 #else
         const QPointF global=mouse->globalPos();
 #endif
-        QWidget* target=mNativeMouseTarget;
-        if(!target){
-            target=mOverlay->childAt(mOverlay->mapFromGlobal(global.toPoint()));
-            if(target==mTitle)target=nullptr;
+        QWidget* hit=mOverlay->childAt(mOverlay->mapFromGlobal(global.toPoint()));
+        if(hit==mTitle)hit=nullptr;
+        if((event->type()==QEvent::MouseMove||event->type()==QEvent::MouseButtonPress)&&
+           hit!=mNativeHoverTarget){
+            if(auto* old=mNativeHoverTarget.data()){
+                old->setAttribute(Qt::WA_UnderMouse,false);
+                QEvent leave(QEvent::Leave);QCoreApplication::sendEvent(old,&leave);
+            }
+            mNativeHoverTarget=hit;
+            if(hit){
+                hit->setAttribute(Qt::WA_UnderMouse,true);
+#if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
+                QEnterEvent enter(hit->mapFromGlobal(global.toPoint()),
+                    mOverlay->mapFromGlobal(global.toPoint()),global);
+#else
+                QEvent enter(QEvent::Enter);
+#endif
+                QCoreApplication::sendEvent(hit,&enter);
+            }
         }
+        QWidget* target=mNativeMouseTarget?mNativeMouseTarget.data():hit;
         if(target){
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
             QMouseEvent forwarded(event->type(),target->mapFromGlobal(global),
@@ -3277,7 +3548,7 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         return FramePushResult::Retry;
     const int incomingSourceFrame=sourceFrameIndex>=0
         ?sourceFrameIndex:mIncomingFrame->load();
-    if(mAudioEnabled&&incomingSourceFrame>mNextInputFrame){
+    if(mAudioEnabled&&mAudioClock.isValid()&&incomingSourceFrame>mNextInputFrame){
         mNextInputFrame=incomingSourceFrame;
         mPositionSeconds=mNextInputFrame/std::max(1.0,mClips[mIndex].fps);
     }
@@ -3401,6 +3672,7 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
 }
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
+    positionVolumePanel();
     updateVisibleThumbnailWidgets();
     // A clip switch keeps the previous frame visible until the replacement
     // arrives. Do not redraw that retained image using the new clip's size,
