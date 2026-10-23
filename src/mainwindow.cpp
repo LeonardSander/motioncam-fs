@@ -5014,7 +5014,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         const QString partialGyroflowPath = stageDir.absoluteFilePath(outputBase + "_gyroflow.json");
         if (QFile::exists(gyroflowPath) && !QFile::copy(gyroflowPath, partialGyroflowPath))
             throw std::runtime_error("Could not stage the Gyroflow lens profile");
-        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus")}){
+        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
             const QString source=QDir(mountPath).absoluteFilePath(name);
             if(QFile::exists(source)){
                 const QString target=stageDir.absoluteFilePath(name);
@@ -5033,7 +5033,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                  << "-noautorotate";
         args << "-f" << "nut" << "-i" << "pipe:0";
         QString audioPath;
-        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus")}){
+        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
             const QString candidate=stageDir.absoluteFilePath(name);
             if(QFile::exists(candidate)){audioPath=candidate;break;}
         }
@@ -5514,6 +5514,31 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         return;
     }
 
+    // DirectLog audio is decoded for the mounted view. Keep its original
+    // compressed packets when the persistent format permits the same codec.
+    QString sourceAudioCodec;
+    if (srcFile.contains("NATIVE", Qt::CaseInsensitive) &&
+        (srcFile.endsWith(".mov", Qt::CaseInsensitive) ||
+         srcFile.endsWith(".mp4", Qt::CaseInsensitive) ||
+         srcFile.endsWith(".mkv", Qt::CaseInsensitive))) {
+        AVFormatContext* sourceFormat = nullptr;
+        if (avformat_open_input(&sourceFormat, srcFile.toUtf8().constData(), nullptr, nullptr) >= 0) {
+            if (avformat_find_stream_info(sourceFormat, nullptr) >= 0) {
+                const int stream = av_find_best_stream(sourceFormat, AVMEDIA_TYPE_AUDIO,
+                                                       -1, -1, nullptr, 0);
+                if (stream >= 0) {
+                    switch (sourceFormat->streams[stream]->codecpar->codec_id) {
+                    case AV_CODEC_ID_FLAC: sourceAudioCodec = "flac"; break;
+                    case AV_CODEC_ID_OPUS: sourceAudioCodec = "opus"; break;
+                    case AV_CODEC_ID_AAC: sourceAudioCodec = "aac"; break;
+                    default: break;
+                    }
+                }
+            }
+            avformat_close_input(&sourceFormat);
+        }
+    }
+
     // Get mount ID and file info
     bool ok = false;
     auto mountId = fileWidget->property("mountId").toInt(&ok);
@@ -5665,13 +5690,18 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                     QApplication::processEvents();
                     return !progress.wasCanceled();
                 });
-            if(!audioCodec.isEmpty()&&!progress.wasCanceled()){
+            if((!audioCodec.isEmpty() || !sourceAudioCodec.isEmpty()) &&
+               !progress.wasCanceled()){
                 QString sourceAudio;
-                for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus")}){
+                for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
                     const QString candidate=QDir(tempPath).absoluteFilePath(name);
                     if(QFile::exists(candidate)){sourceAudio=candidate;break;}
                 }
-                if(!sourceAudio.isEmpty()&&!sourceAudio.endsWith("."+audioCodec,Qt::CaseInsensitive)){
+                const bool copySource = !sourceAudioCodec.isEmpty() &&
+                    (audioCodec.isEmpty() || audioCodec == sourceAudioCodec);
+                const QString targetCodec = copySource ? sourceAudioCodec : audioCodec;
+                if(!sourceAudio.isEmpty() && !targetCodec.isEmpty() &&
+                   (copySource || !sourceAudio.endsWith("."+targetCodec,Qt::CaseInsensitive))){
                     QString ffmpeg=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(
 #ifdef _WIN32
                         "ffmpeg.exe");
@@ -5680,15 +5710,17 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 #endif
                     if(!QFileInfo(ffmpeg).isExecutable())ffmpeg=QStandardPaths::findExecutable("ffmpeg");
                     if(ffmpeg.isEmpty())throw std::runtime_error("FFmpeg is required to encode finalized audio");
-                    const QString target=QDir(tempPath).absoluteFilePath("audio."+audioCodec);
+                    const QString target=QDir(tempPath).absoluteFilePath("audio."+targetCodec);
                     QProcess encoder;encoder.setProcessChannelMode(QProcess::MergedChannels);
-                    QStringList args{"-hide_banner","-y","-i",sourceAudio,"-map","0:a:0","-vn","-c:a",
-                        audioCodec=="flac"?"flac":"libopus"};
-                    if(audioCodec=="opus")args << "-b:a" << "288k";
+                    QStringList args{"-hide_banner","-y","-i",copySource ? srcFile : sourceAudio,
+                        "-map","0:a:0","-vn","-c:a",
+                        copySource ? "copy" : targetCodec=="flac" ? "flac" : "libopus"};
+                    if(!copySource && targetCodec=="opus")args << "-b:a" << "288k";
                     args << target;
                     encoder.start(ffmpeg,args);
                     if(!encoder.waitForStarted())throw std::runtime_error("Could not start FFmpeg audio encoder");
-                    progress.setLabelText("Encoding "+audioCodec.toUpper()+" audio...");
+                    progress.setLabelText((copySource ? "Copying " : "Encoding ")+
+                                          targetCodec.toUpper()+" audio...");
                     while(encoder.state()!=QProcess::NotRunning){
                         encoder.waitForFinished(100);QApplication::processEvents();
                         if(progress.wasCanceled()){encoder.kill();encoder.waitForFinished();throw std::runtime_error("Finalization cancelled");}

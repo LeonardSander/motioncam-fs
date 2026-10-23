@@ -8,6 +8,11 @@
 #include "Utils.h"
 #include "LRUCache.h"
 #include "Types.h"
+#include "AudioWriter.h"
+#include "DirectLogDecoder.h"
+extern "C" {
+#include <libswresample/swresample.h>
+}
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -36,6 +41,90 @@ using motioncam::Timestamp;
 namespace motioncam {
 
 namespace {
+std::shared_ptr<std::vector<uint8_t>> decodeDngAudioWav(
+        const std::string& path, double fps) {
+    AVFormatContext* rawFormat = nullptr;
+    if (avformat_open_input(&rawFormat, path.c_str(), nullptr, nullptr) < 0)
+        throw std::runtime_error("Could not open DNG sequence audio source");
+    std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)> format(
+        rawFormat, [](AVFormatContext* value) { avformat_close_input(&value); });
+    if (avformat_find_stream_info(format.get(), nullptr) < 0)
+        throw std::runtime_error("Could not inspect DNG sequence audio source");
+    const int streamIndex = av_find_best_stream(
+        format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    if (streamIndex < 0) return {};
+    const auto* parameters = format->streams[streamIndex]->codecpar;
+    const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
+    if (!codec) throw std::runtime_error("Unsupported DNG sequence audio codec");
+    std::unique_ptr<AVCodecContext, void(*)(AVCodecContext*)> decoder(
+        avcodec_alloc_context3(codec),
+        [](AVCodecContext* value) { avcodec_free_context(&value); });
+    if (!decoder || avcodec_parameters_to_context(decoder.get(), parameters) < 0 ||
+        avcodec_open2(decoder.get(), codec, nullptr) < 0)
+        throw std::runtime_error("Could not initialize DNG sequence audio decoder");
+    if (decoder->sample_rate <= 0 || decoder->ch_layout.nb_channels <= 0)
+        throw std::runtime_error("Invalid DNG sequence audio format");
+    SwrContext* rawResampler = nullptr;
+    if (swr_alloc_set_opts2(&rawResampler, &decoder->ch_layout,
+            AV_SAMPLE_FMT_S16, decoder->sample_rate, &decoder->ch_layout,
+            decoder->sample_fmt, decoder->sample_rate, 0, nullptr) < 0 ||
+        !rawResampler)
+        throw std::runtime_error("Could not configure DNG sequence audio conversion");
+    std::unique_ptr<SwrContext, void(*)(SwrContext*)> resampler(
+        rawResampler, [](SwrContext* value) { swr_free(&value); });
+    if (swr_init(resampler.get()) < 0)
+        throw std::runtime_error("Could not initialize DNG sequence audio conversion");
+    std::unique_ptr<AVPacket, void(*)(AVPacket*)> packet(
+        av_packet_alloc(), [](AVPacket* value) { av_packet_free(&value); });
+    std::unique_ptr<AVFrame, void(*)(AVFrame*)> frame(
+        av_frame_alloc(), [](AVFrame* value) { av_frame_free(&value); });
+    if (!packet || !frame) throw std::bad_alloc();
+    const auto fpsRational = av_d2q(fps > 0.0 ? fps : 24.0, 100000);
+    auto wav = std::make_shared<std::vector<uint8_t>>();
+    {
+        motioncam::AudioWriter writer(*wav, decoder->ch_layout.nb_channels,
+            decoder->sample_rate, fpsRational.num, fpsRational.den, 16);
+        const auto drain = [&] {
+            while (true) {
+                const int received = avcodec_receive_frame(decoder.get(), frame.get());
+                if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
+                if (received < 0) throw std::runtime_error("Could not decode DNG sequence audio");
+                const int capacity = swr_get_out_samples(resampler.get(), frame->nb_samples);
+                std::vector<int16_t> samples(static_cast<size_t>(capacity) *
+                    decoder->ch_layout.nb_channels);
+                uint8_t* output[] = {reinterpret_cast<uint8_t*>(samples.data())};
+                const int count = swr_convert(resampler.get(), output, capacity,
+                    const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
+                if (count < 0) throw std::runtime_error("Could not convert DNG sequence audio");
+                if (count > 0) writer.write(samples, count);
+                av_frame_unref(frame.get());
+            }
+        };
+        while (av_read_frame(format.get(), packet.get()) >= 0) {
+            if (packet->stream_index == streamIndex) {
+                const int sent = avcodec_send_packet(decoder.get(), packet.get());
+                if (sent < 0) throw std::runtime_error("Could not submit DNG sequence audio packet");
+                drain();
+            }
+            av_packet_unref(packet.get());
+        }
+        if (avcodec_send_packet(decoder.get(), nullptr) < 0)
+            throw std::runtime_error("Could not finish DNG sequence audio decode");
+        drain();
+        while (true) {
+            const int capacity = swr_get_out_samples(resampler.get(), 0);
+            if (capacity <= 0) break;
+            std::vector<int16_t> samples(static_cast<size_t>(capacity) *
+                decoder->ch_layout.nb_channels);
+            uint8_t* output[] = {reinterpret_cast<uint8_t*>(samples.data())};
+            const int count = swr_convert(resampler.get(), output, capacity, nullptr, 0);
+            if (count <= 0) break;
+            writer.write(samples, count);
+        }
+    }
+    return wav;
+}
+
 class DngFrameWorkSlot {
 public:
     DngFrameWorkSlot(std::mutex& mutex, std::condition_variable& available,
@@ -287,7 +376,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             const boost::filesystem::path source(mSrcPath);
             const auto sourceDirectory = boost::filesystem::is_directory(source)
                 ? source : source.parent_path();
-            for (const char* name : {"audio.wav", "audio.flac", "audio.opus"}) {
+            for (const char* name : {"audio.wav", "audio.flac", "audio.opus", "audio.aac"}) {
                 const auto audioPath = sourceDirectory / name;
                 if (!boost::filesystem::is_regular_file(audioPath)) continue;
                 std::ifstream audio(audioPath.string(), std::ios::binary);
@@ -296,10 +385,14 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 if (!audio.eof() && audio.fail())
                     throw std::runtime_error("Could not read DNG sequence audio: " +
                                              audioPath.string());
-                if (!bytes.empty())
-                    mAudioData = std::make_shared<const std::vector<uint8_t>>(
-                        std::move(bytes));
-                mAudioFileName = name;
+                if (std::string(name) == "audio.wav") {
+                    if (!bytes.empty())
+                        mAudioData = std::make_shared<const std::vector<uint8_t>>(
+                            std::move(bytes));
+                } else {
+                    mAudioData = decodeDngAudioWav(audioPath.string(), mFps);
+                }
+                mAudioFileName = "audio.wav";
                 break;
             }
         }
