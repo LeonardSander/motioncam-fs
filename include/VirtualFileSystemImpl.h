@@ -135,6 +135,11 @@ struct FileInfo {
     // Expose that result so UI status checks do not parse large sidecars again.
     // -1 means the source implementation does not report sidecar state.
     int sidecarState = -1; // 0 absent, 1 valid, 2 invalid
+    // Metadata usable for the first source frame, including sidecar overrides.
+    bool hasGainMaps = false;
+    bool hasColorMatrices = false;
+    bool hasForwardMatrices = false;
+    bool hasAsShotNeutral = false;
     bool hasIgnoreForwardMatOverride = false;
     bool ignoreForwardMatOverride = false;
     // False for independent DNG still collections. Such folders may contain

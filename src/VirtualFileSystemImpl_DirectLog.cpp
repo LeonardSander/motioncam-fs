@@ -1888,6 +1888,33 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     FileInfo info = vfs::makeFileInfo(
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, outputWidth, outputHeight);
+    const auto firstFrame = frameMetadata(0);
+    info.hasGainMaps = vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "gainMaps") ||
+        vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "deferredGainMaps") ||
+        !mManualVignetteSidecars.candidates.empty() ||
+        (mManualVignetteSidecars.useDcpGainmap &&
+         mManualVignetteSidecars.dcpSpatialGainMap.has_value());
+    info.hasColorMatrices = firstFrame.colorMatrix1.has_value() ||
+        firstFrame.colorMatrix2.has_value();
+    info.hasForwardMatrices = firstFrame.forwardMatrix1.has_value() ||
+        firstFrame.forwardMatrix2.has_value();
+    info.hasAsShotNeutral = firstFrame.asShotNeutral.has_value();
+    if (mCalibration) {
+        info.hasColorMatrices |= mCalibration->hasColorMatrix1 || mCalibration->hasColorMatrix2;
+        info.hasForwardMatrices |= mCalibration->hasForwardMatrix1 || mCalibration->hasForwardMatrix2;
+        info.hasAsShotNeutral |= mCalibration->hasAsShotNeutral;
+    }
+    for (const auto& candidate : mManualVignetteSidecars.candidates) {
+        if (candidate.whiteImage) continue;
+        const auto& metadata = candidate.image.metadata;
+        info.hasColorMatrices |= metadata.hasColorMatrix1 || metadata.hasColorMatrix2;
+        info.hasForwardMatrices |= metadata.hasForwardMatrix1 || metadata.hasForwardMatrix2;
+        info.hasAsShotNeutral |= metadata.hasAsShotNeutral;
+    }
+    const auto& dcp = mManualVignetteSidecars.dcpColor;
+    info.hasColorMatrices |= dcp.hasColorMatrix1 || dcp.hasColorMatrix2;
+    info.hasForwardMatrices |= dcp.hasForwardMatrix1 || dcp.hasForwardMatrix2;
+    info.hasAsShotNeutral |= dcp.hasAsShotNeutral;
     info.audioWav = mAudioWav;
     info.orientation = mDecoder->getVideoInfo().orientation;
     if (mCalibration && mCalibration->hasOrientation)

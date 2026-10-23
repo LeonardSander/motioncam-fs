@@ -652,6 +652,40 @@ void VirtualFileSystemImpl_MCRAW::init() {
     mFileInfo = vfs::makeFileInfo(
         mFrameRateInfo, mFps, static_cast<int>(frames.size()), droppedFrames,
         duplicatedFrames, outputWidth, outputHeight);
+    mFileInfo.hasGainMaps = hasNonNeutralShadingMap(cameraFrameMetadata) ||
+        hasExternalGainToBake(mManualVignetteSidecars, mSidecarMetadata, 0);
+    const auto hasMatrixValues = [](const std::array<float, 9>& matrix) {
+        return std::any_of(matrix.begin(), matrix.end(),
+                           [](float value) { return value != 0.0f; });
+    };
+    mFileInfo.hasColorMatrices = cameraFrameMetadata.hasColorMatrix1 ||
+        cameraFrameMetadata.hasColorMatrix2 ||
+        hasMatrixValues(cameraConfig.colorMatrix1) || hasMatrixValues(cameraConfig.colorMatrix2);
+    mFileInfo.hasForwardMatrices = cameraFrameMetadata.hasForwardMatrix1 ||
+        cameraFrameMetadata.hasForwardMatrix2 ||
+        hasMatrixValues(cameraConfig.forwardMatrix1) || hasMatrixValues(cameraConfig.forwardMatrix2);
+    mFileInfo.hasAsShotNeutral = metadata.contains("asShotNeutral") &&
+        metadata["asShotNeutral"].is_array() && metadata["asShotNeutral"].size() >= 3 &&
+        std::all_of(
+        cameraFrameMetadata.asShotNeutral.begin(), cameraFrameMetadata.asShotNeutral.end(),
+        [](float value) { return std::isfinite(value) && value > 0.0f; });
+    if (mCalibration) {
+        mFileInfo.hasColorMatrices |= mCalibration->hasColorMatrix1 || mCalibration->hasColorMatrix2;
+        mFileInfo.hasForwardMatrices |= mCalibration->hasForwardMatrix1 || mCalibration->hasForwardMatrix2;
+        mFileInfo.hasAsShotNeutral |= mCalibration->hasAsShotNeutral;
+    }
+    mFileInfo.hasColorMatrices |= mManualVignetteSidecars.dcpColor.hasColorMatrix1 ||
+        mManualVignetteSidecars.dcpColor.hasColorMatrix2;
+    mFileInfo.hasForwardMatrices |= mManualVignetteSidecars.dcpColor.hasForwardMatrix1 ||
+        mManualVignetteSidecars.dcpColor.hasForwardMatrix2;
+    mFileInfo.hasAsShotNeutral |= mManualVignetteSidecars.dcpColor.hasAsShotNeutral;
+    for (const auto& candidate : mManualVignetteSidecars.candidates) {
+        if (candidate.whiteImage) continue;
+        const auto& color = candidate.image.metadata;
+        mFileInfo.hasColorMatrices |= color.hasColorMatrix1 || color.hasColorMatrix2;
+        mFileInfo.hasForwardMatrices |= color.hasForwardMatrix1 || color.hasForwardMatrix2;
+        mFileInfo.hasAsShotNeutral |= color.hasAsShotNeutral;
+    }
     const auto& sidecar = mSidecarPath;
     mFileInfo.sidecarState = !boost::filesystem::exists(sidecar)
         ? 0 : (mCalibration.has_value() ? 1 : 2);

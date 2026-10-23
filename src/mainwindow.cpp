@@ -2477,7 +2477,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     metadataLayout->setSpacing(4);
     auto* metadataTextLayout = new QVBoxLayout();
     metadataTextLayout->setContentsMargins(0, 0, 0, 0);
-    metadataTextLayout->setSpacing(4);
+    metadataTextLayout->setSpacing(0);
+    metadataTextLayout->setAlignment(Qt::AlignTop);
     metadataLayout->addLayout(metadataTextLayout, 1);
     fileLayout->addLayout(metadataLayout);
 
@@ -2517,7 +2518,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
         auto* infoLabel1 = new QLabel(infoText1, fileWidget);
         infoLabel1->setStyleSheet("font-size: 9pt;");
-        infoLabel1->setMinimumHeight(infoLabel1->fontMetrics().height() + 4);
+        infoLabel1->setFixedHeight(infoLabel1->fontMetrics().height() + 1);
+        infoLabel1->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         infoLabel1->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         infoLabel1->setProperty("infoLabel1", true);
         infoLabel1->setProperty("mountId", QVariant(mountId));
@@ -2536,20 +2538,30 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
         auto* infoLabel2 = new QLabel(infoText2, fileWidget);
         infoLabel2->setStyleSheet("font-size: 9pt;");
-        infoLabel2->setMinimumHeight(infoLabel2->fontMetrics().height() + 4);
+        infoLabel2->setFixedHeight(infoLabel2->fontMetrics().height() + 4);
+        infoLabel2->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         infoLabel2->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         infoLabel2->setProperty("infoLabel2", true);
         infoLabel2->setProperty("mountId", QVariant(mountId));
         metadataTextLayout->addWidget(infoLabel2);
     }
 
+    auto* missingMetadataLabel = new QLabel(fileWidget);
+    missingMetadataLabel->setObjectName(QStringLiteral("missingMetadataLabel"));
+    missingMetadataLabel->setStyleSheet("font-size: 9pt; color: #e3a35b;");
+    missingMetadataLabel->setFixedHeight(missingMetadataLabel->fontMetrics().height() + 1);
+    missingMetadataLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    metadataTextLayout->addWidget(missingMetadataLabel);
+
     // Create and add the source folder label
     auto* sourceLabel = new QLabel(QString("Source: %1").arg(fileInfo.path()), fileWidget);
     sourceLabel->setStyleSheet("font-size: 9pt; color: #666666;");
+    sourceLabel->setFixedHeight(sourceLabel->fontMetrics().height() + 1);
+    sourceLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     metadataTextLayout->addWidget(sourceLabel);
 
     // Add spacer to maintain button position
-    fileLayout->addSpacing(8);
+    fileLayout->addSpacing(4);
 
     // Create horizontal layout for buttons
     auto* buttonLayout = new QHBoxLayout();
@@ -7256,6 +7268,23 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
         if (jsonPath.isEmpty()) jsonPath = fileInfo.isDir()
             ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
             : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
+
+        if (auto* label = fileWidget->findChild<QLabel*>(QStringLiteral("missingMetadataLabel"))) {
+            QStringList missing;
+            const auto info = mFuseFilesystem->getFileInfo(
+                fileWidget->property("mountId").toInt());
+            if (info) {
+                if (!info->hasGainMaps) missing << tr("gain maps");
+                if (!info->hasColorMatrices) missing << tr("color matrices");
+                if (!info->hasForwardMatrices) missing << tr("forward matrices");
+                if (!info->hasAsShotNeutral) missing << tr("AsShotNeutral");
+            }
+            label->setText(missing.isEmpty() ? QString()
+                : tr("no %1").arg(missing.join(", no ")));
+            label->setToolTip(tr("Metadata availability for the first source frame."));
+            label->setVisible(!missing.isEmpty());
+            fileWidget->setFixedHeight(missing.isEmpty() ? 156 : 166);
+        }
 
         // Find the calibration button, status container, label, and refresh button
         QPushButton* actualCalibButton = nullptr;

@@ -1274,10 +1274,38 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     if (mAudioFileName == "audio.wav") info.audioWav = mAudioData;
     if (!mDecoder->getFrames().empty()) {
         DNGFrameMetadata metadata;
-        if (mDecoder->getFrameMetadata(0, metadata)) info.orientation = metadata.orientation;
+        if (mDecoder->getFrameMetadata(0, metadata)) {
+            info.orientation = metadata.orientation;
+            info.hasColorMatrices = metadata.hasColorMatrix1 || metadata.hasColorMatrix2;
+            info.hasForwardMatrices = metadata.hasForwardMatrix1 || metadata.hasForwardMatrix2;
+            info.hasAsShotNeutral = metadata.hasAsShotNeutral;
+        }
     }
     if (mCalibration && mCalibration->hasOrientation)
         info.orientation = mCalibration->orientation;
+    info.hasGainMaps = mSourceHasGainMap ||
+        vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "gainMaps") ||
+        vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "deferredGainMaps") ||
+        !mManualVignetteSidecars.candidates.empty() ||
+        (mManualVignetteSidecars.useDcpGainmap &&
+         mManualVignetteSidecars.dcpSpatialGainMap.has_value());
+    info.hasColorMatrices |= mManualVignetteSidecars.dcpColor.hasColorMatrix1 ||
+        mManualVignetteSidecars.dcpColor.hasColorMatrix2;
+    info.hasForwardMatrices |= mManualVignetteSidecars.dcpColor.hasForwardMatrix1 ||
+        mManualVignetteSidecars.dcpColor.hasForwardMatrix2;
+    info.hasAsShotNeutral |= mManualVignetteSidecars.dcpColor.hasAsShotNeutral;
+    for (const auto& candidate : mManualVignetteSidecars.candidates) {
+        if (candidate.whiteImage) continue;
+        const auto& color = candidate.image.metadata;
+        info.hasColorMatrices |= color.hasColorMatrix1 || color.hasColorMatrix2;
+        info.hasForwardMatrices |= color.hasForwardMatrix1 || color.hasForwardMatrix2;
+        info.hasAsShotNeutral |= color.hasAsShotNeutral;
+    }
+    if (mCalibration) {
+        info.hasColorMatrices |= mCalibration->hasColorMatrix1 || mCalibration->hasColorMatrix2;
+        info.hasForwardMatrices |= mCalibration->hasForwardMatrix1 || mCalibration->hasForwardMatrix2;
+        info.hasAsShotNeutral |= mCalibration->hasAsShotNeutral;
+    }
     auto duplicateMask = std::make_shared<std::vector<bool>>();
     for (const auto& entry : mFiles)
         if (boost::filesystem::path(entry.name).extension() == ".dng" ||
