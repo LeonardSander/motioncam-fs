@@ -88,6 +88,7 @@ private:
     int mWidth;
     int mHeight;
     float mSourceWhiteLevel = 65535.0f;
+    uint32_t mSourceLinearizationInputMax = 0;
     std::array<float, 4> mSourceBlackLevel{};
     bool mSourceHasGainMap = false;
     bool mHasCfa = false;

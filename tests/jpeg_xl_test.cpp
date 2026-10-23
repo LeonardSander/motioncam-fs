@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1151,6 +1152,10 @@ int main() {
     assert(logRgb.SetImageData(reinterpret_cast<const unsigned char*>(logSamples.data()),
                                logSamples.size() * sizeof(uint16_t)));
     auto logDctRgb = writeDng(logRgb);
+    motioncam::DNGFrameMetadata logInputMetadata;
+    if (!motioncam::DNGDecoder::getColorMetadata(logDctRgb, logInputMetadata) ||
+        logInputMetadata.linearizationInputMax != 1023)
+        throw std::runtime_error("DNG linearization input maximum was not preserved");
     auto reducedLogRgb = logDctRgb;
     assert(motioncam::DNGDecoder::applyLogTransform(
         reducedLogRgb, motioncam::LogTransformMode::ReduceBy4Bit, 1023));

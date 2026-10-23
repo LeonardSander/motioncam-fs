@@ -44,6 +44,7 @@ struct DNGFrameMetadata {
     uint32_t blackLevelCount = 0;
     uint32_t whiteLevelCount = 0;
     uint32_t inputBitDepth = 0;
+    uint32_t linearizationInputMax = 0;
     int orientation = -1;
     // Exact TIFF Orientation value (1..8). Unlike orientation, this retains
     // reflection and transpose information for Camera Native round-trips.

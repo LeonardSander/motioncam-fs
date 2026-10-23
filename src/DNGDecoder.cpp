@@ -3249,6 +3249,7 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
     if (reportedWhiteLevelMax) includeDepth(bitsForMaximum(reportedWhiteLevelMax));
     includeDepth(packedBitDepth);
     if (hasLinearization) includeDepth(bitsForMaximum(linearizationInputMax));
+    metadata.linearizationInputMax = hasLinearization ? linearizationInputMax : 0;
     if (metadata.inputBitDepth & 1u)
         metadata.inputBitDepth = std::min(16u, metadata.inputBitDepth + 1u);
     std::vector<std::pair<size_t, size_t>> imageRanges;

@@ -1934,6 +1934,12 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     // DirectLog's source representation is the encoded video pixel format;
     // CFA overrides describe a later interpretation/rendering step.
     info.dataType = mPixelFormat;
+    const bool outputBayer = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) &&
+        !mConfig.streamingPreview &&
+        !(mConfig.options & RENDER_OPT_CROPPING) &&
+        !(mCalibration && mCalibration->hasLeftTopCropStride);
+    if (outputBayer && info.dataType != "2x2")
+        info.outputPixelFormat = "2x2";
     
     // Determine levels info
     const bool applyLogCurve = directLogAppliesLogTransform(mConfig);

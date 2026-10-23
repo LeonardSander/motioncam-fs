@@ -122,6 +122,7 @@ struct FileInfo {
     // orientations currently retain only their rotational component.
     int orientation = -1;
     std::string dataType;        // e.g. "MCRAW 2x2", "DNG RGB", or "yuv420p"
+    std::string outputPixelFormat; // Empty when no output format label is needed.
     std::string levelsInfo;      // e.g., "1023/64 -> 1023/0 10b"
     float runtimeSeconds;        // Runtime in seconds based on audio track
     std::shared_ptr<const std::vector<uint8_t>> audioWav;

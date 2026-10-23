@@ -718,6 +718,22 @@ void VirtualFileSystemImpl_MCRAW::init() {
         ? "UNSPK " : "MCRAW ") + vfs::getDisplayDataType(false, displayCfaSize);
     const auto displayPlan = utils::planDngFrameProcessing(
         mSettings, cameraFrameMetadata, mCalibration);
+    int outputCfaSize = displayPlan.cfaRepeatSize;
+    if (displayPlan.explicitBinning && outputCfaSize > 2)
+        outputCfaSize = mSettings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+            outputCfaSize == 8 ? 4 : 2;
+    if (displayPlan.draftScale > 1 && !displayPlan.hqProxy)
+        outputCfaSize = 2;
+    if (displayPlan.demosaic && displayPlan.remosaic)
+        outputCfaSize = 2;
+    if (outputCfaSize > 2 && !displayPlan.explicitBinning &&
+        !mSettings.streamingPreview &&
+        mSettings.quadBayerOption != QuadBayerMode::CorrectQBCFAMetadata)
+        outputCfaSize = 2;
+    const std::string outputFormat = displayPlan.demosaic && !displayPlan.remosaic
+        ? "RGB" : vfs::getDisplayDataType(false, outputCfaSize);
+    if (outputFormat != vfs::getDisplayDataType(false, displayCfaSize))
+        mFileInfo.outputPixelFormat = outputFormat;
     mFileInfo.levelsInfo = vfs::getDisplayDataLevels(
         cameraFrameMetadata.dynamicWhiteLevel, cameraFrameMetadata.dynamicBlackLevel,
         cameraConfig.whiteLevel, cameraConfig.blackLevel,

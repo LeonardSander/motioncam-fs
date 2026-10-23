@@ -311,6 +311,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 mSourceBlackLevel = metadata[0].blackLevel;
             if (metadata[0].inputBitDepth > 0)
                 mSourceInputBitDepth = metadata[0].inputBitDepth;
+            mSourceLinearizationInputMax = metadata[0].linearizationInputMax;
         }
         if (!mSourceFrameLayouts.empty() && mSourceFrameLayouts[0].valid) {
             const auto& layout = mSourceFrameLayouts[0];
@@ -1315,9 +1316,37 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     vfs::buildGalleryFrameMap(mTimingTimestamps, mFiles,
         info.sourceFrameToOutput, info.sourceFrameDuplicated);
     
-    // DNG sequences are pass-through, so we show source format
+    // Show the source format and any configured CFA conversion.
     info.dataType = "DNG " +
         vfs::getDisplayDataType(!mHasCfa, mHasCfa ? mCfaSize : 0);
+    if (mHasCfa) {
+        const bool demosaicMode = mConfig.quadBayerOption == QuadBayerMode::Demosaic ||
+            mConfig.quadBayerOption == QuadBayerMode::DemosaicColor ||
+            mConfig.quadBayerOption == QuadBayerMode::DemosaicOCL;
+        const bool hq = mConfig.options & RENDER_OPT_HIGHER_CFA_HQ;
+        const bool remosaic = mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER;
+        const int scale = std::max(1, vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
+        const bool streamingKeepsCfa = mConfig.streamingPreview && scale == 1 &&
+            !hq && !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
+        const bool outputRgb = (scale > 1 && hq) ||
+            (scale == 1 && mCfaSize > 2 && demosaicMode && !streamingKeepsCfa);
+        int outputCfaSize = mCfaSize;
+        if (mConfig.quadBayerOption == QuadBayerMode::Binning ||
+            mConfig.quadBayerOption == QuadBayerMode::Bin8x8To4x4)
+            outputCfaSize = mCfaSize == 8 &&
+                mConfig.quadBayerOption == QuadBayerMode::Bin8x8To4x4 ? 4 : 2;
+        else if (mCfaSize > 2 && !streamingKeepsCfa &&
+                 mConfig.quadBayerOption != QuadBayerMode::CorrectQBCFAMetadata)
+            outputCfaSize = 2;
+        if (scale > 1 || (outputRgb && remosaic))
+            outputCfaSize = 2;
+        const std::string outputFormat = outputRgb && !remosaic
+            ? "RGB" : vfs::getDisplayDataType(false, outputCfaSize);
+        if (outputFormat != vfs::getDisplayDataType(false, mCfaSize))
+            info.outputPixelFormat = outputFormat;
+    } else if (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) {
+        info.outputPixelFormat = "2x2";
+    }
     const bool applyLogCurve = (mConfig.options & RENDER_OPT_LOG_TRANSFORM) &&
         mConfig.logTransform != LogTransformMode::Disabled &&
         (mConfig.logTransform != LogTransformMode::KeepInput ||
@@ -1332,6 +1361,33 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         mSourceHasGainMap && (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION),
         mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
         mSourceInputBitDepth);
+    if (mSourceLinearizationInputMax > 0) {
+        // Only replace the displayed input code range. Output levels and bit
+        // depth still derive from the DNG's post-linearization WhiteLevel.
+        const auto slash = info.levelsInfo.find('/');
+        if (slash != std::string::npos)
+            info.levelsInfo.replace(0, slash,
+                std::to_string(mSourceLinearizationInputMax));
+        const auto arrow = info.levelsInfo.find(" -> ");
+        if (arrow != std::string::npos) {
+            const auto outputEnd = info.levelsInfo.find(' ', arrow + 4);
+            if (outputEnd != std::string::npos) {
+                const auto inputRange = info.levelsInfo.substr(0, arrow);
+                const auto outputRange = info.levelsInfo.substr(
+                    arrow + 4, outputEnd - arrow - 4);
+                if (inputRange == outputRange)
+                    info.levelsInfo.erase(arrow, outputEnd - arrow);
+            }
+        }
+        // A baked gain map without output log materializes linear samples.
+        // Only label output that retains or rewrites log encoding.
+        if (applyLogCurve || !mSourceHasGainMap ||
+            !(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)) {
+            if (info.levelsInfo.size() < 4 ||
+                info.levelsInfo.compare(info.levelsInfo.size() - 4, 4, " log") != 0)
+                info.levelsInfo += " log";
+        }
+    }
     
     // Calculate runtime from frame count and fps
     const int outputFrames = mTotalFrames - mDroppedFrames + mDuplicatedFrames;

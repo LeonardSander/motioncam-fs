@@ -109,6 +109,40 @@ extern "C" {
 namespace {
     void copyFileAtomically(const QString& source, const QString& destination);
 
+    QString clipInfoFirstLine(const FileInfo& info) {
+        const int minutes = static_cast<int>(info.runtimeSeconds) / 60;
+        const int seconds = static_cast<int>(info.runtimeSeconds) % 60;
+        const QString runtime = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
+        const QString levels = QString::fromStdString(info.levelsInfo);
+        int bitDepthStart = levels.lastIndexOf('b');
+        while (bitDepthStart > 0 && levels.at(bitDepthStart - 1).isDigit())
+            --bitDepthStart;
+        const QString sourceType = QString::fromStdString(info.dataType);
+        const int formatStart = sourceType.lastIndexOf(' ') + 1;
+        const QString outputFormat = QString::fromStdString(info.outputPixelFormat);
+        const QString inputColor = outputFormat.isEmpty() ? "white" : "#888888";
+        QString result = QString(
+            "<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
+            "<span style='color: #888888;'> | Resolution: </span><span style='color: white;'>%2x%3</span>"
+            "<span style='color: #888888;'> | Type: %4</span><span style='color: %5;'>%6</span>")
+            .arg(runtime)
+            .arg(info.width)
+            .arg(info.height)
+            .arg(sourceType.left(formatStart).toHtmlEscaped())
+            .arg(inputColor)
+            .arg(sourceType.mid(formatStart).toHtmlEscaped());
+        if (!outputFormat.isEmpty())
+            result += QString("<span style='color: #888888;'> -> </span>"
+                              "<span style='color: white;'>%1</span>")
+                .arg(outputFormat.toHtmlEscaped());
+        result += QString("<span style='color: #888888;'> %1</span>")
+            .arg(levels.left(bitDepthStart).toHtmlEscaped());
+        if (bitDepthStart >= 0)
+            result += QString("<span style='color: white;'>%1</span>")
+                .arg(levels.mid(bitDepthStart).toHtmlEscaped());
+        return result;
+    }
+
     void writeFinalizedCfaBadPixelOptions(const QString& temporaryDirectory,
                                           const QString& finalDirectory,
                                           const QString& sourceSidecar,
@@ -2487,38 +2521,9 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     if (fileInfoOpt.has_value()) {
         auto info = fileInfoOpt.value();
 
-        // Format runtime as MM:SS
-        int minutes = static_cast<int>(info.runtimeSeconds) / 60;
-        int seconds = static_cast<int>(info.runtimeSeconds) % 60;
-        QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
-
-        // Extract bit depth and log indicator from levelsInfo for styling
-        QString levelsStr = QString::fromStdString(info.levelsInfo);
-        QString rawPart;
-        int rawIdx = levelsStr.lastIndexOf('b');
-        while (rawIdx > 0 && levelsStr.at(rawIdx - 1).isDigit())
-            --rawIdx;
-        if (rawIdx >= 0) {
-            rawPart = levelsStr.mid(rawIdx);
-        }
-
-        // First row: Runtime, Resolution, Data Type, Levels
-        auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
-                                 "<span style='color: #888888;'> | Resolution: %2x%3 | Type: %4 | Levels: %5</span>")
-                                .arg(runtimeStr)
-                                .arg(info.width)
-                                .arg(info.height)
-                                .arg(QString::fromStdString(info.dataType))
-                                .arg(levelsStr.left(rawIdx));
-
-        // Add styled RAW part if it exists
-        if (!rawPart.isEmpty()) {
-            infoText1 += QString("<span style='color: white;'>%1</span>").arg(rawPart);
-        }
-
-        auto* infoLabel1 = new QLabel(infoText1, fileWidget);
+        auto* infoLabel1 = new QLabel(clipInfoFirstLine(info), fileWidget);
         infoLabel1->setStyleSheet("font-size: 9pt;");
-        infoLabel1->setFixedHeight(infoLabel1->fontMetrics().height() + 1);
+        infoLabel1->setFixedHeight(infoLabel1->fontMetrics().height() + 2);
         infoLabel1->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         infoLabel1->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
         infoLabel1->setProperty("infoLabel1", true);
@@ -6070,34 +6075,7 @@ void MainWindow::updateFpsLabels() {
 
         // Update first info label (runtime, resolution, data type, levels)
         if (label->property("infoLabel1").toBool()) {
-            // Format runtime as MM:SS
-            int minutes = static_cast<int>(info.runtimeSeconds) / 60;
-            int seconds = static_cast<int>(info.runtimeSeconds) % 60;
-            QString runtimeStr = QString("%1:%2").arg(minutes).arg(seconds, 2, 10, QChar('0'));
-
-            // Extract bit depth and log indicator from levelsInfo for styling
-            QString levelsStr = QString::fromStdString(info.levelsInfo);
-            QString rawPart;
-            int rawIdx = levelsStr.lastIndexOf('b');
-            while (rawIdx > 0 && levelsStr.at(rawIdx - 1).isDigit())
-                --rawIdx;
-            if (rawIdx >= 0) {
-                rawPart = levelsStr.mid(rawIdx);
-            }
-
-            auto infoText1 = QString("<span style='color: #888888;'>Runtime: </span><span style='color: white;'>%1</span>"
-                                     "<span style='color: #888888;'> | Resolution: %2x%3 | Type: %4 | Levels: %5</span>")
-                                    .arg(runtimeStr)
-                                    .arg(info.width)
-                                    .arg(info.height)
-                                    .arg(QString::fromStdString(info.dataType))
-                                    .arg(levelsStr.left(rawIdx));
-
-            if (!rawPart.isEmpty()) {
-                infoText1 += QString("<span style='color: white;'>%1</span>").arg(rawPart);
-            }
-
-            label->setText(infoText1);
+            label->setText(clipInfoFirstLine(info));
         }
         // Update second info label (FPS and frame counts)
         else if (label->property("infoLabel2").toBool()) {
