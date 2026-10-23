@@ -109,6 +109,48 @@ extern "C" {
 namespace {
     void copyFileAtomically(const QString& source, const QString& destination);
 
+    void writeFinalizedCfaBadPixelOptions(const QString& temporaryDirectory,
+                                          const QString& finalDirectory,
+                                          const QString& sourceSidecar,
+                                          bool perFrame = false) {
+        if (!QFileInfo::exists(sourceSidecar)) return;
+        QDirIterator frames(temporaryDirectory, {"*.dng", "*.DNG"}, QDir::Files,
+                            QDirIterator::Subdirectories);
+        if (!frames.hasNext()) return;
+        std::ifstream input(sourceSidecar.toStdString());
+        if (!input) throw std::runtime_error("Could not read source bad-pixel options JSON");
+        const auto source = nlohmann::json::parse(input);
+        if (!source.is_object() || !source.contains("badPixels")) return;
+        nlohmann::json output = {{"badPixels", source.at("badPixels")}};
+        if (source.contains("fullSensorResolution"))
+            output["fullSensorResolution"] = source.at("fullSensorResolution");
+        const auto bytes = output.dump(2) + '\n';
+        do {
+            const QString framePath = frames.next();
+            QFile frame(framePath);
+            if (!frame.open(QIODevice::ReadOnly))
+                throw std::runtime_error("Could not inspect finalized DNG pixel layout");
+            const QByteArray data = frame.readAll();
+            const std::vector<uint8_t> dng(data.begin(), data.end());
+            motioncam::DNGImageLayout layout;
+            if (!motioncam::DNGDecoder::getImageLayout(dng, layout))
+                throw std::runtime_error("Could not inspect finalized DNG pixel layout");
+            if (layout.pixels == motioncam::DNGPixelLayout::CFA) {
+                const QString destination = perFrame
+                    ? QFileInfo(framePath).absolutePath() + "/" +
+                          QFileInfo(framePath).completeBaseName() + ".json"
+                    : QDir(temporaryDirectory).filePath(
+                          QFileInfo(finalDirectory).fileName() + ".json");
+                QSaveFile file(destination);
+                if (!file.open(QIODevice::WriteOnly) ||
+                    file.write(bytes.data(), static_cast<qint64>(bytes.size())) !=
+                        static_cast<qint64>(bytes.size()) || !file.commit())
+                    throw std::runtime_error("Could not write finalized bad-pixel options JSON");
+            }
+            if (!perFrame) break;
+        } while (frames.hasNext());
+    }
+
     bool projectionDependencyAvailable() {
 #ifdef _WIN32
         HMODULE library = LoadLibraryW(L"projectedfslib.dll");
@@ -3553,6 +3595,15 @@ void MainWindow::finalizeSelectedFrames(){
                                              sidecarError))
                     throw std::runtime_error(sidecarError.toStdString());
             }
+            if(motioncam::effectiveBadPixelTreatment(original.badPixelTreatment,
+                    original.vignetteCorrection) == motioncam::BadPixelTreatment::OptionsJsonOnly &&
+                !(original.options & motioncam::RENDER_OPT_REMOSAIC_TO_BAYER)){
+                QString sidecar=card->property("sidecarPath").toString();
+                if(sidecar.isEmpty())
+                    sidecar=QString::fromStdString(motioncam::vfs::sidecarPath(
+                        card->property("filePath").toString().toStdString()).string());
+                writeFinalizedCfaBadPixelOptions(temporary,output,sidecar,true);
+            }
             if(mFinalizeSelectionToSingleDirectory){
                 QString mergeError;
                 if(!mergeDirectoryContentsFlat(temporary,output,mergeError))
@@ -5565,6 +5616,17 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         if (!progress.wasCanceled()) {
             if (!archiveDngs)
                 spdlog::info("Rendered {} frames to temp directory", totalFrames);
+            if (!archiveDngs &&
+                motioncam::effectiveBadPixelTreatment(settings.badPixelTreatment,
+                    settings.vignetteCorrection) == motioncam::BadPixelTreatment::OptionsJsonOnly &&
+                !(settings.options & motioncam::RENDER_OPT_REMOSAIC_TO_BAYER)) {
+                QString sidecar = fileWidget->property("sidecarPath").toString();
+                if (sidecar.isEmpty())
+                    sidecar = QString::fromStdString(
+                        motioncam::vfs::sidecarPath(srcFile.toStdString()).string());
+                writeFinalizedCfaBadPixelOptions(tempPath,
+                    mUnmountOnFinalize ? mountPath : retainedOutputPath, sidecar);
+            }
 
             if (archiveDngs) {
                 progress.setRange(0, 0);

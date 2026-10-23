@@ -1462,7 +1462,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             RENDER_OPT_BAKE_ISO)) &&
         (!mCalibration || (!mCalibration->hasLeftTopCropStride &&
             (!mCalibration->hasBadPixels ||
-             currentSettings.badPixelTreatment == BadPixelTreatment::Disabled))) &&
+             !processesBadPixels(currentSettings.badPixelTreatment)))) &&
         (!directLogAppliesLogTransform(currentSettings) ||
          directLogLogBits(currentSettings.logTransform,
              directLogBaseLogBits(currentSettings)) <= 16);
@@ -1515,7 +1515,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             (!directLogAppliesLogTransform(mConfig) || fastBakedGallery) &&
             !(mCalibration && (mCalibration->hasLeftTopCropStride ||
                 (mCalibration->hasBadPixels &&
-                 mConfig.badPixelTreatment != BadPixelTreatment::Disabled))) &&
+                 processesBadPixels(mConfig.badPixelTreatment)))) &&
             (configuredScale == 1 || directProxy);
         std::unique_lock gpuFrameLock(mGpuFrameMutex);
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,

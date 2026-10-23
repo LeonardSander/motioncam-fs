@@ -1718,7 +1718,9 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     bool debugShadingMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     bool normalizeExposure = settings.options & RENDER_OPT_NORMALIZE_EXPOSURE;
     const BadPixelTreatment badPixelTreatment = debugShadingMap
-        ? BadPixelTreatment::Disabled : settings.badPixelTreatment;
+        ? BadPixelTreatment::Disabled
+        : effectiveBadPixelTreatment(settings.badPixelTreatment,
+                                     settings.vignetteCorrection);
     const auto processingPlan = planDngFrameProcessing(settings, metadata, calibration);
     const int draftScale = processingPlan.draftScale;
     const auto effectiveLogTransform = processingPlan.logTransform;
@@ -1746,7 +1748,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     const uint32_t badPixelSourceWidth = width;
     const uint32_t badPixelSourceHeight = height;
     if (calibration && calibration->hasBadPixels &&
-        badPixelTreatment != BadPixelTreatment::Disabled) {
+        processesBadPixels(badPixelTreatment)) {
         const auto levelsForDefects = resolveDataLevels(
             settings.levels, metadata.dynamicWhiteLevel, metadata.dynamicBlackLevel,
             cameraConfiguration.whiteLevel, cameraConfiguration.blackLevel);

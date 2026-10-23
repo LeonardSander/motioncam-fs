@@ -268,6 +268,15 @@ int main() {
     assert(!incompleteCoordinates->hasBadPixels);
     assert(stringToBadPixelTreatment("Mark Pixels") == BadPixelTreatment::MarkPixels);
     assert(badPixelTreatmentToString(BadPixelTreatment::MarkPixels) == "Mark Pixels");
+    assert(badPixelTreatmentToString(BadPixelTreatment::OptionsJsonOnly) == "Options JSON Only");
+    assert(stringToBadPixelTreatment("Options JSON Only") == BadPixelTreatment::OptionsJsonOnly);
+    assert(processesBadPixels(BadPixelTreatment::OptionsJsonOnly));
+    assert(effectiveBadPixelTreatment(BadPixelTreatment::OptionsJsonOnly,
+        VignetteCorrectionMode::Resample) == BadPixelTreatment::Bake);
+    assert(effectiveBadPixelTreatment(BadPixelTreatment::OpcodeOnly,
+        VignetteCorrectionMode::Resample) == BadPixelTreatment::Bake);
+    assert(effectiveBadPixelTreatment(BadPixelTreatment::Disabled,
+        VignetteCorrectionMode::Resample) == BadPixelTreatment::Disabled);
 
     const auto partialCalibration = CalibrationData::parse(std::string(R"({
         "colorMatrix1":["invalid"],

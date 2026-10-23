@@ -823,6 +823,30 @@ int main() {
     };
     assert(opcodeBe32(badPixelOpcodeOffset) == 1);
     assert(opcodeBe32(badPixelOpcodeOffset + 4) == 5);
+    auto optionsJsonCfa = makeLogCfaDng(1023, 0);
+    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OptionsJsonOnly;
+    motioncam::vfs::processDngPixels(optionsJsonCfa, badPixelSettings, cfaPipeline);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        optionsJsonCfa, makeLogCfaDng(1023, 0)));
+    assert(tagPayload(optionsJsonCfa, 51008).second == 0);
+    badPixelCalibration.badPixels.front().action =
+        motioncam::CalibrationData::BadPixelAction::Dampen;
+    auto resampledBakeCfa = makeLogCfaDng(1023, 0);
+    badPixelSettings.vignetteCorrection = motioncam::VignetteCorrectionMode::Resample;
+    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OptionsJsonOnly;
+    motioncam::vfs::processDngPixels(resampledBakeCfa, badPixelSettings, cfaPipeline);
+    assert(!motioncam::DNGDecoder::imagePayloadsEqual(
+        resampledBakeCfa, makeLogCfaDng(1023, 0)));
+    assert(tagPayload(resampledBakeCfa, 51008).second == 0);
+    auto resampledDisabledCfa = makeLogCfaDng(1023, 0);
+    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
+    motioncam::vfs::processDngPixels(resampledDisabledCfa, badPixelSettings, cfaPipeline);
+    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+        resampledDisabledCfa, makeLogCfaDng(1023, 0)));
+    badPixelCalibration.badPixels.front().action =
+        motioncam::CalibrationData::BadPixelAction::Interpolate;
+    badPixelSettings.vignetteCorrection = motioncam::VignetteCorrectionMode::Bake;
+    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OpcodeOnly;
     const auto [preservedOpcode3Offset, preservedOpcode3Bytes] =
         tagPayload(opcodeCfa, 51022);
     assert(preservedOpcode3Offset && preservedOpcode3Bytes == existingOpcode3Bytes);

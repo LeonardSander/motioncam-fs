@@ -613,8 +613,10 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             const uint32_t markedSourceWidth = image.layout.width;
             const uint32_t markedSourceHeight = image.layout.height;
             const auto badPixelsStarted = std::chrono::steady_clock::now();
+            const auto badPixelTreatment = effectiveBadPixelTreatment(
+                mConfig.badPixelTreatment, mConfig.vignetteCorrection);
             if (mCalibration && mCalibration->hasBadPixels &&
-                mConfig.badPixelTreatment != BadPixelTreatment::Disabled &&
+                processesBadPixels(badPixelTreatment) &&
                 image.layout.pixels == DNGPixelLayout::CFA) {
                 const int originalWidth = mCalibration->hasFullSensorResolution
                     ? mCalibration->fullSensorResolution[0]
@@ -631,7 +633,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     originalWidth, originalHeight, prepared.cfaSize, white,
                     image.metadata.blackLevel, image.metadata.iso,
                     image.metadata.exposureTime, *mCalibration,
-                    mConfig.badPixelTreatment, true);
+                    badPixelTreatment, true);
             }
             const auto badPixelsFinished = std::chrono::steady_clock::now();
             vfs::mergeManualDngMetadata(
@@ -677,7 +679,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                         reinterpret_cast<uint16_t*>(preview.rgb.data()),
                         preview.width, preview.height, 3, value, 0, 65535);
                 }
-                if (mConfig.badPixelTreatment == BadPixelTreatment::MarkPixels) {
+                if (badPixelTreatment == BadPixelTreatment::MarkPixels) {
                     uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
                     if (mConfig.options & RENDER_OPT_CROPPING)
                         utils::parseCropTarget(mConfig.cropTarget, cropWidth, cropHeight, stride);

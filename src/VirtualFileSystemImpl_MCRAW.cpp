@@ -806,7 +806,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
                                        RENDER_OPT_DEBUG_SHADING_MAP)) &&
             !frameSettings.cameraNativeStaging &&
             !(mCalibration && mCalibration->hasBadPixels &&
-              frameSettings.badPixelTreatment != BadPixelTreatment::Disabled) &&
+              processesBadPixels(frameSettings.badPixelTreatment)) &&
             mManualVignetteSidecars.candidates.empty() &&
             !mManualVignetteSidecars.useDcpGainmap &&
             !vfs::hasSidecarGainMaps(mSidecarMetadata, frameIt->second,

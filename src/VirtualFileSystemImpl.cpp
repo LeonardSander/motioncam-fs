@@ -140,7 +140,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
         throw std::runtime_error("Could not discard neutral gain maps for " + source);
     const bool debugGainMap = settings.options & RENDER_OPT_DEBUG_SHADING_MAP;
     const BadPixelTreatment badPixelTreatment = debugGainMap
-        ? BadPixelTreatment::Disabled : settings.badPixelTreatment;
+        ? BadPixelTreatment::Disabled
+        : effectiveBadPixelTreatment(settings.badPixelTreatment,
+                                     settings.vignetteCorrection);
     // Level correction is tag-only for every source. It deliberately precedes
     // any operation that consults the DNG's black/white metadata and never
     // requantizes the stored samples.
@@ -156,7 +158,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     bool badPixelsWillDemosaic = false;
     if (options.hasCfa && options.calibration &&
         options.calibration->hasBadPixels &&
-        badPixelTreatment != BadPixelTreatment::Disabled) {
+        processesBadPixels(badPixelTreatment)) {
         const bool streamingKeepsCfa = settings.streamingPreview &&
             scale == 1 &&
             !(settings.options & RENDER_OPT_HIGHER_CFA_HQ) &&
@@ -219,8 +221,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
                          source, directStrip);
         if (badPixelTreatment == BadPixelTreatment::MarkPixels)
             markedPixels = active;
-        if (badPixelTreatment != BadPixelTreatment::Bake &&
-            badPixelTreatment != BadPixelTreatment::MarkPixels &&
+        if (badPixelTreatment == BadPixelTreatment::OpcodeOnly &&
             !willDemosaic && !active.empty()) {
             tinydngwriter::FixBadPixelsParams params;
             for (const auto& pixel : active)

@@ -17,7 +17,7 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
         BadPixelTreatment treatment, bool bakeForDemosaic) {
     std::vector<ActiveBadPixel> active;
     if (!samples || !width || !height || !calibration.hasBadPixels ||
-        treatment == BadPixelTreatment::Disabled) return active;
+        !processesBadPixels(treatment)) return active;
     if (treatment == BadPixelTreatment::OpcodeOnly &&
         std::any_of(calibration.badPixels.begin(), calibration.badPixels.end(),
             [](const auto& pixel) {
