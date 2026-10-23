@@ -243,6 +243,7 @@ private:
     bool mSettingsDirty = false;
     bool mAutoApplyClipSettings = true;
     bool mGalleryFpsIndicatorEnabled = true;
+    bool mDetectDuplicateDngs = true;
     bool mGalleryHistogramEnabled = false;
     bool mGalleryClippingEnabled = false;
     bool mUnmountOnFinalize = true;

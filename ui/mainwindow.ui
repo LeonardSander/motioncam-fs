@@ -603,13 +603,6 @@
            </property>
          </widget>
         </item>
-        <item>
-          <widget class="QCheckBox" name="detectDuplicateDngsCheckBox">
-           <property name="text"><string>Detect Duplicate DNGs</string></property>
-           <property name="checked"><bool>true</bool></property>
-           <property name="toolTip"><string>During finalization, detect holds from DNG duplicate metadata or identical DNG image payloads and save the duplicate flag to DNG or Camera Native output. Camera Native inputs use duplicate flags from their JSON sidecar; lossy video pixels are not compared. If interpolation is enabled, holds remaining after frame-rate conversion are interpolated. Mounted sequences are unaffected.</string></property>
-          </widget>
-         </item>
          <item>
           <layout class="QHBoxLayout" name="rifeInterpolationLayout">
            <item>

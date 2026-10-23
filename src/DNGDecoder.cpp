@@ -90,6 +90,7 @@ void readSampleBytes(uint16_t* destination, const uint8_t* samples,
 struct CachedDngSequence {
     DNGSequenceInfo info;
     std::vector<DNGFrameInfo> frames;
+    std::optional<std::vector<uint8_t>> detectedDuplicateMask;
 };
 
 std::mutex sequenceCacheMutex;
@@ -102,6 +103,77 @@ struct CachedCfaMetadata {
     std::array<uint8_t, 4> phase{};
 };
 std::unordered_map<std::string, CachedCfaMetadata> dngCfaCache;
+
+constexpr uint64_t dngDuplicateCacheMagic = 0x4d4346444e470001ULL;
+
+// The sequence signature includes every DNG path, size, and modification time.
+// Store it in the file as well as hashing it for the filename, so a collision
+// can only cause a cache miss.
+std::filesystem::path dngDuplicateCachePath(const std::string& key) {
+    const char* cacheRoot = std::getenv("XDG_CACHE_HOME");
+    std::filesystem::path root;
+    if (cacheRoot && cacheRoot[0] != '\0') root = cacheRoot;
+    else if (const char* home = std::getenv("HOME")) root = std::filesystem::path(home) / ".cache";
+    else root = std::filesystem::temp_directory_path();
+    uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char byte : key) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return root / "motioncam-fuse" / "dng-analysis" /
+           (std::to_string(hash) + ".bin");
+}
+
+bool loadPersistentDngDuplicates(const std::string& key, size_t frames,
+                                 std::vector<uint8_t>& mask) {
+    std::ifstream input(dngDuplicateCachePath(key), std::ios::binary);
+    uint64_t magic = 0, keySize = 0, count = 0;
+    if (!input.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
+        magic != dngDuplicateCacheMagic ||
+        !input.read(reinterpret_cast<char*>(&keySize), sizeof(keySize)) ||
+        keySize != key.size()) return false;
+    std::string storedKey(key.size(), '\0');
+    if (!input.read(storedKey.data(), static_cast<std::streamsize>(storedKey.size())) ||
+        storedKey != key ||
+        !input.read(reinterpret_cast<char*>(&count), sizeof(count)) ||
+        count != frames) return false;
+    std::vector<uint8_t> loaded(frames);
+    if (!input.read(reinterpret_cast<char*>(loaded.data()),
+                    static_cast<std::streamsize>(loaded.size())) ||
+        input.peek() != std::char_traits<char>::eof() ||
+        (!loaded.empty() && loaded.front() != 0) ||
+        std::any_of(loaded.begin(), loaded.end(), [](uint8_t value) { return value > 1; }))
+        return false;
+    mask = std::move(loaded);
+    return true;
+}
+
+void savePersistentDngDuplicates(const std::string& key,
+                                 const std::vector<uint8_t>& mask) {
+    const auto path = dngDuplicateCachePath(key);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return;
+    const auto temporary = path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output) return;
+    const uint64_t keySize = key.size(), count = mask.size();
+    output.write(reinterpret_cast<const char*>(&dngDuplicateCacheMagic), sizeof(dngDuplicateCacheMagic));
+    output.write(reinterpret_cast<const char*>(&keySize), sizeof(keySize));
+    output.write(key.data(), static_cast<std::streamsize>(key.size()));
+    output.write(reinterpret_cast<const char*>(&count), sizeof(count));
+    output.write(reinterpret_cast<const char*>(mask.data()),
+                 static_cast<std::streamsize>(mask.size()));
+    output.close();
+    if (!output) { std::filesystem::remove(temporary, error); return; }
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::filesystem::remove(path, error);
+        error.clear();
+        std::filesystem::rename(temporary, path, error);
+        if (error) std::filesystem::remove(temporary, error);
+    }
+}
 
 std::string dngSequenceSignature(const std::string& path) {
     std::error_code error;
@@ -204,16 +276,30 @@ void DNGDecoder::endForegroundWork() {
 std::pair<uintmax_t, size_t> DNGDecoder::analysisCacheUsage() {
     std::scoped_lock lock(sequenceCacheMutex, dngMetadataCacheMutex);
     uintmax_t bytes = 0;
+    std::set<std::string> cacheNames;
     for (const auto& [key, cached] : sequenceCache) {
         bytes += key.capacity() + sizeof(cached.info);
         bytes += cached.frames.capacity() * sizeof(DNGFrameInfo);
         for (const auto& frame : cached.frames) bytes += frame.filePath.capacity();
+        if (cached.detectedDuplicateMask)
+            bytes += cached.detectedDuplicateMask->capacity();
+        cacheNames.insert(dngDuplicateCachePath(key).filename().string());
     }
     for (const auto& [key, metadata] : dngMetadataCache)
         bytes += key.capacity() + sizeof(metadata);
     for (const auto& [key, metadata] : dngCfaCache)
         bytes += key.capacity() + sizeof(metadata);
-    return {bytes, sequenceCache.size()};
+    std::error_code error;
+    const auto directory = dngDuplicateCachePath("").parent_path();
+    std::filesystem::directory_iterator entries(directory, error);
+    for (std::filesystem::directory_iterator end; !error && entries != end;
+         entries.increment(error)) {
+        if (!entries->is_regular_file(error)) continue;
+        bytes += entries->file_size(error);
+        if (error) break;
+        cacheNames.insert(entries->path().filename().string());
+    }
+    return {bytes, cacheNames.size()};
 }
 
 void DNGDecoder::clearAnalysisCache() {
@@ -221,6 +307,36 @@ void DNGDecoder::clearAnalysisCache() {
     sequenceCache.clear();
     dngMetadataCache.clear();
     dngCfaCache.clear();
+    std::error_code error;
+    std::filesystem::remove_all(dngDuplicateCachePath("").parent_path(), error);
+    if (error)
+        spdlog::warn("Could not clear DNG duplicate analysis cache: {}", error.message());
+}
+
+bool DNGDecoder::loadDuplicateFrameDetection(std::vector<uint8_t>& mask) const {
+    if (mSequenceSignature.empty()) return false;
+    std::lock_guard lock(sequenceCacheMutex);
+    if (const auto cached = sequenceCache.find(mSequenceSignature);
+        cached != sequenceCache.end() && cached->second.detectedDuplicateMask &&
+        cached->second.detectedDuplicateMask->size() == mFrames.size()) {
+        mask = *cached->second.detectedDuplicateMask;
+        return true;
+    }
+    if (!loadPersistentDngDuplicates(mSequenceSignature, mFrames.size(), mask))
+        return false;
+    if (const auto cached = sequenceCache.find(mSequenceSignature);
+        cached != sequenceCache.end())
+        cached->second.detectedDuplicateMask = mask;
+    return true;
+}
+
+void DNGDecoder::cacheDuplicateFrameDetection(const std::vector<uint8_t>& mask) const {
+    if (mSequenceSignature.empty() || mask.size() != mFrames.size()) return;
+    std::lock_guard lock(sequenceCacheMutex);
+    if (const auto cached = sequenceCache.find(mSequenceSignature);
+        cached != sequenceCache.end())
+        cached->second.detectedDuplicateMask = mask;
+    savePersistentDngDuplicates(mSequenceSignature, mask);
 }
 
 namespace {
@@ -1000,7 +1116,14 @@ namespace {
                     tag == TIFF_TAG_IMAGE_WIDTH || tag == TIFF_TAG_IMAGE_HEIGHT ||
                     tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD ||
                     tag == TIFF_TAG_SUB_IFDS;
-                if ((!scanNeeded || scanTag) && valueOffset <= data.size() &&
+                // Byte counts are optional for duplicate detection. Use them
+                // when they are in the prefix already, without extending the
+                // initial scan into image data or remote metadata arrays.
+                const bool optionalPayloadCount =
+                    tag == TIFF_TAG_STRIP_BYTE_COUNTS ||
+                    tag == TIFF_TAG_TILE_BYTE_COUNTS;
+                if ((!scanNeeded || scanTag || optionalPayloadCount) &&
+                    valueOffset <= data.size() &&
                     bytes <= data.size() - valueOffset)
                     result.push_back({tag, type, itemCount, valueOffset, ifd, pos});
                 else if (scanNeeded && scanTag &&
@@ -1835,7 +1958,8 @@ void DNGDecoder::analyzeSequence() {
     // immutable sequence scan performed by the thumbnail renderer instead of
     // rereading every (potentially 100+ MP) DNG before the first gallery
     // frame. File size and write time make the cache self-invalidating.
-    const std::string sequenceSignature = dngSequenceSignature(mSequencePath);
+    mSequenceSignature = dngSequenceSignature(mSequencePath);
+    const auto& sequenceSignature = mSequenceSignature;
     if (!sequenceSignature.empty()) {
         std::lock_guard lock(sequenceCacheMutex);
         if (const auto cached = sequenceCache.find(sequenceSignature);
@@ -1942,6 +2066,7 @@ void DNGDecoder::findDNGFiles() {
         if (end < 8 || static_cast<uintmax_t>(end) >
                 static_cast<uintmax_t>(std::numeric_limits<size_t>::max())) continue;
         const size_t fileSize = static_cast<size_t>(end);
+        frame.fileSize = fileSize;
         std::vector<uint8_t> bytes;
         bool little = true;
         std::vector<TiffEntry> entries;
@@ -2021,13 +2146,14 @@ void DNGDecoder::findDNGFiles() {
                 const uint32_t value = entry.type == TIFF_TYPE_SHORT
                     ? read16(data.data() + entry.valueOffset, little)
                     : read32(data.data() + entry.valueOffset, little);
-                if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+                if (value == TIFF_PHOTOMETRIC_CFA || value == 34892 || value == 2) {
                     photo = &entry;
                     break;
                 }
             }
         }
         if (!photo) continue;
+        frame.imageIfdOffset = photo->ifdOffset;
         for (const auto& entry : entries) {
             if (entry.ifdOffset != photo->ifdOffset) continue;
             const uint32_t value = entry.type == TIFF_TYPE_SHORT
@@ -2035,6 +2161,21 @@ void DNGDecoder::findDNGFiles() {
                 : read32(data.data() + entry.valueOffset, little);
             if (entry.tag == TIFF_TAG_IMAGE_WIDTH) frame.width = static_cast<int>(value);
             if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) frame.height = static_cast<int>(value);
+            if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS ||
+                entry.tag == TIFF_TAG_TILE_BYTE_COUNTS) {
+                const size_t width = entry.type == TIFF_TYPE_SHORT ? 2 :
+                                     entry.type == TIFF_TYPE_LONG ? 4 : 0;
+                if (!width || !entry.count ||
+                    entry.valueOffset > data.size() ||
+                    entry.count > (data.size() - entry.valueOffset) / width)
+                    continue;
+                uint64_t total = 0;
+                for (uint32_t i = 0; i < entry.count; ++i) {
+                    const auto* item = data.data() + entry.valueOffset + i * width;
+                    total += width == 2 ? read16(item, little) : read32(item, little);
+                }
+                frame.imagePayloadBytes = total;
+            }
         }
     }
 }
@@ -2099,6 +2240,123 @@ uint64_t hashImagePayload(const std::vector<uint8_t>& data,
         }
     return value;
 }
+}
+
+bool DNGDecoder::imagePayloadSampleHash(int frameNumber, uint64_t& hash) const {
+    if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) return false;
+    const auto& frame = mFrames[frameNumber];
+    if (!frame.imagePayloadBytes || !frame.fileSize || !frame.imageIfdOffset) return false;
+    std::ifstream file(frame.filePath, std::ios::binary);
+    if (!file) return false;
+    // Some DNGs put the raw IFD after the image. Seek to the offset captured
+    // during indexing instead of reading the entire file to find its strips.
+    std::array<uint8_t, 8> header{};
+    file.read(reinterpret_cast<char*>(header.data()), header.size());
+    if (file.gcount() != static_cast<std::streamsize>(header.size())) return false;
+    const bool little = read16(header.data(), true) == TIFF_LITTLE_ENDIAN;
+    if ((!little && read16(header.data(), true) != TIFF_BIG_ENDIAN) ||
+        read16(header.data() + 2, little) != TIFF_MAGIC)
+        return false;
+    if (static_cast<uint64_t>(frame.imageIfdOffset) + 2 > frame.fileSize) return false;
+    file.seekg(frame.imageIfdOffset);
+    std::array<uint8_t, 2> countBytes{};
+    file.read(reinterpret_cast<char*>(countBytes.data()), countBytes.size());
+    if (file.gcount() != static_cast<std::streamsize>(countBytes.size())) return false;
+    const uint16_t entryCount = read16(countBytes.data(), little);
+    const size_t directoryBytes = static_cast<size_t>(entryCount) * 12;
+    if (static_cast<uint64_t>(frame.imageIfdOffset) + 2 + directoryBytes + 4 >
+        frame.fileSize) return false;
+    std::vector<uint8_t> directory(directoryBytes);
+    file.read(reinterpret_cast<char*>(directory.data()),
+              static_cast<std::streamsize>(directory.size()));
+    if (file.gcount() != static_cast<std::streamsize>(directory.size())) return false;
+    struct Values { uint16_t type = 0; uint32_t count = 0; uint32_t offset = 0;
+                    size_t entry = 0; };
+    Values offsets, counts;
+    for (size_t i = 0; i < entryCount; ++i) {
+        const size_t pos = i * 12;
+        const uint16_t tag = read16(directory.data() + pos, little);
+        Values value{read16(directory.data() + pos + 2, little),
+                     read32(directory.data() + pos + 4, little),
+                     read32(directory.data() + pos + 8, little), pos};
+        if (tag == TIFF_TAG_STRIP_OFFSETS || tag == TIFF_TAG_TILE_OFFSETS)
+            offsets = value;
+        if (tag == TIFF_TAG_STRIP_BYTE_COUNTS || tag == TIFF_TAG_TILE_BYTE_COUNTS)
+            counts = value;
+    }
+    if (!offsets.count || offsets.count != counts.count) return false;
+    auto readValues = [&](const Values& entry, std::vector<uint32_t>& output) {
+        const size_t width = entry.type == TIFF_TYPE_SHORT ? 2 :
+                             entry.type == TIFF_TYPE_LONG ? 4 : 0;
+        if (!width || entry.count > frame.fileSize / width) return false;
+        const size_t bytes = static_cast<size_t>(entry.count) * width;
+        std::vector<uint8_t> remote;
+        const uint8_t* data = nullptr;
+        if (bytes <= 4) {
+            data = directory.data() + entry.entry + 8;
+        } else {
+            if (entry.offset > frame.fileSize || bytes > frame.fileSize - entry.offset)
+                return false;
+            remote.resize(bytes);
+            file.clear();
+            file.seekg(entry.offset);
+            file.read(reinterpret_cast<char*>(remote.data()),
+                      static_cast<std::streamsize>(remote.size()));
+            if (file.gcount() != static_cast<std::streamsize>(remote.size())) return false;
+            data = remote.data();
+        }
+        output.reserve(entry.count);
+        for (uint32_t i = 0; i < entry.count; ++i)
+            output.push_back(width == 2 ? read16(data + i * width, little)
+                                        : read32(data + i * width, little));
+        return true;
+    };
+    std::vector<uint32_t> imageOffsets, imageCounts;
+    if (!readValues(offsets, imageOffsets) || !readValues(counts, imageCounts))
+        return false;
+    std::vector<ImagePayloadSegment> segments;
+    uint64_t total = 0;
+    for (size_t i = 0; i < imageOffsets.size(); ++i) {
+        if (static_cast<uint64_t>(imageOffsets[i]) + imageCounts[i] > frame.fileSize)
+            return false;
+        segments.push_back({imageOffsets[i], imageCounts[i]});
+        total += imageCounts[i];
+    }
+    if (total != frame.imagePayloadBytes) return false;
+
+    constexpr size_t sampleBytes = 1024;
+    hash = 1469598103934665603ULL;
+    std::array<uint8_t, sampleBytes> buffer{};
+    // Sample positions in the concatenated image payload, so metadata size
+    // and strip offsets do not affect equal images. A matching sample still
+    // requires the full byte-for-byte comparison at the call site.
+    for (const uint64_t numerator : {0ULL, 1ULL, 2ULL, 3ULL, 4ULL}) {
+        const uint64_t length = std::min<uint64_t>(sampleBytes, total);
+        const uint64_t start = std::min(total - length, (total / 4) * numerator);
+        uint64_t logical = 0, cursor = start, remaining = length;
+        for (const auto& segment : segments) {
+            const uint64_t end = logical + segment.size;
+            if (cursor < end && remaining) {
+                const uint64_t inside = cursor - logical;
+                const size_t count = static_cast<size_t>(
+                    std::min<uint64_t>(remaining, segment.size - inside));
+                file.clear();
+                file.seekg(static_cast<std::streamoff>(segment.offset + inside));
+                file.read(reinterpret_cast<char*>(buffer.data()),
+                          static_cast<std::streamsize>(count));
+                if (file.gcount() != static_cast<std::streamsize>(count)) return false;
+                for (size_t i = 0; i < count; ++i) {
+                    hash ^= buffer[i];
+                    hash *= 1099511628211ULL;
+                }
+                cursor += count;
+                remaining -= count;
+            }
+            logical = end;
+        }
+        if (remaining) return false;
+    }
+    return true;
 }
 
 bool DNGDecoder::imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash) {

@@ -26,6 +26,9 @@ struct DNGFrameInfo {
     bool hasTimeCodeTimestamp = false;
     bool duplicateFrame = false;
     bool syntheticFrame = false;
+    uintmax_t fileSize = 0;
+    uint64_t imagePayloadBytes = 0;
+    uint32_t imageIfdOffset = 0;
 };
 
 struct DNGSequenceInfo {
@@ -44,6 +47,7 @@ public:
 
     const DNGSequenceInfo& getSequenceInfo() const { return mSequenceInfo; }
     const std::vector<DNGFrameInfo>& getFrames() const { return mFrames; }
+    bool imagePayloadSampleHash(int frameNumber, uint64_t& hash) const;
     
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
@@ -236,6 +240,8 @@ public:
     static bool isDNGSequence(const std::string& path);
     static std::pair<uintmax_t, size_t> analysisCacheUsage();
     static void clearAnalysisCache();
+    bool loadDuplicateFrameDetection(std::vector<uint8_t>& mask) const;
+    void cacheDuplicateFrameDetection(const std::vector<uint8_t>& mask) const;
     static bool imagePayloadsEqual(const std::vector<uint8_t>& left,
                                    const std::vector<uint8_t>& right);
     static bool imagePayloadHash(const std::vector<uint8_t>& data, uint64_t& hash);
@@ -255,6 +261,7 @@ private:
 
 private:
     std::string mSequencePath;
+    std::string mSequenceSignature;
     DNGSequenceInfo mSequenceInfo;
     std::vector<DNGFrameInfo> mFrames;
     std::unordered_map<int, GainMap> mGainMapCache;

@@ -213,6 +213,15 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         this);
     autoApplyHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(autoApplyHelpLabel);
+    mDetectDuplicateDngsCheckBox = new QCheckBox("Detect duplicate DNG frames on import", this);
+    mDetectDuplicateDngsCheckBox->setChecked(true);
+    clipSettingsLayout->addWidget(mDetectDuplicateDngsCheckBox);
+    auto* duplicateHelpLabel = new QLabel(
+        helpSpan("Compares image payloads in numbered DNG sequences to reveal holds "
+                 "in clip frame rates and timing graphs. App-authored presentation "
+                 "timestamps and duplicate tags take precedence. Applies to newly imported clips."), this);
+    duplicateHelpLabel->setWordWrap(true);
+    clipSettingsLayout->addWidget(duplicateHelpLabel);
     mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
     mGalleryFpsIndicatorCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
@@ -434,6 +443,16 @@ void SettingsDialog::setAutoApplyClipSettings(bool enabled)
 bool SettingsDialog::getAutoApplyClipSettings() const
 {
     return mAutoApplyClipSettingsCheckBox->isChecked();
+}
+
+void SettingsDialog::setDetectDuplicateDngs(bool enabled)
+{
+    mDetectDuplicateDngsCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getDetectDuplicateDngs() const
+{
+    return mDetectDuplicateDngsCheckBox->isChecked();
 }
 
 void SettingsDialog::setGalleryFpsIndicatorEnabled(bool enabled)

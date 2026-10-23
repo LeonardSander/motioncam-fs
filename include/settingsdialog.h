@@ -39,6 +39,8 @@ public:
 
     void setAutoApplyClipSettings(bool enabled);
     bool getAutoApplyClipSettings() const;
+    void setDetectDuplicateDngs(bool enabled);
+    bool getDetectDuplicateDngs() const;
     void setGalleryFpsIndicatorEnabled(bool enabled);
     bool getGalleryFpsIndicatorEnabled() const;
     void setUnmountOnFinalize(bool enabled);
@@ -77,6 +79,7 @@ private:
     QCheckBox* mDeleteOnUnmountCheckBox;
     QCheckBox* mAutoApplyClipSettingsCheckBox;
     QCheckBox* mGalleryFpsIndicatorCheckBox;
+    QCheckBox* mDetectDuplicateDngsCheckBox;
     QCheckBox* mUnmountOnFinalizeCheckBox;
     QCheckBox* mFinalizeSelectionToSingleDirectoryCheckBox;
     QCheckBox* mInheritHeroFrameSidecarsCheckBox;

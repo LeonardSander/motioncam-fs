@@ -43,6 +43,9 @@ public:
                                  bool retainSourceSamples = false) override;
 
 private:
+    enum class PayloadComparison { Same, Different, Unavailable };
+    PayloadComparison compareSourceImagePayloads(const Entry& left,
+                                                 const Entry& right);
     struct PreparedFrame {
         std::vector<uint8_t> dng;
         DNGFrameMetadata sourceMetadata;
@@ -77,6 +80,8 @@ private:
     float mFps;
     bool mHasFrameNumberSequence = false;
     FrameRateInfo mFrameRateInfo{};
+    std::vector<Timestamp> mTimingTimestamps;
+    std::vector<uint8_t> mDetectedDuplicateFrames;
     int mTotalFrames;
     int mDroppedFrames;
     int mDuplicatedFrames;
@@ -104,6 +109,7 @@ private:
     int mActiveMaterializeUnits = 0;
     mutable std::shared_mutex mRenderMutex;
     std::unordered_map<size_t, uint64_t> mPayloadHashes;
+    std::unordered_map<size_t, uint64_t> mPayloadSampleHashes;
     std::unordered_map<Timestamp, size_t> mFrameIndexByTimestamp;
     std::vector<size_t> mSourceMetadataSizes;
     struct SourceFrameLayout {

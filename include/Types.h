@@ -429,6 +429,7 @@ struct RenderSettings {
     // are not constrained by projected-file size estimates.
     bool projectedFileSizes; // Internal: advertise conservative DNG sizes only for mounted files.
     bool streamingPreview;
+    bool detectDuplicateDngs = true; // Application preference; never serialized in sessions.
     // Internal gallery routing for clip cards and pre-generated frame thumbnails.
     bool thumbnailPreview;
     // Internal source overrides used by temporary archive staging. These are

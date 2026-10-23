@@ -1488,6 +1488,7 @@ namespace {
 
 motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     motioncam::RenderSettings settings;
+    settings.detectDuplicateDngs = mDetectDuplicateDngs;
 
     // Build options bitfield
     settings.options = motioncam::RENDER_OPT_NONE;
@@ -1664,7 +1665,6 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->bakeIsoCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->cfrConversionCheckBox, &QCheckBox::checkStateChanged, this, &MainWindow::onRenderSettingsChanged);
     connect(ui->rifeInterpolationCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) { saveSettings(); });
-    connect(ui->detectDuplicateDngsCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState) { saveSettings(); });
     connect(ui->rifeRemoveButton, &QPushButton::clicked, this, [this] {
         const QString runtimeRoot = rifeRuntimeRoot();
         const QString archivePath = QDir(QStandardPaths::writableLocation(
@@ -1969,7 +1969,7 @@ void MainWindow::saveSettings() {
     settings.setValue("bakeIso", ui->bakeIsoCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("rifeInterpolation", ui->rifeInterpolationCheckBox->isChecked());
-    settings.setValue("detectDuplicateDngs", ui->detectDuplicateDngsCheckBox->isChecked());
+    settings.setValue("detectDuplicateDngs", mDetectDuplicateDngs);
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
@@ -2045,7 +2045,7 @@ void MainWindow::restoreSettings() {
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
         (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
     ui->rifeInterpolationCheckBox->setChecked(settings.value("rifeInterpolation", false).toBool());
-    ui->detectDuplicateDngsCheckBox->setChecked(settings.value("detectDuplicateDngs", true).toBool());
+    mDetectDuplicateDngs = settings.value("detectDuplicateDngs", true).toBool();
 
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
@@ -3592,9 +3592,9 @@ void MainWindow::finalizeSelectedFrames(){
         mFuseFilesystem->updateOptions(mountId,sourceSettings);
         motioncam::FinalizeOptions options;
         options.skipDngFrame=[selected](size_t frame){return !selected.contains(static_cast<int>(frame));};
-        options.detectDuplicateDngs=ui->detectDuplicateDngsCheckBox->isChecked();
+        options.detectDuplicateDngs=false;
         // Selected frames may omit the neighbors RIFE needs for a duplicated
-        // frame. Keep detection, but leave interpolation to whole-clip finalization.
+        // frame, so leave interpolation to whole-clip finalization.
         options.interpolateDuplicatedFrames=false;
         options.jxlDistance=compressionDistance;
         QProgressDialog progress(tr("Finalizing selected frames…"),tr("Cancel"),0,selected.size(),this);
@@ -4823,9 +4823,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         return;
     }
 
-    const bool detectDuplicateDngs = ui->detectDuplicateDngsCheckBox->isChecked();
+    const bool hasDuplicateFrames = info->duplicateFrameMask &&
+        std::any_of(info->duplicateFrameMask->begin(), info->duplicateFrameMask->end(),
+                    [](bool duplicate) { return duplicate; });
     const bool interpolateFrames = ui->rifeInterpolationCheckBox->isChecked() &&
-        (info->duplicatedFrames > 0 || detectDuplicateDngs);
+        (info->duplicatedFrames > 0 || hasDuplicateFrames);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) {
         mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
@@ -4842,7 +4844,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     try {
         motioncam::FinalizeOptions finalizeOptions;
         finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
-        finalizeOptions.detectDuplicateDngs = detectDuplicateDngs;
+        finalizeOptions.detectDuplicateDngs = false;
         finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
         QDir stageDir(staging.path());
 
@@ -5606,11 +5608,13 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 
     spdlog::info("Using temp directory: {}", tempPath.toStdString());
 
-    const bool detectDuplicateDngs = !archiveDngs &&
-        ui->detectDuplicateDngsCheckBox->isChecked();
+    const bool hasDuplicateFrames = fileInfo->duplicateFrameMask &&
+        std::any_of(fileInfo->duplicateFrameMask->begin(),
+                    fileInfo->duplicateFrameMask->end(),
+                    [](bool duplicate) { return duplicate; });
     const bool interpolateFrames = !archiveDngs &&
         ui->rifeInterpolationCheckBox->isChecked() &&
-        (fileInfo->duplicatedFrames > 0 || detectDuplicateDngs);
+        (fileInfo->duplicatedFrames > 0 || hasDuplicateFrames);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) return;
 
@@ -5630,7 +5634,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         (settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION);
     motioncam::FinalizeOptions finalizeOptions;
     finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
-    finalizeOptions.detectDuplicateDngs = detectDuplicateDngs;
+    finalizeOptions.detectDuplicateDngs = false;
     finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
     finalizeOptions.jxlDistance = settings.jxlDistance;
 
@@ -6622,6 +6626,7 @@ void MainWindow::onOpenPreferences() {
     dialog.setCacheFolder(mCacheRootFolder);
     dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog.setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
+    dialog.setDetectDuplicateDngs(mDetectDuplicateDngs);
     dialog.setUnmountOnFinalize(mUnmountOnFinalize);
     dialog.setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
     dialog.setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
@@ -6641,6 +6646,7 @@ void MainWindow::onOpenPreferences() {
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mGalleryFpsIndicatorEnabled = dialog.getGalleryFpsIndicatorEnabled();
+    mDetectDuplicateDngs = dialog.getDetectDuplicateDngs();
     if (mClipPlayer) mClipPlayer->setFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();
@@ -7004,7 +7010,6 @@ void MainWindow::onSetDefaultSettings(bool checked) {
     ui->smoothWhiteBalanceCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->bakeIsoCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->cfrConversionCheckBox->setCheckState(Qt::CheckState::Checked);
-    ui->detectDuplicateDngsCheckBox->setChecked(true);
     ui->cropEnableCheckBox->setCheckState(Qt::CheckState::Unchecked);
     ui->camModelOverrideCheckBox->setCheckState(Qt::CheckState::Checked);
     ui->logTransformCheckBox->setCheckState(Qt::CheckState::Checked);

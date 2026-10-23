@@ -678,6 +678,7 @@ int main() {
         const size_t timedSize = timedBytes.size();
         assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
         assert(timedBytes.size() == timedSize);
+        if (frame == 2) timedBytes.insert(timedBytes.end(), 7, 0);
         const auto filename = sequencePath /
             ("260524_165247_IMAGE_qb__-00000" + std::to_string(frame) + ".dng");
         std::ofstream output(filename, std::ios::binary);
@@ -695,10 +696,33 @@ int main() {
         assert(frames[0].hasExactPresentationTimestamp && frames[0].timestamp == 0);
         assert(frames[1].hasExactPresentationTimestamp && frames[1].timestamp == 40000000);
         assert(frames[2].hasExactPresentationTimestamp && frames[2].timestamp == 80000000);
+        for (const auto& frame : frames) {
+            assert(frame.fileSize > frame.imagePayloadBytes);
+            assert(frame.imagePayloadBytes > 0);
+        }
+        assert(frames[1].fileSize != frames[2].fileSize);
+        assert(frames[1].imagePayloadBytes == frames[2].imagePayloadBytes);
+        std::vector<uint8_t> before, after;
+        assert(sequence.extractFrame(1, before) && sequence.extractFrame(2, after));
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(before, after));
+        uint64_t beforeSample = 0, afterSample = 0;
+        assert(sequence.imagePayloadSampleHash(1, beforeSample));
+        assert(sequence.imagePayloadSampleHash(2, afterSample));
+        assert(beforeSample == afterSample);
         motioncam::DNGFrameMetadata metadata;
         assert(sequence.getFrameMetadata(0, metadata));
         assert(metadata.hasExposure && metadata.iso == 100);
         assert(metadata.exposureTime > 0.0 && std::isfinite(metadata.exposureTime));
+        const uint32_t imageOffset = tiffTagValue(after, 273);
+        assert(imageOffset < after.size());
+        after[imageOffset] ^= 1;
+        const auto changedPath = sequencePath / "260524_165247_IMAGE_qb__-000002.dng";
+        std::ofstream changed(changedPath, std::ios::binary | std::ios::trunc);
+        changed.write(reinterpret_cast<const char*>(after.data()),
+                      static_cast<std::streamsize>(after.size()));
+        changed.close();
+        assert(sequence.imagePayloadSampleHash(2, afterSample));
+        assert(beforeSample != afterSample);
     }
     std::filesystem::remove_all(sequencePath);
     const auto shortSequencePath = std::filesystem::temp_directory_path() /

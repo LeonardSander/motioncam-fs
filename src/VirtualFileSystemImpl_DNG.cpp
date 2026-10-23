@@ -143,14 +143,49 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         mTotalFrames = static_cast<int>(sequenceInfo.totalFrames);
         mDroppedFrames = 0;
         mDuplicatedFrames = 0;
-        // Calculate frame rate statistics
-        calculateFrameRateStats();
-
         const auto& frames = mDecoder->getFrames();
         std::vector<Timestamp> sourceTimestamps;
         sourceTimestamps.reserve(frames.size());
         for (const auto& frame : frames) sourceTimestamps.push_back(frame.timestamp);
         mFrameIndexByTimestamp = vfs::indexTimestamps(sourceTimestamps);
+        mTimingTimestamps.reserve(frames.size());
+        mDetectedDuplicateFrames.resize(frames.size(), false);
+        for (const auto& frame : frames) mTimingTimestamps.push_back(frame.timestamp);
+        const bool authoredTiming = std::any_of(frames.begin(), frames.end(),
+            [](const DNGFrameInfo& frame) {
+                return frame.hasExactPresentationTimestamp || frame.duplicateFrame;
+            });
+        if (mHasFrameNumberSequence && mConfig.detectDuplicateDngs && !authoredTiming) {
+            if (mDecoder->loadDuplicateFrameDetection(mDetectedDuplicateFrames)) {
+                spdlog::info("Reused cached duplicate analysis for {} DNG frames",
+                             frames.size());
+            } else {
+                bool complete = true;
+                for (size_t i = 1; i < frames.size(); ++i) {
+                    Entry current, previous;
+                    current.userData = frames[i].timestamp;
+                    previous.userData = frames[i - 1].timestamp;
+                    const auto comparison = compareSourceImagePayloads(current, previous);
+                    if (comparison == PayloadComparison::Same)
+                        mDetectedDuplicateFrames[i] = 1;
+                    else if (comparison == PayloadComparison::Unavailable)
+                        complete = false;
+                }
+                if (complete)
+                    mDecoder->cacheDuplicateFrameDetection(mDetectedDuplicateFrames);
+                else
+                    spdlog::warn("DNG duplicate analysis was incomplete; results will be retried on import");
+                spdlog::info("Analyzed {} DNG frames for duplicates", frames.size());
+            }
+            size_t detected = 0;
+            for (size_t i = 1; i < frames.size(); ++i) {
+                if (!mDetectedDuplicateFrames[i]) continue;
+                mTimingTimestamps[i] = mTimingTimestamps[i - 1];
+                ++detected;
+            }
+            spdlog::info("Detected {} duplicated DNG frame(s) on import", detected);
+        }
+        calculateFrameRateStats();
         std::vector<vfs::ExposureSample> exposureSamples;
         std::vector<DNGFrameMetadata> metadata(frames.size());
         mSourceMetadataSizes.resize(frames.size());
@@ -466,15 +501,13 @@ void VirtualFileSystemImpl_DNG::init() {
             : boost::filesystem::path(frames[i].filePath).filename().string();
         dngEntry.userData = frames[i].timestamp;
         dngEntry.sourceFrame = static_cast<int>(i);
-        dngEntry.duplicateFrame = frames[i].duplicateFrame;
+        dngEntry.duplicateFrame = frames[i].duplicateFrame || mDetectedDuplicateFrames[i];
         dngEntry.syntheticFrame = frames[i].syntheticFrame;
         dngEntry.size = measuredDngSizes[i];
         sourceEntries.push_back(dngEntry);
     }
 
-    std::vector<Timestamp> timestamps;
-    timestamps.reserve(frames.size());
-    for (const auto& frame : frames) timestamps.push_back(frame.timestamp);
+    const auto& timestamps = mTimingTimestamps;
     auto mapped = mHasFrameNumberSequence
         ? vfs::mapFramesToCfr(sourceEntries, timestamps, mBaseName, mFps,
               applyCFRConversion, mDroppedFrames, mDuplicatedFrames)
@@ -1002,20 +1035,44 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
 
 bool VirtualFileSystemImpl_DNG::sourceImagePayloadsEqual(const Entry& left,
                                                          const Entry& right) {
+    return compareSourceImagePayloads(left, right) == PayloadComparison::Same;
+}
+
+VirtualFileSystemImpl_DNG::PayloadComparison
+VirtualFileSystemImpl_DNG::compareSourceImagePayloads(const Entry& left,
+                                                       const Entry& right) {
     std::shared_lock renderLock(mRenderMutex);
     const auto leftTimestamp = std::get<Timestamp>(left.userData);
     const auto rightTimestamp = std::get<Timestamp>(right.userData);
-    if (leftTimestamp == rightTimestamp) return true;
+    if (leftTimestamp == rightTimestamp) return PayloadComparison::Same;
     const auto& frames = mDecoder->getFrames();
-    auto findFrame = [&](Timestamp timestamp) {
-        return std::find_if(frames.begin(), frames.end(), [timestamp](const auto& frame) {
-            return frame.timestamp == timestamp;
-        });
+    const auto a = mFrameIndexByTimestamp.find(leftTimestamp);
+    const auto b = mFrameIndexByTimestamp.find(rightTimestamp);
+    if (a == mFrameIndexByTimestamp.end() || b == mFrameIndexByTimestamp.end())
+        return PayloadComparison::Unavailable;
+    // TIFF metadata may change file size; only image payload length is a safe
+    // early rejection before reading pixels.
+    if (frames[a->second].imagePayloadBytes && frames[b->second].imagePayloadBytes &&
+        frames[a->second].imagePayloadBytes != frames[b->second].imagePayloadBytes)
+        return PayloadComparison::Different;
+    auto sampleFingerprint = [&](size_t index) -> std::optional<uint64_t> {
+        {
+            std::lock_guard<std::mutex> lock(mPayloadHashMutex);
+            if (const auto cached = mPayloadSampleHashes.find(index);
+                cached != mPayloadSampleHashes.end())
+                return cached->second;
+        }
+        uint64_t hash = 0;
+        if (!mDecoder->imagePayloadSampleHash(static_cast<int>(index), hash))
+            return std::nullopt;
+        std::lock_guard<std::mutex> lock(mPayloadHashMutex);
+        return mPayloadSampleHashes.emplace(index, hash).first->second;
     };
-    const auto a = findFrame(leftTimestamp), b = findFrame(rightTimestamp);
-    if (a == frames.end() || b == frames.end()) return false;
-    auto fingerprint = [&](decltype(a) frame) -> std::optional<uint64_t> {
-        const size_t index = static_cast<size_t>(std::distance(frames.begin(), frame));
+    const auto leftSample = sampleFingerprint(a->second);
+    const auto rightSample = sampleFingerprint(b->second);
+    if (leftSample && rightSample && *leftSample != *rightSample)
+        return PayloadComparison::Different;
+    auto fingerprint = [&](size_t index) -> std::optional<uint64_t> {
         {
             std::lock_guard<std::mutex> lock(mPayloadHashMutex);
             if (const auto cached = mPayloadHashes.find(index);
@@ -1030,14 +1087,16 @@ bool VirtualFileSystemImpl_DNG::sourceImagePayloadsEqual(const Entry& left,
         std::lock_guard<std::mutex> lock(mPayloadHashMutex);
         return mPayloadHashes.emplace(index, hash).first->second;
     };
-    const auto leftHash = fingerprint(a);
-    const auto rightHash = fingerprint(b);
-    if (!leftHash || !rightHash || *leftHash != *rightHash) return false;
+    const auto leftHash = fingerprint(a->second);
+    const auto rightHash = fingerprint(b->second);
+    if (!leftHash || !rightHash) return PayloadComparison::Unavailable;
+    if (*leftHash != *rightHash) return PayloadComparison::Different;
     std::vector<uint8_t> leftBytes, rightBytes;
-    if (!mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), a)), leftBytes) ||
-        !mDecoder->extractFrame(static_cast<int>(std::distance(frames.begin(), b)), rightBytes))
-        return false;
-    return DNGDecoder::imagePayloadsEqual(leftBytes, rightBytes);
+    if (!mDecoder->extractFrame(static_cast<int>(a->second), leftBytes) ||
+        !mDecoder->extractFrame(static_cast<int>(b->second), rightBytes))
+        return PayloadComparison::Unavailable;
+    return DNGDecoder::imagePayloadsEqual(leftBytes, rightBytes)
+        ? PayloadComparison::Same : PayloadComparison::Different;
 }
 
 void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
@@ -1063,6 +1122,7 @@ void VirtualFileSystemImpl_DNG::updateOptions(const RenderSettings& config) {
 
     mCache.clear();
     mPayloadHashes.clear();
+    mPayloadSampleHashes.clear();
     mConfig = config;
     mSidecarMetadata = std::move(sidecarMetadata);
     mCalibration = std::move(calibration);
@@ -1131,10 +1191,7 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
             boost::filesystem::path(entry.name).extension() == ".DNG")
             duplicateMask->push_back(entry.duplicateFrame);
     info.duplicateFrameMask = std::move(duplicateMask);
-    std::vector<Timestamp> galleryTimestamps;
-    galleryTimestamps.reserve(mDecoder->getFrames().size());
-    for (const auto& frame : mDecoder->getFrames()) galleryTimestamps.push_back(frame.timestamp);
-    vfs::buildGalleryFrameMap(galleryTimestamps, mFiles,
+    vfs::buildGalleryFrameMap(mTimingTimestamps, mFiles,
         info.sourceFrameToOutput, info.sourceFrameDuplicated);
     
     // DNG sequences are pass-through, so we show source format
@@ -1158,11 +1215,10 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
     // Calculate runtime from frame count and fps
     const int outputFrames = mTotalFrames - mDroppedFrames + mDuplicatedFrames;
     info.runtimeSeconds = (mFps > 0) ? (static_cast<float>(outputFrames) / mFps) : 0.0f;
-    const auto& frames = mDecoder->getFrames();
     auto presentationTimestamps = std::make_shared<std::vector<std::int64_t>>();
-    presentationTimestamps->reserve(frames.size());
-    for (const auto& frame : frames)
-        presentationTimestamps->push_back(frame.timestamp);
+    presentationTimestamps->reserve(mTimingTimestamps.size());
+    for (const auto timestamp : mTimingTimestamps)
+        presentationTimestamps->push_back(timestamp);
     info.presentationTimestamps = std::move(presentationTimestamps);
     info.timingTimeBaseNum = 1;
     info.timingTimeBaseDen = 1000000000;
@@ -1173,22 +1229,13 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
 }
 
 void VirtualFileSystemImpl_DNG::calculateFrameRateStats() {
-    const auto& frames = mDecoder->getFrames();
-    
-    if (frames.size() < 2) {
+    if (mTimingTimestamps.size() < 2) {
         mFrameRateInfo.medianFrameRate = mFps;
         mFrameRateInfo.averageFrameRate = mFps;
         return;
     }
     
-    // Convert frame timestamps to vector of Timestamp
-    std::vector<Timestamp> timestamps;
-    timestamps.reserve(frames.size());
-    for (const auto& frame : frames) {
-        timestamps.push_back(frame.timestamp);
-    }
-    
-    mFrameRateInfo = vfs::calculateFrameRate(timestamps);
+    mFrameRateInfo = vfs::calculateFrameRate(mTimingTimestamps);
     
     spdlog::debug("DNG sequence frame rate stats: avg={:.2f}fps, median={:.2f}fps",
                   mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
