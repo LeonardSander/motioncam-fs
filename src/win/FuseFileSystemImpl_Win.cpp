@@ -97,7 +97,8 @@ namespace {
 class Session : public VirtualizationInstance {
 public:
     Session(const std::string& srcPath, const std::string& dstPath,
-            std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles);
+            std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles,
+            const RenderSettings& settings);
     ~Session();
 
 public:
@@ -155,9 +156,9 @@ Session::Session(
     const std::string& srcPath,
     const std::string& dstPath,
     std::unique_ptr<IVirtualFileSystem> fs,
-    bool projectFiles)
-    : mSrcPath(srcPath), mDstPath(dstPath), mFs(std::move(fs)),
-      mProjectFiles(projectFiles)
+    bool projectFiles, const RenderSettings& settings)
+    : mSrcPath(srcPath), mDstPath(dstPath), mConfig(settings),
+      mFs(std::move(fs)), mProjectFiles(projectFiles)
 {
     if (mProjectFiles) startProjection();
 }
@@ -205,17 +206,22 @@ Session::~Session() {
 void Session::setProjectionEnabled(bool enabled) {
     if (enabled == mProjectFiles) return;
     if (enabled) {
+        mConfig.projectedFileSizes = true;
+        mFs->updateOptions(mConfig);
         startProjection();
         mProjectFiles = true;
     } else {
         Stop();
         mProjectFiles = false;
+        mConfig.projectedFileSizes = false;
+        mFs->updateOptions(mConfig);
     }
 }
 
 void Session::updateOptions(const RenderSettings& settings) {
     mConfig = settings;
-    mFs->updateOptions(settings);
+    mConfig.projectedFileSizes = mProjectFiles;
+    mFs->updateOptions(mConfig);
     ++mContentVersion;
     if (!mProjectFiles) return;
 
@@ -626,6 +632,8 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
     std::string filename = srcPath.filename().string();
+    RenderSettings sourceSettings = settings;
+    sourceSettings.projectedFileSizes = projectFiles;
 
     auto normalizedSource = fs::absolute(srcPath).lexically_normal().wstring();
     auto normalizedDestination = fs::absolute(fs::path(dstPath)).lexically_normal().wstring();
@@ -643,8 +651,8 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles);
+            auto fs = std::make_unique<VirtualFileSystemImpl_MCRAW>(*mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings, srcFile, baseName);
+            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles, sourceSettings);
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);
         }
@@ -663,8 +671,8 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles);
+            auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings, srcFile, baseName);
+            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles, sourceSettings);
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);
         }
@@ -681,8 +689,8 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, settings, srcFile, baseName);
-            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles);
+            auto fs = std::make_unique<VirtualFileSystemImpl_DNG>(*mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings, srcFile, baseName);
+            auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles, sourceSettings);
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);
         }

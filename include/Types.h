@@ -427,6 +427,7 @@ struct RenderSettings {
     bool cameraNativeStaging;
     // Internal gallery mode: materialized frames are consumed as a stream and
     // are not constrained by projected-file size estimates.
+    bool projectedFileSizes; // Internal: advertise conservative DNG sizes only for mounted files.
     bool streamingPreview;
     // Internal gallery routing for clip cards and pre-generated frame thumbnails.
     bool thumbnailPreview;
@@ -453,6 +454,7 @@ struct RenderSettings {
         , orientation(-1)
         , ignoreForwardMat(false)
         , cameraNativeStaging(false)
+        , projectedFileSizes(true)
         , streamingPreview(false)
         , thumbnailPreview(false)
     {}
@@ -486,6 +488,7 @@ struct RenderSettings {
         , orientation(-1)
         , ignoreForwardMat(false)
         , cameraNativeStaging(false)
+        , projectedFileSizes(true)
         , streamingPreview(false)
         , thumbnailPreview(false)
     {}
@@ -519,6 +522,7 @@ struct RenderSettings {
         , orientation(-1)
         , ignoreForwardMat(false)
         , cameraNativeStaging(false)
+        , projectedFileSizes(true)
         , streamingPreview(false)
         , thumbnailPreview(false)
     {}

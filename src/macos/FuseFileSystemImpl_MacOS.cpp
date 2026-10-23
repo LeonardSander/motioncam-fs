@@ -108,7 +108,8 @@ class Session {
 public:
     void setProjectionEnabled(bool enabled);
     Session(const std::string& srcFile, const std::string& dstPath,
-            std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles);
+            std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles,
+            const RenderSettings& settings);
     ~Session();
 
     void updateOptions(const RenderSettings& settings);
@@ -138,16 +139,19 @@ private:
     std::string mDstPath;
     std::unique_ptr<std::thread> mThread;
     std::unique_ptr<IVirtualFileSystem> mFs;
+    RenderSettings mSettings;
     struct fuse_chan* mFuseCh;
     struct fuse* mFuse;
 };
 
 
 Session::Session(const std::string& srcFile, const std::string& dstPath,
-                 std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles) :
+                 std::unique_ptr<IVirtualFileSystem> fs, bool projectFiles,
+                 const RenderSettings& settings) :
     mSrcFile(srcFile),
     mDstPath(dstPath),
     mFs(std::move(fs)),
+    mSettings(settings),
     mFuseCh(nullptr),
     mFuse(nullptr)
 {
@@ -245,7 +249,9 @@ void Session::init(IVirtualFileSystem* fs) {
 
 void Session::updateOptions(const RenderSettings& settings)
 {
-    mFs->updateOptions(settings);
+    mSettings = settings;
+    mSettings.projectedFileSizes = mFuseCh != nullptr;
+    mFs->updateOptions(mSettings);
     if (mFuse) fuse_invalidate_path(mFuse, mDstPath.c_str());
 }
 
@@ -262,12 +268,16 @@ void Session::setProjectionEnabled(bool enabled) {
     if (enabled == (mFuseCh != nullptr)) return;
     if (!enabled) {
         stopProjection();
+        mSettings.projectedFileSizes = false;
+        mFs->updateOptions(mSettings);
         if (!QDir().rmdir(QString::fromStdString(mDstPath)))
             spdlog::warn("Could not remove empty mount directory {}", mDstPath);
         return;
     }
     if (!QDir().mkpath(QString::fromStdString(mDstPath)))
         throw std::runtime_error("Failed to create " + mDstPath);
+    mSettings.projectedFileSizes = true;
+    mFs->updateOptions(mSettings);
     init(mFs.get());
 }
 
@@ -457,6 +467,8 @@ MountId FuseFileSystemImpl_MacOs::mount(
 {
     fs::path srcPath(srcFile);
     std::string extension = srcPath.extension().string();
+    RenderSettings sourceSettings = settings;
+    sourceSettings.projectedFileSizes = projectFiles;
 
     if (fs::absolute(srcPath).lexically_normal() ==
         fs::absolute(fs::path(dstPath)).lexically_normal())
@@ -503,22 +515,22 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     *mIoThreadPool,
                     *mProcessingThreadPool,
                     *mCache,
-                    settings,
+                    sourceSettings,
                     srcFile,
                     baseName
                 );
             } else if (boost::iequals(extension, ".dng") || DNGDecoder::isDNGSequence(srcFile)) {
                 filesystem = std::make_unique<VirtualFileSystemImpl_DNG>(
                     *mIoThreadPool, *mProcessingThreadPool, *mCache,
-                    settings, srcFile, baseName);
+                    sourceSettings, srcFile, baseName);
             } else {
                 filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
                     *mIoThreadPool, *mProcessingThreadPool, *mCache,
-                    settings, srcFile, baseName);
+                    sourceSettings, srcFile, baseName);
             }
 
             auto session = std::make_shared<Session>(
-                srcFile, dstPath, std::move(filesystem), projectFiles);
+                srcFile, dstPath, std::move(filesystem), projectFiles, sourceSettings);
 
             if(!session) {
                 spdlog::error("Failed to mount {} to {}", srcFile, dstPath);

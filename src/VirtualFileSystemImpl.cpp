@@ -2154,7 +2154,7 @@ for line in sys.stdin:
         }
         const bool delayCompression = interpolate && gapMember[index];
         auto data = filesystem.materializeFile(entries[index],
-            delayCompression ? false : jpegCompression);
+            delayCompression ? false : jpegCompression, true);
         if (!data) throw std::runtime_error("Failed to render " + entries[index].name);
         std::vector<uint8_t> rendered(data->begin(), data->end());
         if (isDng(entries[index])) {

@@ -82,7 +82,8 @@ bool sameRenderSettings(const RenderSettings& left, const RenderSettings& right)
            left.cfaPhase == right.cfaPhase &&
            left.jxlDistance == right.jxlDistance &&
            left.cameraNativeStaging == right.cameraNativeStaging &&
-           left.streamingPreview == right.streamingPreview;
+           left.streamingPreview == right.streamingPreview &&
+           left.projectedFileSizes == right.projectedFileSizes;
 }
 }
 
@@ -443,10 +444,13 @@ void VirtualFileSystemImpl_DNG::init() {
                                      transformedMetadataAllowance);
     };
 
-    std::vector<size_t> measuredDngSizes(frames.size());
-    for (size_t i = 0; i < frames.size(); ++i)
-        measuredDngSizes[i] = estimatedSize(i, false);
-    const size_t firstDngSize = estimatedSize(0, hasNativeMetadataFrame);
+    // Unmounted entries still carry frame identity, but need no size projection.
+    std::vector<size_t> measuredDngSizes(frames.size(), 1);
+    if (mConfig.projectedFileSizes)
+        for (size_t i = 0; i < frames.size(); ++i)
+            measuredDngSizes[i] = estimatedSize(i, false);
+    const size_t firstDngSize = mConfig.projectedFileSizes
+        ? estimatedSize(0, hasNativeMetadataFrame) : 1;
 
     std::vector<Entry> sourceEntries;
     sourceEntries.reserve(frames.size());
@@ -490,12 +494,12 @@ VirtualFileSystemImpl_DNG::staticMaterializer(const Entry& entry) {
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile(
-    const Entry& entry, bool jpegCompression) {
+    const Entry& entry, bool jpegCompression, bool savedOutput) {
     std::shared_lock renderLock(mRenderMutex);
     if (entry.name == "audio.wav" && mAudioWav)
         return std::make_shared<std::vector<uint8_t>>(mAudioWav->begin(), mAudioWav->end());
 
-    return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
+    return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
         const auto materializeStarted = std::chrono::steady_clock::now();
         spdlog::info("DNG timing [{}]: materialize cache miss started (advertised {:.2f} MiB)",
                      entry.name, static_cast<double>(entry.size) / (1024.0 * 1024.0));
@@ -523,7 +527,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
             renderPlan.nativeMetadataFrame, &stageTiming);
         const auto transformedAt = std::chrono::steady_clock::now();
         const size_t advertisedSize = entry.size;
-        if (!jpegCompression && !mConfig.streamingPreview) {
+        if (!jpegCompression && !mConfig.streamingPreview && mConfig.projectedFileSizes && !savedOutput) {
             if (bytes.size() > advertisedSize)
                 throw std::runtime_error(
                     "Transformed DNG size " + std::to_string(bytes.size()) +

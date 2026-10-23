@@ -476,104 +476,107 @@ void VirtualFileSystemImpl_MCRAW::init() {
     disableUnavailableVignetteBake(mSettings, cameraFrameMetadata,
         hasExternalGainToBake(mManualVignetteSidecars, mSidecarMetadata, 0));
 
-    // Match DNG-sequence sizing by accounting for the metadata that will be
-    // serialized alongside the pixels. JSON sidecars may store compressed gain
-    // maps, whereas DNG opcodes contain their expanded float samples, so include
-    // both the serialized documents and the expanded native/sidecar map data.
-    constexpr size_t transformedMetadataAllowance = 256 * 1024;
-    size_t serializedMetadataBytes = metadata.dump().size() +
-        vfs::projectedSidecarMetadataSize(mSidecarMetadata) +
-        vfs::projectedDcpMetadataSize(mManualVignetteSidecars);
-    if (mCalibration && mSettings.badPixelTreatment == BadPixelTreatment::OpcodeOnly) {
-        const size_t opcodeBytes = vfs::projectedBadPixelOpcodeSize(
-            *mCalibration, static_cast<uint32_t>(cameraFrameMetadata.originalWidth),
-            static_cast<uint32_t>(cameraFrameMetadata.originalHeight));
-        serializedMetadataBytes = opcodeBytes >
-                std::numeric_limits<size_t>::max() - serializedMetadataBytes
-            ? std::numeric_limits<size_t>::max()
-            : serializedMetadataBytes + opcodeBytes;
-    }
-    if (cameraFrameMetadata.lensShadingMapWidth > 0 &&
-        cameraFrameMetadata.lensShadingMapHeight > 0) {
-        const size_t gainMapPlanes = std::min<size_t>(
-            4, cameraFrameMetadata.lensShadingMap.size());
-        const size_t gainMapSamples =
-            static_cast<size_t>(cameraFrameMetadata.lensShadingMapWidth) *
-            static_cast<size_t>(cameraFrameMetadata.lensShadingMapHeight) *
-            gainMapPlanes;
-        const size_t gainMapBytes = gainMapSamples >
-                std::numeric_limits<size_t>::max() / sizeof(float)
-            ? std::numeric_limits<size_t>::max()
-            : gainMapSamples * sizeof(float);
-        serializedMetadataBytes = gainMapBytes >
-                std::numeric_limits<size_t>::max() - serializedMetadataBytes
-            ? std::numeric_limits<size_t>::max()
-            : serializedMetadataBytes + gainMapBytes;
-    }
-    // Mounted-file sizes only need a safe upper bound. Rendering frame zero to
-    // measure it made higher-CFA imports perform a full demosaic before the
-    // user had requested any frame. Use the same conservative uncompressed
-    // geometry estimate as DNG sequences and render lazily on first read.
-    auto estimatedDngSize = [&](bool nativeResolution) {
-        RenderSettings plannedSettings = mSettings;
-        if (nativeResolution)
-            plannedSettings.options = static_cast<FileRenderOptions>(
-                plannedSettings.options & ~RENDER_OPT_DRAFT);
-        const auto plan = utils::planDngFrameProcessing(
-            plannedSettings, cameraFrameMetadata, mCalibration);
-        uint32_t width = cropWidth > 0 ? cropWidth
-            : static_cast<uint32_t>(cameraFrameMetadata.width);
-        uint32_t height = cropHeight > 0 ? cropHeight
-            : static_cast<uint32_t>(cameraFrameMetadata.height);
-        const int cfaSize = plan.cfaRepeatSize;
-        const bool binning = cfaSize > 2 && plan.explicitBinning;
-        if (binning) {
-            const uint32_t factor = mSettings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
-                                    cfaSize == 8 ? 2u : static_cast<uint32_t>(cfaSize / 2);
-            width = std::max<uint32_t>(1, width / factor);
-            height = std::max<uint32_t>(1, height / factor);
+    size_t firstDngSize = 1;
+    mTypicalDngSize = 1;
+    if (mSettings.projectedFileSizes && !mSettings.streamingPreview) {
+        // Match DNG-sequence sizing by accounting for the metadata that will be
+        // serialized alongside the pixels. JSON sidecars may store compressed gain
+        // maps, whereas DNG opcodes contain their expanded float samples, so include
+        // both the serialized documents and the expanded native/sidecar map data.
+        constexpr size_t transformedMetadataAllowance = 256 * 1024;
+        size_t serializedMetadataBytes = metadata.dump().size() +
+            vfs::projectedSidecarMetadataSize(mSidecarMetadata) +
+            vfs::projectedDcpMetadataSize(mManualVignetteSidecars);
+        if (mCalibration && mSettings.badPixelTreatment == BadPixelTreatment::OpcodeOnly) {
+            const size_t opcodeBytes = vfs::projectedBadPixelOpcodeSize(
+                *mCalibration, static_cast<uint32_t>(cameraFrameMetadata.originalWidth),
+                static_cast<uint32_t>(cameraFrameMetadata.originalHeight));
+            serializedMetadataBytes = opcodeBytes >
+                    std::numeric_limits<size_t>::max() - serializedMetadataBytes
+                ? std::numeric_limits<size_t>::max()
+                : serializedMetadataBytes + opcodeBytes;
         }
-        const int scale = plan.draftScale;
-        if (scale > 1) {
-            width = std::max<uint32_t>(1, width / static_cast<uint32_t>(scale));
-            height = std::max<uint32_t>(1, height / static_cast<uint32_t>(scale));
+        if (cameraFrameMetadata.lensShadingMapWidth > 0 &&
+            cameraFrameMetadata.lensShadingMapHeight > 0) {
+            const size_t gainMapPlanes = std::min<size_t>(
+                4, cameraFrameMetadata.lensShadingMap.size());
+            const size_t gainMapSamples =
+                static_cast<size_t>(cameraFrameMetadata.lensShadingMapWidth) *
+                static_cast<size_t>(cameraFrameMetadata.lensShadingMapHeight) *
+                gainMapPlanes;
+            const size_t gainMapBytes = gainMapSamples >
+                    std::numeric_limits<size_t>::max() / sizeof(float)
+                ? std::numeric_limits<size_t>::max()
+                : gainMapSamples * sizeof(float);
+            serializedMetadataBytes = gainMapBytes >
+                    std::numeric_limits<size_t>::max() - serializedMetadataBytes
+                ? std::numeric_limits<size_t>::max()
+                : serializedMetadataBytes + gainMapBytes;
         }
-        const uint32_t channels = plan.demosaic && !plan.remosaic ? 3u : 1u;
-        const auto levels = resolveDataLevels(
-            mSettings.levels, cameraFrameMetadata.dynamicWhiteLevel,
-            cameraFrameMetadata.dynamicBlackLevel, cameraConfig.whiteLevel,
-            cameraConfig.blackLevel);
-        double storedWhite = std::clamp<double>(levels.white, 1.0, 65535.0);
-        std::array<double, 4> storedBlack{};
-        std::copy(levels.black.begin(), levels.black.end(), storedBlack.begin());
-        if (cfaSize > 2 && scale > 1 && plan.hqProxy) {
-            const double area = std::pow(std::max(1, cfaSize / 2), 2);
-            storedWhite *= area;
-            for (double& black : storedBlack) black *= area;
-            while (storedWhite > 65535.0) {
-                storedWhite *= 0.5;
-                for (double& black : storedBlack) black *= 0.5;
+        // Mounted-file sizes only need a safe upper bound. Rendering frame zero to
+        // measure it made higher-CFA imports perform a full demosaic before the
+        // user had requested any frame. Use the same conservative uncompressed
+        // geometry estimate as DNG sequences and render lazily on first read.
+        auto estimatedDngSize = [&](bool nativeResolution) {
+            RenderSettings plannedSettings = mSettings;
+            if (nativeResolution)
+                plannedSettings.options = static_cast<FileRenderOptions>(
+                    plannedSettings.options & ~RENDER_OPT_DRAFT);
+            const auto plan = utils::planDngFrameProcessing(
+                plannedSettings, cameraFrameMetadata, mCalibration);
+            uint32_t width = cropWidth > 0 ? cropWidth
+                : static_cast<uint32_t>(cameraFrameMetadata.width);
+            uint32_t height = cropHeight > 0 ? cropHeight
+                : static_cast<uint32_t>(cameraFrameMetadata.height);
+            const int cfaSize = plan.cfaRepeatSize;
+            const bool binning = cfaSize > 2 && plan.explicitBinning;
+            if (binning) {
+                const uint32_t factor = mSettings.quadBayerOption == QuadBayerMode::Bin8x8To4x4 &&
+                                        cfaSize == 8 ? 2u : static_cast<uint32_t>(cfaSize / 2);
+                width = std::max<uint32_t>(1, width / factor);
+                height = std::max<uint32_t>(1, height / factor);
             }
-        }
-        const bool vignetteBake =
-            mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-        const auto outputLevels = utils::planDngOutputLevels(
-            storedWhite, storedBlack, vignetteBake,
-            mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-            mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP, plan.logTransform);
-        storedWhite = outputLevels.white;
-        const uint32_t storedBits = utils::dngPackedBits(
-            static_cast<uint16_t>(storedWhite), channels == 3,
-            mSettings.cameraNativeStaging);
-        return vfs::projectedDngSize(
-            width, height, channels, storedBits, serializedMetadataBytes,
-            transformedMetadataAllowance);
-    };
-    mTypicalDngSize = mSettings.streamingPreview ? 1 : estimatedDngSize(false);
-    const bool nativeFirstFrame = !mSettings.streamingPreview &&
-        vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1;
-    const size_t firstDngSize = mSettings.streamingPreview
-        ? 1 : estimatedDngSize(nativeFirstFrame);
+            const int scale = plan.draftScale;
+            if (scale > 1) {
+                width = std::max<uint32_t>(1, width / static_cast<uint32_t>(scale));
+                height = std::max<uint32_t>(1, height / static_cast<uint32_t>(scale));
+            }
+            const uint32_t channels = plan.demosaic && !plan.remosaic ? 3u : 1u;
+            const auto levels = resolveDataLevels(
+                mSettings.levels, cameraFrameMetadata.dynamicWhiteLevel,
+                cameraFrameMetadata.dynamicBlackLevel, cameraConfig.whiteLevel,
+                cameraConfig.blackLevel);
+            double storedWhite = std::clamp<double>(levels.white, 1.0, 65535.0);
+            std::array<double, 4> storedBlack{};
+            std::copy(levels.black.begin(), levels.black.end(), storedBlack.begin());
+            if (cfaSize > 2 && scale > 1 && plan.hqProxy) {
+                const double area = std::pow(std::max(1, cfaSize / 2), 2);
+                storedWhite *= area;
+                for (double& black : storedBlack) black *= area;
+                while (storedWhite > 65535.0) {
+                    storedWhite *= 0.5;
+                    for (double& black : storedBlack) black *= 0.5;
+                }
+            }
+            const bool vignetteBake =
+                mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+            const auto outputLevels = utils::planDngOutputLevels(
+                storedWhite, storedBlack, vignetteBake,
+                mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+                mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP, plan.logTransform);
+            storedWhite = outputLevels.white;
+            const uint32_t storedBits = utils::dngPackedBits(
+                static_cast<uint16_t>(storedWhite), channels == 3,
+                mSettings.cameraNativeStaging);
+            return vfs::projectedDngSize(
+                width, height, channels, storedBits, serializedMetadataBytes,
+                transformedMetadataAllowance);
+        };
+        mTypicalDngSize = estimatedDngSize(false);
+        const bool nativeFirstFrame =
+            vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale) > 1;
+        firstDngSize = estimatedDngSize(nativeFirstFrame);
+    }
 
     // Generate file entries
     mFiles.reserve(frames.size()*2);
@@ -740,12 +743,12 @@ void VirtualFileSystemImpl_MCRAW::clearAnalysisCache() {
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFile(
-    const Entry& entry, bool jpegCompression) {
+    const Entry& entry, bool jpegCompression, bool savedOutput) {
     std::shared_lock renderLock(mRenderMutex);
     if (boost::ends_with(entry.name, "wav"))
         return std::make_shared<std::vector<uint8_t>>(mAudioFile.begin(), mAudioFile.end());
 
-    return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
+    return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
         const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
         const auto materializeStarted = std::chrono::steady_clock::now();
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
@@ -880,7 +883,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
                 throw std::runtime_error("Could not set Unspektra DNG orientation");
         }
         const auto finalizedAt = std::chrono::steady_clock::now();
-        if (!jpegCompression && !mSettings.streamingPreview) {
+        if (!jpegCompression && !mSettings.streamingPreview && mSettings.projectedFileSizes && !savedOutput) {
             if (timed.size() > entry.size)
                 throw std::runtime_error(
                     "Generated MCRAW DNG exceeds advertised mounted size");

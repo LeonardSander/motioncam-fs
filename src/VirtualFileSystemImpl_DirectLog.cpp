@@ -378,8 +378,8 @@ void VirtualFileSystemImpl_DirectLog::init() {
     size_t firstDngSize = 0;
 
     // Generate one sample DNG to determine actual file size (mimics MCRAW approach)
-    if (mConfig.streamingPreview) {
-        // Callback-only previews neither pad nor expose projected file sizes.
+    if (mConfig.streamingPreview || !mConfig.projectedFileSizes) {
+        // Unmounted sources and callback-only previews do not expose projected file sizes.
         // Avoid allocating a full-resolution RGB image and encoding one or two
         // synthetic sizing DNGs before the real preview frame is decoded.
         mTypicalDngSize = 1;
@@ -1267,10 +1267,10 @@ VirtualFileSystemImpl_DirectLog::staticMaterializer(const Entry& entry) {
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materializeFile(
-    const Entry& entry, bool jpegCompression) {
+    const Entry& entry, bool jpegCompression, bool savedOutput) {
     if (entry.name == "audio.wav") return mAudioWav;
     std::shared_lock renderLock(mRenderMutex);
-    return vfs::materializeCached(mCache, entry, jpegCompression, [&] {
+    return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
         std::unique_lock gpuFrameLock(mGpuFrameMutex);
         const auto materializeStart = std::chrono::steady_clock::now();
         const auto& frames = mDecoder->getFrames();
@@ -1411,7 +1411,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         finalize.sourceName = "DirectLog";
         vfs::finalizeDng(dngData, mConfig, finalize);
         const auto finalizedAt = std::chrono::steady_clock::now();
-        if (!jpegCompression && !mConfig.streamingPreview) {
+        if (!jpegCompression && !mConfig.streamingPreview && mConfig.projectedFileSizes && !savedOutput) {
             if (dngData.size() > entry.size)
                 throw std::runtime_error(
                     "Generated DirectLog DNG exceeds advertised mounted size");

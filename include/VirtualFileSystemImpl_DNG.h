@@ -38,7 +38,7 @@ public:
     FileInfo getFileInfo() const override;
     bool sourceImagePayloadsEqual(const Entry& left, const Entry& right) override;
     std::shared_ptr<std::vector<uint8_t>> materializeFile(
-        const Entry& entry, bool jpegCompression = false) override;
+        const Entry& entry, bool jpegCompression = false, bool savedOutput = false) override;
     bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame,
                                  bool retainSourceSamples = false) override;
 

@@ -138,8 +138,9 @@ FuseContext* context() {
 
 struct LinuxFuseSession {
     LinuxFuseSession(const std::string& source, const std::string& destination,
-                     std::unique_ptr<IVirtualFileSystem> filesystem, bool projectFiles)
-        : mSrcPath(source), mDstPath(destination), mFs(std::move(filesystem)) {
+                     std::unique_ptr<IVirtualFileSystem> filesystem, bool projectFiles,
+                     const RenderSettings& settings)
+        : mSrcPath(source), mDstPath(destination), mFs(std::move(filesystem)), mSettings(settings) {
         if (projectFiles) start();
     }
 
@@ -152,10 +153,14 @@ struct LinuxFuseSession {
         if (enabled == (mFuse != nullptr)) return;
         if (!enabled) {
             stop();
+            mSettings.projectedFileSizes = false;
+            mFs->updateOptions(mSettings);
             if (!QDir().rmdir(QString::fromStdString(mDstPath)))
                 spdlog::warn("Could not remove empty mount directory {}", mDstPath);
             return;
         }
+        mSettings.projectedFileSizes = true;
+        mFs->updateOptions(mSettings);
         recoverStaleMount(mDstPath);
         if (!QDir().mkpath(QString::fromStdString(mDstPath)))
             throw std::runtime_error("Failed to create " + mDstPath);
@@ -176,7 +181,9 @@ struct LinuxFuseSession {
     }
 
     void updateOptions(const RenderSettings& settings) {
-        mFs->updateOptions(settings);
+        mSettings = settings;
+        mSettings.projectedFileSizes = mFuse != nullptr;
+        mFs->updateOptions(mSettings);
         if (!mFuse) return;
         if (mState) {
             const auto previous = mState->mountTime.load();
@@ -318,6 +325,7 @@ private:
     std::string mSrcPath;
     std::string mDstPath;
     std::unique_ptr<IVirtualFileSystem> mFs;
+    RenderSettings mSettings;
     FuseContext* mState = nullptr;
     fuse* mFuse = nullptr;
     std::thread mThread;
@@ -349,6 +357,8 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     };
     const fs::path sourcePath(srcFile);
     const std::string extension = sourcePath.extension().string();
+    RenderSettings sourceSettings = settings;
+    sourceSettings.projectedFileSizes = projectFiles;
     const std::string filename = sourcePath.filename().string();
 
     const auto normalizedSource = std::filesystem::absolute(srcFile).lexically_normal();
@@ -368,19 +378,19 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     std::unique_ptr<IVirtualFileSystem> filesystem;
     if ((boost::iequals(extension, ".mcraw") || boost::iequals(extension, ".unspektra"))) {
         filesystem = std::make_unique<VirtualFileSystemImpl_MCRAW>(
-            *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
+            *mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings,
             srcFile, baseName);
     } else if ((boost::iequals(extension, ".mov") ||
                 boost::iequals(extension, ".mp4") ||
                 boost::iequals(extension, ".mkv")) &&
                boost::icontains(filename, "NATIVE")) {
         filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
-            *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
+            *mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings,
             srcFile, baseName);
     } else if (boost::iequals(extension, ".dng") ||
                DNGDecoder::isDNGSequence(srcFile)) {
         filesystem = std::make_unique<VirtualFileSystemImpl_DNG>(
-            *mIoThreadPool, *mProcessingThreadPool, *mCache, settings,
+            *mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings,
             srcFile, baseName);
     } else {
         throw std::runtime_error("Invalid format");
@@ -389,7 +399,7 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
 
     const MountId mountId = mNextMountId++;
     auto session = std::make_shared<LinuxFuseSession>(
-        srcFile, dstPath, std::move(filesystem), projectFiles);
+        srcFile, dstPath, std::move(filesystem), projectFiles, sourceSettings);
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         mMountedFiles.emplace(mountId, std::move(session));

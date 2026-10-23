@@ -204,7 +204,7 @@ public:
     std::optional<motioncam::Entry> findEntry(const std::string&) const override { return {}; }
     int readFile(const motioncam::Entry&, size_t, size_t, void*,
                  std::function<void(size_t, int)>, bool) override { return -1; }
-    std::shared_ptr<std::vector<uint8_t>> materializeFile(const motioncam::Entry& entry, bool) override {
+    std::shared_ptr<std::vector<uint8_t>> materializeFile(const motioncam::Entry& entry, bool, bool = false) override {
         if (entry.name == "audio.wav") {
             ++mAncillaryMaterializations;
             return std::make_shared<std::vector<uint8_t>>(

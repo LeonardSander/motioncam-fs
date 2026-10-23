@@ -35,7 +35,7 @@ public:
     // frame sequences or metadata.
     virtual std::shared_ptr<std::vector<uint8_t>> materializeFile(
         const Entry& entry,
-        bool jpegCompression = false) = 0;
+        bool jpegCompression = false, bool savedOutput = false) = 0;
     virtual bool materializePreviewFrame(const Entry&, PreviewFrame&,
                                          bool retainSourceSamples = false) = 0;
 
