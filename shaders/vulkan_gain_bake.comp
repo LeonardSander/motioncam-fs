@@ -122,7 +122,8 @@ uint codeAt(uint y, uint rowSample) {
                 : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
         }
     }
-    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;
+    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite)
+        : float((1u << p.dimensions.w) - 1u);
     return uint(floor(clamp(value, 0.0, maximum) + 0.5));
 }
 float sourceCode(uint index) {
@@ -156,7 +157,8 @@ uvec3 pixelCodes(uint x, uint y) {
                 : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
         }
     }
-    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite) : 65535.0;
+    float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite)
+        : float((1u << p.dimensions.w) - 1u);
     return uvec3(floor(clamp(value, 0.0, maximum) + 0.5));
 }
 void main() {

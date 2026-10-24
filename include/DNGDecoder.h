@@ -167,11 +167,13 @@ public:
     static bool bakeLogTexture(std::vector<uint8_t>& dngData,
                                const VulkanGainBakeTextureSource& texture,
                                LogTransformMode mode, uint32_t quantizationWhite,
-                               bool highQuality, uint32_t ditherSeed);
+                               bool highQuality, uint32_t ditherSeed,
+                               std::vector<uint8_t>* gpuJpeg = nullptr);
     static bool bakeLogStripVulkan(std::vector<uint8_t>& dngData,
                                    LogTransformMode mode,
                                    uint32_t quantizationWhite,
-                                   bool highQuality, uint32_t ditherSeed);
+                                   bool highQuality, uint32_t ditherSeed,
+                                   std::vector<uint8_t>* gpuJpeg = nullptr);
     static bool decodePreview(std::vector<uint8_t> dngData,
                               const RenderSettings& settings,
                               PreviewFrame& frame,
@@ -202,6 +204,10 @@ public:
                                bool clampToWhiteLevel = false);
     static bool compressLossyJPEG(std::vector<uint8_t>& dngData, int quality = 90);
     static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);
+    // A bake with gpuJpeg output may leave a placeholder uncompressed strip.
+    // Attach its JPEG before exposing or decoding the DNG.
+    static bool attachLosslessJPEG(std::vector<uint8_t>& dngData,
+                                   const std::vector<uint8_t>& jpeg);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,
                              bool normalizeGainMaps,
                              bool colorOnly,
@@ -216,7 +222,8 @@ public:
                              bool packFusedLog = false,
                              uint32_t ditherSeed = 0,
                              bool preferVulkan = false,
-                             const VulkanGainBakeTextureSource* textureSource = nullptr);
+                             const VulkanGainBakeTextureSource* textureSource = nullptr,
+                             std::vector<uint8_t>* gpuJpeg = nullptr);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

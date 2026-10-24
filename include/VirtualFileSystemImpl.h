@@ -196,6 +196,8 @@ struct DngFinalizeOptions {
     std::optional<double> isoOverlay;
     bool packToWhiteLevel = false;
     bool compression = false;
+    // Final processed pixels already encoded from a Vulkan output buffer.
+    const std::vector<uint8_t>* gpuJpeg = nullptr;
     const GyroflowLensProfile* gyroflowLensProfile = nullptr;
     std::string_view sourceName;
 };
@@ -232,6 +234,8 @@ struct DngPixelPipelineOptions {
     // Called once the deferred source texture is no longer needed.
     std::function<void()> textureMaterialized;
     bool preferVulkan = true;
+    // Populated only when the terminal GPU pixel stage can encode directly.
+    std::vector<uint8_t>* gpuJpeg = nullptr;
 };
 
 size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,

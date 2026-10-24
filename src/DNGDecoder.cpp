@@ -4,6 +4,7 @@
 #include "GainMapBake.h"
 #include "RawLogTransform.h"
 #include "VulkanGainBake.h"
+#include "VulkanJpegFullEncode.h"
 #include "VulkanGalleryPreview.h"
 #include "CpuWorkerBudget.h"
 #include "JxlParallelRunner.h"
@@ -54,6 +55,27 @@ struct DngByteView {
 
 std::atomic_uint32_t foregroundDngWork{0};
 std::atomic_uint32_t activeGainBakeJobs{0};
+
+void prepareGpuJpegConsumer(VulkanGainBakeParams& params,
+                            std::vector<uint8_t>* jpegOutput) {
+    if (!jpegOutput) return;
+    jpegOutput->clear();
+    if (std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") ||
+        std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") ||
+        std::getenv("MOTIONCAM_JPEG_TILED")) return;
+    params.consumePackedOutput = [jpegOutput](const VulkanPackedImage& image) {
+        if (image.bits < 8 || image.bits > 16) return false;
+        const bool encoded = jpegEncodeFullyVulkanPackedBufferBorrowed(
+            image.gpu, image.buffer, image.width, image.height,
+            image.channels, image.bits, image.wordsPerRow,
+            [&](const uint8_t* bytes, size_t size) {
+                jpegOutput->assign(bytes, bytes + size);
+                return true;
+            });
+        if (!encoded) jpegOutput->clear();
+        return encoded;
+    };
+}
 
 void writeSampleBytes(uint8_t* destination, const uint16_t* samples,
                       size_t count, bool littleEndian) {
@@ -729,6 +751,29 @@ namespace {
         jpeg_finish_compress(&codec);
         jpeg_destroy_compress(&codec);
         return *output && *outputSize > 0;
+    }
+
+    bool encodeLosslessJPEGWithVulkan(const uint16_t* pixels, uint32_t width,
+                                     uint32_t height, uint32_t channels,
+                                     uint32_t bits, uint8_t** encoded,
+                                     int* encodedLength) {
+        size_t sampleCount = 0;
+        if (!pixels || !encoded || !encodedLength ||
+            !checkedImageSamples(width, height, channels, sampleCount) ||
+            width > INT_MAX / channels || height > INT_MAX / (width * channels))
+            return false;
+        *encoded = nullptr;
+        *encodedLength = 0;
+        if (!std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
+            jpegEncodeFullyVulkan(pixels, width, height, channels, bits,
+                                  encoded, encodedLength))
+            return true;
+        // liblj92 takes a mutable pointer but only reads image samples.
+        const int result = lj92_encode(const_cast<uint16_t*>(pixels),
+                                       width, height, bits, channels,
+                                       width * channels, 0, nullptr, 0,
+                                       encoded, encodedLength);
+        return result == LJ92_ERROR_NONE && *encoded && *encodedLength > 0;
     }
 
     bool encodeDctJPEG12(const std::vector<uint16_t>& pixels, uint32_t width,
@@ -4904,10 +4949,10 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
                 !arrayValue(*tileCountsE, index, byteCount)) return false;
             sourceChunks.emplace_back(offset, byteCount);
         }
-        std::atomic_uint32_t nextTile{0};
-        std::atomic_bool decodeFailed{false};
         const unsigned workerCount = std::min<unsigned>(
             expectedCount, std::min(8u, utils::availableCpuWorkers()));
+        std::atomic_uint32_t nextTile{0};
+        std::atomic_bool decodeFailed{false};
         auto decodeTiles = [&] {
             while (!decodeFailed.load(std::memory_order_relaxed)) {
                 if (backgroundWork) yieldToForegroundDngWork();
@@ -5043,28 +5088,76 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         if (!arrayValue(*stripOffsetsE, index, offset) ||
             !arrayValue(*stripCountsE, index, byteCount)) return false;
         sourceChunks.emplace_back(offset, byteCount);
-        const uint32_t plane = planar == 2 ? index / stripsPerPlane : 0;
-        const uint32_t strip = planar == 2 ? index % stripsPerPlane : index;
-        const uint32_t originY = strip * rowsPerStrip;
-        const uint32_t rows = std::min(rowsPerStrip, height - originY);
-        const uint32_t chunkChannels = planar == 2 ? 1 : channels;
-        std::vector<uint16_t> decoded;
-        uint32_t decodedWidth = 0, decodedHeight = 0;
-        bool decodedOk = decodeChunk(offset, byteCount, width, rows, chunkChannels,
-                                     decoded, decodedWidth, decodedHeight);
-        if (!decodedOk && compression != TIFF_COMPRESSION_NONE && rows < rowsPerStrip)
-            decodedOk = decodeChunk(offset, byteCount, width, rowsPerStrip, chunkChannels,
-                                    decoded, decodedWidth, decodedHeight);
-        if (!decodedOk || decodedWidth < width || decodedHeight < rows) return false;
-        for (uint32_t y = 0; y < rows; ++y)
-            for (uint32_t x = 0; x < width; ++x)
-                for (uint32_t c = 0; c < chunkChannels; ++c) {
-                    const uint32_t destinationChannel = planar == 2 ? plane : c;
-                    pixels[(static_cast<size_t>(originY + y) * width + x) * channels +
-                        destinationChannel] =
-                        decoded[(static_cast<size_t>(y) * decodedWidth + x) * chunkChannels + c];
-                }
     }
+    std::atomic_uint32_t nextStrip{0};
+    std::atomic_bool stripDecodeFailed{false};
+    auto decodeStrips = [&] {
+        while (!stripDecodeFailed.load(std::memory_order_relaxed)) {
+            if (backgroundWork) yieldToForegroundDngWork();
+            const uint32_t index = nextStrip.fetch_add(1, std::memory_order_relaxed);
+            if (index >= expectedStrips) return;
+            const auto [offset, byteCount] = sourceChunks[index];
+            const uint32_t plane = planar == 2 ? index / stripsPerPlane : 0;
+            const uint32_t strip = planar == 2 ? index % stripsPerPlane : index;
+            const uint32_t originY = strip * rowsPerStrip;
+            const uint32_t rows = std::min(rowsPerStrip, height - originY);
+            const uint32_t chunkChannels = planar == 2 ? 1 : channels;
+            // JPEG strips are independent scans. Decode a complete chunky strip
+            // into its final rows and avoid a full-size temporary and copy.
+            if (compression == TIFF_COMPRESSION_JPEG && planar == 1 &&
+                offset <= data.size() && byteCount <= data.size() - offset) {
+                uint16_t* destination = pixels.data() +
+                    static_cast<size_t>(originY) * width * channels;
+                const size_t stride = static_cast<size_t>(width) * channels;
+                turboAttempts.fetch_add(1, std::memory_order_relaxed);
+                if (decodeLosslessJPEGTo(data.data() + offset, byteCount,
+                                         width, rows, channels, destination, stride)) {
+                    turboSuccesses.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+            }
+            std::vector<uint16_t> decoded;
+            uint32_t decodedWidth = 0, decodedHeight = 0;
+            bool decodedOk = decodeChunk(offset, byteCount, width, rows, chunkChannels,
+                                         decoded, decodedWidth, decodedHeight);
+            if (!decodedOk && compression != TIFF_COMPRESSION_NONE && rows < rowsPerStrip)
+                decodedOk = decodeChunk(offset, byteCount, width, rowsPerStrip, chunkChannels,
+                                        decoded, decodedWidth, decodedHeight);
+            if (!decodedOk || decodedWidth < width || decodedHeight < rows) {
+                stripDecodeFailed.store(true, std::memory_order_relaxed);
+                return;
+            }
+            if (planar == 1 && decodedWidth == width) {
+                for (uint32_t y = 0; y < rows; ++y)
+                    std::memcpy(pixels.data() +
+                                    static_cast<size_t>(originY + y) * width * channels,
+                                decoded.data() +
+                                    static_cast<size_t>(y) * width * channels,
+                                static_cast<size_t>(width) * channels * sizeof(uint16_t));
+            } else {
+                for (uint32_t y = 0; y < rows; ++y)
+                    for (uint32_t x = 0; x < width; ++x)
+                        for (uint32_t c = 0; c < chunkChannels; ++c) {
+                            const uint32_t destinationChannel = planar == 2 ? plane : c;
+                            pixels[(static_cast<size_t>(originY + y) * width + x) * channels +
+                                destinationChannel] =
+                                decoded[(static_cast<size_t>(y) * decodedWidth + x) *
+                                    chunkChannels + c];
+                        }
+            }
+        }
+    };
+    if (expectedStrips == 1 || compression != TIFF_COMPRESSION_JPEG) {
+        decodeStrips();
+    } else {
+        const unsigned workerCount = std::min<unsigned>(
+            expectedStrips, std::min(8u, utils::availableCpuWorkers()));
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+        for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(decodeStrips);
+        for (auto& worker : workers) worker.join();
+    }
+    if (stripDecodeFailed.load(std::memory_order_relaxed)) return false;
     if (!restoreInterleave(pixels)) return false;
     if (decodedImage) {
         decodedImage->samples = std::move(pixels);
@@ -5846,7 +5939,8 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
 
 bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
         const VulkanGainBakeTextureSource& texture, LogTransformMode mode,
-        uint32_t quantizationWhite, bool highQuality, uint32_t ditherSeed) {
+        uint32_t quantizationWhite, bool highQuality, uint32_t ditherSeed,
+        std::vector<uint8_t>* gpuJpeg) {
     if (!texture.gpu || !texture.texture || !logReductionBits(mode))
         return false;
     bool little = true;
@@ -5900,14 +5994,19 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
     const uint32_t encodedWhite = logStoredWhite(mode, quantizationWhite,
                                                  sourceWhite);
     const uint32_t packedBits = logStoredBits(static_cast<uint16_t>(encodedWhite));
-    if (packedBits != 8) return false;
-    const size_t packedBytes = static_cast<size_t>(width) * height * channels;
+    const uint64_t pixels = static_cast<uint64_t>(width) * height;
+    if (packedBits < 8 || packedBits >= 16 ||
+        pixels > UINT32_MAX / (channels * sizeof(uint16_t))) return false;
+    const size_t sampleCount = static_cast<size_t>(pixels) * channels;
+    const size_t rowBytes =
+        (static_cast<size_t>(width) * channels * packedBits + 7u) / 8u;
+    const size_t packedBytes = rowBytes * height;
     bool alreadyPacked = oldBytes == packedBytes;
     for (uint32_t i = 0; i < bitsE->count; ++i)
         if (scalar(*bitsE, i) != (alreadyPacked ? packedBits : 16)) return false;
     if (packedBytes > std::numeric_limits<uint32_t>::max() ||
         (countsE->type == TIFF_TYPE_SHORT && packedBytes > 65535u) ||
-        (!alreadyPacked && oldBytes != packedBytes * sizeof(uint16_t)) ||
+        (!alreadyPacked && oldBytes != sampleCount * sizeof(uint16_t)) ||
         offset > data.size() || oldBytes > data.size() - offset)
         return false;
     const std::vector<float> identity{1.0f, 1.0f, 1.0f};
@@ -5928,6 +6027,7 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
     params.textureSource = &texture;
     params.map = VulkanRgbGainMap{1, 1, 3, 0, 0, width, height,
                                  1, 1, 0.0f, 0.0f, 1.0f, 1.0f, &identity};
+    prepareGpuJpegConsumer(params, gpuJpeg);
     if (!bakeRgbGainVulkan(nullptr, params, data.data() + offset, packedBytes))
         return false;
     for (uint32_t i = 0; i < bitsE->count; ++i) {
@@ -5953,7 +6053,8 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
 
 bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         LogTransformMode mode, uint32_t quantizationWhite,
-        bool highQuality, uint32_t ditherSeed) {
+        bool highQuality, uint32_t ditherSeed,
+        std::vector<uint8_t>* gpuJpeg) {
     if (!logReductionBits(mode)) return false;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -6052,13 +6153,15 @@ bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         params.scale[channel] = static_cast<float>(sourceWhite) /
             static_cast<float>(sourceWhite - black);
     }
+    prepareGpuJpegConsumer(params, gpuJpeg);
     std::vector<uint8_t> packed(packedBytes);
     const auto* source = reinterpret_cast<const uint16_t*>(data.data() + offset);
     const bool baked = channels == 3
         ? bakeRgbGainVulkan(source, params, packed.data(), packed.size())
         : bakeCfaGainVulkan(source, params, packed.data(), packed.size());
     if (!baked) return false;
-    std::memcpy(data.data() + offset, packed.data(), packedBytes);
+    if (!gpuJpeg || gpuJpeg->empty())
+        std::memcpy(data.data() + offset, packed.data(), packedBytes);
     for (uint32_t i = 0; i < bitsE->count; ++i) {
         const size_t at = bitsE->valueOffset + static_cast<size_t>(i) *
             (bitsE->type == TIFF_TYPE_SHORT ? 2u : 4u);
@@ -8028,6 +8131,79 @@ bool DNGDecoder::compressLossyJPEG(std::vector<uint8_t>& data, int quality) {
     return true;
 }
 
+bool DNGDecoder::attachLosslessJPEG(std::vector<uint8_t>& data,
+                                    const std::vector<uint8_t>& jpeg) {
+    DNGImageLayout layout;
+    if (jpeg.empty() || jpeg.size() > INT_MAX ||
+        !getImageLayout(data, layout) || layout.compression != TIFF_COMPRESSION_NONE ||
+        layout.storage != DNGStorageLayout::Strips ||
+        (layout.pixels != DNGPixelLayout::CFA &&
+         layout.pixels != DNGPixelLayout::LinearRGB)) return false;
+    lj92 decoder = nullptr;
+    int width = 0, height = 0, bits = 0, channels = 0;
+    const bool headerValid = lj92_open(&decoder,
+        const_cast<uint8_t*>(jpeg.data()), static_cast<int>(jpeg.size()),
+        &width, &height, &bits, &channels) == LJ92_ERROR_NONE;
+    if (decoder) lj92_close(decoder);
+    if (!headerValid || width != static_cast<int>(layout.width) ||
+        height != static_cast<int>(layout.height) ||
+        bits != static_cast<int>(layout.bitsPerSample) ||
+        channels != static_cast<int>(layout.samplesPerPixel)) return false;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries)
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+            const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                ? read16(data.data() + entry.valueOffset, little)
+                : read32(data.data() + entry.valueOffset, little);
+            if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+                photo = &entry;
+                break;
+            }
+        }
+    if (!photo) return false;
+    auto find = [&](uint16_t tag) -> const TiffEntry* {
+        for (const auto& entry : entries)
+            if (entry.ifdOffset == photo->ifdOffset && entry.tag == tag)
+                return &entry;
+        return nullptr;
+    };
+    const auto offsets = find(TIFF_TAG_STRIP_OFFSETS);
+    const auto counts = find(TIFF_TAG_STRIP_BYTE_COUNTS);
+    const auto compression = find(TIFF_TAG_COMPRESSION);
+    if (!offsets || !counts || !compression || offsets->count != 1 ||
+        counts->count != 1 ||
+        (offsets->type != TIFF_TYPE_LONG &&
+         offsets->type != TIFF_TYPE_SHORT) ||
+        (counts->type != TIFF_TYPE_LONG &&
+         counts->type != TIFF_TYPE_SHORT) ||
+        (compression->type != TIFF_TYPE_LONG &&
+         compression->type != TIFF_TYPE_SHORT) ||
+        jpeg.size() > UINT32_MAX ||
+        (counts->type == TIFF_TYPE_SHORT && jpeg.size() > UINT16_MAX))
+        return false;
+    const uint32_t offset = offsets->type == TIFF_TYPE_SHORT
+        ? read16(data.data() + offsets->valueOffset, little)
+        : read32(data.data() + offsets->valueOffset, little);
+    const uint32_t oldBytes = counts->type == TIFF_TYPE_SHORT
+        ? read16(data.data() + counts->valueOffset, little)
+        : read32(data.data() + counts->valueOffset, little);
+    if (offset > data.size() || oldBytes > data.size() - offset) return false;
+    if (compression->type == TIFF_TYPE_SHORT)
+        write16(data.data() + compression->valueOffset,
+                TIFF_COMPRESSION_JPEG, little);
+    else write32(data.data() + compression->valueOffset,
+                 TIFF_COMPRESSION_JPEG, little);
+    if (counts->type == TIFF_TYPE_SHORT)
+        write16(data.data() + counts->valueOffset, jpeg.size(), little);
+    else write32(data.data() + counts->valueOffset,
+                 static_cast<uint32_t>(jpeg.size()), little);
+    return replaceTiffStrip(data, offset, oldBytes,
+                            jpeg.data(), jpeg.size(), little);
+}
+
 bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -8104,7 +8280,184 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
     const char* encoderSetting = std::getenv("MOTIONCAM_LOSSLESS_JPEG_ENCODER");
     const bool useTurbo = bits > 8 && encoderSetting &&
         std::strcmp(encoderSetting, "turbo") == 0;
-    if (useTurbo) {
+    // TIFF tiles give decoders independent JPEG scans to process in parallel.
+    // MOTIONCAM_JPEG_TILED enables this output topology explicitly.
+    if (channels == 1 &&
+        scalar(*photo) == TIFF_PHOTOMETRIC_CFA && width % 16u == 0 &&
+        std::getenv("MOTIONCAM_JPEG_TILED")) {
+        const uint32_t desiredRows = static_cast<uint32_t>(
+            std::min<uint64_t>(1024u,
+                (uint64_t{4} * 1024u * 1024u + rowSamples - 1u) / rowSamples));
+        const uint32_t tileRows = std::clamp((desiredRows + 15u) & ~15u,
+                                              256u, 1024u);
+        if (height > tileRows) {
+            auto encodeTiles = [&]() -> bool {
+                const uint32_t tileCount = (height + tileRows - 1u) / tileRows;
+                std::vector<uint8_t> payload;
+                std::vector<uint32_t> relativeOffsets, tileLengths;
+                relativeOffsets.reserve(tileCount);
+                tileLengths.reserve(tileCount);
+                std::vector<uint16_t> paddedTile;
+                for (uint32_t tile = 0; tile < tileCount; ++tile) {
+                    const uint32_t firstRow = tile * tileRows;
+                    const uint32_t validRows = std::min(tileRows, height - firstRow);
+                    const uint16_t* source = pixels +
+                        static_cast<size_t>(firstRow) * rowSamples;
+                    if (validRows != tileRows) {
+                        paddedTile.assign(static_cast<size_t>(tileRows) * rowSamples, 0);
+                        std::copy_n(source, static_cast<size_t>(validRows) * rowSamples,
+                                    paddedTile.data());
+                        source = paddedTile.data();
+                    }
+                    uint8_t* encodedTile = nullptr;
+                    int tileLength = 0;
+                    if (!encodeLosslessJPEGWithVulkan(source, width, tileRows,
+                                                      channels, bits,
+                                                      &encodedTile, &tileLength)) {
+                        free(encodedTile);
+                        return false;
+                    }
+                    if (payload.size() & 1u) payload.push_back(0);
+                    if (payload.size() > UINT32_MAX - static_cast<size_t>(tileLength)) {
+                        free(encodedTile);
+                        return false;
+                    }
+                    relativeOffsets.push_back(static_cast<uint32_t>(payload.size()));
+                    tileLengths.push_back(static_cast<uint32_t>(tileLength));
+                    payload.insert(payload.end(), encodedTile,
+                                   encodedTile + tileLength);
+                    free(encodedTile);
+                }
+                std::vector<uint8_t> candidate = data;
+                if (!replaceTiffStrip(candidate, stripOffset, stripBytes,
+                                      payload, little)) return false;
+                auto findCurrent = [&](uint16_t tag, uint32_t ifd,
+                                       const std::vector<TiffEntry>& current)
+                    -> const TiffEntry* {
+                    for (const auto& entry : current)
+                        if (entry.ifdOffset == ifd && entry.tag == tag)
+                            return &entry;
+                    return nullptr;
+                };
+                auto current = findTiffEntries(candidate, little);
+                uint32_t rawIfd = 0;
+                for (const auto& entry : current)
+                    if (entry.tag == TIFF_TAG_PHOTOMETRIC &&
+                        (entry.type == TIFF_TYPE_SHORT
+                            ? read16(candidate.data() + entry.valueOffset, little)
+                            : read32(candidate.data() + entry.valueOffset, little)) ==
+                            TIFF_PHOTOMETRIC_CFA) {
+                        rawIfd = entry.ifdOffset;
+                        break;
+                    }
+                if (!rawIfd ||
+                    !insertTiffScalarEntry(candidate, rawIfd,
+                                           TIFF_TAG_TILE_LENGTH,
+                                           TIFF_TYPE_LONG, tileRows, little)) return false;
+                current = findTiffEntries(candidate, little);
+                rawIfd = 0;
+                for (const auto& entry : current)
+                    if (entry.tag == TIFF_TAG_PHOTOMETRIC &&
+                        (entry.type == TIFF_TYPE_SHORT
+                            ? read16(candidate.data() + entry.valueOffset, little)
+                            : read32(candidate.data() + entry.valueOffset, little)) ==
+                            TIFF_PHOTOMETRIC_CFA) {
+                        rawIfd = entry.ifdOffset;
+                        break;
+                    }
+                if (!rawIfd) return false;
+                const auto* updatedOffsets = findCurrent(TIFF_TAG_STRIP_OFFSETS,
+                                                         rawIfd, current);
+                const auto* updatedCounts = findCurrent(TIFF_TAG_STRIP_BYTE_COUNTS,
+                                                        rawIfd, current);
+                const auto* updatedRows = findCurrent(TIFF_TAG_ROWS_PER_STRIP,
+                                                      rawIfd, current);
+                const auto* updatedCompression = findCurrent(TIFF_TAG_COMPRESSION,
+                                                             rawIfd, current);
+                if (!updatedOffsets || !updatedCounts || !updatedRows ||
+                    !updatedCompression || data.size() > UINT32_MAX ||
+                    candidate.size() > UINT32_MAX - static_cast<size_t>(tileCount) * 8u - 1u)
+                    return false;
+                const uint32_t payloadStart = updatedOffsets->type == TIFF_TYPE_SHORT
+                    ? read16(candidate.data() + updatedOffsets->valueOffset, little)
+                    : read32(candidate.data() + updatedOffsets->valueOffset, little);
+                if (candidate.size() & 1u) candidate.push_back(0);
+                const uint32_t arrayOffset = static_cast<uint32_t>(candidate.size());
+                candidate.resize(candidate.size() + static_cast<size_t>(tileCount) * 8u);
+                for (uint32_t tile = 0; tile < tileCount; ++tile) {
+                    if (relativeOffsets[tile] > UINT32_MAX - payloadStart)
+                        return false;
+                    write32(candidate.data() + arrayOffset + tile * 4u,
+                            payloadStart + relativeOffsets[tile], little);
+                    write32(candidate.data() + arrayOffset +
+                            (tileCount + tile) * 4u, tileLengths[tile], little);
+                }
+                auto makeLong = [&](const TiffEntry& entry, uint16_t tag,
+                                    uint32_t count, uint32_t value) {
+                    write16(candidate.data() + entry.entryOffset, tag, little);
+                    write16(candidate.data() + entry.entryOffset + 2,
+                            TIFF_TYPE_LONG, little);
+                    write32(candidate.data() + entry.entryOffset + 4, count, little);
+                    write32(candidate.data() + entry.entryOffset + 8, value, little);
+                };
+                makeLong(*updatedOffsets, TIFF_TAG_TILE_OFFSETS,
+                         tileCount, arrayOffset);
+                makeLong(*updatedCounts, TIFF_TAG_TILE_BYTE_COUNTS,
+                         tileCount, arrayOffset + tileCount * 4u);
+                makeLong(*updatedRows, TIFF_TAG_TILE_WIDTH, 1, width);
+                if (updatedCompression->type == TIFF_TYPE_SHORT)
+                    write16(candidate.data() + updatedCompression->valueOffset,
+                            TIFF_COMPRESSION_JPEG, little);
+                else write32(candidate.data() + updatedCompression->valueOffset,
+                             TIFF_COMPRESSION_JPEG, little);
+                if (!sortTiffIfdEntries(candidate, rawIfd, little)) return false;
+                data = std::move(candidate);
+                return true;
+            };
+            if (encodeTiles()) return true;
+        }
+    }
+    auto commitEncoded = [&](const uint8_t* payload, size_t length) {
+        if (length > std::numeric_limits<uint32_t>::max() ||
+            (countsE->type == TIFF_TYPE_SHORT && length > UINT16_MAX))
+            return false;
+        if (compressionE->type == TIFF_TYPE_SHORT)
+            write16(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG, little);
+        else
+            write32(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG, little);
+        if (countsE->type == TIFF_TYPE_SHORT)
+            write16(data.data() + countsE->valueOffset, length, little);
+        else
+            write32(data.data() + countsE->valueOffset,
+                    static_cast<uint32_t>(length), little);
+        return replaceTiffStrip(data, stripOffset, stripBytes,
+                                payload, length, little);
+    };
+    if (!std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
+        !std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE")) {
+        bool delivered = false;
+        if (jpegEncodeFullyVulkanBorrowed(
+                pixels, width, height, channels, bits,
+                [&](const uint8_t* jpeg, size_t length) {
+                    delivered = true;
+                    return commitEncoded(jpeg, length);
+                }))
+            return true;
+        if (delivered) return false;
+    }
+    // Borrowed output avoids one host copy. Keep the owned GPU path as a
+    // fallback when mapped output is unavailable or explicitly disabled.
+    if (!std::getenv("MOTIONCAM_GPU_JPEG_DISABLE")) {
+        int gpuLength = 0;
+        if (jpegEncodeFullyVulkan(pixels, width, height, channels, bits,
+                                  &encodedBuffer, &gpuLength))
+            encodedLength = static_cast<size_t>(gpuLength);
+        else {
+            free(encodedBuffer);
+            encodedBuffer = nullptr;
+        }
+    }
+    if (!encodedBuffer && useTurbo) {
         unsigned long turboLength = 0;
         int predictor = channels == 3 ? 4 : 6;
         if (const char* setting = std::getenv("MOTIONCAM_LOSSLESS_JPEG_PREDICTOR"))
@@ -8116,8 +8469,8 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
     if (!encodedBuffer) {
         int lj92Length = 0;
         // liblj92 takes a mutable pointer but only reads image samples.
-        if (lj92_encode(const_cast<uint16_t*>(pixels), width, height, bits, channels,
-                        width * channels, 0, nullptr, 0,
+        if (lj92_encode(const_cast<uint16_t*>(pixels), width, height, bits,
+                        channels, width * channels, 0, nullptr, 0,
                         &encodedBuffer, &lj92Length) != LJ92_ERROR_NONE ||
             !encodedBuffer || lj92Length <= 0) {
             free(encodedBuffer);
@@ -8125,18 +8478,7 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
         }
         encodedLength = static_cast<size_t>(lj92Length);
     }
-    if (encodedLength > std::numeric_limits<uint32_t>::max() ||
-        (countsE->type == TIFF_TYPE_SHORT && encodedLength > UINT16_MAX)) {
-        free(encodedBuffer);
-        return false;
-    }
-    if (compressionE->type == TIFF_TYPE_SHORT)
-        write16(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG, little);
-    else write32(data.data() + compressionE->valueOffset, TIFF_COMPRESSION_JPEG, little);
-    if (countsE->type == TIFF_TYPE_SHORT) write16(data.data() + countsE->valueOffset, encodedLength, little);
-    else write32(data.data() + countsE->valueOffset, static_cast<uint32_t>(encodedLength), little);
-    const bool replaced = replaceTiffStrip(data, stripOffset, stripBytes,
-                                           encodedBuffer, encodedLength, little);
+    const bool replaced = commitEncoded(encodedBuffer, encodedLength);
     free(encodedBuffer);
     return replaced;
 }
@@ -8155,7 +8497,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool packFusedLog,
                               uint32_t ditherSeed,
                               bool preferVulkan,
-                              const VulkanGainBakeTextureSource* textureSource) {
+                              const VulkanGainBakeTextureSource* textureSource,
+                              std::vector<uint8_t>* gpuJpeg) {
     if (logFused) *logFused = false;
     const char* cpuOptSetting = std::getenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
     const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
@@ -8533,12 +8876,12 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         logLookup = &cachedLog60EncodeLookup(
             destinationBlack[0], destinationWhite, encodedWhite);
     }
-    const uint32_t packedBits = fuseLog && packFusedLog
+    uint32_t packedBits = fuseLog && packFusedLog
         ? logStoredBits(encodedWhite) : 16;
-    const bool packDuringBake = packedBits < 16;
-    const size_t packedRowBytes = packDuringBake
+    bool packDuringBake = packedBits < 16;
+    size_t packedRowBytes = packDuringBake
         ? (static_cast<size_t>(width) * imageChannels * packedBits + 7) / 8 : 0;
-    const size_t packedBytes = packedRowBytes * height;
+    size_t packedBytes = packedRowBytes * height;
     if (packDuringBake && packedBytes > std::numeric_limits<uint32_t>::max())
         return false;
     const bool directGpuStrip = textureSource && inPlace;
@@ -8881,6 +9224,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         gpuParams.log60 = fuseLog;
         gpuParams.logHighQuality = logHighQuality;
         gpuParams.debugGain = debugGainMap;
+        // Fused LOG uses its packed precision. If LOG is requested but did
+        // not fuse, leave the strip available for the later LOG pass.
+        if (packDuringBake || fusedLogMode == LogTransformMode::Disabled)
+            prepareGpuJpegConsumer(gpuParams, gpuJpeg);
         auto gpuMap = [&](size_t index) {
             const auto& selected = maps[index];
             return VulkanRgbGainMap{selected.width, selected.height,
@@ -8904,6 +9251,44 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 gpuParams.cfaMaps[phase] = gpuMap(gpuCfaFour
                     ? (*directCfaIndices)[phase] : 0);
         }
+        // For a terminal linear gain bake, match the finalizer's even-bit
+        // packing on the GPU. The shader clamps to that code range before
+        // JPEG encoding. If this optional path fails, run the usual 16-bit
+        // bake and let the finalizer pack and encode its CPU fallback.
+        if (gpuParams.consumePackedOutput && !packDuringBake &&
+            fusedLogMode == LogTransformMode::Disabled && packFusedLog &&
+            sampleCount >= 1000000u && sampleCount <= INT_MAX) {
+            const uint32_t finalBits = utils::evenBitsNeeded(
+                static_cast<uint16_t>(std::clamp(destinationWhite,
+                    1.0, 65535.0)));
+            if (finalBits >= 8 && finalBits < 16) {
+                const size_t rowBytes =
+                    (static_cast<size_t>(width) * imageChannels * finalBits + 7u) / 8u;
+                const size_t byteCount = rowBytes * height;
+                if (byteCount <= UINT32_MAX) {
+                    auto packedParams = gpuParams;
+                    packedParams.outputBits = finalBits;
+                    std::vector<uint8_t> unusedPacked(byteCount);
+                    const uint16_t* gpuSource = inPlace
+                        ? reinterpret_cast<const uint16_t*>(stripPixels) : pixels;
+                    const bool packedBaked = sourceIsRgb
+                        ? bakeRgbGainVulkan(gpuSource, packedParams,
+                                            unusedPacked.data(), byteCount)
+                        : bakeCfaGainVulkan(gpuSource, packedParams,
+                                            unusedPacked.data(), byteCount);
+                    if (packedBaked && gpuJpeg && !gpuJpeg->empty()) {
+                        gpuBaked = true;
+                        packedBits = finalBits;
+                        packDuringBake = true;
+                        packedRowBytes = rowBytes;
+                        packedBytes = byteCount;
+                        packedOutput.resize(data.size() - stripBytes + packedBytes, 0);
+                    }
+                }
+            }
+            if (finalBits < 16 && !gpuBaked)
+                gpuParams.consumePackedOutput = {};
+        }
         // An in-place texture-backed source remains available if the GPU read
         // fails, so its result can land directly in the DNG strip.
         // CPU sources still need a separate destination for fallback.
@@ -8915,7 +9300,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             ? directGpuPacked ? data.data() + stripOffset
                               : packedOutput.data() + stripOffset
             : directGpuStrip ? stripPixels : gpuBytes.data();
-        gpuBaked = sourceIsRgb
+        if (!gpuBaked) gpuBaked = sourceIsRgb
             ? bakeRgbGainVulkan(inPlace
                                 ? reinterpret_cast<const uint16_t*>(stripPixels)
                                 : pixels,

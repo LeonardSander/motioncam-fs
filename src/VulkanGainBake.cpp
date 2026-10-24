@@ -631,6 +631,19 @@ bool bakeGainVulkan(const uint16_t* source,
     if (run.compute_groups[0] > device->gpu->limits.max_dispatch[0] ||
         run.compute_groups[1] > device->gpu->limits.max_dispatch[1]) return false;
     pl_pass_run(device->gpu, &run);
+    const VulkanPackedImage packedImage{
+        device->gpu, device->directOutput ? device->directOutput : device->output,
+        params.width, params.height, params.channels, params.outputBits,
+        static_cast<uint32_t>(wordsPerRow)};
+    if (params.consumePackedOutput &&
+        params.consumePackedOutput(packedImage)) {
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            std::fprintf(stderr,
+                "GALLERY_PERF event=vulkan_gain_gpu_jpeg_handoff width=%u height=%u channels=%u bits=%u\n",
+                params.width, params.height, params.channels,
+                params.outputBits);
+        return true;
+    }
     const size_t firstDownloadBytes = device->splitOutput
         ? (outputBytes / 2) & ~size_t{63} : outputBytes;
     if (!device->directOutput)

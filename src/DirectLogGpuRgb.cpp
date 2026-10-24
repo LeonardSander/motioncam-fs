@@ -1,5 +1,6 @@
 #include "DirectLogGpuRgb.h"
 #include "VulkanGainBake.h"
+#include "VulkanJpegFullEncode.h"
 #include "VulkanGalleryPreview.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
@@ -75,6 +76,7 @@ struct DirectLogGpuRgb::State {
     ~State() {
         if (vulkan) {
             releaseVulkanGainBakeTextureDevice(vulkan->gpu);
+            releaseVulkanJpegFullEncodeDevice(vulkan->gpu);
             releaseVulkanGalleryTextureDevice(vulkan->gpu);
         }
         if (vulkan) pl_gpu_finish(vulkan->gpu);

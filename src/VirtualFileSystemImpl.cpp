@@ -1,5 +1,6 @@
 #include "VirtualFileSystemImpl.h"
 #include "VulkanGainBake.h"
+#include "VulkanJpegFullEncode.h"
 #include "DataLevels.h"
 #include "DNGDecoder.h"
 #include "LRUCache.h"
@@ -129,6 +130,7 @@ size_t projectedBadPixelOpcodeSize(const CalibrationData& calibration,
 void processDngPixels(std::vector<uint8_t>& dng,
         const RenderSettings& settings,
         const DngPixelPipelineOptions& options) {
+    if (options.gpuJpeg) options.gpuJpeg->clear();
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     const auto pipelineStarted = std::chrono::steady_clock::now();
     const std::string source = options.sourceName.empty()
@@ -268,6 +270,45 @@ void processDngPixels(std::vector<uint8_t>& dng,
          (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
     const auto texturePreparationStarted = std::chrono::steady_clock::now();
     const VulkanGainBakeTextureSource* textureSource = options.textureSource;
+    // A DirectLog texture with no remaining pixel operation can go straight
+    // to JPEG. Metadata edits below still run against the DNG template; the
+    // finalizer replaces its placeholder strip with the encoded payload.
+    if (options.gpuJpeg && textureSource &&
+        !std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
+        !std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
+        !std::getenv("MOTIONCAM_JPEG_TILED") &&
+        !bakeGain && !debugGainMap &&
+        !remosaic && scale == 1 && options.cfaRepeatSize == 2 &&
+        !settings.cameraNativeStaging &&
+        !(settings.options & (RENDER_OPT_CROPPING |
+                              RENDER_OPT_LOG_TRANSFORM)) &&
+        !(options.hasCfa && options.calibration &&
+          options.calibration->hasBadPixels &&
+          processesBadPixels(badPixelTreatment))) {
+        DNGImageLayout layout;
+        DNGFrameMetadata metadata;
+        const uint32_t channels = options.hasCfa ? 1u : 3u;
+        if (DNGDecoder::getImageLayout(dng, layout) &&
+            DNGDecoder::getColorMetadata(dng, metadata) &&
+            metadata.whiteLevelCount > 0 &&
+            utils::evenBitsNeeded(static_cast<uint16_t>(std::clamp(
+                std::lround(metadata.whiteLevel[0]), 1l, 65535l))) == 16 &&
+            layout.width && layout.height && layout.bitsPerSample == 16 &&
+            layout.samplesPerPixel == channels &&
+            layout.compression == 1 &&
+            jpegEncodeFullyVulkanTextureBorrowed(
+                textureSource->gpu, textureSource->texture,
+                layout.width, layout.height, channels, 16,
+                [&](const uint8_t* bytes, size_t size) {
+                    options.gpuJpeg->assign(bytes, bytes + size);
+                    return true;
+                })) {
+            textureSource = nullptr;
+            if (options.textureMaterialized) options.textureMaterialized();
+        } else {
+            options.gpuJpeg->clear();
+        }
+    }
     bool logFused = false;
     bool logMetadataDone = false;
     if (!std::getenv("MOTIONCAM_DIRECTLOG_GPU_LOG_DISABLE") && textureSource &&
@@ -276,7 +317,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
         logReductionBits(settings.logTransform) > 0 &&
         DNGDecoder::bakeLogTexture(dng, *textureSource, settings.logTransform,
             options.inputQuantizationWhite,
-            settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed)) {
+            settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
+            !remosaic && options.cfaRepeatSize == 2 ? options.gpuJpeg : nullptr)) {
         textureSource = nullptr;
         logFused = true;
         logMetadataDone = true;
@@ -346,7 +388,10 @@ void processDngPixels(std::vector<uint8_t>& dng,
             settings.options & RENDER_OPT_LOG_HQ, &logFused, packFusedLog,
             options.ditherSeed,
             options.preferVulkan,
-            textureSource))
+            textureSource,
+            !postTopologyAfterBake &&
+            badPixelTreatment != BadPixelTreatment::MarkPixels
+                ? options.gpuJpeg : nullptr))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = std::chrono::steady_clock::now();
     if (!topologyBeforeBake &&
@@ -380,7 +425,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !std::getenv("MOTIONCAM_GPU_LOG_STRIP_DISABLE") &&
         DNGDecoder::bakeLogStripVulkan(
             dng, settings.logTransform, options.inputQuantizationWhite,
-            settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed)) {
+            settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
+            badPixelTreatment != BadPixelTreatment::MarkPixels
+                ? options.gpuJpeg : nullptr)) {
         logMetadataDone = true;
         if (profile)
             spdlog::info("GALLERY_PERF event=dng_gpu_log_strip source={}", source);
@@ -468,7 +515,10 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
     profileStage("timing_metadata");
     const bool fusedJxlPacking = options.packToWhiteLevel && options.compression &&
         !isLossyJpegDct(settings.jxlDistance) && settings.jxlDistance >= 0.0f;
-    if (options.packToWhiteLevel && !fusedJxlPacking &&
+    const bool gpuJpegReady = options.compression &&
+        settings.jxlDistance < 0.0f && options.gpuJpeg &&
+        !options.gpuJpeg->empty();
+    if (options.packToWhiteLevel && !fusedJxlPacking && !gpuJpegReady &&
         !DNGDecoder::packUncompressedToWhiteLevel(dng))
         throw std::runtime_error("Could not pack " + source + " DNG to its sensor bit depth");
     profileStage("bit_packing");
@@ -480,10 +530,15 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
     const bool compressed = isLossyJpegDct(settings.jxlDistance)
         ? DNGDecoder::compressLossyJPEG(dng)
         : settings.jxlDistance < 0.0f
-            ? DNGDecoder::compressLosslessJPEG(dng)
+            ? gpuJpegReady
+                ? DNGDecoder::attachLosslessJPEG(dng, *options.gpuJpeg)
+                : DNGDecoder::compressLosslessJPEG(dng)
             : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance, fusedJxlPacking);
     if (!compressed)
         throw std::runtime_error("Could not compress " + source + " DNG");
+    if (gpuJpegReady && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_attach source={} bytes={}",
+                     source, options.gpuJpeg->size());
     profileStage("compression");
 }
 

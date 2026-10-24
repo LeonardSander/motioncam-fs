@@ -1299,7 +1299,11 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
              (bakedGallery && !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU"))) &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
-            (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+            ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
+             (jpegCompression && mConfig.jxlDistance < 0.0f &&
+              !std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
+              !std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
+              !std::getenv("MOTIONCAM_JPEG_TILED")));
         const uint32_t inputBits = utils::evenBitsNeeded(
             static_cast<uint16_t>(std::min<uint32_t>(
                 directLogQuantizationWhite(mConfig), 65535u)));
@@ -1353,6 +1357,10 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             throw std::runtime_error("Could not generate DirectLog DNG");
         const auto generatedAt = std::chrono::steady_clock::now();
         vfs::DngPixelPipelineOptions pixels;
+        std::vector<uint8_t> gpuJpeg;
+        if (jpegCompression && mConfig.jxlDistance < 0.0f &&
+            !(mConfig.options & RENDER_OPT_BAKE_ISO))
+            pixels.gpuJpeg = &gpuJpeg;
         pixels.hasCfa = processed.bayer;
         pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
         pixels.outputScale = renderPlan.scale;
@@ -1406,6 +1414,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             finalize.isoOverlay = processed.metadata.iso;
         finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
         finalize.compression = jpegCompression;
+        finalize.gpuJpeg = pixels.gpuJpeg;
         finalize.gyroflowLensProfile = mGyroflowLensProfile && !mConfig.cameraNativeStaging
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "DirectLog";

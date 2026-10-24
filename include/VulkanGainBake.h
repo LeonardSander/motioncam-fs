@@ -21,6 +21,12 @@ struct VulkanGainBakeTextureSource {
     std::function<bool(uint16_t*, size_t)> download;
     std::function<bool(uint16_t*, size_t)> recoverCpu;
 };
+struct VulkanPackedImage {
+    const void* gpu = nullptr;
+    const void* buffer = nullptr;
+    uint32_t width = 0, height = 0, channels = 0, bits = 0;
+    uint32_t wordsPerRow = 0;
+};
 struct VulkanGainBakeParams {
     std::array<float, 4> black{}, destinationBlack{}, scale{};
     uint32_t width = 0, height = 0, channels = 0, outputBits = 16;
@@ -31,6 +37,9 @@ struct VulkanGainBakeParams {
     const std::vector<uint16_t>* linearization = nullptr;
     const std::vector<float>* logLookup = nullptr;
     const VulkanGainBakeTextureSource* textureSource = nullptr;
+    // Called while the packed GPU output remains live. A true result means
+    // the caller has consumed it and no uncompressed readback is needed.
+    std::function<bool(const VulkanPackedImage&)> consumePackedOutput;
     VulkanRgbGainMap map;
     std::array<VulkanRgbGainMap, 4> cfaMaps{};
     uint32_t cfaMapCount = 0;

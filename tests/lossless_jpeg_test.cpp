@@ -395,6 +395,35 @@ int main() {
             assert(read16(stripOffset + i * 2) == stripPixels[i]);
     }
 
+    // Independent lossless JPEG strips decode into disjoint output rows. The
+    // last scan is padded to RowsPerStrip, exercising the fallback copy path.
+    {
+        constexpr uint32_t w = 16, h = 10, rowsPerStrip = 4;
+        std::vector<uint16_t> expected(w * h);
+        for (size_t i = 0; i < expected.size(); ++i)
+            expected[i] = static_cast<uint16_t>((i * 173u + i / w * 997u) & 65535u);
+        std::vector<std::vector<uint8_t>> strips;
+        for (uint32_t firstRow = 0; firstRow < h; firstRow += rowsPerStrip) {
+            std::vector<uint16_t> samples(w * rowsPerStrip, 0);
+            const uint32_t rows = std::min(rowsPerStrip, h - firstRow);
+            std::copy_n(expected.data() + static_cast<size_t>(firstRow) * w,
+                        static_cast<size_t>(rows) * w, samples.data());
+            uint8_t* encoded = nullptr;
+            int bytes = 0;
+            assert(lj92_encode(samples.data(), w, rowsPerStrip, 16, 1,
+                               w, 0, nullptr, 0, &encoded, &bytes) == LJ92_ERROR_NONE);
+            strips.emplace_back(encoded, encoded + bytes);
+            free(encoded);
+        }
+        auto dng = chunkedDng(w, h, 16, 1, 7, w, rowsPerStrip,
+                              false, false, strips);
+        motioncam::DecodedDNGImage decoded;
+        assert(motioncam::DNGDecoder::decodeImage(dng, decoded, false, false));
+        assert(decoded.samples == expected);
+        assert(motioncam::DNGDecoder::ensureUncompressed(dng));
+        assert(ifdsAreTagSorted(dng));
+    }
+
     // Two-component Android DNG tiles may assign a different DC Huffman table
     // to each component. Verify that the selectors in SOS are honored.
     {
@@ -1411,6 +1440,108 @@ int main() {
     assert(!producerIsRepaired("MotionCam Tools 1.0.0.1"));
     assert(producerIsRepaired("MotionCam Tools"));
     assert(!producerIsRepaired("MotionCamera 3.0"));
+
+    // A terminal Vulkan LOG pass can feed JPEG from its packed GPU buffer.
+    // Compare its JPEG DNG with the same GPU pass using the ordinary strip
+    // readback. Run both CFA and RGB; CPU-only builds simply skip this path.
+    auto checkGpuPackedJpeg = [&](uint32_t testWidth, uint32_t testHeight,
+                                  uint32_t channels, bool fusedGain = false,
+                                  uint32_t sourceWhite = 4095,
+                                  motioncam::LogTransformMode mode =
+                                      motioncam::LogTransformMode::ReduceBy4Bit,
+                                  bool packOutput = true) {
+        std::vector<uint16_t> samples(static_cast<size_t>(testWidth) *
+                                      testHeight * channels);
+        for (size_t i = 0; i < samples.size(); ++i)
+            samples[i] = static_cast<uint16_t>(
+                (i * 37u + i / 91u) % (sourceWhite + 1u));
+        tinydngwriter::DNGImage testImage;
+        testImage.SetBigEndian(false);
+        const unsigned short testBits[] = {16, 16, 16};
+        assert(testImage.SetImageWidth(testWidth));
+        assert(testImage.SetImageLength(testHeight));
+        assert(testImage.SetRowsPerStrip(testHeight));
+        assert(testImage.SetSamplesPerPixel(channels));
+        assert(testImage.SetBitsPerSample(channels, testBits));
+        assert(testImage.SetCompression(tinydngwriter::COMPRESSION_NONE));
+        assert(testImage.SetPhotometric(channels == 1
+            ? tinydngwriter::PHOTOMETRIC_CFA
+            : tinydngwriter::PHOTOMETRIC_LINEARRAW));
+        assert(testImage.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+        assert(testImage.SetWhiteLevel(sourceWhite));
+        assert(testImage.SetImageData(
+            reinterpret_cast<const unsigned char*>(samples.data()),
+            samples.size() * sizeof(uint16_t)));
+        if (fusedGain) {
+            tinydngwriter::GainMapParams map{};
+            map.top = 0; map.left = 0;
+            map.bottom = testHeight; map.right = testWidth;
+            map.plane = 0; map.planes = 3;
+            map.row_pitch = 1; map.col_pitch = 1;
+            map.map_points_v = 2; map.map_points_h = 2;
+            map.map_spacing_v = 0.5; map.map_spacing_h = 0.5;
+            map.map_planes = 1;
+            map.gain_data = {1.0f, 1.1f, 1.2f, 1.3f};
+            tinydngwriter::OpcodeList opcodes;
+            opcodes.AddGainMap(map);
+            assert(testImage.SetOpcodeList2(opcodes));
+        }
+        tinydngwriter::DNGWriter testWriter(false);
+        assert(testWriter.AddImage(&testImage));
+        std::ostringstream testOutput(std::ios::binary);
+        std::string testError;
+        assert(testWriter.WriteToFile(testOutput, &testError));
+        const std::string serialized = testOutput.str();
+        std::vector<uint8_t> reference(serialized.begin(), serialized.end());
+        auto fast = reference;
+        std::vector<uint8_t> gpuJpeg;
+        bool fused = false;
+        const bool baked = fusedGain
+            ? motioncam::DNGDecoder::bakeGainMaps(
+                  fast, false, false, false, false, 0, std::nullopt,
+                  mode, sourceWhite, false, &fused, packOutput, 7, true, nullptr,
+                  &gpuJpeg)
+            : motioncam::DNGDecoder::bakeLogStripVulkan(
+                  fast, mode, sourceWhite, false, 7, &gpuJpeg);
+        if (!baked) {
+            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
+            return;
+        }
+        if (gpuJpeg.empty()) {
+            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
+            return; // Vulkan unavailable: CPU fallback ran.
+        }
+        if (fusedGain) {
+            bool referenceFused = false;
+            assert(motioncam::DNGDecoder::bakeGainMaps(
+                reference, false, false, false, false, 0, std::nullopt,
+                mode, sourceWhite, false, &referenceFused, packOutput, 7, true));
+            assert(fused == referenceFused);
+            assert(fused == (mode != motioncam::LogTransformMode::Disabled));
+            if (mode == motioncam::LogTransformMode::Disabled && packOutput)
+                assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(
+                    reference));
+        } else {
+            assert(motioncam::DNGDecoder::bakeLogStripVulkan(
+                reference, mode, sourceWhite, false, 7));
+        }
+        assert(motioncam::DNGDecoder::attachLosslessJPEG(fast, gpuJpeg));
+        motioncam::DecodedDNGImage fastImage, referenceImage;
+        assert(motioncam::DNGDecoder::decodeImage(fast, fastImage));
+        assert(motioncam::DNGDecoder::decodeImage(reference, referenceImage));
+        assert(fastImage.samples == referenceImage.samples);
+    };
+    checkGpuPackedJpeg(1024, 1024, 1);
+    checkGpuPackedJpeg(1024, 512, 3);
+    checkGpuPackedJpeg(1024, 512, 3, true);
+    checkGpuPackedJpeg(1024, 512, 3, true, 4095,
+                       motioncam::LogTransformMode::Disabled);
+    checkGpuPackedJpeg(1024, 512, 3, true, 4095,
+                       motioncam::LogTransformMode::Disabled, false);
+    checkGpuPackedJpeg(1025, 1024, 1, false, 65535,
+                       motioncam::LogTransformMode::ReduceBy4Bit);
+    checkGpuPackedJpeg(1023, 512, 3, false, 4095,
+                       motioncam::LogTransformMode::ReduceBy2Bit);
 
     return 0;
 }

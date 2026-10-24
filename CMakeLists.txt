@@ -59,6 +59,9 @@ set(PROJECT_SOURCES
         src/DirectLogDecoder.cpp
         src/DirectLogGpuRgb.cpp
         src/VulkanGainBake.cpp
+        src/VulkanJpegPredictor.cpp
+        src/VulkanJpegEntropy.cpp
+        src/VulkanJpegFullEncode.cpp
         src/VulkanGalleryPreview.cpp
         shaders/vulkan_gain_bake.comp
         shaders/vulkan_cfa_gain_bake.comp
@@ -670,15 +673,28 @@ if(BUILD_TESTING)
         tests/lossless_jpeg_test.cpp
         src/IsoOverlay.cpp
         src/VulkanGainBake.cpp
+        src/VulkanJpegPredictor.cpp
+        src/VulkanJpegEntropy.cpp
+        src/VulkanJpegFullEncode.cpp
+        src/VulkanGalleryPreview.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
     target_include_directories(motioncam-lossless-jpeg-test PRIVATE
         deps/motioncam-decoder/thirdparty
         deps/motioncam-decoder/thirdparty/liblj92)
-    target_include_directories(motioncam-lossless-jpeg-test PRIVATE include)
+    target_include_directories(motioncam-lossless-jpeg-test PRIVATE
+        include "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
         Boost::filesystem Boost::regex spdlog::spdlog JPEG::JPEG ${JXL_TARGET})
+    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
+        target_include_directories(motioncam-lossless-jpeg-test PRIVATE
+            ${DIRECTLOG_VULKAN_INCLUDE_DIR})
+        target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
+            PkgConfig::DIRECTLOG_PLACEBO)
+        target_compile_definitions(motioncam-lossless-jpeg-test PRIVATE
+            MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+    endif()
     add_test(NAME motioncam-lossless-jpeg-test
         COMMAND motioncam-lossless-jpeg-test)
 
@@ -686,6 +702,9 @@ if(BUILD_TESTING)
         tests/jpeg_xl_test.cpp
         src/IsoOverlay.cpp
         src/VulkanGainBake.cpp
+        src/VulkanJpegPredictor.cpp
+        src/VulkanJpegEntropy.cpp
+        src/VulkanJpegFullEncode.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -705,6 +724,9 @@ if(BUILD_TESTING)
         src/CalibrationData.cpp
         src/CfaBadPixels.cpp
         src/VulkanGainBake.cpp
+        src/VulkanJpegPredictor.cpp
+        src/VulkanJpegEntropy.cpp
+        src/VulkanJpegFullEncode.cpp
         src/VulkanGalleryPreview.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp

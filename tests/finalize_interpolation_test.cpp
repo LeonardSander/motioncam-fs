@@ -6,10 +6,20 @@
 #include "VirtualFileSystemImpl.h"
 #include "Utils.h"
 #include "VulkanGalleryPreview.h"
+#include "VulkanJpegPredictor.h"
+#include "VulkanJpegEntropy.h"
+#include "VulkanJpegFullEncode.h"
+#include "VulkanGainBake.h"
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#include "VulkanJpegContext.h"
+#include <libplacebo/gpu.h>
+#endif
+#include "liblj92/lj92.h"
 #include <BS_thread_pool.hpp>
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +28,16 @@
 #include <fstream>
 
 namespace {
+int verifiedGpuEntropy(const int16_t* residuals, int sampleCount,
+                       const uint16_t codes[18], const uint16_t codeBits[18],
+                       uint8_t* output, int capacity, int* written,
+                       void* context) {
+    const int result = motioncam::jpegEntropyVulkan(
+        residuals, sampleCount, codes, codeBits,
+        output, capacity, written, nullptr);
+    if (result == 0) *static_cast<bool*>(context) = true;
+    return result;
+}
 struct TagValue { uint32_t value = 0, count = 0; };
 TagValue tagValue(const std::vector<uint8_t>& dng, uint16_t wanted) {
     auto u16 = [&](size_t offset) { return static_cast<uint16_t>(dng[offset] | dng[offset + 1] << 8); };
@@ -93,8 +113,8 @@ std::pair<size_t, uint32_t> tagPayload(const std::vector<uint8_t>& dng, uint16_t
 
 std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
                              float baseline, const std::array<float, 3>& neutral,
-                             motioncam::Timestamp timestamp) {
-    constexpr uint32_t width = 8, height = 8;
+                             motioncam::Timestamp timestamp,
+                             uint32_t width = 8, uint32_t height = 8) {
     std::vector<uint16_t> pixels(width * height * 3, value);
     tinydngwriter::DNGImage image;
     image.SetBigEndian(false);
@@ -240,7 +260,483 @@ private:
 };
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--jpeg-gpu-benchmark") == 0) {
+        for (const int channels : {1, 3}) {
+            const int width = channels == 1 ? 4096 : 2051;
+            const int height = channels == 1 ? 3072 : 2048;
+            const int bits = channels == 1 ? 16 : 12;
+            std::vector<uint16_t> pixels(static_cast<size_t>(width) * height * channels);
+            uint32_t random = 0x12345678u;
+            for (auto &pixel : pixels) {
+                random = random * 1664525u + 1013904223u;
+                pixel = static_cast<uint16_t>((random >> (32 - bits)) &
+                                              ((1u << bits) - 1u));
+            }
+            uint8_t *cpu = nullptr, *cold = nullptr, *warm = nullptr;
+            int cpuBytes = 0, coldBytes = 0, warmBytes = 0;
+            const auto start = std::chrono::steady_clock::now();
+            if (lj92_encode(pixels.data(), width, height, bits, channels,
+                            width * channels, 0, nullptr, 0, &cpu,
+                            &cpuBytes) != LJ92_ERROR_NONE) return 2;
+            const auto cpuEnd = std::chrono::steady_clock::now();
+            if (!motioncam::jpegEncodeFullyVulkan(
+                    pixels.data(), width, height, channels, bits,
+                    &cold, &coldBytes)) return 3;
+            const auto coldEnd = std::chrono::steady_clock::now();
+            if (!motioncam::jpegEncodeFullyVulkan(
+                    pixels.data(), width, height, channels, bits,
+                    &warm, &warmBytes)) return 4;
+            const auto warmEnd = std::chrono::steady_clock::now();
+            const bool equal = cpuBytes == coldBytes && cpuBytes == warmBytes &&
+                std::memcmp(cpu, cold, cpuBytes) == 0 &&
+                std::memcmp(cpu, warm, cpuBytes) == 0;
+            std::fprintf(stderr,
+                "GPU JPEG benchmark: channels=%d bits=%d pixels=%zu bytes=%d "
+                "cpu_ms=%.3f gpu_first_ms=%.3f gpu_warm_ms=%.3f byte_equal=%d\n",
+                channels, bits, pixels.size(), cpuBytes,
+                std::chrono::duration<double, std::milli>(cpuEnd - start).count(),
+                std::chrono::duration<double, std::milli>(coldEnd - cpuEnd).count(),
+                std::chrono::duration<double, std::milli>(warmEnd - coldEnd).count(),
+                equal);
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+            if (channels == 3) {
+                auto &context = motioncam::jpegContext();
+                if (!context.init()) return 6;
+                const pl_gpu gpu = context.vulkan->gpu;
+                const pl_fmt format = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+                                                  PL_FMT_CAP_SAMPLEABLE);
+                if (!format) return 7;
+                std::vector<uint16_t> rgba(static_cast<size_t>(width) * height * 4);
+                for (size_t pixel = 0; pixel < pixels.size() / 3; ++pixel)
+                    for (int component = 0; component < 3; ++component)
+                        rgba[pixel * 4 + component] = pixels[pixel * 3 + component];
+                pl_tex texture = nullptr;
+                pl_tex_params params{};
+                params.w = width;
+                params.h = height;
+                params.format = format;
+                params.sampleable = true;
+                params.host_writable = true;
+                if (!pl_tex_recreate(gpu, &texture, &params)) return 8;
+                pl_tex_transfer_params transfer{};
+                transfer.tex = texture;
+                transfer.ptr = rgba.data();
+                transfer.row_pitch = size_t(width) * 4u * sizeof(uint16_t);
+                if (!pl_tex_upload(gpu, &transfer)) return 9;
+                uint8_t *textureCold = nullptr, *textureWarm = nullptr;
+                int textureColdBytes = 0, textureWarmBytes = 0;
+                const auto textureStart = std::chrono::steady_clock::now();
+                if (!motioncam::jpegEncodeFullyVulkanTexture(
+                        gpu, texture, width, height, 3, bits,
+                        &textureCold, &textureColdBytes)) return 10;
+                const auto textureColdEnd = std::chrono::steady_clock::now();
+                if (!motioncam::jpegEncodeFullyVulkanTexture(
+                        gpu, texture, width, height, 3, bits,
+                        &textureWarm, &textureWarmBytes)) return 11;
+                const auto textureWarmEnd = std::chrono::steady_clock::now();
+                const bool textureEqual = textureColdBytes == cpuBytes &&
+                    textureWarmBytes == cpuBytes &&
+                    std::memcmp(textureCold, cpu, cpuBytes) == 0 &&
+                    std::memcmp(textureWarm, cpu, cpuBytes) == 0;
+                std::fprintf(stderr,
+                    "GPU RGB texture JPEG benchmark: first_ms=%.3f warm_ms=%.3f "
+                    "byte_equal=%d\n",
+                    std::chrono::duration<double, std::milli>(
+                        textureColdEnd - textureStart).count(),
+                    std::chrono::duration<double, std::milli>(
+                        textureWarmEnd - textureColdEnd).count(), textureEqual);
+                std::free(textureCold);
+                std::free(textureWarm);
+                motioncam::releaseVulkanJpegFullEncodeDevice(gpu);
+                pl_tex_destroy(gpu, &texture);
+                if (!textureEqual) return 12;
+
+                auto uncompressedDng = makeDng(
+                    0, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0,
+                    width, height);
+                const size_t stripOffset = tagPayload(uncompressedDng, 273).first;
+                if (stripOffset > uncompressedDng.size() ||
+                    pixels.size() * sizeof(uint16_t) >
+                        uncompressedDng.size() - stripOffset) return 13;
+                std::memcpy(uncompressedDng.data() + stripOffset,
+                            pixels.data(), pixels.size() * sizeof(uint16_t));
+                auto cpuDng = uncompressedDng;
+#ifdef _WIN32
+                _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "1");
+#else
+                setenv("MOTIONCAM_GPU_JPEG_DISABLE", "1", 1);
+#endif
+                const bool cpuDngOk = motioncam::DNGDecoder::compressLosslessJPEG(
+                    cpuDng);
+#ifdef _WIN32
+                _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "");
+#else
+                unsetenv("MOTIONCAM_GPU_JPEG_DISABLE");
+#endif
+                if (!cpuDngOk) return 14;
+                auto ownedDng = uncompressedDng;
+#ifdef _WIN32
+                _putenv_s("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE", "1");
+#else
+                setenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE", "1", 1);
+#endif
+                const auto ownedStart = std::chrono::steady_clock::now();
+                const bool ownedOk = motioncam::DNGDecoder::compressLosslessJPEG(
+                    ownedDng);
+                const auto ownedEnd = std::chrono::steady_clock::now();
+#ifdef _WIN32
+                _putenv_s("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE", "");
+#else
+                unsetenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE");
+#endif
+                if (!ownedOk) return 15;
+                auto gpuDng = uncompressedDng;
+                const auto dngStart = std::chrono::steady_clock::now();
+                const bool gpuDngOk = motioncam::DNGDecoder::compressLosslessJPEG(
+                    gpuDng);
+                const auto dngEnd = std::chrono::steady_clock::now();
+                motioncam::DecodedDNGImage decodedDng;
+                const bool pixelEqual = gpuDngOk &&
+                    motioncam::DNGDecoder::decodeImageBorrowed(
+                        gpuDng, decodedDng, false, false) &&
+                    decodedDng.samples == pixels;
+                const bool dngEqual = gpuDngOk && gpuDng == cpuDng &&
+                    gpuDng == ownedDng;
+                std::fprintf(stderr,
+                    "GPU RGB DNG borrowed benchmark: owned_ms=%.3f "
+                    "borrowed_ms=%.3f bytes=%zu "
+                    "byte_equal=%d pixel_equal=%d\n",
+                    std::chrono::duration<double, std::milli>(
+                        ownedEnd - ownedStart).count(),
+                    std::chrono::duration<double, std::milli>(
+                        dngEnd - dngStart).count(), gpuDng.size(),
+                    dngEqual, pixelEqual);
+                if (!dngEqual || !pixelEqual) return 16;
+            }
+#endif
+            std::free(cpu);
+            std::free(cold);
+            std::free(warm);
+            if (!equal) return 5;
+        }
+        return 0;
+    }
+    if ((argc == 3 || argc == 4) &&
+        (std::strcmp(argv[1], "--reencode") == 0 ||
+                      std::strcmp(argv[1], "--reencode-tiled") == 0)) {
+        const bool tiled = std::strcmp(argv[1], "--reencode-tiled") == 0;
+        std::ifstream file(argv[2], std::ios::binary);
+        if (!file) return 2;
+        std::vector<uint8_t> input((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+        if (!motioncam::DNGDecoder::ensureUncompressed(input)) return 3;
+        auto cpu = input, gpu = input, warmGpu = input;
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "1");
+#else
+        setenv("MOTIONCAM_GPU_JPEG_DISABLE", "1", 1);
+#endif
+        const auto started = std::chrono::steady_clock::now();
+        if (!motioncam::DNGDecoder::compressLosslessJPEG(cpu)) return 4;
+        const auto cpuEnd = std::chrono::steady_clock::now();
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "");
+        _putenv_s("MOTIONCAM_JPEG_ENCODE_PROFILE", "1");
+        if (tiled) _putenv_s("MOTIONCAM_JPEG_TILED", "1");
+#else
+        unsetenv("MOTIONCAM_GPU_JPEG_DISABLE");
+        setenv("MOTIONCAM_JPEG_ENCODE_PROFILE", "1", 1);
+        if (tiled) setenv("MOTIONCAM_JPEG_TILED", "1", 1);
+#endif
+        if (!motioncam::DNGDecoder::compressLosslessJPEG(gpu)) return 5;
+        const auto gpuEnd = std::chrono::steady_clock::now();
+        if (!motioncam::DNGDecoder::compressLosslessJPEG(warmGpu)) return 6;
+        const auto warmEnd = std::chrono::steady_clock::now();
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_JPEG_ENCODE_PROFILE", "");
+        if (tiled) _putenv_s("MOTIONCAM_JPEG_TILED", "");
+#else
+        unsetenv("MOTIONCAM_JPEG_ENCODE_PROFILE");
+        if (tiled) unsetenv("MOTIONCAM_JPEG_TILED");
+#endif
+        const bool byteEqual = cpu == gpu && cpu == warmGpu;
+        bool equal = byteEqual;
+        double cpuDecodeMs = 0, tiledDecodeMs = 0;
+        if (tiled) {
+            motioncam::DecodedDNGImage cpuPixels, tiledPixels;
+            const auto decodeStarted = std::chrono::steady_clock::now();
+            if (!motioncam::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels,
+                                                            false, false)) return 8;
+            const auto cpuDecodeEnd = std::chrono::steady_clock::now();
+            if (!motioncam::DNGDecoder::decodeImageBorrowed(gpu, tiledPixels,
+                                                            false, false)) return 9;
+            const auto tiledDecodeEnd = std::chrono::steady_clock::now();
+            cpuDecodeMs = std::chrono::duration<double, std::milli>(
+                cpuDecodeEnd - decodeStarted).count();
+            tiledDecodeMs = std::chrono::duration<double, std::milli>(
+                tiledDecodeEnd - cpuDecodeEnd).count();
+            equal = cpuPixels.samples == tiledPixels.samples && gpu == warmGpu;
+        } else if (!byteEqual) {
+            motioncam::DecodedDNGImage cpuPixels, gpuPixels, warmPixels;
+            if (!motioncam::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels,
+                                                            false, false) ||
+                !motioncam::DNGDecoder::decodeImageBorrowed(gpu, gpuPixels,
+                                                            false, false) ||
+                !motioncam::DNGDecoder::decodeImageBorrowed(warmGpu, warmPixels,
+                                                            false, false)) return 8;
+            equal = cpuPixels.samples == gpuPixels.samples &&
+                    cpuPixels.samples == warmPixels.samples;
+        }
+        std::fprintf(stderr, "DNG reencode benchmark: tiled=%d cpu_ms=%.2f gpu_first_ms=%.2f gpu_warm_ms=%.2f cpu_decode_ms=%.2f tiled_decode_ms=%.2f byte_equal=%d pixel_equal=%d\n",
+                     tiled,
+                     std::chrono::duration<double, std::milli>(cpuEnd - started).count(),
+                     std::chrono::duration<double, std::milli>(gpuEnd - cpuEnd).count(),
+                     std::chrono::duration<double, std::milli>(warmEnd - gpuEnd).count(),
+                     cpuDecodeMs, tiledDecodeMs, byteEqual, equal);
+        if (equal && argc == 4) {
+            std::ofstream saved(argv[3], std::ios::binary);
+            saved.write(reinterpret_cast<const char*>(gpu.data()), gpu.size());
+            if (!saved) return 10;
+        }
+        return equal ? 0 : 7;
+    }
+    if (argc == 2) {
+        std::ifstream file(argv[1], std::ios::binary);
+        if (!file) return 2;
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+        motioncam::DecodedDNGImage decoded;
+        const auto started = std::chrono::steady_clock::now();
+        const bool ok = motioncam::DNGDecoder::decodeImageBorrowed(
+            bytes, decoded, false, false);
+        const auto finished = std::chrono::steady_clock::now();
+        uint64_t hash = 1469598103934665603ull;
+        for (uint16_t sample : decoded.samples) {
+            hash ^= sample;
+            hash *= 1099511628211ull;
+        }
+        std::fprintf(stderr, "DNG decode benchmark: ok=%d width=%u height=%u channels=%u ms=%.2f hash=%016llx\n",
+                     ok, decoded.layout.width, decoded.layout.height,
+                     decoded.layout.samplesPerPixel,
+                     std::chrono::duration<double, std::milli>(finished - started).count(),
+                     static_cast<unsigned long long>(hash));
+        return ok ? 0 : 1;
+    }
+    // A large strip exercises the GPU's sampled histogram path. The encoded
+    // stream must match liblj92's own scan, including predictor selection.
+    {
+        constexpr int width = 1023, height = 1024;
+        std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
+        uint32_t random = 0x12345678u;
+        for (auto &pixel : pixels) {
+            random = random * 1664525u + 1013904223u;
+            pixel = static_cast<uint16_t>((random >> 10) ^ (random >> 22));
+        }
+        for (int bits : {16, 12}) {
+            if (bits == 12)
+                for (auto &pixel : pixels)
+                    pixel &= 0x0fff;
+            int predictor = 0, histogram[18] = {};
+            std::vector<int16_t> residuals;
+            const auto gpuStart = std::chrono::steady_clock::now();
+            if (motioncam::jpegPredictorHistogramVulkan(pixels.data(), width,
+                                                        height, 1, bits,
+                                                        predictor, histogram,
+                                                        &residuals)) {
+                const auto gpuScanEnd = std::chrono::steady_clock::now();
+                int warmPredictor = 0, warmHistogram[18] = {};
+                std::vector<int16_t> warmResiduals;
+                const auto warmStart = std::chrono::steady_clock::now();
+                assert(motioncam::jpegPredictorHistogramVulkan(
+                    pixels.data(), width, height, 1, bits, warmPredictor,
+                    warmHistogram, &warmResiduals));
+                const auto warmEnd = std::chrono::steady_clock::now();
+                assert(warmPredictor == predictor);
+                assert(std::equal(std::begin(histogram), std::end(histogram),
+                                  std::begin(warmHistogram)));
+                assert(residuals == warmResiduals);
+                assert(residuals.size() == pixels.size());
+                uint8_t *cpu = nullptr, *gpu = nullptr;
+                bool gpuEntropyUsed = false;
+                int cpuBytes = 0, gpuBytes = 0;
+                const auto cpuStart = std::chrono::steady_clock::now();
+                assert(lj92_encode(pixels.data(), width, height, bits, 1, width,
+                                   0, nullptr, 0, &cpu,
+                                   &cpuBytes) == LJ92_ERROR_NONE);
+                const auto cpuEnd = std::chrono::steady_clock::now();
+                assert(lj92_encode_with_entropy_writer(pixels.data(), width,
+                                                  height, bits, 1, width, 0,
+                                                  predictor, histogram,
+                                                  residuals.data(),
+                                                  verifiedGpuEntropy,
+                                                  &gpuEntropyUsed, &gpu,
+                                                  &gpuBytes) ==
+                       LJ92_ERROR_NONE);
+                const auto gpuEnd = std::chrono::steady_clock::now();
+                std::fprintf(
+                    stderr,
+                    "Vulkan JPEG predictor validation: bits=%d "
+                    "cold_gpu_scan_ms=%.2f "
+                    "warm_gpu_scan_ms=%.2f cpu_encode_ms=%.2f "
+                    "residual_entropy_ms=%.2f\n",
+                    bits,
+                    std::chrono::duration<double, std::milli>(gpuScanEnd -
+                                                              gpuStart)
+                        .count(),
+                    std::chrono::duration<double, std::milli>(warmEnd -
+                                                              warmStart)
+                        .count(),
+                    std::chrono::duration<double, std::milli>(cpuEnd - cpuStart)
+                        .count(),
+                    std::chrono::duration<double, std::milli>(gpuEnd - cpuEnd)
+                        .count());
+                assert(cpuBytes == gpuBytes);
+                assert(gpuEntropyUsed);
+                assert(std::memcmp(cpu, gpu, cpuBytes) == 0);
+                uint8_t* fullGpu = nullptr;
+                int fullGpuBytes = 0;
+                assert(motioncam::jpegEncodeFullyVulkan(
+                    pixels.data(), width, height, 1, bits,
+                    &fullGpu, &fullGpuBytes));
+                assert(fullGpuBytes == cpuBytes &&
+                       std::memcmp(cpu, fullGpu, cpuBytes) == 0);
+                free(fullGpu);
+                bool directUsed = false;
+                motioncam::JpegEntropyImageSource source{
+                    pixels.data(), width, height, 1,
+                    static_cast<uint32_t>(bits),
+                    static_cast<uint32_t>(predictor), &directUsed
+                };
+                uint8_t* direct = nullptr;
+                int directBytes = 0;
+                assert(lj92_encode_with_entropy_writer(
+                    pixels.data(), width, height, bits, 1, width, 0,
+                    predictor, histogram, nullptr, motioncam::jpegEntropyVulkan,
+                    &source, &direct, &directBytes) == LJ92_ERROR_NONE);
+                assert(directUsed && directBytes == cpuBytes &&
+                       std::memcmp(cpu, direct, cpuBytes) == 0);
+                free(direct);
+                // A stale GPU image must fall back to the CPU predictor.
+                source.pixels = pixels.data() + 1;
+                directUsed = true;
+                direct = nullptr;
+                directBytes = 0;
+                assert(lj92_encode_with_entropy_writer(
+                    pixels.data(), width, height, bits, 1, width, 0,
+                    predictor, histogram, nullptr, motioncam::jpegEntropyVulkan,
+                    &source, &direct, &directBytes) == LJ92_ERROR_NONE);
+                assert(!directUsed && directBytes == cpuBytes &&
+                       std::memcmp(cpu, direct, cpuBytes) == 0);
+                free(direct);
+                free(cpu);
+                free(gpu);
+            } else {
+                std::fprintf(stderr,
+                             "Vulkan JPEG predictor validation: unavailable\n");
+            }
+        }
+        // Interleaved RGB uses independent neighbors for each component.
+        std::vector<uint16_t> rgb(static_cast<size_t>(width) * height * 3);
+        for (auto &pixel : rgb) {
+            random = random * 1664525u + 1013904223u;
+            pixel = static_cast<uint16_t>((random >> 12) & 0x0fff);
+        }
+        int predictor = 0, histogram[18] = {};
+        std::vector<int16_t> residuals;
+        if (motioncam::jpegPredictorHistogramVulkan(
+                rgb.data(), width, height, 3, 12, predictor, histogram,
+                &residuals)) {
+            uint8_t *cpu = nullptr, *gpu = nullptr;
+            bool gpuEntropyUsed = false;
+            int cpuBytes = 0, gpuBytes = 0;
+            assert(lj92_encode(rgb.data(), width, height, 12, 3, width * 3, 0,
+                               nullptr, 0, &cpu, &cpuBytes) == LJ92_ERROR_NONE);
+            assert(residuals.size() == rgb.size());
+            assert(lj92_encode_with_entropy_writer(rgb.data(), width, height, 12,
+                                              3, width * 3, 0, predictor,
+                                              histogram, residuals.data(),
+                                              verifiedGpuEntropy,
+                                              &gpuEntropyUsed,
+                                              &gpu, &gpuBytes) == LJ92_ERROR_NONE);
+            assert(cpuBytes == gpuBytes &&
+                   std::memcmp(cpu, gpu, cpuBytes) == 0);
+            assert(gpuEntropyUsed);
+            uint8_t* fullGpu = nullptr;
+            int fullGpuBytes = 0;
+            assert(motioncam::jpegEncodeFullyVulkan(
+                rgb.data(), width, height, 3, 12,
+                &fullGpu, &fullGpuBytes));
+            assert(fullGpuBytes == cpuBytes &&
+                   std::memcmp(cpu, fullGpu, cpuBytes) == 0);
+            free(fullGpu);
+            bool directUsed = false;
+            motioncam::JpegEntropyImageSource source{
+                rgb.data(), width, height, 3, 12,
+                static_cast<uint32_t>(predictor), &directUsed
+            };
+            uint8_t* direct = nullptr;
+            int directBytes = 0;
+            assert(lj92_encode_with_entropy_writer(
+                rgb.data(), width, height, 12, 3, width * 3, 0,
+                predictor, histogram, nullptr, motioncam::jpegEntropyVulkan,
+                &source, &direct, &directBytes) == LJ92_ERROR_NONE);
+            assert(directUsed && directBytes == cpuBytes &&
+                   std::memcmp(cpu, direct, cpuBytes) == 0);
+            free(direct);
+            free(cpu);
+            free(gpu);
+        }
+    }
+    // Exercise the DNG entry point above its GPU threshold, then verify a
+    // complete decode through the TIFF/JPEG path.
+    {
+        constexpr uint32_t width = 2048, height = 2000;
+        std::vector<uint16_t> pixels(static_cast<size_t>(width) * height);
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                pixels[static_cast<size_t>(y) * width + x] =
+                    static_cast<uint16_t>((x * 17u + y * 29u) & 4095u);
+        tinydngwriter::DNGImage image;
+        image.SetBigEndian(false);
+        const unsigned short bits = 16;
+        assert(image.SetImageWidth(width) && image.SetImageLength(height));
+        assert(image.SetRowsPerStrip(height) && image.SetSamplesPerPixel(1));
+        assert(image.SetBitsPerSample(1, &bits));
+        assert(image.SetCompression(tinydngwriter::COMPRESSION_NONE));
+        assert(image.SetPhotometric(tinydngwriter::PHOTOMETRIC_CFA));
+        assert(image.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+        assert(image.SetWhiteLevel(4095));
+        assert(image.SetImageData(reinterpret_cast<const uint8_t*>(pixels.data()),
+                                  pixels.size() * sizeof(uint16_t)));
+        tinydngwriter::DNGWriter writer(false);
+        assert(writer.AddImage(&image));
+        std::ostringstream output(std::ios::binary);
+        std::string error;
+        assert(writer.WriteToFile(output, &error));
+        const auto bytes = output.str();
+        std::vector<uint8_t> dng(bytes.begin(), bytes.end());
+        auto tiled = dng;
+        assert(motioncam::DNGDecoder::compressLosslessJPEG(dng));
+        motioncam::DecodedDNGImage decoded;
+        assert(motioncam::DNGDecoder::decodeImage(dng, decoded));
+        assert(decoded.samples == pixels);
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_JPEG_TILED", "1");
+#else
+        setenv("MOTIONCAM_JPEG_TILED", "1", 1);
+#endif
+        assert(motioncam::DNGDecoder::compressLosslessJPEG(tiled));
+#ifdef _WIN32
+        _putenv_s("MOTIONCAM_JPEG_TILED", "");
+#else
+        unsetenv("MOTIONCAM_JPEG_TILED");
+#endif
+        assert(tagValue(tiled, 324).count >= 2);
+        motioncam::DecodedDNGImage tiledDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(tiled, tiledDecoded));
+        assert(tiledDecoded.samples == pixels);
+    }
     assert((motioncam::vfs::inferLegacyGainMapSensorResolution(1920, 1080, 1920, 1080) ==
             std::array<int, 2>{2048, 1536}));
     assert((motioncam::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 3840, 2160) ==
@@ -604,6 +1100,161 @@ int main() {
     assert(motioncam::DNGDecoder::decodeImageBorrowed(
         compressedGainCpu, uncompressedGainImage, false, false));
     assert(compressedGainImage.samples.size() == uncompressedGainImage.samples.size());
+    // The shared finalizer must attach a terminal GPU JPEG after metadata work
+    // without reading an intermediate uncompressed strip back to the CPU.
+    auto gpuFinalDng = makeDng(32768, 0.01f, 100, 0.0f,
+                               {1, 1, 1}, 0, 1024, 512);
+    auto referenceFinalDng = gpuFinalDng;
+    motioncam::RenderSettings gpuFinalSettings;
+    gpuFinalSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+    gpuFinalSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
+    gpuFinalSettings.jxlDistance = -1.0f;
+    std::vector<uint8_t> preparedJpeg;
+    motioncam::vfs::DngPixelPipelineOptions gpuFinalPixels;
+    gpuFinalPixels.gpuJpeg = &preparedJpeg;
+    gpuFinalPixels.inputQuantizationWhite = 65535;
+    motioncam::vfs::processDngPixels(
+        gpuFinalDng, gpuFinalSettings, gpuFinalPixels);
+    if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"))
+        assert(!preparedJpeg.empty());
+    motioncam::vfs::DngPixelPipelineOptions referenceFinalPixels;
+    referenceFinalPixels.inputQuantizationWhite = 65535;
+    motioncam::vfs::processDngPixels(
+        referenceFinalDng, gpuFinalSettings, referenceFinalPixels);
+    motioncam::vfs::DngFinalizeOptions gpuFinalOptions;
+    gpuFinalOptions.writeTiming = false;
+    gpuFinalOptions.packToWhiteLevel = true;
+    gpuFinalOptions.compression = true;
+    gpuFinalOptions.gpuJpeg = &preparedJpeg;
+    motioncam::vfs::finalizeDng(
+        gpuFinalDng, gpuFinalSettings, gpuFinalOptions);
+    gpuFinalOptions.gpuJpeg = nullptr;
+    motioncam::vfs::finalizeDng(
+        referenceFinalDng, gpuFinalSettings, gpuFinalOptions);
+    motioncam::DecodedDNGImage gpuFinalDecoded, referenceFinalDecoded;
+    assert(motioncam::DNGDecoder::decodeImage(gpuFinalDng, gpuFinalDecoded));
+    assert(motioncam::DNGDecoder::decodeImage(
+        referenceFinalDng, referenceFinalDecoded));
+    assert(gpuFinalDecoded.samples == referenceFinalDecoded.samples);
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+    // DirectLog's terminal decode texture can supply JPEG without first
+    // materializing the placeholder DNG strip.
+    {
+        constexpr uint32_t textureWidth = 1024, textureHeight = 512;
+        std::vector<uint16_t> rgb(static_cast<size_t>(textureWidth) *
+                                  textureHeight * 3u);
+        std::vector<uint16_t> rgba(static_cast<size_t>(textureWidth) *
+                                   textureHeight * 4u);
+        for (size_t pixel = 0; pixel < rgb.size() / 3u; ++pixel)
+            for (uint32_t channel = 0; channel < 3u; ++channel) {
+                const uint16_t value = static_cast<uint16_t>(
+                    (pixel * 31u + channel * 911u) & 65535u);
+                rgb[pixel * 3u + channel] = value;
+                rgba[pixel * 4u + channel] = value;
+            }
+        auto& context = motioncam::jpegContext();
+        const bool textureGpuReady = context.init();
+        if (!textureGpuReady)
+            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
+        if (textureGpuReady) {
+        const pl_gpu gpu = context.vulkan->gpu;
+        const pl_fmt format = pl_find_fmt(
+            gpu, PL_FMT_UNORM, 4, 16, 16, PL_FMT_CAP_SAMPLEABLE);
+        assert(format);
+        pl_tex texture = nullptr;
+        pl_tex_params textureParams{};
+        textureParams.w = textureWidth;
+        textureParams.h = textureHeight;
+        textureParams.format = format;
+        textureParams.sampleable = true;
+        textureParams.host_writable = true;
+        assert(pl_tex_recreate(gpu, &texture, &textureParams));
+        pl_tex_transfer_params upload{};
+        upload.tex = texture;
+        upload.ptr = rgba.data();
+        upload.row_pitch = size_t(textureWidth) * 4u * sizeof(uint16_t);
+        assert(pl_tex_upload(gpu, &upload));
+        motioncam::VulkanGainBakeTextureSource source;
+        source.gpu = gpu;
+        source.texture = texture;
+        size_t textureDownloads = 0;
+        source.download = [&rgb, &textureDownloads](uint16_t* output, size_t count) {
+            ++textureDownloads;
+            if (count != rgb.size()) return false;
+            std::copy(rgb.begin(), rgb.end(), output);
+            return true;
+        };
+        auto textureDng = makeDng(0, 0.01f, 100, 0.0f,
+                                  {1, 1, 1}, 0,
+                                  textureWidth, textureHeight);
+        std::vector<uint8_t> textureJpeg;
+        motioncam::vfs::DngPixelPipelineOptions texturePixels;
+        texturePixels.textureSource = &source;
+        texturePixels.gpuJpeg = &textureJpeg;
+        motioncam::RenderSettings textureSettings;
+        textureSettings.jxlDistance = -1.0f;
+        motioncam::vfs::processDngPixels(
+            textureDng, textureSettings, texturePixels);
+        if (!textureJpeg.empty()) assert(textureDownloads == 0);
+        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"))
+            assert(!textureJpeg.empty());
+        motioncam::vfs::DngFinalizeOptions textureFinalize;
+        textureFinalize.writeTiming = false;
+        textureFinalize.packToWhiteLevel = true;
+        textureFinalize.compression = true;
+        textureFinalize.gpuJpeg = &textureJpeg;
+        motioncam::vfs::finalizeDng(
+            textureDng, textureSettings, textureFinalize);
+        motioncam::DecodedDNGImage textureDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(
+            textureDng, textureDecoded));
+        assert(textureDecoded.samples == rgb);
+
+        auto textureLogDng = makeDng(0, 0.01f, 100, 0.0f,
+                                     {1, 1, 1}, 0,
+                                     textureWidth, textureHeight);
+        auto referenceLogDng = textureLogDng;
+        assert(motioncam::DNGDecoder::fillUncompressedImageStrip(
+            referenceLogDng, [&rgb](uint16_t* output, size_t count) {
+                if (count != rgb.size()) return false;
+                std::copy(rgb.begin(), rgb.end(), output);
+                return true;
+            }));
+        auto textureLogSettings = textureSettings;
+        textureLogSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+        textureLogSettings.logTransform =
+            motioncam::LogTransformMode::ReduceBy4Bit;
+        std::vector<uint8_t> textureLogJpeg;
+        auto textureLogPixels = texturePixels;
+        textureLogPixels.gpuJpeg = &textureLogJpeg;
+        textureLogPixels.inputQuantizationWhite = 65535;
+        const size_t downloadsBeforeLog = textureDownloads;
+        motioncam::vfs::processDngPixels(
+            textureLogDng, textureLogSettings, textureLogPixels);
+        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST")) {
+            assert(!textureLogJpeg.empty());
+            assert(textureDownloads == downloadsBeforeLog);
+        }
+        motioncam::vfs::DngPixelPipelineOptions referenceLogPixels;
+        referenceLogPixels.inputQuantizationWhite = 65535;
+        motioncam::vfs::processDngPixels(
+            referenceLogDng, textureLogSettings, referenceLogPixels);
+        textureFinalize.gpuJpeg = &textureLogJpeg;
+        motioncam::vfs::finalizeDng(
+            textureLogDng, textureLogSettings, textureFinalize);
+        textureFinalize.gpuJpeg = nullptr;
+        motioncam::vfs::finalizeDng(
+            referenceLogDng, textureLogSettings, textureFinalize);
+        motioncam::DecodedDNGImage textureLogDecoded, referenceLogDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(
+            textureLogDng, textureLogDecoded));
+        assert(motioncam::DNGDecoder::decodeImage(
+            referenceLogDng, referenceLogDecoded));
+        assert(textureLogDecoded.samples == referenceLogDecoded.samples);
+        pl_tex_destroy(gpu, &texture);
+        }
+    }
+#endif
     int largestDifference = 0;
     for (size_t i = 0; i < compressedGainImage.samples.size(); ++i)
         largestDifference = std::max(largestDifference,

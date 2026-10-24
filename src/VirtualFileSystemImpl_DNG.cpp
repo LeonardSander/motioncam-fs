@@ -1089,6 +1089,10 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
             inputQuantizationWhite = (uint32_t{1} << inputBits) - 1;
     }
     vfs::DngPixelPipelineOptions pixels;
+    std::vector<uint8_t> gpuJpeg;
+    if (jpegCompression && mConfig.jxlDistance < 0.0f &&
+        !(mConfig.options & RENDER_OPT_BAKE_ISO))
+        pixels.gpuJpeg = &gpuJpeg;
     pixels.cfaRepeatSize = frameCfaSize;
     pixels.cfaPhase = frameCfaPhase;
     pixels.hasCfa = frameHasCfa;
@@ -1111,6 +1115,7 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         finalize.isoOverlay = resolved.iso;
     finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
     finalize.compression = jpegCompression;
+    finalize.gpuJpeg = pixels.gpuJpeg;
     finalize.gyroflowLensProfile = mGyroflowLensProfile && !mConfig.cameraNativeStaging
         ? &*mGyroflowLensProfile : nullptr;
     finalize.sourceName = "source";
