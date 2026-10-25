@@ -899,9 +899,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         attachSidecarGainMapOpcodes(timed, frameIt->second);
         vfs::DngPixelPipelineOptions pixels;
         std::vector<uint8_t> gpuJpeg;
-        if (jpegCompression && frameSettings.jxlDistance < 0.0f &&
-            !(frameSettings.options & RENDER_OPT_BAKE_ISO))
-            pixels.gpuJpeg = &gpuJpeg;
+        vfs::GpuJpegTiles gpuJpegTiles;
+        if (jpegCompression && isLosslessJpeg92(frameSettings.jxlDistance) &&
+            !(frameSettings.options & RENDER_OPT_BAKE_ISO)) {
+            if (frameSettings.jxlDistance == DNG_COMPRESSION_JPEG92_STRIP)
+                pixels.gpuJpeg = &gpuJpeg;
+            else
+                pixels.gpuJpegTiles = &gpuJpegTiles;
+        }
         pixels.cfaRepeatSize = earlyProxy ? 2 : nativePlan.cfaRepeatSize;
         pixels.cfaPhase = cfaColorsFromPhase(effectiveCfaArrangement(
             frameSettings, mCalibration, cameraConfig.sensorArrangement));
@@ -927,6 +932,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         finalize.packToWhiteLevel = !frameSettings.cameraNativeStaging;
         finalize.compression = jpegCompression;
         finalize.gpuJpeg = pixels.gpuJpeg;
+        finalize.gpuJpegTiles = pixels.gpuJpegTiles;
         finalize.gyroflowLensProfile = mGyroflowLensProfile && !mSettings.cameraNativeStaging
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "MCRAW";

@@ -62,6 +62,7 @@ set(PROJECT_SOURCES
         src/VulkanJpegPredictor.cpp
         src/VulkanJpegEntropy.cpp
         src/VulkanJpegFullEncode.cpp
+        src/VulkanJpegDecode.cpp
         src/VulkanGalleryPreview.cpp
         shaders/vulkan_gain_bake.comp
         shaders/vulkan_cfa_gain_bake.comp
@@ -676,6 +677,7 @@ if(BUILD_TESTING)
         src/VulkanJpegPredictor.cpp
         src/VulkanJpegEntropy.cpp
         src/VulkanJpegFullEncode.cpp
+        src/VulkanJpegDecode.cpp
         src/VulkanGalleryPreview.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
@@ -705,6 +707,7 @@ if(BUILD_TESTING)
         src/VulkanJpegPredictor.cpp
         src/VulkanJpegEntropy.cpp
         src/VulkanJpegFullEncode.cpp
+        src/VulkanJpegDecode.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
@@ -727,6 +730,7 @@ if(BUILD_TESTING)
         src/VulkanJpegPredictor.cpp
         src/VulkanJpegEntropy.cpp
         src/VulkanJpegFullEncode.cpp
+        src/VulkanJpegDecode.cpp
         src/VulkanGalleryPreview.cpp
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp

@@ -21,6 +21,10 @@ struct VulkanGainBakeTextureSource {
     std::function<bool(uint16_t*, size_t)> download;
     std::function<bool(uint16_t*, size_t)> recoverCpu;
 };
+struct VulkanGainBakeBufferSource {
+    const void* gpu = nullptr;
+    const void* buffer = nullptr;
+};
 struct VulkanPackedImage {
     const void* gpu = nullptr;
     const void* buffer = nullptr;
@@ -37,6 +41,7 @@ struct VulkanGainBakeParams {
     const std::vector<uint16_t>* linearization = nullptr;
     const std::vector<float>* logLookup = nullptr;
     const VulkanGainBakeTextureSource* textureSource = nullptr;
+    const VulkanGainBakeBufferSource* bufferSource = nullptr;
     // Called while the packed GPU output remains live. A true result means
     // the caller has consumed it and no uncompressed readback is needed.
     std::function<bool(const VulkanPackedImage&)> consumePackedOutput;
@@ -49,6 +54,7 @@ struct VulkanGainBakeParams {
 // Begin Vulkan device and shader setup while the source prepares its first frame.
 void warmVulkanGainBake();
 void releaseVulkanGainBakeTextureDevice(const void* gpu);
+void releaseVulkanGainBakeBufferDevice(const void* gpu);
 // Source is an unpacked 16-bit DNG strip. Output is packed per DNG row.
 // On failure the caller must restore a texture-backed source before CPU bake;
 // readback may have written part of the destination.

@@ -51,6 +51,7 @@ struct Device {
     pl_vulkan vk = nullptr;
     pl_gpu gpu = nullptr;
     bool textureSource = false;
+    bool borrowedSource = false;
     bool mappedOutput = false;
     bool splitOutput = false;
     bool mappedReadbackUnavailable = false;
@@ -119,12 +120,15 @@ struct Device {
         }
         return pass && cfaPass;
     }
-    bool initExternal(pl_gpu externalGpu) {
+    bool initExternal(pl_gpu externalGpu, bool sampledTexture = true) {
         if (!externalGpu || !externalGpu->glsl.compute) return false;
         gpu = externalGpu;
-        textureSource = true;
+        textureSource = sampledTexture;
+        borrowedSource = true;
         pl_desc desc[4] = {};
-        desc[0] = {"sourceImage", PL_DESC_SAMPLED_TEX, 0, PL_DESC_ACCESS_READONLY};
+        desc[0] = sampledTexture
+            ? pl_desc{"sourceImage", PL_DESC_SAMPLED_TEX, 0, PL_DESC_ACCESS_READONLY}
+            : pl_desc{"src", PL_DESC_BUF_STORAGE, 0, PL_DESC_ACCESS_READONLY};
         desc[1] = {"gainMap", PL_DESC_BUF_STORAGE, 1, PL_DESC_ACCESS_READONLY};
         desc[2] = {"dst", PL_DESC_BUF_STORAGE, 2, PL_DESC_ACCESS_WRITEONLY};
         desc[3] = {"linearization", PL_DESC_BUF_STORAGE, 3, PL_DESC_ACCESS_READONLY};
@@ -139,8 +143,10 @@ struct Device {
                     "#define SOURCE_TEXTURE 1\n" + (newline + 1)
                 : std::string();
         };
-        std::string rgb = shaderSource(vulkanGainBakeShader);
-        std::string cfa = shaderSource(vulkanCfaGainBakeShader);
+        std::string rgb = sampledTexture ? shaderSource(vulkanGainBakeShader)
+                                         : vulkanGainBakeShader;
+        std::string cfa = sampledTexture ? shaderSource(vulkanCfaGainBakeShader)
+                                         : vulkanCfaGainBakeShader;
         pp.glsl_shader = rgb.c_str();
         pass = pl_pass_create(gpu, &pp);
         pp.glsl_shader = cfa.c_str();
@@ -177,7 +183,7 @@ struct Device {
     bool reserve(size_t sourceBytes, size_t mapBytes, size_t outputBytes,
                  size_t linearizationBytes) {
         const auto max = gpu->limits.max_ssbo_size;
-        if ((!textureSource && sourceBytes > max) || mapBytes > max || outputBytes > max ||
+        if ((!borrowedSource && sourceBytes > max) || mapBytes > max || outputBytes > max ||
             linearizationBytes > max) return false;
         pl_buf_params src = {}, gains = {}, dst = {}, lut = {};
         src.size = sourceBytes;
@@ -263,7 +269,7 @@ struct Device {
             if (!splitOutput && outputStageSecond)
                 pl_buf_destroy(gpu, &outputStageSecond);
         }
-        return (textureSource || (pl_buf_recreate(gpu, &source, &src) &&
+        return (borrowedSource || (pl_buf_recreate(gpu, &source, &src) &&
                                   pl_buf_recreate(gpu, &sourceStage, &srcUpload))) &&
             pl_buf_recreate(gpu, &map, &gains) &&
             (directOutput || pl_buf_recreate(gpu, &output, &dst)) &&
@@ -278,6 +284,7 @@ struct BakeState {
     std::mutex mutex;
     std::unique_ptr<Device> device;
     std::unordered_map<pl_gpu, std::unique_ptr<Device>> textureDevices;
+    std::unordered_map<pl_gpu, std::unique_ptr<Device>> bufferDevices;
     std::once_flag warmOnce;
     std::future<void> warmup;
 };
@@ -306,13 +313,23 @@ void releaseVulkanGainBakeTextureDevice(const void* gpu) {
     state.textureDevices.erase(static_cast<pl_gpu>(gpu));
 }
 
+void releaseVulkanGainBakeBufferDevice(const void* gpu) {
+    auto& state = bakeState();
+    std::lock_guard lock(state.mutex);
+    state.bufferDevices.erase(static_cast<pl_gpu>(gpu));
+}
+
 bool bakeGainVulkan(const uint16_t* source,
                     const VulkanGainBakeParams& params,
                     uint8_t* destination, size_t destinationBytes, bool cfa) {
     const auto& map = params.map;
     const bool genericMaps = !params.maps.empty();
-    const bool externalSource = params.textureSource &&
+    const bool externalTexture = params.textureSource &&
         params.textureSource->gpu && params.textureSource->texture;
+    const bool externalBuffer = params.bufferSource &&
+        params.bufferSource->gpu && params.bufferSource->buffer;
+    const bool externalSource = externalTexture || externalBuffer;
+    if (externalTexture && externalBuffer) return false;
     if (externalSource && std::getenv("MOTIONCAM_TEST_FAIL_VULKAN_GAIN_BAKE"))
         return false;
     if ((!source && !externalSource) || !destination || !params.width || !params.height ||
@@ -355,6 +372,7 @@ bool bakeGainVulkan(const uint16_t* source,
         params.sourceNominalWhite <= 4095u ? 12u :
         params.sourceNominalWhite <= 16383u ? 14u : 16u;
     std::unique_ptr<uint32_t[]> packedSource;
+    if (externalBuffer) sourceBits = 16;
     if (!externalSource && sourceBits < 16) {
         packedSource.reset(new uint32_t[(totalSamples * sourceBits + 31u) / 32u]);
         const uint32_t samplesPerBlock = sourceBits == 14u ? 16u :
@@ -441,20 +459,30 @@ bool bakeGainVulkan(const uint16_t* source,
     }
     const size_t sourceWords = (totalSamples * sourceBits + 31u) / 32u;
     const size_t sourceBytes = sourceWords * sizeof(uint32_t);
+    if (externalBuffer) {
+        const auto buffer = static_cast<pl_buf>(
+            const_cast<void*>(params.bufferSource->buffer));
+        if (!buffer->params.storable || buffer->params.size < sourceBytes)
+            return false;
+    }
     const auto packFinished = std::chrono::steady_clock::now();
     // Mounted reads run on different FUSE workers. Share one Vulkan device
     // instead of allocating a device and full-frame buffers per worker.
     auto& state = bakeState();
     std::lock_guard deviceLock(state.mutex);
     const auto started = std::chrono::steady_clock::now();
-    auto& device = externalSource
+    auto& device = externalTexture
         ? state.textureDevices[static_cast<pl_gpu>(params.textureSource->gpu)]
-        : state.device;
+        : externalBuffer
+            ? state.bufferDevices[static_cast<pl_gpu>(params.bufferSource->gpu)]
+            : state.device;
     if (!device) {
         device = std::make_unique<Device>();
-        if (!(externalSource
+        if (!(externalTexture
                   ? device->initExternal(static_cast<pl_gpu>(params.textureSource->gpu))
-                  : device->init())) { device.reset(); return false; }
+                  : externalBuffer
+                      ? device->initExternal(static_cast<pl_gpu>(params.bufferSource->gpu), false)
+                      : device->init())) { device.reset(); return false; }
     }
     if (genericMaps && !device->ensureMultiPass(cfa)) return false;
     const size_t rowBytes = (rowSamples * params.outputBits + 7) / 8;
@@ -607,8 +635,10 @@ bool bakeGainVulkan(const uint16_t* source,
     }
     const auto uploaded = std::chrono::steady_clock::now();
     pl_desc_binding bindings[4] = {};
-    bindings[0].object = externalSource
-        ? params.textureSource->texture : static_cast<const void*>(device->source);
+    bindings[0].object = externalTexture
+        ? params.textureSource->texture
+        : externalBuffer ? params.bufferSource->buffer
+                         : static_cast<const void*>(device->source);
     bindings[0].sample_mode = PL_TEX_SAMPLE_NEAREST;
     bindings[1].object = device->map;
     bindings[2].object = device->directOutput
@@ -756,6 +786,7 @@ bool bakeCfaGainVulkan(const uint16_t* source,
 namespace motioncam {
 void warmVulkanGainBake() {}
 void releaseVulkanGainBakeTextureDevice(const void*) {}
+void releaseVulkanGainBakeBufferDevice(const void*) {}
 bool bakeRgbGainVulkan(const uint16_t*, const VulkanGainBakeParams&,
                        uint8_t*, size_t) { return false; }
 bool bakeCfaGainVulkan(const uint16_t*, const VulkanGainBakeParams&,

@@ -189,6 +189,11 @@ std::vector<Entry> filterEntries(
 // Common tail of every ingest path once it has produced a valid DNG. Keeping
 // container timing, sample packing, lens metadata and compression here avoids
 // each source subtly inventing its own output order.
+struct GpuJpegTiles {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<std::vector<uint8_t>> bytes;
+};
 struct DngFinalizeOptions {
     float frameRate = 0.0f;
     Timestamp timestamp = 0;
@@ -198,6 +203,7 @@ struct DngFinalizeOptions {
     bool compression = false;
     // Final processed pixels already encoded from a Vulkan output buffer.
     const std::vector<uint8_t>* gpuJpeg = nullptr;
+    const GpuJpegTiles* gpuJpegTiles = nullptr;
     const GyroflowLensProfile* gyroflowLensProfile = nullptr;
     std::string_view sourceName;
 };
@@ -236,6 +242,7 @@ struct DngPixelPipelineOptions {
     bool preferVulkan = true;
     // Populated only when the terminal GPU pixel stage can encode directly.
     std::vector<uint8_t>* gpuJpeg = nullptr;
+    GpuJpegTiles* gpuJpegTiles = nullptr;
 };
 
 size_t projectedDngSize(uint32_t width, uint32_t height, uint32_t channels,

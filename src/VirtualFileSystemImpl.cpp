@@ -131,6 +131,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         const RenderSettings& settings,
         const DngPixelPipelineOptions& options) {
     if (options.gpuJpeg) options.gpuJpeg->clear();
+    if (options.gpuJpegTiles) options.gpuJpegTiles->bytes.clear();
     const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     const auto pipelineStarted = std::chrono::steady_clock::now();
     const std::string source = options.sourceName.empty()
@@ -273,10 +274,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
     // A DirectLog texture with no remaining pixel operation can go straight
     // to JPEG. Metadata edits below still run against the DNG template; the
     // finalizer replaces its placeholder strip with the encoded payload.
-    if (options.gpuJpeg && textureSource &&
+    if ((options.gpuJpeg || options.gpuJpegTiles) && textureSource &&
         !std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
         !std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
-        !std::getenv("MOTIONCAM_JPEG_TILED") &&
         !bakeGain && !debugGainMap &&
         !remosaic && scale == 1 && options.cfaRepeatSize == 2 &&
         !settings.cameraNativeStaging &&
@@ -295,18 +295,36 @@ void processDngPixels(std::vector<uint8_t>& dng,
                 std::lround(metadata.whiteLevel[0]), 1l, 65535l))) == 16 &&
             layout.width && layout.height && layout.bitsPerSample == 16 &&
             layout.samplesPerPixel == channels &&
-            layout.compression == 1 &&
-            jpegEncodeFullyVulkanTextureBorrowed(
-                textureSource->gpu, textureSource->texture,
-                layout.width, layout.height, channels, 16,
-                [&](const uint8_t* bytes, size_t size) {
-                    options.gpuJpeg->assign(bytes, bytes + size);
-                    return true;
-                })) {
+            layout.compression == 1) {
+          bool encoded = false;
+          if (options.gpuJpegTiles) {
+              const auto shape = jpeg92TileShape(channels);
+              if (layout.width % shape.width == 0 &&
+                  layout.height % shape.height == 0 &&
+                  jpegEncodeTiledVulkanTexture(
+                      textureSource->gpu, textureSource->texture,
+                      layout.width, layout.height, channels,
+                      shape.width, shape.height, options.gpuJpegTiles->bytes)) {
+                  options.gpuJpegTiles->width = shape.width;
+                  options.gpuJpegTiles->height = shape.height;
+                  encoded = true;
+              }
+          }
+          if (!encoded && options.gpuJpeg)
+              encoded = jpegEncodeFullyVulkanTextureBorrowed(
+                  textureSource->gpu, textureSource->texture,
+                  layout.width, layout.height, channels, 16,
+                  [&](const uint8_t* bytes, size_t size) {
+                      options.gpuJpeg->assign(bytes, bytes + size);
+                      return true;
+                  });
+          if (encoded) {
             textureSource = nullptr;
             if (options.textureMaterialized) options.textureMaterialized();
-        } else {
-            options.gpuJpeg->clear();
+          } else {
+              if (options.gpuJpeg) options.gpuJpeg->clear();
+              if (options.gpuJpegTiles) options.gpuJpegTiles->bytes.clear();
+          }
         }
     }
     bool logFused = false;
@@ -318,7 +336,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
         DNGDecoder::bakeLogTexture(dng, *textureSource, settings.logTransform,
             options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
-            !remosaic && options.cfaRepeatSize == 2 ? options.gpuJpeg : nullptr)) {
+            !remosaic && options.cfaRepeatSize == 2 ? options.gpuJpeg : nullptr,
+            !remosaic && options.cfaRepeatSize == 2 && options.gpuJpegTiles
+                ? &options.gpuJpegTiles->bytes : nullptr)) {
         textureSource = nullptr;
         logFused = true;
         logMetadataDone = true;
@@ -391,7 +411,10 @@ void processDngPixels(std::vector<uint8_t>& dng,
             textureSource,
             !postTopologyAfterBake &&
             badPixelTreatment != BadPixelTreatment::MarkPixels
-                ? options.gpuJpeg : nullptr))
+                ? options.gpuJpeg : nullptr,
+            badPixelTreatment != BadPixelTreatment::MarkPixels &&
+            !postTopologyAfterBake && options.gpuJpegTiles
+                ? &options.gpuJpegTiles->bytes : nullptr))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = std::chrono::steady_clock::now();
     if (!topologyBeforeBake &&
@@ -427,7 +450,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
             dng, settings.logTransform, options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
             badPixelTreatment != BadPixelTreatment::MarkPixels
-                ? options.gpuJpeg : nullptr)) {
+                ? options.gpuJpeg : nullptr,
+            badPixelTreatment != BadPixelTreatment::MarkPixels && options.gpuJpegTiles
+                ? &options.gpuJpegTiles->bytes : nullptr)) {
         logMetadataDone = true;
         if (profile)
             spdlog::info("GALLERY_PERF event=dng_gpu_log_strip source={}", source);
@@ -468,6 +493,15 @@ void processDngPixels(std::vector<uint8_t>& dng,
             if (!DNGDecoder::encodeImage(dng, marked))
                 throw std::runtime_error("Could not encode marked DNG: " + source);
         }
+    }
+    if (options.gpuJpegTiles && !options.gpuJpegTiles->bytes.empty() &&
+        !options.gpuJpegTiles->width) {
+        DNGImageLayout outputLayout;
+        if (!DNGDecoder::getImageLayout(dng, outputLayout))
+            throw std::runtime_error("Could not inspect tiled JPEG output for " + source);
+        const auto shape = jpeg92TileShape(outputLayout.samplesPerPixel);
+        options.gpuJpegTiles->width = shape.width;
+        options.gpuJpegTiles->height = shape.height;
     }
     if (profile || (source == "DirectLog" && std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS")))
         spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} log_fused={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
@@ -515,10 +549,21 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
     profileStage("timing_metadata");
     const bool fusedJxlPacking = options.packToWhiteLevel && options.compression &&
         !isLossyJpegDct(settings.jxlDistance) && settings.jxlDistance >= 0.0f;
+    const bool tiledJpeg92 = settings.jxlDistance == DNG_COMPRESSION_JPEG_LOSSLESS;
+    const bool stripJpeg92 = settings.jxlDistance == DNG_COMPRESSION_JPEG92_STRIP;
+    if (options.compression &&
+        ((options.gpuJpeg && !options.gpuJpeg->empty() && !stripJpeg92) ||
+         (options.gpuJpegTiles && !options.gpuJpegTiles->bytes.empty() &&
+          !tiledJpeg92)))
+        throw std::runtime_error("Unexpected GPU JPEG layout for " + source);
+    const bool gpuTilesReady = options.compression &&
+        tiledJpeg92 && options.gpuJpegTiles &&
+        !options.gpuJpegTiles->bytes.empty();
     const bool gpuJpegReady = options.compression &&
-        settings.jxlDistance < 0.0f && options.gpuJpeg &&
+        stripJpeg92 && options.gpuJpeg &&
         !options.gpuJpeg->empty();
-    if (options.packToWhiteLevel && !fusedJxlPacking && !gpuJpegReady &&
+    if (options.packToWhiteLevel && !fusedJxlPacking &&
+        !gpuJpegReady && !gpuTilesReady &&
         !DNGDecoder::packUncompressedToWhiteLevel(dng))
         throw std::runtime_error("Could not pack " + source + " DNG to its sensor bit depth");
     profileStage("bit_packing");
@@ -530,9 +575,16 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
     const bool compressed = isLossyJpegDct(settings.jxlDistance)
         ? DNGDecoder::compressLossyJPEG(dng)
         : settings.jxlDistance < 0.0f
-            ? gpuJpegReady
+            ? gpuTilesReady
+                ? DNGDecoder::attachLosslessJPEGTiles(
+                    dng, options.gpuJpegTiles->bytes,
+                    options.gpuJpegTiles->width,
+                    options.gpuJpegTiles->height)
+                : gpuJpegReady
                 ? DNGDecoder::attachLosslessJPEG(dng, *options.gpuJpeg)
-                : DNGDecoder::compressLosslessJPEG(dng)
+                : settings.jxlDistance == DNG_COMPRESSION_JPEG92_STRIP
+                    ? DNGDecoder::compressLosslessJPEG(dng, false)
+                    : DNGDecoder::compressLosslessJPEGTiled(dng)
             : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance, fusedJxlPacking);
     if (!compressed)
         throw std::runtime_error("Could not compress " + source + " DNG");
@@ -2120,7 +2172,9 @@ void finalize(
             ? DNGDecoder::compressLossyJPEG(dng)
             : options.jxlDistance >= 0.0f
                 ? DNGDecoder::compressJPEGXL(dng, options.jxlDistance)
-                : DNGDecoder::compressLosslessJPEG(dng);
+                : options.jxlDistance == DNG_COMPRESSION_JPEG92_STRIP
+                    ? DNGDecoder::compressLosslessJPEG(dng, false)
+                    : DNGDecoder::compressLosslessJPEGTiled(dng);
         if (!ok) throw std::runtime_error("Could not compress " + entries[index].name);
         if (writeFiles) writeBytes(outputPath(entries[index]), dng);
         if (fileReady) finalizedDngs[index] = std::move(dng);

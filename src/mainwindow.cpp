@@ -1281,7 +1281,11 @@ namespace {
         QString trimmed = mode.trimmed();
         finalizeAudioCodec(trimmed);
         if (trimmed.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
-            distance = -1.0f;
+            distance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
+            return true;
+        }
+        if (trimmed.compare("JPEG92 Lossless Strip", Qt::CaseInsensitive) == 0) {
+            distance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
             return true;
         }
         if (trimmed.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
@@ -2140,6 +2144,9 @@ void MainWindow::restoreSettings() {
         ui->dngCompressionModeComboBox->setCurrentText(
             QString("JPEG XL DCT %1").arg(mRenderSettings.jxlDistance));
     }
+    if (!restoredNativeMode &&
+        mRenderSettings.jxlDistance == motioncam::DNG_COMPRESSION_JPEG92_STRIP)
+        ui->dngCompressionModeComboBox->setCurrentText("JPEG92 Lossless Strip");
     ui->higherCfaHqCheckBox->setChecked(
         settings.value("higherCfaHq", false).toBool());
 
@@ -3614,6 +3621,7 @@ void MainWindow::finalizeSelectedFrames(){
         sourceSettings.options=static_cast<motioncam::FileRenderOptions>(
             static_cast<unsigned int>(sourceSettings.options)&
             ~static_cast<unsigned int>(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+        sourceSettings.jxlDistance=compressionDistance;
         mFuseFilesystem->updateOptions(mountId,sourceSettings);
         motioncam::FinalizeOptions options;
         options.skipDngFrame=[selected](size_t frame){return !selected.contains(static_cast<int>(frame));};
@@ -6426,6 +6434,8 @@ void MainWindow::updateSelectionUi() {
         !isSevenZipFinalizeFormat(ui->dngCompressionModeComboBox->currentText())) {
         if (motioncam::isLossyJpegDct(settings.jxlDistance))
             ui->dngCompressionModeComboBox->setCurrentIndex(1);
+        else if (settings.jxlDistance == motioncam::DNG_COMPRESSION_JPEG92_STRIP)
+            ui->dngCompressionModeComboBox->setCurrentText("JPEG92 Lossless Strip");
         else if (settings.jxlDistance < 0.0f)
             ui->dngCompressionModeComboBox->setCurrentIndex(0);
         else if (settings.jxlDistance == 0.0f)

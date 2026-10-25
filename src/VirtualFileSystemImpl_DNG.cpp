@@ -1090,9 +1090,14 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     }
     vfs::DngPixelPipelineOptions pixels;
     std::vector<uint8_t> gpuJpeg;
-    if (jpegCompression && mConfig.jxlDistance < 0.0f &&
-        !(mConfig.options & RENDER_OPT_BAKE_ISO))
-        pixels.gpuJpeg = &gpuJpeg;
+    vfs::GpuJpegTiles gpuJpegTiles;
+    if (jpegCompression && isLosslessJpeg92(mConfig.jxlDistance) &&
+        !(mConfig.options & RENDER_OPT_BAKE_ISO)) {
+        if (mConfig.jxlDistance == DNG_COMPRESSION_JPEG92_STRIP)
+            pixels.gpuJpeg = &gpuJpeg;
+        else
+            pixels.gpuJpegTiles = &gpuJpegTiles;
+    }
     pixels.cfaRepeatSize = frameCfaSize;
     pixels.cfaPhase = frameCfaPhase;
     pixels.hasCfa = frameHasCfa;
@@ -1116,6 +1121,7 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     finalize.packToWhiteLevel = !mConfig.cameraNativeStaging;
     finalize.compression = jpegCompression;
     finalize.gpuJpeg = pixels.gpuJpeg;
+    finalize.gpuJpegTiles = pixels.gpuJpegTiles;
     finalize.gyroflowLensProfile = mGyroflowLensProfile && !mConfig.cameraNativeStaging
         ? &*mGyroflowLensProfile : nullptr;
     finalize.sourceName = "source";

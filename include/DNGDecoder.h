@@ -168,12 +168,14 @@ public:
                                const VulkanGainBakeTextureSource& texture,
                                LogTransformMode mode, uint32_t quantizationWhite,
                                bool highQuality, uint32_t ditherSeed,
-                               std::vector<uint8_t>* gpuJpeg = nullptr);
+                               std::vector<uint8_t>* gpuJpeg = nullptr,
+                               std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr);
     static bool bakeLogStripVulkan(std::vector<uint8_t>& dngData,
                                    LogTransformMode mode,
                                    uint32_t quantizationWhite,
                                    bool highQuality, uint32_t ditherSeed,
-                                   std::vector<uint8_t>* gpuJpeg = nullptr);
+                                   std::vector<uint8_t>* gpuJpeg = nullptr,
+                                   std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr);
     static bool decodePreview(std::vector<uint8_t> dngData,
                               const RenderSettings& settings,
                               PreviewFrame& frame,
@@ -203,11 +205,17 @@ public:
     static bool compressJPEGXL(std::vector<uint8_t>& dngData, float distance,
                                bool clampToWhiteLevel = false);
     static bool compressLossyJPEG(std::vector<uint8_t>& dngData, int quality = 90);
-    static bool compressLosslessJPEG(std::vector<uint8_t>& dngData);
+    static bool compressLosslessJPEG(std::vector<uint8_t>& dngData,
+                                     bool allowLegacyTiles = true);
+    static bool compressLosslessJPEGTiled(std::vector<uint8_t>& dngData);
     // A bake with gpuJpeg output may leave a placeholder uncompressed strip.
     // Attach its JPEG before exposing or decoding the DNG.
     static bool attachLosslessJPEG(std::vector<uint8_t>& dngData,
                                    const std::vector<uint8_t>& jpeg);
+    static bool attachLosslessJPEGTiles(
+        std::vector<uint8_t>& dngData,
+        const std::vector<std::vector<uint8_t>>& jpegTiles,
+        uint32_t tileWidth, uint32_t tileHeight);
     static bool bakeGainMaps(std::vector<uint8_t>& dngData,
                              bool normalizeGainMaps,
                              bool colorOnly,
@@ -223,7 +231,8 @@ public:
                              uint32_t ditherSeed = 0,
                              bool preferVulkan = false,
                              const VulkanGainBakeTextureSource* textureSource = nullptr,
-                             std::vector<uint8_t>* gpuJpeg = nullptr);
+                             std::vector<uint8_t>* gpuJpeg = nullptr,
+                             std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

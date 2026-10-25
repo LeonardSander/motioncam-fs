@@ -2,19 +2,29 @@
 #include "tinydng/tiny_dng_writer.h"
 #include "liblj92/lj92.h"
 #include "DNGDecoder.h"
+#include "VulkanJpegDecode.h"
+#include "VulkanJpegFullEncode.h"
+#include "VulkanGainBake.h"
 #include "GainMapBake.h"
 #include <jpeglib.h>
 
 #include <algorithm>
+#include <atomic>
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
 #include <cassert>
+#include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 static std::vector<uint8_t> tiledLosslessJpegDng(
@@ -229,7 +239,88 @@ static bool ifdsAreTagSorted(const std::vector<uint8_t>& dng) {
     return true;
 }
 
+static int benchmarkRealJpegDng(const char* path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return 2;
+    const std::vector<uint8_t> dng((std::istreambuf_iterator<char>(file)),
+                                    std::istreambuf_iterator<char>());
+    if (dng.size() < 8 || dng[0] != 'I' || dng[1] != 'I' ||
+        dng[2] != 42 || dng[3] != 0) return 3;
+    auto u16 = [&](size_t at) -> uint32_t {
+        return uint32_t(dng[at]) | (uint32_t(dng[at + 1]) << 8u);
+    };
+    auto u32 = [&](size_t at) -> uint32_t {
+        return u16(at) | (u16(at + 2) << 16u);
+    };
+    const size_t ifd = u32(4);
+    if (ifd > dng.size() - 2) return 3;
+    const uint32_t entries = u16(ifd);
+    if (entries > (dng.size() - ifd - 2u) / 12u) return 3;
+    auto tag = [&](uint16_t wanted) -> uint32_t {
+        for (uint32_t i = 0; i < entries; ++i) {
+            const size_t at = ifd + 2u + i * 12u;
+            if (u16(at) == wanted && u32(at + 4u) == 1u)
+                return u16(at + 2u) == 3u ? u16(at + 8u) : u32(at + 8u);
+        }
+        return 0;
+    };
+    const uint32_t width = tag(256), height = tag(257), bits = tag(258);
+    const uint32_t compression = tag(259), channels = tag(277);
+    const uint32_t offset = tag(273), size = tag(279);
+    if (!width || !height || !size || compression != 7u ||
+        (channels != 1u && channels != 3u) ||
+        bits < 8u || bits > 16u || tag(278) != height ||
+        size > dng.size() || offset > dng.size() - size) return 3;
+    const uint8_t* jpeg = dng.data() + offset;
+    lj92 decoder = nullptr;
+    int jpegWidth = 0, jpegHeight = 0, jpegBits = 0, jpegChannels = 0;
+    if (lj92_open(&decoder, const_cast<uint8_t*>(jpeg), int(size), &jpegWidth, &jpegHeight,
+                  &jpegBits, &jpegChannels) != LJ92_ERROR_NONE) return 4;
+    if (jpegWidth != int(width) || jpegHeight != int(height) ||
+        jpegBits != int(bits) || jpegChannels != int(channels)) {
+        lj92_close(decoder);
+        return 4;
+    }
+    std::vector<uint16_t> cpu(size_t(width) * height * channels);
+    const auto cpuStart = std::chrono::steady_clock::now();
+    const bool cpuOkay = lj92_decode(decoder, cpu.data(), width * channels,
+                                    0, nullptr, 0) == LJ92_ERROR_NONE;
+    const auto cpuEnd = std::chrono::steady_clock::now();
+    lj92_close(decoder);
+    if (!cpuOkay) return 4;
+    const double cpuMs = std::chrono::duration<double, std::milli>(
+        cpuEnd - cpuStart).count();
+    if (cpu.size() > 65536u) {
+        std::fprintf(stderr,
+            "Real DNG JPEG decode: size=%ux%u channels=%u bits=%u "
+            "strip_bytes=%u streams=1 cpu_ms=%.3f gpu=serial_scan_unsupported\n",
+            width, height, channels, bits, size, cpuMs);
+        return 0;
+    }
+    const motioncam::VulkanJpegTile tile{jpeg, size, width, height, bits, channels};
+    const motioncam::VulkanJpegContiguousSource contiguous{jpeg, size};
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::vector<std::vector<uint16_t>> gpu;
+        const auto started = std::chrono::steady_clock::now();
+        const bool ok = motioncam::jpegDecodeTilesVulkan({tile}, gpu, &contiguous);
+        const auto finished = std::chrono::steady_clock::now();
+        const bool equal = ok && gpu.size() == 1u && gpu.front() == cpu;
+        std::fprintf(stderr,
+            "Real DNG JPEG decode: size=%ux%u channels=%u bits=%u strip_bytes=%u "
+            "cpu_ms=%.3f gpu_%s_ms=%.3f equal=%d\n",
+            width, height, channels, bits, size,
+            cpuMs,
+            attempt ? "warm" : "cold",
+            std::chrono::duration<double, std::milli>(finished - started).count(),
+            equal);
+        if (!equal) return 5;
+    }
+    return 0;
+}
+
 int main() {
+    if (const char* path = std::getenv("MOTIONCAM_GPU_JPEG_REAL_DNG_BENCHMARK"))
+        return benchmarkRealJpegDng(path);
     // Only the two CFA representations may be split into color and luminance.
     motioncam::GainMap region{};
     region.top = 0; region.left = 0; region.bottom = 8; region.right = 8;
@@ -855,6 +946,11 @@ int main() {
     assert(rgbScalarWriter.WriteToFile(rgbScalarOutput, &error));
     const std::string rgbScalarDng = rgbScalarOutput.str();
     std::vector<uint8_t> rgbLosslessDng(rgbScalarDng.begin(), rgbScalarDng.end());
+    auto rgbTiledDng = rgbLosslessDng;
+    assert(motioncam::DNGDecoder::compressLosslessJPEGTiled(rgbTiledDng));
+    motioncam::DecodedDNGImage rgbTiledDecoded;
+    assert(motioncam::DNGDecoder::decodeImage(rgbTiledDng, rgbTiledDecoded));
+    assert(rgbTiledDecoded.samples == rgb);
     assert(motioncam::DNGDecoder::compressLosslessJPEG(rgbLosslessDng));
     motioncam::DecodedDNGImage rgbLosslessDecoded;
     assert(motioncam::DNGDecoder::decodeImage(rgbLosslessDng, rgbLosslessDecoded));
@@ -1449,7 +1545,8 @@ int main() {
                                   uint32_t sourceWhite = 4095,
                                   motioncam::LogTransformMode mode =
                                       motioncam::LogTransformMode::ReduceBy4Bit,
-                                  bool packOutput = true) {
+                                  bool packOutput = true,
+                                  bool tileOutput = false) {
         std::vector<uint16_t> samples(static_cast<size_t>(testWidth) *
                                       testHeight * channels);
         for (size_t i = 0; i < samples.size(); ++i)
@@ -1495,19 +1592,26 @@ int main() {
         std::vector<uint8_t> reference(serialized.begin(), serialized.end());
         auto fast = reference;
         std::vector<uint8_t> gpuJpeg;
+        std::vector<std::vector<uint8_t>> gpuTiles;
         bool fused = false;
         const bool baked = fusedGain
             ? motioncam::DNGDecoder::bakeGainMaps(
                   fast, false, false, false, false, 0, std::nullopt,
                   mode, sourceWhite, false, &fused, packOutput, 7, true, nullptr,
-                  &gpuJpeg)
+                  tileOutput ? nullptr : &gpuJpeg,
+                  tileOutput ? &gpuTiles : nullptr)
             : motioncam::DNGDecoder::bakeLogStripVulkan(
-                  fast, mode, sourceWhite, false, 7, &gpuJpeg);
+                  fast, mode, sourceWhite, false, 7,
+                  tileOutput ? nullptr : &gpuJpeg,
+                  tileOutput ? &gpuTiles : nullptr);
         if (!baked) {
             assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
             return;
         }
-        if (gpuJpeg.empty()) {
+        if (tileOutput ? gpuTiles.empty() : gpuJpeg.empty()) {
+            std::fprintf(stderr, "GPU JPEG output missing: %ux%u channels=%u sourceWhite=%u mode=%d packed=%d tiled=%d\n",
+                         testWidth, testHeight, channels, sourceWhite,
+                         int(mode), packOutput, tileOutput);
             assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
             return; // Vulkan unavailable: CPU fallback ran.
         }
@@ -1525,7 +1629,12 @@ int main() {
             assert(motioncam::DNGDecoder::bakeLogStripVulkan(
                 reference, mode, sourceWhite, false, 7));
         }
-        assert(motioncam::DNGDecoder::attachLosslessJPEG(fast, gpuJpeg));
+        if (tileOutput)
+            assert(motioncam::DNGDecoder::attachLosslessJPEGTiles(
+                fast, gpuTiles, channels == 1 ? 16u : 8u,
+                channels == 1 ? 64u : 128u));
+        else
+            assert(motioncam::DNGDecoder::attachLosslessJPEG(fast, gpuJpeg));
         motioncam::DecodedDNGImage fastImage, referenceImage;
         assert(motioncam::DNGDecoder::decodeImage(fast, fastImage));
         assert(motioncam::DNGDecoder::decodeImage(reference, referenceImage));
@@ -1542,6 +1651,344 @@ int main() {
                        motioncam::LogTransformMode::ReduceBy4Bit);
     checkGpuPackedJpeg(1023, 512, 3, false, 4095,
                        motioncam::LogTransformMode::ReduceBy2Bit);
+    checkGpuPackedJpeg(1024, 1024, 1, true, 65535,
+                       motioncam::LogTransformMode::Disabled, false, true);
+    checkGpuPackedJpeg(1024, 512, 3, true, 65535,
+                       motioncam::LogTransformMode::Disabled, false, true);
+    checkGpuPackedJpeg(1024, 1024, 1, false, 65535,
+                       motioncam::LogTransformMode::ReduceBy4Bit, true, true);
+    checkGpuPackedJpeg(1024, 512, 3, false, 65535,
+                       motioncam::LogTransformMode::ReduceBy4Bit, true, true);
+    checkGpuPackedJpeg(1024, 512, 3, true, 4095,
+                       motioncam::LogTransformMode::ReduceBy2Bit, true, true);
+    checkGpuPackedJpeg(1024, 1024, 1, false, 65535,
+                       motioncam::LogTransformMode::ReduceBy8Bit, true, true);
+    checkGpuPackedJpeg(1024, 512, 3, false, 65535,
+                       motioncam::LogTransformMode::ReduceBy2Bit, true, true);
+    checkGpuPackedJpeg(1000, 512, 3, true, 4095,
+                       motioncam::LogTransformMode::ReduceBy2Bit, true, true);
+    checkGpuPackedJpeg(1024, 1024, 1, true, 4095,
+                       motioncam::LogTransformMode::Disabled, true, true);
+    checkGpuPackedJpeg(1024, 512, 3, true, 4095,
+                       motioncam::LogTransformMode::Disabled, true, true);
+
+    // Independent lossless JPEG tiles exercise the Vulkan entropy and
+    // predictor decoder, including its tile placement and 16-bit wrapping.
+    {
+        const bool smallTiles = std::getenv("MOTIONCAM_JPEG_DECODE_SMALL_TILES");
+        const uint32_t tileWidth = smallTiles ? 32u : 128u;
+        const uint32_t tileHeight = tileWidth;
+        const uint32_t tileCount = smallTiles ? 12288u :
+            std::getenv("MOTIONCAM_JPEG_DECODE_LARGE_BENCHMARK") ? 768u : 64u;
+        const bool residentTest = std::getenv("MOTIONCAM_JPEG_DECODE_RESIDENT_TEST");
+        const bool residentLog = std::getenv("MOTIONCAM_JPEG_DECODE_LOG_TEST");
+        std::vector<std::vector<uint16_t>> expected(tileCount);
+        std::vector<std::vector<uint8_t>> encoded(tileCount);
+        std::vector<motioncam::VulkanJpegTile> inputs(tileCount);
+        for (uint32_t tile = 0; tile < tileCount; ++tile) {
+            const uint32_t bits = residentTest ? 12u : (tile & 1u) ? 16u : 12u;
+            auto& samples = expected[tile];
+            samples.resize(tileWidth * tileHeight);
+            for (size_t i = 0; i < samples.size(); ++i)
+                samples[i] = uint16_t((i * 37u + tile * 109u + i / 31u) &
+                                      ((1u << bits) - 1u));
+            uint8_t* bytes = nullptr;
+            int count = 0;
+            assert(lj92_encode(samples.data(), tileWidth, tileHeight, bits, 1,
+                               tileWidth, 0, nullptr, 0, &bytes, &count) == LJ92_ERROR_NONE);
+            encoded[tile].assign(bytes, bytes + count);
+            free(bytes);
+            inputs[tile] = {encoded[tile].data(), encoded[tile].size(),
+                            tileWidth, tileHeight, bits};
+        }
+        std::vector<std::vector<uint16_t>> actual;
+        if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE")) {
+            std::vector<std::vector<uint16_t>> warm;
+            assert(motioncam::jpegDecodeTilesVulkan(inputs, warm));
+            assert(warm == expected);
+        }
+        const auto gpuStart = std::chrono::steady_clock::now();
+        const bool gpuDecoded = motioncam::jpegDecodeTilesVulkan(inputs, actual);
+        const auto gpuEnd = std::chrono::steady_clock::now();
+        if (gpuDecoded) {
+            if (actual != expected)
+                for (size_t t = 0; t < actual.size(); ++t) {
+                    auto mismatch = std::mismatch(actual[t].begin(), actual[t].end(),
+                                                  expected[t].begin());
+                    if (mismatch.first != actual[t].end()) {
+                        std::fprintf(stderr, "GPU JPEG mismatch tile=%zu sample=%zu got=%u expected=%u\n",
+                            t, size_t(mismatch.first - actual[t].begin()),
+                            unsigned(*mismatch.first), unsigned(*mismatch.second));
+                        for (size_t i = 0; i < 12; ++i)
+                            std::fprintf(stderr, "%zu:%u/%u ", i,
+                                unsigned(actual[t][i]), unsigned(expected[t][i]));
+                        std::fprintf(stderr, "\n");
+                        break;
+                    }
+                }
+            assert(actual == expected);
+            if (tileCount == 64 && !residentTest) {
+                // Exercise the DNG import dispatch as well as the standalone
+                // decoder. All tiles use one precision for the TIFF tag.
+                std::vector<uint16_t> imageSamples(1024u * 1024u);
+                for (uint32_t tile = 0; tile < 64; ++tile)
+                    for (uint32_t y = 0; y < 128; ++y)
+                        std::copy_n(expected[tile].data() + y * 128u, 128u,
+                            imageSamples.data() +
+                            (static_cast<size_t>(tile / 8u) * 128u + y) * 1024u +
+                            (tile % 8u) * 128u);
+                auto dng = tiledLosslessJpegDng(
+                    imageSamples, 1024, 1024, 128, 128, 16);
+                motioncam::DecodedDNGImage imported;
+                assert(motioncam::DNGDecoder::decodeImageBorrowed(dng, imported));
+                assert(imported.samples == imageSamples);
+            }
+            if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE")) {
+                std::fprintf(stderr, "Vulkan JPEG tile decode %.3f ms\n",
+                    std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count());
+                std::atomic_uint nextTile{0};
+                std::atomic_bool cpuOk{true};
+                std::vector<std::vector<uint16_t>> cpu(tileCount);
+                const auto cpuStart = std::chrono::steady_clock::now();
+                std::vector<std::thread> workers;
+                for (int worker = 0; worker < 8; ++worker)
+                    workers.emplace_back([&] {
+                        for (uint32_t t; (t = nextTile.fetch_add(1)) < tileCount;) {
+                            lj92 decoder = nullptr;
+                            int w = 0, h = 0, bits = 0, channels = 0;
+                            if (lj92_open(&decoder, encoded[t].data(),
+                                          int(encoded[t].size()), &w, &h,
+                                          &bits, &channels) != LJ92_ERROR_NONE) {
+                                cpuOk = false;
+                                continue;
+                            }
+                            cpu[t].resize(tileWidth * tileHeight);
+                            if (lj92_decode(decoder, cpu[t].data(), tileWidth, 0,
+                                            nullptr, 0) != LJ92_ERROR_NONE)
+                                cpuOk = false;
+                            lj92_close(decoder);
+                        }
+                    });
+                for (auto& worker : workers) worker.join();
+                const auto cpuEnd = std::chrono::steady_clock::now();
+                assert(cpuOk && cpu == expected);
+                std::fprintf(stderr, "CPU JPEG tile decode %.3f ms\n",
+                    std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count());
+            }
+        } else {
+            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_DECODE_TEST"));
+        }
+        if (residentTest && gpuDecoded) {
+            const uint32_t canvasWidth = tileCount == 64 ? 1024u : 4096u;
+            const uint32_t canvasHeight = tileCount == 64 ? 1024u : 3072u;
+            std::vector<uint8_t> recompressed;
+            const void* residentGpu = nullptr;
+            double residentMs[2]{};
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                const auto start = std::chrono::steady_clock::now();
+                assert(motioncam::jpegDecodeTiledImageVulkan(
+                inputs, canvasWidth, canvasHeight, tileWidth, tileHeight,
+                [&](const motioncam::VulkanDecodedJpegImage& image) {
+                    residentGpu = image.gpu;
+                    const std::vector<float> gains{1.1f};
+                    motioncam::VulkanGainBakeBufferSource source{image.gpu, image.buffer};
+                    motioncam::VulkanGainBakeParams params;
+                    params.width = image.width;
+                    params.height = image.height;
+                    params.channels = 1;
+                    params.outputBits = residentLog ? 12u : 16u;
+                    params.sourceNominalWhite = 4095;
+                    params.destinationWhite = 4095;
+                    params.encodedWhite = residentLog ? 4095u : 0u;
+                    params.log60 = residentLog;
+                    params.scale.fill(1.0f);
+                    params.bufferSource = &source;
+                    params.map = motioncam::VulkanRgbGainMap{
+                        1, 1, 1, 0, 0, image.width, image.height,
+                        1, 1, 0, 0, 1, 1, &gains};
+                    params.cfaMapCount = 1;
+                    params.cfaMaps[0] = params.map;
+                    params.consumePackedOutput = [&](const motioncam::VulkanPackedImage& packed) {
+                        return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                            packed.gpu, packed.buffer, packed.width, packed.height,
+                            packed.channels, packed.bits, packed.wordsPerRow,
+                            [&](const uint8_t* bytes, size_t count) {
+                                recompressed.assign(bytes, bytes + count);
+                                return true;
+                            }, image.validationBuffer);
+                    };
+                    std::vector<uint8_t> unused(size_t(image.width) * image.height *
+                                                (residentLog ? 3u : 4u) / 2u);
+                    return motioncam::bakeCfaGainVulkan(nullptr, params,
+                                                         unused.data(), unused.size());
+                }));
+                const auto end = std::chrono::steady_clock::now();
+                residentMs[attempt] =
+                    std::chrono::duration<double, std::milli>(end - start).count();
+            }
+            motioncam::releaseVulkanGainBakeBufferDevice(residentGpu);
+            if (tileCount == 64) {
+                auto brokenInputs = inputs;
+                auto brokenTile = encoded.front();
+                assert(brokenTile.size() > 102u);
+                brokenTile.erase(brokenTile.end() - 102, brokenTile.end() - 2);
+                brokenInputs.front().bytes = brokenTile.data();
+                brokenInputs.front().size = brokenTile.size();
+                assert(!motioncam::jpegDecodeTiledImageVulkan(
+                    brokenInputs, canvasWidth, canvasHeight, tileWidth, tileHeight,
+                    [&](const motioncam::VulkanDecodedJpegImage& image) {
+                        return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                            image.gpu, image.buffer, image.width, image.height,
+                            1, 16, image.wordsPerRow,
+                            [](const uint8_t*, size_t) { return true; },
+                            image.validationBuffer);
+                    }));
+            }
+            lj92 decoder = nullptr;
+            int w = 0, h = 0, bits = 0, channels = 0;
+            assert(lj92_open(&decoder, recompressed.data(), int(recompressed.size()),
+                             &w, &h, &bits, &channels) == LJ92_ERROR_NONE);
+            assert(w == int(canvasWidth) && h == int(canvasHeight) &&
+                   bits == int(residentLog ? 12u : 16u) && channels == 1);
+            std::vector<uint16_t> canvas(size_t(canvasWidth) * canvasHeight);
+            assert(lj92_decode(decoder, canvas.data(), canvasWidth, 0,
+                               nullptr, 0) == LJ92_ERROR_NONE);
+            lj92_close(decoder);
+            if (!residentLog) for (uint32_t t = 0; t < tileCount; ++t) {
+                const uint32_t tilesAcross = canvasWidth / tileWidth;
+                const uint32_t ox = (t % tilesAcross) * tileWidth;
+                const uint32_t oy = (t / tilesAcross) * tileHeight;
+                for (uint32_t y = 0; y < tileHeight; ++y)
+                    for (uint32_t x = 0; x < tileWidth; ++x) {
+                        const auto source = expected[t][size_t(y) * tileWidth + x];
+                        const auto result = uint16_t(std::lround(source * 1.1f));
+                        assert(canvas[size_t(oy + y) * canvasWidth + ox + x] == result);
+                    }
+            }
+            std::fprintf(stderr, "Vulkan JPEG decode->gain->encode resident cold=%.3f warm=%.3f ms\n",
+                         residentMs[0], residentMs[1]);
+            if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE") || residentLog) {
+                std::vector<uint16_t> sourceCanvas(canvas.size());
+                const uint32_t tilesAcross = canvasWidth / tileWidth;
+                for (uint32_t t = 0; t < tileCount; ++t) {
+                    const uint32_t ox = (t % tilesAcross) * tileWidth;
+                    const uint32_t oy = (t / tilesAcross) * tileHeight;
+                    for (uint32_t y = 0; y < tileHeight; ++y)
+                        std::copy_n(expected[t].data() + size_t(y) * tileWidth,
+                                    tileWidth,
+                                    sourceCanvas.data() + size_t(oy + y) * canvasWidth + ox);
+                }
+                const std::vector<float> gains{1.1f};
+                motioncam::VulkanGainBakeParams params;
+                params.width = canvasWidth;
+                params.height = canvasHeight;
+                params.channels = 1;
+                params.outputBits = residentLog ? 12u : 16u;
+                params.sourceNominalWhite = 4095;
+                params.destinationWhite = 4095;
+                params.encodedWhite = residentLog ? 4095u : 0u;
+                params.log60 = residentLog;
+                params.scale.fill(1.0f);
+                params.map = motioncam::VulkanRgbGainMap{
+                    1, 1, 1, 0, 0, canvasWidth, canvasHeight,
+                    1, 1, 0, 0, 1, 1, &gains};
+                params.cfaMapCount = 1;
+                params.cfaMaps[0] = params.map;
+                params.consumePackedOutput = [&](const motioncam::VulkanPackedImage& packed) {
+                    return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                        packed.gpu, packed.buffer, packed.width, packed.height,
+                        packed.channels, packed.bits, packed.wordsPerRow,
+                        [&](const uint8_t*, size_t) { return true; });
+                };
+                std::vector<uint8_t> unused(sourceCanvas.size() *
+                                            (residentLog ? 3u : 4u) / 2u);
+                double cpuSourceMs[2]{};
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    const auto start = std::chrono::steady_clock::now();
+                    assert(motioncam::bakeCfaGainVulkan(
+                        sourceCanvas.data(), params, unused.data(), unused.size()));
+                    cpuSourceMs[attempt] = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+                }
+                if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE"))
+                    std::fprintf(stderr, "CPU pixels->Vulkan gain->JPEG cold=%.3f warm=%.3f ms\n",
+                                 cpuSourceMs[0], cpuSourceMs[1]);
+                if (residentLog) {
+                    params.consumePackedOutput = {};
+                    assert(motioncam::bakeCfaGainVulkan(
+                        sourceCanvas.data(), params, unused.data(), unused.size()));
+                    const size_t rowBytes = size_t(canvasWidth) * 12u / 8u;
+                    for (uint32_t y = 0; y < canvasHeight; ++y)
+                        for (uint32_t x = 0; x < canvasWidth; ++x) {
+                            const size_t bit = size_t(x) * 12u;
+                            const size_t byte = size_t(y) * rowBytes + bit / 8u;
+                            const uint32_t word = (uint32_t(unused[byte]) << 16u) |
+                                (uint32_t(unused[byte + 1u]) << 8u) |
+                                (byte + 2u < unused.size() ? unused[byte + 2u] : 0u);
+                            const uint16_t code = uint16_t((word >>
+                                (12u - (bit & 7u))) & 4095u);
+                            assert(canvas[size_t(y) * canvasWidth + x] == code);
+                        }
+                }
+            }
+        }
+    }
+    if (std::getenv("MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST")) {
+        constexpr uint32_t tileSide = 128, across = 8, tileCount = across * across;
+        constexpr uint32_t width = tileSide * across, height = width;
+        std::vector<std::vector<uint16_t>> reference(tileCount);
+        std::vector<std::vector<uint8_t>> encoded(tileCount);
+        std::vector<motioncam::VulkanJpegTile> tiles(tileCount);
+        for (uint32_t t = 0; t < tileCount; ++t) {
+            reference[t].resize(size_t(tileSide) * tileSide * 3u);
+            for (size_t i = 0; i < reference[t].size(); ++i)
+                reference[t][i] = uint16_t((i * 101u + t * 31u + i / 7u) & 65535u);
+            uint8_t* bytes = nullptr;
+            int count = 0;
+            assert(lj92_encode(reference[t].data(), tileSide, tileSide,
+                               16, 3, tileSide * 3, 0, nullptr, 0,
+                               &bytes, &count) == LJ92_ERROR_NONE);
+            encoded[t].assign(bytes, bytes + count);
+            free(bytes);
+            tiles[t] = {encoded[t].data(), encoded[t].size(),
+                        tileSide, tileSide, 16, 3};
+        }
+        std::vector<std::vector<uint16_t>> decodedTiles;
+        assert(motioncam::jpegDecodeTilesVulkan(tiles, decodedTiles));
+        assert(decodedTiles == reference);
+        std::vector<uint8_t> jpeg;
+        assert(motioncam::jpegDecodeTiledImageVulkan(
+            tiles, width, height, tileSide, tileSide,
+            [&](const motioncam::VulkanDecodedJpegImage& image) {
+                assert(image.channels == 3);
+                return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                    image.gpu, image.buffer, image.width, image.height,
+                    3, 16, image.wordsPerRow,
+                    [&](const uint8_t* bytes, size_t size) {
+                        jpeg.assign(bytes, bytes + size);
+                        return true;
+                    }, image.validationBuffer);
+            }));
+        lj92 decoder = nullptr;
+        int jpegWidth = 0, jpegHeight = 0, bits = 0, components = 0;
+        assert(lj92_open(&decoder, jpeg.data(), int(jpeg.size()),
+                         &jpegWidth, &jpegHeight, &bits, &components) == LJ92_ERROR_NONE);
+        assert(jpegWidth == int(width) && jpegHeight == int(height) &&
+               bits == 16 && components == 3);
+        std::vector<uint16_t> pixels(size_t(width) * height * 3u);
+        assert(lj92_decode(decoder, pixels.data(), width * 3u, 0,
+                           nullptr, 0) == LJ92_ERROR_NONE);
+        lj92_close(decoder);
+        for (uint32_t t = 0; t < tileCount; ++t) {
+            const uint32_t ox = (t % across) * tileSide;
+            const uint32_t oy = (t / across) * tileSide;
+            for (uint32_t y = 0; y < tileSide; ++y)
+                assert(std::equal(reference[t].begin() + size_t(y) * tileSide * 3u,
+                                  reference[t].begin() + size_t(y + 1u) * tileSide * 3u,
+                                  pixels.begin() +
+                                    (size_t(oy + y) * width + ox) * 3u));
+        }
+    }
 
     return 0;
 }

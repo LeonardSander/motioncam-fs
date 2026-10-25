@@ -16,10 +16,22 @@
 namespace motioncam {
 
 constexpr float DNG_COMPRESSION_JPEG_DCT = -2.0f;
+constexpr float DNG_COMPRESSION_JPEG92_STRIP = -1.5f;
 constexpr float DNG_COMPRESSION_JPEG_LOSSLESS = -1.0f;
 
 inline bool isLossyJpegDct(float value) {
     return value <= DNG_COMPRESSION_JPEG_DCT + 0.01f;
+}
+inline bool isLosslessJpeg92(float value) {
+    return value == DNG_COMPRESSION_JPEG_LOSSLESS ||
+           value == DNG_COMPRESSION_JPEG92_STRIP;
+}
+struct Jpeg92TileShape {
+    uint32_t width, height;
+};
+constexpr Jpeg92TileShape jpeg92TileShape(uint32_t channels) {
+    return channels == 1 ? Jpeg92TileShape{16, 64} :
+                           Jpeg92TileShape{8, 128};
 }
 
 typedef int64_t Timestamp;
@@ -414,7 +426,8 @@ struct RenderSettings {
     VignetteCorrectionMode vignetteCorrection;
     QuadBayerMode quadBayerOption;
     std::string cfaPhase;
-    // Compression selector: -2 is 12-bit CinemaDNG JPEG DCT, -1 is JPEG 92 lossless,
+    // Compression selector: -2 is 12-bit CinemaDNG JPEG DCT, -1.5 is
+    // JPEG 92 lossless strip, -1 is JPEG 92 lossless tiles,
     // zero is lossless JXL, and positive values are lossy JXL.
     float jxlDistance;
     // Gallery/thumbnail-only display overrides. orientation is -1 when the

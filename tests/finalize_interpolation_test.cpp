@@ -721,6 +721,25 @@ int main(int argc, char** argv) {
         motioncam::DecodedDNGImage decoded;
         assert(motioncam::DNGDecoder::decodeImage(dng, decoded));
         assert(decoded.samples == pixels);
+        auto defaultTiled = std::vector<uint8_t>(bytes.begin(), bytes.end());
+        assert(motioncam::DNGDecoder::compressLosslessJPEGTiled(defaultTiled));
+        assert(tagValue(defaultTiled, 324).count > 1);
+        motioncam::DecodedDNGImage defaultTiledDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(defaultTiled,
+                                                  defaultTiledDecoded));
+        assert(defaultTiledDecoded.samples == pixels);
+        motioncam::RenderSettings jpeg92Settings;
+        jpeg92Settings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
+        motioncam::vfs::DngFinalizeOptions jpeg92Finalize;
+        jpeg92Finalize.compression = true;
+        jpeg92Finalize.writeTiming = false;
+        auto finalizedTiles = std::vector<uint8_t>(bytes.begin(), bytes.end());
+        motioncam::vfs::finalizeDng(finalizedTiles, jpeg92Settings, jpeg92Finalize);
+        assert(tagValue(finalizedTiles, 324).count > 1);
+        jpeg92Settings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
+        auto finalizedStrip = std::vector<uint8_t>(bytes.begin(), bytes.end());
+        motioncam::vfs::finalizeDng(finalizedStrip, jpeg92Settings, jpeg92Finalize);
+        assert(tagValue(finalizedStrip, 273).count == 1);
 #ifdef _WIN32
         _putenv_s("MOTIONCAM_JPEG_TILED", "1");
 #else
@@ -1108,7 +1127,7 @@ int main(int argc, char** argv) {
     motioncam::RenderSettings gpuFinalSettings;
     gpuFinalSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
     gpuFinalSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
-    gpuFinalSettings.jxlDistance = -1.0f;
+    gpuFinalSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
     std::vector<uint8_t> preparedJpeg;
     motioncam::vfs::DngPixelPipelineOptions gpuFinalPixels;
     gpuFinalPixels.gpuJpeg = &preparedJpeg;
@@ -1192,7 +1211,7 @@ int main(int argc, char** argv) {
         texturePixels.textureSource = &source;
         texturePixels.gpuJpeg = &textureJpeg;
         motioncam::RenderSettings textureSettings;
-        textureSettings.jxlDistance = -1.0f;
+        textureSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
         motioncam::vfs::processDngPixels(
             textureDng, textureSettings, texturePixels);
         if (!textureJpeg.empty()) assert(textureDownloads == 0);
@@ -1251,6 +1270,57 @@ int main(int argc, char** argv) {
         assert(motioncam::DNGDecoder::decodeImage(
             referenceLogDng, referenceLogDecoded));
         assert(textureLogDecoded.samples == referenceLogDecoded.samples);
+        auto tiledTextureSettings = textureSettings;
+        tiledTextureSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
+        auto tiledTextureDng = makeDng(0, 0.01f, 100, 0.0f,
+                                       {1, 1, 1}, 0,
+                                       textureWidth, textureHeight);
+        motioncam::vfs::GpuJpegTiles textureTiles;
+        auto tiledTexturePixels = texturePixels;
+        tiledTexturePixels.gpuJpeg = nullptr;
+        tiledTexturePixels.gpuJpegTiles = &textureTiles;
+        const size_t downloadsBeforeTiles = textureDownloads;
+        motioncam::vfs::processDngPixels(
+            tiledTextureDng, tiledTextureSettings, tiledTexturePixels);
+        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST")) {
+            assert(!textureTiles.bytes.empty());
+            assert(textureDownloads == downloadsBeforeTiles);
+        }
+        motioncam::vfs::DngFinalizeOptions tiledTextureFinalize;
+        tiledTextureFinalize.writeTiming = false;
+        tiledTextureFinalize.packToWhiteLevel = true;
+        tiledTextureFinalize.compression = true;
+        tiledTextureFinalize.gpuJpegTiles = &textureTiles;
+        motioncam::vfs::finalizeDng(
+            tiledTextureDng, tiledTextureSettings, tiledTextureFinalize);
+        motioncam::DecodedDNGImage tiledTextureDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(
+            tiledTextureDng, tiledTextureDecoded));
+        assert(tiledTextureDecoded.samples == rgb);
+
+        auto tiledTextureLogDng = makeDng(0, 0.01f, 100, 0.0f,
+                                          {1, 1, 1}, 0,
+                                          textureWidth, textureHeight);
+        auto tiledTextureLogSettings = textureLogSettings;
+        tiledTextureLogSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
+        motioncam::vfs::GpuJpegTiles textureLogTiles;
+        auto tiledTextureLogPixels = textureLogPixels;
+        tiledTextureLogPixels.gpuJpeg = nullptr;
+        tiledTextureLogPixels.gpuJpegTiles = &textureLogTiles;
+        const size_t downloadsBeforeTiledLog = textureDownloads;
+        motioncam::vfs::processDngPixels(
+            tiledTextureLogDng, tiledTextureLogSettings, tiledTextureLogPixels);
+        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST")) {
+            assert(!textureLogTiles.bytes.empty());
+            assert(textureDownloads == downloadsBeforeTiledLog);
+        }
+        tiledTextureFinalize.gpuJpegTiles = &textureLogTiles;
+        motioncam::vfs::finalizeDng(
+            tiledTextureLogDng, tiledTextureLogSettings, tiledTextureFinalize);
+        motioncam::DecodedDNGImage tiledTextureLogDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(
+            tiledTextureLogDng, tiledTextureLogDecoded));
+        assert(tiledTextureLogDecoded.samples == referenceLogDecoded.samples);
         pl_tex_destroy(gpu, &texture);
         }
     }

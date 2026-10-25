@@ -5,6 +5,7 @@
 #include "RawLogTransform.h"
 #include "VulkanGainBake.h"
 #include "VulkanJpegFullEncode.h"
+#include "VulkanJpegDecode.h"
 #include "VulkanGalleryPreview.h"
 #include "CpuWorkerBudget.h"
 #include "JxlParallelRunner.h"
@@ -57,14 +58,26 @@ std::atomic_uint32_t foregroundDngWork{0};
 std::atomic_uint32_t activeGainBakeJobs{0};
 
 void prepareGpuJpegConsumer(VulkanGainBakeParams& params,
-                            std::vector<uint8_t>* jpegOutput) {
-    if (!jpegOutput) return;
-    jpegOutput->clear();
+                            std::vector<uint8_t>* jpegOutput,
+                            std::vector<std::vector<uint8_t>>* tileOutput) {
+    if (!jpegOutput && !tileOutput) return;
+    if (jpegOutput) jpegOutput->clear();
+    if (tileOutput) tileOutput->clear();
     if (std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") ||
         std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") ||
         std::getenv("MOTIONCAM_JPEG_TILED")) return;
-    params.consumePackedOutput = [jpegOutput](const VulkanPackedImage& image) {
+    params.consumePackedOutput = [jpegOutput, tileOutput](const VulkanPackedImage& image) {
         if (image.bits < 8 || image.bits > 16) return false;
+        if (tileOutput) {
+            const auto shape = jpeg92TileShape(image.channels);
+            if (image.width % shape.width || image.height % shape.height)
+                return false;
+            return jpegEncodeTiledVulkanPackedBuffer(
+                image.gpu, image.buffer, image.width, image.height,
+                image.channels, image.bits, image.wordsPerRow,
+                shape.width, shape.height,
+                *tileOutput);
+        }
         const bool encoded = jpegEncodeFullyVulkanPackedBufferBorrowed(
             image.gpu, image.buffer, image.width, image.height,
             image.channels, image.bits, image.wordsPerRow,
@@ -72,7 +85,7 @@ void prepareGpuJpegConsumer(VulkanGainBakeParams& params,
                 jpegOutput->assign(bytes, bytes + size);
                 return true;
             });
-        if (!encoded) jpegOutput->clear();
+        if (!encoded && jpegOutput) jpegOutput->clear();
         return encoded;
     };
 }
@@ -4949,6 +4962,52 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
                 !arrayValue(*tileCountsE, index, byteCount)) return false;
             sourceChunks.emplace_back(offset, byteCount);
         }
+        // Large, regular JPEG92 tile grids can decode in parallel on Vulkan.
+        // Preserve the general CPU path for edge tiles, planar images and
+        // uncommon layouts that the GPU decoder cannot represent.
+        bool gpuDecoded = false;
+        if (compression == TIFF_COMPRESSION_JPEG && planar == 1 &&
+            !interleaved && (channels == 1 || channels == 3) &&
+            bits >= 8 && expectedCount >= 64 &&
+            width % tileWidth == 0 && height % tileHeight == 0 &&
+            !std::getenv("MOTIONCAM_GPU_JPEG_DECODE_DISABLE")) {
+            std::vector<VulkanJpegTile> tiles;
+            tiles.reserve(expectedCount);
+            for (const auto& [offset, byteCount] : sourceChunks) {
+                if (!byteCount || offset > data.size() ||
+                    byteCount > data.size() - offset) {
+                    tiles.clear();
+                    break;
+                }
+                tiles.push_back({data.data() + offset, byteCount,
+                                 tileWidth, tileHeight, bits, channels});
+            }
+            std::vector<std::vector<uint16_t>> decodedTiles;
+            const VulkanJpegContiguousSource contiguous{data.data(), data.size()};
+            if (tiles.size() == expectedCount &&
+                jpegDecodeTilesVulkan(tiles, decodedTiles, &contiguous) &&
+                decodedTiles.size() == expectedCount) {
+                gpuDecoded = true;
+                for (uint32_t index = 0; index < expectedCount; ++index) {
+                    if (decodedTiles[index].size() !=
+                        static_cast<size_t>(tileWidth) * tileHeight * channels) {
+                        gpuDecoded = false;
+                        break;
+                    }
+                    const uint32_t originX = (index % across) * tileWidth;
+                    const uint32_t originY = (index / across) * tileHeight;
+                    for (uint32_t y = 0; y < tileHeight; ++y)
+                        std::memcpy(pixels.data() +
+                            (static_cast<size_t>(originY + y) * width + originX) * channels,
+                            decodedTiles[index].data() +
+                            static_cast<size_t>(y) * tileWidth * channels,
+                            static_cast<size_t>(tileWidth) * channels * sizeof(uint16_t));
+                }
+            }
+        }
+        if (gpuDecoded && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_tiled_decode width={} height={} channels={} tiles={}",
+                         width, height, channels, expectedCount);
         const unsigned workerCount = std::min<unsigned>(
             expectedCount, std::min(8u, utils::availableCpuWorkers()));
         std::atomic_uint32_t nextTile{0};
@@ -5036,9 +5095,11 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
             }
         };
         std::vector<std::thread> workers;
-        workers.reserve(workerCount);
-        for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(decodeTiles);
-        for (auto& worker : workers) worker.join();
+        if (!gpuDecoded) {
+            workers.reserve(workerCount);
+            for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(decodeTiles);
+            for (auto& worker : workers) worker.join();
+        }
         if (decodeFailed.load(std::memory_order_relaxed)) return false;
         if (!restoreInterleave(pixels)) return false;
         const auto decodedAt = std::chrono::steady_clock::now();
@@ -5940,7 +6001,8 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
 bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
         const VulkanGainBakeTextureSource& texture, LogTransformMode mode,
         uint32_t quantizationWhite, bool highQuality, uint32_t ditherSeed,
-        std::vector<uint8_t>* gpuJpeg) {
+        std::vector<uint8_t>* gpuJpeg,
+        std::vector<std::vector<uint8_t>>* gpuJpegTiles) {
     if (!texture.gpu || !texture.texture || !logReductionBits(mode))
         return false;
     bool little = true;
@@ -6027,7 +6089,7 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
     params.textureSource = &texture;
     params.map = VulkanRgbGainMap{1, 1, 3, 0, 0, width, height,
                                  1, 1, 0.0f, 0.0f, 1.0f, 1.0f, &identity};
-    prepareGpuJpegConsumer(params, gpuJpeg);
+    prepareGpuJpegConsumer(params, gpuJpeg, gpuJpegTiles);
     if (!bakeRgbGainVulkan(nullptr, params, data.data() + offset, packedBytes))
         return false;
     for (uint32_t i = 0; i < bitsE->count; ++i) {
@@ -6054,7 +6116,8 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
 bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         LogTransformMode mode, uint32_t quantizationWhite,
         bool highQuality, uint32_t ditherSeed,
-        std::vector<uint8_t>* gpuJpeg) {
+        std::vector<uint8_t>* gpuJpeg,
+        std::vector<std::vector<uint8_t>>* gpuJpegTiles) {
     if (!logReductionBits(mode)) return false;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -6153,14 +6216,15 @@ bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         params.scale[channel] = static_cast<float>(sourceWhite) /
             static_cast<float>(sourceWhite - black);
     }
-    prepareGpuJpegConsumer(params, gpuJpeg);
+    prepareGpuJpegConsumer(params, gpuJpeg, gpuJpegTiles);
     std::vector<uint8_t> packed(packedBytes);
     const auto* source = reinterpret_cast<const uint16_t*>(data.data() + offset);
     const bool baked = channels == 3
         ? bakeRgbGainVulkan(source, params, packed.data(), packed.size())
         : bakeCfaGainVulkan(source, params, packed.data(), packed.size());
     if (!baked) return false;
-    if (!gpuJpeg || gpuJpeg->empty())
+    if ((!gpuJpeg || gpuJpeg->empty()) &&
+        (!gpuJpegTiles || gpuJpegTiles->empty()))
         std::memcpy(data.data() + offset, packed.data(), packedBytes);
     for (uint32_t i = 0; i < bitsE->count; ++i) {
         const size_t at = bitsE->valueOffset + static_cast<size_t>(i) *
@@ -8204,7 +8268,162 @@ bool DNGDecoder::attachLosslessJPEG(std::vector<uint8_t>& data,
                             jpeg.data(), jpeg.size(), little);
 }
 
-bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
+bool DNGDecoder::attachLosslessJPEGTiles(
+    std::vector<uint8_t>& data,
+    const std::vector<std::vector<uint8_t>>& jpegTiles,
+    uint32_t tileWidth, uint32_t tileHeight) {
+    DNGImageLayout layout;
+    if (!tileWidth || !tileHeight || jpegTiles.empty() ||
+        jpegTiles.size() > UINT32_MAX / 8u ||
+        !getImageLayout(data, layout) ||
+        layout.compression != TIFF_COMPRESSION_NONE ||
+        layout.storage != DNGStorageLayout::Strips ||
+        (layout.pixels != DNGPixelLayout::CFA &&
+         layout.pixels != DNGPixelLayout::LinearRGB) ||
+        layout.width % tileWidth || layout.height % tileHeight ||
+        uint64_t(layout.width / tileWidth) * (layout.height / tileHeight) !=
+            jpegTiles.size()) return false;
+    std::vector<uint8_t> payload;
+    std::vector<uint32_t> relativeOffsets, lengths;
+    relativeOffsets.reserve(jpegTiles.size());
+    lengths.reserve(jpegTiles.size());
+    for (const auto& jpeg : jpegTiles) {
+        if (jpeg.empty() || jpeg.size() > INT_MAX) return false;
+        lj92 decoder = nullptr;
+        int width = 0, height = 0, bits = 0, channels = 0;
+        const bool valid = lj92_open(&decoder,
+            const_cast<uint8_t*>(jpeg.data()), int(jpeg.size()),
+            &width, &height, &bits, &channels) == LJ92_ERROR_NONE;
+        if (decoder) lj92_close(decoder);
+        if (!valid || width != int(tileWidth) || height != int(tileHeight) ||
+            bits != int(layout.bitsPerSample) ||
+            channels != int(layout.samplesPerPixel)) return false;
+        if (payload.size() & 1u) payload.push_back(0);
+        if (payload.size() > UINT32_MAX - jpeg.size()) return false;
+        relativeOffsets.push_back(uint32_t(payload.size()));
+        lengths.push_back(uint32_t(jpeg.size()));
+        payload.insert(payload.end(), jpeg.begin(), jpeg.end());
+    }
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    const TiffEntry* photo = nullptr;
+    for (const auto& entry : entries)
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+            const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                ? read16(data.data() + entry.valueOffset, little)
+                : read32(data.data() + entry.valueOffset, little);
+            if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+                photo = &entry;
+                break;
+            }
+        }
+    if (!photo) return false;
+    const uint32_t oldIfd = photo->ifdOffset;
+    auto find = [&](uint16_t tag, uint32_t ifd,
+                    const std::vector<TiffEntry>& list) -> const TiffEntry* {
+        for (const auto& entry : list)
+            if (entry.ifdOffset == ifd && entry.tag == tag) return &entry;
+        return nullptr;
+    };
+    const auto* offsets = find(TIFF_TAG_STRIP_OFFSETS, oldIfd, entries);
+    const auto* counts = find(TIFF_TAG_STRIP_BYTE_COUNTS, oldIfd, entries);
+    if (!offsets || !counts || offsets->count != 1 || counts->count != 1 ||
+        (offsets->type != TIFF_TYPE_SHORT && offsets->type != TIFF_TYPE_LONG) ||
+        (counts->type != TIFF_TYPE_SHORT && counts->type != TIFF_TYPE_LONG))
+        return false;
+    const uint32_t oldOffset = offsets->type == TIFF_TYPE_SHORT
+        ? read16(data.data() + offsets->valueOffset, little)
+        : read32(data.data() + offsets->valueOffset, little);
+    const uint32_t oldBytes = counts->type == TIFF_TYPE_SHORT
+        ? read16(data.data() + counts->valueOffset, little)
+        : read32(data.data() + counts->valueOffset, little);
+    if (oldOffset > data.size() || oldBytes > data.size() - oldOffset)
+        return false;
+    std::vector<uint8_t> candidate = data;
+    if (!replaceTiffStrip(candidate, oldOffset, oldBytes, payload, little))
+        return false;
+    auto current = findTiffEntries(candidate, little);
+    photo = nullptr;
+    for (const auto& entry : current)
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+            const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                ? read16(candidate.data() + entry.valueOffset, little)
+                : read32(candidate.data() + entry.valueOffset, little);
+            if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+                photo = &entry;
+                break;
+            }
+        }
+    if (!photo || !insertTiffScalarEntry(candidate, photo->ifdOffset,
+                                        TIFF_TAG_TILE_LENGTH, TIFF_TYPE_LONG,
+                                        tileHeight, little)) return false;
+    current = findTiffEntries(candidate, little);
+    photo = nullptr;
+    for (const auto& entry : current)
+        if (entry.tag == TIFF_TAG_PHOTOMETRIC && entry.count &&
+            (entry.type == TIFF_TYPE_SHORT || entry.type == TIFF_TYPE_LONG)) {
+            const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                ? read16(candidate.data() + entry.valueOffset, little)
+                : read32(candidate.data() + entry.valueOffset, little);
+            if (value == TIFF_PHOTOMETRIC_CFA || value == 34892) {
+                photo = &entry;
+                break;
+            }
+        }
+    if (!photo) return false;
+    const uint32_t ifd = photo->ifdOffset;
+    offsets = find(TIFF_TAG_STRIP_OFFSETS, ifd, current);
+    counts = find(TIFF_TAG_STRIP_BYTE_COUNTS, ifd, current);
+    const auto* rows = find(TIFF_TAG_ROWS_PER_STRIP, ifd, current);
+    const auto* compression = find(TIFF_TAG_COMPRESSION, ifd, current);
+    if (!offsets || !counts || !rows || !compression ||
+        candidate.size() > UINT32_MAX - jpegTiles.size() * 8u - 1u)
+        return false;
+    const uint32_t payloadStart = offsets->type == TIFF_TYPE_SHORT
+        ? read16(candidate.data() + offsets->valueOffset, little)
+        : read32(candidate.data() + offsets->valueOffset, little);
+    uint32_t arrayOffset = 0;
+    if (jpegTiles.size() > 1) {
+        if (candidate.size() & 1u) candidate.push_back(0);
+        arrayOffset = uint32_t(candidate.size());
+        candidate.resize(candidate.size() + jpegTiles.size() * 8u);
+        for (size_t tile = 0; tile < jpegTiles.size(); ++tile) {
+            if (relativeOffsets[tile] > UINT32_MAX - payloadStart) return false;
+            write32(candidate.data() + arrayOffset + tile * 4u,
+                    payloadStart + relativeOffsets[tile], little);
+            write32(candidate.data() + arrayOffset +
+                    (jpegTiles.size() + tile) * 4u, lengths[tile], little);
+        }
+    }
+    auto makeLong = [&](const TiffEntry& entry, uint16_t tag,
+                        uint32_t count, uint32_t value) {
+        write16(candidate.data() + entry.entryOffset, tag, little);
+        write16(candidate.data() + entry.entryOffset + 2, TIFF_TYPE_LONG, little);
+        write32(candidate.data() + entry.entryOffset + 4, count, little);
+        write32(candidate.data() + entry.entryOffset + 8, value, little);
+    };
+    makeLong(*offsets, TIFF_TAG_TILE_OFFSETS, uint32_t(jpegTiles.size()),
+             jpegTiles.size() == 1 ? payloadStart : arrayOffset);
+    makeLong(*counts, TIFF_TAG_TILE_BYTE_COUNTS, uint32_t(jpegTiles.size()),
+             jpegTiles.size() == 1 ? lengths.front() :
+             arrayOffset + uint32_t(jpegTiles.size()) * 4u);
+    makeLong(*rows, TIFF_TAG_TILE_WIDTH, 1u, tileWidth);
+    if (compression->type == TIFF_TYPE_SHORT)
+        write16(candidate.data() + compression->valueOffset,
+                TIFF_COMPRESSION_JPEG, little);
+    else if (compression->type == TIFF_TYPE_LONG)
+        write32(candidate.data() + compression->valueOffset,
+                TIFF_COMPRESSION_JPEG, little);
+    else return false;
+    if (!sortTiffIfdEntries(candidate, ifd, little)) return false;
+    data = std::move(candidate);
+    return true;
+}
+
+bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data,
+                                      bool allowLegacyTiles) {
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     auto scalar = [&](const TiffEntry& entry) -> uint32_t {
@@ -8282,7 +8501,7 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
         std::strcmp(encoderSetting, "turbo") == 0;
     // TIFF tiles give decoders independent JPEG scans to process in parallel.
     // MOTIONCAM_JPEG_TILED enables this output topology explicitly.
-    if (channels == 1 &&
+    if (allowLegacyTiles && channels == 1 &&
         scalar(*photo) == TIFF_PHOTOMETRIC_CFA && width % 16u == 0 &&
         std::getenv("MOTIONCAM_JPEG_TILED")) {
         const uint32_t desiredRows = static_cast<uint32_t>(
@@ -8483,6 +8702,69 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data) {
     return replaced;
 }
 
+bool DNGDecoder::compressLosslessJPEGTiled(std::vector<uint8_t>& data) {
+    DNGImageLayout layout;
+    if (!getImageLayout(data, layout) || layout.compression != TIFF_COMPRESSION_NONE ||
+        (layout.samplesPerPixel != 1 && layout.samplesPerPixel != 3) ||
+        layout.bitsPerSample < 8 || layout.bitsPerSample > 16 ||
+        !layout.width || !layout.height) return false;
+    DecodedDNGImage image;
+    if (!decodeImageBorrowed(data, image, false, false)) return false;
+    const uint32_t channels = layout.samplesPerPixel;
+    auto tileDivisor = [](uint32_t dimension, uint32_t preferred) {
+        for (uint32_t side = std::min(dimension, preferred); side > 1; --side)
+            if (dimension % side == 0) return side;
+        return dimension;
+    };
+    const auto preferred = jpeg92TileShape(channels);
+    const uint32_t tileWidth = tileDivisor(layout.width, preferred.width);
+    const uint32_t tileHeight = tileDivisor(layout.height, preferred.height);
+    const uint64_t count64 = uint64_t(layout.width / tileWidth) *
+                             (layout.height / tileHeight);
+    if (!count64 || count64 > UINT32_MAX ||
+        uint64_t(tileWidth) * tileHeight * channels > SIZE_MAX / sizeof(uint16_t))
+        return false;
+    const uint32_t count = uint32_t(count64);
+    std::vector<std::vector<uint8_t>> tiles(count);
+    std::atomic_uint32_t next{0};
+    std::atomic_bool failed{false};
+    auto encode = [&] {
+        std::vector<uint16_t> samples(size_t(tileWidth) * tileHeight * channels);
+        for (uint32_t index; !failed.load(std::memory_order_relaxed) &&
+             (index = next.fetch_add(1, std::memory_order_relaxed)) < count;) {
+            const uint32_t across = layout.width / tileWidth;
+            const uint32_t x = index % across * tileWidth;
+            const uint32_t y = index / across * tileHeight;
+            for (uint32_t row = 0; row < tileHeight; ++row)
+                std::copy_n(image.samples.data() +
+                    (size_t(y + row) * layout.width + x) * channels,
+                    size_t(tileWidth) * channels,
+                    samples.data() + size_t(row) * tileWidth * channels);
+            uint8_t* bytes = nullptr;
+            int length = 0;
+            const auto result = lj92_encode(samples.data(), int(tileWidth),
+                int(tileHeight), int(layout.bitsPerSample), int(channels),
+                int(tileWidth * channels), 0, nullptr, 0, &bytes, &length);
+            if (result != LJ92_ERROR_NONE || length <= 0) {
+                free(bytes);
+                failed.store(true, std::memory_order_relaxed);
+                break;
+            }
+            tiles[index].assign(bytes, bytes + length);
+            free(bytes);
+        }
+    };
+    const unsigned workers = std::min<unsigned>(count,
+        std::min(8u, utils::availableCpuWorkers()));
+    std::vector<std::thread> threads;
+    threads.reserve(workers > 0 ? workers - 1 : 0);
+    for (unsigned i = 1; i < workers; ++i) threads.emplace_back(encode);
+    encode();
+    for (auto& thread : threads) thread.join();
+    return !failed.load(std::memory_order_relaxed) &&
+        attachLosslessJPEGTiles(data, tiles, tileWidth, tileHeight);
+}
+
 bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool normalizeGainMaps,
                               bool colorOnly,
@@ -8498,7 +8780,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               uint32_t ditherSeed,
                               bool preferVulkan,
                               const VulkanGainBakeTextureSource* textureSource,
-                              std::vector<uint8_t>* gpuJpeg) {
+                              std::vector<uint8_t>* gpuJpeg,
+                              std::vector<std::vector<uint8_t>>* gpuJpegTiles) {
     if (logFused) *logFused = false;
     const char* cpuOptSetting = std::getenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
     const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
@@ -9227,7 +9510,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         // Fused LOG uses its packed precision. If LOG is requested but did
         // not fuse, leave the strip available for the later LOG pass.
         if (packDuringBake || fusedLogMode == LogTransformMode::Disabled)
-            prepareGpuJpegConsumer(gpuParams, gpuJpeg);
+            prepareGpuJpegConsumer(gpuParams, gpuJpeg, gpuJpegTiles);
         auto gpuMap = [&](size_t index) {
             const auto& selected = maps[index];
             return VulkanRgbGainMap{selected.width, selected.height,
@@ -9276,7 +9559,9 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                             unusedPacked.data(), byteCount)
                         : bakeCfaGainVulkan(gpuSource, packedParams,
                                             unusedPacked.data(), byteCount);
-                    if (packedBaked && gpuJpeg && !gpuJpeg->empty()) {
+                    if (packedBaked &&
+                        ((gpuJpeg && !gpuJpeg->empty()) ||
+                         (gpuJpegTiles && !gpuJpegTiles->empty()))) {
                         gpuBaked = true;
                         packedBits = finalBits;
                         packDuringBake = true;
@@ -9317,7 +9602,8 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             }
         }
         if (gpuBaked) {
-            if (!packDuringBake && !directGpuStrip)
+            if (!packDuringBake && !directGpuStrip &&
+                (!gpuJpegTiles || gpuJpegTiles->empty()))
                 std::memcpy(inPlace ? static_cast<void*>(stripPixels)
                                     : static_cast<void*>(pixels),
                             gpuBytes.data(), gpuBytes.size());
