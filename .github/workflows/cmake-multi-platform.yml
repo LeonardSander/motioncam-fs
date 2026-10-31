@@ -246,6 +246,7 @@ jobs:
         arch: ${{ matrix.qt_arch }}
         modules: qtmultimedia
         set-env: true
+        extra: --timeout 60
 
     - name: Install Qt (macOS arm64 via Homebrew)
       if: matrix.qt_install == 'brew'

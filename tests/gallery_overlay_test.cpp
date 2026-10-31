@@ -7,6 +7,13 @@
 #include <QLabel>
 #include <cstdio>
 
+// Capturing and recompositing adds a premultiplied-alpha rounding step.
+// Qt's raster paths can round differently across image formats and CPUs.
+static bool pixelsDiffer(QRgb a, QRgb b) {
+    return std::max({std::abs(qRed(a)-qRed(b)), std::abs(qGreen(a)-qGreen(b)),
+                     std::abs(qBlue(a)-qBlue(b)), std::abs(qAlpha(a)-qAlpha(b))}) > 2;
+}
+
 class Patch final : public QWidget {
 public:
     Patch(QWidget* parent, QColor color) : QWidget(parent), mColor(color) {}
@@ -100,13 +107,15 @@ int main(int argc, char** argv) {
                         int differences = 0;
                         for (int y = 0; y < actual.height(); ++y)
                             for (int x = 0; x < actual.width(); ++x)
-                                if (actual.pixel(x, y) != expected.pixel(x, y)) {
+                                if (pixelsDiffer(actual.pixel(x, y), expected.pixel(x, y))) {
                                     if (differences == 0) std::fprintf(stderr, "First mismatch %d,%d: %08x vs %08x\n", x, y, actual.pixel(x,y), expected.pixel(x,y));
                                     ++differences;
                                 }
-                        std::fprintf(stderr, "Overlay mismatch: %dx%d ratio=%.2f opacity=%.1f histogram=%d pixels=%d\n",
-                            size.width(), size.height(), ratio, opacity, histogramVisible, differences);
-                        return 1;
+                        if (differences) {
+                            std::fprintf(stderr, "Overlay mismatch: %dx%d ratio=%.2f opacity=%.1f histogram=%d pixels=%d\n",
+                                size.width(), size.height(), ratio, opacity, histogramVisible, differences);
+                            return 1;
+                        }
                     }
                     if (size.height() == 560 && opacity > 0 && captured.image.height() >= pixels.height()) {
                         std::fprintf(stderr, "Overlay was not compacted\n");
@@ -157,9 +166,7 @@ int main(int argc, char** argv) {
             int count=0;
             for(int y=0;y<actual.height();++y)for(int x=0;x<actual.width();++x){
                 const QRgb a=actual.pixel(x,y),b=expected.pixel(x,y);
-                // Cached glyphs add a premultiplied-alpha composition step.
-                count+=std::max({std::abs(qRed(a)-qRed(b)),std::abs(qGreen(a)-qGreen(b)),
-                    std::abs(qBlue(a)-qBlue(b)),std::abs(qAlpha(a)-qAlpha(b))})>2;
+                count += pixelsDiffer(a, b);
             }
             if(count){
                 std::fprintf(stderr,"Item-view overlay differs ratio=%g scroll=%d checked=%d pixels=%d\n",double(ratio),value,selected,count);
