@@ -196,9 +196,16 @@ export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
 export QT_ANDROID_ROOT=/path/to/Qt/6.12.0/android_arm64_v8a
 export QT_HOST_PATH=/path/to/Qt/6.12.0/gcc_64
 export VCPKG_ROOT=/path/to/vcpkg
+export JAVA_HOME=/path/to/jdk-21
 python3 scripts/install_qt_android.py "$QT_ANDROID_ROOT"
 bash scripts/build_android_apk.sh
 ```
+
+For repeated local builds, copy `scripts/android-build.env.example` to
+`android-build.env` and adjust its persistent toolchain paths. The script loads
+this ignored file automatically, so subsequent builds only need
+`bash scripts/build_android_apk.sh`. Build files and dependencies are kept in
+`build-android-arm64` by default.
 
 The script prints the APK path. The APK has optimized native code and Qt's
 debug signature for direct installation; rebuilds use the same debug key on

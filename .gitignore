@@ -10,3 +10,6 @@ logs/
 out/
 vcpkg_installed/
 mcraw_player_debug_log.txt
+
+# Machine-specific Android toolchain paths.
+/android-build.env

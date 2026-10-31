@@ -196,10 +196,24 @@ popup is retained for Android compatibility.
 
 ## Build and verification
 
-Use `scripts/build_android_apk.sh` with the SDK, NDK, vcpkg and matching Qt paths
-listed in its required environment variables. `scripts/install_qt_android.py`
-can install the pinned public Android Qt kit into a chosen directory. The
-vcpkg overlay builds unmodified libplacebo; no external-buffer import patch is needed.
+Run `bash scripts/build_android_apk.sh` from the repository root. Its default
+output is `build-android-arm64/android-build/build/outputs/apk/debug/android-build-debug.apk`;
+an optional first argument selects another build directory.
+
+Copy `scripts/android-build.env.example` to the ignored `android-build.env`
+and adjust its paths for a persistent local setup. The script loads it
+automatically; CI supplies the same variables through its environment.
+Use matching Qt 6.12.0 Android and Linux host kits, a full JDK 21, SDK
+platform/build tools 36, NDK 27.2.12479018, and the pinned vcpkg checkout.
+Keep these tools outside `/tmp`. The example uses `~/Qt/6.12.0` and
+`~/.local/share/mcfuse`; generated build files and dependencies stay in
+`build-android-arm64`. `scripts/install_qt_android.py` installs the Android
+kit; aqt can install the matching host kit with Qt Declarative and Shader Tools.
+
+`CMAKE_BUILD_PARALLEL_LEVEL` and `VCPKG_MAX_CONCURRENCY` override the default
+four build jobs. The build requires the Vulkan backend and retains runtime
+CPU fallback. The vcpkg overlay builds unmodified libplacebo; no external-buffer
+import patch is needed.
 
 Desktop regression targets include `motioncam-lossless-jpeg-test`,
 `motioncam-audio-finalize-test` and `motioncam-finalize-interpolation-test`.
