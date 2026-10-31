@@ -27,6 +27,10 @@
             "version": "1.4.357.0"
         },
         {
+            "name": "vulkan-loader",
+            "version": "1.4.357.0"
+        },
+        {
             "name": "ffmpeg",
             "version": "6.1.1"
         }

@@ -8,6 +8,24 @@ vcpkg_from_github(
     HEAD_REF master
 )
 
+# GitHub release archives omit these submodules. Use pinned source packages
+# in the locations libplacebo already adds to its generator's PYTHONPATH.
+# This also works with isolated Python installations on hosted runners.
+vcpkg_from_github(
+    OUT_SOURCE_PATH JINJA_SOURCE_PATH
+    REPO pallets/jinja
+    REF 3.1.6
+    SHA512 a3558f89d9d60676583bfc05e8987e9c486c2335affb71c9733b93040d56a2f97fb036974f1be1bf82c5b0767f482b2e795d58ea35456fcfe7e705f5e6b7a778
+)
+vcpkg_from_github(
+    OUT_SOURCE_PATH MARKUPSAFE_SOURCE_PATH
+    REPO pallets/markupsafe
+    REF 3.0.3
+    SHA512 2259dba158c37d06f87ef208603706f1d79b536124cec599ee634717d6061cccd89ee4bc8c35aa40ce9c728d595f2b802b6e68e9c7219c2f17135ed91854d777
+)
+file(COPY "${JINJA_SOURCE_PATH}/src" DESTINATION "${SOURCE_PATH}/3rdparty/jinja")
+file(COPY "${MARKUPSAFE_SOURCE_PATH}/src" DESTINATION "${SOURCE_PATH}/3rdparty/markupsafe")
+
 set(VULKAN_REGISTRY "${CURRENT_INSTALLED_DIR}/share/vulkan/registry/vk.xml")
 if(NOT EXISTS "${VULKAN_REGISTRY}")
     message(FATAL_ERROR "Vulkan registry is required at ${VULKAN_REGISTRY}")
