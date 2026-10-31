@@ -5008,13 +5008,13 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
                 !arrayValue(*tileCountsE, index, byteCount)) return false;
             sourceChunks.emplace_back(offset, byteCount);
         }
-        // Large, regular JPEG92 tile grids can decode in parallel on Vulkan.
+        // Regular JPEG92 tile grids can decode in parallel on Vulkan.
         // Preserve the general CPU path for edge tiles, planar images and
         // uncommon layouts that the GPU decoder cannot represent.
         bool gpuDecoded = false;
         if (compression == TIFF_COMPRESSION_JPEG && planar == 1 &&
             !interleaved && (channels == 1 || channels == 3) &&
-            bits >= 8 && expectedCount >= 64 &&
+            bits >= 8 &&
             width % tileWidth == 0 && height % tileHeight == 0 &&
             !std::getenv("MOTIONCAM_GPU_JPEG_DECODE_DISABLE")) {
             std::vector<VulkanJpegTile> tiles;
@@ -6836,10 +6836,9 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     }
     // Resident previews must fall back before a CPU bake touches samples.
     if (image.gpuImage) return false;
-    // A streaming preview that cannot defer gain into the final display pass
-    // still needs CPU topology or normalization. Baking it on a separate GPU
-    // device would force a full-frame readback followed by another upload.
-    if (preferVulkan && !settings.streamingPreview &&
+    // Prefer the supported GPU bake even when the final display pass cannot
+    // consume deferred gains. CPU normalization remains the fallback.
+    if (preferVulkan &&
         !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
         sourceScale == 1 && sourceWidth == image.layout.width &&
         sourceHeight == image.layout.height && phaseGroup == 1 &&
@@ -9424,9 +9423,11 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
     std::shared_ptr<const std::vector<float>> cachedCfaGains;
     bool gainFieldCacheHit = false;
     bool gainFieldWarmup = false;
-    if (cpuOpt && !(preferVulkan && inPlace) &&
-        (directCfaMaps || directScalarMap) &&
-        static_cast<uint64_t>(width) * height <= 16u * 1024u * 1024u) {
+    // Defer CPU-only interpolation until the GPU attempt has failed.
+    auto prepareCpuGainField = [&] {
+        if (!cpuOpt || !(directCfaMaps || directScalarMap) ||
+            static_cast<uint64_t>(width) * height > 16u * 1024u * 1024u)
+            return;
         static std::mutex gainFieldMutex;
         static std::deque<std::pair<std::string,
             std::shared_ptr<const std::vector<float>>>> gainFields;
@@ -9498,7 +9499,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             cachedCfaGains = field;
             gainFields.back().second = std::move(field);
         }
-    }
+    };
     // Select the storage layout once per frame. All modes use the same gain
     // calculation for RGB and CFA pixels.
     enum class BakeOutputMode { Packed8, PackedBits, InPlace16, Decoded16 };
@@ -9874,6 +9875,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                 BakeTransformMode::Log60Fast>{});
     };
     if (!gpuBaked) {
+        prepareCpuGainField();
         if (packDuringBake && packedBits == 8)
             runLogBake(std::integral_constant<BakeOutputMode, BakeOutputMode::Packed8>{});
         else if (packDuringBake)

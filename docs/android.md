@@ -80,13 +80,18 @@ selected by default on supported desktop builds. Gallery frames are presented
 by its Vulkan QWindow and swapchain; QWidget only hosts the window and controls.
 Android does not use a QWidget image-painting fallback. Qt backing-store backend
 settings are scoped to Android and do not override desktop backend selection.
-On Android, decoding, gallery processing and native presentation share one
+Decoding, gallery processing and native presentation can share one
 Vulkan device, with separate libplacebo command recorders and common queue
 locks. The presenter wraps the processed VkImage directly, with an in-device
 timeline semaphore for readiness. There are no exported memory descriptors or
 inter-device semaphore transfers. Unsupported image output retains the host
 upload fallback.
-Desktop retains its existing device and DMA-BUF transport.
+This transport is platform-independent. It is selected automatically on
+unified-memory GPUs; Android and Apple Silicon assume unified memory, while
+other devices are classified by their Vulkan memory properties. Linux retains
+its tested DMA-BUF transport for separate devices. DMA-BUF availability is
+independent of whether the GPU has dedicated memory. Desktop presentation
+retries through its existing backend if native Vulkan fails.
 
 ## Current processing and lifetime rules
 
@@ -102,7 +107,7 @@ synchronous thumbnail readback. Allocation failures retain the staging fallback.
 Queued thumbnails carry the playback generation and are discarded after a seek
 or clip replacement.
 MediaCodec hardware-buffer import and native surface creation remain
-platform adapters, independent of that memory policy. macOS requires validation
+platform adapters, independent of that memory policy. macOS is enabled but requires validation
 on hardware; Android testing does not validate its import/presentation backend.
 
 DirectLog uses MediaCodec AImageReader output when FFmpeg Vulkan decode is

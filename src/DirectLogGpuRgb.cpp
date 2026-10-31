@@ -192,11 +192,7 @@ struct DirectLogGpuRgb::State {
         log = pl_log_create(PL_API_VER, nullptr);
         if (!log) return false;
         if (softwareSource) {
-#ifdef __ANDROID__
-            vulkan = createSharedVulkanContext(log);
-#else
-            vulkan = pl_vulkan_create(log, nullptr);
-#endif
+            vulkan = createGalleryVulkanContext(log);
         } else {
         pl_vulkan_import_params params = {};
         params.instance = hw->inst;

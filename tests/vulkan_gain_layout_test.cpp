@@ -2,6 +2,7 @@
 #include "VulkanGalleryPreview.h"
 #include "Utils.h"
 #include "GalleryColor.h"
+#include "SharedVulkanDevice.h"
 #include <libplacebo/vulkan.h>
 #include <libplacebo/gpu.h>
 
@@ -15,6 +16,30 @@
 #include <vector>
 
 int main() {
+    // Topology, rather than an OS or host-visible VRAM BAR, determines policy.
+    {
+        VkPhysicalDeviceProperties properties{};
+        properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+        VkPhysicalDeviceMemoryProperties memory{};
+        memory.memoryHeapCount = memory.memoryTypeCount = 1;
+        memory.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+        memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        if (!motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+        memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        if (motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        memory.memoryHeapCount = memory.memoryTypeCount = 2;
+        memory.memoryHeaps[1].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+        memory.memoryTypes[1].heapIndex = 1;
+        memory.memoryTypes[1].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        if (motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        memory.memoryTypes[1].propertyFlags |= VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
+        if (!motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+    }
     // Compare the gallery compute pass with the established CPU fallback,
     // including odd dimensions and all four Bayer phases.
     for (const std::array<uint8_t, 4> phase : {
@@ -466,7 +491,7 @@ int main() {
     {
         // RGB texture specialization must match the existing buffer shader;
         // excluding Bayer branches must not alter normalization or color math.
-        pl_vulkan vk = pl_vulkan_create(nullptr, nullptr);
+        pl_vulkan vk = motioncam::createGalleryVulkanContext(nullptr);
         if (!vk) return 1;
         const pl_fmt format = pl_find_fmt(vk->gpu, PL_FMT_UNORM, 4, 16, 16,
                                           PL_FMT_CAP_SAMPLEABLE);
@@ -505,6 +530,61 @@ int main() {
                 std::fprintf(stderr, "RGB texture shader differs from buffer shader\n");
                 return 1;
             }
+        }
+        if (auto shared = motioncam::sharedVulkanDevice()) {
+            // Exercise the common image transport on any GPU with the shared
+            // device enabled, including dedicated Linux hardware in CI/tests.
+            motioncam::VulkanGalleryOutput output;
+            output.width = output.height = 16;
+            output.rgb24 = true;
+            output.requireZeroCopy = true;
+            std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame;
+            output.gpuBuffer = &frame;
+            std::vector<uint8_t> pixels;
+            if (!motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+                    1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
+                !pixels.empty() || !frame || !frame->texture || frame->fd >= 0 ||
+                pl_vulkan_get(static_cast<pl_gpu>(frame->gpu))->device != shared->device)
+                return 1;
+            pl_vulkan_wrap_params wrap{};
+            VkFormat nativeFormat{};
+            VkImageUsageFlags usage{};
+            wrap.image = pl_vulkan_unwrap(static_cast<pl_gpu>(frame->gpu),
+                static_cast<pl_tex>(frame->texture), &nativeFormat, &usage);
+            wrap.width = wrap.height = 16;
+            wrap.format = nativeFormat;
+            wrap.usage = usage;
+            auto wrapped = pl_vulkan_wrap(shared->gpu, &wrap);
+            if (!wrapped) return 1;
+            pl_vulkan_release_params release{};
+            release.tex = wrapped;
+            release.layout = VK_IMAGE_LAYOUT_GENERAL;
+            release.qf = VK_QUEUE_FAMILY_IGNORED;
+            VkSemaphore ready{};
+            std::memcpy(&ready, &frame->readySemaphore, sizeof(ready));
+            release.semaphore = {ready, 1};
+            pl_vulkan_release_ex(shared->gpu, &release);
+            motioncam::VulkanGalleryTextureSource presented;
+            presented.gpu = shared->gpu;
+            presented.texture = wrapped;
+            presented.width = presented.height = 16;
+            presented.white.fill(65535);
+            if (!motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+                    1.0f, nullptr, nullptr, false, false, nullptr, nullptr, &presented) ||
+                pixels.size() != 16u * 16u * 6u) return 1;
+            pl_gpu_finish(shared->gpu);
+            pl_tex_destroy(shared->gpu, &wrapped);
+            motioncam::releaseVulkanGalleryTextureDevice(shared->gpu);
+            if (!frame->rejectSharedImage || !frame->rejectSharedImage() ||
+                frame->rejectSharedImage()) return 1;
+            frame.reset();
+            if (motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+                    1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture)) return 1;
+            output.requireZeroCopy = false;
+            if (!motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+                    1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
+                (pixels.empty() && (!frame || frame->texture || frame->fd < 0))) return 1;
+            frame.reset();
         }
         {
             // Resident RGB clipping must match the CPU mask without source

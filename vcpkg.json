@@ -12,7 +12,7 @@
         "libjxl",
         {
             "name": "libplacebo",
-            "platform": "android"
+            "platform": "android | osx | windows"
         },
         {
             "name": "ffmpeg",

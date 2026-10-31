@@ -871,7 +871,7 @@ public:
     explicit GalleryGpuVideo(QWidget* parent) : QWidget(parent) {
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
-#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && !defined(Q_OS_MACOS)
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
         mNative = new GalleryVulkanVideo(this);
         if (mNative->usable()) {
             spdlog::info("Gallery native Vulkan presenter selected");
@@ -882,21 +882,7 @@ public:
         delete mNative;
         mNative = nullptr;
 #endif
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
-        mQuick = new QQuickWidget(this);
-        connect(mQuick, &QQuickWidget::sceneGraphError, this,
-            [this](QQuickWindow::SceneGraphError, const QString& message) {
-                mAvailable = false;
-                spdlog::warn("Gallery GPU presentation unavailable: {}", message.toStdString());
-            });
-        mQuick->setResizeMode(QQuickWidget::SizeRootObjectToView);
-        mQuick->setClearColor(QColor(96, 96, 96));
-        mTextureItem = new GalleryTextureItem;
-        mTextureItem->setSize(QSizeF(640, 360));
-        mQuick->setContent(QUrl(), nullptr, mTextureItem);
-        layout->addWidget(mQuick);
-        mAvailable = mQuick->status() != QQuickWidget::Error && mQuick->rootObject();
-#endif
+        createFallback();
     }
 
     void setFrame(const QImage& image, const QRectF& target, bool smooth) {
@@ -921,7 +907,31 @@ public:
         return mNative ? mNative->pixelRatio() : devicePixelRatioF();
     }
 
+    void disableNative() {
+        auto* old = mNative;
+        mNative = nullptr;
+        delete old;
+        createFallback();
+    }
+
 private:
+    void createFallback() {
+#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+        mQuick = new QQuickWidget(this);
+        connect(mQuick, &QQuickWidget::sceneGraphError, this,
+            [this](QQuickWindow::SceneGraphError, const QString& message) {
+                mAvailable = false;
+                spdlog::warn("Gallery GPU presentation unavailable: {}", message.toStdString());
+            });
+        mQuick->setResizeMode(QQuickWidget::SizeRootObjectToView);
+        mQuick->setClearColor(QColor(96, 96, 96));
+        mTextureItem = new GalleryTextureItem;
+        mTextureItem->setSize(QSizeF(640, 360));
+        mQuick->setContent(QUrl(), nullptr, mTextureItem);
+        layout()->addWidget(mQuick);
+        mAvailable = mQuick->status() != QQuickWidget::Error && mQuick->rootObject();
+#endif
+    }
     GalleryVulkanVideo* mNative = nullptr;
 #if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
     QQuickWidget* mQuick = nullptr;
@@ -1681,7 +1691,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
         (mClips[index].directPresentation ||
          qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_DIRECT_PRESENT")) &&
         !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
-#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && !defined(Q_OS_MACOS)
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
     const bool nativeStillPresentation = !mClips[index].isSequence;
 #else
     constexpr bool nativeStillPresentation = false;
@@ -2845,6 +2855,17 @@ void ClipPlayerDialog::updateDisplayedImage(){
     const bool fastTouchPreview=mTouchActive;
 #else
     constexpr bool fastTouchPreview=false;
+#endif
+#ifndef Q_OS_ANDROID
+    if (mGpuVideo && mGpuVideo->native() && !mGpuVideo->usable()) {
+        spdlog::warn("Gallery native Vulkan presenter failed; retrying through fallback presentation");
+        mGpuVideo->disableNative();
+        mNativeOverlayCaptureTimer.stop();
+        mLastPresentedGpuBuffer.reset();
+        // Restart delivery as host frames. Existing Qt Quick/Metal and label
+        // presenters remain available if native Vulkan fails after startup.
+        QTimer::singleShot(0, this, [this] { reloadCurrentClip(); });
+    }
 #endif
     auto presentPixmap=[this](const QPixmap& pixmap){
         mVideo->setPixmap(pixmap);

@@ -756,8 +756,6 @@ bool jpegDecodeResidentTiledImageVulkan(
     DecodeState& s = *slot;
     const bool profile = std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE") != nullptr;
     const bool directOutput =
-        (channels == 1u ||
-         std::getenv("MOTIONCAM_JPEG_RESIDENT_DIRECT_RGB") != nullptr) &&
         std::getenv("MOTIONCAM_JPEG_RESIDENT_SCATTER") == nullptr;
     const size_t metadataBytes = size_t(tileCount) * kMetaWords * 4u;
     const size_t lookupBytes = kLookupSize * 4u;

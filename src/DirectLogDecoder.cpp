@@ -44,6 +44,25 @@ std::string ffmpegErrorString(int error) {
     return buffer;
 }
 
+bool gpuYuvUploadSupported(int format) {
+    switch (format) {
+    case AV_PIX_FMT_NV12:
+    case AV_PIX_FMT_P010LE:
+    case AV_PIX_FMT_YUV420P:
+    case AV_PIX_FMT_YUVJ420P:
+    case AV_PIX_FMT_YUV420P10LE:
+    case AV_PIX_FMT_YUV422P:
+    case AV_PIX_FMT_YUVJ422P:
+    case AV_PIX_FMT_YUV422P10LE:
+    case AV_PIX_FMT_YUV444P:
+    case AV_PIX_FMT_YUVJ444P:
+    case AV_PIX_FMT_YUV444P10LE:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool directLogDiagnosticsEnabled() {
     static const bool enabled = [] {
         const char* value = std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
@@ -696,15 +715,11 @@ bool DirectLogDecoder::canExtractFrameTexture() {
     const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
     if (enabled && enabled[0] == '0') return false;
     initDecoder();
-    const bool vulkanDecode = mHardwarePixelFormat == AV_PIX_FMT_VULKAN;
-#ifdef __ANDROID__
-    const bool mediaCodecDecode = mCodec &&
-        std::string_view(mCodec->name) == "hevc_mediacodec";
-#else
-    const bool mediaCodecDecode = false;
-#endif
-    return (vulkanDecode || mediaCodecDecode) && !mGpuRgbRejected &&
-        !mForceSoftwareDecoder;
+    // Software YUV can also be uploaded to the common Vulkan renderer;
+    // hardware formats without an import adapter transfer before that upload.
+    return !mGpuRgbRejected && !mForceSoftwareDecoder &&
+        (mHardwarePixelFormat != AV_PIX_FMT_NONE || mMediaCodecSurfaceActive ||
+         gpuYuvUploadSupported(mCodecContext->pix_fmt));
 #else
     return false;
 #endif
@@ -877,6 +892,9 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     const char* cacheSetting = std::getenv("MOTIONCAM_DIRECTLOG_FRAME_CACHE");
     const bool cacheEnabled = (!cacheSetting || cacheSetting[0] != '0') && !mMediaCodecSurfaceActive;
     auto convertDecoded = [&](AVFrame* decoded, bool advanceDecoder) {
+        // Decoding advances independently of conversion. Keep the received
+        // frame available if GPU conversion fails and the caller retries.
+        if (advanceDecoder) mLastDecodedFrame = frameNumber;
         const auto conversionStart = std::chrono::steady_clock::now();
 #if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
         if (mMediaCodecSurfaceActive && decoded->format == AV_PIX_FMT_MEDIACODEC) {
@@ -898,7 +916,6 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             const bool rendered = mDirectGpuRgb->renderAndroidImage(decoded, image, acquireFd,
                 width, height, smoothChroma, curve, fullRange, rgbData, cfaPhase, deferDownload);
             av_frame_unref(decoded);
-            if (rendered && advanceDecoder) mLastDecodedFrame = frameNumber;
             if (rendered && !mFullRange.has_value()) mFullRange = fullRange;
             return rendered;
         }
@@ -921,7 +938,6 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         if (directProxyRender && convertVulkanYUVToRGB(decoded, rgbData, sampleCount,
                 outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
                 cfaPhase, deferDownload)) {
-            if (advanceDecoder) mLastDecodedFrame = frameNumber;
             if (diagnostics)
                 spdlog::info("DirectLog diagnostic: frame={} direct_proxy_conversion_ms={:.3f} decoder_total_ms={:.3f}",
                              frameNumber, elapsedMilliseconds(conversionStart),
@@ -933,7 +949,6 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         if (!directProxyRender && convertVulkanYUVToRGB(hardwareFrame, rgbData, sampleCount,
                 outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
                 cfaPhase, deferDownload)) {
-            if (advanceDecoder) mLastDecodedFrame = frameNumber;
             if (diagnostics)
                 spdlog::info("DirectLog diagnostic: frame={} gpu_conversion_ms={:.3f} decoder_total_ms={:.3f}",
                              frameNumber, elapsedMilliseconds(conversionStart),
@@ -941,8 +956,16 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             return true;
         }
 #endif
-        if (textureOnly) return false;
         AVFrame* conversionFrame = transferableFrame(hardwareFrame);
+#ifdef MOTIONCAM_HAS_AVFILTER
+        if (conversionFrame && conversionFrame != hardwareFrame &&
+            convertVulkanYUVToRGB(conversionFrame, rgbData, sampleCount,
+                outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
+                cfaPhase, deferDownload)) {
+            return true;
+        }
+#endif
+        if (textureOnly) return false;
         std::vector<uint16_t> fallbackRgb;
         uint16_t* conversionOutput = rgbData;
         size_t conversionSamples = sampleCount;
@@ -963,7 +986,6 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
                         (*cfaPhase)[(y & 1) * 2 + (x & 1)]];
                 }
         }
-        if (advanceDecoder) mLastDecodedFrame = frameNumber;
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} conversion_ms={:.3f} decoder_total_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(conversionStart),
@@ -991,8 +1013,10 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             spdlog::info("DirectLog diagnostic: frame={} decoder begin mode=cache pts={}",
                          frameNumber, frameInfo.pts);
         const bool converted = convertDecoded(it->second, false);
-        av_frame_free(&it->second);
-        mDecodedFrameCache.erase(it);
+        if (converted) {
+            av_frame_free(&it->second);
+            mDecodedFrameCache.erase(it);
+        }
         return converted;
     }
     auto cacheSkippedFrame = [&](int64_t pts) {
@@ -1405,15 +1429,7 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
         if (!frames || (frames->sw_format != AV_PIX_FMT_P010LE &&
                         frames->sw_format != AV_PIX_FMT_NV12)) return false;
     } else {
-#ifdef __ANDROID__
-        if (!deferDownload) return false;
-        if (frame->format != AV_PIX_FMT_NV12 &&
-            frame->format != AV_PIX_FMT_P010LE &&
-            frame->format != AV_PIX_FMT_YUV420P &&
-            frame->format != AV_PIX_FMT_YUV420P10LE) return false;
-#else
-        return false;
-#endif
+        if (!gpuYuvUploadSupported(frame->format)) return false;
     }
     AVColorRange range = frame->color_range;
     if (range == AVCOL_RANGE_UNSPECIFIED) range = mCodecContext->color_range;
@@ -1494,6 +1510,11 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
             mFullRangeOverride.has_value() ? (*mFullRangeOverride ? "Full" : "Limited") : "Auto");
     }
     const bool fullRange = *mFullRange;
+#ifdef MOTIONCAM_HAS_AVFILTER
+    if (convertVulkanYUVToRGB(yuvFrame, rgbData, sampleCount,
+            outputWidth, outputHeight, preserveLogEncoded, smoothChroma, nullptr, false))
+        return true;
+#endif
 
     // Area filtering keeps the fast proxy path while averaging the source
     // region. The override supports direct comparisons with point/bicubic.

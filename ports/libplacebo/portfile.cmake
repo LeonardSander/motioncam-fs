@@ -1,3 +1,5 @@
+vcpkg_check_linkage(ONLY_STATIC_LIBRARY)
+
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO haasn/libplacebo
@@ -12,16 +14,30 @@ if(NOT EXISTS "${VULKAN_REGISTRY}")
 endif()
 
 # Meson otherwise sees the build machine's shaderc/vulkan .pc files and
-# silently probes x86_64 headers while compiling for arm64 Android.
+# silently probes headers and libraries outside the selected target triplet.
+if(CMAKE_HOST_WIN32)
+    set(pkgconfig_separator ";")
+else()
+    set(pkgconfig_separator ":")
+endif()
 set(ENV{PKG_CONFIG_LIBDIR}
-    "${CURRENT_INSTALLED_DIR}/lib/pkgconfig:${CURRENT_INSTALLED_DIR}/debug/lib/pkgconfig:${CURRENT_INSTALLED_DIR}/share/pkgconfig")
+    "${CURRENT_INSTALLED_DIR}/lib/pkgconfig${pkgconfig_separator}${CURRENT_INSTALLED_DIR}/debug/lib/pkgconfig${pkgconfig_separator}${CURRENT_INSTALLED_DIR}/share/pkgconfig")
 set(ENV{PKG_CONFIG_PATH} "")
+
+# Load Vulkan explicitly on Windows so a machine without a Vulkan driver can
+# still start the application and use its CPU fallback.
+if(VCPKG_TARGET_IS_WINDOWS)
+    set(vulkan_entrypoint -Dvk-proc-addr=disabled)
+else()
+    set(vulkan_entrypoint -Dvk-proc-addr=auto)
+endif()
 
 vcpkg_configure_meson(
     SOURCE_PATH "${SOURCE_PATH}"
     OPTIONS
         -Ddefault_library=static
         -Dvulkan=enabled
+        ${vulkan_entrypoint}
         -Dvulkan-registry=${VULKAN_REGISTRY}
         -Dshaderc=enabled
         -Dglslang=disabled

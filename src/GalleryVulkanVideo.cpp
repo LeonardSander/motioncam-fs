@@ -1,5 +1,6 @@
 #include "GalleryVulkanVideo.h"
 #include "SharedVulkanDevice.h"
+#include <cstring>
 #include "WidgetPaintSignature.h"
 #include "VulkanGalleryPreview.h"
 
@@ -209,7 +210,6 @@ GalleryOverlayCapture captureGalleryOverlay(
 #include <condition_variable>
 #include <mutex>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 void galleryVulkanLog(void*, enum pl_log_level level, const char* message) {
@@ -249,7 +249,8 @@ uint64_t samplePackedFrame(pl_gpu gpu, pl_buf source,
 
 class GalleryVulkanSurface final : public QWindow {
 public:
-    explicit GalleryVulkanSurface(QVulkanInstance* instance) {
+    explicit GalleryVulkanSurface(QVulkanInstance* instance, pl_vulkan sharedDevice)
+        : mSharedDevice(sharedDevice) {
         setSurfaceType(VulkanSurface);
         setVulkanInstance(instance);
         setProperty("galleryVulkanSurface", true);
@@ -266,11 +267,8 @@ public:
     void releaseSurfaceResources() {
         stopRenderer();
         pl_swapchain_destroy(&mPreparedSwapchain);
-#ifndef __ANDROID__
-        pl_vulkan_destroy(&mPreparedVk);
-#else
+        if (!mSharedDevice) pl_vulkan_destroy(&mPreparedVk);
         mPreparedVk = nullptr;
-#endif
         pl_log_destroy(&mPreparedLog);
         mPreparedSurface = VK_NULL_HANDLE;
     }
@@ -280,21 +278,19 @@ public:
         create();
         mPreparedSurface = QVulkanInstance::surfaceForWindow(this);
         if (!mPreparedSurface) return;
-        const pl_log_params logParams{
-            .log_cb = galleryVulkanLog,
-            .log_priv = nullptr,
-            .log_level = PL_LOG_WARN,
-        };
+        pl_log_params logParams{};
+        logParams.log_cb = galleryVulkanLog;
+        logParams.log_level = PL_LOG_WARN;
         mPreparedLog = pl_log_create(PL_API_VER, &logParams);
         if (!mPreparedLog) return;
-#ifdef __ANDROID__
-        mPreparedVk = motioncam::sharedVulkanDevice();
-#else
-        pl_vulkan_params params = pl_vulkan_default_params;
-        params.instance = vulkanInstance()->vkInstance();
-        params.surface = mPreparedSurface;
-        mPreparedVk = pl_vulkan_create(mPreparedLog, &params);
-#endif
+        mPreparedVk = mSharedDevice;
+        if (!mPreparedVk) {
+            pl_vulkan_params params = pl_vulkan_default_params;
+            params.get_proc_addr = motioncam::galleryVulkanGetInstanceProcAddr();
+            params.instance = vulkanInstance()->vkInstance();
+            params.surface = mPreparedSurface;
+            mPreparedVk = pl_vulkan_create(mPreparedLog, &params);
+        }
         if (mPreparedVk) {
             pl_vulkan_swapchain_params swapchainParams{};
             swapchainParams.surface = mPreparedSurface;
@@ -358,13 +354,7 @@ public:
     void setFrame(const QImage& image, const QRectF& target, bool smooth) {
         {
             std::lock_guard lock(mMutex);
-#ifdef __ANDROID__
-            // Android Vulkan devices commonly lack a sampleable RGB8 image
-            // format. Upload four-component rows to the swapchain renderer.
-            mImage = image.convertToFormat(QImage::Format_RGBA8888);
-#else
             mImage = image;
-#endif
             mGpuBuffer.reset();
             mPlaceholder = false;
             mLogicalTarget = target;
@@ -532,17 +522,12 @@ private:
             mPreparedSwapchain = nullptr;
         } else {
             pl_swapchain_destroy(&mPreparedSwapchain);
-#ifndef __ANDROID__
-            pl_vulkan_destroy(&mPreparedVk);
-#else
+            if (!mSharedDevice) pl_vulkan_destroy(&mPreparedVk);
             mPreparedVk = nullptr;
-#endif
             pl_log_destroy(&mPreparedLog);
-            const pl_log_params logParams{
-                .log_cb = galleryVulkanLog,
-                .log_priv = nullptr,
-                .log_level = PL_LOG_WARN,
-            };
+            pl_log_params logParams{};
+            logParams.log_cb = galleryVulkanLog;
+            logParams.log_level = PL_LOG_WARN;
             log = pl_log_create(PL_API_VER, &logParams);
         }
         pl_renderer renderer = nullptr;
@@ -561,14 +546,14 @@ private:
         bool haveFrameTexture = false;
         pl_tex overlayTexture = nullptr;
         if (log && !vk) {
-#ifdef __ANDROID__
-            vk = motioncam::sharedVulkanDevice();
-#else
-            pl_vulkan_params params = pl_vulkan_default_params;
-            params.instance = instance;
-            params.surface = surface;
-            vk = pl_vulkan_create(log, &params);
-#endif
+            vk = mSharedDevice;
+            if (!vk) {
+                pl_vulkan_params params = pl_vulkan_default_params;
+                params.get_proc_addr = motioncam::galleryVulkanGetInstanceProcAddr();
+                params.instance = instance;
+                params.surface = surface;
+                vk = pl_vulkan_create(log, &params);
+            }
         }
         if (vk) {
             pl_vulkan_swapchain_params params{};
@@ -602,11 +587,7 @@ private:
         if(rgb10a2&&std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_packed_format name={} texel_size={} emulated={}",
                 rgb10a2->name,rgb10a2->texel_size,rgb10a2->emulated);
-        if (!swapchain || !renderer || !rgba8
-#ifndef __ANDROID__
-            || !rgb8 || !rgb10a2
-#endif
-            ) {
+        if (!swapchain || !renderer || !rgba8) {
             spdlog::warn("Gallery native Vulkan presenter initialization failed");
 #ifdef __ANDROID__
             qWarning() << "Gallery Vulkan presenter initialization failed"
@@ -771,7 +752,10 @@ private:
                     release.tex = uploadTexture;
                     release.layout = VK_IMAGE_LAYOUT_GENERAL;
                     release.qf = VK_QUEUE_FAMILY_IGNORED;
-                    release.semaphore = {reinterpret_cast<VkSemaphore>(gpuBuffer->readySemaphore), 1};
+                    VkSemaphore ready{};
+                    static_assert(sizeof(ready) == sizeof(gpuBuffer->readySemaphore));
+                    std::memcpy(&ready, &gpuBuffer->readySemaphore, sizeof(ready));
+                    release.semaphore = {ready, 1};
                     pl_vulkan_release_ex(vk->gpu, &release);
                     importedFrameOwners[nextSlot] = gpuBuffer;
                     ++sharedImageFrames;
@@ -781,14 +765,19 @@ private:
                 } else {
                 if (gpuBuffer) ++bufferUploadFrames;
                 else if (!placeholder) ++hostUploadFrames;
+                QImage uploadImage = image;
+                if (!gpuBuffer && (!rgb8 ||
+                    (uploadImage.format() != QImage::Format_RGB888 &&
+                     uploadImage.format() != QImage::Format_RGBA8888)))
+                    uploadImage = uploadImage.convertToFormat(QImage::Format_RGBA8888);
                 pl_tex_params tex{};
                 tex.w = gpuBuffer ? int(gpuBuffer->width) : image.width();
                 tex.h = gpuBuffer ? int(gpuBuffer->height) : image.height();
                 tex.format = gpuBuffer && gpuBuffer->rgb10a2 ? rgb10a2 :
-                    image.format() == QImage::Format_RGBA8888 ? rgba8 : rgb8;
+                    uploadImage.format() == QImage::Format_RGBA8888 ? rgba8 : rgb8;
                 tex.sampleable = true;
                 tex.host_writable = true;
-                if (!pl_tex_recreate(vk->gpu, &uploadTexture, &tex)) {
+                if (!tex.format || !pl_tex_recreate(vk->gpu, &uploadTexture, &tex)) {
                     mHealthy = false;
                     break;
                 }
@@ -811,8 +800,8 @@ private:
                     transfer.row_pitch = size_t(gpuBuffer->width) *
                         (gpuBuffer->rgb10a2 ? 4u : 3u);
                 } else {
-                    transfer.ptr = const_cast<uchar*>(image.constBits());
-                    transfer.row_pitch = image.bytesPerLine();
+                    transfer.ptr = const_cast<uchar*>(uploadImage.constBits());
+                    transfer.row_pitch = uploadImage.bytesPerLine();
                 }
                 const bool uploaded = (!gpuBuffer || imported) &&
                     pl_tex_upload(vk->gpu, &transfer);
@@ -914,16 +903,10 @@ private:
             pl_frame input{};
             input.num_planes = 1;
             input.planes[0].texture = frameTextures[frameTextureSlot];
-            input.planes[0].components =
-                (gpuBuffer && (gpuBuffer->rgb10a2 || gpuBuffer->texture)) ||
-                image.format() == QImage::Format_RGBA8888 ? 4 : 3;
-            input.planes[0].component_mapping[0] = 0;
-            input.planes[0].component_mapping[1] = 1;
-            input.planes[0].component_mapping[2] = 2;
-            if ((gpuBuffer && gpuBuffer->rgb10a2) ||
-                image.format() == QImage::Format_RGBA8888 ||
-                (gpuBuffer && gpuBuffer->texture))
-                input.planes[0].component_mapping[3] = 3;
+            input.planes[0].components = std::min(4,
+                frameTextures[frameTextureSlot]->params.format->num_components);
+            for (int channel = 0; channel < input.planes[0].components; ++channel)
+                input.planes[0].component_mapping[channel] = channel;
             input.repr = pl_color_repr_rgb;
             input.rotation = gpuBuffer
                 ? gpuBuffer->orientation == 90 ? PL_ROTATION_90
@@ -1012,9 +995,7 @@ private:
         if (vk) pl_tex_destroy(vk->gpu, &overlayTexture);
         if (renderer) pl_renderer_destroy(&renderer);
         pl_swapchain_destroy(&swapchain);
-#ifndef __ANDROID__
-        pl_vulkan_destroy(&vk);
-#endif
+        if (!mSharedDevice) pl_vulkan_destroy(&vk);
         pl_log_destroy(&log);
         {
             std::lock_guard lock(mMutex);
@@ -1027,6 +1008,7 @@ private:
     VkSurfaceKHR mPreparedSurface = VK_NULL_HANDLE;
     pl_log mPreparedLog = nullptr;
     pl_vulkan mPreparedVk = nullptr;
+    pl_vulkan mSharedDevice = nullptr;
     pl_swapchain mPreparedSwapchain = nullptr;
     std::mutex mMutex;
     std::condition_variable mReady;
@@ -1056,11 +1038,8 @@ GalleryVulkanVideo::GalleryVulkanVideo(QWidget* parent) : QWidget(parent) {
     setPalette(background);
     setAutoFillBackground(true);
     mInstance = std::make_unique<QVulkanInstance>();
-#ifdef __ANDROID__
     const auto shared = motioncam::sharedVulkanDevice();
-    if (!shared) return;
-    mInstance->setVkInstance(shared->instance);
-#endif
+    if (shared) mInstance->setVkInstance(shared->instance);
     mInstance->setApiVersion(QVersionNumber(1, 2));
     if (!mInstance->create()) {
         spdlog::warn("Gallery native Vulkan instance unavailable: {}",
@@ -1071,7 +1050,7 @@ GalleryVulkanVideo::GalleryVulkanVideo(QWidget* parent) : QWidget(parent) {
 #endif
         return;
     }
-    mSurface = new GalleryVulkanSurface(mInstance.get());
+    mSurface = new GalleryVulkanSurface(mInstance.get(), shared);
     mContainer = QWidget::createWindowContainer(mSurface, this);
 #ifndef __ANDROID__
     mSurface->prewarmDevice();

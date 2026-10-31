@@ -489,11 +489,17 @@ endif()
 
 # Last resort: manually find libraries in vcpkg directory
 if(NOT FFMPEG_FOUND AND WIN32)
-    set(VCPKG_INSTALLED_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed/x64-windows")
+    if(NOT VCPKG_INSTALLED_DIR)
+        set(VCPKG_INSTALLED_DIR "${CMAKE_BINARY_DIR}/vcpkg_installed")
+    endif()
+    if(NOT VCPKG_TARGET_TRIPLET)
+        message(FATAL_ERROR "VCPKG_TARGET_TRIPLET is required for Windows dependency discovery")
+    endif()
+    set(_motioncam_windows_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/debug/lib")
+        set(VCPKG_LIB_DIR "${_motioncam_windows_prefix}/debug/lib")
     else()
-        set(VCPKG_LIB_DIR "${VCPKG_INSTALLED_DIR}/lib")
+        set(VCPKG_LIB_DIR "${_motioncam_windows_prefix}/lib")
     endif()
     
     # Clear cached values to force re-search
@@ -512,7 +518,7 @@ if(NOT FFMPEG_FOUND AND WIN32)
     if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWRESAMPLE_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
         set(FFMPEG_FOUND TRUE)
         set(MOTIONCAM_FFMPEG_PROVIDER vcpkg_manual)
-        set(MOTIONCAM_FFMPEG_INCLUDE_DIR "${VCPKG_INSTALLED_DIR}/include")
+        set(MOTIONCAM_FFMPEG_INCLUDE_DIR "${_motioncam_windows_prefix}/include")
         set(MOTIONCAM_FFMPEG_LIBRARY_DIR "${VCPKG_LIB_DIR}")
         set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWRESAMPLE_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
         message(STATUS "Found FFmpeg in vcpkg: ${VCPKG_LIB_DIR}")
@@ -603,21 +609,66 @@ if(MOTIONCAM_AVFILTER_TARGET)
   target_link_libraries(${PROJECT_NAME} PRIVATE ${MOTIONCAM_AVFILTER_TARGET})
   target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_AVFILTER=1)
 endif()
-if(PkgConfig_FOUND)
-  if(ANDROID)
+option(MOTIONCAM_REQUIRE_VULKAN "Require the Vulkan processing backend at build time" OFF)
+if(VCPKG_TARGET_TRIPLET)
+  if(VCPKG_INSTALLED_DIR)
+    set(_motioncam_vcpkg_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+  else()
+    set(_motioncam_vcpkg_prefix "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
+  endif()
+endif()
+if(WIN32 AND _motioncam_vcpkg_prefix)
+  # pkg-config cannot reliably select the MSVC Debug/Release runtime. Import
+  # both archives and let CMake select the matching configuration instead.
+  find_path(DIRECTLOG_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+    PATHS "${_motioncam_vcpkg_prefix}/include" NO_DEFAULT_PATH)
+  find_path(DIRECTLOG_PLACEBO_INCLUDE_DIR libplacebo/config.h
+    PATHS "${_motioncam_vcpkg_prefix}/include" NO_DEFAULT_PATH)
+  find_library(DIRECTLOG_PLACEBO_RELEASE NAMES placebo libplacebo
+    PATHS "${_motioncam_vcpkg_prefix}/lib" NO_DEFAULT_PATH)
+  find_library(DIRECTLOG_PLACEBO_DEBUG NAMES placebo libplacebo
+    PATHS "${_motioncam_vcpkg_prefix}/debug/lib" NO_DEFAULT_PATH)
+  if(DIRECTLOG_PLACEBO_INCLUDE_DIR AND DIRECTLOG_VULKAN_INCLUDE_DIR AND
+     DIRECTLOG_PLACEBO_RELEASE AND DIRECTLOG_PLACEBO_DEBUG)
+    file(STRINGS "${DIRECTLOG_PLACEBO_INCLUDE_DIR}/libplacebo/config.h"
+      _motioncam_placebo_api REGEX "^#define PL_API_VER +[0-9]+")
+    if(_motioncam_placebo_api MATCHES "PL_API_VER +([0-9]+)" AND CMAKE_MATCH_1 GREATER_EQUAL 360)
+      find_package(unofficial-shaderc CONFIG REQUIRED)
+      add_library(MotionCamPlaceboArchive STATIC IMPORTED)
+      set_target_properties(MotionCamPlaceboArchive PROPERTIES
+        IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+        IMPORTED_LOCATION_RELEASE "${DIRECTLOG_PLACEBO_RELEASE}"
+        IMPORTED_LOCATION_DEBUG "${DIRECTLOG_PLACEBO_DEBUG}"
+        MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
+        MAP_IMPORTED_CONFIG_MINSIZEREL Release
+        INTERFACE_INCLUDE_DIRECTORIES "${DIRECTLOG_PLACEBO_INCLUDE_DIR}"
+        INTERFACE_COMPILE_DEFINITIONS PL_STATIC)
+      add_library(MotionCamPlacebo INTERFACE)
+      target_link_libraries(MotionCamPlacebo INTERFACE MotionCamPlaceboArchive
+        unofficial::shaderc::shaderc shlwapi)
+      set(DIRECTLOG_PLACEBO_FOUND TRUE)
+      set(DIRECTLOG_PLACEBO_SAME_INSTALL TRUE)
+      target_link_libraries(${PROJECT_NAME} PRIVATE MotionCamPlacebo)
+      target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+    endif()
+  endif()
+elseif(PkgConfig_FOUND)
+  if(ANDROID OR (APPLE AND VCPKG_TARGET_TRIPLET))
     # The host may have libplacebo installed too. Restrict this probe to the
-    # arm64 vcpkg tree so an x86_64 .pc file cannot silently disable Vulkan.
+    # target vcpkg tree so another installation cannot silently disable Vulkan.
     set(_saved_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
     set(_saved_pkg_config_argn "${PKG_CONFIG_ARGN}")
-    set(ENV{PKG_CONFIG_LIBDIR}
-      "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig")
+    set(_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+    set(ENV{PKG_CONFIG_PATH} "")
+    set(ENV{PKG_CONFIG_LIBDIR} "${_motioncam_vcpkg_prefix}/lib/pkgconfig")
     set(PKG_CONFIG_ARGN --static)
     unset(__pkg_config_checked_DIRECTLOG_PLACEBO CACHE)
     unset(pkgcfg_lib_DIRECTLOG_PLACEBO_placebo CACHE)
   endif()
-  pkg_check_modules(DIRECTLOG_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.0)
-  if(ANDROID)
+  pkg_check_modules(DIRECTLOG_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.1)
+  if(ANDROID OR (APPLE AND VCPKG_TARGET_TRIPLET))
     set(ENV{PKG_CONFIG_LIBDIR} "${_saved_pkg_config_libdir}")
+    set(ENV{PKG_CONFIG_PATH} "${_saved_pkg_config_path}")
     set(PKG_CONFIG_ARGN "${_saved_pkg_config_argn}")
   endif()
   if(DIRECTLOG_PLACEBO_FOUND)
@@ -632,15 +683,60 @@ if(PkgConfig_FOUND)
       HINTS "${CMAKE_BINARY_DIR}/deps/vulkan-headers/include")
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
       target_include_directories(${PROJECT_NAME} PRIVATE ${DIRECTLOG_VULKAN_INCLUDE_DIR})
-      target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::DIRECTLOG_PLACEBO)
-      if(ANDROID)
+      add_library(MotionCamPlacebo INTERFACE)
+      target_link_libraries(MotionCamPlacebo INTERFACE PkgConfig::DIRECTLOG_PLACEBO)
+      target_link_libraries(${PROJECT_NAME} PRIVATE MotionCamPlacebo)
+      if(ANDROID OR (APPLE AND VCPKG_TARGET_TRIPLET))
         # The vcpkg shaderc .pc file omits static glslang/SPIRV-Tools links.
         # Its CMake target records the complete transitive dependency graph.
         find_package(unofficial-shaderc CONFIG REQUIRED)
-        target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::shaderc::shaderc)
+        target_link_libraries(MotionCamPlacebo INTERFACE unofficial::shaderc::shaderc)
       endif()
       target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
     endif()
+  endif()
+endif()
+if(MOTIONCAM_REQUIRE_VULKAN AND (NOT TARGET MotionCamPlacebo OR NOT MOTIONCAM_AVFILTER_TARGET))
+  message(FATAL_ERROR "GPU processing requires libplacebo >= 7.360.1, Vulkan headers, shaderc, and FFmpeg avfilter from compatible target dependencies")
+endif()
+if(TARGET MotionCamPlacebo)
+  message(STATUS "Vulkan GPU processing enabled (CPU fallback remains available at runtime)")
+else()
+  message(STATUS "Vulkan GPU processing unavailable in this build; using CPU processing")
+endif()
+if(APPLE AND DIRECTLOG_PLACEBO_FOUND AND DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
+  find_library(MOTIONCAM_VULKAN_LOADER NAMES vulkan
+    HINTS "${MOTIONCAM_FFMPEG_LIBRARY_DIR}" "${_motioncam_vcpkg_prefix}/lib")
+  if(MOTIONCAM_VULKAN_LOADER)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MOTIONCAM_VULKAN_LOADER}"
+        "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/libvulkan.1.dylib"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink libvulkan.1.dylib
+        "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/libvulkan.dylib")
+  endif()
+  if(MOTIONCAM_REQUIRE_VULKAN AND NOT MOTIONCAM_VULKAN_LOADER)
+    message(FATAL_ERROR "The macOS Vulkan build requires a Vulkan loader to bundle")
+  endif()
+  find_library(MOTIONCAM_MOLTENVK_LIBRARY NAMES MoltenVK
+    HINTS "$ENV{VULKAN_SDK}/lib" /opt/homebrew/opt/molten-vk/lib /usr/local/opt/molten-vk/lib)
+  if(MOTIONCAM_MOLTENVK_LIBRARY)
+    # Ship the driver alongside the loader pulled in by libplacebo. The loader
+    # searches the application bundle's Resources/vulkan/icd.d directory.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/MoltenVK_icd.json"
+      "{\n  \"file_format_version\": \"1.0.0\",\n  \"ICD\": {\n    \"library_path\": \"../../../Frameworks/libMoltenVK.dylib\",\n    \"api_version\": \"1.2.0\",\n    \"is_portability_driver\": true\n  }\n}\n")
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks"
+        "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Resources/vulkan/icd.d"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MOTIONCAM_MOLTENVK_LIBRARY}"
+        "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/libMoltenVK.dylib"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/MoltenVK_icd.json"
+        "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json")
+  elseif(MOTIONCAM_REQUIRE_VULKAN)
+    message(FATAL_ERROR "The macOS Vulkan build requires MoltenVK; set MOTIONCAM_MOLTENVK_LIBRARY")
+  else()
+    message(STATUS "MoltenVK not bundled; gallery retains native/CPU fallbacks when Vulkan is unavailable")
   endif()
 endif()
 if(TARGET Qt6::QuickWidgets AND NOT ANDROID)
@@ -710,7 +806,7 @@ if(BUILD_TESTING)
             include deps/motioncam-decoder/thirdparty
             "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
         target_link_libraries(motioncam-vulkan-gain-layout-test PRIVATE
-            PkgConfig::DIRECTLOG_PLACEBO)
+            MotionCamPlacebo spdlog::spdlog)
         target_compile_definitions(motioncam-vulkan-gain-layout-test PRIVATE
             MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
         add_test(NAME motioncam-vulkan-gain-layout-test
@@ -766,7 +862,7 @@ if(BUILD_TESTING)
         target_include_directories(motioncam-lossless-jpeg-test PRIVATE
             ${DIRECTLOG_VULKAN_INCLUDE_DIR})
         target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
-            PkgConfig::DIRECTLOG_PLACEBO)
+            MotionCamPlacebo)
         target_compile_definitions(motioncam-lossless-jpeg-test PRIVATE
             MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
     endif()
@@ -827,7 +923,7 @@ if(BUILD_TESTING)
         target_include_directories(motioncam-finalize-interpolation-test PRIVATE
             ${DIRECTLOG_VULKAN_INCLUDE_DIR})
         target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
-            PkgConfig::DIRECTLOG_PLACEBO)
+            MotionCamPlacebo)
         target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
             MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
     endif()
@@ -839,6 +935,12 @@ if(BUILD_TESTING)
     target_include_directories(motioncam-audio-finalize-test PRIVATE include)
     target_link_libraries(motioncam-audio-finalize-test PRIVATE motioncam-decoder ${FFMPEG_LIBRARIES})
     add_test(NAME motioncam-audio-finalize-test COMMAND motioncam-audio-finalize-test)
+
+    add_executable(motioncam-hardware-video-encoder-test tests/hardware_video_encoder_test.cpp)
+    target_include_directories(motioncam-hardware-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(motioncam-hardware-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
+    add_test(NAME motioncam-hardware-video-encoder-test COMMAND motioncam-hardware-video-encoder-test)
+    set_tests_properties(motioncam-hardware-video-encoder-test PROPERTIES SKIP_RETURN_CODE 77)
 
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations

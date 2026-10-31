@@ -2,6 +2,7 @@
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 #include "VulkanGainBakeShader.h"
+#include "SharedVulkanDevice.h"
 #include <libplacebo/vulkan.h>
 #include <libplacebo/gpu.h>
 #include <algorithm>
@@ -89,7 +90,7 @@ struct Device {
         const auto started = std::chrono::steady_clock::now();
         log = pl_log_create(PL_API_VER, nullptr);
         if (!log) return false;
-        vk = pl_vulkan_create(log, nullptr);
+        vk = createGalleryVulkanContext(log);
         if (!vk || !vk->gpu->glsl.compute) return false;
         gpu = vk->gpu;
         const auto vulkanReady = std::chrono::steady_clock::now();

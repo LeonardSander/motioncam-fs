@@ -2194,6 +2194,7 @@ int main() {
             }
         }
     }
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
     if (std::getenv("MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST")) {
         constexpr uint32_t tileSide = 128, across = 8, tileCount = across * across;
         constexpr uint32_t width = tileSide * across, height = width;
@@ -2337,6 +2338,7 @@ int main() {
                                     (size_t(oy + y) * width + ox) * 3u));
         }
     }
+#endif
 
     return 0;
 }

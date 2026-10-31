@@ -27,6 +27,8 @@ jobs:
 
     - name: Set up Android SDK
       uses: android-actions/setup-android@v3
+      with:
+        packages: platform-tools
 
     - name: Install Android platform and NDK
       shell: bash
@@ -267,7 +269,7 @@ jobs:
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macOS build tools
       if: matrix.platform == 'macos'
-      run: brew install nasm sevenzip
+      run: brew install nasm sevenzip pkgconf molten-vk
 
     - name: Install macFUSE (macOS)
       if: matrix.platform == 'macos'
@@ -297,6 +299,7 @@ jobs:
         cmake -S . -B ${{ matrix.build_dir }} `
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
           -DCMAKE_VERBOSE_MAKEFILE=ON `
+          -DMOTIONCAM_REQUIRE_VULKAN=ON `
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}" `
@@ -336,6 +339,7 @@ jobs:
         cmake -S . -B "${{ matrix.build_dir }}" \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DMOTIONCAM_REQUIRE_VULKAN=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
           -DVCPKG_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
@@ -343,6 +347,7 @@ jobs:
           -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
           -DCMAKE_IGNORE_PREFIX_PATH="$BREW_PREFIX" \
           -DQt6_DIR="$QT_PREFIX/lib/cmake/Qt6" \
+          -DMOTIONCAM_MOLTENVK_LIBRARY="$(brew --prefix molten-vk)/lib/libMoltenVK.dylib" \
           -DJPEG_ROOT="$VCPKG_PREFIX" \
           -DFUSE_T_FRAMEWORK="$FUSE_LIB"
 
@@ -352,8 +357,6 @@ jobs:
       run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
 
     - name: Test
-      if: matrix.platform == 'macos'
-      continue-on-error: true
       run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} --output-on-failure
 
 

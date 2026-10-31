@@ -113,9 +113,11 @@ Input resolution is being reduced by discarding pixel values to increase playbac
 
 ### Finalization
 
+Supported GPU decode, processing, and lossless JPEG encode paths take precedence regardless of preview size or memory topology, with CPU fallback for unsupported layouts or GPU failures. HEVC and AV1 Camera Native export tries compatible NVENC, QSV, AMF, VAAPI, and VideoToolbox encoders supplied by FFmpeg before software. An actual encode probe must preserve resolution, 10-bit chroma, and full-range BT.2020 metadata; a later hardware failure retries in software. Quality values map to each encoder's quality control and are not numerically equivalent to software CRF; hardware uses its quality-oriented preset. SVT noise synthesis and codecs without a compatible hardware implementation retain software encoding. Explicit CPU/debug overrides remain available.
+
 To store processed clips persistently many compression options are available. For DNG output there are lossless JPEG 92, lossy 12b JPEG DCT (Davinci only), lossless and lossy JPEG-XL options. Video compression options are available as well namely HEVC, AV1, CineForm and ProRes, relying on a RGB to YUV pixel format conversion assuming Rec.2020. JSON sidecars containing otherwise lost metadata are written automatically and resulting files can be imported again in Fuse. When specific frames from mounted clips are selected in Gallery, these can be finalized by themselves instead of the entire sequence.
 
-Lossless JPEG DNG encoding uses Vulkan for camera-sized frames when available and falls back to the CPU otherwise. The single-scan encoder runs predictor selection, Huffman table construction, entropy packing, byte stuffing, and JPEG marker writing on the GPU; only the completed JPEG stream is read back for DNG storage. The tiled encoder accepts a resident texture or an 8–16-bit row-aligned packed GPU buffer and uses adaptive Huffman coding. CFA tiles are assembled into complete JPEGs on the GPU; RGB tiles currently use CPU assembly after the entropy payload readback. The first Vulkan encode includes device and shader setup, so the speed benefit is greatest when exporting a sequence. The "JPEG 92 Lossless" finalize format always writes tiled DNGs: it uses tiled GPU encode for supported texture or buffer output and tiled CPU encode for other processed frames. Type "JPEG92 Lossless Strip" in the format field to select the single-strip path. Set `MOTIONCAM_GPU_JPEG_DISABLE=1` to force CPU encoding. `MOTIONCAM_JPEG_TILED=1` requests the older tiled path for other eligible CFA DNGs.
+Lossless JPEG DNG encoding uses Vulkan for camera-sized frames when available and falls back to the CPU otherwise. The single-scan encoder runs predictor selection, Huffman table construction, entropy packing, byte stuffing, and JPEG marker writing on the GPU; only the completed JPEG stream is read back for DNG storage. The tiled encoder accepts a resident texture or an 8–16-bit row-aligned packed GPU buffer and uses adaptive Huffman coding. CFA and RGB tiles are assembled into complete JPEGs on the GPU, with CPU encoding fallback when the GPU path is unavailable. The first Vulkan encode includes device and shader setup, so the speed benefit is greatest when exporting a sequence. The "JPEG 92 Lossless" finalize format always writes tiled DNGs: it uses tiled GPU encode for supported texture or buffer output and tiled CPU encode for other processed frames. Type "JPEG92 Lossless Strip" in the format field to select the single-strip path. Set `MOTIONCAM_GPU_JPEG_DISABLE=1` to force CPU encoding. `MOTIONCAM_JPEG_TILED=1` requests the older tiled path for other eligible CFA DNGs.
 
 When a terminal Vulkan gain or LOG bake produces 8–16-bit samples, finalization passes its packed GPU buffer directly to the tiled JPEG encoder, avoiding an uncompressed pixel readback and reupload. The encoder binds that buffer for histogram and entropy work without an extra GPU copy. The explicit strip format retains its packed-buffer GPU encoder. DirectLog can also encode a decoded GPU texture directly when no pixel bake, crop, topology conversion, or bit-depth packing is needed. With `MOTIONCAM_GALLERY_PERF_PROFILE=1`, `vulkan_gain_gpu_jpeg_handoff` and `dng_gpu_jpeg_attach` mark GPU JPEG handoffs.
 
@@ -156,7 +158,7 @@ git submodule update --init --recursive
 ```
 Executable lands in `build\Release\MotionCamFuse.exe`.
 
-macOS (Qt + vcpkg, CMake):
+macOS (Qt + vcpkg, CMake; install `molten-vk` for Vulkan presentation):
 ```
 git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -274,9 +276,26 @@ raw samples or drawing the histogram.
 its frame collection during playback.
 `MOTIONCAM_GALLERY_PERF_VIEWPORT=960x540` tests a fixed window size. Sequence
 frames, including full-resolution frames, are presented at source size through
-Qt Quick's Vulkan scene graph when available; Qt uses its native graphics
-backend on macOS. Set `MOTIONCAM_GALLERY_FFMPEG_PRESENT=1` to compare the
-previous FFmpeg presenter.
+the native Vulkan presenter when available, including MoltenVK on macOS.
+Shared-device presentation is selected automatically on unified-memory GPUs;
+Android and Apple Silicon assume unified memory. Other GPUs are classified by
+Vulkan memory properties. Linux retains DMA-BUF when using separate devices.
+`MOTIONCAM_GALLERY_SHARED_DEVICE=1` forces shared-device selection for testing,
+including dedicated GPUs; `=0` retains separate devices and existing fallbacks.
+The memory policy remains based on topology in either mode. If Vulkan
+presentation fails on desktop, playback retries with the existing Qt presenter
+(Metal on macOS), then CPU presentation if necessary. macOS VideoToolbox input
+still uses its CPU transfer path; shared output presentation does not imply
+zero-copy hardware decode. Windows and macOS vcpkg builds include libplacebo.
+Windows selects the matching Debug/Release archive and loads the system Vulkan
+loader at runtime, allowing CPU fallback even when the loader is absent. The
+selected vcpkg triplet determines architecture; there is no x64-only dependency
+lookup. macOS includes the Vulkan loader; CMake also bundles MoltenVK when found, or when supplied through
+`MOTIONCAM_MOLTENVK_LIBRARY`. CI requires the GPU backend with
+`MOTIONCAM_REQUIRE_VULKAN=ON` and runs the tests on Windows and both macOS
+architectures. This build requirement retains CPU fallback at runtime. Windows
+and macOS hardware validation remains outstanding.
+Set `MOTIONCAM_GALLERY_FFMPEG_PRESENT=1` to compare the previous FFmpeg presenter.
 
 ---
 

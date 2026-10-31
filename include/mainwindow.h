@@ -156,7 +156,8 @@ private slots:
     void clearSelectedFrames();
     void selectAllFrames();
     void renderDroppedFrameThumbnail(motioncam::MountId mountId, int sourceFrame);
-    void finalizeCameraNative(QWidget* fileWidget, const QString& mode, bool metadataOnly);
+    void finalizeCameraNative(QWidget* fileWidget, const QString& mode, bool metadataOnly,
+                              bool allowHardwareEncoder = true);
     void createCalibrationJson(QWidget* fileWidget);
     void reloadCalibration(QWidget* fileWidget);
     void updateCalibrationButtonStates(QWidget* onlyFileWidget = nullptr);

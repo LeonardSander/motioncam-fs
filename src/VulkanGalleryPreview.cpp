@@ -546,6 +546,9 @@ uint sourcePixel(uint outputPixel) {
 uvec3 outputColor(uint outputPixel) {
     uint source = sourcePixel(outputPixel);
     uvec3 color = transform(source);
+#ifndef GALLERY_CLIPPING
+    return color;
+#else
     if ((p.geometry.w & 2u) == 0u) return color;
     uint indication;
 #ifdef SOURCE_TEXTURE
@@ -572,6 +575,7 @@ uvec3 outputColor(uint outputPixel) {
     return uvec3((bits & 1u) != 0u ? 65535u : 0u,
                  (bits & 2u) != 0u ? 65535u : 0u,
                  (bits & 4u) != 0u ? 65535u : 0u);
+#endif
 }
 void main() {
     uint group = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y *
@@ -643,7 +647,8 @@ void main() {
 )glsl";
 
 std::string galleryColorShader(bool textureSource, bool imageOutput = false,
-                               bool imageRgb10a2 = false, bool bayerTexture = false) {
+                               bool imageRgb10a2 = false, bool bayerTexture = false,
+                               bool clipping = true) {
     const char* newline = std::strchr(colorShader, '\n');
     if (!newline) return {};
     std::string source = textureSource
@@ -660,6 +665,8 @@ std::string galleryColorShader(bool textureSource, bool imageOutput = false,
         if (imageRgb10a2)
             source.insert(newlinePos + 1, "#define GALLERY_IMAGE_RGB10A2 1\n");
     }
+    if (clipping)
+        source.insert(source.find('\n') + 1, "#define GALLERY_CLIPPING 1\n");
     constexpr char marker[] = "// @DISPLAY_MATH@";
     const auto position = source.find(marker);
     if (position == std::string::npos) return {};
@@ -785,7 +792,7 @@ struct Device {
     bool directHostInput = false;
     bool externalBufferRejected = false;
     std::atomic_bool sharedTextureRejected{false};
-    pl_pass pass = nullptr, colorPass = nullptr;
+    pl_pass pass = nullptr, colorPass = nullptr, unclippedColorPass = nullptr;
     pl_pass colorImagePass = nullptr, colorImage10Pass = nullptr;
     pl_buf source = nullptr, upload = nullptr, output = nullptr, download = nullptr;
     ThumbnailReadback thumbnailReadback;
@@ -821,6 +828,7 @@ struct Device {
             pl_buf_destroy(gpu, &emptyGain);
             pl_pass_destroy(gpu, &pass);
             pl_pass_destroy(gpu, &colorPass);
+            pl_pass_destroy(gpu, &unclippedColorPass);
             pl_pass_destroy(gpu, &colorImagePass);
             pl_pass_destroy(gpu, &colorImage10Pass);
         }
@@ -837,11 +845,7 @@ struct Device {
         log = pl_log_create(PL_API_VER, nullptr);
 #endif
         if (!log) return false;
-#ifdef __ANDROID__
-        vk = createSharedVulkanContext(log);
-#else
-        vk = pl_vulkan_create(log, nullptr);
-#endif
+        vk = createGalleryVulkanContext(log);
         if (!vk || !vk->gpu->glsl.compute) return false;
         gpu = vk->gpu;
         pl_gpu_set_cache(gpu, galleryShaderCache().cache);
@@ -871,47 +875,9 @@ struct Device {
         return initResources();
     }
     bool initResources() {
-        // Memory topology, not the operating system, selects the shared-memory
-        // path. A discrete GPU's host-visible BAR does not make its VRAM unified.
-        if (const pl_vulkan vulkan = pl_vulkan_get(gpu)) {
-            VkPhysicalDeviceProperties properties{};
-            VkPhysicalDeviceMemoryProperties memory{};
-            const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
-                vulkan->get_proc_addr(vulkan->instance, "vkGetPhysicalDeviceProperties"));
-            const auto getMemory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-                vulkan->get_proc_addr(vulkan->instance, "vkGetPhysicalDeviceMemoryProperties"));
-            if (!getProperties || !getMemory) return false;
-            getProperties(vulkan->phys_device, &properties);
-            getMemory(vulkan->phys_device, &memory);
-            bool hasDeviceHeap = false;
-            unifiedMemory = properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
-                properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU;
-            for (uint32_t heap = 0; heap < memory.memoryHeapCount; ++heap) {
-                if (!(memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
-                    continue;
-                bool usable = false, hostVisible = false;
-                for (uint32_t type = 0; type < memory.memoryTypeCount; ++type) {
-                    const auto& candidate = memory.memoryTypes[type];
-                    // Protected and transient-only allocations cannot back our
-                    // ordinary storage buffers and do not describe their topology.
-                    if (candidate.heapIndex != heap ||
-                        !(candidate.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
-                        (candidate.propertyFlags & (VK_MEMORY_PROPERTY_PROTECTED_BIT |
-                                                    VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)))
-                        continue;
-                    usable = true;
-                    hostVisible |= bool(candidate.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-                }
-                if (usable) {
-                    hasDeviceHeap = true;
-                    unifiedMemory = unifiedMemory && hostVisible;
-                }
-            }
-            unifiedMemory = unifiedMemory && hasDeviceHeap;
-            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
-                std::fprintf(stderr, "GALLERY_PERF event=gallery_memory device=%s unified=%d\n",
-                    properties.deviceName, int(unifiedMemory));
-        }
+        if (const pl_vulkan vulkan = pl_vulkan_get(gpu))
+            unifiedMemory = vulkanUsesUnifiedMemory(vulkan->instance,
+                vulkan->phys_device, vulkan->get_proc_addr);
         // Every shader reads this binding, including plain RGB with no bake.
         const std::array<uint8_t, 2112> zero{};
         pl_buf_params gainParams{};
@@ -923,12 +889,12 @@ struct Device {
 
         return true;
     }
-    bool ensureColorPass() {
-        if (!colorPass)
-            colorPass = createColorPass();
-        return colorPass != nullptr;
+    pl_pass ensureColorPass(bool clipping) {
+        auto& selected = clipping ? colorPass : unclippedColorPass;
+        if (!selected) selected = createColorPass(false, false, clipping);
+        return selected;
     }
-    pl_pass createColorPass(bool image = false, bool rgb10a2 = false) {
+    pl_pass createColorPass(bool image = false, bool rgb10a2 = false, bool clipping = true) {
         const bool sampled = textureSource;
         const bool bayerTexture = bayerTextureSource;
         pl_desc descriptors[5] = {};
@@ -944,7 +910,7 @@ struct Device {
                           3, PL_DESC_ACCESS_READONLY};
         descriptors[4] = {sampled && !bayerTexture ? "galleryGain" : "bayerGain", PL_DESC_BUF_STORAGE,
                           4, PL_DESC_ACCESS_READONLY};
-        const std::string source = galleryColorShader(sampled, image, rgb10a2, bayerTexture);
+        const std::string source = galleryColorShader(sampled, image, rgb10a2, bayerTexture, clipping);
         if (source.empty()) return nullptr;
         pl_pass_params params = {};
         params.type = PL_PASS_COMPUTE;
@@ -1654,29 +1620,34 @@ bool colorGalleryRgbVulkan(
     pl_desc_binding bindings[5] = {};
     pl_buf exported = nullptr;
     bool sharedTexture = false;
+    bool sharedImage10 = rgb10a2;
     pl_tex frameOutputTexture = nullptr;
     bool exportNeedsCopy = false;
-#ifndef _WIN32
-    // Android shares textures directly; Linux retains its DMA-BUF transport.
-#ifdef __ANDROID__
+    // Sharing depends on a common VkDevice, regardless of memory topology.
     const uint32_t outputWidth = orientation == 90 || orientation == 270
         ? sourceHeight : sourceWidth;
     const uint32_t outputHeight = orientation == 90 || orientation == 270
         ? sourceWidth : sourceHeight;
-    sharedTexture = output && output->gpuBuffer && rgb24 &&
-        !selected->sharedTextureRejected && pl_vulkan_get(selected->gpu) && sharedVulkanDevice() &&
-        pl_vulkan_get(selected->gpu)->device == sharedVulkanDevice()->device &&
-        selected->ensureColorImagePass(rgb10a2) &&
-        (frameOutputTexture = selected->createOutputTexture(
-            outputWidth, outputHeight, rgb10a2));
+    if (output && output->gpuBuffer && rgb24 && !selected->sharedTextureRejected &&
+        pl_vulkan_get(selected->gpu) && sharedVulkanDevice() &&
+        pl_vulkan_get(selected->gpu)->device == sharedVulkanDevice()->device) {
+        if (selected->ensureColorImagePass(sharedImage10))
+            frameOutputTexture = selected->createOutputTexture(outputWidth, outputHeight, sharedImage10);
+        // A driver may sample packed 10-bit images without supporting storage
+        // writes. Keep the shared transport and use RGBA8 in that case.
+        if (!frameOutputTexture && sharedImage10) {
+            sharedImage10 = false;
+            if (selected->ensureColorImagePass(false))
+                frameOutputTexture = selected->createOutputTexture(outputWidth, outputHeight, false);
+        }
+        sharedTexture = frameOutputTexture != nullptr;
+    }
     if (output && output->requireZeroCopy && !sharedTexture) return false;
-#else
-    constexpr auto galleryHandle = PL_HANDLE_DMA_BUF;
-    if (output && output->requireZeroCopy) return false;
+    const auto galleryHandle = galleryExternalBufferHandle(selected->gpu);
     const bool exportGpu = !sharedTexture && !selected->externalBufferRejected &&
         output && output->gpuBuffer && rgb24 &&
         (selected->gpu->export_caps.buf & galleryHandle);
-    if (rgb10a2 && !exportGpu) selected->externalBufferRejected = true;
+    if (rgb10a2 && !sharedTexture && !exportGpu) selected->externalBufferRejected = true;
     if (exportGpu) {
         pl_buf_params params = {};
         params.size = paddedOutput;
@@ -1694,14 +1665,12 @@ bool colorGalleryRgbVulkan(
         exportNeedsCopy = exported && !params.storable;
         if (!exported) selected->externalBufferRejected = true;
     }
-#endif
-#endif
     if (!sharedTexture && (!exported || exportNeedsCopy) &&
         !selected->reserveOutput(paddedOutput)) {
         if (exported) pl_buf_destroy(selected->gpu, &exported);
         return false;
     }
-    if (!sharedTexture && !selected->ensureColorPass()) {
+    if (!sharedTexture && !selected->ensureColorPass(bool(clip))) {
         if (exported) pl_buf_destroy(selected->gpu, &exported);
         return false;
     }
@@ -1721,8 +1690,8 @@ bool colorGalleryRgbVulkan(
         ? selected->gain : selected->emptyGain;
     pl_pass_run_params run = {};
     run.pass = sharedTexture
-        ? (rgb10a2 ? selected->colorImage10Pass : selected->colorImagePass)
-        : selected->colorPass;
+        ? (sharedImage10 ? selected->colorImage10Pass : selected->colorImagePass)
+        : selected->ensureColorPass(bool(clip));
     run.desc_bindings = bindings;
     run.push_constants = &constants;
     const uint32_t pixelsPerInvocation = sharedTexture ? 1u : rgb24 ? 4u : 2u;
@@ -1796,7 +1765,7 @@ bool colorGalleryRgbVulkan(
                     }
                 }
             }
-            if (slot && selected->ensureColorPass() && selected->reserveThumbnail(*slot, padded)) {
+            if (slot && selected->ensureColorPass(bool(clip)) && selected->reserveThumbnail(*slot, padded)) {
                 scheduledThumbnailConstants = constants;
                 auto& c = scheduledThumbnailConstants;
                 c.dimensions[0] = static_cast<uint32_t>(count);
@@ -1810,7 +1779,7 @@ bool colorGalleryRgbVulkan(
                           scheduledThumbnailBindings.begin());
                 scheduledThumbnailBindings[1].object = slot->output;
                 scheduledThumbnailRun = run;
-                scheduledThumbnailRun.pass = selected->colorPass;
+                scheduledThumbnailRun.pass = selected->ensureColorPass(bool(clip));
                 scheduledThumbnailRun.desc_bindings = scheduledThumbnailBindings.data();
                 scheduledThumbnailRun.push_constants = &scheduledThumbnailConstants;
                 scheduledThumbnailRun.compute_groups[0] = static_cast<int>(
@@ -1848,15 +1817,20 @@ bool colorGalleryRgbVulkan(
         scheduledThumbnail->pending=true;
         scheduledThumbnail=nullptr;
     };
-#ifdef __ANDROID__
     if (sharedTexture) {
         const auto producer = pl_vulkan_get(selected->gpu);
-        auto waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(
-            vkGetDeviceProcAddr(producer->device, "vkWaitSemaphores"));
-        if (!waitSemaphores)
+        const auto getDeviceProc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            producer->get_proc_addr(producer->instance, "vkGetDeviceProcAddr"));
+        const auto createSemaphore = getDeviceProc ? reinterpret_cast<PFN_vkCreateSemaphore>(
+            getDeviceProc(producer->device, "vkCreateSemaphore")) : nullptr;
+        const auto destroySemaphore = getDeviceProc ? reinterpret_cast<PFN_vkDestroySemaphore>(
+            getDeviceProc(producer->device, "vkDestroySemaphore")) : nullptr;
+        auto waitSemaphores = getDeviceProc ? reinterpret_cast<PFN_vkWaitSemaphores>(
+            getDeviceProc(producer->device, "vkWaitSemaphores")) : nullptr;
+        if (!waitSemaphores && getDeviceProc)
             waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(
-                vkGetDeviceProcAddr(producer->device, "vkWaitSemaphoresKHR"));
-        if (!waitSemaphores) {
+                getDeviceProc(producer->device, "vkWaitSemaphoresKHR"));
+        if (!waitSemaphores || !createSemaphore || !destroySemaphore) {
             pl_tex_destroy(selected->gpu, &frameOutputTexture);
             return false;
         }
@@ -1867,7 +1841,7 @@ bool colorGalleryRgbVulkan(
         create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         create.pNext = &type;
         VkSemaphore ready = VK_NULL_HANDLE;
-        if (vkCreateSemaphore(producer->device, &create, nullptr, &ready) != VK_SUCCESS) {
+        if (createSemaphore(producer->device, &create, nullptr, &ready) != VK_SUCCESS) {
             pl_tex_destroy(selected->gpu, &frameOutputTexture);
             return false;
         }
@@ -1878,7 +1852,7 @@ bool colorGalleryRgbVulkan(
         hold.semaphore = {ready, 1};
         if (!pl_vulkan_hold_ex(selected->gpu, &hold)) {
             pl_tex_destroy(selected->gpu, &frameOutputTexture);
-            vkDestroySemaphore(producer->device, ready, nullptr);
+            destroySemaphore(producer->device, ready, nullptr);
             return false;
         }
         pl_gpu_flush(selected->gpu);
@@ -1890,23 +1864,28 @@ bool colorGalleryRgbVulkan(
             const auto owner = weak.lock();
             return owner && !owner->sharedTextureRejected.exchange(true);
         };
-        gpuFrame->readySemaphore = reinterpret_cast<uint64_t>(ready);
-        gpuFrame->rgb10a2 = rgb10a2;
+        static_assert(sizeof(ready) == sizeof(gpuFrame->readySemaphore));
+        std::memcpy(&gpuFrame->readySemaphore, &ready, sizeof(ready));
+        gpuFrame->rgb10a2 = sharedImage10;
         gpuFrame->width = outputWidth;
         gpuFrame->height = outputHeight;
         gpuFrame->sourceFrameIndex = output->thumbnailSourceFrame;
+        const bool fenceCompletion = vulkanNeedsFenceCompletion(producer);
         gpuFrame->resourceLease = std::shared_ptr<void>(
-            new pl_tex(frameOutputTexture), [owner = selectedDevice, producer, ready, waitSemaphores](void* ptr) {
+            new pl_tex(frameOutputTexture), [owner = selectedDevice, producer, ready, waitSemaphores, destroySemaphore, fenceCompletion](void* ptr) {
                 const uint64_t value = 1;
                 VkSemaphoreWaitInfo wait{};
                 wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
                 wait.semaphoreCount = 1;
                 wait.pSemaphores = &ready;
                 wait.pValues = &value;
-                waitSemaphores(producer->device, &wait, UINT64_MAX);
+                if (fenceCompletion)
+                    pl_gpu_finish(owner->gpu);
+                else
+                    waitSemaphores(producer->device, &wait, UINT64_MAX);
                 auto* texture = static_cast<pl_tex*>(ptr);
                 pl_tex_destroy(owner->gpu, texture);
-                vkDestroySemaphore(producer->device, ready, nullptr);
+                destroySemaphore(producer->device, ready, nullptr);
                 delete texture;
             });
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
@@ -1916,7 +1895,6 @@ bool colorGalleryRgbVulkan(
         rgb.clear();
         return true;
     }
-#endif
 #ifndef _WIN32
     if (exported) {
         const uint64_t debugSampleHash =

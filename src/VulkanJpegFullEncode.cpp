@@ -1629,12 +1629,8 @@ static bool encodeTiledVulkanTexture(
   const size_t lengthBytes = size_t(tileCount64) * 4u;
   const bool compact = channels == 3u;
   const bool gpuAssemble = residentConsumer ||
-      ((channels == 1u ||
-       std::getenv("MOTIONCAM_GPU_TILED_JPEG_GPU_ASSEMBLE_RGB") != nullptr) &&
-      std::getenv("MOTIONCAM_GPU_TILED_JPEG_GPU_ASSEMBLE_DISABLE") == nullptr);
+      std::getenv("MOTIONCAM_GPU_TILED_JPEG_GPU_ASSEMBLE_DISABLE") == nullptr;
   const bool directResident = residentConsumer &&
-      (channels == 1u ||
-       std::getenv("MOTIONCAM_GPU_TILED_JPEG_DIRECT_RGB") != nullptr) &&
       std::getenv("MOTIONCAM_GPU_TILED_JPEG_DIRECT_DISABLE") == nullptr;
   const bool sameLayout = s.lastTiledWidth == width &&
       s.lastTiledHeight == height && s.lastTiledChannels == channels &&

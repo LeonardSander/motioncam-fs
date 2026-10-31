@@ -15,6 +15,7 @@
 #include "VirtualFileSystemImpl.h"
 #include "ArchiveImport.h"
 #include "AudioWriter.h"
+#include "HardwareVideoEncoder.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -620,11 +621,6 @@ namespace {
             : texture ? static_cast<size_t>(texture->width) * texture->height
             : bytes.size() / 6;
         const auto transformStarted = std::chrono::steady_clock::now();
-        // Small card previews already have a CPU color path. Avoid compiling
-        // full gallery shaders for them ahead of the first playback frame.
-        if (!output && !bayer && !texture && pixelCount <= 256u * 256u &&
-            !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_VALIDATE_GPU"))
-            enableGpu = false;
         static const std::array<uint16_t, 65536> srgbTransfer = [] {
             std::array<uint16_t, 65536> result{};
             for (size_t index = 0; index < result.size(); ++index) {
@@ -5626,7 +5622,7 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
 }
 
 void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& requestedMode,
-                                      bool metadataOnly) {
+                                      bool metadataOnly, bool allowHardwareEncoder) {
     QString mode=requestedMode;
     const QString audioCodec=finalizeAudioCodec(mode);
     const QStringList modeParts = mode.simplified().split(' ', Qt::SkipEmptyParts);
@@ -5803,7 +5799,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     bool hasExistingAudio = false;
     for (const char* extension : {"wav", "flac", "opus", "aac"})
         hasExistingAudio |= QFile::exists(audioBasePath + "." + extension);
-    if (((!metadataOnly && QFile::exists(outputPath)) || QFile::exists(jsonPath) ||
+    if (allowHardwareEncoder && ((!metadataOnly && QFile::exists(outputPath)) || QFile::exists(jsonPath) ||
          (metadataOnly && (QFile::exists(gcsvPath) || hasExistingAudio)) ||
          (!metadataOnly && QFile::exists(gyroflowPath) && QFile::exists(outputGyroflowPath))) &&
         QMessageBox::question(this, metadataOnly ? "Replace metadata output?"
@@ -5844,6 +5840,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     showAndroidProgress(progress,this);
 #endif
 
+    bool retrySoftwareEncoder = false;
     try {
         motioncam::FinalizeOptions finalizeOptions;
         finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
@@ -5875,9 +5872,15 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             if (help) *help = output;
             return probe.exitCode() == 0 && output.contains(("Encoder " + name).toUtf8());
         };
+        const auto hardwareEncoder = !metadataOnly && allowHardwareEncoder &&
+                (hevc || av1) && !hdrNoise
+            ? motioncam::selectHardwareVideoEncoder(ffmpeg, av1, chroma,
+                info->width, info->height, info->fps,
+                av1 ? qRound(av1Crf * 51.0 / 63.0) : qRound(encoderCrf.toDouble()))
+            : motioncam::HardwareVideoEncoder{};
         QString av1Encoder;
         QString requiredEncoder = proRes ? "prores_ks" : cineForm ? "cfhd" : QString{};
-        if (!metadataOnly && av1) {
+        if (!metadataOnly && av1 && hardwareEncoder.name.isEmpty()) {
             QByteArray svtHelp;
             const bool hasSvt = probeEncoder("libsvtav1", &svtHelp);
             const QByteArray requiredPixelFormat =
@@ -6035,6 +6038,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
         QStringList args{"-hide_banner", "-y"};
+        const bool vaapiEncoder = hardwareEncoder.name.endsWith("_vaapi");
+        if (vaapiEncoder)
+            args << "-init_hw_device" << "vaapi=gpu" << "-filter_hw_device" << "gpu";
         // Attach a real track display matrix to the NUT input and prevent
         // FFmpeg from baking it into pixels. A plain output `rotate` metadata
         // tag is discarded when encoding a new MOV/MP4 stream.
@@ -6054,7 +6060,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             "g=log(1+60*val/maxval)/log(61)*maxval:"
             "b=log(1+60*val/maxval)/log(61)*maxval";
         const bool proRes444 = mode.contains("ProRes 444") || mode.contains("ProRes XQ");
-        const QString pixelFormat = cineFormRgb ? "gbrp12le"
+        const QString pixelFormat = !hardwareEncoder.name.isEmpty() ? hardwareEncoder.pixelFormat
+            : cineFormRgb ? "gbrp12le"
             : proRes444 ? "yuv444p10le"
             : (proRes || cineForm || chroma == "422") ? "yuv422p10le"
             : chroma == "444" ? "yuv444p10le" : "yuv420p10le";
@@ -6071,8 +6078,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                      audioCodec=="flac"?QStringLiteral("flac"):QStringLiteral("libopus"));
             if(audioCodec=="opus")args << "-b:a" << "288k";
         }
-        args << "-vf" << videoFilter;
-        if (av1) {
+        args << "-vf" << (videoFilter + (vaapiEncoder ? ",hwupload" : ""));
+        if (!hardwareEncoder.name.isEmpty()) {
+            args << hardwareEncoder.arguments;
+            spdlog::info("Camera Native: using hardware encoder {}",
+                         hardwareEncoder.name.toStdString());
+        } else if (av1) {
             // SVT 4 defaults to parallelism level 6 (305 PPCS at 4K), which
             // can exhaust a desktop process's memory during encoder startup.
             // Level 4 keeps preset/quality unchanged while bounding its frame
@@ -6111,7 +6122,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                  << "-x265-params"
                  << "range=full:colorprim=bt2020:colormatrix=bt2020nc:psy-rd=1.0";
         }
-        args << "-pix_fmt" << pixelFormat
+        args << "-pix_fmt" << (vaapiEncoder ? QStringLiteral("vaapi") : pixelFormat)
              << "-color_range" << "pc";
         if (cineFormRgb)
             args << "-colorspace" << "rgb" << "-color_primaries" << "bt2020";
@@ -6139,6 +6150,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         QApplication::processEvents();
         QProcess encoder;
         encoder.setProcessChannelMode(QProcess::MergedChannels);
+        retrySoftwareEncoder = !hardwareEncoder.name.isEmpty();
         if (!metadataOnly) encoder.start(ffmpeg, args, QIODevice::ReadWrite);
         if (!metadataOnly && !encoder.waitForStarted())
             throw std::runtime_error("Could not start FFmpeg: " + encoder.errorString().toStdString());
@@ -6370,6 +6382,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 QString::fromUtf8(diagnostic.right(4000))).toStdString());
         }
 
+        retrySoftwareEncoder = false;
+
         // The source sidecar is authoritative for explicit calibration
         // overrides. Keep those values independently of the temporary staging
         // DNG: its RGB conversion is an implementation detail and must not be
@@ -6410,7 +6424,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             sidecar["transferFunction"] = "LOG60";
             sidecar["dataLevels"] = "Full";
             sidecar["videoCodec"] = av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
-            sidecar["encoder"] = av1 ? av1Encoder.toStdString()
+            sidecar["encoder"] = !hardwareEncoder.name.isEmpty() ? hardwareEncoder.name.toStdString()
+                : av1 ? av1Encoder.toStdString()
                 : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
             sidecar["pixelFormat"] = pixelFormat.toStdString();
             if (hdrNoise) sidecar["noiseSynthesis"] = 8;
@@ -6579,6 +6594,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 #endif
     } catch (const std::exception& e) {
         progress.close();
+        if (std::string(e.what()) != "Finalization cancelled" && retrySoftwareEncoder) {
+            spdlog::warn("Hardware video encoding failed; retrying software: {}", e.what());
+            mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+            finalizeCameraNative(fileWidget, requestedMode, metadataOnly, false);
+            return;
+        }
         if (std::string(e.what()) != "Finalization cancelled") {
 #ifdef __ANDROID__
             showAndroidNotice(tr("Camera Native finalization"),

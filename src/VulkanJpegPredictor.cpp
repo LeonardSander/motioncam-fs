@@ -29,11 +29,7 @@ bool VulkanJpegContext::init() {
     if (vulkan) return true;
     log = pl_log_create(PL_API_VER, nullptr);
     if (!log) { unavailable = true; return false; }
-#ifdef __ANDROID__
-    vulkan = createSharedVulkanContext(log);
-#else
-    vulkan = pl_vulkan_create(log, nullptr);
-#endif
+    vulkan = createGalleryVulkanContext(log);
     if (!vulkan || !vulkan->gpu->glsl.compute) {
         unavailable = true;
         return false;
