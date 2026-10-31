@@ -3,9 +3,14 @@
 #include "liblj92/lj92.h"
 #include "DNGDecoder.h"
 #include "VulkanJpegDecode.h"
+#include "VulkanGalleryPreview.h"
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#include <libplacebo/gpu.h>
+#endif
 #include "VulkanJpegFullEncode.h"
 #include "VulkanGainBake.h"
 #include "GainMapBake.h"
+#include "Utils.h"
 #include <jpeglib.h>
 
 #include <algorithm>
@@ -21,6 +26,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -319,9 +325,73 @@ static int benchmarkRealJpegDng(const char* path) {
 }
 
 int main() {
+    // Adapting a common GPU image to vector readback must keep its lease.
+    {
+        auto owner = std::make_shared<int>(7);
+        std::weak_ptr<int> lifetime = owner;
+        motioncam::DNGGpuImage source;
+        source.buffer = owner.get();
+        source.width = source.height = 2; source.channels = 1;
+        source.lease = owner;
+        source.download = [lifetime](uint16_t* samples, size_t count) {
+            assert(!lifetime.expired() && count == 4);
+            std::fill_n(samples, count, 17);
+            return true;
+        };
+        motioncam::PreviewFrame frame;
+        frame.gallerySource = source;
+        assert(frame.hasGalleryCfa());
+        auto readback = frame.gallerySource.vectorDownloader();
+        source = {}; frame.gallerySource = {}; owner.reset();
+        assert(!lifetime.expired() && !frame.hasGalleryCfa());
+        std::vector<uint16_t> samples;
+        assert(readback(samples) && samples == std::vector<uint16_t>(4, 17));
+        readback = {};
+        assert(lifetime.expired());
+    }
+    // A displayed texture must be destroyed before the decoder device it uses.
+    {
+        bool resourceReleased = false;
+        auto source = std::make_shared<int>(1);
+        std::weak_ptr<int> device = source;
+        auto frame = std::make_shared<motioncam::VulkanGalleryGpuBuffer>();
+        frame->sourceLease = std::move(source);
+        frame->resourceLease = std::shared_ptr<void>(new int(2), [&](void* value) {
+            assert(!device.expired());
+            resourceReleased = true;
+            delete static_cast<int*>(value);
+        });
+        frame.reset();
+        assert(resourceReleased && device.expired());
+    }
     if (const char* path = std::getenv("MOTIONCAM_GPU_JPEG_REAL_DNG_BENCHMARK"))
         return benchmarkRealJpegDng(path);
     // Only the two CFA representations may be split into color and luminance.
+    {
+        const auto directory = std::filesystem::temp_directory_path() /
+            ("mcfuse-incomplete-sequence-" + std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directory(directory);
+        struct Cleanup {
+            std::filesystem::path path;
+            ~Cleanup() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
+        } cleanup{directory};
+        const auto complete = tiledLosslessJpegDng(std::vector<uint16_t>(256, 512),
+                                                   16, 16, 8, 8, 10);
+        auto write = [&](const char* name, size_t size) {
+            std::ofstream output(directory / name, std::ios::binary);
+            output.write(reinterpret_cast<const char*>(complete.data()), size);
+        };
+        write("frame-000001.dng", complete.size());
+        write("frame-000002.dng", 0);
+        write("frame-000003.dng", 8);
+        motioncam::DNGDecoder sequence(directory.string());
+        assert(sequence.getFrames().size() == 1);
+        bool rejected = false;
+        try { motioncam::DNGDecoder invalid((directory / "frame-000002.dng").string()); }
+        catch (const std::runtime_error&) { rejected = true; }
+        assert(rejected);
+    }
     motioncam::GainMap region{};
     region.top = 0; region.left = 0; region.bottom = 8; region.right = 8;
     region.plane = 0; region.planes = 1;
@@ -955,6 +1025,17 @@ int main() {
     motioncam::DecodedDNGImage rgbLosslessDecoded;
     assert(motioncam::DNGDecoder::decodeImage(rgbLosslessDng, rgbLosslessDecoded));
     assert(rgbLosslessDecoded.samples == rgb);
+    auto rgbProxy = rgbLosslessDng;
+    assert(motioncam::DNGDecoder::processHigherCFA(rgbProxy, 2, {0,1,1,2},
+        motioncam::QuadBayerMode::Binning, false, 2, false));
+    motioncam::DecodedDNGImage decodedProxy;
+    assert(motioncam::DNGDecoder::decodeImage(rgbProxy, decodedProxy));
+    std::vector<uint16_t> expectedProxy;
+    uint32_t proxyWidth = 0, proxyHeight = 0;
+    motioncam::utils::reduceRGB(rgb, expectedProxy, rgbWidth, rgbHeight,
+                              2, false, proxyWidth, proxyHeight);
+    assert(decodedProxy.layout.width == proxyWidth && decodedProxy.layout.height == proxyHeight);
+    assert(decodedProxy.storedBitsPerSample == 16 && decodedProxy.samples == expectedProxy);
     const uint8_t soi[] = {0xff, 0xd8};
     const uint8_t eoi[] = {0xff, 0xd9};
     const auto jpegBegin = std::search(rgbLosslessDng.begin(), rgbLosslessDng.end(),
@@ -1742,6 +1823,186 @@ int main() {
                 motioncam::DecodedDNGImage imported;
                 assert(motioncam::DNGDecoder::decodeImageBorrowed(dng, imported));
                 assert(imported.samples == imageSamples);
+                motioncam::DecodedDNGImage resident;
+                assert(motioncam::DNGDecoder::decodeImage(dng, resident, false, true, true));
+                assert(resident.gpuImage && resident.samples.empty());
+                // Reusing decoder scratch for another frame cannot overwrite a
+                // retained frame that is waiting for gallery processing.
+                motioncam::DecodedDNGImage next;
+                assert(motioncam::DNGDecoder::decodeImage(dng, next, false, true, true));
+                assert(next.gpuImage && next.gpuImage->buffer != resident.gpuImage->buffer);
+                std::vector<uint16_t> recovered(imageSamples.size());
+                assert(resident.gpuImage->download(recovered.data(), recovered.size()));
+                assert(recovered == imageSamples);
+                resident.layout.cfaRepeatSize = 2;
+                resident.layout.cfaPhase = {0, 1, 1, 2};
+                motioncam::RenderSettings settings;
+                settings.options = static_cast<motioncam::FileRenderOptions>(0);
+                settings.streamingPreview = true;
+                motioncam::PreviewFrame frame;
+                assert(motioncam::DNGDecoder::decodePreview(resident, settings, frame));
+                assert(frame.gallerySource.buffer && frame.galleryCfa.empty() && frame.rgb.empty());
+                motioncam::VulkanGalleryBayerSource source;
+                source.gpu = frame.gallerySource.gpu;
+                source.buffer = frame.gallerySource.buffer;
+                source.width = frame.width; source.height = frame.height;
+                source.phase = frame.galleryCfaPhase;
+                source.black = frame.galleryBlack; source.white = frame.galleryWhite;
+                const std::array<float, 3> gains{1, 1, 1};
+                const std::array<float, 9> identity{1,0,0, 0,1,0, 0,0,1};
+                std::vector<uint8_t> gpuColor, hostColor;
+                assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                    1, nullptr, nullptr, false, false, &source));
+                source.gpu = source.buffer = nullptr;
+                source.samples = imageSamples.data();
+                assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                    1, nullptr, nullptr, false, false, &source));
+                assert(gpuColor == hostColor);
+                auto withGain = resident;
+                motioncam::GainMap map{};
+                map.right = map.bottom = 1024;
+                map.planes = map.channels = map.rowPitch = map.colPitch = 1;
+                map.width = map.height = 1;
+                map.spacingH = map.spacingV = 1;
+                map.data = {1.1f};
+                withGain.opcodeList2 = {map};
+                auto gainSettings = settings;
+                gainSettings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+                motioncam::PreviewFrame gainFrame;
+                assert(motioncam::DNGDecoder::decodePreview(withGain, gainSettings, gainFrame));
+                assert(gainFrame.gallerySource.buffer && gainFrame.galleryCfaGain && gainFrame.gainMapApplied);
+                source.samples = nullptr;
+                source.gpu = gainFrame.gallerySource.gpu;
+                source.buffer = gainFrame.gallerySource.buffer;
+                source.black = gainFrame.galleryBlack; source.white = gainFrame.galleryWhite;
+                source.gain = gainFrame.galleryCfaGain.get();
+                assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                    1, nullptr, nullptr, false, false, &source));
+                source.gpu = source.buffer = nullptr;
+                source.samples = imageSamples.data();
+                assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                    1, nullptr, nullptr, false, false, &source));
+                assert(gpuColor == hostColor);
+                // CPU recovery must match the ordinary CPU preview for both
+                // gain baking and LOG-only processing of resident JPEG frames.
+                for (bool bakeGain : {false, true}) for (bool log : {false, true}) {
+                    auto input = bakeGain ? withGain : resident;
+                    auto recoverySettings = bakeGain ? gainSettings : settings;
+                    if (log) recoverySettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+                    recoverySettings.logTransform = motioncam::LogTransformMode::ReduceBy6Bit;
+                    motioncam::PreviewFrame deferred;
+                    assert(motioncam::DNGDecoder::decodePreview(input, recoverySettings, deferred, true));
+                    std::vector<uint16_t> samples;
+                    assert(deferred.gallerySource.downloadSamples(samples));
+                    if (deferred.galleryCfaGain) {
+                        assert(deferred.galleryCfaRecoverCpu);
+                        assert(deferred.galleryCfaRecoverCpu(samples));
+                    }
+                    std::vector<uint8_t> recoveredRgb;
+                    assert(motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                        samples.data(), recoveredRgb, deferred.width, deferred.height,
+                        deferred.galleryCfaPhase, deferred.galleryBlack, deferred.galleryWhite));
+                    input.gpuImage.reset(); input.samples = imageSamples;
+                    recoverySettings.streamingPreview = false;
+                    motioncam::PreviewFrame ordinary;
+                    assert(motioncam::DNGDecoder::decodePreview(input, recoverySettings, ordinary, true));
+                    assert(recoveredRgb == ordinary.rgb);
+                }
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+                const auto gpu = static_cast<pl_gpu>(resident.gpuImage->gpu);
+                pl_tex_params textureParams{};
+                textureParams.w = textureParams.h = 1024;
+                textureParams.format = pl_find_fmt(gpu, PL_FMT_UNORM, 1, 16, 16,
+                                                   PL_FMT_CAP_SAMPLEABLE);
+                textureParams.sampleable = textureParams.host_writable = true;
+                textureParams.initial_data = imageSamples.data();
+                pl_tex cfaTexture = pl_tex_create(gpu, &textureParams);
+                assert(cfaTexture);
+                auto textureLease = std::shared_ptr<void>(new pl_tex(cfaTexture),
+                    [gpu](void* pointer) {
+                        auto* texture = static_cast<pl_tex*>(pointer);
+                        pl_tex_destroy(gpu, texture); delete texture;
+                    });
+                for (bool log : {false, true}) {
+                    auto textureImage = resident;
+                    textureImage.gpuImage = std::make_shared<motioncam::DNGGpuImage>(*resident.gpuImage);
+                    textureImage.gpuImage->buffer = nullptr;
+                    textureImage.gpuImage->texture = cfaTexture;
+                    textureImage.gpuImage->lease = textureLease;
+                    auto textureSettings = settings;
+                    if (log) textureSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+                    textureSettings.logTransform = motioncam::LogTransformMode::ReduceBy6Bit;
+                    motioncam::PreviewFrame textureFrame;
+                    assert(motioncam::DNGDecoder::decodePreview(textureImage, textureSettings,
+                                                               textureFrame, true));
+                    assert(textureFrame.gallerySource.texture && textureFrame.rgb.empty());
+                    source.samples = nullptr;
+                    source.gpu = textureFrame.gallerySource.gpu;
+                    source.buffer = nullptr; source.texture = textureFrame.gallerySource.texture;
+                    source.black = textureFrame.galleryBlack; source.white = textureFrame.galleryWhite;
+                    source.gain = textureFrame.galleryCfaGain.get();
+                    assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                        1, nullptr, nullptr, false, false, &source));
+                    auto cpuImage = resident;
+                    cpuImage.gpuImage.reset(); cpuImage.samples = imageSamples;
+                    motioncam::PreviewFrame cpuFrame;
+                    assert(motioncam::DNGDecoder::decodePreview(cpuImage, textureSettings, cpuFrame, true));
+                    source.gpu = source.texture = nullptr;
+                    source.samples = cpuFrame.galleryCfaSamples();
+                    source.black = cpuFrame.galleryBlack; source.white = cpuFrame.galleryWhite;
+                    source.gain = cpuFrame.galleryCfaGain.get();
+                    assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                        1, nullptr, nullptr, false, false, &source));
+                    if (gpuColor != hostColor) {
+                        unsigned maximum = 0; size_t different = 0;
+                        for (size_t i = 0; i < gpuColor.size(); i += 2) {
+                            uint16_t a, b;
+                            std::memcpy(&a, gpuColor.data()+i, 2);
+                            std::memcpy(&b, hostColor.data()+i, 2);
+                            maximum = std::max(maximum, unsigned(std::abs(int(a)-int(b))));
+                            different += a != b;
+                        }
+                        std::fprintf(stderr, "CFA texture log=%d max_error=%u different=%zu\n", log, maximum, different);
+                    }
+                    assert(gpuColor == hostColor);
+                }
+#endif
+                // Finalized LOG JPEG DNGs must linearize resident codes before
+                // demosaic, matching the ordinary CPU import exactly.
+                auto logDng = dng;
+                assert(motioncam::DNGDecoder::ensureUncompressed(logDng));
+                assert(motioncam::DNGDecoder::applyLogTransform(logDng,
+                    motioncam::LogTransformMode::ReduceBy6Bit));
+                assert(motioncam::DNGDecoder::compressLosslessJPEGTiled(logDng));
+                motioncam::DecodedDNGImage logResident, logCpu;
+                assert(motioncam::DNGDecoder::decodeImage(logDng, logResident, false, true, true));
+                assert(logResident.gpuImage && !logResident.residentLinearization.empty());
+                assert(motioncam::DNGDecoder::decodeImage(logDng, logCpu));
+                logResident.layout.cfaRepeatSize = 2;
+                logResident.layout.cfaPhase = {0,1,1,2};
+                motioncam::PreviewFrame logFrame;
+                assert(motioncam::DNGDecoder::decodePreview(logResident, settings, logFrame));
+                assert(logFrame.gallerySource.buffer && logFrame.galleryCfaGain);
+                source.samples = nullptr;
+                source.gpu = logFrame.gallerySource.gpu; source.buffer = logFrame.gallerySource.buffer;
+                source.black = logFrame.galleryBlack; source.white = logFrame.galleryWhite;
+                source.gain = logFrame.galleryCfaGain.get();
+                assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                    1, nullptr, nullptr, false, false, &source));
+                source.gpu = source.buffer = nullptr;
+                source.samples = logCpu.samples.data();
+                source.gain = nullptr;
+                assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                    1, nullptr, nullptr, false, false, &source));
+                assert(gpuColor == hostColor);
+                std::vector<uint16_t> fallback;
+                assert(logFrame.gallerySource.downloadSamples(fallback));
+                assert(fallback == logCpu.samples);
+                // Histogram/clipping requests recover through shared CPU processing.
+                motioncam::PreviewFrame histogram;
+                assert(motioncam::DNGDecoder::decodePreview(resident, settings,
+                    histogram, false, true));
+                assert(histogram.rawSamples && *histogram.rawSamples == imageSamples);
             }
             if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE")) {
                 std::fprintf(stderr, "Vulkan JPEG tile decode %.3f ms\n",
@@ -1956,6 +2217,93 @@ int main() {
         std::vector<std::vector<uint16_t>> decodedTiles;
         assert(motioncam::jpegDecodeTilesVulkan(tiles, decodedTiles));
         assert(decodedTiles == reference);
+        motioncam::VulkanDecodedJpegImage retained;
+        assert(motioncam::jpegDecodeTiledImageVulkanRetained(
+            tiles, width, height, tileSide, tileSide, retained));
+        motioncam::DecodedDNGImage rgbImage;
+        rgbImage.gpuImage = std::make_shared<motioncam::DNGGpuImage>();
+        rgbImage.gpuImage->gpu = retained.gpu; rgbImage.gpuImage->buffer = retained.buffer;
+        rgbImage.gpuImage->width = retained.width; rgbImage.gpuImage->height = retained.height;
+        rgbImage.gpuImage->channels = retained.channels;
+        rgbImage.gpuImage->lease = retained.lease;
+        rgbImage.gpuImage->download = [retained](uint16_t* pixels, size_t samples) {
+            return motioncam::downloadVulkanDecodedJpegImage(retained, pixels, samples);
+        };
+        rgbImage.layout.width = width; rgbImage.layout.height = height;
+        rgbImage.layout.samplesPerPixel = 3;
+        rgbImage.layout.bitsPerSample = rgbImage.storedBitsPerSample = 16;
+        rgbImage.layout.pixels = motioncam::DNGPixelLayout::LinearRGB;
+        rgbImage.metadata.blackLevelCount = rgbImage.metadata.whiteLevelCount = 3;
+        rgbImage.metadata.blackLevel.fill(123);
+        rgbImage.metadata.whiteLevel.fill(60000);
+        motioncam::RenderSettings rgbSettings;
+        rgbSettings.options = static_cast<motioncam::FileRenderOptions>(0);
+        rgbSettings.streamingPreview = true;
+        motioncam::PreviewFrame rgbFrame;
+        assert(motioncam::DNGDecoder::decodePreview(rgbImage, rgbSettings, rgbFrame));
+        assert(rgbFrame.gallerySource.buffer && rgbFrame.rgb.empty());
+        motioncam::VulkanGalleryTextureSource rgbSource;
+        rgbSource.gpu = rgbFrame.gallerySource.gpu;
+        rgbSource.buffer = rgbFrame.gallerySource.buffer;
+        rgbSource.width = width; rgbSource.height = height;
+        rgbSource.black = rgbFrame.galleryGpuBlack; rgbSource.white = rgbFrame.galleryGpuWhite;
+        const std::array<float, 3> gains{1, 1, 1};
+        const std::array<float, 9> identity{1,0,0, 0,1,0, 0,0,1};
+        std::vector<uint8_t> residentColor;
+        assert(motioncam::colorGalleryRgbVulkan(residentColor, gains, identity, identity,
+            1, nullptr, nullptr, false, false, nullptr, nullptr, &rgbSource));
+        rgbImage.samples.resize(size_t(width) * height * 3u);
+        assert(motioncam::downloadVulkanDecodedJpegImage(retained,
+            rgbImage.samples.data(), rgbImage.samples.size()));
+        // Plain sampled RGB needs the neutral gain binding too. Baking used
+        // to hide its missing descriptor by supplying a nonempty gain buffer.
+        auto gpu = static_cast<pl_gpu>(retained.gpu);
+        const auto rgbaFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+                                            PL_FMT_CAP_SAMPLEABLE);
+        assert(rgbaFormat);
+        std::vector<uint16_t> rgba(size_t(width) * height * 4u, 65535u);
+        for (size_t pixel = 0; pixel < size_t(width) * height; ++pixel)
+            std::copy_n(rgbImage.samples.data() + pixel * 3u, 3u,
+                        rgba.data() + pixel * 4u);
+        pl_tex_params textureParams{};
+        textureParams.w = width; textureParams.h = height;
+        textureParams.format = rgbaFormat;
+        textureParams.sampleable = textureParams.host_writable = true;
+        pl_tex rgbTexture = pl_tex_create(gpu, &textureParams);
+        assert(rgbTexture);
+        pl_tex_transfer_params transfer{};
+        transfer.tex = rgbTexture; transfer.ptr = rgba.data();
+        assert(pl_tex_upload(gpu, &transfer));
+        rgbSource.buffer = nullptr; rgbSource.texture = rgbTexture;
+        std::vector<uint8_t> textureColor;
+        assert(motioncam::colorGalleryRgbVulkan(textureColor, gains, identity, identity,
+            1, nullptr, nullptr, false, false, nullptr, nullptr, &rgbSource));
+        assert(textureColor == residentColor);
+        assert(std::any_of(textureColor.begin(), textureColor.end(),
+                           [](uint8_t value) { return value != 0; }));
+        pl_tex_destroy(gpu, &rgbTexture);
+        rgbImage.gpuImage.reset();
+        motioncam::PreviewFrame cpuFrame;
+        assert(motioncam::DNGDecoder::decodePreview(rgbImage, rgbSettings, cpuFrame));
+        assert(motioncam::colorGalleryRgbVulkan(cpuFrame.rgb, gains, identity, identity,
+            1, nullptr, nullptr, false, false));
+        assert(residentColor.size() == cpuFrame.rgb.size());
+        unsigned maximumError = 0;
+        uint64_t errorSum = 0;
+        for (size_t sample = 0; sample < residentColor.size() / 2u; ++sample) {
+            uint16_t residentCode, cpuCode;
+            std::memcpy(&residentCode, residentColor.data() + sample * 2u, 2u);
+            std::memcpy(&cpuCode, cpuFrame.rgb.data() + sample * 2u, 2u);
+            const unsigned error = std::abs(int(residentCode) - int(cpuCode));
+            maximumError = std::max(maximumError, error);
+            errorSum += error;
+        }
+        std::fprintf(stderr, "Resident RGB normalization: max_error=%u mean_error=%.6f\n",
+            maximumError, double(errorSum) / (residentColor.size() / 2u));
+        // Float normalization can differ by one linear code from the CPU's
+        // double-precision LUT; sRGB expands that by at most thirteen codes.
+        assert(maximumError <= 13u);
+        assert(errorSum < residentColor.size() / 2u);
         std::vector<uint8_t> jpeg;
         assert(motioncam::jpegDecodeTiledImageVulkan(
             tiles, width, height, tileSide, tileSide,

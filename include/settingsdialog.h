@@ -52,6 +52,9 @@ public:
     void setFuseMountingEnabled(bool enabled);
     bool getFuseMountingEnabled() const;
     void setFuseMountingAvailable(bool available);
+    void setAndroidFinalizeDestination(const QString& mode,
+                                       const QString& legacyCustomDirectory);
+    QString getAndroidFinalizeDestination() const;
 
     void setMatrixOverrideEnabled(bool enabled);
     bool getMatrixOverrideEnabled() const;
@@ -94,6 +97,11 @@ private:
     QLineEdit* mCacheCleanupCustomEdit;
     QLabel* mDirectLogCacheUsageLabel;
     QPushButton* mClearDirectLogCacheButton;
+#ifdef __ANDROID__
+    QComboBox* mAndroidFinalizeDestinationCombo;
+    QString mAndroidFinalizeDestination=QStringLiteral("documents");
+    int rememberAndroidFinalizeDirectory(const QString& uri);
+#endif
 
     void updateDirectLogCacheUsage();
 };

@@ -1,0 +1,14 @@
+{
+  "name": "libplacebo",
+  "version": "7.360.1",
+  "description": "Vulkan color processing and presentation for Android gallery",
+  "homepage": "https://github.com/haasn/libplacebo",
+  "license": "LGPL-2.1-or-later",
+  "supports": "android",
+  "dependencies": [
+    "fast-float",
+    "shaderc",
+    "vulkan-headers",
+    { "name": "vcpkg-tool-meson", "host": true }
+  ]
+}

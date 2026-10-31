@@ -133,7 +133,7 @@ For tiled decode measurements, `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH` and 
 
 - **Duplicated frame interpolation**
 
-Duplicated frames introduced by CFR conversion can be replaced by motion-interpolated frames using [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). On first use, Fuse downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment. Python 3 must be available for this one-time setup. Synthetic and duplicated frames are indicated as such in frame metadata. Beyond that duplicated frames are still detectable in DNG sequences to properly interpolate DNG sequences with poor CFR conversion.
+Duplicated frames introduced by CFR conversion can be replaced by motion-interpolated frames using [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). This Python/PyTorch backend is available on desktop platforms; its controls are hidden on Android. On first use, Fuse downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment. Python 3 must be available for this one-time setup. Synthetic and duplicated frames are indicated as such in frame metadata. Beyond that duplicated frames are still detectable in DNG sequences to properly interpolate DNG sequences with poor CFR conversion.
 
 - **MCRAW archival**
 
@@ -179,6 +179,30 @@ sudo apt install clang ninja-build pkg-config libfuse3-dev libboost-filesystem-d
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
 cmake --build build --parallel
 ```
+
+Android arm64 APK (Qt 6.12.0, JDK 21, Android SDK 36, NDK r27c, and the
+repository's pinned vcpkg revision):
+
+The SDK needs `platforms;android-36` and `build-tools;36.0.0`. Install the
+matching Qt Linux host kit and use `scripts/install_qt_android.py` to install
+the public Android arm64 archives. The NDK compiler must be executable by your
+user, and vcpkg bootstrap needs `zip` and `unzip`.
+
+```bash
+export ANDROID_SDK_ROOT=/path/to/android-sdk
+export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+export QT_ANDROID_ROOT=/path/to/Qt/6.12.0/android_arm64_v8a
+export QT_HOST_PATH=/path/to/Qt/6.12.0/gcc_64
+export VCPKG_ROOT=/path/to/vcpkg
+python3 scripts/install_qt_android.py "$QT_ANDROID_ROOT"
+bash scripts/build_android_apk.sh
+```
+
+The script prints the APK path. The APK has optimized native code and Qt's
+debug signature for direct installation; rebuilds use the same debug key on
+one build machine. GitHub Actions uploads the APK with the other platform
+artifacts and includes it in tagged releases. See [Android notes](docs/android.md)
+for the current feature scope and runtime performance opportunities.
 
 ---
 

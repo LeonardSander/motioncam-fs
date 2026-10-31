@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace motioncam {
@@ -31,6 +32,8 @@ struct VulkanDecodedJpegImage {
     // to the terminal JPEG encoder for validation at the final readback.
     const void* validationBuffer = nullptr;
     uint32_t width = 0, height = 0, channels = 0, bits = 0, wordsPerRow = 0;
+    // Optional ownership transferred from the decoder for deferred consumers.
+    std::shared_ptr<void> lease;
 };
 struct VulkanJpegContiguousSource {
     const uint8_t* bytes = nullptr;
@@ -49,6 +52,14 @@ bool jpegDecodeTiledImageVulkan(
     uint32_t tileWidth, uint32_t tileHeight,
     const std::function<bool(const VulkanDecodedJpegImage&)>& consume,
     const VulkanJpegContiguousSource* contiguous = nullptr);
+// Retains the assembled allocation without copying pixels. Reads only the
+// validation word before returning; deferred consumers own the output lease.
+bool jpegDecodeTiledImageVulkanRetained(
+    const std::vector<VulkanJpegTile>& tiles, uint32_t width, uint32_t height,
+    uint32_t tileWidth, uint32_t tileHeight, VulkanDecodedJpegImage& image,
+    const VulkanJpegContiguousSource* contiguous = nullptr);
+bool downloadVulkanDecodedJpegImage(const VulkanDecodedJpegImage& image,
+                                  uint16_t* pixels, size_t samples);
 // Waits for decode and tile assembly, then reads only the GPU validation word.
 // Intended for decode-only timing without downloading pixels or re-encoding.
 bool jpegDecodeTiledImageVulkanValidated(

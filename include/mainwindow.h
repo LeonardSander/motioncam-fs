@@ -72,6 +72,7 @@ class QMenu;
 class QPushButton;
 class QKeyEvent;
 class QCloseEvent;
+class QResizeEvent;
 class QTimer;
 class QProgressDialog;
 namespace Ui {
@@ -81,6 +82,7 @@ QT_END_NAMESPACE
 
 class FrameTimingDialog;
 class ClipPlayerDialog;
+class SettingsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -105,6 +107,11 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+#ifdef __ANDROID__
+    void resizeEvent(QResizeEvent *event) override;
+    void showAndroidComboChoices(class QComboBox* combo);
+    void updateAndroidOrientationPolicy();
+#endif
 
 private slots:
     void onProcessingStarted();
@@ -133,12 +140,14 @@ private slots:
     void onClearRecentSessions();
 
     void playMount(motioncam::MountId mountId, bool startRender = true);
+    void showGallery(motioncam::MountId mountId, bool startRender);
     void startGalleryRender(motioncam::MountId mountId, double startSeconds = 0.0,
                             bool backfillThumbnails = false);
     motioncam::RenderSettings settingsForMount(motioncam::MountId mountId) const;
     void openMountedDirectory(QWidget* fileWidget);
-    void revealSourceJson(const QString& jsonPath);
-    void removeFile(QWidget* fileWidget);
+    void revealSourceJson(const QString& jsonPath,
+                          const QString& clipPath = {});
+    void removeFile(QWidget* fileWidget, bool releaseMount = true);
 #ifdef _WIN32
     void discardFile(QWidget* fileWidget);
 #endif
@@ -178,12 +187,19 @@ private:
     void updateRecentSessionsMenu();
     void addRecentSession(const QString& path);
     QString sessionDirectory() const;
+    QString promptSessionSavePath();
     QString autoSessionPath() const;
     void autoSaveSession();
     void markSettingsDirty();
     void clearApplyFeedback();
     void applyAutoSettings();
     void updateApplyButtonsVisibility();
+    void applyPreferences(SettingsDialog& dialog);
+#ifdef __ANDROID__
+    void hideSecondaryWindowsForGallery();
+    void restoreSecondaryWindowsAfterGallery();
+    void showAndroidNotice(const QString& title, const QString& message);
+#endif
 #ifdef __APPLE__
     void cleanupStaleMacFuseMounts();
     void forceUnmountAllMacFuseMounts();
@@ -234,6 +250,19 @@ private:
     QHash<motioncam::MountId, std::shared_ptr<std::atomic_bool>> mThumbnailCancellations;
     QHash<motioncam::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
     QPointer<ClipPlayerDialog> mClipPlayer;
+#ifdef __ANDROID__
+    QPointer<SettingsDialog> mSettingsDialog;
+    QList<QPointer<QWidget>> mHiddenForGallery;
+    bool mAndroidGalleryOpening=false;
+    double mAndroidSplitterHorizontal=0.5,mAndroidSplitterVertical=0.5;
+    QPointer<QWidget> mPendingAndroidJsonCard;
+    QPointer<QWidget> mAndroidExternalJsonCard;
+    QPointer<QWidget> mAndroidComboOverlay;
+    QPointer<QWidget> mPendingAndroidFinalizeCard;
+    QString mPendingAndroidNoticeTitle;
+    QString mPendingAndroidNoticeMessage;
+    bool mAndroidExternalEditorLeftApp = false;
+#endif
     motioncam::MountId mGalleryMountId = motioncam::InvalidMountId;
     std::atomic_uint64_t mGalleryGeneration{0};
     // Preview filesystems are independent per mount. Serialize their large

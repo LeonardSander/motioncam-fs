@@ -20,7 +20,9 @@
 #include <QGuiApplication>
 #include <QProcess>
 #include <QPushButton>
+#include <QToolButton>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QUrl>
 #include <algorithm>
 #include <array>
@@ -33,6 +35,11 @@
 #include <thread>
 #include <vector>
 #include <spdlog/spdlog.h>
+#ifdef __ANDROID__
+#include <spdlog/sinks/android_sink.h>
+#include <spdlog/sinks/dist_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
+#endif
 
 #ifdef __APPLE__
 #include "CrashDebug.h"
@@ -50,6 +57,21 @@
 #endif
 
 namespace {
+#ifdef __ANDROID__
+class AndroidButtonSizing final : public QObject {
+public:
+    using QObject::QObject;
+    bool eventFilter(QObject* watched,QEvent* event) override {
+        if(event->type()==QEvent::Polish){
+            if(auto* button=qobject_cast<QAbstractButton*>(watched);
+               button&&(qobject_cast<QPushButton*>(button)||qobject_cast<QToolButton*>(button)))
+                button->setMinimumHeight(std::max(30,button->minimumHeight()));
+        }
+        return false;
+    }
+};
+#endif
+
 std::vector<uint8_t> benchmarkCfaDng(const uint8_t* payload, size_t bytes,
                                      uint32_t width, uint32_t height,
                                      bool jpeg) {
@@ -586,13 +608,28 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
 int main(int argc, char *argv[])
 {
     const auto processStarted = std::chrono::steady_clock::now();
+#ifdef __ANDROID__
+    spdlog::set_default_logger(
+        spdlog::android_logger_mt("MotionCamFuse", "MotionCamFuse"));
+#endif
 #ifndef _WIN32
     // Pipe consumers such as the gallery FFmpeg process can exit between a
     // state check and a buffered write. Let QProcess report EPIPE instead of
     // allowing the process-wide default SIGPIPE action to terminate the app.
     std::signal(SIGPIPE, SIG_IGN);
 #endif
+#if defined(__ANDROID__) && QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    // QWidget backing stores otherwise default to EGL on Android, even when
+    // the gallery itself already presents through a native Vulkan surface.
+    qputenv("QT_WIDGETS_RHI", "1");
+    qputenv("QT_WIDGETS_RHI_BACKEND", "vulkan");
+#endif
     SingleApplication app(argc, argv);
+#ifdef __ANDROID__
+    QFont androidFont = app.font();
+    androidFont.setPixelSize(11);
+    app.setFont(androidFont);
+#endif
     const auto applicationConstructed = std::chrono::steady_clock::now();
 
 #ifdef __APPLE__
@@ -622,6 +659,9 @@ int main(int argc, char *argv[])
         app.setStyleSheet(ts.readAll());
     }
 
+#ifdef __ANDROID__
+    app.installEventFilter(new AndroidButtonSizing(&app));
+#endif
     // Parse command line arguments
     QCommandLineParser parser;
 
@@ -645,6 +685,10 @@ int main(int argc, char *argv[])
         QStringList() << "gallery-perf-thumbnails",
         "Generate thumbnails concurrently during the cold gallery startup (on/off)",
         "mode", "on");
+    QCommandLineOption galleryPerfFlagsOption(
+        QStringList() << "gallery-perf-flags",
+        "Comma separated gallery perf switches for Android automation",
+        "flags");
     QCommandLineOption directLogJpegBenchmarkOption(
         QStringList() << "directlog-jpeg-benchmark",
         "Compare remosaiced DirectLog GPU JPEG with raw pixel download",
@@ -654,8 +698,57 @@ int main(int argc, char *argv[])
     parser.addOption(galleryPerfOption);
     parser.addOption(galleryPerfPlaybackOption);
     parser.addOption(galleryPerfThumbnailsOption);
+    parser.addOption(galleryPerfFlagsOption);
     parser.addOption(directLogJpegBenchmarkOption);
-    parser.process(app);
+    QStringList arguments = app.arguments();
+#ifdef __ANDROID__
+    const auto activity = QNativeInterface::QAndroidApplication::context();
+    if (activity.isValid()) {
+        for (const QString& option : {QStringLiteral("gallery-perf-session"),
+                QStringLiteral("gallery-perf-playback-ms"), QStringLiteral("gallery-perf-flags"),
+                QStringLiteral("gallery-perf-thumbnails")}) {
+            const QString value = activity.callMethod<QString>("galleryPerfArgument", option);
+            if (!value.isEmpty()) arguments << "--" + option << value;
+        }
+    }
+#endif
+    parser.process(arguments);
+#ifdef Q_OS_ANDROID
+    // Dispatching these short high-DPI raster fills to Qt's worker pool
+    // costs more than drawing them on the GUI thread on Android.
+    qputenv("QT_NO_GUI_THREADPOOL", "1");
+#endif
+    const struct { const char* flag; const char* environment; const char* value; } perfFlags[] = {
+        {"profile", "MOTIONCAM_GALLERY_PERF_PROFILE", "1"},
+        {"noguipool", "QT_NO_GUI_THREADPOOL", "1"},
+        {"guipool", "QT_NO_GUI_THREADPOOL", nullptr},
+        {"zerocopy", "MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY", "1"},
+        {"failimagehandoff", "MOTIONCAM_GALLERY_TEST_IMAGE_HANDOFF_FAILURE", "1"},
+        {"failimageimport", "MOTIONCAM_GALLERY_TEST_IMAGE_IMPORT_FAILURE", "1"},
+        {"unfuseddecode", "MOTIONCAM_ANDROID_FUSED_DECODE", "0"},
+        {"hashpreview", "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW", "1"},
+        {"jpegprofile", "MOTIONCAM_JPEG_DECODE_PROFILE", "1"},
+        {"nohist", "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM", "1"},
+        {"hidethumbnails", "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS", "1"},
+        {"openthumbnails", "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK", "500"},
+        {"autofade", "MOTIONCAM_GALLERY_PERF_AUTO_FADE", "1"},
+        {"presenttrace", "MOTIONCAM_GALLERY_PERF_PRESENT_TRACE", "1"},
+        {"gestures", "MOTIONCAM_GALLERY_PERF_GESTURES", "1"},
+        {"skipbackfill", "MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL", "1"},
+        {"preserveproxy", "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY", "1"},
+        {"capped", "MOTIONCAM_GALLERY_PERF_CAPPED", "1"},
+        {"audio", "MOTIONCAM_GALLERY_PERF_AUDIO", "1"},
+        {"clipping", "MOTIONCAM_GALLERY_PERF_CLIPPING", "1"},
+        {"expandhistogram", "MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM", "1"},
+        {"histpaint", "MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT", "1"},
+        {"keepalive", "MOTIONCAM_GALLERY_PERF_KEEP_ALIVE", "1"},
+    };
+    for (const QString& flag : parser.value(galleryPerfFlagsOption).split(',', Qt::SkipEmptyParts))
+        for (const auto& option : perfFlags)
+            if (flag.trimmed().compare(QLatin1String(option.flag), Qt::CaseInsensitive) == 0) {
+                if (option.value) qputenv(option.environment, option.value);
+                else qunsetenv(option.environment);
+            }
 
     if (parser.isSet(directLogJpegBenchmarkOption)) {
         try {
@@ -1031,6 +1124,38 @@ int main(int argc, char *argv[])
     const bool galleryPerfThumbnails =
         parser.value(galleryPerfThumbnailsOption).compare("off", Qt::CaseInsensitive) != 0;
     if (!galleryPerfSession.isEmpty()) {
+#ifdef __ANDROID__
+        // Android logcat can be unavailable or aggressively truncated during
+        // long GPU profiling sessions. Keep the same structured events in a
+        // bounded app-private file so gallery-perf results remain retrievable
+        // with `run-as com.motioncam.fuse` after a crash or device disconnect.
+        const QString diagnosticsDir = QDir(QStandardPaths::writableLocation(
+            QStandardPaths::AppLocalDataLocation)).filePath("diagnostics");
+        if (QDir().mkpath(diagnosticsDir)) {
+            const QString logPath = QDir(diagnosticsDir).filePath("gallery-perf.log");
+            try {
+                auto distribution = std::make_shared<spdlog::sinks::dist_sink_mt>();
+                distribution->add_sink(
+                    std::make_shared<spdlog::sinks::android_sink_mt>("MotionCamFuse"));
+                distribution->add_sink(
+                    std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                        logPath.toStdString(), 4u * 1024u * 1024u, 2u, true));
+                auto logger = std::make_shared<spdlog::logger>(
+                    "MotionCamFuseGalleryPerf", distribution);
+                logger->set_level(spdlog::level::info);
+                logger->flush_on(spdlog::level::warn);
+                spdlog::set_default_logger(logger);
+                spdlog::info("GALLERY_PERF event=diagnostic_log_file path={}",
+                             logPath.toStdString());
+            } catch (const spdlog::spdlog_ex& error) {
+                spdlog::error("Could not create gallery-perf diagnostic file: {}",
+                              error.what());
+            }
+        } else {
+            spdlog::error("Could not create gallery-perf diagnostics directory: {}",
+                          diagnosticsDir.toStdString());
+        }
+#endif
         qputenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS", "1");
         qputenv("MOTIONCAM_GALLERY_DIAGNOSTICS", "1");
         const auto milliseconds = [](auto duration) {
@@ -1088,7 +1213,11 @@ int main(int argc, char *argv[])
                  QString filePath = message.mid(11); // Remove "MOUNT_FILE:" prefix
 
                  window.mountFile(filePath);
+#ifdef __ANDROID__
+                 window.showFullScreen();
+#else
                  window.show();
+#endif
                  window.raise();
                  window.activateWindow();
              }
@@ -1101,7 +1230,11 @@ int main(int argc, char *argv[])
         });
     }
 
+#ifdef __ANDROID__
+    window.showFullScreen();
+#else
     window.show();
+#endif
 #ifdef __APPLE__
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window,
         [&window](Qt::ApplicationState state) {

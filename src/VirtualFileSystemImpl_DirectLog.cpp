@@ -29,9 +29,6 @@
 #include <fstream>
 #include <mutex>
 #include <QByteArray>
-extern "C" {
-#include <libswresample/swresample.h>
-}
 
 using motioncam::Timestamp;
 
@@ -68,11 +65,11 @@ int directLogLogBits(motioncam::LogTransformMode mode, int baseBits = 12) {
         static_cast<uint32_t>(baseBits), mode));
 }
 
-bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings) {
+bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings, bool hasGainMaps = true) {
     if (!(settings.options & motioncam::RENDER_OPT_LOG_TRANSFORM) ||
         settings.logTransform == motioncam::LogTransformMode::Disabled)
         return false;
-    if (settings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
+    if (hasGainMaps && (settings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION))
         return true;
     const auto levels = directLogDataLevels(settings);
     const auto white = static_cast<uint16_t>(std::clamp(
@@ -114,89 +111,7 @@ double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
         std::chrono::steady_clock::now() - start).count();
 }
 
-std::shared_ptr<std::vector<uint8_t>> decodeAudioWav(
-        const std::string& path, double fps) {
-    AVFormatContext* rawFormat = nullptr;
-    if (avformat_open_input(&rawFormat, path.c_str(), nullptr, nullptr) < 0)
-        throw std::runtime_error("Could not open DirectLog audio source");
-    std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)> format(
-        rawFormat, [](AVFormatContext* value) { avformat_close_input(&value); });
-    if (avformat_find_stream_info(format.get(), nullptr) < 0)
-        throw std::runtime_error("Could not inspect DirectLog audio source");
-    const int streamIndex = av_find_best_stream(
-        format.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
-    if (streamIndex < 0) return {};
-    const auto* parameters = format->streams[streamIndex]->codecpar;
-    const AVCodec* codec = avcodec_find_decoder(parameters->codec_id);
-    if (!codec) throw std::runtime_error("Unsupported DirectLog audio codec");
-    std::unique_ptr<AVCodecContext, void(*)(AVCodecContext*)> decoder(
-        avcodec_alloc_context3(codec),
-        [](AVCodecContext* value) { avcodec_free_context(&value); });
-    if (!decoder || avcodec_parameters_to_context(decoder.get(), parameters) < 0 ||
-        avcodec_open2(decoder.get(), codec, nullptr) < 0)
-        throw std::runtime_error("Could not initialize DirectLog audio decoder");
-    if (decoder->sample_rate <= 0 || decoder->ch_layout.nb_channels <= 0)
-        throw std::runtime_error("Invalid DirectLog audio format");
-    SwrContext* rawResampler = nullptr;
-    if (swr_alloc_set_opts2(&rawResampler, &decoder->ch_layout,
-            AV_SAMPLE_FMT_S16, decoder->sample_rate, &decoder->ch_layout,
-            decoder->sample_fmt, decoder->sample_rate, 0, nullptr) < 0 ||
-        !rawResampler)
-        throw std::runtime_error("Could not configure DirectLog audio conversion");
-    std::unique_ptr<SwrContext, void(*)(SwrContext*)> resampler(
-        rawResampler, [](SwrContext* value) { swr_free(&value); });
-    if (swr_init(resampler.get()) < 0)
-        throw std::runtime_error("Could not initialize DirectLog audio conversion");
-    std::unique_ptr<AVPacket, void(*)(AVPacket*)> packet(
-        av_packet_alloc(), [](AVPacket* value) { av_packet_free(&value); });
-    std::unique_ptr<AVFrame, void(*)(AVFrame*)> frame(
-        av_frame_alloc(), [](AVFrame* value) { av_frame_free(&value); });
-    if (!packet || !frame) throw std::bad_alloc();
-    const auto fpsRational = av_d2q(fps > 0.0 ? fps : 24.0, 100000);
-    auto wav = std::make_shared<std::vector<uint8_t>>();
-    {
-        motioncam::AudioWriter writer(*wav, decoder->ch_layout.nb_channels,
-            decoder->sample_rate, fpsRational.num, fpsRational.den, 16);
-        const auto drain = [&] {
-            while (true) {
-                const int received = avcodec_receive_frame(decoder.get(), frame.get());
-                if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
-                if (received < 0) throw std::runtime_error("Could not decode DirectLog audio");
-                const int capacity = swr_get_out_samples(resampler.get(), frame->nb_samples);
-                std::vector<int16_t> samples(static_cast<size_t>(capacity) *
-                    decoder->ch_layout.nb_channels);
-                uint8_t* output[] = {reinterpret_cast<uint8_t*>(samples.data())};
-                const int count = swr_convert(resampler.get(), output, capacity,
-                    const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
-                if (count < 0) throw std::runtime_error("Could not convert DirectLog audio");
-                if (count > 0) writer.write(samples, count);
-                av_frame_unref(frame.get());
-            }
-        };
-        while (av_read_frame(format.get(), packet.get()) >= 0) {
-            if (packet->stream_index == streamIndex) {
-                const int sent = avcodec_send_packet(decoder.get(), packet.get());
-                if (sent < 0) throw std::runtime_error("Could not submit DirectLog audio packet");
-                drain();
-            }
-            av_packet_unref(packet.get());
-        }
-        if (avcodec_send_packet(decoder.get(), nullptr) < 0)
-            throw std::runtime_error("Could not finish DirectLog audio decode");
-        drain();
-        while (true) {
-            const int capacity = swr_get_out_samples(resampler.get(), 0);
-            if (capacity <= 0) break;
-            std::vector<int16_t> samples(static_cast<size_t>(capacity) *
-                decoder->ch_layout.nb_channels);
-            uint8_t* output[] = {reinterpret_cast<uint8_t*>(samples.data())};
-            const int count = swr_convert(resampler.get(), output, capacity, nullptr, 0);
-            if (count <= 0) break;
-            writer.write(samples, count);
-        }
-    }
-    return wav;
-}
+
 
 } // namespace
 
@@ -288,7 +203,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         analyzeSidecarExposure();
         if (!mConfig.streamingPreview) {
             try {
-                mAudioWav = decodeAudioWav(mSrcPath, mFps);
+                mAudioWav = AudioWriter::decodeWav(mSrcPath, mFps);
             } catch (const std::exception& error) {
                 spdlog::warn("Could not project DirectLog audio for {}: {}",
                              mSrcPath, error.what());
@@ -426,7 +341,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
         const uint32_t projectedChannels =
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? 1u : 3u;
         const auto levels = directLogDataLevels(mConfig);
-        const bool appliesLog = directLogAppliesLogTransform(mConfig) &&
+        const bool appliesLog = directLogAppliesLogTransform(mConfig, hasSourceGainMaps()) &&
             !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
         const double sizingWhite = appliesLog
             ? static_cast<double>(directLogQuantizationWhite(mConfig))
@@ -435,7 +350,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
             levels.black[0], levels.black[1], levels.black[2], levels.black[3]};
         const auto outputLevels = utils::planDngOutputLevels(
             sizingWhite, sizingBlack,
-            mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
+            (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) && hasSourceGainMaps(),
             mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
             mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP,
             appliesLog ? mConfig.logTransform : LogTransformMode::Disabled);
@@ -1116,6 +1031,13 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
               result.dngStripBuffer, directLogStripOffset,
               directLogCfaPhase(mConfig, mCalibration),
               result.width, result.height, keepGpuTexture)
+        : bayerOutput && textureOnly && keepGpuTexture
+        ? [&] {
+            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            return mDecoder->extractFrameTextureDeferred(result.frameNumber,
+                result.width > 0 ? result.width : mWidth,
+                result.height > 0 ? result.height : mHeight, smoothChroma, &phase);
+          }()
         : bayerOutput
         ? keepGpuTexture
             ? mDecoder->extractFrameBayerDeferred(result.frameNumber, result.rgb,
@@ -1144,6 +1066,9 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     if (!extractedFrame && packedGpuStrip)
         return processFrame(entry, previewScale, prepopulateDng, outputBayer,
                             deferGpuDownload, textureOnly, false);
+    if (!extractedFrame && textureOnly)
+        return processFrame(entry, previewScale, prepopulateDng, outputBayer,
+                            false, false, false);
     if (!extractedFrame)
         throw std::runtime_error("Could not decode DirectLog frame");
     if (keepGpuTexture) {
@@ -1334,7 +1259,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
 
         const auto renderPlan = vfs::planDngRender(
             entry, timestamp, frames.front().timestamp, mConfig, mFps,
-            jpegCompression);
+            savedOutput || jpegCompression);
         const int outputFrameNumber = renderPlan.outputFrameNumber;
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} metadata_ms={:.3f}; DNG construction begin",
@@ -1470,15 +1395,15 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
     const bool fastBakedGalleryCandidate =
         !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
         !currentSettings.thumbnailPreview &&
-        ((currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
-         directLogAppliesLogTransform(currentSettings)) &&
+        (((currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) && hasSourceGainMaps()) ||
+         directLogAppliesLogTransform(currentSettings, hasSourceGainMaps())) &&
         !(currentSettings.options & (RENDER_OPT_CROPPING |
             RENDER_OPT_REMOSAIC_TO_BAYER |
             RENDER_OPT_BAKE_ISO)) &&
         (!mCalibration || (!mCalibration->hasLeftTopCropStride &&
             (!mCalibration->hasBadPixels ||
              !processesBadPixels(currentSettings.badPixelTreatment)))) &&
-        (!directLogAppliesLogTransform(currentSettings) ||
+        (!directLogAppliesLogTransform(currentSettings, hasSourceGainMaps()) ||
          directLogLogBits(currentSettings.logTransform,
              directLogBaseLogBits(currentSettings)) <= 16);
     const bool fastBakedGallery = fastBakedGalleryCandidate &&
@@ -1503,7 +1428,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         return false;
     };
     if (!fastBakedGallery && !currentSettings.thumbnailPreview &&
-        (currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+        (currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) && hasSourceGainMaps() &&
         !(currentSettings.options & RENDER_OPT_REMOSAIC_TO_BAYER)) {
         if (bakedFallback()) return true;
     }
@@ -1521,21 +1446,27 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         const bool gpuBayer = remosaic &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
-        const bool textureCandidate = !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        const bool residentBayerCandidate = gpuBayer && configuredScale == 1 &&
+            !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+            !(mConfig.options & (RENDER_OPT_HIGHER_CFA_HQ | RENDER_OPT_BAKE_ISO)) &&
+            !(mCalibration && mCalibration->hasBadPixels &&
+                processesBadPixels(mConfig.badPixelTreatment)) &&
+            mDecoder->canExtractFrameTexture();
+        const bool textureCandidate = residentBayerCandidate || (!std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
             !remosaic &&
             !(mConfig.options & (RENDER_OPT_CROPPING |
                                  RENDER_OPT_BAKE_ISO)) &&
             (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
-                fastBakedGallery) &&
-            (!directLogAppliesLogTransform(mConfig) || fastBakedGallery) &&
+                !hasSourceGainMaps() || fastBakedGallery) &&
+            (!directLogAppliesLogTransform(mConfig, hasSourceGainMaps()) || fastBakedGallery) &&
             !(mCalibration && (mCalibration->hasLeftTopCropStride ||
                 (mCalibration->hasBadPixels &&
                  processesBadPixels(mConfig.badPixelTreatment)))) &&
-            (configuredScale == 1 || directProxy);
+            (configuredScale == 1 || directProxy));
         std::unique_lock gpuFrameLock(mGpuFrameMutex);
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
                                       false, gpuBayer, textureCandidate,
-                                      fastBakedGallery);
+                                      fastBakedGallery || residentBayerCandidate);
         const bool textureProxyReady = configuredScale == 1 ||
             (directProxy && processed.width == mWidth / configuredScale &&
              processed.height == mHeight / configuredScale);
@@ -1730,7 +1661,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 galleryGain->spacingH = galleryGain->spacingV = 1.0f;
                 galleryGain->values = {1.0f, 1.0f, 1.0f};
             }
-            if (directLogAppliesLogTransform(mConfig) && !debugGainMap) {
+            if (directLogAppliesLogTransform(mConfig, hasSourceGainMaps()) && !debugGainMap) {
                 const auto bits = directLogLogBits(mConfig.logTransform,
                     directLogBaseLogBits(mConfig));
                 galleryGain->encodedWhite = (1u << bits) - 1u;
@@ -1744,6 +1675,25 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 image.metadata.whiteLevel.fill(65535.0f);
             }
         }
+        if (residentBayerCandidate && processed.bayer && processed.gpuPending && textureProxyReady) {
+            auto resident = std::make_shared<DNGGpuImage>();
+            if (!mDecoder->pendingGpuTexture(resident->gpu, resident->texture)) return false;
+            resident->deviceLease = mDecoder->pendingGpuLease();
+            resident->width = processed.width;
+            resident->height = processed.height;
+            resident->channels = 1;
+            resident->lease = std::make_shared<std::unique_lock<std::mutex>>(std::move(gpuFrameLock));
+            resident->download = [this, frameNumber = processed.frameNumber,
+                    width = processed.width, height = processed.height,
+                    phase = image.layout.cfaPhase](uint16_t* pixels, size_t samples) {
+                return mDecoder->downloadPendingGpu(pixels, samples) ||
+                    mDecoder->recoverFrameInSoftware(frameNumber, pixels, samples,
+                        width, height, false, &phase);
+            };
+            image.gpuImage = std::move(resident);
+            return DNGDecoder::decodePreview(std::move(image), previewSettings,
+                                            preview, true, retainSourceSamples);
+        }
         if (processed.gpuPending && textureProxyReady) {
             const void* gpu = nullptr;
             const void* texture = nullptr;
@@ -1754,8 +1704,12 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             preview.displayBitDepth = image.metadata.inputBitDepth;
             preview.metadata = image.metadata;
             preview.timestamp = image.timestamp;
-            preview.galleryGpuDevice = gpu;
-            preview.galleryGpuTexture = texture;
+            preview.gallerySource.width = processed.width;
+            preview.gallerySource.height = processed.height;
+            preview.gallerySource.channels = 3;
+            preview.gallerySource.deviceLease = mDecoder->pendingGpuLease();
+            preview.gallerySource.gpu = gpu;
+            preview.gallerySource.texture = texture;
             preview.galleryGpuGain = galleryGain;
             for (size_t channel = 0; channel < 3; ++channel) {
                 preview.galleryGpuBlack[channel] = galleryGain
@@ -1763,7 +1717,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 preview.galleryGpuWhite[channel] = galleryGain
                     ? levels.white : image.metadata.whiteLevel[channel];
             }
-            preview.galleryGpuDownload = [this, frameNumber = processed.frameNumber,
+            preview.gallerySource.download = [this, frameNumber = processed.frameNumber,
                                           width = processed.width, height = processed.height]
                 (uint16_t* dst, size_t count) {
                     if (mDecoder->downloadPendingGpu(dst, count))
@@ -1774,9 +1728,23 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             if(retainSourceSamples||preview.clippingRequested){
                 const size_t pixels=static_cast<size_t>(processed.width)*processed.height;
                 auto source=std::make_shared<std::vector<uint16_t>>(pixels*3u);
-                if(!preview.galleryGpuDownload(source->data(),source->size()))
-                    throw std::runtime_error("DirectLog gallery source readback failed");
-                preview.galleryGpuDownload=[source](uint16_t* dst,size_t count){
+                if(!mDecoder->downloadPendingGpu(source->data(),source->size())){
+                    // Software recovery replaces the decoder state. Rebuild
+                    // the preview rather than mix its previous GPU texture
+                    // with recovered CPU samples.
+                    if(std::getenv("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")||
+                       !mDecoder->recoverFrameInSoftware(processed.frameNumber,source->data(),
+                           source->size(),processed.width,processed.height,true,nullptr))
+                        throw std::runtime_error("DirectLog gallery source readback failed");
+                    PreviewFrame retry;
+                    retry.sourceFrameIndex=preview.sourceFrameIndex;
+                    retry.clippingRequested=preview.clippingRequested;
+                    gpuFrameLock.unlock();
+                    renderLock.unlock();
+                    const bool ok=materializePreviewFrame(entry,retry,retainSourceSamples);
+                    preview=std::move(retry);return ok;
+                }
+                preview.gallerySource.download=[source](uint16_t* dst,size_t count){
                     if(count!=source->size())return false;
                     std::memcpy(dst,source->data(),count*sizeof(uint16_t));
                     return true;
@@ -1805,7 +1773,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                     }
                 }
             }
-            preview.galleryGpuLease =
+            preview.gallerySource.lease =
                 std::make_shared<std::unique_lock<std::mutex>>(std::move(gpuFrameLock));
             if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=directlog_texture_preview source={} width={} height={}",
@@ -1904,11 +1872,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
         mFrameRateInfo, mFps, mTotalFrames, mDroppedFrames,
         mDuplicatedFrames, outputWidth, outputHeight);
     const auto firstFrame = frameMetadata(0);
-    info.hasGainMaps = vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "gainMaps") ||
-        vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "deferredGainMaps") ||
-        !mManualVignetteSidecars.candidates.empty() ||
-        (mManualVignetteSidecars.useDcpGainmap &&
-         mManualVignetteSidecars.dcpSpatialGainMap.has_value());
+    info.hasGainMaps = hasSourceGainMaps();
     info.hasColorMatrices = firstFrame.colorMatrix1.has_value() ||
         firstFrame.colorMatrix2.has_value();
     info.hasForwardMatrices = firstFrame.forwardMatrix1.has_value() ||
@@ -1957,7 +1921,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
         info.outputPixelFormat = "2x2";
     
     // Determine levels info
-    const bool applyLogCurve = directLogAppliesLogTransform(mConfig);
+    const bool applyLogCurve = directLogAppliesLogTransform(mConfig, hasSourceGainMaps());
     const std::array<float, 4> sourceBlack{0, 0, 0, 0};
     const auto displayLevels = resolveDataLevels(
         mConfig.levels, 65535.0f, sourceBlack, 65535.0f, sourceBlack, 3);
@@ -1978,7 +1942,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
             displayLevels.white, displayLevels.black,
             displayLevels.white, displayLevels.black,
             mConfig.levels, "",
-            mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
+            (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) && hasSourceGainMaps(),
             mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
             static_cast<uint32_t>(inputBits));
     }
@@ -2000,6 +1964,14 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.timingUsesCfrMapping = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
 
     return info;
+}
+
+bool VirtualFileSystemImpl_DirectLog::hasSourceGainMaps() const {
+    return vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "gainMaps") ||
+        vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "deferredGainMaps") ||
+        !mManualVignetteSidecars.candidates.empty() ||
+        (mManualVignetteSidecars.useDcpGainmap &&
+         mManualVignetteSidecars.dcpSpatialGainMap.has_value());
 }
 
 bool VirtualFileSystemImpl_DirectLog::isHLGVideo() const {

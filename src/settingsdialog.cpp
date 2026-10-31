@@ -17,6 +17,14 @@
 #include <QStorageInfo>
 #include <QCheckBox>
 #include <QLocale>
+#ifdef __ANDROID__
+#include "android/ExportDirectory.h"
+#include <QSettings>
+#include <QTimer>
+#include <QScrollArea>
+#include <QScrollBar>
+#include "android/TouchScrolling.h"
+#endif
 
 SettingsDialog::SettingsDialog(QWidget *parent)
     : QDialog(parent)
@@ -101,6 +109,55 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 #endif
 
     mainLayout->addWidget(cacheGroup);
+#ifdef __ANDROID__
+    cacheGroup->hide();
+    auto* finalizeDestinationGroup = new QGroupBox(tr("Finalize destination"), this);
+    auto* finalizeDestinationLayout = new QVBoxLayout(finalizeDestinationGroup);
+    mAndroidFinalizeDestinationCombo = new QComboBox(finalizeDestinationGroup);
+    mAndroidFinalizeDestinationCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    mAndroidFinalizeDestinationCombo->setMinimumContentsLength(16);
+    mAndroidFinalizeDestinationCombo->addItem(tr("Documents/mcFuse"),
+                                               QStringLiteral("documents"));
+    mAndroidFinalizeDestinationCombo->addItem(tr("Source directory"),
+                                               QStringLiteral("source"));
+    mAndroidFinalizeDestinationCombo->addItem(tr("Custom directory"),
+                                               QStringLiteral("custom"));
+    finalizeDestinationLayout->addWidget(mAndroidFinalizeDestinationCombo);
+    const auto history=QSettings("com.motioncam","MotionCam FS").value(
+        "android/finalizeDirectoryHistory").toList();
+    for(const auto& value:history){
+        const auto entry=value.toMap();
+        const QString uri=entry.value("uri").toString();
+        if(uri.startsWith("content:")&&mAndroidFinalizeDestinationCombo->findData(uri)<0)
+            mAndroidFinalizeDestinationCombo->addItem(entry.value("path").toString(),uri);
+    }
+    auto* destinationHelp = new QLabel(helpSpan(
+        tr("Finalized DNG frames are written directly to this folder. Source directory uses the selected clip's source folder.")),
+        finalizeDestinationGroup);
+    destinationHelp->setWordWrap(true);
+    finalizeDestinationLayout->addWidget(destinationHelp);
+    mainLayout->addWidget(finalizeDestinationGroup);
+    connect(mAndroidFinalizeDestinationCombo,QOverload<int>::of(&QComboBox::activated),
+        this,[this](int index){
+            const QString destination=mAndroidFinalizeDestinationCombo->itemData(index).toString();
+            if(destination!="custom"){
+                mAndroidFinalizeDestination=destination;return;
+            }
+            mAndroidFinalizeDestinationCombo->setCurrentIndex(
+                mAndroidFinalizeDestinationCombo->findData(mAndroidFinalizeDestination));
+            // Let the combo popup close before opening the system picker.
+            QTimer::singleShot(0,this,[this]{
+                const QUrl initial=mAndroidFinalizeDestination.startsWith("content:")
+                    ?QUrl(mAndroidFinalizeDestination):QUrl();
+                const QUrl folder=QFileDialog::getExistingDirectoryUrl(this,tr("Choose finalize directory"),
+                    initial,QFileDialog::ShowDirsOnly,{QStringLiteral("content")});
+                if(folder.isEmpty())return;
+                mAndroidFinalizeDestination=folder.toString(QUrl::FullyEncoded);
+                mAndroidFinalizeDestinationCombo->setCurrentIndex(
+                    rememberAndroidFinalizeDirectory(mAndroidFinalizeDestination));
+            });
+        });
+#endif
 
     // Cache management group
     auto* cacheManagementGroup = new QGroupBox("Cache Management", this);
@@ -194,7 +251,34 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     // Clip settings group
     auto* clipSettingsGroup = new QGroupBox("Clip Settings", this);
+#ifdef __ANDROID__
+    auto* clipGroupLayout = new QVBoxLayout(clipSettingsGroup);
+    clipGroupLayout->setContentsMargins(0, 0, 0, 0);
+    auto* clipScrollArea = new QScrollArea(clipSettingsGroup);
+    clipScrollArea->setWidgetResizable(true);
+    clipScrollArea->setFrameShape(QFrame::NoFrame);
+    clipScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    clipScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* clipContent = new QWidget(clipScrollArea);
+    auto* clipColumns = new QHBoxLayout(clipContent);
+    clipColumns->setContentsMargins(8, 8, 8, 8);
+    clipColumns->setSpacing(12);
+    auto* firstColumn = new QWidget(clipContent);
+    auto* secondColumn = new QWidget(clipContent);
+    auto* clipSettingsLayout = new QVBoxLayout(firstColumn);
+    auto* secondClipSettingsLayout = new QVBoxLayout(secondColumn);
+    for (auto* columnLayout : {clipSettingsLayout, secondClipSettingsLayout}) {
+        columnLayout->setContentsMargins(0, 0, 0, 0);
+        columnLayout->setSpacing(8);
+    }
+    clipColumns->addWidget(firstColumn, 1);
+    clipColumns->addWidget(secondColumn, 1);
+    clipScrollArea->setWidget(clipContent);
+    clipGroupLayout->addWidget(clipScrollArea);
+    new motioncam::TouchScrolling(clipScrollArea);
+#else
     auto* clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
+#endif
     mFuseMountingCheckBox = new QCheckBox("Mount clips as virtual DNG folders", this);
     mFuseMountingCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mFuseMountingCheckBox);
@@ -225,6 +309,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
     mGalleryFpsIndicatorCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
+#ifdef __ANDROID__
+    clipSettingsLayout->addStretch();
+    clipSettingsLayout = secondClipSettingsLayout;
+#endif
     mUnmountOnFinalizeCheckBox = new QCheckBox("Unmount on finalize", this);
     mUnmountOnFinalizeCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mUnmountOnFinalizeCheckBox);
@@ -256,7 +344,12 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         this);
     heroSidecarHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(heroSidecarHelpLabel);
+#ifdef __ANDROID__
+    clipSettingsLayout->addStretch();
+    mainLayout->addWidget(clipSettingsGroup, 1);
+#else
     mainLayout->addWidget(clipSettingsGroup);
+#endif
 
     // Matrix override group (disabled for Fuse-AllV2)
     auto* matrixGroup = new QGroupBox("Color Matrix Override", this);
@@ -283,9 +376,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mainLayout->addWidget(matrixGroup);
 
     // Add spacer
+#ifndef __ANDROID__
     mainLayout->addStretch();
+#endif
 
-    auto* resetLayout = new QHBoxLayout();
 #ifdef __APPLE__
     mResetPathsButton = new QPushButton("Reset", this);
     mResetPathsButton->setToolTip("Clear the mount folder.");
@@ -293,9 +387,14 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mResetPathsButton = new QPushButton("Reset Paths", this);
     mResetPathsButton->setToolTip("Clear the saved output folder.");
 #endif
+#ifdef __ANDROID__
+    mResetPathsButton->hide();
+#else
+    auto* resetLayout = new QHBoxLayout();
     resetLayout->addWidget(mResetPathsButton);
     resetLayout->addStretch();
     mainLayout->addLayout(resetLayout);
+#endif
 
     // Button box
     mButtonBox = new QDialogButtonBox(
@@ -672,3 +771,38 @@ void SettingsDialog::onClearDirectLogCache()
     motioncam::DNGDecoder::clearAnalysisCache();
     updateDirectLogCacheUsage();
 }
+
+#ifdef __ANDROID__
+void SettingsDialog::setAndroidFinalizeDestination(const QString& mode,
+                                                   const QString& legacyCustomDirectory) {
+    QString destination=mode;
+    if(!legacyCustomDirectory.isEmpty()){
+        rememberAndroidFinalizeDirectory(legacyCustomDirectory);
+        if(destination=="custom")destination=legacyCustomDirectory;
+    }
+    if(destination.startsWith("content:"))rememberAndroidFinalizeDirectory(destination);
+    int index=mAndroidFinalizeDestinationCombo->findData(destination);
+    if(index<0||destination=="custom")index=0;
+    mAndroidFinalizeDestinationCombo->setCurrentIndex(index);
+    mAndroidFinalizeDestination=mAndroidFinalizeDestinationCombo->currentData().toString();
+}
+
+QString SettingsDialog::getAndroidFinalizeDestination() const {
+    return mAndroidFinalizeDestination;
+}
+
+int SettingsDialog::rememberAndroidFinalizeDirectory(const QString& uri) {
+    int index=mAndroidFinalizeDestinationCombo->findData(uri);
+    if(index>=0)return index;
+    QString path=motioncam::finalizeDirectoryPath(uri);
+    if(path.isEmpty())path=uri;
+    mAndroidFinalizeDestinationCombo->insertItem(3,path,uri);
+    QVariantList history;
+    for(int row=3;row<mAndroidFinalizeDestinationCombo->count();++row)
+        history.append(QVariantMap{{"uri",mAndroidFinalizeDestinationCombo->itemData(row)},
+            {"path",mAndroidFinalizeDestinationCombo->itemText(row)}});
+    QSettings("com.motioncam","MotionCam FS").setValue("android/finalizeDirectoryHistory",history);
+    return 3;
+}
+
+#endif

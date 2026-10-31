@@ -14,6 +14,7 @@
 #include "CpuWorkerBudget.h"
 #include "VirtualFileSystemImpl.h"
 #include "ArchiveImport.h"
+#include "AudioWriter.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -25,9 +26,11 @@
 #endif
 
 #include <QDragEnterEvent>
+#include <QDebug>
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QCloseEvent>
 
 using namespace motioncam;
@@ -41,11 +44,13 @@ using namespace motioncam;
 #include <QUrl>
 #include <QPointer>
 #include <QMessageBox>
+#include <QMenu>
 #include <QFileDialog>
 #include <QFileSystemModel>
 #include <QDialogButtonBox>
 #include <QTreeView>
 #include <QLineEdit>
+#include <QInputDialog>
 #include <QSettings>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -58,7 +63,21 @@ using namespace motioncam;
 #include <QFrame>
 #include <QProgressDialog>
 #include <QProgressBar>
+#ifdef __ANDROID__
+#include <QJniObject>
+#endif
 #include <QScrollBar>
+#include <QScroller>
+#ifdef __ANDROID__
+#include "android/TouchScrolling.h"
+#include "android/PageCrossfade.h"
+#endif
+#include <QScrollArea>
+#include <QListWidget>
+#include <QSplitter>
+#include <QToolButton>
+#include <QStyleOptionButton>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QThread>
@@ -101,13 +120,150 @@ extern "C" {
 #elif __APPLE__
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include <sys/mount.h>
-#elif __linux__
+#elif defined(__ANDROID__)
+#include "android/ProcessingFileSystem.h"
+#include "android/ExportDirectory.h"
+#include <fcntl.h>
+#include <unistd.h>
+#elif defined(__linux__)
 #include "linux/FuseFileSystemImpl_Linux.h"
 #include <cerrno>
 #include <sys/stat.h>
 #endif
 
 namespace {
+#ifdef __ANDROID__
+    class AndroidPopup final : public QWidget {
+    public:
+        AndroidPopup(QWidget* parent,const QString& title):QWidget(parent) {
+            setObjectName(QStringLiteral("androidPopupOverlay"));
+            setGeometry(parent->rect());parent->installEventFilter(this);
+            setFocusPolicy(Qt::StrongFocus);
+            setStyleSheet(
+                "QWidget#androidPopupOverlay{background:rgba(0,0,0,180);}"
+                "QFrame#androidPopupPanel{background:#19232d;border:1px solid #455364;border-radius:8px;}"
+                "QFrame#androidPopupPanel QLabel{background:transparent;border:0;padding:0;color:#dfe1e2;}"
+                "QFrame#androidPopupPanel QPushButton{background:#263445;border:1px solid #455364;"
+                "border-radius:4px;padding:8px 12px;min-height:28px;min-width:0;color:#dfe1e2;}"
+                "QFrame#androidPopupPanel QPushButton:pressed{background:#346792;}");
+            auto* layout=new QVBoxLayout(this);layout->setContentsMargins(16,16,16,16);
+            layout->addStretch();
+            panel=new QFrame(this);panel->setObjectName(QStringLiteral("androidPopupPanel"));
+            content=new QVBoxLayout(panel);content->setContentsMargins(20,20,20,20);content->setSpacing(14);
+            auto* heading=new QLabel(title,panel);heading->setWordWrap(true);
+            QFont font=heading->font();font.setBold(true);heading->setFont(font);content->addWidget(heading);
+            layout->addWidget(panel,0,Qt::AlignHCenter);layout->addStretch();resizePanel();
+        }
+        void open(){resizePanel();show();raise();setFocus();}
+        QFrame* panel;
+        QVBoxLayout* content;
+    protected:
+        bool eventFilter(QObject* watched,QEvent* event) override {
+            if(watched==parentWidget()&&event->type()==QEvent::Resize){
+                if(property("dismissOnResize").toBool()){hide();deleteLater();}
+                else {setGeometry(parentWidget()->rect());resizePanel();}
+            }
+            return QWidget::eventFilter(watched,event);
+        }
+        void mouseReleaseEvent(QMouseEvent* event) override {
+            if(!panel->geometry().contains(event->pos()))deleteLater();
+        }
+        void keyPressEvent(QKeyEvent* event) override {
+            if(event->key()==Qt::Key_Back||event->key()==Qt::Key_Escape){deleteLater();event->accept();}
+            else QWidget::keyPressEvent(event);
+        }
+    private:
+        void resizePanel(){
+            panel->setFixedWidth(std::max(1,std::min(520,width()-32)));
+        }
+    };
+
+    void showAndroidActionMenu(QWidget* parent,QMenu* menu,int first=0) {
+        auto* popup=new AndroidPopup(parent,menu->title().remove('&'));
+        popup->setProperty("dismissOnResize",true);
+        popup->content->setSpacing(6);
+        QVector<QPointer<QAction>> actions;
+        for(auto* action:menu->actions())
+            if(!action->isSeparator()&&action->isVisible())actions.push_back(action);
+        const int pageSize=std::max(1,(parent->height()-180)/36);
+        const int last=std::min(first+pageSize,int(actions.size()));
+        const auto button=[&](const QString& text){
+            auto* result=new QPushButton(text,popup->panel);
+            result->setFixedHeight(30);
+            result->setStyleSheet("QPushButton{padding:2px 10px;min-height:0;text-align:left;}");
+            popup->content->addWidget(result);return result;
+        };
+        for(int row=first;row<last;++row){
+            const auto action=actions[row];
+            auto* choice=button(action->text().remove('&'));
+            choice->setEnabled(action->isEnabled());
+            if(action->menu())choice->setIcon(QIcon(QStringLiteral(":/qss_icons/dark/rc/arrow_right.png")));
+            QObject::connect(choice,&QPushButton::clicked,popup,[popup,parent,action]{
+                popup->hide();popup->deleteLater();
+                if(!action)return;
+                if(action->menu())showAndroidActionMenu(parent,action->menu());
+                else QTimer::singleShot(0,action,[action]{if(action)action->trigger();});
+            });
+        }
+        if(first>0||last<actions.size()){
+            auto* pages=new QHBoxLayout();
+            for(bool next:{false,true}){
+                auto* control=new QPushButton(next?QObject::tr("Next page"):QObject::tr("Previous page"),popup->panel);
+                control->setFixedHeight(30);
+                control->setStyleSheet("QPushButton{padding:2px;min-height:0;}");
+                control->setEnabled(next?last<actions.size():first>0);pages->addWidget(control);
+                QObject::connect(control,&QPushButton::clicked,popup,[popup,parent,menu,first,last,pageSize,next]{
+                    popup->hide();popup->deleteLater();
+                    showAndroidActionMenu(parent,menu,next?last:std::max(0,first-pageSize));
+                });
+            }
+            popup->content->addLayout(pages);
+        }
+        popup->open();
+    }
+
+    void showAndroidProgress(QProgressDialog& progress, QWidget* parent) {
+        progress.setWindowFlags(Qt::Widget);
+        progress.setWindowModality(Qt::NonModal);
+        const int width=std::clamp(parent->width()-32,320,480);
+        progress.setMaximumWidth(width);
+        if(auto* label=progress.findChild<QLabel*>()){
+            label->setWordWrap(true);
+            label->setMaximumWidth(width-32);
+            label->setMaximumHeight(72);
+        }
+        const QSize size=progress.sizeHint().expandedTo(QSize(width,112));
+        progress.setGeometry(std::max(0,(parent->width()-width)/2),
+                             std::max(0,(parent->height()-size.height())/2),
+                             width,std::min(size.height(),parent->height()-16));
+        progress.show();
+        progress.raise();
+    }
+
+    class AndroidFinalizeWakeLock {
+    public:
+        AndroidFinalizeWakeLock() {
+            const auto activity=QNativeInterface::QAndroidApplication::context();
+            if(activity.isValid())activity.callMethod<void>("beginFinalizeWork");
+        }
+        ~AndroidFinalizeWakeLock() {
+            const auto activity=QNativeInterface::QAndroidApplication::context();
+            if(activity.isValid())activity.callMethod<void>("endFinalizeWork");
+        }
+        AndroidFinalizeWakeLock(const AndroidFinalizeWakeLock&)=delete;
+        AndroidFinalizeWakeLock& operator=(const AndroidFinalizeWakeLock&)=delete;
+    };
+
+    QString androidFinalizeEntryName(const std::string& name) {
+        QString display=QFileInfo(QString::fromStdString(name)).fileName();
+        if(display.size()>52)
+            display=display.left(24)+QChar(0x2026)+display.right(24);
+        return display;
+    }
+
+
+
+#endif
     void copyFileAtomically(const QString& source, const QString& destination);
 
     QString clipInfoFirstLine(const FileInfo& info) {
@@ -152,14 +308,6 @@ namespace {
         QDirIterator frames(temporaryDirectory, {"*.dng", "*.DNG"}, QDir::Files,
                             QDirIterator::Subdirectories);
         if (!frames.hasNext()) return;
-        std::ifstream input(sourceSidecar.toStdString());
-        if (!input) throw std::runtime_error("Could not read source bad-pixel options JSON");
-        const auto source = nlohmann::json::parse(input);
-        if (!source.is_object() || !source.contains("badPixels")) return;
-        nlohmann::json output = {{"badPixels", source.at("badPixels")}};
-        if (source.contains("fullSensorResolution"))
-            output["fullSensorResolution"] = source.at("fullSensorResolution");
-        const auto bytes = output.dump(2) + '\n';
         do {
             const QString framePath = frames.next();
             QFile frame(framePath);
@@ -167,10 +315,8 @@ namespace {
                 throw std::runtime_error("Could not inspect finalized DNG pixel layout");
             const QByteArray data = frame.readAll();
             const std::vector<uint8_t> dng(data.begin(), data.end());
-            motioncam::DNGImageLayout layout;
-            if (!motioncam::DNGDecoder::getImageLayout(dng, layout))
-                throw std::runtime_error("Could not inspect finalized DNG pixel layout");
-            if (layout.pixels == motioncam::DNGPixelLayout::CFA) {
+            const auto bytes = motioncam::vfs::finalizedCfaBadPixelOptions(sourceSidecar.toStdString(), dng);
+            if (!bytes.empty()) {
                 const QString destination = perFrame
                     ? QFileInfo(framePath).absolutePath() + "/" +
                           QFileInfo(framePath).completeBaseName() + ".json"
@@ -198,6 +344,8 @@ namespace {
             "/Library/Frameworks/fuse_t.framework"};
         for (const auto& path : candidates)
             if (QFileInfo::exists(path)) return true;
+        return false;
+#elif defined(__ANDROID__)
         return false;
 #else
         return QFileInfo::exists(QStringLiteral("/dev/fuse")) &&
@@ -433,6 +581,24 @@ namespace {
 
     constexpr auto PACKAGE_NAME = "com.motioncam";
     constexpr auto APP_NAME = "MotionCam FS";
+
+    void styleClipMetadata(QLabel* label,const QString& extra={}) {
+#ifdef __ANDROID__
+        constexpr int pointSize=10;
+#else
+        constexpr int pointSize=9;
+#endif
+        label->setStyleSheet(QStringLiteral("font-size:%1pt;%2").arg(pointSize).arg(extra));
+#ifdef __ANDROID__
+        label->ensurePolished();
+#endif
+    }
+
+#ifdef __ANDROID__
+    constexpr bool RIFE_SUPPORTED = false;
+#else
+    constexpr bool RIFE_SUPPORTED = true;
+#endif
     constexpr auto RIFE_REVISION = "b0542ef99f380f0fe17a1b44151ac6935e8b82d4";
     constexpr auto RIFE_ARCHIVE_SHA256 =
         "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
@@ -454,6 +620,11 @@ namespace {
             : texture ? static_cast<size_t>(texture->width) * texture->height
             : bytes.size() / 6;
         const auto transformStarted = std::chrono::steady_clock::now();
+        // Small card previews already have a CPU color path. Avoid compiling
+        // full gallery shaders for them ahead of the first playback frame.
+        if (!output && !bayer && !texture && pixelCount <= 256u * 256u &&
+            !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_VALIDATE_GPU"))
+            enableGpu = false;
         static const std::array<uint16_t, 65536> srgbTransfer = [] {
             std::array<uint16_t, 65536> result{};
             for (size_t index = 0; index < result.size(); ++index) {
@@ -667,12 +838,19 @@ namespace {
                         std::chrono::steady_clock::now() - transformStarted).count());
             return;
         }
+        if (output && output->requireZeroCopy)
+            throw std::runtime_error("Zero-copy gallery requires resident GPU input and shared Vulkan image output");
         if (bayer) {
             std::vector<uint16_t> recovered;
             const uint16_t* samples = bayer->samples;
+            if (!samples) {
+                if (!bayer->download || !bayer->download(recovered))
+                    throw std::runtime_error("Could not download gallery Bayer preview");
+                samples = recovered.data();
+            }
             if (bayer->gain) {
                 const size_t count = static_cast<size_t>(bayer->width) * bayer->height;
-                recovered.assign(samples, samples + count);
+                if (recovered.empty()) recovered.assign(samples, samples + count);
                 if (!bayer->recoverCpu || !bayer->recoverCpu(recovered))
                     throw std::runtime_error("Could not recover gallery Bayer gain");
                 samples = recovered.data();
@@ -917,11 +1095,17 @@ namespace {
                                            bool ignoreForwardMat,
                                            bool gainMapOnlyDebug,
                                            const motioncam::VulkanGalleryOutput* output = nullptr,
-                                           bool* gpuApplied = nullptr) {
+                                           bool* gpuApplied = nullptr,
+                                           std::vector<uint8_t>* destination = nullptr) {
         motioncam::VulkanGalleryBayerSource bayer;
         motioncam::VulkanGalleryTextureSource texture;
         if (preview.hasGalleryCfa()) {
-            bayer.samples = preview.galleryCfaSamples();
+            bayer.samples = (preview.gallerySource.buffer || preview.gallerySource.texture)
+                ? nullptr : preview.galleryCfaSamples();
+            bayer.gpu = preview.gallerySource.gpu;
+            bayer.buffer = preview.gallerySource.buffer;
+            bayer.texture = preview.gallerySource.texture;
+            bayer.download = preview.gallerySource.vectorDownloader();
             bayer.width = preview.width;
             bayer.height = preview.height;
             bayer.phase = preview.galleryCfaPhase;
@@ -930,21 +1114,22 @@ namespace {
             bayer.gain = preview.galleryCfaGain.get();
             bayer.recoverCpu = preview.galleryCfaRecoverCpu;
         }
-        if (preview.galleryGpuTexture) {
-            texture.gpu = preview.galleryGpuDevice;
-            texture.texture = preview.galleryGpuTexture;
+        if (preview.gallerySource.channels == 3 && preview.gallerySource.hasStorage()) {
+            texture.gpu = preview.gallerySource.gpu;
+            texture.texture = preview.gallerySource.texture;
+            texture.buffer = preview.gallerySource.buffer;
             texture.width = preview.width;
             texture.height = preview.height;
             texture.black = preview.galleryGpuBlack;
             texture.white = preview.galleryGpuWhite;
             texture.gain = preview.galleryGpuGain.get();
         }
-        applyGalleryColorTransform(preview.rgb, preview.metadata,
+        applyGalleryColorTransform(destination ? *destination : preview.rgb, preview.metadata,
                                    ignoreForwardMat, gainMapOnlyDebug,
-                                   bayer.samples ? &bayer : nullptr,
+                                   (bayer.samples || bayer.buffer || bayer.texture) ? &bayer : nullptr,
                                    output, gpuApplied, true,
-                                   texture.texture ? &texture : nullptr,
-                                   texture.texture ? &preview.galleryGpuDownload : nullptr);
+                                   (texture.texture || texture.buffer) ? &texture : nullptr,
+                                   (texture.texture || texture.buffer) ? &preview.gallerySource.download : nullptr);
     }
 
     motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
@@ -1338,7 +1523,7 @@ namespace {
     }
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
     QByteArray decodeLinuxMountInfoPath(QByteArray path) {
         path.replace("\\040", " ");
         path.replace("\\011", "\t");
@@ -1621,6 +1806,135 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
 {
     ui->setupUi(this);
+    ui->rifeInterpolationCheckBox->setVisible(RIFE_SUPPORTED);
+    ui->rifeInterpolationCheckBox->setEnabled(RIFE_SUPPORTED);
+    ui->rifeRemoveButton->setVisible(RIFE_SUPPORTED);
+    ui->rifeRemoveButton->setEnabled(RIFE_SUPPORTED);
+#ifdef __ANDROID__
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+        [this](Qt::ApplicationState state) {
+            if (state != Qt::ApplicationActive ||
+                mPendingAndroidNoticeMessage.isEmpty()) return;
+            const QString title = std::exchange(mPendingAndroidNoticeTitle, {});
+            const QString message = std::exchange(mPendingAndroidNoticeMessage, {});
+            QTimer::singleShot(0, this, [this, title, message] {
+                showAndroidNotice(title, message);
+            });
+        });
+    // Qt 6.9+ reserves the display cutout and rounded corners as a safe area
+    // unless the window opts into the expanded client area. Keep the whole
+    // QWidget layout in that area as requested for the Android main window.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 9, 0)
+    setWindowFlag(Qt::ExpandedClientAreaHint);
+    setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    ui->centralwidget->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    for(auto* widget:ui->centralwidget->findChildren<QWidget*>())
+        widget->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+#endif
+    QMenu* androidSessionMenu = nullptr;
+#endif
+#ifdef __ANDROID__
+    ui->horizontalLayout->setContentsMargins(0,0,0,0);
+    ui->verticalLayout_3->setContentsMargins(0,0,0,0);
+    ui->verticalLayout_3->setAlignment(Qt::AlignTop);
+    ui->verticalLayout_3->setSpacing(2);
+    ui->dragAndDropScrollArea->setFrameShape(QFrame::NoFrame);
+    ui->dragAndDropScrollArea->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
+    ui->verticalSpacer_top->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+    ui->verticalSpacer_bottom->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+    ui->verticalLayout_3->invalidate();
+    ui->dragAndDropLabel->setText(tr("Import a clip to begin"));
+    ui->settingsTitle->setText(tr("Settings"));
+    ui->preprocessingTitle->setText(tr("Preprocessing"));
+    for (auto* title : {ui->settingsTitle, ui->preprocessingTitle}) {
+        QFont font = title->font();
+        font.setPixelSize(14);
+        font.setBold(true);
+        title->setFont(font);
+    }
+
+    auto* settingsStrip = new QScrollArea(ui->centralwidget);
+    settingsStrip->setWidgetResizable(true);
+    settingsStrip->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    auto* stripContent = new QWidget(settingsStrip);
+    auto* stripLayout = new QHBoxLayout(stripContent);
+    stripLayout->setContentsMargins(0, 0, 0, 0);
+    stripLayout->setSpacing(0);
+    QList<QAbstractScrollArea*> settingsColumns;
+    int stripWidth = 0;
+    for (auto* column : {ui->globalSettings, ui->globalPreprocessingSettings}) {
+        ui->horizontalLayout->removeWidget(column);
+        auto* vertical = new QScrollArea(stripContent);
+        const int columnWidth = std::max(300, column->sizeHint().width());
+        vertical->setFixedWidth(columnWidth);
+        stripWidth += columnWidth;
+        vertical->setWidgetResizable(true);
+        vertical->setWidget(column);
+        stripLayout->addWidget(vertical);
+        vertical->setFrameShape(QFrame::NoFrame);
+        vertical->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
+        vertical->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        vertical->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        settingsColumns.append(vertical);
+    }
+    stripContent->setFixedWidth(stripWidth + stripLayout->spacing());
+    settingsStrip->setWidget(stripContent);
+    settingsStrip->setFrameShape(QFrame::NoFrame);
+    settingsStrip->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
+    new motioncam::TouchScrolling(settingsStrip, settingsColumns);
+    new motioncam::TouchScrolling(ui->dragAndDropScrollArea);
+    // The clip cards include transparent children. Give their scrolling
+    // parent an opaque fill so newly exposed pixels are initialized while
+    // Android moves the content widget and while the splitter resizes it.
+    ui->scrollAreaWidgetContents->setAutoFillBackground(true);
+    ui->scrollAreaWidgetContents->setAttribute(Qt::WA_OpaquePaintEvent, false);
+    ui->horizontalLayout->removeWidget(ui->dragAndDropScrollArea);
+    auto* splitter = new QSplitter(Qt::Horizontal, ui->centralwidget);
+    splitter->setObjectName(QStringLiteral("androidMainSplitter"));
+    QSettings splitterSettings(PACKAGE_NAME, APP_NAME);
+    mAndroidSplitterHorizontal=std::clamp(splitterSettings.value("android/mainSplitterHorizontal",0.5).toDouble(),1.0/6.0,5.0/6.0);
+    mAndroidSplitterVertical=std::clamp(splitterSettings.value("android/mainSplitterVertical",0.5).toDouble(),1.0/6.0,5.0/6.0);
+    auto* saveSplitter=new QTimer(splitter);
+    saveSplitter->setSingleShot(true);
+    saveSplitter->setInterval(250);
+    connect(splitter,&QSplitter::splitterMoved,this,[this,splitter,saveSplitter]{
+        const auto sizes=splitter->sizes();
+        if(sizes.size()!=2||sizes[0]+sizes[1]<=0)return;
+        auto& fraction=splitter->orientation()==Qt::Horizontal
+            ?mAndroidSplitterHorizontal:mAndroidSplitterVertical;
+        fraction=double(sizes[0])/(sizes[0]+sizes[1]);
+        saveSplitter->start();
+    });
+    connect(saveSplitter,&QTimer::timeout,this,[this]{
+        QSettings settings(PACKAGE_NAME, APP_NAME);
+        settings.setValue("android/mainSplitterHorizontal",mAndroidSplitterHorizontal);
+        settings.setValue("android/mainSplitterVertical",mAndroidSplitterVertical);
+        settings.sync();
+    });
+    splitter->setHandleWidth(12);
+    splitter->setChildrenCollapsible(false);
+    splitter->setStyleSheet(
+        "QSplitter::handle:horizontal{background:#25282c;border:0;}"
+        "QSplitter::handle:vertical{background:#25282c;border:0;}");
+    ui->dragAndDropScrollArea->setMinimumWidth(0);
+    settingsStrip->setMinimumWidth(0);
+    splitter->addWidget(ui->dragAndDropScrollArea);
+    splitter->addWidget(settingsStrip);
+    ui->horizontalLayout->addWidget(splitter);
+    QTimer::singleShot(0, this, [this] {
+        updateAndroidOrientationPolicy();
+    });
+    for (auto* column : {ui->globalSettings, ui->globalPreprocessingSettings}) {
+        for (auto* box : column->findChildren<QCheckBox*>()) {
+            box->setProperty("androidIndicatorOnly", true);
+            box->installEventFilter(this);
+        }
+        for (auto* combo : column->findChildren<QComboBox*>()) {
+            combo->setProperty("androidInlineChoices", true);
+            combo->installEventFilter(this);
+        }
+    }
+#endif
     ui->dngCompressionModeComboBox->addItems({
         "JPEG XL Lossless flac", "JPEG XL Lossless opus",
         "HEVC 420 slow 14 flac", "HEVC 420 slow 14 opus",
@@ -1629,7 +1943,9 @@ MainWindow::MainWindow(QWidget *parent)
         tr("Append flac or opus to a DNG or Camera Native format to encode audio. "
            "Without a suffix, existing audio is copied unchanged. "
            "Audio, GCSV, JSON Only exports audio, gyro data, and per-clip metadata without video."));
-    motioncam::warmVulkanGalleryPreview();
+    motioncam::warmVulkanGalleryPreview(
+        QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
+            .filePath(QStringLiteral("gallery-vulkan-shaders")).toStdString());
 
 #ifdef _WIN32
     // Initialize COM for taskbar progress
@@ -1648,6 +1964,8 @@ MainWindow::MainWindow(QWidget *parent)
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Win>();
 #elif __APPLE__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_MacOs>();
+#elif defined(__ANDROID__)
+    mFuseFilesystem = std::make_unique<motioncam::ProcessingFileSystem>();
 #elif __linux__
     mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Linux>();
 #endif
@@ -1658,6 +1976,32 @@ MainWindow::MainWindow(QWidget *parent)
     // the current frame finishes.
     connect(qApp, &QGuiApplication::applicationStateChanged, this,
             [this](Qt::ApplicationState state) {
+#ifdef __ANDROID__
+                if (state == Qt::ApplicationActive && mPendingAndroidFinalizeCard) {
+                    const QString selection=motioncam::finalizeTreeSelectionStatus();
+                    if(selection!="choosing"){
+                        auto card=mPendingAndroidFinalizeCard;
+                        mPendingAndroidFinalizeCard=nullptr;
+                        if(selection=="ready")
+                            QTimer::singleShot(350,this,[this,card]{
+                                if(card)finalizeFile(card);
+                            });
+                    }
+                }
+                if (mAndroidExternalJsonCard) {
+                    if (state == Qt::ApplicationActive &&
+                        mAndroidExternalEditorLeftApp) {
+                        auto card = mAndroidExternalJsonCard;
+                        mAndroidExternalJsonCard = nullptr;
+                        mAndroidExternalEditorLeftApp = false;
+                        QTimer::singleShot(200, this, [this, card] {
+                            if (card) reloadCalibration(card);
+                        });
+                    } else if (state != Qt::ApplicationActive) {
+                        mAndroidExternalEditorLeftApp = true;
+                    }
+                }
+#endif
                 if (state != Qt::ApplicationInactive) return;
                 for (const auto& mounted : mMountedFiles)
                     mFuseFilesystem->releasePreviewResources(mounted.mountId);
@@ -1668,6 +2012,221 @@ MainWindow::MainWindow(QWidget *parent)
     ui->dragAndDropScrollArea->installEventFilter(this);
 
     restoreSettings();
+#ifdef __ANDROID__
+    auto* importAction = new QAction(tr("Import clip"), this);
+    auto* importButton = new QPushButton(tr("Import clip(s)"),
+                                         ui->dragAndDropScrollArea->widget());
+    auto* importRow = new QHBoxLayout();
+    importRow->setContentsMargins(0, 0, 0, 0);
+    importRow->setSpacing(4);
+    importRow->addWidget(importButton, 1);
+    importButton->setMinimumWidth(0);
+    auto* importSequenceButton = new QPushButton(tr("Import DNG sequence(s)"),
+                                                 ui->dragAndDropScrollArea->widget());
+    importSequenceButton->setToolTip(tr("Import a finalized DNG sequence folder"));
+    importSequenceButton->setMinimumWidth(0);
+    importRow->addWidget(importSequenceButton,1);
+    auto* sessionButton = new QPushButton(tr("Session menu"),ui->dragAndDropScrollArea->widget());
+    sessionButton->setObjectName(QStringLiteral("sessionActionsButton"));
+    sessionButton->setMinimumWidth(0);
+    for(auto* button:{importButton,importSequenceButton,sessionButton}){
+        button->setStyleSheet("QPushButton{padding:4px 2px;min-width:0;}");
+        button->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    }
+    const int importHeight=30;
+    for(auto* button:{importButton,importSequenceButton,sessionButton})button->setFixedHeight(importHeight);
+    androidSessionMenu = new QMenu(sessionButton);
+    androidSessionMenu->setTitle(tr("Session actions"));
+    connect(sessionButton,&QPushButton::clicked,this,[this,androidSessionMenu]{
+        showAndroidActionMenu(this,androidSessionMenu);
+    });
+    importRow->addWidget(sessionButton,1);
+    ui->verticalLayout_3->insertLayout(0,importRow);
+    auto* sidecarButton = new QPushButton(tr("Scan source directories for clip sidecar files"),
+                                         ui->dragAndDropScrollArea->widget());
+    sidecarButton->setObjectName(QStringLiteral("scanSidecarDirectoryButton"));
+    auto* utilityRow=new QHBoxLayout();
+    utilityRow->setContentsMargins(0,0,0,0);utilityRow->setSpacing(4);
+    utilityRow->addWidget(sidecarButton,1);
+    ui->verticalLayout_3->insertLayout(1,utilityRow);
+    auto* preferencesButton = new QPushButton(tr("Preferences"),
+                                              ui->dragAndDropScrollArea->widget());
+    utilityRow->addWidget(preferencesButton,1);
+    sidecarButton->setFixedHeight(importHeight);
+    preferencesButton->setFixedHeight(importHeight);
+    sidecarButton->setStyleSheet("QPushButton{padding:4px 2px;min-width:0;}");
+    const int utilityButtonWidth=sidecarButton->sizeHint().width();
+    for(auto* button:{sidecarButton,preferencesButton}){
+        button->setMinimumWidth(utilityButtonWidth);
+        button->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+    }
+    connect(preferencesButton, &QPushButton::clicked,
+            this, &MainWindow::onOpenPreferences);
+    connect(importSequenceButton, &QPushButton::clicked, this, [this] {
+        motioncam::requestDngSequenceFolderImport();
+        auto* poll = new QTimer(this);
+        connect(poll, &QTimer::timeout, this, [this, poll] {
+            const QString status=motioncam::dngSequenceFolderImportStatus();
+            if(status=="idle"||status=="choosing"||status=="copying")return;
+            poll->stop();poll->deleteLater();
+            if(status.startsWith("done:")){
+                const QStringList paths=status.mid(5).split(QChar('\n'),Qt::SkipEmptyParts);
+                for(const auto& path:paths)mountFile(path);
+            }
+            else if(status.startsWith("error:"))
+                showAndroidNotice(tr("DNG folder import failed"),status.mid(6));
+        });
+        poll->start(250);
+    });
+    connect(sidecarButton, &QPushButton::clicked, this, [this, sidecarButton] {
+        const QString importRoot = QDir(QStandardPaths::writableLocation(
+            QStandardPaths::AppLocalDataLocation)).filePath("imports");
+        if (mMountedFiles.isEmpty()) {
+            QMessageBox::information(this, tr("Scan source directories for clip sidecar files"),
+                tr("Import a clip before scanning its source directory."));
+            return;
+        }
+        sidecarButton->setEnabled(false);
+        motioncam::scanDirectoryForSidecars(importRoot,
+            mPendingAndroidJsonCard
+                ? mPendingAndroidJsonCard->property("filePath").toString()
+                : QString());
+        auto* poll = new QTimer(this);
+        connect(poll, &QTimer::timeout, this, [this, poll, sidecarButton] {
+            const QString status = motioncam::sidecarScanStatus();
+            if (status == "choosing" || status == "scanning" || status == "idle") return;
+            poll->stop();poll->deleteLater();sidecarButton->setEnabled(true);
+            if (status.startsWith("done:")) {
+                for (const auto& mounted : mMountedFiles) {
+                    auto* card = fileWidgetForMount(mounted.mountId);
+                    if (!card) continue;
+                    const QString path = card->property("filePath").toString();
+                    const QString location = motioncam::sourceDirectoryForImport(path);
+                    if (location.isEmpty()) continue;
+                    card->setProperty("sourceDirectory", location);
+                    if (auto* label = card->findChild<QLabel*>("sourceDirectoryLabel"))
+                        label->setText(tr("Source: %1").arg(location));
+                    QSettings(PACKAGE_NAME, APP_NAME).setValue(
+                        "android/sourceDirectory/" + QFileInfo(path).dir().dirName(),
+                        location);
+                }
+                if (auto* card = fileWidgetForMount(mMountedFiles.front().mountId))
+                    reloadCalibration(card);
+                auto pending = mPendingAndroidJsonCard;
+                mPendingAndroidJsonCard = nullptr;
+                if (pending) {
+                    const QString path = pending->property("filePath").toString();
+                    if (!motioncam::sourceDirectoryForImport(path).isEmpty()) {
+                        QTimer::singleShot(0, this, [this, pending] {
+                            if (pending) createCalibrationJson(pending);
+                        });
+                    } else {
+                        QMessageBox::information(this, tr("Clip not found"),
+                            tr("The selected directory does not contain this clip."));
+                    }
+                } else {
+                    QMessageBox::information(this, tr("Sidecar scan complete"),
+                        tr("Copied %1 sidecar files beside imported clips.")
+                            .arg(status.mid(5)));
+                }
+            } else if (status.startsWith("error:")) {
+                mPendingAndroidJsonCard = nullptr;
+                QMessageBox::critical(this, tr("Sidecar scan failed"), status.mid(6));
+            } else {
+                mPendingAndroidJsonCard = nullptr;
+            }
+        });
+        poll->start(250);
+    });
+    connect(importButton, &QPushButton::clicked, importAction, &QAction::trigger);
+    connect(importAction, &QAction::triggered, this, [this] {
+        const QStringList sourcePaths = QFileDialog::getOpenFileNames(
+            this, tr("Import clip"));
+        if (sourcePaths.isEmpty()) return;
+        for (const QString& sourcePath : sourcePaths) {
+            QFile source(sourcePath);
+            if (!source.open(QIODevice::ReadOnly)) {
+                showAndroidNotice(tr("Import failed"), source.errorString());
+                continue;
+            }
+            QString name = motioncam::documentDisplayName(sourcePath);
+            if (name.isEmpty())
+                name = QFileInfo(QUrl(sourcePath).path()).fileName();
+            name = QFileInfo(name).fileName();
+            const QStringList supportedSuffixes{
+                QStringLiteral("mcraw"), QStringLiteral("unspektra"),
+                QStringLiteral("dng"), QStringLiteral("mov"),
+                QStringLiteral("mp4"), QStringLiteral("mkv")};
+            if (!supportedSuffixes.contains(QFileInfo(name).suffix().toLower())) {
+                showAndroidNotice(tr("Import failed"),
+                    tr("The selected file has no supported clip extension. Its reported name is: %1")
+                        .arg(name));
+                continue;
+            }
+            const QString directory = QStandardPaths::writableLocation(
+                QStandardPaths::AppLocalDataLocation) + QStringLiteral("/imports/") +
+                QUuid::createUuid().toString(QUuid::WithoutBraces);
+            if (!QDir().mkpath(directory)) {
+                showAndroidNotice(tr("Import failed"),
+                    tr("Could not create import directory"));
+                continue;
+            }
+            const QString destination = QDir(directory).filePath(name);
+            motioncam::registerImportedClip(destination, sourcePath);
+            bool importedByLink = false;
+            if (QUrl(sourcePath).scheme() == QStringLiteral("content")) {
+                const int descriptor = ::fcntl(source.handle(), F_DUPFD_CLOEXEC, 0);
+                if (descriptor >= 0)
+                    importedByLink = motioncam::installSeekableSourceLink(
+                        destination, descriptor);
+            }
+            if (!importedByLink) {
+                QSaveFile output(destination);
+                if (!output.open(QIODevice::WriteOnly)) {
+                    showAndroidNotice(tr("Import failed"), output.errorString());
+                    continue;
+                }
+                bool copied = true;
+                QByteArray chunk(1024 * 1024, Qt::Uninitialized);
+                for (;;) {
+                    const qint64 count = source.read(chunk.data(), chunk.size());
+                    if (count < 0) {
+                        showAndroidNotice(tr("Import failed"), source.errorString());
+                        copied = false;
+                        break;
+                    }
+                    if (count == 0) break;
+                    if (output.write(chunk.constData(), count) != count) {
+                        showAndroidNotice(tr("Import failed"), output.errorString());
+                        copied = false;
+                        break;
+                    }
+                }
+                if (!copied) {
+                    output.cancelWriting();
+                    continue;
+                }
+                if (!output.commit()) {
+                    showAndroidNotice(tr("Import failed"), output.errorString());
+                    continue;
+                }
+            }
+            mountFile(destination);
+            const QString location = motioncam::sourceDirectoryForUri(sourcePath);
+            QSettings(PACKAGE_NAME, APP_NAME).setValue(
+                "android/sourceDirectory/" + QFileInfo(destination).dir().dirName(),
+                location);
+            for (const auto& mounted : mMountedFiles) {
+                auto* card = fileWidgetForMount(mounted.mountId);
+                if (!card || card->property("filePath").toString() != destination) continue;
+                card->setProperty("sourceDirectory", location);
+                if (auto* label = card->findChild<QLabel*>("sourceDirectoryLabel"))
+                    label->setText(tr("Source: %1").arg(location));
+                break;
+            }
+        }
+    });
+#endif
     mFuseMountingAvailable = projectionDependencyAvailable();
     if (!mFuseMountingAvailable) mFuseMountingEnabled = false;
 #ifdef __APPLE__
@@ -1835,6 +2394,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(saveSession, &QAction::triggered, this, &MainWindow::onSaveSession);
     connect(saveSessionAs, &QAction::triggered, this, &MainWindow::onSaveSessionAs);
     mRecentSessionsMenu = fileMenu->addMenu(tr("Recent Sessions"));
+#ifdef __ANDROID__
+    androidSessionMenu->addAction(newSession);
+    androidSessionMenu->addAction(loadSession);
+    androidSessionMenu->addAction(saveSession);
+    androidSessionMenu->addAction(saveSessionAs);
+    androidSessionMenu->addSeparator();
+    androidSessionMenu->addMenu(mRecentSessionsMenu);
+#endif
     fileMenu->addSeparator();
     auto* openClip = fileMenu->addAction(tr("Open Clip..."));
     connect(openClip, &QAction::triggered, this, [this] {
@@ -1929,6 +2496,9 @@ MainWindow::MainWindow(QWidget *parent)
     auto* preferencesAction = settingsMenu->addAction(tr("Preferences..."));
     preferencesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
     connect(preferencesAction, &QAction::triggered, this, &MainWindow::onOpenPreferences);
+#ifdef __ANDROID__
+    menuBar()->hide();
+#endif
 
     // Load global calibration.json if it exists
     QString appDir = QCoreApplication::applicationDirPath();
@@ -1959,7 +2529,7 @@ MainWindow::~MainWindow() {
     ++mGalleryGeneration;
     // The gallery is an independent top-level window, so it is not destroyed
     // automatically with MainWindow. Close it before waiting for its workers.
-    if (mClipPlayer) mClipPlayer->close();
+    if (mClipPlayer) mClipPlayer->closeImmediately();
     // Gallery workers may be waiting for a UI-thread handoff. Keep servicing
     // those cancellation handoffs until every worker has observed shutdown;
     // waiting directly on the UI thread can otherwise deadlock.
@@ -2001,6 +2571,10 @@ MainWindow::~MainWindow() {
 
 void MainWindow::saveSettings() {
     QSettings settings(PACKAGE_NAME, APP_NAME);
+#ifdef __ANDROID__
+    settings.setValue("android/mainSplitterHorizontal",mAndroidSplitterHorizontal);
+    settings.setValue("android/mainSplitterVertical",mAndroidSplitterVertical);
+#endif
 
     settings.setValue("draftMode", ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteCorrection", QString::fromStdString(
@@ -2089,7 +2663,7 @@ void MainWindow::restoreSettings() {
     ui->cfrConversionCheckBox->setCheckState(
         !settings.contains("cfrConversion") ? Qt::CheckState::Checked :
         (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
-    ui->rifeInterpolationCheckBox->setChecked(settings.value("rifeInterpolation", false).toBool());
+    ui->rifeInterpolationCheckBox->setChecked(RIFE_SUPPORTED && settings.value("rifeInterpolation", false).toBool());
     mDetectDuplicateDngs = settings.value("detectDuplicateDngs", true).toBool();
 
     ui->cropEnableCheckBox->setCheckState(
@@ -2202,11 +2776,142 @@ void MainWindow::restoreSettings() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     ++mGalleryGeneration;
-    if (mClipPlayer) mClipPlayer->close();
+    if (mClipPlayer) mClipPlayer->closeImmediately();
     QMainWindow::closeEvent(event);
 }
 
+#ifdef __ANDROID__
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    if (mAndroidComboOverlay) mAndroidComboOverlay->deleteLater();
+    if (mClipPlayer && mClipPlayer->parentWidget() == this)
+        mClipPlayer->setGeometry(rect());
+    QTimer::singleShot(0, this, [this] {
+        if (auto* splitter = findChild<QSplitter*>(QStringLiteral("androidMainSplitter"))) {
+            auto* clips = ui->dragAndDropScrollArea;
+            auto* settings = splitter->widget(1);
+            const Qt::Orientation orientation = height() > width()
+                ? Qt::Vertical : Qt::Horizontal;
+            const bool orientationChanged = splitter->orientation() != orientation;
+            if (orientationChanged) splitter->setOrientation(orientation);
+            const int extent = orientation == Qt::Vertical ? splitter->height()
+                                                           : splitter->width();
+            const int available = std::max(2, extent - splitter->handleWidth());
+            const int minimum = std::max(1, available / 6);
+            if (orientation == Qt::Vertical) {
+                clips->setMinimumWidth(0);
+                settings->setMinimumWidth(0);
+                clips->setMinimumHeight(minimum);
+                settings->setMinimumHeight(minimum);
+            } else {
+                clips->setMinimumHeight(0);
+                settings->setMinimumHeight(0);
+                clips->setMinimumWidth(minimum);
+                settings->setMinimumWidth(minimum);
+            }
+            const double fraction=orientation==Qt::Horizontal
+                ?mAndroidSplitterHorizontal:mAndroidSplitterVertical;
+            const int first=std::clamp(qRound(available*fraction),minimum,available-minimum);
+            splitter->setSizes({first,available-first});
+        }
+        if (mSettingsDialog && mSettingsDialog->parentWidget() == ui->centralwidget)
+            mSettingsDialog->setGeometry(ui->centralwidget->rect());
+        for (const auto& dialog : mTimingDialogs)
+            if (dialog && dialog->parentWidget() == ui->centralwidget)
+                dialog->setGeometry(ui->centralwidget->rect());
+    });
+}
+
+void MainWindow::updateAndroidOrientationPolicy() {
+    bool landscapeOnly = false;
+    if (!(mClipPlayer && mClipPlayer->isVisible())) {
+        landscapeOnly = mSettingsDialog && mSettingsDialog->isVisible();
+        for (const auto& dialog : mTimingDialogs)
+            landscapeOnly |= dialog && dialog->isVisible();
+    }
+    const auto activity = QNativeInterface::QAndroidApplication::context();
+    if (activity.isValid())
+        activity.callMethod<void>("setMotionCamLandscapeOnly", landscapeOnly);
+}
+
+void MainWindow::showAndroidComboChoices(QComboBox* combo) {
+    if (mAndroidComboOverlay) {
+        mAndroidComboOverlay->hide();
+        mAndroidComboOverlay->deleteLater();
+    }
+    auto* overlay = new QWidget(ui->centralwidget);
+    overlay->setGeometry(ui->centralwidget->rect());
+    overlay->setAttribute(Qt::WA_TranslucentBackground);
+    overlay->setProperty("androidComboBackdrop", true);
+    overlay->installEventFilter(this);
+    auto* choices = new QListWidget(overlay);
+    choices->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    choices->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    choices->setStyleSheet("QListWidget{background:#25282c;border:1px solid #555;}"
+                           "QListWidget::item{padding:8px;color:white;}"
+                           "QListWidget::item:selected{background:#3a5878;}");
+    for (int i = 0; i < combo->count(); ++i) {
+        auto* item = new QListWidgetItem(combo->itemText(i), choices);
+        item->setData(Qt::UserRole, i);
+    }
+    const QPoint anchor = combo->mapTo(ui->centralwidget, QPoint(0, combo->height()));
+    const int width = std::min(std::max(combo->width(), 180), overlay->width());
+    const int height = std::min(std::max(combo->count() * 44 + 2, 44),
+                                std::max(44, overlay->height() - 16));
+    const int x = std::clamp(anchor.x(), 0, std::max(0, overlay->width() - width));
+    const int y = anchor.y() + height <= overlay->height()
+        ? std::max(0, anchor.y())
+        : std::max(0, anchor.y() - combo->height() - height);
+    choices->setGeometry(x, y, width, height);
+    new motioncam::TouchScrolling(choices);
+    connect(choices, &QListWidget::itemClicked, overlay,
+            [this, combo, overlay](QListWidgetItem* item) {
+        combo->setCurrentIndex(item->data(Qt::UserRole).toInt());
+        overlay->hide();
+        overlay->deleteLater();
+    });
+    mAndroidComboOverlay = overlay;
+    overlay->show();
+    overlay->raise();
+}
+#endif
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+#ifdef __ANDROID__
+    if (watched->property("androidComboBackdrop").toBool() &&
+        event->type() == QEvent::MouseButtonRelease) {
+        if (auto* overlay = qobject_cast<QWidget*>(watched)) {
+            overlay->hide();
+            overlay->deleteLater();
+        }
+        return true;
+    }
+    if (auto* combo = qobject_cast<QComboBox*>(watched);
+        combo && combo->property("androidInlineChoices").toBool() &&
+        (event->type() == QEvent::MouseButtonPress ||
+         event->type() == QEvent::MouseButtonRelease)) {
+        if (event->type() == QEvent::MouseButtonRelease)
+            showAndroidComboChoices(combo);
+        return true;
+    }
+    if (auto* box = qobject_cast<QCheckBox*>(watched);
+        box && box->property("androidIndicatorOnly").toBool() &&
+        (event->type() == QEvent::MouseButtonPress ||
+         event->type() == QEvent::MouseButtonRelease ||
+         event->type() == QEvent::MouseButtonDblClick)) {
+        auto* mouse = static_cast<QMouseEvent*>(event);
+        QStyleOptionButton option;
+        option.initFrom(box);
+        option.text = box->text();
+        const QRect indicator = box->style()->subElementRect(
+            QStyle::SE_CheckBoxIndicator, &option, box).adjusted(-3, -3, 3, 3);
+        if (!indicator.contains(mouse->position().toPoint())) {
+            if (event->type() == QEvent::MouseButtonRelease) box->setDown(false);
+            event->accept();
+            return true;
+        }
+    }
+#endif
     if (watched->property("sourceJsonStatus").toBool() &&
         event->type() == QEvent::MouseButtonDblClick) {
         // Cancel the refresh queued by the first click.  The release following
@@ -2214,6 +2919,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
         // signal for the remainder of the platform double-click interval too.
         const int serial = watched->property("refreshClickSerial").toInt() + 1;
         watched->setProperty("refreshClickSerial", serial);
+        watched->setProperty("refreshClickPending", false);
         watched->setProperty("suppressRefreshClick", true);
         QPointer<QObject> guardedWatched(watched);
         QTimer::singleShot(QApplication::doubleClickInterval(), this,
@@ -2222,7 +2928,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                     guardedWatched->property("refreshClickSerial").toInt() == serial)
                     guardedWatched->setProperty("suppressRefreshClick", false);
             });
-        revealSourceJson(watched->property("sourceJsonPath").toString());
+        revealSourceJson(watched->property("sourceJsonPath").toString(),
+                         watched->property("sourceClipPath").toString());
         return true;
     }
     if (auto* card = qobject_cast<QWidget*>(watched);
@@ -2234,8 +2941,10 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     if (auto* card = qobject_cast<QWidget*>(watched);
         card && card->property("clipCard").toBool() &&
         event->type() == QEvent::MouseButtonRelease) {
+#ifndef Q_OS_ANDROID
         if (auto* check = card->findChild<QCheckBox*>("clipSelection"))
             check->toggle();
+#endif
         return true;
     }
     if (watched == ui->dragAndDropScrollArea) {
@@ -2289,8 +2998,14 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void MainWindow::mountFile(const QString& filePath) {
+#ifdef __ANDROID__
+    const QFileInfo requested(filePath);
+    if (requested.isSymLink() || !requested.exists())
+        motioncam::reopenSeekableSourceLink(filePath);
+#endif
     if (filePath.endsWith(".7z", Qt::CaseInsensitive)) {
         std::unique_ptr<QProgressDialog> progress;
+#ifndef __ANDROID__
         if (!mImportBatchProgress) {
             progress = std::make_unique<QProgressDialog>(
                 tr("Decompressing %1...").arg(QFileInfo(filePath).fileName()),
@@ -2300,6 +3015,7 @@ void MainWindow::mountFile(const QString& filePath) {
             progress->setMinimumDuration(0);
             progress->show();
         }
+#endif
         try {
             auto future = QtConcurrent::run([filePath] {
                 return motioncam::extractReviewArchive(filePath);
@@ -2331,6 +3047,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                const QString& temporaryRoot,
                                const QString& sidecarPath,
                                const QString& gyroflowSidecarPath) {
+#ifdef __ANDROID__
+    const QString sidecarSyncError = motioncam::syncSidecarsForImport(filePath);
+    if (!sidecarSyncError.isEmpty())
+        spdlog::warn("{}", sidecarSyncError.toStdString());
+#endif
     QElapsedTimer mountTimer;
     mountTimer.start();
     const int importIndex = mMountedFiles.size();
@@ -2379,6 +3100,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     std::unique_ptr<QProgressDialog> singleProgress;
     QProgressDialog* mountProgress = mImportBatchProgress.data();
+#ifndef __ANDROID__
     if (!mountProgress) {
         singleProgress = std::make_unique<QProgressDialog>(
             tr("Reading and importing %1...").arg(fileInfo.fileName()), QString(), 0, 0, this);
@@ -2389,13 +3111,14 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         mountProgress->show();
         QApplication::processEvents();
     }
+#endif
     QString mountError;
     auto settings = buildRenderSettings();
     settings.sourceSidecarPath = sidecarPath.toStdString();
     settings.sourceGyroflowSidecarPath = gyroflowSidecarPath.toStdString();
 #ifdef __APPLE__
     if (mFuseMountingEnabled) cleanupStaleMacFuseMounts();
-#elif __linux__
+#elif defined(__linux__) && !defined(__ANDROID__)
     const qint64 cleanupStarted = mountTimer.elapsed();
     if (mFuseMountingEnabled && !cleanupStaleLinuxFuseMount(dstPath, mountError)) {
         if (singleProgress) mountProgress->close();
@@ -2443,6 +3166,9 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     mMountInProgress = false;
     mMountPathInProgress.clear();
     if (mountId == motioncam::InvalidMountId) {
+#ifdef __ANDROID__
+        motioncam::releaseSeekableSourceLink(importPath);
+#endif
         if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
         QMessageBox::critical(this, "Error",
             QString("There was an error importing the file. (error: %1)").arg(mountError));
@@ -2456,7 +3182,12 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
+#ifdef __ANDROID__
+    fileWidget->setMinimumHeight(156);
+    fileWidget->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+#else
     fileWidget->setFixedHeight(156);
+#endif
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("importPath", importPath);
     fileWidget->setProperty("sidecarPath", sidecarPath);
@@ -2497,7 +3228,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // Create and add the filename label
     auto* fileLabel = new QLabel(fileInfo.baseName(), fileWidget);
     fileLabel->setToolTip(filePath); // Show full path on hover
+#ifdef __ANDROID__
+    fileLabel->setStyleSheet("font-weight: bold; font-size: 13pt;");
+#else
     fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
+#endif
     auto* titleLayout = new QHBoxLayout();
     titleLayout->setContentsMargins(0, 0, 0, 0);
     titleLayout->addWidget(fileLabel, 1);
@@ -2536,7 +3271,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         auto info = fileInfoOpt.value();
 
         auto* infoLabel1 = new QLabel(clipInfoFirstLine(info), fileWidget);
-        infoLabel1->setStyleSheet("font-size: 9pt;");
+        styleClipMetadata(infoLabel1);
         infoLabel1->setFixedHeight(infoLabel1->fontMetrics().height() + 2);
         infoLabel1->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         infoLabel1->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -2556,7 +3291,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                 .arg(info.duplicatedFrames);
 
         auto* infoLabel2 = new QLabel(infoText2, fileWidget);
-        infoLabel2->setStyleSheet("font-size: 9pt;");
+        styleClipMetadata(infoLabel2);
         infoLabel2->setFixedHeight(infoLabel2->fontMetrics().height() + 4);
         infoLabel2->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         infoLabel2->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -2567,14 +3302,22 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     auto* missingMetadataLabel = new QLabel(fileWidget);
     missingMetadataLabel->setObjectName(QStringLiteral("missingMetadataLabel"));
-    missingMetadataLabel->setStyleSheet("font-size: 9pt; color: #e3a35b;");
+    styleClipMetadata(missingMetadataLabel,QStringLiteral("color:#e3a35b;"));
     missingMetadataLabel->setFixedHeight(missingMetadataLabel->fontMetrics().height() + 1);
     missingMetadataLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     metadataTextLayout->addWidget(missingMetadataLabel);
 
     // Create and add the source folder label
-    auto* sourceLabel = new QLabel(QString("Source: %1").arg(fileInfo.path()), fileWidget);
-    sourceLabel->setStyleSheet("font-size: 9pt; color: #666666;");
+    QString sourceDirectory = fileInfo.path();
+#ifdef __ANDROID__
+    sourceDirectory = QSettings(PACKAGE_NAME, APP_NAME).value(
+        "android/sourceDirectory/" + fileInfo.dir().dirName(),
+        sourceDirectory).toString();
+#endif
+    auto* sourceLabel = new QLabel(QString("Source: %1").arg(sourceDirectory), fileWidget);
+    sourceLabel->setObjectName(QStringLiteral("sourceDirectoryLabel"));
+    fileWidget->setProperty("sourceDirectory", sourceDirectory);
+    styleClipMetadata(sourceLabel,QStringLiteral("color:#666666;"));
     sourceLabel->setFixedHeight(sourceLabel->fontMetrics().height() + 1);
     sourceLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     metadataTextLayout->addWidget(sourceLabel);
@@ -2595,7 +3338,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     auto* openButton = new QPushButton("Open", fileWidget);
     openButton->setObjectName(QStringLiteral("openDestinationButton"));
     openButton->setEnabled(projectFiles);
-    if (!projectFiles) openButton->setToolTip(tr("Virtual DNG folder mounting is disabled."));
+    openButton->setVisible(projectFiles);
     openButton->setFixedSize(buttonWidth, buttonHeight);
     openButton->setIcon(QIcon(":/assets/folder_btn.png"));
     buttonLayout->addWidget(openButton);
@@ -2608,6 +3351,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     // Create and add the remove button
     auto* removeButton = new QPushButton("Unmount", fileWidget);
+    removeButton->setObjectName(QStringLiteral("removeClipButton"));
     if (!projectFiles) removeButton->setText(tr("Remove"));
     removeButton->setFixedSize(buttonWidth, buttonHeight);
     removeButton->setIcon(QIcon(":/assets/remove_btn.png"));
@@ -2654,7 +3398,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
     // Create calibration status label (initially hidden)
     auto* calibStatusLabel = new QLabel("", statusContainer);
-    calibStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold;");
+    styleClipMetadata(calibStatusLabel,QStringLiteral("font-weight:bold;"));
     calibStatusLabel->setProperty("calibStatusLabel", true);
     calibStatusLabel->setVisible(false);
     calibStatusLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -2676,6 +3420,15 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     connect(refreshButton, &QPushButton::clicked, this,
             [this, fileWidget, refreshButton] {
         if (refreshButton->property("suppressRefreshClick").toBool()) return;
+        if (refreshButton->property("refreshClickPending").toBool()) {
+            refreshButton->setProperty("refreshClickPending", false);
+            refreshButton->setProperty("refreshClickSerial",
+                refreshButton->property("refreshClickSerial").toInt() + 1);
+            revealSourceJson(refreshButton->property("sourceJsonPath").toString(),
+                             refreshButton->property("sourceClipPath").toString());
+            return;
+        }
+        refreshButton->setProperty("refreshClickPending", true);
         const int serial = refreshButton->property("refreshClickSerial").toInt() + 1;
         refreshButton->setProperty("refreshClickSerial", serial);
         QPointer<QPushButton> guardedButton(refreshButton);
@@ -2685,6 +3438,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                 if (!guardedButton || !guardedFileWidget ||
                     guardedButton->property("refreshClickSerial").toInt() != serial)
                     return;
+                guardedButton->setProperty("refreshClickPending", false);
                 reloadCalibration(guardedFileWidget);
             });
     });
@@ -2704,7 +3458,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     clipControls->addWidget(clipCheckBox, 0, Qt::AlignHCenter);
     auto* clipNumber = new QLabel(QString::number(mMountedFiles.size() + 1), fileWidget);
     clipNumber->setObjectName(QStringLiteral("indexLabel"));
-    clipNumber->setStyleSheet("color:#7f93ad; font-size:9pt;");
+    styleClipMetadata(clipNumber,QStringLiteral("color:#7f93ad;"));
     clipNumber->setAlignment(Qt::AlignCenter);
     clipControls->addWidget(clipNumber, 0, Qt::AlignHCenter);
     clipControls->addStretch();
@@ -2724,10 +3478,23 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
             dialog = new FrameTimingDialog(
                 fileInfo.baseName(), *info->presentationTimestamps,
                 info->timingTimeBaseNum, info->timingTimeBaseDen, info->fps,
-                info->timingUsesCfrMapping, info->frameRateInfo, this);
+                info->timingUsesCfrMapping, info->frameRateInfo,
+#ifdef __ANDROID__
+                ui->centralwidget);
+#else
+                this);
+#endif
+#ifdef __ANDROID__
+            dialog->setWindowFlags(Qt::Widget);
+            dialog->setAutoFillBackground(true);
+            new motioncam::PageCrossfade(dialog);
+#endif
             mTimingDialogs.insert(mountId, dialog);
             connect(dialog, &QObject::destroyed, this, [this, mountId] {
                 mTimingDialogs.remove(mountId);
+#ifdef __ANDROID__
+                updateAndroidOrientationPolicy();
+#endif
             });
         } else {
             dialog->updateTiming(*info->presentationTimestamps,
@@ -2735,7 +3502,13 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                  info->fps, info->timingUsesCfrMapping,
                                  info->frameRateInfo);
         }
+#ifdef __ANDROID__
+        dialog->setGeometry(ui->centralwidget->rect());
+        motioncam::PageCrossfade::show(dialog);
+        updateAndroidOrientationPolicy();
+#else
         dialog->show();
+#endif
         dialog->raise();
         dialog->activateWindow();
     });
@@ -2757,7 +3530,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     });
     connect(localReset, &QPushButton::clicked, this, [this, mountId, clipCheckBox] {
         mLocalSettings.remove(mountId);
-        mFuseFilesystem->updateOptions(mountId, mGlobalRenderSettings);
+        mFuseFilesystem->updateOptions(mountId, settingsForMount(mountId));
+        updateFpsLabels();
         updateThumbnail(mountId);
         updateLocalBadge(mountId);
         // The checkbox owns the selection state and refreshes the settings UI.
@@ -2879,6 +3653,9 @@ void MainWindow::mountFiles(
         return;
     }
 
+    mImportBatchActive = true;
+    mCancelImportBatch = false;
+#ifndef __ANDROID__
     QProgressDialog progress(
         tr("Importing %1 clips...").arg(filePaths.size()),
         QString(), 0, filePaths.size(), this);
@@ -2890,10 +3667,11 @@ void MainWindow::mountFiles(
     if (auto* bar = progress.findChild<QProgressBar*>())
         bar->setFormat(tr("0 / %1").arg(filePaths.size()));
     mImportBatchProgress = &progress;
-    mImportBatchActive = true;
-    mCancelImportBatch = false;
     progress.show();
     QApplication::processEvents();
+#else
+    mImportBatchProgress.clear();
+#endif
 
     int imported = 0;
     for (int processed = 0; processed < filePaths.size(); ++processed) {
@@ -2903,9 +3681,11 @@ void MainWindow::mountFiles(
             ++imported;
             if (mounted) mounted(mMountedFiles.back());
         }
+#ifndef __ANDROID__
         progress.setValue(processed + 1);
         if (auto* bar = progress.findChild<QProgressBar*>())
             bar->setFormat(tr("%1 / %2").arg(imported).arg(filePaths.size()));
+#endif
         QApplication::processEvents();
         if (mCancelImportBatch) break;
     }
@@ -2913,7 +3693,9 @@ void MainWindow::mountFiles(
     mImportBatchProgress.clear();
     mImportBatchActive = false;
     mCancelImportBatch = false;
+#ifndef __ANDROID__
     progress.close();
+#endif
     updateCalibrationButtonStates();
     if (!mGalleryPerformanceTestActive) autoSaveSession();
     const auto thumbnails = std::move(mDeferredImportThumbnails);
@@ -2964,9 +3746,7 @@ motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountI
 
 void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeconds,
                                     bool backfillThumbnails) {
-    auto settings = backfillThumbnails
-        ? thumbnailRenderSettings(settingsForMount(mountId))
-        : previewRenderSettings(settingsForMount(mountId));
+    auto settings = previewRenderSettings(settingsForMount(mountId));
     const auto info = mFuseFilesystem->getFileInfo(mountId);
     if (!info) return;
     if (!mClipPlayer) return;
@@ -2984,23 +3764,26 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     const size_t playbackFirstFrame = static_cast<size_t>(std::clamp(
         std::round(startSeconds * previewFps), 0.0,
         static_cast<double>(playbackFrames-1)));
-    const size_t firstFrame = backfillThumbnails ? 0 : playbackFirstFrame;
+    const auto visibleRange=backfillThumbnails?mClipPlayer->visibleThumbnailOutputRange():QPair<int,int>{0,0};
+    const size_t firstFrame = backfillThumbnails?size_t(visibleRange.first):playbackFirstFrame;
     QPointer<ClipPlayerDialog> player(mClipPlayer);
     const auto playbackTarget=mClipPlayer->playbackTarget();
     const auto incomingFrame=mClipPlayer->incomingFrame();
     const auto thumbnailCollectionEnabled=mClipPlayer->thumbnailCollectionEnabled();
     const auto thumbnailPrecacheEnabled=mClipPlayer->thumbnailPrecacheEnabled();
     const bool diagnostics = mGalleryPerformanceTestActive;
-    const bool clippingEnabled = mGalleryClippingEnabled && !backfillThumbnails;
+    const bool clippingEnabled = mGalleryClippingEnabled;
     const bool histogramEnabled = mClipPlayer->histogramEnabled() && !backfillThumbnails;
     const bool nativePresenter = mClipPlayer->nativeVulkanPresenter();
+    const qreal thumbnailPixelRatio=mClipPlayer->devicePixelRatioF();
+    const auto thumbnailRenderBounds=mClipPlayer->thumbnailRenderBounds();
     const bool directPresenter = mClipPlayer->directSequencePresentation();
-    auto render = [this, mountId, settings, generation, firstFrame, isSequence,
+    auto render = [this, mountId, settings, generation, firstFrame, visibleRange, playbackFrames, isSequence,
                    thumbnailOrientation,
                    backfillThumbnails, player, playbackTarget, incomingFrame,
                    thumbnailCollectionEnabled, thumbnailPrecacheEnabled,
                    diagnostics, clippingEnabled,
-                   histogramEnabled, nativePresenter, directPresenter] {
+                   histogramEnabled, nativePresenter, directPresenter, thumbnailPixelRatio, thumbnailRenderBounds] {
         const auto taskStarted = std::chrono::steady_clock::now();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
@@ -3040,12 +3823,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                 return skip;
             };
             bool presentedFirstFrame = false;
-            mFuseFilesystem->renderPreview(
-                mountId, settings, options,
-                [this, generation](size_t, size_t, const std::string&) {
-                    return mGalleryGeneration.load() == generation;
-                },
+            auto receiveFrame =
                 [this, generation, player, mountId, settings, isSequence, incomingFrame, thumbnailCollectionEnabled,
+                 thumbnailPixelRatio, thumbnailRenderBounds,
                  thumbnailPrecacheEnabled,
                  thumbnailOrientation,
                  clippingEnabled, directPresenter,
@@ -3070,6 +3850,8 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     const bool hashPreview =
                         qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
                     motioncam::VulkanGalleryOutput gpuOutput;
+                    gpuOutput.requireZeroCopy =
+                        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY");
                     gpuOutput.width = preview.width;
                     gpuOutput.height = preview.height;
                     // Direct presentation can use the GPU's rotated RGB24
@@ -3085,10 +3867,15 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     // an FFmpeg sequence. That sequence still needs host rows.
                     const bool nativeGpuOutput=nativePresenter&&
                         (!isSequence||directPresenter)&&!hashPreview;
+#ifdef Q_OS_ANDROID
+                    constexpr bool cacheLiveThumbnail=false;
+#else
                     const bool cacheLiveThumbnail=isSequence&&directPresenter&&
                         !backfillThumbnails&&thumbnailPrecacheEnabled->load();
+#endif
                     gpuOutput.rgb24 = rgb24 || nativeGpuOutput;
                     std::vector<uint8_t> nativeThumbnail;
+                    int nativeThumbnailFrame=-1;
                     if(cacheLiveThumbnail||collectThumbnail){
                         gpuOutput.thumbnailOrientation=isSequence
                             ?(thumbnailOrientation<0?0:thumbnailOrientation)
@@ -3097,13 +3884,24 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             gpuOutput.thumbnailOrientation==270;
                         const uint32_t orientedWidth=swap?preview.height:preview.width;
                         const uint32_t orientedHeight=swap?preview.width:preview.height;
-                        const double scale=std::min(176.0/orientedWidth,
-                                                    112.0/orientedHeight);
-                        gpuOutput.thumbnailWidth=std::max(1u,static_cast<uint32_t>(
-                            std::lround(orientedWidth*scale)));
-                        gpuOutput.thumbnailHeight=std::max(1u,static_cast<uint32_t>(
-                            std::lround(orientedHeight*scale)));
+                        // Fit in logical pixels first, exactly as the shared item
+                        // delegate does, then generate at native display resolution.
+                        // No per-frame smooth resize is needed on the UI thread.
+                        const QSize sourceSize(orientedWidth,orientedHeight);
+                        const QSize requested=sourceSize.scaled(
+                            thumbnailRenderBounds->load(std::memory_order_relaxed),Qt::KeepAspectRatio)*thumbnailPixelRatio;
+                        const QSize thumbnailSize=sourceSize.scaled(
+                            requested.boundedTo(sourceSize),Qt::KeepAspectRatio);
+                        gpuOutput.thumbnailWidth=std::max(1,thumbnailSize.width());
+                        gpuOutput.thumbnailHeight=std::max(1,thumbnailSize.height());
                         gpuOutput.thumbnailPixels=&nativeThumbnail;
+                        gpuOutput.thumbnailGeneration=generation;
+                        gpuOutput.thumbnailSourceFrame=
+                            static_cast<int>(preview.sourceFrameIndex);
+                        // Paused work has no presentation deadline and must
+                        // deliver its last thumbnail without a later frame.
+                        if(!backfillThumbnails)
+                            gpuOutput.completedThumbnailSourceFrame=&nativeThumbnailFrame;
                     }
                     if(nativeGpuOutput){
                         gpuOutput.gpuBuffer = &preview.galleryDisplayGpu;
@@ -3115,14 +3913,20 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             :(rawOrientation<0?0:rawOrientation);
                         gpuOutput.rgb10a2=true;
                     }
-                    std::vector<uint8_t> unmarkedSource;
+                    std::vector<uint8_t> thumbnailSource;
                     if (clippingEnabled && collectThumbnail && !hashPreview)
-                        unmarkedSource = preview.rgb;
+                        thumbnailSource = preview.rgb;
                     bool gpuFinal = false;
                     applyGalleryPreviewColorTransform(
                         preview, settings.ignoreForwardMat,
                         gainMapOnlyDebug(settings),
                         hashPreview ? nullptr : &gpuOutput, &gpuFinal);
+                    // Own the producing device immediately: cancellation or
+                    // thumbnail fallback can exit before the playback handoff.
+                    if(auto& frame=preview.galleryDisplayGpu;frame){
+                        frame->sourceLease = std::make_shared<std::pair<std::shared_ptr<void>,std::shared_ptr<void>>>(
+                            std::move(preview.galleryStateLease),std::move(preview.gallerySource.deviceLease));
+                    }
                     const auto colorFinished = std::chrono::steady_clock::now();
                     if (hashPreview) gpuFinal = false;
                     const bool gpuPreOriented = gpuFinal && isSequence &&
@@ -3147,64 +3951,46 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             sampledCount ? double(sampledSum) / sampledCount : 0.0,
                             sampledWhite, sampledCount);
                     }
-                    QImage unmarkedThumbnail;
-                    if(!nativeThumbnail.empty())
-                        unmarkedThumbnail=ClipPlayerDialog::makeRgb48Thumbnail(
-                            nativeThumbnail.data(),
-                            static_cast<qsizetype>(nativeThumbnail.size()),
+                    if(!gpuFinal&&clippingEnabled)
+                        applyGalleryClipping(preview.rgb,preview.clipping);
+                    QImage thumbnailImage;
+                    if(!nativeThumbnail.empty()&&nativeThumbnail.size()>=
+                       size_t(gpuOutput.thumbnailWidth)*gpuOutput.thumbnailHeight*3)
+                        thumbnailImage=QImage(nativeThumbnail.data(),
                             static_cast<int>(gpuOutput.thumbnailWidth),
-                            static_cast<int>(gpuOutput.thumbnailHeight),0);
-                    if(cacheLiveThumbnail&&unmarkedThumbnail.isNull()&&
+                            static_cast<int>(gpuOutput.thumbnailHeight),
+                            static_cast<int>(gpuOutput.thumbnailWidth)*3,
+                            QImage::Format_RGB888).copy();
+                    if(cacheLiveThumbnail&&!gpuFinal&&thumbnailImage.isNull()&&
                        !preview.rgb.empty())
-                        unmarkedThumbnail=ClipPlayerDialog::makeRgb48Thumbnail(
+                        thumbnailImage=ClipPlayerDialog::makeRgb48Thumbnail(
                             preview.rgb.data(),static_cast<qsizetype>(preview.rgb.size()),
                             static_cast<int>(preview.width),
-                            static_cast<int>(preview.height),thumbnailOrientation);
+                            static_cast<int>(preview.height),thumbnailOrientation,thumbnailPixelRatio);
+                    bool canBuildCpuThumbnail=true;
+#ifdef Q_OS_ANDROID
+                    // The GPU path produces thumbnails asynchronously. Do not
+                    // launch a second full-frame transform/readback while its
+                    // first result is still in flight.
+                    canBuildCpuThumbnail=!nativeGpuOutput||!gpuFinal;
+#endif
                     if ((clippingEnabled || nativeGpuOutput) && collectThumbnail &&
-                        unmarkedThumbnail.isNull()) {
-                        if (gpuFinal) {
-                            motioncam::VulkanGalleryBayerSource bayer;
-                            motioncam::VulkanGalleryTextureSource texture;
-                            if (preview.hasGalleryCfa()) {
-                                bayer.samples = preview.galleryCfaSamples();
-                                bayer.width = gpuOutput.width;
-                                bayer.height = gpuOutput.height;
-                                bayer.phase = preview.galleryCfaPhase;
-                                bayer.black = preview.galleryBlack;
-                                bayer.white = preview.galleryWhite;
-                                bayer.gain = preview.galleryCfaGain.get();
-                                bayer.recoverCpu = preview.galleryCfaRecoverCpu;
-                            }
-                            if (preview.galleryGpuTexture) {
-                                texture.gpu = preview.galleryGpuDevice;
-                                texture.texture = preview.galleryGpuTexture;
-                                texture.width = gpuOutput.width;
-                                texture.height = gpuOutput.height;
-                                texture.black = preview.galleryGpuBlack;
-                                texture.white = preview.galleryGpuWhite;
-                                texture.gain = preview.galleryGpuGain.get();
-                            }
-                            applyGalleryColorTransform(
-                                unmarkedSource, preview.metadata,
-                                settings.ignoreForwardMat,
-                                gainMapOnlyDebug(settings),
-                                bayer.samples ? &bayer : nullptr,
-                                nullptr, nullptr, true,
-                                texture.texture ? &texture : nullptr,
-                                texture.texture ? &preview.galleryGpuDownload : nullptr);
-                        }
-                        const auto& unmarked = gpuFinal ? unmarkedSource : preview.rgb;
-                        unmarkedThumbnail = ClipPlayerDialog::makeRgb48Thumbnail(
-                            unmarked.data(), static_cast<qsizetype>(unmarked.size()),
+                        thumbnailImage.isNull()&&canBuildCpuThumbnail) {
+                        if (gpuFinal)
+                            applyGalleryPreviewColorTransform(preview, settings.ignoreForwardMat,
+                                gainMapOnlyDebug(settings), nullptr, nullptr, &thumbnailSource);
+                        if(gpuFinal&&clippingEnabled)
+                            applyGalleryClipping(thumbnailSource,preview.clipping);
+                        const auto& pixels = gpuFinal ? thumbnailSource : preview.rgb;
+                        thumbnailImage = ClipPlayerDialog::makeRgb48Thumbnail(
+                            pixels.data(), static_cast<qsizetype>(pixels.size()),
                             static_cast<int>(preview.width), static_cast<int>(preview.height),
-                            isSequence ? thumbnailOrientation : rawOrientation);
+                            isSequence ? thumbnailOrientation : rawOrientation,thumbnailPixelRatio);
                     }
                     preview.galleryCfa = {};
                     preview.galleryCfaBytes = {};
-                    preview.galleryGpuLease.reset();
+                    preview.gallerySource = {};
                     if (!gpuFinal) {
-                        if (clippingEnabled)
-                            applyGalleryClipping(preview.rgb, preview.clipping);
                         if (rgb24)
                             packGalleryRgb24(preview.rgb);
                     }
@@ -3240,7 +4026,23 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         gpuBuffer->orientation=isSequence
                             ?(thumbnailOrientation==90?0:thumbnailOrientation):0;
                         gpuBuffer->staticFrame=!isSequence;
-                        gpuBuffer->resourceLease = std::move(preview.galleryStateLease);
+                        if (gpuBuffer->rejectSharedImage) {
+                            auto reject = std::move(gpuBuffer->rejectSharedImage);
+                            const bool strictZeroCopy = gpuOutput.requireZeroCopy;
+                            gpuBuffer->rejectSharedImage = [this, generation, player,
+                                    reject = std::move(reject), strictZeroCopy] {
+                                if (!reject()) return false;
+                                QMetaObject::invokeMethod(this, [this, generation, player, strictZeroCopy] {
+                                    if (mGalleryGeneration.load() != generation || !player) return;
+                                    if (strictZeroCopy)
+                                        player->failRgb48Frames(QStringLiteral(
+                                            "Shared Vulkan image import failed in strict zero-copy mode"));
+                                    else
+                                        player->reloadCurrentClip();
+                                }, Qt::QueuedConnection);
+                                return true;
+                            };
+                        }
                     }
                     const auto* rgbData = gpuBuffer ? nullptr
                         : rgbPixels ? rgbPixels.get() : rgb->data();
@@ -3249,26 +4051,28 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     const QByteArray bytes = QByteArray::fromRawData(
                         reinterpret_cast<const char*>(rgbData),
                         static_cast<qsizetype>(rgbSize));
-                    const int thumbnailOutputFrame=static_cast<int>(preview.sourceFrameIndex);
+                    const int thumbnailOutputFrame=nativeThumbnailFrame>=0
+                        ?nativeThumbnailFrame:static_cast<int>(preview.sourceFrameIndex);
                     if((collectThumbnail || cacheLiveThumbnail) &&
-                       !unmarkedThumbnail.isNull()){
+                       !thumbnailImage.isNull()){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
-                                                        thumbnailCollectionEnabled,cacheLiveThumbnail,unmarkedThumbnail,
+                                                        thumbnailCollectionEnabled,cacheLiveThumbnail,thumbnailImage,
                                                         thumbnailOutputFrame]{
                             if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
                                player->currentMountId()==mountId&&
                                (thumbnailCollectionEnabled->load()||cacheLiveThumbnail))
                                 player->setOutputFrameThumbnailImage(
-                                    thumbnailOutputFrame,unmarkedThumbnail,
+                                    thumbnailOutputFrame,thumbnailImage,
                                     cacheLiveThumbnail);
                         },Qt::QueuedConnection);
-                    } else if(collectThumbnail && !clippingEnabled){
+                    } else if(collectThumbnail && !clippingEnabled &&
+                             rgbData&&rgbSize>0){
                         ++thumbnailFrames;
                         QMetaObject::invokeMethod(this,[this,player,mountId,generation,
                                                         thumbnailCollectionEnabled,rgb,rgbPixels,rgbData,rgbSize,width,height,
                                                         thumbnailOutputFrame,gpuPreOriented,
-                                                        thumbnailOrientation]{
+                                                        thumbnailOrientation,thumbnailPixelRatio]{
                             if(mGalleryGeneration.load()==generation&&player&&player==mClipPlayer&&
                                player->currentMountId()==mountId&&thumbnailCollectionEnabled->load()) {
                                 const QByteArray view = QByteArray::fromRawData(
@@ -3281,7 +4085,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                         ClipPlayerDialog::makeRgb48Thumbnail(
                                             rgbData, static_cast<qsizetype>(rgbSize),
                                             static_cast<int>(swap ? height : width),
-                                            static_cast<int>(swap ? width : height), 0));
+                                            static_cast<int>(swap ? width : height), 0,thumbnailPixelRatio));
                                 } else {
                                     player->setOutputFrameThumbnail(thumbnailOutputFrame,view,
                                         static_cast<int>(width),static_cast<int>(height));
@@ -3365,7 +4169,20 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     deliveryWaitMs += std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - deliveryStarted).count();
                     ++deliveredFrames;
-                });
+                };
+            const auto renderRange=[&](size_t begin,size_t last){
+                if(begin>last||mGalleryGeneration.load()!=generation)return;
+                options.firstFrame=begin;
+                options.lastFrame=last;
+                mFuseFilesystem->renderPreview(mountId,settings,options,
+                    [this,generation](size_t,size_t,const std::string&){
+                        return mGalleryGeneration.load()==generation;
+                    },receiveFrame);
+            };
+            if(backfillThumbnails){
+                const size_t end=std::min(size_t(playbackFrames-1),size_t(visibleRange.second));
+                renderRange(firstFrame,end);
+            }else renderRange(firstFrame,size_t(playbackFrames-1));
             if (mGalleryGeneration.load() == generation && !backfillThumbnails)
                 QMetaObject::invokeMethod(this, [this, player, generation] {
                     if (mGalleryGeneration.load() != generation) return;
@@ -3413,6 +4230,21 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
 }
 
 void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
+#ifdef __ANDROID__
+    if(!mClipPlayer&&startRender){
+        if(mAndroidGalleryOpening)return;
+        mAndroidGalleryOpening=true;
+        motioncam::stagePageCrossfade(this,motioncam::grabPageSnapshot(this),[this,mountId,startRender]{
+            mAndroidGalleryOpening=false;
+            showGallery(mountId,startRender);
+        });
+        return;
+    }
+#endif
+    showGallery(mountId,startRender);
+}
+
+void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
     if (mClipPlayer) {
         mClipPlayer->selectMount(mountId);
         mClipPlayer->raise();
@@ -3472,7 +4304,9 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     connect(mClipPlayer, &ClipPlayerDialog::clippingEnabledChanged, this, [this](bool enabled) {
         mGalleryClippingEnabled = enabled;
         QSettings(PACKAGE_NAME, APP_NAME).setValue("galleryClippingEnabled", enabled);
-        if (mClipPlayer) mClipPlayer->reloadCurrentClip();
+        if (mClipPlayer) {
+            mClipPlayer->reloadCurrentClip();
+        }
     });
     connect(mClipPlayer, &ClipPlayerDialog::currentClipChanged, this,
             [this](int id, double startSeconds) {
@@ -3489,6 +4323,11 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         mGalleryMountId = motioncam::InvalidMountId;
         for (const auto& mounted : mMountedFiles)
             mFuseFilesystem->releasePreviewResources(mounted.mountId);
+#ifdef __ANDROID__
+        QTimer::singleShot(0, this, [this] {
+            restoreSecondaryWindowsAfterGallery();
+        });
+#endif
     });
     connect(mClipPlayer,&ClipPlayerDialog::sourceFrameSelectionChanged,this,
         [this](int id,int frame,bool selected){
@@ -3500,7 +4339,24 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
         &MainWindow::renderDroppedFrameThumbnail);
     connect(mClipPlayer,&ClipPlayerDialog::thumbnailBackfillRequested,this,
         [this](int id,double seconds){startGalleryRender(id,seconds,true);});
+#ifdef __ANDROID__
+    hideSecondaryWindowsForGallery();
+    // Qt 6.7's Android backing store can dereference a null RHI when a
+    // second full-screen QWidget surface is shown. Keep the gallery in the
+    // existing activity surface and cover the entire main window instead.
+    mClipPlayer->setParent(this, Qt::Widget);
+    mClipPlayer->setGeometry(rect());
+    mClipPlayer->setNavigationReturnSnapshot([this]{
+        QWidget* destination=ui->centralwidget;
+        for(const auto& page:mHiddenForGallery)if(page)destination=page;
+        return motioncam::grabPageSnapshot(destination);
+    });
     mClipPlayer->show();
+    mClipPlayer->raise();
+    updateAndroidOrientationPolicy();
+#else
+    mClipPlayer->show();
+#endif
     if (startRender) startGalleryRender(mountId);
 }
 
@@ -3632,11 +4488,21 @@ void MainWindow::finalizeSelectedFrames(){
         options.jxlDistance=compressionDistance;
         QProgressDialog progress(tr("Finalizing selected frames…"),tr("Cancel"),0,selected.size(),this);
         progress.setWindowModality(Qt::WindowModal);progress.setMinimumDuration(0);
+#ifdef __ANDROID__
+        AndroidFinalizeWakeLock finalizeWakeLock;
+        showAndroidProgress(progress,this);
+#endif
         try{
             mFuseFilesystem->finalize(mountId,temporary.toStdString(),compressionEnabled,options,
                 [&progress](size_t completed,size_t count,const std::string& name){
                     progress.setMaximum(static_cast<int>(count));progress.setValue(static_cast<int>(completed));
-                    if(!name.empty())progress.setLabelText(QString::fromStdString(name));
+                    if(!name.empty())progress.setLabelText(
+#ifdef __ANDROID__
+                        androidFinalizeEntryName(name)
+#else
+                        QString::fromStdString(name)
+#endif
+                    );
                     QApplication::processEvents();return !progress.wasCanceled();
                 });
             mFuseFilesystem->updateOptions(mountId,original);
@@ -4006,7 +4872,8 @@ void MainWindow::startGalleryPerformanceTest(
                  cappedPlayback?"capped":"uncapped");
     if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING"))
         mClipPlayer->setClippingEnabled(true);
-    mClipPlayer->setPerformanceOverlayPinned(true);
+    mClipPlayer->setPerformanceOverlayPinned(
+        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUTO_FADE"));
     mClipPlayer->setHistogramEnabled(!qEnvironmentVariableIsSet(
         "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM"));
     if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM"))
@@ -4034,6 +4901,8 @@ void MainWindow::startGalleryPerformanceTest(
         mClipPlayer->resize(viewportWidth, viewportHeight);
         spdlog::info("GALLERY_PERF event=gallery_viewport requested={}x{}",
             viewportWidth, viewportHeight);
+    } else if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FULLSCREEN")) {
+        mClipPlayer->showFullScreen();
     } else {
         mClipPlayer->showMaximized();
     }
@@ -4046,9 +4915,22 @@ void MainWindow::startGalleryPerformanceTest(
         spdlog::info("GALLERY_PERF event=suite_complete clips={} total_ms={:.3f}",
                      state->mounts.size(), totalMs);
         if (mClipPlayer) mClipPlayer->setClippingEnabled(previousClippingEnabled);
-        if (mClipPlayer) mClipPlayer->close();
+        if (mClipPlayer) {
+            mClipPlayer->closeImmediately();
+        }
         mGalleryClippingEnabled = previousClippingEnabled;
-        QCoreApplication::quit();
+#ifdef __ANDROID__
+        spdlog::default_logger()->flush();
+        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_KEEP_ALIVE")) {
+            spdlog::info("GALLERY_PERF event=suite_waiting_for_external_stop");
+            spdlog::default_logger()->flush();
+            return;
+        }
+#endif
+        if (mClipPlayer) mClipPlayer->deleteLater();
+        // Let Qt finish the native Vulkan child-window teardown before the
+        // Android process starts destroying its HWUI/Vulkan resources.
+        QTimer::singleShot(750, qApp, &QCoreApplication::quit);
     };
 
     auto startClip = std::make_shared<std::function<void()>>();
@@ -4094,6 +4976,8 @@ void MainWindow::startGalleryPerformanceTest(
         state->firstPresentedIndex = -1;
         state->presentationIntervalsNs.clear();
         state->sampleTimer.restart();
+        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUTO_FADE"))
+            mClipPlayer->setPerformanceOverlayPinned(false);
         const int serial = ++state->actionSerial;
         if (!afterSeek && qEnvironmentVariableIsSet(
                 "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK"))
@@ -4281,7 +5165,7 @@ void MainWindow::openMountedDirectory(QWidget* fileWidget) {
     success = QProcess::startDetached("explorer", QStringList() << QDir::toNativeSeparators(mountPath));
 #elif __APPLE__
     success = QProcess::startDetached("/usr/bin/open", QStringList() << mountPath);
-#elif __linux__
+#elif defined(__linux__) && !defined(__ANDROID__)
     success = QProcess::startDetached("xdg-open", QStringList() << mountPath);
 #endif
 
@@ -4289,7 +5173,29 @@ void MainWindow::openMountedDirectory(QWidget* fileWidget) {
         QMessageBox::warning(this, "Error", QString("Failed to open directory: %1").arg(mountPath));
 }
 
-void MainWindow::revealSourceJson(const QString& jsonPath) {
+void MainWindow::revealSourceJson(const QString& jsonPath,
+                                  const QString& clipPath) {
+#ifdef __ANDROID__
+    if (clipPath.isEmpty() ||
+        motioncam::sourceDirectoryForImport(clipPath).isEmpty()) {
+        QMessageBox::information(this, tr("Source directory required"),
+            tr("Link this clip's source directory before editing its JSON."));
+        return;
+    }
+    const QString error = motioncam::editSidecarInExternalApp(
+        clipPath, QFileInfo(jsonPath).fileName());
+    if (!error.isEmpty()) {
+        QMessageBox::critical(this, tr("Could not open JSON"), error);
+        return;
+    }
+    for (const auto& mounted : mMountedFiles) {
+        if (mounted.srcFile != clipPath) continue;
+        mAndroidExternalJsonCard = fileWidgetForMount(mounted.mountId);
+        mAndroidExternalEditorLeftApp = false;
+        break;
+    }
+    return;
+#endif
     const QFileInfo jsonInfo(jsonPath);
     if (jsonPath.isEmpty() || !jsonInfo.exists()) {
         QMessageBox::warning(this, tr("Error"), tr("Source JSON file not found: %1").arg(jsonPath));
@@ -4302,7 +5208,7 @@ void MainWindow::revealSourceJson(const QString& jsonPath) {
         "explorer", QStringList() << "/select," << QDir::toNativeSeparators(jsonInfo.absoluteFilePath()));
 #elif __APPLE__
     success = QProcess::startDetached("/usr/bin/open", QStringList() << "-R" << jsonInfo.absoluteFilePath());
-#elif __linux__
+#elif defined(__linux__) && !defined(__ANDROID__)
     // FileManager1 is implemented by the major Linux file managers and asks
     // them to reveal/select the item rather than merely opening its parent.
     // Fall back to xdg-open when the desktop does not expose that interface.
@@ -4341,7 +5247,7 @@ void MainWindow::revealSourceJson(const QString& jsonPath) {
                              tr("Failed to open source JSON directory: %1").arg(jsonInfo.absolutePath()));
 }
 
-void MainWindow::removeFile(QWidget* fileWidget) {
+void MainWindow::removeFile(QWidget* fileWidget, bool releaseMount) {
     auto* scrollContent = ui->dragAndDropScrollArea->widget();
     auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
     const QString mountPath = fileWidget->property("mountPath").toString();
@@ -4359,18 +5265,20 @@ void MainWindow::removeFile(QWidget* fileWidget) {
         // The player owns a snapshot of the mounted clip list. Close it before
         // changing that list so it cannot keep rendering or navigate back to
         // an unmounted clip. closeEvent also cancels the active generation.
-        if (mClipPlayer) mClipPlayer->close();
+        if (mClipPlayer) mClipPlayer->closeImmediately();
         if (const auto cancellation = mThumbnailCancellations.take(mountId))
             cancellation->store(true);
         if (auto* dialog = mTimingDialogs.value(mountId).data()) dialog->close();
-        mFuseFilesystem->unmount(mountId);
-        cleanupArchiveMount(mountId);
+        if (releaseMount) {
+            mFuseFilesystem->unmount(mountId);
+            cleanupArchiveMount(mountId);
+        }
         mSelectedMountIds.remove(mountId);
         mSelectedFrames.remove(mountId);
         mLocalSettings.remove(mountId);
 
 #ifdef _WIN32
-        if (mDeleteOnUnmount && !mountPath.isEmpty()) {
+        if (releaseMount && mDeleteOnUnmount && !mountPath.isEmpty()) {
             QThread::msleep(100);
             QDir mountDirectory(mountPath);
             if (mountDirectory.exists() && !mountDirectory.removeRecursively())
@@ -4382,9 +5290,13 @@ void MainWindow::removeFile(QWidget* fileWidget) {
         auto it = std::find_if(
             mMountedFiles.begin(), mMountedFiles.end(),
             [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
-        if(it != mMountedFiles.end())
-
+        if(it != mMountedFiles.end()) {
+#ifdef __ANDROID__
+            motioncam::releaseSeekableSourceLink(
+                it->importFile);
+#endif
             mMountedFiles.erase(it);
+        }
     }
 
     // If all files are removed, show the drag-drop label again
@@ -4393,7 +5305,10 @@ void MainWindow::removeFile(QWidget* fileWidget) {
     }
     updateClipIndices();
     updateSelectionUi();
-    autoSaveSession();
+    if (mMountedFiles.empty() && !mClearingSession && !mGalleryPerformanceTestActive)
+        QFile::remove(autoSessionPath());
+    else
+        autoSaveSession();
 }
 
 void MainWindow::cleanupArchiveMount(motioncam::MountId mountId) {
@@ -4498,8 +5413,13 @@ void MainWindow::discardFile(QWidget* fileWidget) {
         auto it = std::find_if(
             mMountedFiles.begin(), mMountedFiles.end(),
             [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
-        if(it != mMountedFiles.end())
+        if(it != mMountedFiles.end()) {
+#ifdef __ANDROID__
+            motioncam::releaseSeekableSourceLink(
+                it->importFile);
+#endif
             mMountedFiles.erase(it);
+        }
     }
 
     if (mMountedFiles.empty()) {
@@ -4509,6 +5429,7 @@ void MainWindow::discardFile(QWidget* fileWidget) {
 #endif
 
 std::optional<QString> MainWindow::ensureRifeRuntime() {
+    if (!RIFE_SUPPORTED) return std::nullopt;
     const QString dataRoot = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     const QString runtimeRoot = rifeRuntimeRoot();
 #ifdef _WIN32
@@ -4543,7 +5464,11 @@ std::optional<QString> MainWindow::ensureRifeRuntime() {
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
+#ifdef __ANDROID__
+    showAndroidProgress(progress,this);
+#else
     progress.show();
+#endif
 
     QNetworkAccessManager network;
     QNetworkRequest request(QUrl(QString("https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS/archive/%1.zip")
@@ -4869,7 +5794,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     const bool hasDuplicateFrames = info->duplicateFrameMask &&
         std::any_of(info->duplicateFrameMask->begin(), info->duplicateFrameMask->end(),
                     [](bool duplicate) { return duplicate; });
-    const bool interpolateFrames = ui->rifeInterpolationCheckBox->isChecked() &&
+    const bool interpolateFrames = RIFE_SUPPORTED && ui->rifeInterpolationCheckBox->isChecked() &&
         (info->duplicatedFrames > 0 || hasDuplicateFrames);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) {
@@ -4884,6 +5809,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
     progress.setAutoReset(false);
+#ifdef __ANDROID__
+    AndroidFinalizeWakeLock finalizeWakeLock;
+    showAndroidProgress(progress,this);
+#endif
 
     try {
         motioncam::FinalizeOptions finalizeOptions;
@@ -5041,7 +5970,13 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             lock.unlock();
             progress.setMaximum(static_cast<int>(count));
             progress.setValue(static_cast<int>(completed));
-            if (!label.empty()) progress.setLabelText(QString::fromStdString(label));
+            if (!label.empty()) progress.setLabelText(
+#ifdef __ANDROID__
+                androidFinalizeEntryName(label)
+#else
+                QString::fromStdString(label)
+#endif
+            );
             QApplication::processEvents();
             if (progress.wasCanceled()) cancelled.store(true);
         }
@@ -5605,12 +6540,23 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         QFile::remove(gyroflowBackup);
 
         progress.close();
+#ifdef __ANDROID__
+        showAndroidNotice(tr("Camera Native finalization"),
+            tr("Created:\n%1\n%2").arg(outputPath, jsonPath));
+#else
         QMessageBox::information(this, "Camera Native finalization",
             QString("Created:\n%1\n%2").arg(outputPath, jsonPath));
+#endif
     } catch (const std::exception& e) {
         progress.close();
-        if (std::string(e.what()) != "Finalization cancelled")
+        if (std::string(e.what()) != "Finalization cancelled") {
+#ifdef __ANDROID__
+            showAndroidNotice(tr("Camera Native finalization"),
+                              QString::fromStdString(e.what()));
+#else
             QMessageBox::critical(this, "Camera Native finalization", QString::fromStdString(e.what()));
+#endif
+        }
     }
 
     // Restore the mounted view; Camera Native settings affect finalization only.
@@ -5750,37 +6696,73 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             return;
     }
 
-    // Rendered formats use a temporary directory to avoid ProjectedFS locks.
-    // The archive path also uses it as harmless transaction scratch space.
-    QString tempPath = mountPath + ".finalizing-" +
-        QUuid::createUuid().toString(QUuid::WithoutBraces);
-    const QString retainedOutputPath = mountPath + "-finalized";
-    if (!mUnmountOnFinalize && QFileInfo::exists(retainedOutputPath) &&
-        QMessageBox::question(this, "Replace finalized output?",
-            QString("Replace the existing finalized output at:\n%1").arg(retainedOutputPath),
-            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
-        return;
-    }
-    QDir tempDir(tempPath);
-
-    // Create temp directory
-    if (!tempDir.mkpath(".")) {
-        spdlog::error("Failed to create temp directory: {}", tempPath.toStdString());
-        QMessageBox::critical(this, "Finalize failed", "Could not create the temporary render directory.");
-        return;
-    }
-
-    spdlog::info("Using temp directory: {}", tempPath.toStdString());
-
     const bool hasDuplicateFrames = fileInfo->duplicateFrameMask &&
         std::any_of(fileInfo->duplicateFrameMask->begin(),
                     fileInfo->duplicateFrameMask->end(),
                     [](bool duplicate) { return duplicate; });
-    const bool interpolateFrames = !archiveDngs &&
+    const bool interpolateFrames = RIFE_SUPPORTED && !archiveDngs &&
         ui->rifeInterpolationCheckBox->isChecked() &&
         (fileInfo->duplicatedFrames > 0 || hasDuplicateFrames);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) return;
+
+    QString tempPath;
+    QString finalizedFolderName;
+    std::unique_ptr<QTemporaryDir> audioStaging;
+    const QString retainedOutputPath = mountPath + "-finalized";
+    QDir tempDir;
+#ifdef __ANDROID__
+    const bool androidDirectOutput = !archiveDngs;
+    if (androidDirectOutput) {
+        const QString folderName = QFileInfo(mountPath).fileName() + "-finalized";
+        const QString destinationMode=QSettings(PACKAGE_NAME,APP_NAME).value(
+            "android/finalizeDestination","documents").toString();
+        const QString destination = motioncam::prepareFinalizeOutput(folderName,
+            destinationMode,fileWidget->property("importPath").toString());
+        if (destination == "choose") {
+            mPendingAndroidFinalizeCard=fileWidget;
+            return;
+        }
+        if (!destination.startsWith("ready:")) {
+            showAndroidNotice(tr("Finalize failed"), destination.mid(6));
+            return;
+        }
+        finalizedFolderName = destination.mid(6);
+        if (!audioCodec.isEmpty() || !sourceAudioCodec.isEmpty()) {
+            audioStaging = std::make_unique<QTemporaryDir>();
+            if (!audioStaging->isValid()) {
+                motioncam::cancelFinalizeOutput();
+                showAndroidNotice(tr("Finalize failed"), tr("Could not prepare audio staging."));
+                return;
+            }
+        }
+    }
+#else
+    constexpr bool androidDirectOutput = false;
+#endif
+    if (!androidDirectOutput) {
+        // Desktop finalization uses a local transaction directory. Android
+        // streams completed entries straight to its SAF destination.
+        tempPath = mountPath + ".finalizing-" +
+            QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (!mUnmountOnFinalize && QFileInfo::exists(retainedOutputPath) &&
+            QMessageBox::question(this, "Replace finalized output?",
+                QString("Replace the existing finalized output at:\n%1").arg(retainedOutputPath),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+        tempDir.setPath(tempPath);
+        if (!tempDir.mkpath(".")) {
+            spdlog::error("Failed to create temp directory: {}", tempPath.toStdString());
+#ifdef __ANDROID__
+            showAndroidNotice(tr("Finalize failed"),
+                              tr("Could not create the temporary render directory."));
+#else
+            QMessageBox::critical(this, "Finalize failed", "Could not create the temporary render directory.");
+#endif
+            return;
+        }
+        spdlog::info("Using temp directory: {}", tempPath.toStdString());
+    }
 
     // Create progress dialog
     QProgressDialog progress(
@@ -5790,10 +6772,22 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
     progress.setAutoReset(false);
+#ifdef __ANDROID__
+    AndroidFinalizeWakeLock finalizeWakeLock;
+    showAndroidProgress(progress,this);
+#endif
     progress.setValue(0);
 
     // Get current render config
     auto settings = buildRenderSettings();
+    const bool exportBadPixelOptions = !archiveDngs &&
+        motioncam::effectiveBadPixelTreatment(settings.badPixelTreatment,
+            settings.vignetteCorrection) == motioncam::BadPixelTreatment::OptionsJsonOnly &&
+        !(settings.options & motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
+    QString badPixelSidecar = fileWidget->property("sidecarPath").toString();
+    if (badPixelSidecar.isEmpty()) badPixelSidecar = QString::fromStdString(
+        motioncam::vfs::sidecarPath(srcFile.toStdString()).string());
+
     bool enableCompression = !archiveDngs &&
         (settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION);
     motioncam::FinalizeOptions finalizeOptions;
@@ -5812,28 +6806,74 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     bool mountReleased = false;
     try {
         if (!archiveDngs) {
-            mFuseFilesystem->finalize(
-                mountId,
-                tempPath.toStdString(),
-                enableCompression,
-                finalizeOptions,
-                [&](size_t completed, size_t count, const std::string& name) {
+            auto updateFinalizeProgress = [&](size_t completed, size_t count,
+                                               const std::string& name) {
                     progress.setMaximum(static_cast<int>(count));
                     progress.setValue(static_cast<int>(completed));
                     if (!name.empty()) {
                         progress.setLabelText(
-                            QString("Finalizing—step %1 of %2: %3")
+                            QString("Finalizing—step %1 of %2:\n%3")
                                 .arg(std::min(completed + 1, count)).arg(count)
-                                .arg(QString::fromStdString(name)));
+                                .arg(
+#ifdef __ANDROID__
+                                    androidFinalizeEntryName(name)
+#else
+                                    QString::fromStdString(name)
+#endif
+                                ));
                     }
                     QApplication::processEvents();
                     return !progress.wasCanceled();
-                });
+                };
+#ifdef __ANDROID__
+            if (androidDirectOutput) {
+                auto* processing = dynamic_cast<motioncam::ProcessingFileSystem*>(
+                    mFuseFilesystem.get());
+                if (!processing)
+                    throw std::runtime_error("Android processing filesystem is unavailable");
+                const auto writeEntry = [](const std::string& name,
+                                            const std::vector<uint8_t>& bytes) {
+                    if (!motioncam::writeFinalizeOutputEntry(QString::fromStdString(name), bytes))
+                        throw std::runtime_error("Could not write finalized entry " + name +
+                            " to the selected output folder");
+                };
+                bool inspectedCfa = false;
+                processing->finalizeToEntries(mountId, enableCompression,
+                    finalizeOptions, updateFinalizeProgress,
+                    [&](const std::string& name, const std::vector<uint8_t>& bytes) {
+                        const QString entryName = QString::fromStdString(name);
+                        if (audioStaging && entryName.startsWith("audio.") &&
+                            QStringList{"wav", "flac", "opus", "aac"}.contains(
+                                QFileInfo(entryName).suffix().toLower())) {
+                            QFile audio(QDir(audioStaging->path()).filePath(entryName));
+                            if (!audio.open(QIODevice::WriteOnly) ||
+                                audio.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()) !=
+                                    static_cast<qint64>(bytes.size()) || !audio.flush())
+                                throw std::runtime_error("Could not stage finalized audio");
+                            return;
+                        }
+                        writeEntry(name, bytes);
+                        if (!inspectedCfa && entryName.endsWith(".dng", Qt::CaseInsensitive)) {
+                            inspectedCfa = true;
+                            if (exportBadPixelOptions) {
+                                const auto json = motioncam::vfs::finalizedCfaBadPixelOptions(
+                                    badPixelSidecar.toStdString(), bytes);
+                                if (!json.empty()) writeEntry(
+                                    (finalizedFolderName + ".json").toStdString(),
+                                    std::vector<uint8_t>(json.begin(), json.end()));
+                            }
+                        }
+                    });
+            } else
+#endif
+                mFuseFilesystem->finalize(mountId, tempPath.toStdString(),
+                    enableCompression, finalizeOptions, updateFinalizeProgress);
             if((!audioCodec.isEmpty() || !sourceAudioCodec.isEmpty()) &&
                !progress.wasCanceled()){
+                const QString audioDirectory = audioStaging ? audioStaging->path() : tempPath;
                 QString sourceAudio;
                 for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
-                    const QString candidate=QDir(tempPath).absoluteFilePath(name);
+                    const QString candidate=QDir(audioDirectory).absoluteFilePath(name);
                     if(QFile::exists(candidate)){sourceAudio=candidate;break;}
                 }
                 const bool copySource = !sourceAudioCodec.isEmpty() &&
@@ -5841,32 +6881,15 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 const QString targetCodec = copySource ? sourceAudioCodec : audioCodec;
                 if(!sourceAudio.isEmpty() && !targetCodec.isEmpty() &&
                    (copySource || !sourceAudio.endsWith("."+targetCodec,Qt::CaseInsensitive))){
-                    QString ffmpeg=QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(
-#ifdef _WIN32
-                        "ffmpeg.exe");
-#else
-                        "ffmpeg");
-#endif
-                    if(!QFileInfo(ffmpeg).isExecutable())ffmpeg=QStandardPaths::findExecutable("ffmpeg");
-                    if(ffmpeg.isEmpty())throw std::runtime_error("FFmpeg is required to encode finalized audio");
-                    const QString target=QDir(tempPath).absoluteFilePath("audio."+targetCodec);
-                    QProcess encoder;encoder.setProcessChannelMode(QProcess::MergedChannels);
-                    QStringList args{"-hide_banner","-y","-i",copySource ? srcFile : sourceAudio,
-                        "-map","0:a:0","-vn","-c:a",
-                        copySource ? "copy" : targetCodec=="flac" ? "flac" : "libopus"};
-                    if(!copySource && targetCodec=="opus")args << "-b:a" << "288k";
-                    args << target;
-                    encoder.start(ffmpeg,args);
-                    if(!encoder.waitForStarted())throw std::runtime_error("Could not start FFmpeg audio encoder");
+                    const QString target=QDir(audioDirectory).absoluteFilePath("audio."+targetCodec);
                     progress.setLabelText((copySource ? "Copying " : "Encoding ")+
                                           targetCodec.toUpper()+" audio...");
-                    while(encoder.state()!=QProcess::NotRunning){
-                        encoder.waitForFinished(100);QApplication::processEvents();
-                        if(progress.wasCanceled()){encoder.kill();encoder.waitForFinished();throw std::runtime_error("Finalization cancelled");}
-                    }
-                    if(encoder.exitCode()!=0)throw std::runtime_error(
-                        ("Audio encoding failed: "+QString::fromUtf8(encoder.readAll().right(4000))).toStdString());
-                    QFile::remove(sourceAudio);
+                    AudioWriter::convertFile((copySource ? srcFile : sourceAudio).toStdString(),
+                        target.toStdString(), targetCodec.toStdString(), copySource, [&] {
+                            QApplication::processEvents();
+                            return !progress.wasCanceled();
+                        });
+                    if (sourceAudio != target) QFile::remove(sourceAudio);
                 }
             }
         }
@@ -5874,18 +6897,34 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         if (!progress.wasCanceled()) {
             if (!archiveDngs)
                 spdlog::info("Rendered {} frames to temp directory", totalFrames);
-            if (!archiveDngs &&
-                motioncam::effectiveBadPixelTreatment(settings.badPixelTreatment,
-                    settings.vignetteCorrection) == motioncam::BadPixelTreatment::OptionsJsonOnly &&
-                !(settings.options & motioncam::RENDER_OPT_REMOSAIC_TO_BAYER)) {
-                QString sidecar = fileWidget->property("sidecarPath").toString();
-                if (sidecar.isEmpty())
-                    sidecar = QString::fromStdString(
-                        motioncam::vfs::sidecarPath(srcFile.toStdString()).string());
+            if (!androidDirectOutput && exportBadPixelOptions)
                 writeFinalizedCfaBadPixelOptions(tempPath,
-                    mUnmountOnFinalize ? mountPath : retainedOutputPath, sidecar);
-            }
+                    mUnmountOnFinalize ? mountPath : retainedOutputPath, badPixelSidecar);
 
+#ifdef __ANDROID__
+            if (androidDirectOutput) {
+                if (audioStaging) {
+                    for (const auto& name : QDir(audioStaging->path()).entryList(QDir::Files)) {
+                        QFile audio(QDir(audioStaging->path()).filePath(name));
+                        if (!audio.open(QIODevice::ReadOnly))
+                            throw std::runtime_error("Could not read finalized audio");
+                        const auto data = audio.readAll();
+                        if (audio.error() != QFileDevice::NoError ||
+                            !motioncam::writeFinalizeOutputEntry(name,
+                                std::vector<uint8_t>(data.begin(), data.end())))
+                            throw std::runtime_error("Could not write finalized audio to the selected output folder");
+                    }
+                }
+                motioncam::finishFinalizeOutput();
+                progress.close();
+                showAndroidNotice(tr("Finalize complete"),
+                    tr("The rendered files were written to the selected output folder."));
+                if (!mUnmountOnFinalize) return;
+                mFuseFilesystem->unmount(mountId);
+                cleanupArchiveMount(mountId);
+                mountReleased = true;
+            } else
+#endif
             if (archiveDngs) {
                 progress.setRange(0, 0);
                 progress.setLabelText("Compressing original MCRAW with 7z LZMA2 Ultra...");
@@ -5978,9 +7017,14 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
 
                 if (!mUnmountOnFinalize) {
                     progress.close();
+#ifdef __ANDROID__
+                    showAndroidNotice(tr("Finalize complete"),
+                        QString("The finalized archive was created at:\n%1").arg(archivePath));
+#else
                     QMessageBox::information(this, "Finalize complete",
                         QString("The clip remains mounted. Finalized archive was created at:\n%1")
                             .arg(archivePath));
+#endif
                     return;
                 }
 
@@ -6051,14 +7095,20 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             }
         } else {
             spdlog::info("Finalize cancelled by user");
-            tempDir.removeRecursively();
+            if (!androidDirectOutput) tempDir.removeRecursively();
+#ifdef __ANDROID__
+            if (androidDirectOutput) motioncam::cancelFinalizeOutput();
+#endif
             return;
         }
 
     } catch (const std::exception& e) {
         spdlog::error("Finalize failed: {}", e.what());
+#ifdef __ANDROID__
+        if (androidDirectOutput) motioncam::cancelFinalizeOutput();
+#endif
         if (!mountReleased) {
-            tempDir.removeRecursively();
+            if (!androidDirectOutput) tempDir.removeRecursively();
         }
         progress.close();
         if (std::string(e.what()) == "Finalization cancelled") {
@@ -6069,33 +7119,16 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             message += QString("\n\nThe completed temporary render was preserved at:\n%1")
                            .arg(tempPath);
         }
-        QMessageBox::critical(
-            this,
-            "Finalize failed",
-            message);
+#ifdef __ANDROID__
+        showAndroidNotice(tr("Finalize failed"), message);
+#else
+        QMessageBox::critical(this, "Finalize failed", message);
+#endif
         return;
     }
 
-    // Remove from UI
-    auto* scrollContent = ui->dragAndDropScrollArea->widget();
-    auto* scrollLayout = qobject_cast<QVBoxLayout*>(scrollContent->layout());
-
-    int fileWidgetIndex = scrollLayout->indexOf(fileWidget);
-    removeAdjacentClipSeparator(scrollLayout,fileWidgetIndex);
-
-    scrollLayout->removeWidget(fileWidget);
-    fileWidget->deleteLater();
-
-    // Remove from mounted files list
-    auto it = std::find_if(
-        mMountedFiles.begin(), mMountedFiles.end(),
-        [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
-    if(it != mMountedFiles.end())
-        mMountedFiles.erase(it);
-
-    if (mMountedFiles.empty()) {
-        ui->dragAndDropLabel->show();
-    }
+    // Reuse normal clip removal after the output transaction has committed.
+    removeFile(fileWidget, false);
 }
 
 void MainWindow::updateUi() {
@@ -6769,26 +7802,86 @@ void MainWindow::onCfaPhaseChanged(std::string input) {
 }
 
 void MainWindow::onOpenPreferences() {
-    SettingsDialog dialog(this);
-    dialog.setCacheFolder(mCacheRootFolder);
-    dialog.setAutoApplyClipSettings(mAutoApplyClipSettings);
-    dialog.setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
-    dialog.setDetectDuplicateDngs(mDetectDuplicateDngs);
-    dialog.setUnmountOnFinalize(mUnmountOnFinalize);
-    dialog.setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
-    dialog.setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
-    dialog.setFuseMountingEnabled(mFuseMountingEnabled);
-    dialog.setFuseMountingAvailable(mFuseMountingAvailable);
+#ifdef __ANDROID__
+    if (mSettingsDialog) {
+        mSettingsDialog->raise();
+        mSettingsDialog->activateWindow();
+        return;
+    }
+    auto* dialog = new SettingsDialog(ui->centralwidget);
+    mSettingsDialog = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowFlags(Qt::Widget);
+    dialog->setAutoFillBackground(true);
+    new motioncam::PageCrossfade(dialog);
+#else
+    SettingsDialog stackDialog(this);
+    auto* dialog = &stackDialog;
+#endif
+    dialog->setCacheFolder(mCacheRootFolder);
+    dialog->setAutoApplyClipSettings(mAutoApplyClipSettings);
+    dialog->setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
+    dialog->setDetectDuplicateDngs(mDetectDuplicateDngs);
+    dialog->setUnmountOnFinalize(mUnmountOnFinalize);
+    dialog->setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
+    dialog->setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
+    dialog->setFuseMountingEnabled(mFuseMountingEnabled);
+    dialog->setFuseMountingAvailable(mFuseMountingAvailable);
 #ifdef _WIN32
-    dialog.setDeleteOnUnmount(mDeleteOnUnmount);
-    dialog.setCachePolicyMode(mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
-    dialog.setCacheQuotaGb(static_cast<double>(mCacheQuotaBytes) / (1024.0 * 1024.0 * 1024.0));
-    dialog.setCacheCleanupIntervalSeconds(mCacheCleanupIntervalSeconds);
+    dialog->setDeleteOnUnmount(mDeleteOnUnmount);
+    dialog->setCachePolicyMode(mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
+    dialog->setCacheQuotaGb(static_cast<double>(mCacheQuotaBytes) / (1024.0 * 1024.0 * 1024.0));
+    dialog->setCacheCleanupIntervalSeconds(mCacheCleanupIntervalSeconds);
 #endif
 
-    if (dialog.exec() != QDialog::Accepted)
-        return;
+#ifdef __ANDROID__
+    QSettings androidPreferences(PACKAGE_NAME, APP_NAME);
+    dialog->setAndroidFinalizeDestination(
+        androidPreferences.value("android/finalizeDestination", "documents").toString(),
+        motioncam::legacyCustomFinalizeDirectory());
+    connect(dialog, &QDialog::finished, this, [this, dialog](int result) {
+        if (result == QDialog::Accepted) applyPreferences(*dialog);
+        mSettingsDialog = nullptr;
+        updateAndroidOrientationPolicy();
+        dialog->deleteLater();
+    });
+    dialog->setGeometry(ui->centralwidget->rect());
+    motioncam::PageCrossfade::show(dialog);
+    updateAndroidOrientationPolicy();
+#else
+    if (dialog->exec() == QDialog::Accepted) applyPreferences(*dialog);
+#endif
+}
 
+#ifdef __ANDROID__
+void MainWindow::hideSecondaryWindowsForGallery() {
+    mHiddenForGallery.clear();
+    auto hide = [this](QWidget* window) {
+        if (window && window->isVisible()) {
+            mHiddenForGallery.append(window);
+            window->setProperty("suppressNavigationFade", true);
+            window->hide();
+            window->setProperty("suppressNavigationFade", false);
+        }
+    };
+    hide(mSettingsDialog);
+    for (const auto& dialog : mTimingDialogs) hide(dialog);
+}
+
+void MainWindow::restoreSecondaryWindowsAfterGallery() {
+    for (const auto& window : mHiddenForGallery) {
+        if (window) {
+            window->setGeometry(ui->centralwidget->rect());
+            window->show();
+            window->raise();
+        }
+    }
+    mHiddenForGallery.clear();
+    updateAndroidOrientationPolicy();
+}
+#endif
+
+void MainWindow::applyPreferences(SettingsDialog& dialog) {
     const bool wasAutoApply = mAutoApplyClipSettings;
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
@@ -6798,6 +7891,10 @@ void MainWindow::onOpenPreferences() {
     mUnmountOnFinalize = dialog.getUnmountOnFinalize();
     mFinalizeSelectionToSingleDirectory = dialog.getFinalizeSelectionToSingleDirectory();
     mInheritHeroFrameSidecars = dialog.getInheritHeroFrameSidecars();
+#ifdef __ANDROID__
+    QSettings(PACKAGE_NAME, APP_NAME).setValue(
+        "android/finalizeDestination", dialog.getAndroidFinalizeDestination());
+#endif
     const bool requestedProjection = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;
     if (requestedProjection != mFuseMountingEnabled) {
         std::vector<motioncam::MountId> changedMounts;
@@ -6812,9 +7909,10 @@ void MainWindow::onOpenPreferences() {
                     card->setProperty("projectedFiles", requestedProjection);
                     if (auto* button = card->findChild<QPushButton*>(QStringLiteral("openDestinationButton"))) {
                         button->setEnabled(requestedProjection);
-                        button->setToolTip(requestedProjection ? QString() :
-                            tr("Virtual DNG folder mounting is disabled."));
+                        button->setVisible(requestedProjection);
                     }
+                    if(auto* button=card->findChild<QPushButton*>(QStringLiteral("removeClipButton")))
+                        button->setText(requestedProjection?tr("Unmount"):tr("Remove"));
                 }
             }
         } catch (const std::exception& error) {
@@ -6876,6 +7974,7 @@ bool MainWindow::saveSessionToFile(const QString& path) {
     };
     QJsonObject root;
     root["version"] = 3;
+    root["sessionFile"] = mCurrentSessionFile;
     root["globalSettings"] = encode(mGlobalRenderSettings);
     root["cacheFolder"] = mCacheRootFolder;
     QJsonArray clips;
@@ -6892,15 +7991,27 @@ bool MainWindow::saveSessionToFile(const QString& path) {
         clips.append(clip);
     }
     root["clips"] = clips;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) ||
-        file.write(QJsonDocument(root).toJson()) < 0 || !file.commit()) {
+    const QByteArray json=QJsonDocument(root).toJson();
+    bool saved=false;
+#ifdef __ANDROID__
+    if(path.startsWith("content:")){
+        const QString error=motioncam::writeDocument(path,json);
+        saved=error.isEmpty();
+        if(!saved)spdlog::error("Could not save session document: {}",error.toStdString());
+    }else
+#endif
+    {
+        QSaveFile file(path);
+        saved=file.open(QIODevice::WriteOnly)&&file.write(json)==json.size()&&file.commit();
+    }
+    if (!saved) {
         QMessageBox::warning(this, tr("Save Session"), tr("Could not save %1").arg(path));
         return false;
     }
     if (QFileInfo(path).absoluteFilePath() != QFileInfo(autoSessionPath()).absoluteFilePath()) {
         mCurrentSessionFile = path;
         addRecentSession(path);
+        autoSaveSession();
     }
     return true;
 }
@@ -6912,6 +8023,10 @@ void MainWindow::clearSession() {
         if (card) removeFile(card);
         else {
             const auto mountId = mMountedFiles.front().mountId;
+#ifdef __ANDROID__
+            motioncam::releaseSeekableSourceLink(
+                mMountedFiles.front().importFile);
+#endif
             mFuseFilesystem->unmount(mountId);
             cleanupArchiveMount(mountId);
             mMountedFiles.removeFirst();
@@ -6967,6 +8082,10 @@ void MainWindow::loadSessionFromFile(const QString& path) {
     for (const auto& value : clips) {
         const auto clip = value.toObject();
         const QString clipPath = clip["path"].toString();
+#ifdef __ANDROID__
+        if (!QFileInfo::exists(clipPath))
+            motioncam::reopenSeekableSourceLink(clipPath);
+#endif
         if (!QFileInfo::exists(clipPath)) continue;
         clipPaths.append(clipPath);
         clipsByPath.insert(QFileInfo(clipPath).absoluteFilePath(), clip);
@@ -6979,7 +8098,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
             const auto id = mounted.mountId;
             const auto local = decode(clip["localSettings"].toObject());
             mLocalSettings.insert(id, local);
-            mFuseFilesystem->updateOptions(id, local);
+            mFuseFilesystem->updateOptions(id, settingsForMount(id));
             updateLocalBadge(id);
         }
         QSet<int> selected;
@@ -6987,12 +8106,14 @@ void MainWindow::loadSessionFromFile(const QString& path) {
             if(value.isDouble()&&value.toInt()>=0)selected.insert(value.toInt());
         if(!selected.isEmpty())mSelectedFrames.insert(mounted.mountId,std::move(selected));
     });
-    if (QFileInfo(path).absoluteFilePath() == QFileInfo(autoSessionPath()).absoluteFilePath())
-        mCurrentSessionFile.clear();
-    else {
-        mCurrentSessionFile = path;
-        addRecentSession(path);
-    }
+    // Cards are created with global settings before their local overrides
+    // are restored. Refresh their metadata from the updated backend now.
+    updateFpsLabels();
+    updateCalibrationButtonStates();
+    const bool snapshot=QFileInfo(path).absoluteFilePath()==QFileInfo(autoSessionPath()).absoluteFilePath();
+    mCurrentSessionFile=snapshot?document.object().value("sessionFile").toString(path):path;
+    if(mCurrentSessionFile.isEmpty())mCurrentSessionFile=path;
+    if(!snapshot)addRecentSession(path);
     autoSaveSession();
 }
 
@@ -7017,6 +8138,26 @@ void MainWindow::autoSaveSession() {
 void MainWindow::promptToResumeSession() {
     const QString path = autoSessionPath();
     if (!QFileInfo::exists(path)) return;
+#ifdef __ANDROID__
+    // Embedded in the active Qt surface to avoid Android popup-window crashes.
+    auto* overlay=new AndroidPopup(this,tr("Resume Session"));
+    auto* question=new QLabel(tr("Resume the last session or start a new one?"),overlay->panel);
+    question->setWordWrap(true);overlay->content->addWidget(question);
+    auto* buttons=new QDialogButtonBox(overlay->panel);
+    auto* resume=buttons->addButton(tr("Resume"),QDialogButtonBox::AcceptRole);
+    auto* newSession=buttons->addButton(tr("New Session"),QDialogButtonBox::RejectRole);
+    overlay->content->addWidget(buttons);
+    connect(newSession, &QPushButton::clicked, overlay, [overlay] {
+        overlay->hide();
+        overlay->deleteLater();
+    });
+    connect(resume, &QPushButton::clicked, overlay, [this, overlay, path] {
+        overlay->hide();
+        overlay->deleteLater();
+        QTimer::singleShot(0, this, [this, path] { loadSessionFromFile(path); });
+    });
+    overlay->open();
+#else
     QMessageBox prompt(this);
     prompt.setIcon(QMessageBox::Question);
     prompt.setWindowTitle(tr("Resume Session"));
@@ -7026,8 +8167,26 @@ void MainWindow::promptToResumeSession() {
     prompt.setDefaultButton(resume);
     prompt.exec();
     if (prompt.clickedButton() == resume) loadSessionFromFile(path);
+#endif
     // An empty new session leaves the last snapshot available on the next start.
 }
+
+#ifdef __ANDROID__
+void MainWindow::showAndroidNotice(const QString& title, const QString& message) {
+    if (QApplication::applicationState() != Qt::ApplicationActive || !isVisible()) {
+        mPendingAndroidNoticeTitle = title;
+        mPendingAndroidNoticeMessage = message;
+        return;
+    }
+    auto* overlay=new AndroidPopup(this,title);
+    auto* body=new QLabel(message,overlay->panel);body->setTextFormat(Qt::PlainText);body->setWordWrap(true);
+    overlay->content->addWidget(body);
+    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok,overlay->panel);
+    overlay->content->addWidget(buttons);
+    connect(buttons,&QDialogButtonBox::accepted,overlay,&QWidget::deleteLater);
+    overlay->open();
+}
+#endif
 
 #ifdef __APPLE__
 void MainWindow::cleanupStaleMacFuseMounts() {
@@ -7061,7 +8220,7 @@ void MainWindow::forceUnmountAllMacFuseMounts() {
 #endif
 
 void MainWindow::addRecentSession(const QString& path) {
-    const QString normalized = QFileInfo(path).absoluteFilePath();
+    const QString normalized = path.startsWith("content:")?path:QFileInfo(path).absoluteFilePath();
     if (normalized == QFileInfo(autoSessionPath()).absoluteFilePath()) return;
     mRecentSessions.removeAll(normalized);
     mRecentSessions.prepend(normalized);
@@ -7078,10 +8237,17 @@ void MainWindow::updateRecentSessionsMenu() {
         empty->setEnabled(false);
     }
     for (const QString& path : mRecentSessions) {
-        auto* action = mRecentSessionsMenu->addAction(QFileInfo(path).completeBaseName());
+        QString name=QFileInfo(path).completeBaseName();
+#ifdef __ANDROID__
+        if(path.startsWith("content:")){
+            const QString displayName=motioncam::documentDisplayName(path);
+            if(!displayName.isEmpty())name=QFileInfo(displayName).completeBaseName();
+        }
+#endif
+        auto* action = mRecentSessionsMenu->addAction(name);
         action->setToolTip(path);
         connect(action, &QAction::triggered, this, [this, path] {
-            if (QFileInfo::exists(path)) {
+            if (path.startsWith("content:")||QFileInfo::exists(path)) {
                 if (confirmSaveBeforeReplacingSession()) loadSessionFromFile(path);
             }
             else {
@@ -7109,9 +8275,23 @@ void MainWindow::onNewSession() {
     clearApplyFeedback();
 }
 void MainWindow::onLoadSession() {
-    const QString path = QFileDialog::getOpenFileName(this, tr("Load Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
-    if (!path.isEmpty() && confirmSaveBeforeReplacingSession()) loadSessionFromFile(path);
+    const QUrl selected=QFileDialog::getOpenFileUrl(this,tr("Load Session"),
+        QUrl::fromLocalFile(sessionDirectory()),tr("JSON files (*.json)"));
+    const QString path=selected.isLocalFile()?selected.toLocalFile():selected.toString(QUrl::FullyEncoded);
+    if(!path.isEmpty()&&confirmSaveBeforeReplacingSession())loadSessionFromFile(path);
 }
+
+QString MainWindow::promptSessionSavePath() {
+    const QString initial=mCurrentSessionFile.isEmpty()?sessionDirectory():mCurrentSessionFile;
+    const QUrl selected=QFileDialog::getSaveFileUrl(this,tr("Save Session As"),
+        initial.startsWith("content:")?QUrl(initial):QUrl::fromLocalFile(initial),
+        tr("JSON files (*.json)"));
+    QString path=selected.isLocalFile()?selected.toLocalFile():selected.toString(QUrl::FullyEncoded);
+    if(!path.isEmpty()&&!path.startsWith("content:")&&
+       !path.endsWith(".json",Qt::CaseInsensitive))path+=".json";
+    return path;
+}
+
 bool MainWindow::confirmSaveBeforeReplacingSession() {
     if (mMountedFiles.isEmpty()) return true;
     QMessageBox prompt(this);
@@ -7127,9 +8307,8 @@ bool MainWindow::confirmSaveBeforeReplacingSession() {
     if (prompt.clickedButton() != save) return true;
     QString path = mCurrentSessionFile;
     if (path.isEmpty()) {
-        path = QFileDialog::getSaveFileName(this, tr("Save Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
+        path = promptSessionSavePath();
         if (path.isEmpty()) return false;
-        if (!path.endsWith(".json", Qt::CaseInsensitive)) path += ".json";
     }
     return saveSessionToFile(path);
 }
@@ -7138,9 +8317,8 @@ void MainWindow::onSaveSession() {
     else saveSessionToFile(mCurrentSessionFile);
 }
 void MainWindow::onSaveSessionAs() {
-    QString path = QFileDialog::getSaveFileName(this, tr("Save Session"), sessionDirectory(), tr("MotionCam Session (*.json)"));
+    QString path = promptSessionSavePath();
     if (!path.isEmpty()) {
-        if (!path.endsWith(".json", Qt::CaseInsensitive)) path += ".json";
         saveSessionToFile(path);
     }
 }
@@ -7203,6 +8381,18 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     if (jsonPath.isEmpty()) jsonPath = fileInfo.isDir()
         ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
         : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
+#ifdef __ANDROID__
+    const QString sourceDirectory = motioncam::sourceDirectoryForImport(filePath);
+    if (sourceDirectory.isEmpty()) {
+        mPendingAndroidJsonCard = fileWidget;
+        if (auto* scanButton = findChild<QPushButton*>("scanSidecarDirectoryButton"))
+            scanButton->click();
+        return;
+    }
+    fileWidget->setProperty("sourceDirectory", sourceDirectory);
+    if (auto* label = fileWidget->findChild<QLabel*>("sourceDirectoryLabel"))
+        label->setText(tr("Source: %1").arg(sourceDirectory));
+#endif
 
     // When exactly one clip with a valid sidecar is selected, the calibration
     // buttons on the other clips copy that sidecar instead of creating a new
@@ -7211,6 +8401,20 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         if (!candidate->property("calibButton").toBool()) continue;
         const QString sourcePath = candidate->property("copyJsonSourcePath").toString();
         if (!sourcePath.isEmpty()) {
+#ifdef __ANDROID__
+            QFile sourceJson(sourcePath);
+            if (!sourceJson.open(QIODevice::ReadOnly)) {
+                QMessageBox::critical(this, tr("Error"), sourceJson.errorString());
+                return;
+            }
+            const QString writeError = motioncam::writeSidecarToSource(
+                filePath, QFileInfo(jsonPath).fileName(),
+                QString::fromUtf8(sourceJson.readAll()));
+            if (!writeError.isEmpty()) {
+                QMessageBox::critical(this, tr("Error"), writeError);
+                return;
+            }
+#endif
             if (!QFile::copy(sourcePath, jsonPath)) {
                 QMessageBox::critical(this, tr("Error"),
                     tr("Failed to copy calibration file:\n%1\n\nto:\n%2")
@@ -7269,6 +8473,16 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         spdlog::warn("Could not merge new calibration template fields: {}", e.what());
     }
 
+#ifdef __ANDROID__
+    const QString writeError = motioncam::writeSidecarToSource(
+        filePath, QFileInfo(jsonPath).fileName(),
+        QString::fromStdString(jsonContent));
+    if (!writeError.isEmpty()) {
+        QMessageBox::critical(this, tr("Error"), writeError);
+        return;
+    }
+#endif
+
     // Write JSON file
     std::ofstream outFile(jsonPath.toStdString());
     if (!outFile.is_open()) {
@@ -7293,9 +8507,16 @@ void MainWindow::reloadCalibration(QWidget* fileWidget) {
     // since the last rescan, and limiting invalidation to the clicked card
     // leaves the remaining processed thumbnails stale. Preserve each clip's
     // global/local settings and its routed sidecar path.
-    for (const auto& mounted : mMountedFiles)
+    for (const auto& mounted : mMountedFiles) {
+#ifdef __ANDROID__
+        const QString sidecarSyncError = motioncam::syncSidecarsForImport(
+            mounted.srcFile);
+        if (!sidecarSyncError.isEmpty())
+            spdlog::warn("{}", sidecarSyncError.toStdString());
+#endif
         mFuseFilesystem->updateOptions(
             mounted.mountId, settingsForMount(mounted.mountId));
+    }
 
     // FileInfo (including sidecar validity) is rebuilt by updateOptions.  Read
     // it only after the reload so Create JSON and the clickable Loaded/Ignored
@@ -7386,7 +8607,9 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
                 : tr("no %1").arg(missing.join(", no ")));
             label->setToolTip(tr("Metadata availability for the first source frame."));
             label->setVisible(!missing.isEmpty());
+#ifndef __ANDROID__
             fileWidget->setFixedHeight(missing.isEmpty() ? 156 : 166);
+#endif
         }
 
         // Find the calibration button, status container, label, and refresh button
@@ -7422,6 +8645,7 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
         }
 
         actualRefreshButton->setProperty("sourceJsonPath", jsonPath);
+        actualRefreshButton->setProperty("sourceClipPath", filePath);
 
         const bool canCopySelectedJson = !selectedJsonPath.isEmpty() &&
                                          fileWidget != selectedFileWidget;
@@ -7452,7 +8676,7 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
                 // Valid calibration found
                 actualCalibButton->setVisible(false);
                 actualStatusLabel->setText("Calibration Loaded");
-                actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #00AA00;");
+                styleClipMetadata(actualStatusLabel,QStringLiteral("font-weight:bold;color:#00AA00;"));
                 actualStatusLabel->setVisible(true);
 
                 // Adjust label size and position
@@ -7471,7 +8695,7 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
                 // Invalid calibration
                 actualCalibButton->setVisible(false);
                 actualStatusLabel->setText("Calibration Ignored");
-                actualStatusLabel->setStyleSheet("font-size: 9pt; font-weight: bold; color: #AA0000;");
+                styleClipMetadata(actualStatusLabel,QStringLiteral("font-weight:bold;color:#AA0000;"));
                 actualStatusLabel->setVisible(true);
 
                 // Adjust label size and position

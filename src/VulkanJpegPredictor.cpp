@@ -1,4 +1,7 @@
 #include "VulkanJpegPredictor.h"
+#ifdef __ANDROID__
+#include "android/VulkanInteropDevice.h"
+#endif
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 #include "VulkanJpegContext.h"
@@ -28,7 +31,13 @@ bool VulkanJpegContext::init() {
     if (vulkan) return true;
     log = pl_log_create(PL_API_VER, nullptr);
     if (!log) { unavailable = true; return false; }
+#ifdef __ANDROID__
+    pl_vulkan_params params = pl_vulkan_default_params;
+    enableAndroidVulkanInterop(params);
+    vulkan = pl_vulkan_create(log, &params);
+#else
     vulkan = pl_vulkan_create(log, nullptr);
+#endif
     if (!vulkan || !vulkan->gpu->glsl.compute) {
         unavailable = true;
         return false;

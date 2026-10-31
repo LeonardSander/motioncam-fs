@@ -2,6 +2,7 @@
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 #include "VulkanJpegContext.h"
+#include "VulkanGalleryPreview.h"
 #include <libplacebo/gpu.h>
 #include <algorithm>
 #include <array>
@@ -563,6 +564,7 @@ struct DecodeState {
     pl_buf validReadback = nullptr;
     ~DecodeState() {
         if (!gpu) return;
+        releaseVulkanGalleryTextureDevice(gpu);
         pl_gpu_finish(gpu);
         for (auto* buffer : {&stream, &metadata, &image, &status,
                              &streamUpload, &metadataUpload, &seed, &seedUpload,
@@ -651,6 +653,52 @@ struct DecodeState {
         return parser && residentMeta && pass && residentDirect &&
                scatter && validate;
     }
+    void decodeImage(pl_buf input, uint32_t tileCount, bool directOutput,
+                     uint32_t width, uint32_t tileWidth, uint32_t tileHeight, bool profile) {
+        pl_desc_binding bindings[5]{};
+        bindings[0].object = input;
+        bindings[1].object = metadata;
+        bindings[2].object = directOutput ? assembled : image;
+        bindings[3].object = status;
+        bindings[4].object = lookup;
+        uint32_t constants[5] = {
+            tileCount, width, tileWidth, tileHeight, tileWidth ? width / tileWidth : 0u};
+        pl_pass_run_params run{};
+        run.pass = directOutput ? residentDirect : pass;
+        run.desc_bindings = bindings;
+        run.push_constants = directOutput ? constants : &tileCount;
+        if (profile) run.timer = timer;
+        run.compute_groups[0] = int((tileCount + 7u) / 8u);
+        run.compute_groups[1] = run.compute_groups[2] = 1;
+        pl_pass_run(gpu, &run);
+    }
+    void scatterImage(uint32_t width, uint32_t height, uint32_t tileWidth,
+                      uint32_t tileHeight, uint32_t channels, bool profile) {
+        uint32_t constants[6] = {width, height, tileWidth, tileHeight, width / tileWidth, channels};
+        pl_desc_binding bindings[3]{};
+        bindings[0].object = image;
+        bindings[1].object = metadata;
+        bindings[2].object = assembled;
+        pl_pass_run_params run{};
+        run.pass = scatter;
+        run.desc_bindings = bindings;
+        run.push_constants = constants;
+        if (profile) run.timer = scatterTimer;
+        run.compute_groups[0] = int((uint64_t(width) * height * channels / 2u + 255u) / 256u);
+        run.compute_groups[1] = run.compute_groups[2] = 1;
+        pl_pass_run(gpu, &run);
+    }
+    void validateTiles(uint32_t tileCount) {
+        pl_desc_binding bindings[2]{};
+        bindings[0].object = status;
+        bindings[1].object = valid;
+        pl_pass_run_params run{};
+        run.pass = validate;
+        run.desc_bindings = bindings;
+        run.push_constants = &tileCount;
+        run.compute_groups[0] = run.compute_groups[1] = run.compute_groups[2] = 1;
+        pl_pass_run(gpu, &run);
+    }
     bool buffer(pl_buf& target, size_t bytes, bool readable = false,
                 bool writable = false) {
         pl_buf_params params{};
@@ -736,48 +784,9 @@ bool jpegDecodeResidentTiledImageVulkan(
     metaRun.compute_groups[0] = int((tileCount + 63u) / 64u);
     metaRun.compute_groups[1] = metaRun.compute_groups[2] = 1;
     pl_pass_run(gpu, &metaRun);
-    pl_desc_binding decodeBindings[5]{};
-    decodeBindings[0].object = stream;
-    decodeBindings[1].object = s.metadata;
-    decodeBindings[2].object = directOutput ? s.assembled : s.image;
-    decodeBindings[3].object = s.status;
-    decodeBindings[4].object = s.lookup;
-    pl_pass_run_params decodeRun{};
-    decodeRun.pass = directOutput ? s.residentDirect : s.pass;
-    decodeRun.desc_bindings = decodeBindings;
-    uint32_t directConstants[5] = {
-        tileCount, width, tileWidth, tileHeight, width / tileWidth};
-    decodeRun.push_constants = directOutput ? directConstants : &tileCount;
-    if (profile) decodeRun.timer = s.timer;
-    decodeRun.compute_groups[0] = int((tileCount + 7u) / 8u);
-    decodeRun.compute_groups[1] = decodeRun.compute_groups[2] = 1;
-    pl_pass_run(gpu, &decodeRun);
-    if (!directOutput) {
-        uint32_t scatterConstants[6] = {width, height, tileWidth, tileHeight,
-                                        width / tileWidth, channels};
-        pl_desc_binding scatterBindings[3]{};
-        scatterBindings[0].object = s.image;
-        scatterBindings[1].object = s.metadata;
-        scatterBindings[2].object = s.assembled;
-        pl_pass_run_params scatterRun{};
-        scatterRun.pass = s.scatter;
-        scatterRun.desc_bindings = scatterBindings;
-        scatterRun.push_constants = scatterConstants;
-        if (profile) scatterRun.timer = s.scatterTimer;
-        scatterRun.compute_groups[0] = int((samples / 2u + 255u) / 256u);
-        scatterRun.compute_groups[1] = scatterRun.compute_groups[2] = 1;
-        pl_pass_run(gpu, &scatterRun);
-    }
-    pl_desc_binding validationBindings[2]{};
-    validationBindings[0].object = s.status;
-    validationBindings[1].object = s.valid;
-    pl_pass_run_params validationRun{};
-    validationRun.pass = s.validate;
-    validationRun.desc_bindings = validationBindings;
-    validationRun.push_constants = &tileCount;
-    validationRun.compute_groups[0] = validationRun.compute_groups[1] =
-        validationRun.compute_groups[2] = 1;
-    pl_pass_run(gpu, &validationRun);
+    s.decodeImage(stream, tileCount, directOutput, width, tileWidth, tileHeight, profile);
+    if (!directOutput) s.scatterImage(width, height, tileWidth, tileHeight, channels, profile);
+    s.validateTiles(tileCount);
     const bool consumed = consume({gpu, s.assembled, s.valid, width, height,
                                    channels, 16u, width * channels / 2u});
     if (profile) {
@@ -892,6 +901,9 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
         return false;
     const size_t streamSize = size_t((scanBytes + 3u) & ~3ull);
     const size_t imageSize = size_t(sampleCount) * 2u;
+    // Reuse the encoder round-trip decoder's direct CFA output layout.
+    const bool directOutput = consume && tiles.front().channels == 1u &&
+        !std::getenv("MOTIONCAM_JPEG_RESIDENT_SCATTER");
     const size_t statusSize = tiles.size() * 4u;
     const size_t metaSize = tiles.size() * kMetaWords * 4u;
     const size_t seedSize = seeds.size() * 4u;
@@ -904,7 +916,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
                   : !s.buffer(s.metadataUpload, metaSize, false, true)) ||
         !s.buffer(s.lookup, lookupSize) ||
         (!gpuParse && !s.buffer(s.lookupUpload, lookupSize, false, true)) ||
-        !s.buffer(s.image, imageSize) || !s.buffer(s.status, statusSize) ||
+        (!directOutput && !s.buffer(s.image, imageSize)) || !s.buffer(s.status, statusSize) ||
         (!consume && !s.buffer(s.readback, imageSize, true)) ||
         (consume ? (!s.buffer(s.valid, 4u) ||
                     (readValidation && !s.buffer(s.validReadback, 4u, true)))
@@ -993,54 +1005,17 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
     }
     const auto uploadedAt = std::chrono::steady_clock::now();
     uint32_t tileCount = uint32_t(tiles.size());
-    pl_desc_binding bindings[5]{};
-    bindings[0].object = s.stream;
-    bindings[1].object = s.metadata;
-    bindings[2].object = s.image;
-    bindings[3].object = s.status;
-    bindings[4].object = s.lookup;
-    pl_pass_run_params run{};
-    run.pass = s.pass;
-    run.desc_bindings = bindings;
-    run.push_constants = &tileCount;
-    if (profile) run.timer = s.timer;
-    run.compute_groups[0] = int((tileCount + 7u) / 8u);
-    run.compute_groups[1] = run.compute_groups[2] = 1;
-    pl_pass_run(gpu, &run);
+    s.decodeImage(s.stream, tileCount, directOutput, width, tileWidth, tileHeight, profile);
     if (!consume)
         pl_buf_copy(gpu, s.readback, 0, s.image, 0, imageSize);
     if (!consume) {
         pl_buf_copy(gpu, s.statusReadback, 0, s.status, 0, statusSize);
     }
-    if (consume) {
-        pl_desc_binding validationBindings[2]{};
-        validationBindings[0].object = s.status;
-        validationBindings[1].object = s.valid;
-        pl_pass_run_params validationRun{};
-        validationRun.pass = s.validate;
-        validationRun.desc_bindings = validationBindings;
-        validationRun.push_constants = &tileCount;
-        validationRun.compute_groups[0] = validationRun.compute_groups[1] =
-            validationRun.compute_groups[2] = 1;
-        pl_pass_run(gpu, &validationRun);
-    }
+    if (consume) s.validateTiles(tileCount);
     const auto dispatchedAt = std::chrono::steady_clock::now();
+    if (consume && !directOutput)
+        s.scatterImage(width, height, tileWidth, tileHeight, tiles.front().channels, profile);
     if (consume) {
-        uint32_t scatterConstants[6] = {width, height, tileWidth, tileHeight,
-                                        width / tileWidth, tiles.front().channels};
-        pl_desc_binding scatterBindings[3]{};
-        scatterBindings[0].object = s.image;
-        scatterBindings[1].object = s.metadata;
-        scatterBindings[2].object = s.assembled;
-        pl_pass_run_params scatterRun{};
-        scatterRun.pass = s.scatter;
-        scatterRun.desc_bindings = scatterBindings;
-        scatterRun.push_constants = scatterConstants;
-        if (profile) scatterRun.timer = s.scatterTimer;
-        scatterRun.compute_groups[0] = int((uint64_t(width) * height *
-                                            tiles.front().channels / 2u + 255u) / 256u);
-        scatterRun.compute_groups[1] = scatterRun.compute_groups[2] = 1;
-        pl_pass_run(gpu, &scatterRun);
         if (readValidation) {
             pl_buf_copy(gpu, s.validReadback, 0, s.valid, 0, 4u);
             uint32_t valid = 0;
@@ -1135,6 +1110,54 @@ bool jpegDecodeTiledImageVulkan(
                                   tileWidth, tileHeight, &consume, contiguous);
 }
 
+bool jpegDecodeTiledImageVulkanRetained(
+    const std::vector<VulkanJpegTile>& tiles, uint32_t width, uint32_t height,
+    uint32_t tileWidth, uint32_t tileHeight, VulkanDecodedJpegImage& image,
+    const VulkanJpegContiguousSource* contiguous) {
+    VulkanDecodedJpegImage retained;
+    const std::function<bool(const VulkanDecodedJpegImage&)> consume =
+        [&](const VulkanDecodedJpegImage& decoded) {
+            auto& s = state();
+            retained = decoded;
+            auto buffer = s.assembled;
+            retained.lease = std::shared_ptr<void>(new pl_buf(buffer),
+                [gpu = s.gpu](void* pointer) {
+                    auto* owned = static_cast<pl_buf*>(pointer);
+                    pl_buf_destroy(gpu, owned);
+                    delete owned;
+                });
+            s.assembled = nullptr;
+            // This status allocation is reused by the next decode. The output
+            // was validated before the callback, so consumers do not need it.
+            retained.validationBuffer = nullptr;
+            return true;
+        };
+    if (!decodeTiles(tiles, nullptr, width, height, tileWidth, tileHeight,
+                     &consume, contiguous, true)) return false;
+    image = std::move(retained);
+    return true;
+}
+
+bool downloadVulkanDecodedJpegImage(const VulkanDecodedJpegImage& image,
+                                  uint16_t* pixels, size_t samples) {
+    if (!pixels || !image.gpu || !image.buffer || !image.lease ||
+        samples != size_t(image.width) * image.height * image.channels ||
+        image.wordsPerRow * 2u != image.width * image.channels) return false;
+    auto& context = jpegContext();
+    std::lock_guard lock(context.mutex);
+    const auto gpu = static_cast<pl_gpu>(image.gpu);
+    pl_buf_params params{};
+    params.size = samples * sizeof(uint16_t);
+    params.host_readable = true;
+    params.memory_type = PL_BUF_MEM_HOST;
+    pl_buf readback = pl_buf_create(gpu, &params);
+    if (!readback) return false;
+    pl_buf_copy(gpu, readback, 0, static_cast<pl_buf>(image.buffer), 0, params.size);
+    const bool okay = pl_buf_read(gpu, readback, 0, pixels, params.size);
+    pl_buf_destroy(gpu, &readback);
+    return okay;
+}
+
 bool jpegDecodeTiledImageVulkanValidated(
     const std::vector<VulkanJpegTile>& tiles, uint32_t width, uint32_t height,
     uint32_t tileWidth, uint32_t tileHeight,
@@ -1155,6 +1178,12 @@ bool jpegDecodeTiledImageVulkan(
     const std::vector<VulkanJpegTile>&, uint32_t, uint32_t, uint32_t, uint32_t,
     const std::function<bool(const VulkanDecodedJpegImage&)>&,
     const VulkanJpegContiguousSource*) { return false; }
+bool jpegDecodeTiledImageVulkanRetained(
+    const std::vector<VulkanJpegTile>&, uint32_t, uint32_t, uint32_t, uint32_t,
+    VulkanDecodedJpegImage&, const VulkanJpegContiguousSource*) { return false; }
+bool downloadVulkanDecodedJpegImage(const VulkanDecodedJpegImage&, uint16_t*, size_t) {
+    return false;
+}
 bool jpegDecodeTiledImageVulkanValidated(
     const std::vector<VulkanJpegTile>&, uint32_t, uint32_t, uint32_t, uint32_t,
     const VulkanJpegContiguousSource*) { return false; }

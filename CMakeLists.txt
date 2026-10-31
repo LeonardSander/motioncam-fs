@@ -32,7 +32,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network Concurrent Multimedia)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Concurrent Multimedia)
-if(QT_VERSION_MAJOR EQUAL 6)
+if(ANDROID AND QT_VERSION_MAJOR LESS 6)
+    message(FATAL_ERROR "Android APK builds require Qt 6")
+endif()
+if(QT_VERSION_MAJOR EQUAL 6 AND NOT ANDROID)
     find_package(Qt6 COMPONENTS QuickWidgets QUIET)
 endif()
 
@@ -204,6 +207,21 @@ elseif(APPLE)
       ${SECURITY_FRAMEWORK}
       ${VIDEO_TOOLBOX_FRAMEWORK})
 
+elseif(ANDROID)
+  list(APPEND PROJECT_SOURCES
+      src/android/VulkanHardwareBuffer.cpp
+      include/android/VulkanHardwareBuffer.h
+      src/android/MediaCodecImageReader.cpp
+      include/android/MediaCodecImageReader.h
+      src/android/ProcessingFileSystem.cpp
+      include/android/ProcessingFileSystem.h
+      src/android/ExportDirectory.cpp
+      include/android/ExportDirectory.h)
+  find_library(ANDROID_LIB android REQUIRED)
+  find_library(ANDROID_MEDIANDK_LIB mediandk REQUIRED)
+  find_library(ANDROID_VULKAN_LIB vulkan REQUIRED)
+  find_library(ANDROID_DL_LIB dl REQUIRED)
+  set(platform-specific ${ANDROID_LIB} ${ANDROID_MEDIANDK_LIB} ${ANDROID_VULKAN_LIB} ${ANDROID_DL_LIB})
 elseif(UNIX)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3)
@@ -223,10 +241,26 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
     )
-# Define target properties for Android with Qt 6 as:
-#    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
-#                 ${CMAKE_CURRENT_SOURCE_DIR}/android)
-# For more information, see https://doc.qt.io/qt-6/qt-add-executable.html#target-creation
+    if(ANDROID)
+        # Stage native resources in the build tree, reusing the desktop icon.
+        set(android_package_dir "${CMAKE_CURRENT_BINARY_DIR}/android-package")
+        file(GLOB_RECURSE android_package_files CONFIGURE_DEPENDS
+            RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/android"
+            "${CMAKE_CURRENT_SOURCE_DIR}/android/*")
+        file(REMOVE_RECURSE "${android_package_dir}")
+        foreach(package_file IN LISTS android_package_files)
+            configure_file("android/${package_file}"
+                "${android_package_dir}/${package_file}" COPYONLY)
+        endforeach()
+        configure_file(assets/app_icon.png
+            "${android_package_dir}/res/drawable-nodpi/app_icon.png" COPYONLY)
+        set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
+            "${android_package_dir}")
+        set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_PACKAGE_NAME
+            "com.motioncam.fuse")
+        set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_MIN_SDK_VERSION 28)
+        set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_TARGET_SDK_VERSION 34)
+    endif()
 else()
     if(ANDROID)
         add_library(${PROJECT_NAME} SHARED
@@ -244,6 +278,9 @@ endif()
 target_include_directories(${PROJECT_NAME} PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64)
+if(ANDROID)
+    target_link_options(${PROJECT_NAME} PRIVATE -Wl,--strip-debug)
+endif()
 if(APPLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE FUSE_USE_VERSION=26)
 endif()
@@ -353,6 +390,14 @@ find_package(PkgConfig QUIET)
 find_package(JPEG REQUIRED)
 if(PkgConfig_FOUND)
     pkg_check_modules(JXL QUIET IMPORTED_TARGET libjxl)
+endif()
+if(ANDROID AND TARGET PkgConfig::JXL)
+    # FindPkgConfig can resolve libjxl's -lc++ to the NDK's host-side
+    # libc++.so. Keep it as a linker name so clang selects the target STL.
+    get_target_property(_jxl_links PkgConfig::JXL INTERFACE_LINK_LIBRARIES)
+    list(FILTER _jxl_links EXCLUDE REGEX "/libc\\+\\+\\.so$")
+    list(APPEND _jxl_links c++)
+    set_property(TARGET PkgConfig::JXL PROPERTY INTERFACE_LINK_LIBRARIES "${_jxl_links}")
 endif()
 if(TARGET PkgConfig::JXL)
     set(JXL_TARGET PkgConfig::JXL)
@@ -559,7 +604,22 @@ if(MOTIONCAM_AVFILTER_TARGET)
   target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_AVFILTER=1)
 endif()
 if(PkgConfig_FOUND)
+  if(ANDROID)
+    # The host may have libplacebo installed too. Restrict this probe to the
+    # arm64 vcpkg tree so an x86_64 .pc file cannot silently disable Vulkan.
+    set(_saved_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
+    set(_saved_pkg_config_argn "${PKG_CONFIG_ARGN}")
+    set(ENV{PKG_CONFIG_LIBDIR}
+      "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/pkgconfig")
+    set(PKG_CONFIG_ARGN --static)
+    unset(__pkg_config_checked_DIRECTLOG_PLACEBO CACHE)
+    unset(pkgcfg_lib_DIRECTLOG_PLACEBO_placebo CACHE)
+  endif()
   pkg_check_modules(DIRECTLOG_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.0)
+  if(ANDROID)
+    set(ENV{PKG_CONFIG_LIBDIR} "${_saved_pkg_config_libdir}")
+    set(PKG_CONFIG_ARGN "${_saved_pkg_config_argn}")
+  endif()
   if(DIRECTLOG_PLACEBO_FOUND)
     set(DIRECTLOG_PLACEBO_SAME_INSTALL TRUE)
     foreach(PLACEBO_DIR IN LISTS DIRECTLOG_PLACEBO_LIBRARY_DIRS)
@@ -573,11 +633,17 @@ if(PkgConfig_FOUND)
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
       target_include_directories(${PROJECT_NAME} PRIVATE ${DIRECTLOG_VULKAN_INCLUDE_DIR})
       target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::DIRECTLOG_PLACEBO)
+      if(ANDROID)
+        # The vcpkg shaderc .pc file omits static glslang/SPIRV-Tools links.
+        # Its CMake target records the complete transitive dependency graph.
+        find_package(unofficial-shaderc CONFIG REQUIRED)
+        target_link_libraries(${PROJECT_NAME} PRIVATE unofficial::shaderc::shaderc)
+      endif()
       target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
     endif()
   endif()
 endif()
-if(TARGET Qt6::QuickWidgets)
+if(TARGET Qt6::QuickWidgets AND NOT ANDROID)
   target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::QuickWidgets)
   target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_QUICKWIDGETS=1)
 endif()
@@ -629,6 +695,13 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-gallery-overlay-test
+        tests/gallery_overlay_test.cpp src/GalleryVulkanVideo.cpp)
+    target_include_directories(motioncam-gallery-overlay-test PRIVATE include)
+    target_link_libraries(motioncam-gallery-overlay-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+    add_test(NAME motioncam-gallery-overlay-test COMMAND motioncam-gallery-overlay-test)
+    set_tests_properties(motioncam-gallery-overlay-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
         add_executable(motioncam-vulkan-gain-layout-test
             tests/vulkan_gain_layout_test.cpp src/VulkanGainBake.cpp
@@ -762,10 +835,15 @@ if(BUILD_TESTING)
     add_test(NAME motioncam-finalize-interpolation-test
         COMMAND motioncam-finalize-interpolation-test)
 
+    add_executable(motioncam-audio-finalize-test tests/audio_finalize_test.cpp src/AudioWriter.cpp)
+    target_include_directories(motioncam-audio-finalize-test PRIVATE include)
+    target_link_libraries(motioncam-audio-finalize-test PRIVATE motioncam-decoder ${FFMPEG_LIBRARIES})
+    add_test(NAME motioncam-audio-finalize-test COMMAND motioncam-audio-finalize-test)
+
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations
     # are not compiled out.
-    foreach(test_target motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test motioncam-finalize-interpolation-test)
+    foreach(test_target motioncam-audio-finalize-test motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test motioncam-finalize-interpolation-test)
         if(MSVC)
             target_compile_options(${test_target} PRIVATE /UNDEBUG)
         else()

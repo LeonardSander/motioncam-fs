@@ -1,17 +1,30 @@
 #include "VulkanGalleryPreview.h"
+#ifdef __ANDROID__
+#include "android/VulkanInteropFence.h"
+#include "android/VulkanInteropDevice.h"
+#include <poll.h>
+#include <cerrno>
+#endif
 #include "DNGImage.h"
 #include "RawLogTransform.h"
 #include "VulkanGainBakeShader.h"
 
 #ifndef _WIN32
 #include <unistd.h>
+#else
+#include <process.h>
 #endif
 
 namespace motioncam {
 VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
     if (release) release();
+    release = {};
+    rejectSharedImage = {};
+    resourceLease.reset();
+    sourceLease.reset();
 #ifndef _WIN32
     if (fd >= 0) ::close(fd);
+    if (readyFenceFd >= 0) ::close(readyFenceFd);
 #endif
 }
 }
@@ -19,12 +32,14 @@ VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 #include <libplacebo/vulkan.h>
 #include <libplacebo/gpu.h>
+#include <libplacebo/cache.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
 #include <future>
+#include <filesystem>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -33,9 +48,20 @@ VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
 #include <memory>
 #include <new>
 #include <mutex>
+#include <spdlog/spdlog.h>
+#ifdef __ANDROID__
+#include <QDebug>
+#endif
 
 namespace motioncam {
 namespace {
+
+#ifdef __ANDROID__
+void galleryPlaceboLog(void*, pl_log_level level, const char* message) {
+    if (level <= PL_LOG_ERR)
+        qWarning().noquote() << "Gallery libplacebo:" << message;
+}
+#endif
 
 constexpr char shader[] = R"glsl(#version 450
 layout(local_size_x = 256) in;
@@ -107,8 +133,12 @@ void main() {
 
 constexpr char colorShader[] = R"glsl(#version 450
 layout(local_size_x = 256) in;
-#ifdef SOURCE_TEXTURE
+#if defined(SOURCE_TEXTURE) || defined(SOURCE_BAYER_TEXTURE)
 layout(binding = 0) uniform sampler2D sourceImage;
+#else
+layout(std430, binding = 0) readonly buffer Source { uint words[]; } src;
+#endif
+#ifdef SOURCE_TEXTURE
 layout(std430, binding = 4) readonly buffer GalleryGain {
     uvec4 shape; // width, height, encoded white, dither seed
     uvec4 bounds;
@@ -120,7 +150,6 @@ layout(std430, binding = 4) readonly buffer GalleryGain {
     float values[]; // gain grids, followed by linearization codes
 } galleryGain;
 #else
-layout(std430, binding = 0) readonly buffer Source { uint words[]; } src;
 layout(std430, binding = 4) readonly buffer GalleryBayerGain {
     uvec4 header; // map count, LOG white, dither seed, flags
     vec4 black;
@@ -133,7 +162,15 @@ layout(std430, binding = 4) readonly buffer GalleryBayerGain {
     float values[];
 } bayerGain;
 #endif
+#ifdef GALLERY_IMAGE_OUTPUT
+#ifdef GALLERY_IMAGE_RGB10A2
+layout(rgb10_a2, binding = 1) writeonly uniform image2D dstImage;
+#else
+layout(rgba8, binding = 1) writeonly uniform image2D dstImage;
+#endif
+#else
 layout(std430, binding = 1) writeonly buffer Destination { uint words[]; } dst;
+#endif
 layout(std430, binding = 2) readonly buffer Profiles {
     uvec4 shapes[2]; // hue, saturation, value, encoding
     uvec4 offsets[2]; // first float, count
@@ -217,8 +254,17 @@ uint packedCode(uint sampleIndex) {
     }
     return uint(floor(clamp(normalized, 0.0, 1.0) * 65535.0 + 0.5));
 #else
+#ifdef SOURCE_BAYER_TEXTURE
+    ivec2 xy = ivec2(int(sampleIndex % p.bayer.x), int(sampleIndex / p.bayer.x));
+    uint code = uint(floor(clamp(texelFetch(sourceImage, xy, 0).r, 0.0, 1.0) * 65535.0 + 0.5));
+#else
     uint word = src.words[sampleIndex >> 1u];
-    return (sampleIndex & 1u) == 0u ? word & 65535u : word >> 16u;
+    uint code = (sampleIndex & 1u) == 0u ? word & 65535u : word >> 16u;
+#endif
+    if (p.bayer.w != 0u && (bayerGain.header.w & 4u) != 0u)
+        code = uint(bayerGain.values[bayerGain.lookup.y +
+            min(code, bayerGain.lookup.z - 1u)]);
+    return code;
 #endif
 }
 uint bayerColor(int x, int y) {
@@ -264,8 +310,7 @@ uint bayerCode(int x, int y) {
           bayerGain.scale[phase] * gain;
     uint code = uint(floor(clamp(linear, 0.0, 65535.0) + 0.5));
     if (bayerGain.header.y == 0u) return code;
-    float encoded = motioncamLog60(float(code) / 65535.0,
-                                   bayerGain.header.y);
+    float encoded = bayerGain.values[bayerGain.lookup.w + code];
     encoded += motioncamDither(uint(x), uint(y), bayerGain.header.z,
                               (bayerGain.header.w & 1u) != 0u);
     uint logCode = uint(floor(clamp(encoded, 0.0,
@@ -303,12 +348,24 @@ uint bayerAverage(int x, int y, uint channel) {
     return (sum + valid / 2u) / valid;
 }
 uint sourceCode(uint sampleIndex) {
+#ifdef SOURCE_TEXTURE
+    // RGB textures cannot be Bayer sources. Exclude the unrolled demosaic
+    // branches from this shader instead of leaving them behind a uniform.
+    return packedCode(sampleIndex);
+#else
     if (p.bayer.w == 0u) return packedCode(sampleIndex);
+    if (p.bayer.w == 3u) {
+        uint channel = sampleIndex % 3u;
+        float normalized = (float(packedCode(sampleIndex)) -
+            p.textureBlack[channel]) * p.textureInverseRange[channel];
+        return uint(floor(clamp(normalized, 0.0, 1.0) * 65535.0 + 0.5));
+    }
     uint pixel = sampleIndex / 3u, channel = sampleIndex % 3u;
     int x = int(pixel % p.bayer.x), y = int(pixel / p.bayer.x);
     float normalized = (float(bayerAverage(x, y, channel)) -
         p.bayerBlack[channel]) * p.bayerInverseRange[channel];
     return uint(floor(clamp(normalized, 0.0, 1.0) * 65535.0 + 0.5));
+#endif
 }
 uint encode(float value) {
     uint index = uint(floor(clamp(value, 0.0, 1.0) * 65535.0 + 0.5));
@@ -507,13 +564,37 @@ uvec3 outputColor(uint outputPixel) {
                  (bits & 4u) != 0u ? 65535u : 0u);
 }
 void main() {
-    uint group = gl_GlobalInvocationID.x;
+    uint group = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y *
+        gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+#ifdef GALLERY_IMAGE_OUTPUT
+    if (group >= p.dimensions.x) return;
+    uint outputWidth = (p.geometry.z == 90u || p.geometry.z == 270u)
+        ? p.geometry.y : p.geometry.x;
+    uvec3 color = outputColor(group);
+    ivec2 xy = ivec2(group % outputWidth, group / outputWidth);
+#ifdef GALLERY_IMAGE_RGB10A2
+    imageStore(dstImage, xy, vec4(vec3(color) / 65535.0, 1.0));
+#else
+    imageStore(dstImage, xy, vec4(vec3(color >> uvec3(8u)) / 255.0, 1.0));
+#endif
+    return;
+#endif
+#ifndef GALLERY_IMAGE_OUTPUT
     if ((p.geometry.w & 4u) != 0u) {
         uint first = group * 4u;
         for (uint i = 0u; i < 4u && first + i < p.dimensions.x; ++i) {
             uvec3 color = (outputColor(first + i) * 1023u + 32767u) / 65535u;
             dst.words[first + i] = color.x | (color.y << 10u) |
                 (color.z << 20u) | 0xc0000000u;
+        }
+        return;
+    }
+    if ((p.geometry.w & 8u) != 0u) {
+        uint first = group * 4u;
+        for (uint i = 0u; i < 4u && first + i < p.dimensions.x; ++i) {
+            uvec3 color = outputColor(first + i) >> uvec3(8u);
+            dst.words[first + i] = color.x | (color.y << 8u) |
+                (color.z << 16u) | 0xff000000u;
         }
         return;
     }
@@ -547,16 +628,28 @@ void main() {
             dst.words[word + 2u] = b.y | (b.z << 16u);
         } else dst.words[word + 1u] = a.z;
     }
+#endif
 }
 )glsl";
 
-std::string galleryColorShader(bool textureSource) {
+std::string galleryColorShader(bool textureSource, bool imageOutput = false,
+                               bool imageRgb10a2 = false, bool bayerTexture = false) {
     const char* newline = std::strchr(colorShader, '\n');
     if (!newline) return {};
     std::string source = textureSource
         ? std::string(colorShader, newline + 1) +
             "#define SOURCE_TEXTURE 1\n" + (newline + 1)
         : std::string(colorShader);
+    if (bayerTexture) {
+        source = std::string(colorShader);
+        source.insert(source.find('\n') + 1, "#define SOURCE_BAYER_TEXTURE 1\n");
+    }
+    if (imageOutput) {
+        const auto newlinePos = source.find('\n');
+        source.insert(newlinePos + 1, "#define GALLERY_IMAGE_OUTPUT 1\n");
+        if (imageRgb10a2)
+            source.insert(newlinePos + 1, "#define GALLERY_IMAGE_RGB10A2 1\n");
+    }
     constexpr char marker[] = "// @DISPLAY_MATH@";
     const auto position = source.find(marker);
     if (position == std::string::npos) return {};
@@ -583,21 +676,114 @@ struct ColorConstants {
     uint32_t thumbnail[4];
 };
 
+struct GalleryShaderCache {
+    std::mutex ioMutex;
+    std::filesystem::path directory;
+    pl_cache cache;
+    static constexpr size_t maxObjectBytes = 8u * 1024u * 1024u;
+
+    GalleryShaderCache() {
+        pl_cache_params params{};
+        params.max_object_size = maxObjectBytes;
+        params.max_total_size = 32u * 1024u * 1024u;
+        params.priv = this;
+        params.get = [](void* priv, uint64_t key) {
+            auto& self = *static_cast<GalleryShaderCache*>(priv);
+            std::lock_guard lock(self.ioMutex);
+            if (self.directory.empty()) return pl_cache_obj{};
+            auto prefix = (self.directory / "").u8string();
+            // libplacebo validates the header, key and checksum, and removes
+            // incomplete or corrupt entries instead of passing them to Vulkan.
+            return pl_cache_get_file(prefix.data(), key);
+        };
+        params.set = [](void* priv, pl_cache_obj object) {
+            auto& self = *static_cast<GalleryShaderCache*>(priv);
+            std::lock_guard lock(self.ioMutex);
+            if (self.directory.empty()) return;
+            char key[17];
+            std::snprintf(key, sizeof(key), "%016llx", static_cast<unsigned long long>(object.key));
+            const auto path = self.directory / key;
+            std::error_code error;
+            if (!object.size) {
+                std::filesystem::remove(path, error);
+                return;
+            }
+#ifdef _WIN32
+            const auto pid = _getpid();
+#else
+            const auto pid = ::getpid();
+#endif
+            auto prefix = (self.directory / (std::to_string(pid) + ".tmp-")).u8string();
+            const auto temporary = std::filesystem::u8path(prefix + key);
+            // Each process writes its own temporary entry. Publish only after
+            // the library has finished writing its checksummed cache format.
+            std::filesystem::remove(temporary, error);
+            pl_cache_set_file(prefix.data(), object);
+            std::filesystem::rename(temporary, path, error);
+#ifdef _WIN32
+            // Windows rename does not replace an existing cache entry.
+            if (error && std::filesystem::exists(temporary, error)) {
+                std::filesystem::remove(path, error);
+                std::filesystem::rename(temporary, path, error);
+            }
+#endif
+            std::filesystem::remove(temporary, error);
+        };
+        cache = pl_cache_create(&params);
+    }
+    void configure(const std::string& path) {
+        std::lock_guard lock(ioMutex);
+        if (path.empty()) return;
+        const auto candidate = std::filesystem::u8path(path);
+        std::error_code error;
+        std::filesystem::create_directories(candidate, error);
+        if (!error) directory = candidate;
+    }
+};
+
+GalleryShaderCache& galleryShaderCache() {
+    // Shared across decoder devices and kept alive with the process-wide GPU
+    // cache. libplacebo keys compiled objects for their shader/compiler/device.
+    static auto* cache = new GalleryShaderCache;
+    return *cache;
+}
+
 struct Device {
     struct HostFrame {
         std::shared_ptr<uint8_t> memory;
         pl_buf buffer = nullptr;
         size_t size = 0;
     };
+    struct ThumbnailReadback {
+        pl_buf output = nullptr;
+        pl_buf download = nullptr;
+        size_t capacity = 0;
+        size_t byteCount = 0;
+        uint32_t width = 0, height = 0;
+        bool clipping = false;
+        int sourceFrame = -1;
+        uint64_t generation = 0;
+        bool pending = false;
+    };
     pl_log log = nullptr;
     pl_vulkan vk = nullptr;
     pl_gpu gpu = nullptr;
     bool textureSource = false;
+    bool bufferSource = false;
+    bool bayerTextureSource = false;
+    bool unifiedMemory = false;
+    bool directHostInput = false;
+    bool externalBufferRejected = false;
+    std::atomic_bool externalTextureRejected{false};
     pl_pass pass = nullptr, colorPass = nullptr;
+    pl_pass colorImagePass = nullptr, colorImage10Pass = nullptr;
     pl_buf source = nullptr, upload = nullptr, output = nullptr, download = nullptr;
-    pl_buf thumbnailOutput = nullptr, thumbnailDownload = nullptr;
+    ThumbnailReadback thumbnailReadback;
+    std::array<ThumbnailReadback,3> thumbnailReadbacks{};
+    size_t nextThumbnailReadback = 0;
     pl_buf profiles = nullptr, profilesUpload = nullptr;
     pl_buf clipping = nullptr, clippingUpload = nullptr;
+    size_t previousClippingBytes=0;
     pl_buf gain = nullptr, gainUpload = nullptr;
     pl_buf emptyGain = nullptr;
     std::vector<HostFrame> hostFrames;
@@ -610,8 +796,12 @@ struct Device {
             pl_buf_destroy(gpu, &upload);
             pl_buf_destroy(gpu, &output);
             pl_buf_destroy(gpu, &download);
-            pl_buf_destroy(gpu, &thumbnailOutput);
-            pl_buf_destroy(gpu, &thumbnailDownload);
+            pl_buf_destroy(gpu, &thumbnailReadback.output);
+            pl_buf_destroy(gpu, &thumbnailReadback.download);
+            for(auto& slot:thumbnailReadbacks){
+                pl_buf_destroy(gpu,&slot.output);
+                pl_buf_destroy(gpu,&slot.download);
+            }
             pl_buf_destroy(gpu, &profiles);
             pl_buf_destroy(gpu, &profilesUpload);
             pl_buf_destroy(gpu, &clipping);
@@ -621,26 +811,37 @@ struct Device {
             pl_buf_destroy(gpu, &emptyGain);
             pl_pass_destroy(gpu, &pass);
             pl_pass_destroy(gpu, &colorPass);
+            pl_pass_destroy(gpu, &colorImagePass);
+            pl_pass_destroy(gpu, &colorImage10Pass);
         }
         pl_vulkan_destroy(&vk);
         pl_log_destroy(&log);
     }
     bool init() {
+#ifdef __ANDROID__
+        pl_log_params logParams = {};
+        logParams.log_cb = galleryPlaceboLog;
+        logParams.log_level = PL_LOG_ERR;
+        log = pl_log_create(PL_API_VER, &logParams);
+#else
         log = pl_log_create(PL_API_VER, nullptr);
+#endif
         if (!log) return false;
+#ifdef __ANDROID__
+        pl_vulkan_params vulkanParams = pl_vulkan_default_params;
+        enableAndroidVulkanInterop(vulkanParams);
+        vk = pl_vulkan_create(log, &vulkanParams);
+#else
         vk = pl_vulkan_create(log, nullptr);
+#endif
         if (!vk || !vk->gpu->glsl.compute) return false;
         gpu = vk->gpu;
-        pl_buf_params emptyGainParams = {};
-        emptyGainParams.size = 2112u;
-        emptyGainParams.storable = true;
-        emptyGainParams.host_writable = true;
-        emptyGainParams.memory_type = PL_BUF_MEM_HOST;
-        emptyGain = pl_buf_create(gpu, &emptyGainParams);
-        if (!emptyGain) return false;
-        const std::array<uint8_t, 2112> zeroGain{};
-        pl_buf_write(gpu, emptyGain, 0, zeroGain.data(), zeroGain.size());
-        pl_desc descriptors[5] = {};
+        pl_gpu_set_cache(gpu, galleryShaderCache().cache);
+        return initResources();
+    }
+    bool ensureDemosaicPass() {
+        if (pass) return true;
+        pl_desc descriptors[2] = {};
         descriptors[0] = {"src", PL_DESC_BUF_STORAGE, 0, PL_DESC_ACCESS_READONLY};
         descriptors[1] = {"dst", PL_DESC_BUF_STORAGE, 1, PL_DESC_ACCESS_WRITEONLY};
         pl_pass_params params = {};
@@ -650,59 +851,169 @@ struct Device {
         params.push_constants_size = sizeof(Constants);
         params.glsl_shader = shader;
         pass = pl_pass_create(gpu, &params);
-        descriptors[2] = {"profiles", PL_DESC_BUF_STORAGE, 2, PL_DESC_ACCESS_READONLY};
-        descriptors[3] = {"clipping", PL_DESC_BUF_STORAGE, 3, PL_DESC_ACCESS_READONLY};
-        descriptors[4] = {"bayerGain", PL_DESC_BUF_STORAGE, 4, PL_DESC_ACCESS_READONLY};
-        const std::string colorSource = galleryColorShader(false);
-        if (colorSource.empty()) return false;
-        params.glsl_shader = colorSource.c_str();
-        params.num_descriptors = 5;
-        params.push_constants_size = sizeof(ColorConstants);
-        colorPass = pl_pass_create(gpu, &params);
-        return pass && colorPass;
+        return pass != nullptr;
     }
-    bool initExternal(pl_gpu externalGpu) {
+    bool initExternal(pl_gpu externalGpu, bool sampled = true, bool bayerTexture = false) {
         if (!externalGpu || !externalGpu->glsl.compute) return false;
         gpu = externalGpu;
-        textureSource = true;
+        textureSource = sampled;
+        bufferSource = !sampled;
+        bayerTextureSource = bayerTexture;
+        pl_gpu_set_cache(gpu, galleryShaderCache().cache);
+        return initResources();
+    }
+    bool initResources() {
+        // Memory topology, not the operating system, selects the shared-memory
+        // path. A discrete GPU's host-visible BAR does not make its VRAM unified.
+        if (const pl_vulkan vulkan = pl_vulkan_get(gpu)) {
+            VkPhysicalDeviceProperties properties{};
+            VkPhysicalDeviceMemoryProperties memory{};
+            const auto getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+                vulkan->get_proc_addr(vulkan->instance, "vkGetPhysicalDeviceProperties"));
+            const auto getMemory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+                vulkan->get_proc_addr(vulkan->instance, "vkGetPhysicalDeviceMemoryProperties"));
+            if (!getProperties || !getMemory) return false;
+            getProperties(vulkan->phys_device, &properties);
+            getMemory(vulkan->phys_device, &memory);
+            bool hasDeviceHeap = false;
+            unifiedMemory = properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
+                properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU;
+            for (uint32_t heap = 0; heap < memory.memoryHeapCount; ++heap) {
+                if (!(memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+                    continue;
+                bool usable = false, hostVisible = false;
+                for (uint32_t type = 0; type < memory.memoryTypeCount; ++type) {
+                    const auto& candidate = memory.memoryTypes[type];
+                    // Protected and transient-only allocations cannot back our
+                    // ordinary storage buffers and do not describe their topology.
+                    if (candidate.heapIndex != heap ||
+                        !(candidate.propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
+                        (candidate.propertyFlags & (VK_MEMORY_PROPERTY_PROTECTED_BIT |
+                                                    VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)))
+                        continue;
+                    usable = true;
+                    hostVisible |= bool(candidate.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+                }
+                if (usable) {
+                    hasDeviceHeap = true;
+                    unifiedMemory = unifiedMemory && hostVisible;
+                }
+            }
+            unifiedMemory = unifiedMemory && hasDeviceHeap;
+            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                std::fprintf(stderr, "GALLERY_PERF event=gallery_memory device=%s unified=%d\n",
+                    properties.deviceName, int(unifiedMemory));
+        }
+        // Every shader reads this binding, including plain RGB with no bake.
+        const std::array<uint8_t, 2112> zero{};
+        pl_buf_params gainParams{};
+        gainParams.size = zero.size();
+        gainParams.storable = gainParams.host_writable = true;
+        gainParams.initial_data = zero.data();
+        emptyGain = pl_buf_create(gpu, &gainParams);
+        if (!emptyGain) return false;
+
+        return true;
+    }
+    bool ensureColorPass() {
+        if (!colorPass)
+            colorPass = createColorPass();
+        return colorPass != nullptr;
+    }
+    pl_pass createColorPass(bool image = false, bool rgb10a2 = false) {
+        const bool sampled = textureSource;
+        const bool bayerTexture = bayerTextureSource;
         pl_desc descriptors[5] = {};
-        descriptors[0] = {"sourceImage", PL_DESC_SAMPLED_TEX,
+        descriptors[0] = {sampled ? "sourceImage" : "src",
+                          sampled ? PL_DESC_SAMPLED_TEX : PL_DESC_BUF_STORAGE,
                           0, PL_DESC_ACCESS_READONLY};
-        descriptors[1] = {"dst", PL_DESC_BUF_STORAGE,
+        descriptors[1] = {image ? "dstImage" : "dst",
+                          image ? PL_DESC_STORAGE_IMG : PL_DESC_BUF_STORAGE,
                           1, PL_DESC_ACCESS_WRITEONLY};
         descriptors[2] = {"profiles", PL_DESC_BUF_STORAGE,
                           2, PL_DESC_ACCESS_READONLY};
         descriptors[3] = {"clipping", PL_DESC_BUF_STORAGE,
                           3, PL_DESC_ACCESS_READONLY};
-        descriptors[4] = {"galleryGain", PL_DESC_BUF_STORAGE,
+        descriptors[4] = {sampled && !bayerTexture ? "galleryGain" : "bayerGain", PL_DESC_BUF_STORAGE,
                           4, PL_DESC_ACCESS_READONLY};
-        const std::string source = galleryColorShader(true);
-        if (source.empty()) return false;
+        const std::string source = galleryColorShader(sampled, image, rgb10a2, bayerTexture);
+        if (source.empty()) return nullptr;
         pl_pass_params params = {};
         params.type = PL_PASS_COMPUTE;
         params.descriptors = descriptors;
         params.num_descriptors = 5;
         params.push_constants_size = sizeof(ColorConstants);
         params.glsl_shader = source.c_str();
-        colorPass = pl_pass_create(gpu, &params);
-        return colorPass != nullptr;
+        return pl_pass_create(gpu, &params);
     }
-    bool reserve(size_t sourceBytes, size_t outputBytes) {
+    pl_pass ensureColorImagePass(bool rgb10a2) {
+        auto& imagePass = rgb10a2 ? colorImage10Pass : colorImagePass;
+        if (!imagePass)
+            imagePass = createColorPass(true, rgb10a2);
+        return imagePass;
+    }
+    bool reserveOutput(size_t bytes) {
+        pl_buf_params params{};
+        params.size = bytes;
+        params.storable = true;
+        params.memory_type = PL_BUF_MEM_DEVICE;
+        return pl_buf_recreate(gpu, &output, &params);
+    }
+    bool reserve(size_t sourceBytes, size_t outputBytes, bool outputRequired = true) {
         if ((!textureSource && sourceBytes > gpu->limits.max_ssbo_size) ||
             outputBytes > gpu->limits.max_ssbo_size) return false;
-        pl_buf_params src = {}, dst = {}, srcStage = {};
+        pl_buf_params src = {}, srcStage = {};
         src.size = sourceBytes;
         src.storable = true;
         src.memory_type = PL_BUF_MEM_DEVICE;
-        dst.size = outputBytes;
-        dst.storable = true;
-        dst.memory_type = PL_BUF_MEM_DEVICE;
         srcStage.size = sourceBytes;
         srcStage.host_writable = true;
         srcStage.memory_type = PL_BUF_MEM_HOST;
-        return (textureSource || (pl_buf_recreate(gpu, &source, &src) &&
-            pl_buf_recreate(gpu, &upload, &srcStage))) &&
-            pl_buf_recreate(gpu, &output, &dst);
+        if (textureSource || bufferSource)
+            return !outputRequired || reserveOutput(outputBytes);
+        // On unified memory consume the host-visible SSBO directly. Keep the
+        // dedicated-GPU staging path, also used if allocation is unsupported.
+        directHostInput = false;
+        if (unifiedMemory) {
+            auto directParams = srcStage;
+            directParams.storable = true;
+            directHostInput = pl_buf_recreate(gpu, &upload, &directParams);
+            if (directHostInput) {
+                pl_buf_destroy(gpu, &source);
+                return !outputRequired || reserveOutput(outputBytes);
+            }
+        }
+        if (!pl_buf_recreate(gpu, &source, &src) ||
+            !pl_buf_recreate(gpu, &upload, &srcStage)) {
+            return false;
+        }
+        return !outputRequired || reserveOutput(outputBytes);
+    }
+    pl_tex createOutputTexture(uint32_t width, uint32_t height,
+                               enum pl_handle_type handle, bool rgb10a2) {
+        const pl_fmt format = rgb10a2 ? pl_find_named_fmt(gpu, "rgb10a2")
+            : pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+                static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+        if (!format || (format->caps & (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE)) !=
+                (PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE)) {
+#ifdef __ANDROID__
+            qWarning() << "Gallery Vulkan shared-image format unavailable" << rgb10a2;
+#endif
+            return nullptr;
+        }
+        pl_tex_params params{};
+        params.w = static_cast<int>(width);
+        params.h = static_cast<int>(height);
+        params.format = format;
+        params.sampleable = true;
+        params.storable = true;
+        params.export_handle = handle;
+        pl_tex result = pl_tex_create(gpu, &params);
+#ifdef __ANDROID__
+        if (!result) qWarning() << "Gallery Vulkan shared-image allocation failed"
+                                << format->name << width << height;
+#endif
+        return result;
     }
     bool reserveDownload(size_t bytes) {
         pl_buf_params params = {};
@@ -711,17 +1022,20 @@ struct Device {
         params.memory_type = PL_BUF_MEM_HOST;
         return pl_buf_recreate(gpu, &download, &params);
     }
-    bool reserveThumbnail(size_t bytes) {
-        if (bytes > gpu->limits.max_ssbo_size) return false;
-        pl_buf_params outputParams = {}, readParams = {};
-        outputParams.size = bytes;
-        outputParams.storable = true;
-        outputParams.memory_type = PL_BUF_MEM_DEVICE;
-        readParams.size = bytes;
-        readParams.host_readable = true;
-        readParams.memory_type = PL_BUF_MEM_HOST;
-        return pl_buf_recreate(gpu, &thumbnailOutput, &outputParams) &&
-            pl_buf_recreate(gpu, &thumbnailDownload, &readParams);
+    bool reserveThumbnail(ThumbnailReadback& slot,size_t bytes) {
+        if(bytes>gpu->limits.max_ssbo_size)return false;
+        if(slot.capacity==bytes&&slot.output&&slot.download)return true;
+        pl_buf_params outputParams={},readParams={};
+        outputParams.size=bytes;
+        outputParams.storable=true;
+        outputParams.memory_type=PL_BUF_MEM_DEVICE;
+        readParams.size=bytes;
+        readParams.host_readable=true;
+        readParams.memory_type=PL_BUF_MEM_HOST;
+        if(!pl_buf_recreate(gpu,&slot.output,&outputParams)||
+           !pl_buf_recreate(gpu,&slot.download,&readParams))return false;
+        slot.capacity=bytes;
+        return true;
     }
     bool acquireHostFrame(size_t bytes, pl_buf& buffer,
                           std::shared_ptr<uint8_t>& memory) {
@@ -797,10 +1111,32 @@ struct Device {
     }
 };
 
-std::mutex deviceMutex;
-std::shared_ptr<Device> device;
-std::unordered_map<pl_gpu, std::shared_ptr<Device>> textureDevices;
-bool unavailable = false;
+struct DeviceCache {
+    std::mutex mutex;
+    std::shared_ptr<Device> device;
+    std::unordered_map<pl_gpu, std::shared_ptr<Device>> textureDevices;
+    std::unordered_map<pl_gpu, std::shared_ptr<Device>> bufferDevices;
+    std::unordered_map<pl_gpu, std::shared_ptr<Device>> bayerTextureDevices;
+    bool unavailable = false;
+};
+
+DeviceCache& deviceCache() {
+    // libplacebo's Android shaderc/glslang teardown is not safe when multiple
+    // Vulkan devices are destroyed from C++ static destructors. Keep this
+    // process-wide cache alive until the OS tears down the process instead.
+    static auto* cache = new DeviceCache;
+    return *cache;
+}
+
+std::mutex& deviceMutex = deviceCache().mutex;
+std::shared_ptr<Device>& device = deviceCache().device;
+std::unordered_map<pl_gpu, std::shared_ptr<Device>>& textureDevices =
+    deviceCache().textureDevices;
+std::unordered_map<pl_gpu, std::shared_ptr<Device>>& bufferDevices =
+    deviceCache().bufferDevices;
+std::unordered_map<pl_gpu, std::shared_ptr<Device>>& bayerTextureDevices =
+    deviceCache().bayerTextureDevices;
+bool& unavailable = deviceCache().unavailable;
 std::once_flag warmOnce;
 std::future<void> warmup;
 std::atomic_bool warming{false};
@@ -830,8 +1166,9 @@ uint64_t samplePackedFrame(pl_gpu gpu, pl_buf source,
 }
 } // namespace
 
-void warmVulkanGalleryPreview() {
-    std::call_once(warmOnce, [] {
+void warmVulkanGalleryPreview(const std::string& cacheDirectory) {
+    std::call_once(warmOnce, [&] {
+        galleryShaderCache().configure(cacheDirectory);
         warming = true;
         warmup = std::async(std::launch::async, [] {
             std::lock_guard lock(deviceMutex);
@@ -858,6 +1195,8 @@ bool waitVulkanGalleryPreviewReady() {
 void releaseVulkanGalleryTextureDevice(const void* gpu) {
     std::lock_guard lock(deviceMutex);
     textureDevices.erase(static_cast<pl_gpu>(gpu));
+    bufferDevices.erase(static_cast<pl_gpu>(gpu));
+    bayerTextureDevices.erase(static_cast<pl_gpu>(gpu));
 }
 
 bool demosaicGalleryBayerVulkan(
@@ -885,7 +1224,8 @@ bool demosaicGalleryBayerVulkan(
         if (!candidate->init()) { unavailable = true; return false; }
         device = std::move(candidate);
     }
-    if (!device->reserve(sourceBytes, outputBytes) ||
+    if (!device->ensureDemosaicPass() ||
+        !device->reserve(sourceBytes, outputBytes) ||
         !device->reserveDownload(outputBytes)) return false;
     const size_t completeSourceBytes = static_cast<size_t>(width) * height * 2;
     if (completeSourceBytes == sourceBytes)
@@ -897,7 +1237,9 @@ bool demosaicGalleryBayerVulkan(
         pl_buf_write(device->gpu, device->upload,
                      completeSourceBytes - 2, &tail, sizeof(tail));
     }
-    pl_buf_copy(device->gpu, device->source, 0, device->upload, 0, sourceBytes);
+    if (!device->directHostInput)
+        pl_buf_copy(device->gpu, device->source, 0,
+                    device->upload, 0, sourceBytes);
     Constants constants = {};
     constants.dimensions[0] = width;
     constants.dimensions[1] = height;
@@ -910,7 +1252,8 @@ bool demosaicGalleryBayerVulkan(
             1.0 / (white[channel] - black[channel]));
     }
     pl_desc_binding bindings[2] = {};
-    bindings[0].object = device->source;
+    bindings[0].object = device->directHostInput
+        ? device->upload : device->source;
     bindings[1].object = device->output;
     pl_pass_run_params run = {};
     run.pass = device->pass;
@@ -953,16 +1296,21 @@ bool colorGalleryRgbVulkan(
     const VulkanGalleryOutput* output,
     const VulkanGalleryTextureSource* texture) {
     if (std::getenv("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
-    // Startup may still be compiling the shader on another thread. Present
-    // those first frames through the CPU fallback instead of blocking the UI.
-    if (warming.load()) return false;
+    // Device warmup runs on another thread. Keep host previews responsive
+    // through the CPU fallback instead of blocking on device creation.
+    // Resident sources need their final shader variant before playback starts.
+    // Falling back during warmup would compile it on a later playback frame.
+    const bool residentSource = texture ||
+        (bayer && bayer->gpu && (bayer->buffer || bayer->texture));
+    if (warming.load() && !residentSource) return false;
     if (texture) {
-        if (bayer || !texture->gpu || !texture->texture ||
+        if (bayer || !texture->gpu || (!texture->texture && !texture->buffer) ||
             texture->width == 0 || texture->height == 0 ||
             texture->width > std::numeric_limits<uint32_t>::max() /
                 texture->height / 3u) return false;
         for (size_t channel = 0; channel < 3; ++channel)
             if (!(texture->white[channel] > texture->black[channel])) return false;
+        if (texture->buffer && texture->gain) return false;
         if (texture->gain) {
             const auto& gain = *texture->gain;
             if (!gain.width || !gain.height || !gain.spacingH || !gain.spacingV ||
@@ -977,7 +1325,7 @@ bool colorGalleryRgbVulkan(
                 return false;
         }
     } else if (bayer) {
-        if (!bayer->samples || bayer->width < 2 || bayer->height < 2 ||
+        if ((!bayer->samples && !(bayer->gpu && (bayer->buffer || bayer->texture))) || bayer->width < 2 || bayer->height < 2 ||
             bayer->width > std::numeric_limits<uint32_t>::max() /
                 bayer->height / 3u ||
             (bayer->phase != std::array<uint8_t, 4>{0, 1, 1, 2} &&
@@ -1009,16 +1357,20 @@ bool colorGalleryRgbVulkan(
     if (rgb10a2 && !rgb24) return false;
     const auto* clip = output ? output->clipping : nullptr;
     if (clip && clip->size() != pixels) return false;
-    const size_t inputBytes = texture ? 0u
+    const void* externalGpu = texture ? texture->gpu
+        : bayer && (bayer->buffer || bayer->texture) ? bayer->gpu : nullptr;
+    const bool bayerTexture = bayer && bayer->texture;
+    const void* externalBuffer = texture ? texture->buffer
+        : bayer ? bayer->buffer : nullptr;
+    const size_t inputBytes = externalGpu ? 0u
         : bayer ? static_cast<size_t>(pixels) * 2u : rgb.size();
-    const size_t outputBytes = static_cast<size_t>(pixels) *
-        (rgb10a2 ? 4u : rgb24 ? 3u : 6u);
-    const size_t paddedInput = texture ? 0u : (inputBytes + 3u) & ~size_t{3};
-    const size_t paddedOutput = (outputBytes + 3u) & ~size_t{3};
     std::lock_guard lock(deviceMutex);
-    if (unavailable && !texture) return false;
-    auto& selectedDevice = texture
-        ? textureDevices[static_cast<pl_gpu>(texture->gpu)] : device;
+    if (unavailable && !externalGpu) return false;
+    auto& selectedDevice = bayerTexture
+        ? bayerTextureDevices[static_cast<pl_gpu>(externalGpu)]
+        : externalBuffer
+        ? bufferDevices[static_cast<pl_gpu>(externalGpu)]
+        : texture ? textureDevices[static_cast<pl_gpu>(externalGpu)] : device;
     if (texture && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
         static std::atomic_bool loggedExternalCaps{false};
         if (!loggedExternalCaps.exchange(true))
@@ -1030,7 +1382,7 @@ bool colorGalleryRgbVulkan(
     }
     if (!selectedDevice) {
         auto candidate = std::make_shared<Device>();
-        if (!(texture ? candidate->initExternal(static_cast<pl_gpu>(texture->gpu))
+        if (!(externalGpu ? candidate->initExternal(static_cast<pl_gpu>(externalGpu), !externalBuffer, bayerTexture)
                       : candidate->init())) {
             if (!texture) unavailable = true;
             return false;
@@ -1038,17 +1390,28 @@ bool colorGalleryRgbVulkan(
         selectedDevice = std::move(candidate);
     }
     Device* selected = selectedDevice.get();
-    if (!selected->reserve(paddedInput, paddedOutput)) return false;
-    const size_t clipBytes = clip ? (clip->size() + 3u) & ~size_t{3} : 4u;
+    const bool alignedRgb24 = selected->unifiedMemory && rgb24 && !rgb10a2;
+    const size_t outputBytes = static_cast<size_t>(pixels) *
+        (rgb10a2 || alignedRgb24 ? 4u : rgb24 ? 3u : 6u);
+    const size_t paddedInput = texture ? 0u : (inputBytes + 3u) & ~size_t{3};
+    const size_t paddedOutput = (outputBytes + 3u) & ~size_t{3};
+    if (output && output->requireZeroCopy && !externalGpu) return false;
+    // Shared-image/storage-buffer output does not need a second full-frame
+    // scratch buffer. Allocate it below only for paths that actually use it.
+    if (!selected->reserve(paddedInput, paddedOutput, false)) return false;
+    const size_t clipBytes = clip ? (clip->size() + 3u) & ~size_t{3} : std::max(size_t(4),selected->previousClippingBytes);
     if (!selected->reserveClipping(clipBytes)) return false;
-    if (clip) {
+    // Clear the retired mask once when disabling indication. Deferred GPU
+    // thumbnail work must not retain the previous frame's clipping colors.
+    if (clip || selected->previousClippingBytes) {
         std::vector<uint8_t> padded(clipBytes);
-        std::memcpy(padded.data(), clip->data(), clip->size());
+        if(clip)std::memcpy(padded.data(), clip->data(), clip->size());
         pl_buf_write(selected->gpu, selected->clippingUpload, 0,
                      padded.data(), clipBytes);
         pl_buf_copy(selected->gpu, selected->clipping, 0,
                     selected->clippingUpload, 0, clipBytes);
     }
+    selected->previousClippingBytes=clip?clipBytes:0;
     const size_t hueCount = hueSat ? hueSat->values.size() : 0u;
     const size_t lookCount = look ? look->values.size() : 0u;
     if (hueCount > std::numeric_limits<uint32_t>::max() ||
@@ -1094,10 +1457,13 @@ bool colorGalleryRgbVulkan(
         }
         const size_t lookup = gain->encodedWhite
             ? gain->encodedWhite + 1u : 0u;
+        const size_t encodeLookup = lookup ? 65536u : 0u;
+        const size_t sourceLookup = gain->sourceLinearization.size();
+        if (sourceLookup > 65536u) return false;
         constexpr size_t headerBytes = 2112u;
-        if (values + lookup > (std::numeric_limits<size_t>::max() -
+        if (values + lookup + sourceLookup + encodeLookup > (std::numeric_limits<size_t>::max() -
                                headerBytes) / sizeof(float)) return false;
-        const size_t gainBytes = headerBytes + (values + lookup) * sizeof(float);
+        const size_t gainBytes = headerBytes + (values + lookup + sourceLookup + encodeLookup) * sizeof(float);
         if (!selected->reserveGain(gainBytes)) return false;
         std::vector<uint8_t> data(gainBytes);
         const uint32_t packedPhase = gain->phase[0] |
@@ -1107,9 +1473,11 @@ bool colorGalleryRgbVulkan(
             static_cast<uint32_t>(gain->maps.size()), gain->encodedWhite,
             gain->ditherSeed,
             (gain->highQualityDither ? 1u : 0u) |
-            (gain->debugGain ? 2u : 0u) | (packedPhase << 8u)};
+            (gain->debugGain ? 2u : 0u) | (sourceLookup ? 4u : 0u) | (packedPhase << 8u)};
         const uint32_t lookupOffset[4] = {
-            static_cast<uint32_t>(values), 0u, 0u, 0u};
+            static_cast<uint32_t>(values), static_cast<uint32_t>(values + lookup),
+            static_cast<uint32_t>(sourceLookup),
+            static_cast<uint32_t>(values + lookup + sourceLookup)};
         std::memcpy(data.data(), header, sizeof(header));
         std::memcpy(data.data() + 16u, gain->black.data(), 16u);
         std::memcpy(data.data() + 32u, gain->scale.data(), 16u);
@@ -1142,12 +1510,24 @@ bool colorGalleryRgbVulkan(
                     (values + index) * sizeof(float), &code, sizeof(code));
             }
         }
+        for (size_t index = 0; index < sourceLookup; ++index) {
+            const float code = static_cast<float>(gain->sourceLinearization[index]);
+            std::memcpy(data.data() + headerBytes +
+                (values + lookup + index) * sizeof(float), &code, sizeof(code));
+        }
+        if (encodeLookup) {
+            const auto& table = cachedLog60EncodeLookup(0.0, 65535.0,
+                static_cast<uint16_t>(gain->encodedWhite));
+            std::memcpy(data.data() + headerBytes +
+                (values + lookup + sourceLookup) * sizeof(float),
+                table.data(), table.size() * sizeof(float));
+        }
         pl_buf_write(selected->gpu, selected->gainUpload, 0,
                      data.data(), gainBytes);
         pl_buf_copy(selected->gpu, selected->gain, 0,
                     selected->gainUpload, 0, gainBytes);
     }
-    if (texture) {
+    if (texture && !externalBuffer) {
         const auto* gain = texture->gain;
         const size_t primaryValues = gain ? gain->values.size() : 0u;
         const size_t values = primaryValues +
@@ -1201,7 +1581,7 @@ bool colorGalleryRgbVulkan(
         pl_buf_copy(selected->gpu, selected->gain, 0,
                     selected->gainUpload, 0, gainBytes);
     }
-    if (!texture) {
+    if (!externalGpu) {
         const auto* input = bayer
             ? reinterpret_cast<const uint8_t*>(bayer->samples) : rgb.data();
         if (paddedInput == inputBytes)
@@ -1215,8 +1595,9 @@ bool colorGalleryRgbVulkan(
             pl_buf_write(selected->gpu, selected->upload,
                          inputBytes - 2u, &tail, sizeof(tail));
         }
-        pl_buf_copy(selected->gpu, selected->source, 0,
-                    selected->upload, 0, paddedInput);
+        if (!selected->directHostInput)
+            pl_buf_copy(selected->gpu, selected->source, 0,
+                        selected->upload, 0, paddedInput);
     }
     ColorConstants constants = {};
     constants.dimensions[0] = pixels;
@@ -1237,7 +1618,7 @@ bool colorGalleryRgbVulkan(
     constants.geometry[1] = sourceHeight;
     constants.geometry[2] = static_cast<uint32_t>(orientation);
     constants.geometry[3] = (rgb24 ? 1u : 0u) | (clip ? 2u : 0u) |
-        (rgb10a2 ? 4u : 0u);
+        (rgb10a2 ? 4u : 0u) | (alignedRgb24 ? 8u : 0u);
     if (bayer) {
         constants.bayer[0] = bayer->width;
         constants.bayer[1] = bayer->height;
@@ -1251,48 +1632,126 @@ bool colorGalleryRgbVulkan(
                 1.0 / (bayer->white[channel] - bayer->black[channel]));
         }
     }
+    if (texture && texture->buffer) constants.bayer[3] = 3u;
     if (texture) for (size_t channel = 0; channel < 3; ++channel) {
         constants.textureBlack[channel] =
             static_cast<float>(texture->black[channel]);
         constants.textureInverseRange[channel] = static_cast<float>(
             1.0 / (texture->white[channel] - texture->black[channel]));
     }
+    // A failed image handoff retries this frame once with image export disabled.
+retryOutput:
     pl_desc_binding bindings[5] = {};
     pl_buf exported = nullptr;
+    bool exportTexture = false;
+    pl_tex frameOutputTexture = nullptr;
+    bool exportNeedsCopy = false;
 #ifndef _WIN32
-    const bool exportGpu = output && output->gpuBuffer && rgb24 &&
-        (selected->gpu->export_caps.buf & PL_HANDLE_DMA_BUF);
-    if (rgb10a2 && !exportGpu) return false;
+    // Android Vulkan devices commonly expose opaque external-memory FDs but
+    // have no DRM modifier support. Linux retains DMA-BUF for its presenter.
+#ifdef __ANDROID__
+    constexpr auto galleryHandle = PL_HANDLE_FD;
+    const uint32_t outputWidth = orientation == 90 || orientation == 270
+        ? sourceHeight : sourceWidth;
+    const uint32_t outputHeight = orientation == 90 || orientation == 270
+        ? sourceWidth : sourceHeight;
+    exportTexture = output && output->gpuBuffer && rgb24 &&
+        !selected->externalTextureRejected &&
+        selected->ensureColorImagePass(rgb10a2) &&
+        (selected->gpu->export_caps.tex & galleryHandle) &&
+        (frameOutputTexture = selected->createOutputTexture(
+            outputWidth, outputHeight, galleryHandle, rgb10a2));
+    if (!exportTexture && output && output->gpuBuffer && rgb24)
+        selected->externalTextureRejected = true;
+#else
+    constexpr auto galleryHandle = PL_HANDLE_DMA_BUF;
+#endif
+    if (output && output->requireZeroCopy && !exportTexture) return false;
+    const bool exportGpu = !exportTexture && !selected->externalBufferRejected &&
+        output && output->gpuBuffer && rgb24 &&
+        (selected->gpu->export_caps.buf & galleryHandle);
+    if (rgb10a2 && !exportGpu && !exportTexture) {
+#ifdef __ANDROID__
+        static std::atomic_bool loggedNoExport{false};
+        if (!loggedNoExport.exchange(true))
+            qWarning() << "Gallery Vulkan buffer export unsupported"
+                       << "caps" << int(selected->gpu->export_caps.buf)
+                       << "requested" << int(galleryHandle);
+#endif
+        selected->externalBufferRejected = true;
+    }
     if (exportGpu) {
         pl_buf_params params = {};
         params.size = paddedOutput;
+        // Use the exported allocation as the compute output when supported,
+        // avoiding a second GPU buffer copy before the presenter imports it.
         params.storable = true;
-        params.export_handle = PL_HANDLE_DMA_BUF;
+        params.export_handle = galleryHandle;
         exported = pl_buf_create(selected->gpu, &params);
+        if (!exported) {
+            // Some drivers can export transfer buffers but not storage
+            // buffers. Use the extra copy only on those drivers.
+            params.storable = false;
+            exported = pl_buf_create(selected->gpu, &params);
+        }
+#ifdef __ANDROID__
+        if (!exported) qWarning() << "Gallery Vulkan export buffer creation failed"
+                                  << "bytes" << paddedOutput;
+#endif
+        exportNeedsCopy = exported && !params.storable;
+        if (!exported) selected->externalBufferRejected = true;
     }
 #endif
-    bindings[0].object = texture ? texture->texture
-        : static_cast<const void*>(selected->source);
-    bindings[0].sample_mode = PL_TEX_SAMPLE_NEAREST;
-    bindings[1].object = exported ? exported : selected->output;
-    bindings[2].object = selected->profiles;
-    bindings[3].object = selected->clipping;
-    bindings[4].object = texture || (bayer && bayer->gain)
-        ? selected->gain : selected->emptyGain;
-    pl_pass_run_params run = {};
-    run.pass = selected->colorPass;
-    run.desc_bindings = bindings;
-    run.push_constants = &constants;
-    const uint32_t pixelsPerInvocation = rgb24 ? 4u : 2u;
-    run.compute_groups[0] = static_cast<int>(
-        (((pixels + pixelsPerInvocation - 1u) / pixelsPerInvocation) + 255u) / 256u);
-    run.compute_groups[1] = 1;
-    run.compute_groups[2] = 1;
-    if (run.compute_groups[0] > selected->gpu->limits.max_dispatch[0]) {
+    if (!exportTexture && (!exported || exportNeedsCopy) &&
+        !selected->reserveOutput(paddedOutput)) {
         if (exported) pl_buf_destroy(selected->gpu, &exported);
         return false;
     }
+    if (!exportTexture && !selected->ensureColorPass()) {
+        if (exported) pl_buf_destroy(selected->gpu, &exported);
+        return false;
+    }
+    bindings[0].object = externalBuffer ? externalBuffer
+        : bayerTexture ? bayer->texture
+        : texture ? texture->texture
+        : static_cast<const void*>(selected->directHostInput
+            ? selected->upload : selected->source);
+    bindings[0].sample_mode = PL_TEX_SAMPLE_NEAREST;
+    bindings[1].object = exportTexture
+        ? static_cast<const void*>(frameOutputTexture)
+        : exported && !exportNeedsCopy
+        ? exported : selected->output;
+    bindings[2].object = selected->profiles;
+    bindings[3].object = selected->clipping;
+    bindings[4].object = (texture && texture->gain) || (bayer && bayer->gain)
+        ? selected->gain : selected->emptyGain;
+    pl_pass_run_params run = {};
+    run.pass = exportTexture
+        ? (rgb10a2 ? selected->colorImage10Pass : selected->colorImagePass)
+        : selected->colorPass;
+    run.desc_bindings = bindings;
+    run.push_constants = &constants;
+    const uint32_t pixelsPerInvocation = exportTexture ? 1u : rgb24 ? 4u : 2u;
+    const uint32_t groups =
+        (((pixels + pixelsPerInvocation - 1u) / pixelsPerInvocation) + 255u) / 256u;
+    run.compute_groups[0] = std::min(groups, selected->gpu->limits.max_dispatch[0]);
+    run.compute_groups[1] = (groups + run.compute_groups[0] - 1u) / run.compute_groups[0];
+    run.compute_groups[2] = 1;
+    if (run.compute_groups[1] > selected->gpu->limits.max_dispatch[1]) {
+        if (exported) pl_buf_destroy(selected->gpu, &exported);
+        return false;
+    }
+    Device::ThumbnailReadback* scheduledThumbnail=nullptr;
+    size_t scheduledThumbnailBytes=0;
+    int scheduledThumbnailFrame=-1;
+    ColorConstants scheduledThumbnailConstants{};
+    std::array<pl_desc_binding,5> scheduledThumbnailBindings{};
+    pl_pass_run_params scheduledThumbnailRun{};
     pl_pass_run(selected->gpu, &run);
+    if (exported && exportNeedsCopy)
+        pl_buf_copy(selected->gpu, exported, 0, selected->output, 0, paddedOutput);
+    if (output && output->completedThumbnailSourceFrame)
+        *output->completedThumbnailSourceFrame = -1;
     if (output && output->thumbnailPixels && output->thumbnailWidth &&
         output->thumbnailHeight) {
         auto& thumbnail = *output->thumbnailPixels;
@@ -1302,37 +1761,185 @@ bool colorGalleryRgbVulkan(
         if (count <= pixels && count <= std::numeric_limits<uint32_t>::max() / 3u) {
             const size_t bytes = count * 3u;
             const size_t padded = (bytes + 3u) & ~size_t{3};
-            if (selected->reserveThumbnail(padded)) {
-                ColorConstants thumbnailConstants = constants;
-                thumbnailConstants.dimensions[0] = static_cast<uint32_t>(count);
-                thumbnailConstants.dimensions[1] = static_cast<uint32_t>(padded / 4u);
-                thumbnailConstants.geometry[3] =
-                    (thumbnailConstants.geometry[3] | 1u) & ~(4u | 2u);
-                thumbnailConstants.geometry[2] =
-                    static_cast<uint32_t>(output->thumbnailOrientation);
-                thumbnailConstants.thumbnail[0] = output->thumbnailWidth;
-                thumbnailConstants.thumbnail[1] = output->thumbnailHeight;
-                thumbnailConstants.thumbnail[2] = 1u;
-                pl_desc_binding thumbnailBindings[5];
+            const bool deferred = selected->unifiedMemory &&
+                output->completedThumbnailSourceFrame;
+            auto* slot = &selected->thumbnailReadback;
+            if (deferred) {
+                // Reclaim completed slots, discarding results from a previous
+                // seek/clip before they can enter the current thumbnail cache.
+                Device::ThumbnailReadback* ready = nullptr;
+                for (auto& candidate : selected->thumbnailReadbacks) {
+                    if (!candidate.pending || pl_buf_poll(selected->gpu, candidate.download, 0))
+                        continue;
+                    if (candidate.generation != output->thumbnailGeneration ||
+                        candidate.width != output->thumbnailWidth ||
+                        candidate.height != output->thumbnailHeight ||
+                        candidate.clipping != bool(output->clipping)) {
+                        candidate.pending = false;
+                        continue;
+                    }
+                    if (!ready || candidate.sourceFrame < ready->sourceFrame)
+                        ready = &candidate;
+                }
+                if (ready) {
+                    thumbnail.resize(ready->byteCount);
+                    if (pl_buf_read(selected->gpu, ready->download, 0,
+                                    thumbnail.data(), ready->byteCount))
+                        *output->completedThumbnailSourceFrame = ready->sourceFrame;
+                    else thumbnail.clear();
+                    ready->pending = false;
+                }
+                slot = nullptr;
+                for (size_t offset = 0; offset < selected->thumbnailReadbacks.size(); ++offset) {
+                    const size_t index = (selected->nextThumbnailReadback + offset) %
+                        selected->thumbnailReadbacks.size();
+                    if (!selected->thumbnailReadbacks[index].pending) {
+                        slot = &selected->thumbnailReadbacks[index];
+                        selected->nextThumbnailReadback = (index + 1) %
+                            selected->thumbnailReadbacks.size();
+                        break;
+                    }
+                }
+            }
+            if (slot && selected->ensureColorPass() && selected->reserveThumbnail(*slot, padded)) {
+                scheduledThumbnailConstants = constants;
+                auto& c = scheduledThumbnailConstants;
+                c.dimensions[0] = static_cast<uint32_t>(count);
+                c.dimensions[1] = static_cast<uint32_t>(padded / 4u);
+                c.geometry[3] = (c.geometry[3] | 1u) & ~(4u | 8u);
+                c.geometry[2] = static_cast<uint32_t>(output->thumbnailOrientation);
+                c.thumbnail[0] = output->thumbnailWidth;
+                c.thumbnail[1] = output->thumbnailHeight;
+                c.thumbnail[2] = 1u;
                 std::copy(std::begin(bindings), std::end(bindings),
-                    thumbnailBindings);
-                thumbnailBindings[1].object = selected->thumbnailOutput;
-                auto thumbnailRun = run;
-                thumbnailRun.desc_bindings = thumbnailBindings;
-                thumbnailRun.push_constants = &thumbnailConstants;
-                thumbnailRun.compute_groups[0] = static_cast<int>(
+                          scheduledThumbnailBindings.begin());
+                scheduledThumbnailBindings[1].object = slot->output;
+                scheduledThumbnailRun = run;
+                scheduledThumbnailRun.pass = selected->colorPass;
+                scheduledThumbnailRun.desc_bindings = scheduledThumbnailBindings.data();
+                scheduledThumbnailRun.push_constants = &scheduledThumbnailConstants;
+                scheduledThumbnailRun.compute_groups[0] = static_cast<int>(
                     (((count + 3u) / 4u) + 255u) / 256u);
-                thumbnail.resize(padded);
-                pl_pass_run(selected->gpu, &thumbnailRun);
-                pl_buf_copy(selected->gpu, selected->thumbnailDownload, 0,
-                    selected->thumbnailOutput, 0, padded);
-                if (pl_buf_read(selected->gpu, selected->thumbnailDownload, 0,
-                        thumbnail.data(), padded))
-                    thumbnail.resize(bytes);
-                else thumbnail.clear();
+                scheduledThumbnailRun.compute_groups[1] = 1;
+                if (deferred) {
+                    scheduledThumbnail = slot;
+                    scheduledThumbnailBytes = bytes;
+                    scheduledThumbnailFrame = output->thumbnailSourceFrame;
+                } else {
+                    thumbnail.resize(padded);
+                    pl_pass_run(selected->gpu, &scheduledThumbnailRun);
+                    pl_buf_copy(selected->gpu, slot->download, 0, slot->output, 0, padded);
+                    if (pl_buf_read(selected->gpu, slot->download, 0, thumbnail.data(), padded)) {
+                        thumbnail.resize(bytes);
+                        if (output->completedThumbnailSourceFrame)
+                            *output->completedThumbnailSourceFrame = output->thumbnailSourceFrame;
+                    } else thumbnail.clear();
+                }
             }
         }
     }
+    auto enqueueThumbnailReadback=[&]{
+        if(!scheduledThumbnail)return;
+        pl_pass_run(selected->gpu,&scheduledThumbnailRun);
+        pl_buf_copy(selected->gpu,scheduledThumbnail->download,0,
+            scheduledThumbnail->output,0,
+            (scheduledThumbnailBytes+3u)&~size_t{3});
+        scheduledThumbnail->byteCount=scheduledThumbnailBytes;
+        scheduledThumbnail->width=output->thumbnailWidth;
+        scheduledThumbnail->height=output->thumbnailHeight;
+        scheduledThumbnail->clipping=bool(output->clipping);
+        scheduledThumbnail->sourceFrame=scheduledThumbnailFrame;
+        scheduledThumbnail->generation=output->thumbnailGeneration;
+        scheduledThumbnail->pending=true;
+        scheduledThumbnail=nullptr;
+    };
+#ifdef __ANDROID__
+    if (exportTexture) {
+        pl_vulkan producerVk = pl_vulkan_get(selected->gpu);
+        VkSemaphore readySemaphore = motioncam::createAndroidReleaseSemaphore(producerVk);
+        int readyFenceFd = -1;
+        bool handedOff = false;
+        if (readySemaphore) {
+            pl_vulkan_hold_params hold{};
+            hold.tex = frameOutputTexture;
+            hold.layout = VK_IMAGE_LAYOUT_GENERAL;
+            hold.qf = VK_QUEUE_FAMILY_EXTERNAL;
+            hold.semaphore = {readySemaphore, 0};
+            if (pl_vulkan_hold_ex(selected->gpu, &hold)) {
+                if (!std::getenv("MOTIONCAM_GALLERY_TEST_IMAGE_HANDOFF_FAILURE"))
+                    readyFenceFd = motioncam::exportAndroidReleaseFence(producerVk, readySemaphore, &handedOff);
+                if (!handedOff) {
+                    pl_vulkan_release_params release{};
+                    release.tex = frameOutputTexture;
+                    release.layout = VK_IMAGE_LAYOUT_GENERAL;
+                    release.qf = VK_QUEUE_FAMILY_EXTERNAL;
+                    release.semaphore = {readySemaphore, 0};
+                    pl_vulkan_release_ex(selected->gpu, &release);
+                    pl_gpu_finish(selected->gpu);
+                }
+            }
+        }
+        if (!handedOff) {
+            while (pl_tex_poll(selected->gpu, frameOutputTexture, UINT64_MAX)) {}
+            if (readySemaphore) vkDestroySemaphore(producerVk->device, readySemaphore, nullptr);
+            readySemaphore = VK_NULL_HANDLE;
+            pl_tex_destroy(selected->gpu, &frameOutputTexture);
+            selected->externalTextureRejected = true;
+            spdlog::warn("GALLERY_PERF event=shared_image_rejected reason=handoff retry=buffer");
+            if (output->requireZeroCopy) return false;
+            goto retryOutput;
+        }
+        const int fd = ::dup(frameOutputTexture->shared_mem.handle.fd);
+        if (fd < 0) {
+            if (readyFenceFd >= 0) {
+                pollfd fence{readyFenceFd, POLLIN, 0};
+                while (::poll(&fence, 1, -1) < 0 && errno == EINTR) {}
+                ::close(readyFenceFd);
+            }
+            if (readySemaphore) vkDestroySemaphore(producerVk->device, readySemaphore, nullptr);
+            pl_tex_destroy(selected->gpu, &frameOutputTexture);
+            return false;
+        }
+        enqueueThumbnailReadback();
+        auto gpuFrame = std::make_shared<VulkanGalleryGpuBuffer>();
+        gpuFrame->fd = fd;
+        gpuFrame->readyFenceFd = readyFenceFd;
+        gpuFrame->externalImageOwnership = handedOff;
+        gpuFrame->opaqueFd = true;
+        gpuFrame->vulkanTexture = true;
+        gpuFrame->rejectSharedImage = [weak = std::weak_ptr<Device>(selectedDevice)] {
+            const auto owner = weak.lock();
+            return owner && !owner->externalTextureRejected.exchange(true);
+        };
+        gpuFrame->rgb10a2 = rgb10a2;
+        gpuFrame->bytes = static_cast<size_t>(outputWidth) * outputHeight *
+            4u;
+        gpuFrame->allocationBytes = frameOutputTexture->shared_mem.size;
+        gpuFrame->allocationOffset = frameOutputTexture->shared_mem.offset;
+        gpuFrame->width = outputWidth;
+        gpuFrame->height = outputHeight;
+        gpuFrame->sourceFrameIndex = output->thumbnailSourceFrame;
+        gpuFrame->resourceLease = std::shared_ptr<void>(
+            new pl_tex(frameOutputTexture), [owner = selectedDevice, producerVk, readySemaphore, signalFence = readyFenceFd >= 0 ? ::dup(readyFenceFd) : -1](void* ptr) {
+                auto* texture = static_cast<pl_tex*>(ptr);
+                if (signalFence >= 0) {
+                    pollfd fence{signalFence, POLLIN, 0};
+                    while (::poll(&fence, 1, -1) < 0 && errno == EINTR) {}
+                    ::close(signalFence);
+                }
+                std::lock_guard lock(deviceMutex);
+                pl_tex_destroy(owner->gpu, texture);
+                if (readySemaphore) vkDestroySemaphore(producerVk->device, readySemaphore, nullptr);
+                delete texture;
+            });
+        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=gallery_shared_image width={} height={} asynchronous={} resident_input={}",
+                outputWidth, outputHeight, handedOff, externalGpu != nullptr);
+        *output->gpuBuffer = std::move(gpuFrame);
+        rgb.clear();
+        return true;
+    }
+#endif
 #ifndef _WIN32
     if (exported) {
         const uint64_t debugSampleHash =
@@ -1348,8 +1955,13 @@ bool colorGalleryRgbVulkan(
             pl_buf_destroy(selected->gpu, &exported);
             return false;
         }
+        // Queue the thumbnail pass after the displayed frame's export fence.
+        // The thumbnail copy can finish later without extending the frame's
+        // producer/presenter handoff wait.
+        enqueueThumbnailReadback();
         auto gpuFrame = std::make_shared<VulkanGalleryGpuBuffer>();
         gpuFrame->fd = fd;
+        gpuFrame->opaqueFd = galleryHandle == PL_HANDLE_FD;
         gpuFrame->bytes = paddedOutput;
         gpuFrame->allocationBytes = exported->shared_mem.size;
         gpuFrame->allocationOffset = exported->shared_mem.offset;
@@ -1370,9 +1982,11 @@ bool colorGalleryRgbVulkan(
         return true;
     }
 #endif
+    if (output && output->requireZeroCopy) return false;
     const bool hostImport = texture && !std::getenv("MOTIONCAM_GALLERY_STAGED_READBACK") &&
         (selected->gpu->import_caps.buf & PL_HANDLE_HOST_PTR);
     const bool directView = hostImport && output && output->hostPixels && rgb24 &&
+        !alignedRgb24 && !rgb10a2 &&
         !std::getenv("MOTIONCAM_GALLERY_VECTOR_READBACK");
     std::shared_ptr<uint8_t> owned;
     pl_buf imported = nullptr;
@@ -1408,12 +2022,34 @@ bool colorGalleryRgbVulkan(
         if (!texture) unavailable = true;
         return false;
     }
+    enqueueThumbnailReadback();
     if (pooled) {
         *output->hostPixels = std::move(owned);
         rgb.clear();
         return true;
     }
     result.resize(outputBytes);
+    if (alignedRgb24) {
+        const size_t count = static_cast<size_t>(pixels);
+        for (size_t i = 0; i < count; ++i) {
+            result[i * 3u] = result[i * 4u];
+            result[i * 3u + 1u] = result[i * 4u + 1u];
+            result[i * 3u + 2u] = result[i * 4u + 2u];
+        }
+        result.resize(count * 3u);
+    } else if (rgb10a2) {
+        const size_t count = static_cast<size_t>(pixels);
+        for (size_t i = 0; i < count; ++i) {
+            uint32_t packed = 0;
+            std::memcpy(&packed, result.data() + i * 4u, sizeof(packed));
+            for (unsigned channel = 0; channel < 3; ++channel) {
+                const uint32_t code = (packed >> (channel * 10u)) & 1023u;
+                result[i * 3u + channel] = static_cast<uint8_t>(
+                    (code * 255u + 511u) / 1023u);
+            }
+        }
+        result.resize(count * 3u);
+    }
     rgb = std::move(result);
     return true;
 }

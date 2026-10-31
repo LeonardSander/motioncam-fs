@@ -820,7 +820,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         RenderSettings frameSettings = mSettings;
         const auto renderPlan = vfs::planDngRender(
             entry, timestamp, mSourceFrames.front(), frameSettings, mFps,
-            jpegCompression);
+            savedOutput || jpegCompression, true);
         if (renderPlan.nativeMetadataFrame)
             frameSettings.options = static_cast<FileRenderOptions>(
                 frameSettings.options & ~RENDER_OPT_DRAFT);

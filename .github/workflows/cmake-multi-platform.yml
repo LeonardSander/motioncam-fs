@@ -10,6 +10,68 @@ on:
   workflow_dispatch:
 
 jobs:
+  android-apk:
+    name: Android APK (arm64)
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install Android platform and NDK
+      shell: bash
+      run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+
+    - name: Install build tools
+      run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config autoconf automake libtool nasm p7zip-full
+
+    - name: Install host Qt
+      id: host-qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.12.0'
+        host: linux
+        target: desktop
+
+    - name: Install Android Qt
+      run: python3 scripts/install_qt_android.py "$PWD/Qt/6.12.0/android_arm64_v8a"
+
+    - name: Set up vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+
+    - name: Build APK
+      shell: bash
+      env:
+        QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_arm64_v8a
+        QT_HOST_PATH: ${{ steps.host-qt.outputs.qt-root-dir }}
+      run: |
+        export ANDROID_SDK_ROOT="${ANDROID_HOME}"
+        export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/27.2.12479018"
+        bash scripts/build_android_apk.sh "$PWD/build-android-arm64"
+        mkdir -p artifacts
+        ref_safe="${GITHUB_REF_NAME//\//-}"
+        apk="$(find build-android-arm64 -type f -name '*.apk' -path '*/outputs/apk/*' -print -quit)"
+        test -n "$apk"
+        cp "$apk" "artifacts/motioncam-${ref_safe}-android-arm64.apk"
+
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: motioncam-android-arm64
+        path: artifacts/*.apk
+
   linux-appimage:
     name: Linux AppImage (Clang)
     # libjxl-dev is not available from the Ubuntu 22.04 runner repositories.
@@ -342,7 +404,7 @@ jobs:
   # ---------- RELEASE ----------
   release:
     name: Create GitHub Release
-    needs: [build, linux-appimage]
+    needs: [build, linux-appimage, android-apk]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:

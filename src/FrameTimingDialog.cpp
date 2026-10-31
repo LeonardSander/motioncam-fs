@@ -9,6 +9,7 @@
 #include <QVBoxLayout>
 #include <QFutureWatcher>
 #include <QPointer>
+#include <QPushButton>
 #include <QtConcurrent>
 #include <algorithm>
 #include <cmath>
@@ -144,7 +145,13 @@ class TimingGraph final : public QWidget
 {
 public:
     explicit TimingGraph(std::vector<Sample> samples, QWidget* parent = nullptr)
-        : QWidget(parent), mSamples(std::move(samples)) { setMinimumSize(720, 380); }
+        : QWidget(parent), mSamples(std::move(samples)) {
+#ifdef __ANDROID__
+        setMinimumSize(360, 160);
+#else
+        setMinimumSize(720, 380);
+#endif
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override
@@ -152,7 +159,11 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         p.fillRect(rect(), QColor("#20242b"));
+#ifdef __ANDROID__
+        const QRectF plot = rect().adjusted(54, 12, -12, -35);
+#else
         const QRectF plot = rect().adjusted(72, 24, -24, -54);
+#endif
         if (mSamples.empty()) {
             p.setPen(Qt::lightGray);
             p.drawText(rect(), Qt::AlignCenter, tr("No frame timing data available"));
@@ -175,7 +186,13 @@ protected:
             const double py = y(value);
             p.drawLine(QPointF(plot.left(), py), QPointF(plot.right(), py));
             p.setPen(QColor("#aeb7c2"));
-            p.drawText(QRectF(4, py - 10, 62, 20), Qt::AlignRight | Qt::AlignVCenter,
+            p.drawText(QRectF(4, py - 10,
+#ifdef __ANDROID__
+                              44,
+#else
+                              62,
+#endif
+                              20), Qt::AlignRight | Qt::AlignVCenter,
                        QString::number(value, 'f', 1));
             p.setPen(QPen(QColor("#424a55"), 1));
         }
@@ -228,10 +245,22 @@ FrameTimingDialog::FrameTimingDialog(const QString& clipName,
     const double ticksPerSecond = timeBaseNum > 0
         ? static_cast<double>(timeBaseDen) / timeBaseNum : 0.0;
     auto* layout = new QVBoxLayout(this);
+#ifdef __ANDROID__
+    layout->setContentsMargins(8, 6, 8, 6);
+    layout->setSpacing(4);
+#endif
     mSummary = new QLabel(this);
     mSummary->setTextInteractionFlags(Qt::TextSelectableByMouse);
+#ifdef __ANDROID__
+    mSummary->setWordWrap(true);
+#endif
     layout->addWidget(mSummary);
     updateTiming(pts, timeBaseNum, timeBaseDen, targetFps, useCfrMapping, frameRateInfo);
+#ifdef __ANDROID__
+    auto* closeButton = new QPushButton(tr("Close graph"), this);
+    layout->addWidget(closeButton);
+    connect(closeButton, &QPushButton::clicked, this, &QWidget::close);
+#endif
 }
 
 void FrameTimingDialog::updateTiming(const std::vector<std::int64_t>& pts,
@@ -270,7 +299,11 @@ void FrameTimingDialog::updateTiming(const std::vector<std::int64_t>& pts,
             layout->replaceWidget(guardedThis->mGraph, graph);
             guardedThis->mGraph->deleteLater();
         } else {
+#ifdef __ANDROID__
+            layout->insertWidget(std::max(0, layout->count() - 1), graph, 1);
+#else
             layout->addWidget(graph, 1);
+#endif
         }
         guardedThis->mGraph = graph;
     });

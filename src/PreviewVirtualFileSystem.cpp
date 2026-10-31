@@ -100,7 +100,7 @@ void PreviewRenderer::render(
     const size_t firstFrame = std::min(options.firstFrame, entries.size());
     size_t completed = 0;
     const bool profileFrames = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    for (size_t index = firstFrame; index < entries.size(); ++index) {
+    for (size_t index = firstFrame; index < entries.size() && index <= options.lastFrame; ++index) {
         if (progress && !progress(completed, entries.size() - firstFrame,
                 "Rendering " + entries[index].name))
             throw std::runtime_error("Preview rendering cancelled");

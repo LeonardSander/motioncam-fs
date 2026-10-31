@@ -560,6 +560,7 @@ struct FinalizeOptions {
 
 struct PreviewOptions {
     size_t firstFrame = 0;
+    size_t lastFrame = size_t(-1); // Inclusive; unbounded by default.
     std::function<bool(size_t)> skipFrame;
     // Build the pre-demosaic clipping mask only for visible gallery playback.
     bool clippingEnabled = false;

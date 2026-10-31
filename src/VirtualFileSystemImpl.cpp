@@ -1997,6 +1997,23 @@ int readMountedEntry(
     return 0;
 }
 
+std::string finalizedCfaBadPixelOptions(const std::string& sourceSidecar,
+                                       const std::vector<uint8_t>& finalizedDng) {
+    if (!std::filesystem::exists(sourceSidecar)) return {};
+    DNGImageLayout layout;
+    if (!DNGDecoder::getImageLayout(finalizedDng, layout))
+        throw std::runtime_error("Could not inspect finalized DNG pixel layout");
+    if (layout.pixels != DNGPixelLayout::CFA) return {};
+    std::ifstream input(sourceSidecar);
+    if (!input) throw std::runtime_error("Could not read source bad-pixel options JSON");
+    const auto source = nlohmann::json::parse(input);
+    if (!source.is_object() || !source.contains("badPixels")) return {};
+    nlohmann::json output = {{"badPixels", source.at("badPixels")}};
+    if (source.contains("fullSensorResolution"))
+        output["fullSensorResolution"] = source.at("fullSensorResolution");
+    return output.dump(2) + '\n';
+}
+
 void finalize(
     IVirtualFileSystem& filesystem,
     const std::string& destination,
@@ -2004,10 +2021,11 @@ void finalize(
     const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
     const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady,
-    bool writeFiles) {
+    bool writeFiles,
+    const std::function<void(const std::string&, const std::vector<uint8_t>&)>& entryReady) {
     namespace stdfs = std::filesystem;
 
-    if (!writeFiles && !fileReady)
+    if (!writeFiles && !fileReady && !entryReady)
         throw std::invalid_argument("Streaming finalization requires a frame callback");
 
     auto entries = filesystem.listFiles("");
@@ -2018,7 +2036,7 @@ void finalize(
     // Callback-only finalization is a DNG frame stream. Ancillary entries such
     // as audio.wav are supplied separately and must not be materialized or
     // written to the caller's destination (which may be a shared temp path).
-    if (!writeFiles) {
+    if (!writeFiles && !entryReady) {
         entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& entry) {
             return entry.name.size() < 4 ||
                 entry.name.substr(entry.name.size() - 4) != ".dng";
@@ -2145,19 +2163,21 @@ void finalize(
         while (nextReady < entries.size() && ready[nextReady]) {
             const size_t readyIndex=nextReady++;
             const auto& entry = entries[readyIndex];
-            if (fileReady && entry.name.size() >= 4 &&
-                entry.name.substr(entry.name.size() - 4) == ".dng" &&
-                !skipped[readyIndex]) {
+            const bool dngEntry=isDng(entry);
+            if (fileReady && dngEntry && !skipped[readyIndex]) {
                 Timestamp timestamp = 0;
                 auto& bytes = finalizedDngs[readyIndex];
                 if (bytes.empty() && writeFiles) bytes = readBytes(outputPath(entry));
                 if (!DNGDecoder::getTimingMetadata(bytes, timestamp))
                     throw std::runtime_error("Finalized DNG is missing timing metadata: " + entry.name);
                 fileReady(bytes, timestamp);
-                if (writeFiles || !gapMember[nextReady - 1]) {
-                    bytes.clear();
-                    bytes.shrink_to_fit();
-                }
+            }
+            if(entryReady&&!skipped[readyIndex])
+                entryReady(entry.name,finalizedDngs[readyIndex]);
+            if ((writeFiles || !gapMember[readyIndex]) &&
+                (fileReady || entryReady)) {
+                finalizedDngs[readyIndex].clear();
+                finalizedDngs[readyIndex].shrink_to_fit();
             }
         }
     };
@@ -2177,7 +2197,7 @@ void finalize(
                     : DNGDecoder::compressLosslessJPEGTiled(dng);
         if (!ok) throw std::runtime_error("Could not compress " + entries[index].name);
         if (writeFiles) writeBytes(outputPath(entries[index]), dng);
-        if (fileReady) finalizedDngs[index] = std::move(dng);
+        if (fileReady || entryReady) finalizedDngs[index] = std::move(dng);
     };
 
     QTemporaryDir staging;
@@ -2250,7 +2270,7 @@ for line in sys.stdin:
         }
     }
 
-    stdfs::create_directories(destination);
+    if(writeFiles)stdfs::create_directories(destination);
     size_t dngIndex = options.firstDngFrame;
     for (size_t index = 0; index < entries.size(); ++index) {
         report("Rendering " + entries[index].name);
@@ -2272,9 +2292,9 @@ for line in sys.stdin:
             if (entries[index].syntheticFrame && !DNGDecoder::markSyntheticFrame(rendered))
                 throw std::runtime_error("Could not preserve synthetic frame " + entries[index].name);
         }
-        if (writeFiles || !isDng(entries[index]))
+        if (writeFiles)
             writeBytes(outputPath(entries[index]), rendered);
-        if (fileReady && isDng(entries[index]))
+        if ((fileReady && isDng(entries[index])) || entryReady)
             finalizedDngs[index] = rendered;
         ++completed;
 
@@ -2367,7 +2387,7 @@ for line in sys.stdin:
                 !DNGDecoder::markSyntheticFrame(dng))
                 throw std::runtime_error("Could not rebuild synthesized DNG " + entries[frame].name);
             if (writeFiles) writeBytes(outputPath(entries[frame]), dng);
-            if (fileReady) finalizedDngs[frame] = dng;
+        if (fileReady || entryReady) finalizedDngs[frame] = dng;
             if (!jpegCompression) ready[frame] = true;
             ++completed;
             report("Rebuilt interpolated frame " + entries[frame].name);
@@ -2405,6 +2425,7 @@ for line in sys.stdin:
         rife.closeWriteChannel();
         if (!rife.waitForFinished(5000)) { rife.kill(); rife.waitForFinished(); }
     }
+    emitReady();
     if (progress) progress(totalWork, totalWork, "Finalization complete");
 }
 

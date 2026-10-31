@@ -11,13 +11,21 @@
         "libarchive",
         "libjxl",
         {
+            "name": "libplacebo",
+            "platform": "android"
+        },
+        {
             "name": "ffmpeg",
             "version>=": "6.1.1",
             "default-features": false,
-            "features": ["avcodec", "avformat", "swresample", "swscale"]
+            "features": ["avcodec", "avfilter", "avformat", "swresample", "swscale"]
         }
     ],
     "overrides": [
+        {
+            "name": "vulkan-headers",
+            "version": "1.4.357.0"
+        },
         {
             "name": "ffmpeg",
             "version": "6.1.1"

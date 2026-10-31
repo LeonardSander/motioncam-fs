@@ -388,6 +388,10 @@ int readMountedEntry(
     const std::function<std::shared_ptr<std::vector<uint8_t>>()>& staticMaterializer = {},
     int priority = 0);
 
+// Preserve only the sensor geometry and bad-pixel options for finalized CFA.
+std::string finalizedCfaBadPixelOptions(const std::string& sourceSidecar,
+                                       const std::vector<uint8_t>& finalizedDng);
+
 void finalize(
     IVirtualFileSystem& filesystem,
     const std::string& destination,
@@ -395,7 +399,8 @@ void finalize(
     const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
     const std::function<void(const std::vector<uint8_t>&, Timestamp)>& fileReady = {},
-    bool writeFiles = true);
+    bool writeFiles = true,
+    const std::function<void(const std::string&, const std::vector<uint8_t>&)>& entryReady = {});
 
 FrameRateInfo calculateFrameRate(const std::vector<Timestamp>& frames);
 

@@ -69,6 +69,28 @@ struct DNGFrameMetadata {
     std::shared_ptr<const DNGProfileTables> profileTables;
 };
 
+struct DNGGpuImage {
+    const void* gpu = nullptr;
+    const void* buffer = nullptr;
+    const void* texture = nullptr;
+    uint32_t width = 0, height = 0, channels = 0;
+    std::shared_ptr<void> lease;
+    std::shared_ptr<void> deviceLease; // GPU ownership independent of decoder resets.
+    std::function<bool(uint16_t*, size_t)> download;
+    bool hasStorage() const { return buffer || texture; }
+    bool downloadSamples(std::vector<uint16_t>& samples) const {
+        if (!download) return false;
+        samples.resize(size_t(width) * height * channels);
+        return download(samples.data(), samples.size());
+    }
+    std::function<bool(std::vector<uint16_t>&)> vectorDownloader() const {
+        if (!download) return {};
+        return [source = *this](std::vector<uint16_t>& samples) {
+            return source.downloadSamples(samples);
+        };
+    }
+};
+
 struct PreviewFrame {
     size_t sourceFrameIndex = 0;
     std::vector<uint8_t> rgb;
@@ -78,13 +100,15 @@ struct PreviewFrame {
     // Non-HQ Bayer preview can remain CFA until the gallery's final GPU pass.
     // The CPU fallback reconstructs this when Vulkan is unavailable.
     std::vector<uint16_t> galleryCfa;
+    DNGGpuImage gallerySource;
     // MCRAW preprocessing already owns its CFA as little-endian bytes. Move
     // that allocation here instead of copying a full frame to galleryCfa.
     std::vector<uint8_t> galleryCfaBytes;
     std::shared_ptr<VulkanGalleryBayerGain> galleryCfaGain;
     std::function<bool(std::vector<uint16_t>&)> galleryCfaRecoverCpu;
     bool hasGalleryCfa() const {
-        return !galleryCfa.empty() || !galleryCfaBytes.empty();
+        return (gallerySource.channels == 1 && gallerySource.hasStorage()) ||
+            !galleryCfa.empty() || !galleryCfaBytes.empty();
     }
     const uint16_t* galleryCfaSamples() const {
         return galleryCfa.empty()
@@ -95,10 +119,6 @@ struct PreviewFrame {
     std::array<double, 3> galleryBlack{}, galleryWhite{};
     // DirectLog can keep its decoded RGB texture until the gallery's final
     // display pass. The lease protects the decoder texture through callback.
-    const void* galleryGpuDevice = nullptr;
-    const void* galleryGpuTexture = nullptr;
-    std::shared_ptr<void> galleryGpuLease;
-    std::function<bool(uint16_t*, size_t)> galleryGpuDownload;
     std::array<double, 3> galleryGpuBlack{}, galleryGpuWhite{};
     std::shared_ptr<VulkanGalleryGain> galleryGpuGain;
     uint32_t displayBitDepth = 16;
@@ -163,6 +183,9 @@ struct DNGSidecarMetadataEntry {
 // Storage-independent, unpacked image samples shared by DNG decoding,
 // source processing, preview rendering, and DNG serialization.
 struct DecodedDNGImage {
+    std::shared_ptr<DNGGpuImage> gpuImage;
+    // Applied by the gallery shader when samples remain resident.
+    std::vector<uint16_t> residentLinearization;
     std::vector<uint16_t> samples;
     DNGImageLayout layout;
     uint32_t storedBitsPerSample = 0;

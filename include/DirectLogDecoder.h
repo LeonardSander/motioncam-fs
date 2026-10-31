@@ -70,7 +70,8 @@ public:
                               int outputWidth, int outputHeight,
                               bool smoothChroma);
     bool extractFrameTextureDeferred(int frameNumber, int outputWidth,
-                                     int outputHeight, bool smoothChroma);
+                                     int outputHeight, bool smoothChroma,
+                                     const std::array<uint8_t, 4>* cfaPhase = nullptr);
     bool canExtractFrameTexture();
     bool extractFrameBayer(int frameNumber, std::vector<uint16_t>& bayerData,
                            const std::array<uint8_t, 4>& cfaPhase,
@@ -93,6 +94,7 @@ public:
                                int outputWidth, int outputHeight,
                                bool smoothChroma);
     bool pendingGpuTexture(const void*& gpu, const void*& texture) const;
+    std::shared_ptr<void> pendingGpuLease() const;
     bool downloadPendingGpu(uint16_t* pixels, size_t samples);
     bool recoverFrameInSoftware(int frameNumber, uint16_t* pixels, size_t samples,
                                 int outputWidth, int outputHeight, bool smoothChroma,
@@ -183,6 +185,8 @@ private:
     bool mDecoderInitialized;
     bool mHardwareDecoderActive;
     bool mForceSoftwareDecoder = false;
+    bool mMediaCodecSurfaceActive = false;
+    bool mMediaCodecSurfaceRejected = false;
     
     int mVideoStreamIndex;
     AVRational mTimeBase;

@@ -144,10 +144,13 @@ public:
     static bool getImageLayout(const std::vector<uint8_t>& dngData,
                                DNGImageLayout& layout);
     static uint32_t getLinearizationTableCount(const std::vector<uint8_t>& dngData);
+    // preferResident may return a GPU allocation instead of CPU samples for
+    // regular lossless JPEG tiles. decodePreview consumes it or recovers pixels.
     static bool decodeImage(std::vector<uint8_t> dngData,
                             DecodedDNGImage& image,
                             bool backgroundWork = false,
-                            bool applyLinearization = true);
+                            bool applyLinearization = true,
+                            bool preferResident = false);
     // Decode pixels from an existing buffer without copying canonical frames.
     // The input remains unchanged; uncommon omitted TIFF defaults use a copy.
     static bool decodeImageBorrowed(std::vector<uint8_t>& dngData,
@@ -266,7 +269,8 @@ private:
     static bool decodeImageInPlace(std::vector<uint8_t>& dngData,
                                    DecodedDNGImage& image,
                                    bool backgroundWork,
-                                   bool applyLinearization);
+                                   bool applyLinearization,
+                                   bool preferResident = false);
     void analyzeSequence();
     void findDNGFiles();
     void extractTimestampsFromFilenames();

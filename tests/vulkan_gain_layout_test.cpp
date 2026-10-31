@@ -2,6 +2,8 @@
 #include "VulkanGalleryPreview.h"
 #include "Utils.h"
 #include "GalleryColor.h"
+#include <libplacebo/vulkan.h>
+#include <libplacebo/gpu.h>
 
 #include <array>
 #include <algorithm>
@@ -78,6 +80,20 @@ int main() {
                 std::fprintf(stderr, "Fused Bayer color mismatch at %zu: %u vs %u\n", index, actual, expected);
                 return 1;
             }
+        }
+        // Strict shared-image validation must reject host input instead of
+        // silently uploading a full frame and calling it zero-copy.
+        motioncam::VulkanGalleryOutput strictOutput;
+        strictOutput.width = previewWidth;
+        strictOutput.height = previewHeight;
+        strictOutput.rgb24 = true;
+        strictOutput.requireZeroCopy = true;
+        auto strictInput = cpu;
+        if (motioncam::colorGalleryRgbVulkan(strictInput, gains, identity,
+                identity, 1.0f, nullptr, nullptr, false, false, nullptr,
+                &strictOutput) || strictInput != cpu) {
+            std::fprintf(stderr, "Zero-copy validation accepted or modified host input\n");
+            return 1;
         }
         motioncam::VulkanGalleryBayerGain bake;
         bake.scale.fill(1.0f);
@@ -274,13 +290,14 @@ int main() {
                                                matrix, 1.0f, nullptr, nullptr,
                                                false, false)) return 1;
         for (int orientation : {0, 90, 180, 270})
-            for (bool rgb24 : {false, true}) {
+            for (bool rgb24 : {false, true})
+              for(bool clippingOn:{true,false,true}) {
                 motioncam::VulkanGalleryOutput output;
                 output.width = width;
                 output.height = height;
                 output.orientation = orientation;
                 output.rgb24 = rgb24;
-                output.clipping = &clipping;
+                output.clipping = clippingOn?&clipping:nullptr;
                 std::vector<uint8_t> thumbnail;
                 if (rgb24) {
                     output.thumbnailPixels = &thumbnail;
@@ -310,7 +327,7 @@ int main() {
                         for (size_t channel = 0; channel < 3; ++channel)
                             std::memcpy(&codes[channel],
                                 colored.data() + inputPixel * 6 + channel * 2, 2);
-                        const uint8_t indication = clipping[inputPixel];
+                        const uint8_t indication = clippingOn?clipping[inputPixel]:0;
                         if (indication == 1) codes = {32768, 16384, 0};
                         else if (indication > 1) {
                             const uint8_t bits = indication - 2;
@@ -345,22 +362,9 @@ int main() {
                                 (2u * tx + 1u) * outputWidth / 10u);
                             const uint32_t oy = std::min(fullHeight - 1,
                                 (2u * ty + 1u) * fullHeight / 6u);
-                            uint32_t sx = ox, sy = oy;
-                            if (orientation == 90) {
-                                sx = oy; sy = height - 1u - ox;
-                            } else if (orientation == 180) {
-                                sx = width - 1u - ox; sy = height - 1u - oy;
-                            } else if (orientation == 270) {
-                                sx = width - 1u - oy; sy = ox;
-                            }
-                            for (uint32_t channel = 0; channel < 3; ++channel) {
-                                uint16_t code;
-                                std::memcpy(&code, colored.data() +
-                                    (static_cast<size_t>(sy) * width + sx) * 6u +
-                                    channel * 2u, 2u);
-                                expectedThumbnail[(ty * 5u + tx) * 3u + channel] =
-                                    static_cast<uint8_t>(code >> 8u);
-                            }
+                            for(uint32_t channel=0;channel<3;++channel)
+                                expectedThumbnail[(ty*5u+tx)*3u+channel]=
+                                    expected[(static_cast<size_t>(oy)*outputWidth+ox)*3u+channel];
                         }
                     if (thumbnail != expectedThumbnail) {
                         std::fprintf(stderr,
@@ -371,6 +375,167 @@ int main() {
                     }
                 }
             }
+    }
+    {
+        // Reusing a gallery device across a seek must not deliver old pixels
+        // or their frame index as a thumbnail for the new playback generation.
+        const std::array<float, 3> gains{1, 1, 1};
+        const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
+        motioncam::VulkanGalleryOutput output;
+        output.width = output.height = 16;
+        output.rgb24 = true;
+        output.thumbnailWidth = 5;
+        output.thumbnailHeight = 3;
+        std::vector<uint8_t> thumbnail;
+        int completedFrame = -1;
+        output.thumbnailPixels = &thumbnail;
+        output.completedThumbnailSourceFrame = &completedFrame;
+        std::vector<uint8_t> clipping(16u*16u,4u); // green indication
+        for (uint64_t generation : {11u, 12u, 13u}) {
+            output.clipping=generation==12?nullptr:&clipping;
+            output.thumbnailGeneration = generation;
+            output.thumbnailSourceFrame = generation == 11 ? 7 : 500;
+            bool received = false;
+            for (int attempt = 0; attempt < 32; ++attempt) {
+                std::vector<uint16_t> samples(16u * 16u * 3u);
+                const size_t channel=0u;
+                for (size_t pixel = 0; pixel < 16u * 16u; ++pixel)
+                    samples[pixel * 3u + channel] = 65535;
+                std::vector<uint8_t> rgb(samples.size() * 2u);
+                std::memcpy(rgb.data(), samples.data(), rgb.size());
+                if (!motioncam::colorGalleryRgbVulkan(rgb, gains, identity,
+                        identity, 1.0f, nullptr, nullptr, false, false,
+                        nullptr, &output)) return 1;
+                if (thumbnail.empty()) continue;
+                if (completedFrame != output.thumbnailSourceFrame || thumbnail.size() != 45u) {
+                    std::fprintf(stderr, "Thumbnail belongs to an old playback generation\n");
+                    return 1;
+                }
+                for (size_t index = 0; index < thumbnail.size(); ++index) {
+                    const size_t expectedChannel=generation==12?0u:1u;
+                    if (thumbnail[index] != (index % 3u == expectedChannel ? 255u : 0u)) {
+                        std::fprintf(stderr, "Thumbnail pixels belong to an old playback generation\n");
+                        return 1;
+                    }
+                }
+                received = true;
+                // Leave another result queued before changing generations.
+                if (attempt >= 3) break;
+            }
+            if (!received) {
+                std::fprintf(stderr, "Gallery thumbnail readback did not complete\n");
+                return 1;
+            }
+        }
+    }
+    {
+        // A pending readback from a previous row size must be discarded, even
+        // when its byte count equals the new shape's byte count.
+        const std::array<float,3> gains{1,1,1};
+        const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
+        motioncam::VulkanGalleryOutput output;
+        output.width=output.height=16;output.rgb24=true;
+        output.thumbnailGeneration=77;output.thumbnailSourceFrame=19;
+        std::vector<uint8_t> thumbnail;
+        int completed=-1;
+        output.thumbnailPixels=&thumbnail;output.completedThumbnailSourceFrame=&completed;
+        for(const auto shape:{std::pair{5u,3u},std::pair{3u,5u},std::pair{4u,4u}}){
+            output.thumbnailWidth=shape.first;output.thumbnailHeight=shape.second;
+            bool received=false;
+            for(int attempt=0;attempt<32;++attempt){
+                std::vector<uint16_t> samples(16u*16u*3u);
+                for(size_t i=0;i<samples.size();++i)samples[i]=uint16_t(i*7919u);
+                std::vector<uint8_t> rgb(samples.size()*2u);
+                std::memcpy(rgb.data(),samples.data(),rgb.size());
+                if(!motioncam::colorGalleryRgbVulkan(rgb,gains,identity,identity,1.0f,
+                    nullptr,nullptr,false,false,nullptr,&output))return 1;
+                if(thumbnail.empty())continue;
+                if(thumbnail.size()!=shape.first*shape.second*3u)return 1;
+                for(uint32_t y=0;y<shape.second;++y)for(uint32_t x=0;x<shape.first;++x){
+                    const uint32_t sx=(2*x+1)*16/(2*shape.first);
+                    const uint32_t sy=(2*y+1)*16/(2*shape.second);
+                    for(uint32_t c=0;c<3;++c)if(thumbnail[(y*shape.first+x)*3+c]!=rgb[(sy*16+sx)*3+c]){
+                        std::fprintf(stderr,"Thumbnail readback used stale dimensions\n");return 1;
+                    }
+                }
+                received=true;if(attempt>=3)break;
+            }
+            if(!received)return 1;
+        }
+    }
+    {
+        // RGB texture specialization must match the existing buffer shader;
+        // excluding Bayer branches must not alter normalization or color math.
+        pl_vulkan vk = pl_vulkan_create(nullptr, nullptr);
+        if (!vk) return 1;
+        const pl_fmt format = pl_find_fmt(vk->gpu, PL_FMT_UNORM, 4, 16, 16,
+                                          PL_FMT_CAP_SAMPLEABLE);
+        pl_tex_params params{};
+        params.w = params.h = 16;
+        params.format = format;
+        params.sampleable = params.host_writable = true;
+        pl_tex tex = format ? pl_tex_create(vk->gpu, &params) : nullptr;
+        std::vector<uint16_t> rgba(16u * 16u * 4u, 65535);
+        std::vector<uint16_t> samples(16u * 16u * 3u);
+        for (size_t i = 0; i < samples.size(); ++i)
+            rgba[(i / 3u) * 4u + i % 3u] = samples[i] = (i * 7919u) & 65535u;
+        pl_tex_transfer_params transfer{};
+        transfer.tex = tex;
+        transfer.ptr = rgba.data();
+        if (!tex || !pl_tex_upload(vk->gpu, &transfer)) return 1;
+        motioncam::VulkanGalleryTextureSource texture;
+        texture.gpu = vk->gpu;
+        texture.texture = tex;
+        texture.width = texture.height = 16;
+        texture.white.fill(65535);
+        const std::array<float, 3> gains{1.1f, 0.9f, 1.2f};
+        const std::array<float, 9> matrix{1,0,0,0,1,0,0,0,1};
+        for (bool rgb24 : {false, true}) {
+            motioncam::VulkanGalleryOutput output;
+            output.width = output.height = 16;
+            output.orientation = 90;
+            output.rgb24 = rgb24;
+            std::vector<uint8_t> expected(samples.size() * 2u), actual;
+            std::memcpy(expected.data(), samples.data(), expected.size());
+            if (!motioncam::colorGalleryRgbVulkan(expected, gains, matrix, matrix,
+                    1.0f, nullptr, nullptr, false, false, nullptr, &output) ||
+                !motioncam::colorGalleryRgbVulkan(actual, gains, matrix, matrix,
+                    1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
+                actual != expected) {
+                std::fprintf(stderr, "RGB texture shader differs from buffer shader\n");
+                return 1;
+            }
+        }
+        {
+            motioncam::VulkanGalleryOutput output;
+            output.width=output.height=16;output.rgb24=true;
+            output.thumbnailWidth=5;output.thumbnailHeight=3;
+            output.thumbnailGeneration=91;output.thumbnailSourceFrame=1;
+            std::vector<uint8_t> thumbnail,clipping(256,4);
+            int completed=-1;
+            output.thumbnailPixels=&thumbnail;output.completedThumbnailSourceFrame=&completed;
+            for(bool enabled:{true,false,true,false}){
+                output.clipping=enabled?&clipping:nullptr;
+                bool received=false;
+                for(int attempt=0;attempt<32;++attempt){
+                    std::vector<uint8_t> actual;
+                    if(!motioncam::colorGalleryRgbVulkan(actual,gains,matrix,matrix,1.0f,
+                        nullptr,nullptr,false,false,nullptr,&output,&texture))return 1;
+                    if(thumbnail.empty())continue;
+                    for(uint32_t y=0;y<3;++y)for(uint32_t x=0;x<5;++x){
+                        const uint32_t sx=(2*x+1)*16/10,sy=(2*y+1)*16/6;
+                        for(uint32_t c=0;c<3;++c)if(thumbnail[(y*5+x)*3+c]!=actual[(sy*16+sx)*3+c]){
+                            std::fprintf(stderr,"Texture thumbnail retained stale clipping\n");return 1;
+                        }
+                    }
+                    received=true;if(attempt>=3)break;
+                }
+                if(!received)return 1;
+            }
+        }
+        motioncam::releaseVulkanGalleryTextureDevice(vk->gpu);
+        pl_tex_destroy(vk->gpu, &tex);
+        pl_vulkan_destroy(&vk);
     }
     constexpr uint32_t width = 32, height = 32;
     const std::vector<float> cfaPhaseGrid(4, 1.25f);

@@ -2719,7 +2719,7 @@ int main(int argc, char** argv) {
             ++detectedFrames;
         }, false);
     assert(detectedFrames == 3);
-    assert(fs::is_empty(root / "detected-out"));
+    assert(!fs::exists(root / "detected-out"));
 
     FakeFileSystem cfaFilesystem(makeLogCfaDng(0, 0), makeLogCfaDng(1023, 2));
     motioncam::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});
@@ -2747,7 +2747,7 @@ int main(int argc, char** argv) {
         }, false);
     assert(streamedFrames == 3);
     assert(streamingFilesystem.ancillaryMaterializations() == 0);
-    assert(fs::is_empty(root / "stream-out"));
+    assert(!fs::exists(root / "stream-out"));
 
     FakeFileSystem compressedStreamingFilesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
@@ -2762,7 +2762,7 @@ int main(int argc, char** argv) {
             ++compressedFrames;
         }, false);
     assert(compressedFrames == 3);
-    assert(fs::is_empty(root / "compressed-stream-out"));
+    assert(!fs::exists(root / "compressed-stream-out"));
 
     FakeFileSystem longGapFilesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
@@ -2782,6 +2782,37 @@ int main(int argc, char** argv) {
         }, false);
     assert(!interpolatedLongGap);
     assert(longGapFrames == 34);
+
+    // Android's entry sink must receive ancillary files as well as DNGs,
+    // propagate destination failures, and avoid materializing an output tree.
+    std::vector<std::string> emittedEntries;
+    motioncam::vfs::finalize(streamingFilesystem, (root / "entry-stream-out").string(),
+        false, options, {}, {}, false,
+        [&](const std::string& name, const std::vector<uint8_t>& bytes) {
+            emittedEntries.push_back(name);
+            if (name == "audio.wav") assert(bytes == std::vector<uint8_t>({'R','I','F','F'}));
+            else { motioncam::Timestamp timestamp; assert(motioncam::DNGDecoder::getTimingMetadata(bytes, timestamp)); }
+        });
+    assert(emittedEntries.size() == 4 && emittedEntries.front() == "audio.wav");
+    assert(!fs::exists(root / "entry-stream-out"));
+    bool sinkFailed = false;
+    size_t attemptedEntries = 0;
+    try {
+        motioncam::vfs::finalize(streamingFilesystem, (root / "failed-entry-out").string(),
+            false, options, {}, {}, false,
+            [&](const std::string&, const std::vector<uint8_t>&) {
+                if (++attemptedEntries == 2) throw std::runtime_error("Destination write failed");
+            });
+    } catch (const std::runtime_error& e) { sinkFailed = std::string(e.what()) == "Destination write failed"; }
+    assert(sinkFailed && attemptedEntries == 2);
+    const auto pixelOptions = root / "bad-pixel-options.json";
+    { std::ofstream sidecar(pixelOptions); sidecar << R"({"badPixels":[[4,6]],"fullSensorResolution":[4096,3072],"levels":"123/4","colorMatrix1":[1,2,3]})"; }
+    const auto preserved = nlohmann::json::parse(motioncam::vfs::finalizedCfaBadPixelOptions(pixelOptions.string(), makeLogCfaDng(0, 0)));
+    assert(preserved.size() == 2 && preserved.at("badPixels")[0][0] == 4);
+    assert(preserved.at("fullSensorResolution")[0] == 4096);
+    assert(motioncam::vfs::finalizedCfaBadPixelOptions(pixelOptions.string(),
+        makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0)).empty());
+    assert(motioncam::vfs::finalizedCfaBadPixelOptions((root / "absent.json").string(), {}).empty());
 
     bool rejectedMissingCallback = false;
     try {

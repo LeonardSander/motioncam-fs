@@ -74,6 +74,7 @@ private:
                          int decodedWidth = 0, int decodedHeight = 0,
                          bool prepopulatedImage = false,
                          bool inputBayer = false);
+    bool hasSourceGainMaps() const;
     std::vector<GainMap> loadSidecarGainMaps(int frameNumber, const char* field) const;
     struct PreparedSidecarGainMaps {
         std::vector<GainMap> opcodeList2, opcodeList3;

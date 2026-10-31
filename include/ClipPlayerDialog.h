@@ -1,4 +1,5 @@
 #pragma once
+#include "GalleryVulkanVideo.h"
 #include <QDialog>
 #include <QImage>
 #include <QPointF>
@@ -19,7 +20,7 @@
 #include <vector>
 #include <array>
 #include <functional>
-class QLabel; class QPushButton; class QSlider; class QScrollArea; class QCheckBox;
+class QLabel; class QPushButton; class QSlider; class QListView; class QCheckBox;
 class QEvent;
 class QBuffer;
 class QTemporaryDir;
@@ -38,6 +39,10 @@ public:
     struct Clip { int mountId=-1; QString title; QString sourceFile; double fps=24.0; double durationSeconds=0.0; int sourceFrames=0; int width=0; int height=0; int nativeWidth=0; int nativeHeight=0; int orientation=-1; bool isSequence=true; bool directPresentation=false; bool autoAdvance=false; bool sourceAudioChecked=false; std::shared_ptr<const std::vector<uint8_t>> audioWav; std::shared_ptr<const std::vector<bool>> duplicateFrames; std::shared_ptr<const std::vector<int>> sourceFrameToOutput; std::shared_ptr<const std::vector<bool>> sourceFrameDuplicated; std::shared_ptr<const std::vector<std::string>> stillFrameNames; QSet<int> selectedSourceFrames; };
     explicit ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent=nullptr);
     ~ClipPlayerDialog() override;
+#ifdef Q_OS_ANDROID
+    void setNavigationReturnSnapshot(std::function<QPixmap()> returnSnapshot);
+#endif
+    void closeImmediately();
     int currentMountId() const;
     bool selectMount(int mountId);
     void seekToSeconds(double seconds);
@@ -48,6 +53,7 @@ public:
     bool isPlaybackPaused() const { return mPaused; }
     bool directSequencePresentation() const { return mDirectSequencePresentation; }
     void requestThumbnailBackfill();
+    QPair<int,int> visibleThumbnailOutputRange() const;
     void setThumbnailStripVisible(bool visible);
     void setFpsIndicatorEnabled(bool enabled);
     void setHistogramEnabled(bool enabled);
@@ -97,8 +103,10 @@ public:
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
     void setOutputFrameThumbnailImage(int outputFrame, const QImage& image,
                                       bool cacheWhenHidden = false);
+    static QSize thumbnailMaximumSize();
+    std::shared_ptr<std::atomic<QSize>> thumbnailRenderBounds() const {return mThumbnailRenderBounds;}
     static QImage makeRgb48Thumbnail(const uint8_t* pixels, qsizetype bytes,
-                                    int width, int height, int orientation);
+                                    int width, int height, int orientation, qreal pixelRatio = 1.0);
     void setSourceFrameThumbnail(int sourceFrame, const QByteArray& frame, int width, int height);
     void presentDroppedSourceFrame(int sourceFrame, const QByteArray& frame, int width, int height);
     void clearFrameSelections();
@@ -144,6 +152,7 @@ private:
     void stopDecoder();
     void releaseGpuFrames(bool keepPresentedFrame=false);
     void captureNativeOverlay(bool submit = true);
+    void suspendNativeBackingStore(bool suspend);
     void decoderFinished(int, QProcess::ExitStatus); void consumeOutput();
     void showNextFrame(); void advance(); QString ffmpegPath() const;
     int frameAtSliderPosition(int x) const;
@@ -163,6 +172,9 @@ private:
     void updateButtonIcons();
     void revealOverlay();
     void setOverlayVisible(bool visible);
+#ifdef Q_OS_ANDROID
+    void updateAndroidOverlayMask();
+#endif
     void changeZoom(double wheelSteps);
     void advanceZoomAnimation();
     void setZoomAnimationTarget(double target);
@@ -184,11 +196,13 @@ private:
     QString framePositionText(int frame) const;
     static QString runtimeText(double seconds);
     void rebuildThumbnailStrip();
-    void updateVisibleThumbnailWidgets();
     void cacheThumbnail(int mountId, int sourceFrame, const QImage& image,
                         bool persistToDisk = true);
     QString thumbnailCachePath(int mountId, int sourceFrame) const;
-    void refreshThumbnailLabel(int sourceFrame);
+    void refreshThumbnail(int sourceFrame);
+    QImage thumbnailImageForSource(int sourceFrame);
+    QSize thumbnailDisplayMaximumSize() const;
+    int thumbnailStripHeight() const;
     QSize thumbnailSizeForSource(int sourceFrame) const;
     void setCurrentThumbnailFrame(int outputFrame);
     void setDroppedCursorVisible(bool visible);
@@ -203,13 +217,15 @@ private:
     QImage rgb48Thumbnail(const QByteArray& frame, int width, int height) const;
     void setSourceFrameThumbnailImage(int sourceFrame, const QImage& image,
                                       bool cacheWhenHidden = false);
-    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; GalleryGpuVideo* mGpuVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
+    QVector<Clip> mClips; int mIndex=-1; QLabel* mVideo=nullptr; QLabel* mPreparingLabel=nullptr; GalleryGpuVideo* mGpuVideo=nullptr; QLabel* mTitle=nullptr; QLabel* mFpsLabel=nullptr; QWidget* mHistogram=nullptr;
     QPushButton* mPlayPause=nullptr; QPushButton* mAudioButton=nullptr; QPushButton* mFullscreenButton=nullptr; QSlider* mPosition=nullptr; QProcess mDecoder; QTimer mFrameTimer;
-    QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QPushButton* mClippingToggle=nullptr; QScrollArea* mThumbnailScroll=nullptr;
-    QWidget* mThumbnailContent=nullptr; QHash<int,QLabel*> mThumbnailLabels;
-    QHash<int,QWidget*> mThumbnailItems;
+    QPushButton* mThumbnailToggle=nullptr; QPushButton* mHistogramToggle=nullptr; QPushButton* mClippingToggle=nullptr; QListView* mThumbnailScroll=nullptr;
     QHash<int,QHash<int,QImage>> mThumbnailCache;
+    QHash<int,QHash<int,QSize>> mStillThumbnailSizes;
     QList<QPair<int,int>> mThumbnailCacheOrder;
+    qint64 mThumbnailCachedBytes=0;
+    std::shared_ptr<std::atomic<QSize>> mThumbnailRenderBounds=
+        std::make_shared<std::atomic<QSize>>(thumbnailMaximumSize()-QSize(2,2));
     std::unique_ptr<QTemporaryDir> mThumbnailDiskCache;
     std::shared_ptr<std::atomic<int>> mThumbnailWritesPending =
         std::make_shared<std::atomic<int>>(0);
@@ -221,10 +237,26 @@ private:
     int mQueuedFrameStep = 0;
     QWidget* mOverlay=nullptr; QGraphicsOpacityEffect* mOverlayOpacity=nullptr;
     QPropertyAnimation* mOverlayAnimation=nullptr;
-    QTimer mOverlayTimer, mNativeOverlayCaptureTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
+    QTimer mThumbnailBackfillTimer, mOverlayTimer, mNativeOverlayCaptureTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
+#ifdef Q_OS_ANDROID
+    QTimer mTouchPanUpdateTimer;
+    std::function<QPixmap()> mNavigationReturnSnapshot;
+    bool mNavigationClosing=false, mNavigationCloseReady=false;
+#endif
     QImage mCapturedNativeOverlay;
+    std::vector<GalleryOverlayPart> mCapturedNativeOverlayParts;
+    std::unique_ptr<GalleryOverlayCache> mNativeOverlayCache;
+    QPointer<QWidget> mNativeBackingStoreHost;
     QPointer<QWidget> mNativeMouseTarget;
     QPointer<QWidget> mNativeHoverTarget;
+    QPointer<QWidget> mNativeTouchTarget;
+    QPointF mNativeTouchPosition;
+    QPointF mNativeTouchStart;
+    bool mNativeThumbnailTouch=false;
+    bool mNativeThumbnailDrag=false;
+#ifdef Q_OS_ANDROID
+    bool mThumbnailFollowPlayback=true;
+#endif
     QElapsedTimer mZoomAnimationClock;
     QElapsedTimer mPresentationClock;
     QElapsedTimer mCadenceClock;
@@ -232,6 +264,9 @@ private:
     int mCadenceLastFrame=-1;
     std::deque<qint64> mPresentationIntervals;
     qint64 mLastPresentationNs=-1;
+    QElapsedTimer mFpsIndicatorClock;
+    bool mNativeOverlayCapturePending=false;
+    static constexpr unsigned kCappedPlaybackBufferFrames=3;
     QBuffer* mAudioBuffer=nullptr;
     QTimer mAudioFadeTimer;
     QElapsedTimer mAudioFadeClock;
@@ -302,6 +337,12 @@ private:
     bool mWaitingForFirstFrame=false;
     QPoint mMouseSourcePosition{-1,-1};
     QPointF mPanSourcePixels, mLastPanGlobal;
+#ifdef Q_OS_ANDROID
+    bool mTouchActive=false;
+    int mTouchPointCount=0;
+    QPointF mLastTouchCenter;
+    double mLastTouchDistance=0.0;
+#endif
     std::shared_ptr<std::atomic_bool> mAudioLoadCancelled=
         std::make_shared<std::atomic_bool>(false);
     std::shared_ptr<std::atomic<int>> mPlaybackTarget=std::make_shared<std::atomic<int>>(0);

@@ -13,8 +13,18 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
+#ifdef __ANDROID__
+#include <QDebug>
+#include <QJniEnvironment>
+#include "android/MediaCodecImageReader.h"
+extern "C" {
+#include <libavutil/opt.h>
+#include <libavcodec/jni.h>
+}
+#endif
 extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/dict.h>
@@ -382,6 +392,34 @@ void DirectLogDecoder::initDecoder() {
         (forceSoftwareValue && forceSoftwareValue[0] != '\0' &&
          std::string(forceSoftwareValue) != "0");
     bool hardwareDecoder = !forceSoftware && initHardwareDecoder();
+    bool mediaCodecDecoder = false;
+#ifdef __ANDROID__
+    if (!hardwareDecoder && !forceSoftware &&
+        codecpar->codec_id == AV_CODEC_ID_HEVC) {
+        static std::once_flag mediaCodecJni;
+        static int mediaCodecJniStatus = AVERROR(EINVAL);
+        std::call_once(mediaCodecJni, [] {
+            JavaVM* javaVm = QJniEnvironment::javaVM();
+            mediaCodecJniStatus = javaVm
+                ? av_jni_set_java_vm(javaVm, nullptr) : AVERROR(EINVAL);
+        });
+        if (mediaCodecJniStatus < 0) {
+            qWarning() << "DirectLog could not register the Android Java VM with FFmpeg"
+                       << mediaCodecJniStatus;
+        } else if (const AVCodec* mediaCodec =
+                avcodec_find_decoder_by_name("hevc_mediacodec")) {
+            AVCodecContext* context = avcodec_alloc_context3(mediaCodec);
+            if (context && avcodec_parameters_to_context(context, codecpar) >= 0) {
+                avcodec_free_context(&mCodecContext);
+                mCodec = mediaCodec;
+                mCodecContext = context;
+                mediaCodecDecoder = true;
+            } else {
+                avcodec_free_context(&context);
+            }
+        }
+    }
+#endif
     if (forceSoftware)
         spdlog::info("DirectLogDecoder: software decoding forced");
     if (!hardwareDecoder && codecpar->codec_id == AV_CODEC_ID_AV1) {
@@ -395,19 +433,53 @@ void DirectLogDecoder::initDecoder() {
     }
     // Explicitly request the decoder's automatic thread configuration. The
     // API default can otherwise leave external decoders effectively serial.
-    configureSoftwareThreading(mCodecContext);
-    if (!hardwareDecoder)
+    if (!mediaCodecDecoder) configureSoftwareThreading(mCodecContext);
+    if (!hardwareDecoder && !mediaCodecDecoder)
         spdlog::info("DirectLogDecoder: using {} software decoding with automatic threading",
                      mCodec->name);
 
     // Open codec. A device being available does not guarantee support for the
     // clip's AV1 profile, bit depth, dimensions, or the installed driver. Retry
     // with the software decoder before rejecting an otherwise valid source.
-    if (avcodec_open2(mCodecContext, mCodec, nullptr) < 0) {
-        if (!hardwareDecoder)
-            throw std::runtime_error("Could not open codec");
-        spdlog::warn(
-            "DirectLogDecoder: hardware decoder could not open clip; retrying in software");
+#ifdef __ANDROID__
+    if (mediaCodecDecoder && !mMediaCodecSurfaceRejected) {
+        const char* surface = std::getenv("MOTIONCAM_ANDROID_MEDIACODEC_SURFACE");
+        if (!surface || surface[0] != '0') {
+            mCodecContext->hw_device_ctx = MediaCodecImageReader::createDevice(
+                codecpar->width, codecpar->height);
+            if (mCodecContext->hw_device_ctx) {
+                av_opt_set_int(mCodecContext->priv_data, "ndk_codec", 1, 0);
+                mCodecContext->get_format = [](AVCodecContext*, const AVPixelFormat* formats) {
+                    for (auto* f = formats; *f != AV_PIX_FMT_NONE; ++f)
+                        if (*f == AV_PIX_FMT_MEDIACODEC) return *f;
+                    return formats[0];
+                };
+                mMediaCodecSurfaceActive = true;
+            }
+        }
+    }
+#endif
+    const int openResult = avcodec_open2(mCodecContext, mCodec, nullptr);
+    int decoderOpenResult = openResult;
+#ifdef __ANDROID__
+    if (decoderOpenResult < 0 && mMediaCodecSurfaceActive) {
+        mMediaCodecSurfaceRejected = true;
+        mMediaCodecSurfaceActive = false;
+        avcodec_free_context(&mCodecContext);
+        mCodecContext = avcodec_alloc_context3(mCodec);
+        if (!mCodecContext || avcodec_parameters_to_context(mCodecContext, codecpar) < 0)
+            throw std::runtime_error("Could not configure MediaCodec YUV fallback");
+        decoderOpenResult = avcodec_open2(mCodecContext, mCodec, nullptr);
+    }
+#endif
+    if (decoderOpenResult < 0) {
+        if (!hardwareDecoder && !mediaCodecDecoder)
+            throw std::runtime_error("Could not open codec " +
+                std::string(mCodec ? mCodec->name : "(unknown)") + ": " +
+                ffmpegErrorString(decoderOpenResult));
+        spdlog::warn("DirectLogDecoder: {} decoder failed to open clip ({}); retrying in software",
+                     mediaCodecDecoder ? "MediaCodec" : "Vulkan hardware",
+                     ffmpegErrorString(decoderOpenResult));
         avcodec_free_context(&mCodecContext);
         releaseHardwareDevice(&mHardwareDeviceContext);
         mHardwarePixelFormat = AV_PIX_FMT_NONE;
@@ -610,20 +682,28 @@ bool DirectLogDecoder::extractFrameDeferred(int frameNumber,
 }
 
 bool DirectLogDecoder::extractFrameTextureDeferred(int frameNumber,
-        int outputWidth, int outputHeight, bool smoothChroma) {
+        int outputWidth, int outputHeight, bool smoothChroma,
+        const std::array<uint8_t, 4>* cfaPhase) {
     if (outputWidth <= 0 || outputHeight <= 0) return false;
     uint16_t unused = 0;
     return extractFrameInto(frameNumber, &unused,
-        static_cast<size_t>(outputWidth) * outputHeight * 3u,
-        outputWidth, outputHeight, false, smoothChroma, nullptr, true, true);
+        static_cast<size_t>(outputWidth) * outputHeight * (cfaPhase ? 1u : 3u),
+        outputWidth, outputHeight, false, smoothChroma, cfaPhase, true, true);
 }
 
 bool DirectLogDecoder::canExtractFrameTexture() {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && defined(MOTIONCAM_HAS_AVFILTER)
     const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
     if (enabled && enabled[0] == '0') return false;
     initDecoder();
-    return mHardwarePixelFormat == AV_PIX_FMT_VULKAN && !mGpuRgbRejected &&
+    const bool vulkanDecode = mHardwarePixelFormat == AV_PIX_FMT_VULKAN;
+#ifdef __ANDROID__
+    const bool mediaCodecDecode = mCodec &&
+        std::string_view(mCodec->name) == "hevc_mediacodec";
+#else
+    const bool mediaCodecDecode = false;
+#endif
+    return (vulkanDecode || mediaCodecDecode) && !mGpuRgbRejected &&
         !mForceSoftwareDecoder;
 #else
     return false;
@@ -712,6 +792,14 @@ bool DirectLogDecoder::extractFrameIntoBytesDeferred(int frameNumber,
         width, height, false, smoothChroma, nullptr, true);
 }
 
+std::shared_ptr<void> DirectLogDecoder::pendingGpuLease() const {
+#ifdef MOTIONCAM_HAS_AVFILTER
+    return mDirectGpuRgb?mDirectGpuRgb->deviceLease():nullptr;
+#else
+    return {};
+#endif
+}
+
 bool DirectLogDecoder::pendingGpuTexture(const void*& gpu, const void*& texture) const {
 #ifdef MOTIONCAM_HAS_AVFILTER
     return mDirectGpuRgb && mDirectGpuRgb->pendingTexture(gpu, texture);
@@ -756,9 +844,20 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
     if (directLogDiagnosticsEnabled())
         spdlog::info("DirectLog diagnostic: frame={} decoder_lock_wait_ms={:.3f}",
                      frameNumber, elapsedMilliseconds(lockStarted));
-    return extractFrameIntoLocked(frameNumber, rgbData, sampleCount, outputWidth,
+    bool result = extractFrameIntoLocked(frameNumber, rgbData, sampleCount, outputWidth,
                                   outputHeight, preserveLogEncoded, smoothChroma,
                                   cfaPhase, deferDownload, textureOnly);
+#ifdef __ANDROID__
+    if (!result && mMediaCodecSurfaceActive) {
+        spdlog::warn("MediaCodec Vulkan interop failed; retrying frame through YUV fallback");
+        mMediaCodecSurfaceRejected = true;
+        cleanup();
+        initFFmpeg();
+        result = extractFrameIntoLocked(frameNumber, rgbData, sampleCount, outputWidth,
+            outputHeight, preserveLogEncoded, smoothChroma, cfaPhase, deferDownload, textureOnly);
+    }
+#endif
+    return result;
 }
 
 bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData,
@@ -776,9 +875,41 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     
     const DirectLogFrameInfo& frameInfo = mFrames[frameNumber];
     const char* cacheSetting = std::getenv("MOTIONCAM_DIRECTLOG_FRAME_CACHE");
-    const bool cacheEnabled = !cacheSetting || cacheSetting[0] != '0';
+    const bool cacheEnabled = (!cacheSetting || cacheSetting[0] != '0') && !mMediaCodecSurfaceActive;
     auto convertDecoded = [&](AVFrame* decoded, bool advanceDecoder) {
         const auto conversionStart = std::chrono::steady_clock::now();
+#if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
+        if (mMediaCodecSurfaceActive && decoded->format == AV_PIX_FMT_MEDIACODEC) {
+            const int width = outputWidth > 0 ? outputWidth : decoded->width;
+            const int height = outputHeight > 0 ? outputHeight : decoded->height;
+            if (width <= 0 || height <= 0 || sampleCount !=
+                static_cast<size_t>(width) * height * (cfaPhase ? 1u : 3u)) return false;
+            auto* reader = MediaCodecImageReader::fromDevice(mCodecContext->hw_device_ctx);
+            AImage* image = nullptr;
+            int acquireFd = -1;
+            if (!reader || !reader->acquireRenderedFrame(decoded, &image, &acquireFd)) return false;
+            AVColorRange range = decoded->color_range;
+            if (range == AVCOL_RANGE_UNSPECIFIED) range = mCodecContext->color_range;
+            const bool fullRange = mFullRangeOverride.value_or(range == AVCOL_RANGE_JPEG);
+            const auto curve = mVideoInfo.isHLG ? DirectLogGpuRgb::TransferCurve::HLG
+                : mVideoInfo.isLOG60 && !preserveLogEncoded ? DirectLogGpuRgb::TransferCurve::LOG60
+                : DirectLogGpuRgb::TransferCurve::None;
+            if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<DirectLogGpuRgb>();
+            const bool rendered = mDirectGpuRgb->renderAndroidImage(decoded, image, acquireFd,
+                width, height, smoothChroma, curve, fullRange, rgbData, cfaPhase, deferDownload);
+            av_frame_unref(decoded);
+            if (rendered && advanceDecoder) mLastDecodedFrame = frameNumber;
+            if (rendered && !mFullRange.has_value()) mFullRange = fullRange;
+            return rendered;
+        }
+#endif
+
+#ifdef __ANDROID__
+        if (std::getenv("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
+            spdlog::error("Zero-copy DirectLog requires MediaCodec hardware-buffer output");
+            return false;
+        }
+#endif
         AVFrame* hardwareFrame = decoded;
 #ifdef MOTIONCAM_HAS_AVFILTER
         // Keep Vulkan import/render/download inside the decoder lock. A cloned
@@ -842,7 +973,8 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     // The caller can request the same source frame again after changing DNG
     // output settings. The decoded AVFrame remains valid until the next receive
     // or decoder reset, so avoid seeking and decoding its GOP again.
-    if (frameNumber == mLastDecodedFrame && mFrame && mFrame->buf[0]) {
+    if (frameNumber == mLastDecodedFrame &&
+        mFrame && mFrame->buf[0]) {
         int64_t decodedPts = mFrame->best_effort_timestamp;
         if (decodedPts == AV_NOPTS_VALUE) decodedPts = mFrame->pts;
         if (decodedPts == frameInfo.pts) {
@@ -905,10 +1037,12 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         // surfaces. Keep the Vulkan device and gain buffers across seeks.
 #ifdef MOTIONCAM_HAS_AVFILTER
         if (mDirectGpuRgb) {
-            if (!mDirectGpuRgb->prepareForSeek()) mDirectGpuRgb.reset();
+            const bool rendererReady = mDirectGpuRgb->prepareForSeek();
+            if (!rendererReady) mDirectGpuRgb.reset();
             if (diagnostics)
-                spdlog::info("DirectLog diagnostic: frame={} gpu_renderer_reset_for_seek=true",
-                             frameNumber);
+                spdlog::info(
+                    "DirectLog diagnostic: frame={} gpu_renderer_preserved_on_seek={} recreated={}",
+                    frameNumber, rendererReady, !rendererReady);
         }
 #endif
         av_frame_unref(mFrame);
@@ -951,6 +1085,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             if (decodedPts != AV_NOPTS_VALUE && decodedPts > frameInfo.pts)
                 return -1;
             cacheSkippedFrame(decodedPts);
+            if (mMediaCodecSurfaceActive) av_frame_unref(mFrame);
         }
         if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
             spdlog::error("DirectLog frame {} receive failed: {}",
@@ -1260,13 +1395,26 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
     return false;
 #else
     const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
-    if ((enabled && enabled[0] == '0') || mGpuRgbRejected ||
-        frame->format != AV_PIX_FMT_VULKAN || !frame->hw_frames_ctx || !rgbData)
+    if ((enabled && enabled[0] == '0') || mGpuRgbRejected || !rgbData)
         return false;
-    const auto* frames = reinterpret_cast<const AVHWFramesContext*>(
-        frame->hw_frames_ctx->data);
-    if (!frames || (frames->sw_format != AV_PIX_FMT_P010LE &&
-                    frames->sw_format != AV_PIX_FMT_NV12)) return false;
+    const bool vulkanFrame = frame->format == AV_PIX_FMT_VULKAN &&
+        frame->hw_frames_ctx;
+    if (vulkanFrame) {
+        const auto* frames = reinterpret_cast<const AVHWFramesContext*>(
+            frame->hw_frames_ctx->data);
+        if (!frames || (frames->sw_format != AV_PIX_FMT_P010LE &&
+                        frames->sw_format != AV_PIX_FMT_NV12)) return false;
+    } else {
+#ifdef __ANDROID__
+        if (!deferDownload) return false;
+        if (frame->format != AV_PIX_FMT_NV12 &&
+            frame->format != AV_PIX_FMT_P010LE &&
+            frame->format != AV_PIX_FMT_YUV420P &&
+            frame->format != AV_PIX_FMT_YUV420P10LE) return false;
+#else
+        return false;
+#endif
+    }
     AVColorRange range = frame->color_range;
     if (range == AVCOL_RANGE_UNSPECIFIED) range = mCodecContext->color_range;
     const bool fullRange = mFullRangeOverride.value_or(range == AVCOL_RANGE_JPEG);
@@ -1761,6 +1909,7 @@ void DirectLogDecoder::cleanup() {
         avformat_close_input(&mFormatContext);
     }
     mDecoderInitialized = false;
+    mMediaCodecSurfaceActive = false;
     mHardwarePixelFormat = AV_PIX_FMT_NONE;
     mLastDecodedFrame = -1;
 }
