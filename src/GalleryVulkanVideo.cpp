@@ -1,8 +1,5 @@
-#ifdef __ANDROID__
-#include "android/VulkanInteropDevice.h"
-#include "android/VulkanInteropFence.h"
-#endif
 #include "GalleryVulkanVideo.h"
+#include "SharedVulkanDevice.h"
 #include "WidgetPaintSignature.h"
 #include "VulkanGalleryPreview.h"
 
@@ -269,7 +266,11 @@ public:
     void releaseSurfaceResources() {
         stopRenderer();
         pl_swapchain_destroy(&mPreparedSwapchain);
+#ifndef __ANDROID__
         pl_vulkan_destroy(&mPreparedVk);
+#else
+        mPreparedVk = nullptr;
+#endif
         pl_log_destroy(&mPreparedLog);
         mPreparedSurface = VK_NULL_HANDLE;
     }
@@ -286,13 +287,14 @@ public:
         };
         mPreparedLog = pl_log_create(PL_API_VER, &logParams);
         if (!mPreparedLog) return;
-        pl_vulkan_params params = pl_vulkan_default_params;
 #ifdef __ANDROID__
-        motioncam::enableAndroidVulkanInterop(params);
-#endif
+        mPreparedVk = motioncam::sharedVulkanDevice();
+#else
+        pl_vulkan_params params = pl_vulkan_default_params;
         params.instance = vulkanInstance()->vkInstance();
         params.surface = mPreparedSurface;
         mPreparedVk = pl_vulkan_create(mPreparedLog, &params);
+#endif
         if (mPreparedVk) {
             pl_vulkan_swapchain_params swapchainParams{};
             swapchainParams.surface = mPreparedSurface;
@@ -530,7 +532,11 @@ private:
             mPreparedSwapchain = nullptr;
         } else {
             pl_swapchain_destroy(&mPreparedSwapchain);
+#ifndef __ANDROID__
             pl_vulkan_destroy(&mPreparedVk);
+#else
+            mPreparedVk = nullptr;
+#endif
             pl_log_destroy(&mPreparedLog);
             const pl_log_params logParams{
                 .log_cb = galleryVulkanLog,
@@ -544,8 +550,6 @@ private:
         // Reusing one texture can change the image still sampled by a queued
         // mailbox present, even when the frame serials arrive in order.
         std::array<pl_tex, 3> frameTextures{};
-        std::array<pl_tex, 3> backingTextures{};
-        std::array<VkSemaphore, 3> acquireSemaphores{};
         // Imported buffers and their producer allocations must remain alive
         // until the corresponding texture upload has completed. Keep them
         // per slot so frame uploads can overlap instead of waiting below on
@@ -557,13 +561,14 @@ private:
         bool haveFrameTexture = false;
         pl_tex overlayTexture = nullptr;
         if (log && !vk) {
-            pl_vulkan_params params = pl_vulkan_default_params;
 #ifdef __ANDROID__
-        motioncam::enableAndroidVulkanInterop(params);
-#endif
+            vk = motioncam::sharedVulkanDevice();
+#else
+            pl_vulkan_params params = pl_vulkan_default_params;
             params.instance = instance;
             params.surface = surface;
             vk = pl_vulkan_create(log, &params);
+#endif
         }
         if (vk) {
             pl_vulkan_swapchain_params params{};
@@ -617,15 +622,8 @@ private:
             if (frameTextures[slot])
                 while (pl_tex_poll(vk->gpu, frameTextures[slot], UINT64_MAX)) {}
             if (destroyTexture || (importedFrameOwners[slot] &&
-                                   importedFrameOwners[slot]->vulkanTexture))
+                                   importedFrameOwners[slot]->texture))
                 pl_tex_destroy(vk->gpu, &frameTextures[slot]);
-            pl_tex_destroy(vk->gpu, &backingTextures[slot]);
-#ifdef __ANDROID__
-            if (acquireSemaphores[slot]) {
-                vkDestroySemaphore(vk->device, acquireSemaphores[slot], nullptr);
-                acquireSemaphores[slot] = VK_NULL_HANDLE;
-            }
-#endif
             pl_buf_destroy(vk->gpu, &importedFrameBuffers[slot]);
             importedFrameOwners[slot].reset();
         };
@@ -744,79 +742,39 @@ private:
                 if (gpuBuffer && gpuBuffer->staticFrame)
                     for (size_t slot = 1; slot < frameTextures.size(); ++slot)
                         releaseSlot(slot, true);
-                releaseSlot(nextSlot, gpuBuffer && gpuBuffer->vulkanTexture);
-                if (gpuBuffer && gpuBuffer->vulkanTexture) {
-                    ++sharedImageFrames;
-                    // libplacebo duplicates imported memory descriptors internally.
-                    const int importFd = gpuBuffer->fd;
-                    pl_tex_params params{};
-                    params.w = static_cast<int>(gpuBuffer->width);
-                    params.h = static_cast<int>(gpuBuffer->height);
-                    params.format = gpuBuffer->rgb10a2 ? rgb10a2 : rgba8;
-                    if (!params.format) {
-                        qWarning() << "Gallery Vulkan shared-image format import unavailable"
-                                   << gpuBuffer->rgb10a2;
+                releaseSlot(nextSlot, gpuBuffer && gpuBuffer->texture);
+                if (gpuBuffer && gpuBuffer->texture) {
+                    const auto producer = pl_vulkan_get(static_cast<pl_gpu>(gpuBuffer->gpu));
+                    if (!producer || producer->device != vk->device) {
                         mHealthy = false;
                         break;
                     }
-                    params.sampleable = true;
-                    params.import_handle = PL_HANDLE_FD;
-                    params.shared_mem.handle.fd = importFd;
-                    params.shared_mem.size = gpuBuffer->allocationBytes;
-                    params.shared_mem.offset = gpuBuffer->allocationOffset;
-                    uploadTexture = importFd >= 0 &&
-                        !std::getenv("MOTIONCAM_GALLERY_TEST_IMAGE_IMPORT_FAILURE")
-                        ? pl_tex_create(vk->gpu, &params) : nullptr;
+                    VkFormat format{};
+                    VkImageUsageFlags usage{};
+                    pl_vulkan_wrap_params wrap{};
+                    wrap.image = pl_vulkan_unwrap(static_cast<pl_gpu>(gpuBuffer->gpu),
+                        static_cast<pl_tex>(gpuBuffer->texture), &format, &usage);
+                    wrap.width = gpuBuffer->width;
+                    wrap.height = gpuBuffer->height;
+                    wrap.format = format;
+                    wrap.usage = usage;
+                    uploadTexture = pl_vulkan_wrap(vk->gpu, &wrap);
                     if (!uploadTexture) {
-                        qWarning() << "Gallery Vulkan shared-image import failed"
-                                   << "fd" << importFd << "bytes"
-                                   << gpuBuffer->allocationBytes;
                         if (gpuBuffer->rejectSharedImage) {
                             gpuBuffer->rejectSharedImage();
-                            spdlog::warn("GALLERY_PERF event=shared_image_rejected reason=import retry=buffer");
                             continue;
                         }
                         mHealthy = false;
                         break;
                     }
-#ifdef __ANDROID__
-                    if (gpuBuffer->externalImageOwnership) {
-                        VkSemaphore ready = motioncam::importAndroidAcquireFence(
-                            vk, gpuBuffer->readyFenceFd >= 0 ? ::dup(gpuBuffer->readyFenceFd) : -1);
-                        VkFormat format = VK_FORMAT_UNDEFINED;
-                        VkImageUsageFlags usage = 0;
-                        VkImage image = pl_vulkan_unwrap(vk->gpu, uploadTexture, &format, &usage);
-                        pl_vulkan_wrap_params wrap{};
-                        wrap.image = image;
-                        wrap.width = params.w;
-                        wrap.height = params.h;
-                        wrap.format = format;
-                        wrap.usage = usage;
-                        pl_tex sampled = (ready || gpuBuffer->readyFenceFd < 0)
-                            ? pl_vulkan_wrap(vk->gpu, &wrap) : nullptr;
-                        if (!sampled) {
-                            if (ready) vkDestroySemaphore(vk->device, ready, nullptr);
-                            releaseSlot(nextSlot, true);
-                            if (gpuBuffer->rejectSharedImage) {
-                                gpuBuffer->rejectSharedImage();
-                                spdlog::warn("GALLERY_PERF event=shared_image_rejected reason=acquire retry=buffer");
-                                continue;
-                            }
-                            mHealthy = false;
-                            break;
-                        }
-                        backingTextures[nextSlot] = uploadTexture;
-                        uploadTexture = sampled;
-                        acquireSemaphores[nextSlot] = ready;
-                        pl_vulkan_release_params release{};
-                        release.tex = sampled;
-                        release.layout = VK_IMAGE_LAYOUT_GENERAL;
-                        release.qf = VK_QUEUE_FAMILY_EXTERNAL;
-                        release.semaphore = {ready, 0};
-                        pl_vulkan_release_ex(vk->gpu, &release);
-                    }
-#endif
+                    pl_vulkan_release_params release{};
+                    release.tex = uploadTexture;
+                    release.layout = VK_IMAGE_LAYOUT_GENERAL;
+                    release.qf = VK_QUEUE_FAMILY_IGNORED;
+                    release.semaphore = {reinterpret_cast<VkSemaphore>(gpuBuffer->readySemaphore), 1};
+                    pl_vulkan_release_ex(vk->gpu, &release);
                     importedFrameOwners[nextSlot] = gpuBuffer;
+                    ++sharedImageFrames;
                     frameTextureSlot = nextSlot;
                     haveFrameTexture = true;
                     uploadedFrameSerial = frameSerial;
@@ -842,13 +800,11 @@ private:
                     if (importFd >= 0) {
                         pl_buf_params params{};
                         params.size = gpuBuffer->bytes;
-                        params.import_handle = gpuBuffer->opaqueFd
-                            ? PL_HANDLE_FD : PL_HANDLE_DMA_BUF;
+                        params.import_handle = PL_HANDLE_DMA_BUF;
                         params.shared_mem.handle.fd = importFd;
                         params.shared_mem.size = gpuBuffer->allocationBytes;
                         params.shared_mem.offset = gpuBuffer->allocationOffset;
-                        if (!gpuBuffer->opaqueFd)
-                            params.shared_mem.drm_format_mod = gpuBuffer->drmFormatModifier;
+                        params.shared_mem.drm_format_mod = gpuBuffer->drmFormatModifier;
                         imported = pl_buf_create(vk->gpu, &params);
                     }
                     transfer.buf = imported;
@@ -959,14 +915,14 @@ private:
             input.num_planes = 1;
             input.planes[0].texture = frameTextures[frameTextureSlot];
             input.planes[0].components =
-                (gpuBuffer && (gpuBuffer->rgb10a2 || gpuBuffer->vulkanTexture)) ||
+                (gpuBuffer && (gpuBuffer->rgb10a2 || gpuBuffer->texture)) ||
                 image.format() == QImage::Format_RGBA8888 ? 4 : 3;
             input.planes[0].component_mapping[0] = 0;
             input.planes[0].component_mapping[1] = 1;
             input.planes[0].component_mapping[2] = 2;
             if ((gpuBuffer && gpuBuffer->rgb10a2) ||
                 image.format() == QImage::Format_RGBA8888 ||
-                (gpuBuffer && gpuBuffer->vulkanTexture))
+                (gpuBuffer && gpuBuffer->texture))
                 input.planes[0].component_mapping[3] = 3;
             input.repr = pl_color_repr_rgb;
             input.rotation = gpuBuffer
@@ -1056,7 +1012,9 @@ private:
         if (vk) pl_tex_destroy(vk->gpu, &overlayTexture);
         if (renderer) pl_renderer_destroy(&renderer);
         pl_swapchain_destroy(&swapchain);
+#ifndef __ANDROID__
         pl_vulkan_destroy(&vk);
+#endif
         pl_log_destroy(&log);
         {
             std::lock_guard lock(mMutex);
@@ -1098,6 +1056,11 @@ GalleryVulkanVideo::GalleryVulkanVideo(QWidget* parent) : QWidget(parent) {
     setPalette(background);
     setAutoFillBackground(true);
     mInstance = std::make_unique<QVulkanInstance>();
+#ifdef __ANDROID__
+    const auto shared = motioncam::sharedVulkanDevice();
+    if (!shared) return;
+    mInstance->setVkInstance(shared->instance);
+#endif
     mInstance->setApiVersion(QVersionNumber(1, 2));
     if (!mInstance->create()) {
         spdlog::warn("Gallery native Vulkan instance unavailable: {}",

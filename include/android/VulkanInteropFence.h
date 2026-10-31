@@ -2,15 +2,13 @@
 #if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
 #include <libplacebo/vulkan.h>
 #include <unistd.h>
-#include <cstring>
 
 namespace motioncam {
 inline bool androidSemaphoreFdEnabled(pl_vulkan vk) {
-    if (!vk) return false;
-    for (int i = 0; i < vk->num_extensions; ++i)
-        if (std::strcmp(vk->extensions[i], "VK_KHR_external_semaphore_fd") == 0)
-            return true;
-    return false;
+    // Imported libplacebo contexts do not preserve the public extension list.
+    // Device-level lookup reflects extensions enabled on the actual VkDevice.
+    return vk && vkGetDeviceProcAddr(vk->device, "vkGetSemaphoreFdKHR") &&
+        vkGetDeviceProcAddr(vk->device, "vkImportSemaphoreFdKHR");
 }
 // Import consumes fd on success; failures close it here. The caller retains
 // the semaphore until all GPU submissions waiting on it have completed.
@@ -18,7 +16,7 @@ inline VkSemaphore importAndroidAcquireFence(pl_vulkan vk, int fd) {
     if (fd < 0) return VK_NULL_HANDLE;
     if (!androidSemaphoreFdEnabled(vk)) { ::close(fd); return VK_NULL_HANDLE; }
     auto importFd = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
-        vk->get_proc_addr(vk->instance, "vkImportSemaphoreFdKHR"));
+        vkGetDeviceProcAddr(vk->device, "vkImportSemaphoreFdKHR"));
     if (!importFd) { ::close(fd); return VK_NULL_HANDLE; }
     VkSemaphoreCreateInfo create{};
     create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -47,7 +45,7 @@ inline int exportAndroidReleaseFence(pl_vulkan vk, VkSemaphore semaphore, bool* 
     if (exported) *exported = false;
     if (!androidSemaphoreFdEnabled(vk) || !semaphore) return -1;
     auto getFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(
-        vk->get_proc_addr(vk->instance, "vkGetSemaphoreFdKHR"));
+        vkGetDeviceProcAddr(vk->device, "vkGetSemaphoreFdKHR"));
     if (!getFd) return -1;
     VkSemaphoreGetFdInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;

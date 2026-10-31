@@ -1725,7 +1725,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                     return mDecoder->recoverFrameInSoftware(
                         frameNumber, dst, count, width, height, true, nullptr);
                 };
-            if(retainSourceSamples||preview.clippingRequested){
+            if(retainSourceSamples){
                 const size_t pixels=static_cast<size_t>(processed.width)*processed.height;
                 auto source=std::make_shared<std::vector<uint16_t>>(pixels*3u);
                 if(!mDecoder->downloadPendingGpu(source->data(),source->size())){
@@ -1749,16 +1749,14 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                     std::memcpy(dst,source->data(),count*sizeof(uint16_t));
                     return true;
                 };
-                if(retainSourceSamples){
-                    preview.rawSamples=source;
-                    preview.rawWidth=processed.width;
-                    preview.rawHeight=processed.height;
-                    preview.rawChannels=3;
-                    preview.rawBlack=levels.black[0];
-                    preview.rawBlackLevels=levels.black;
-                    preview.rawWhite=levels.white;
-                    preview.rawCfaSize=2;
-                }
+                preview.rawSamples=source;
+                preview.rawWidth=processed.width;
+                preview.rawHeight=processed.height;
+                preview.rawChannels=3;
+                preview.rawBlack=levels.black[0];
+                preview.rawBlackLevels=levels.black;
+                preview.rawWhite=levels.white;
+                preview.rawCfaSize=2;
                 if(preview.clippingRequested){
                     preview.clipping.resize(pixels);
                     for(size_t pixel=0;pixel<pixels;++pixel){

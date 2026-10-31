@@ -26,9 +26,6 @@ struct VulkanGalleryBayerGain {
 };
 struct VulkanGalleryGpuBuffer {
     int fd = -1;
-    int readyFenceFd = -1;
-    bool externalImageOwnership = false;
-    bool opaqueFd = false;
     int sourceFrameIndex = -1;
     uint64_t debugSampleHash = 0;
     size_t bytes = 0;
@@ -38,12 +35,15 @@ struct VulkanGalleryGpuBuffer {
     uint32_t width = 0, height = 0;
     int orientation = 0;
     bool rgb10a2 = false;
-    bool vulkanTexture = false;
+    // Borrowed texture on the shared processing/presentation Vulkan device.
+    const void* gpu = nullptr;
+    const void* texture = nullptr;
+    uint64_t readySemaphore = 0;
     bool staticFrame = false;
-    // Keep the source device alive until its exported resources are destroyed.
+    // Keep the source device alive until its shared resources are destroyed.
     std::shared_ptr<void> sourceLease;
     std::shared_ptr<void> resourceLease;
-    // Atomically disable rejected image sharing; true only for the first rejection.
+    // Disable a rejected texture handoff and retry through host output.
     std::function<bool()> rejectSharedImage;
     std::function<void()> release;
     ~VulkanGalleryGpuBuffer();

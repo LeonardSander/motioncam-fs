@@ -1,11 +1,11 @@
 #ifdef __ANDROID__
-#include "android/VulkanInteropDevice.h"
 #include "android/VulkanHardwareBuffer.h"
 #include "android/VulkanInteropFence.h"
 #include <media/NdkImage.h>
 #include <dlfcn.h>
 #endif
 #include "DirectLogGpuRgb.h"
+#include "SharedVulkanDevice.h"
 #include "VulkanGainBake.h"
 #include "VulkanJpegFullEncode.h"
 #include "VulkanGalleryPreview.h"
@@ -193,9 +193,7 @@ struct DirectLogGpuRgb::State {
         if (!log) return false;
         if (softwareSource) {
 #ifdef __ANDROID__
-            pl_vulkan_params params = pl_vulkan_default_params;
-            enableAndroidVulkanInterop(params);
-            vulkan = pl_vulkan_create(log, &params);
+            vulkan = createSharedVulkanContext(log);
 #else
             vulkan = pl_vulkan_create(log, nullptr);
 #endif

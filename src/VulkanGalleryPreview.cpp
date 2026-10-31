@@ -1,10 +1,5 @@
 #include "VulkanGalleryPreview.h"
-#ifdef __ANDROID__
-#include "android/VulkanInteropFence.h"
-#include "android/VulkanInteropDevice.h"
-#include <poll.h>
-#include <cerrno>
-#endif
+#include "SharedVulkanDevice.h"
 #include "DNGImage.h"
 #include "RawLogTransform.h"
 #include "VulkanGainBakeShader.h"
@@ -24,7 +19,6 @@ VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
     sourceLease.reset();
 #ifndef _WIN32
     if (fd >= 0) ::close(fd);
-    if (readyFenceFd >= 0) ::close(readyFenceFd);
 #endif
 }
 }
@@ -553,8 +547,24 @@ uvec3 outputColor(uint outputPixel) {
     uint source = sourcePixel(outputPixel);
     uvec3 color = transform(source);
     if ((p.geometry.w & 2u) == 0u) return color;
-    uint word = clipping.words[source >> 2u];
-    uint indication = (word >> ((source & 3u) * 8u)) & 255u;
+    uint indication;
+#ifdef SOURCE_TEXTURE
+    if ((p.geometry.w & 16u) != 0u) {
+        ivec2 xy = ivec2(int(source % p.geometry.x), int(source / p.geometry.x));
+        vec3 codes = floor(clamp(texelFetch(sourceImage, xy, 0).rgb,
+                                0.0, 1.0) * 65535.0 + 0.5);
+        vec3 white = floor(p.textureBlack.rgb +
+            1.0 / p.textureInverseRange.rgb + 0.5);
+        bvec3 high = greaterThanEqual(codes, white);
+        uint bits = (high.r ? 1u : 0u) | (high.g ? 2u : 0u) | (high.b ? 4u : 0u);
+        indication = any(lessThan(codes, p.textureBlack.rgb))
+            ? 1u : bits != 0u ? 2u + bits : 0u;
+    } else
+#endif
+    {
+        uint word = clipping.words[source >> 2u];
+        indication = (word >> ((source & 3u) * 8u)) & 255u;
+    }
     if (indication == 0u) return color;
     if (indication == 1u) return uvec3(32768u, 16384u, 0u);
     uint bits = indication > 1u ? indication - 2u : 0u;
@@ -774,7 +784,7 @@ struct Device {
     bool unifiedMemory = false;
     bool directHostInput = false;
     bool externalBufferRejected = false;
-    std::atomic_bool externalTextureRejected{false};
+    std::atomic_bool sharedTextureRejected{false};
     pl_pass pass = nullptr, colorPass = nullptr;
     pl_pass colorImagePass = nullptr, colorImage10Pass = nullptr;
     pl_buf source = nullptr, upload = nullptr, output = nullptr, download = nullptr;
@@ -828,9 +838,7 @@ struct Device {
 #endif
         if (!log) return false;
 #ifdef __ANDROID__
-        pl_vulkan_params vulkanParams = pl_vulkan_default_params;
-        enableAndroidVulkanInterop(vulkanParams);
-        vk = pl_vulkan_create(log, &vulkanParams);
+        vk = createSharedVulkanContext(log);
 #else
         vk = pl_vulkan_create(log, nullptr);
 #endif
@@ -990,7 +998,7 @@ struct Device {
         return !outputRequired || reserveOutput(outputBytes);
     }
     pl_tex createOutputTexture(uint32_t width, uint32_t height,
-                               enum pl_handle_type handle, bool rgb10a2) {
+                               bool rgb10a2) {
         const pl_fmt format = rgb10a2 ? pl_find_named_fmt(gpu, "rgb10a2")
             : pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
                 static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
@@ -1007,7 +1015,6 @@ struct Device {
         params.format = format;
         params.sampleable = true;
         params.storable = true;
-        params.export_handle = handle;
         pl_tex result = pl_tex_create(gpu, &params);
 #ifdef __ANDROID__
         if (!result) qWarning() << "Gallery Vulkan shared-image allocation failed"
@@ -1356,7 +1363,8 @@ bool colorGalleryRgbVulkan(
     const bool rgb10a2 = output && output->rgb10a2;
     if (rgb10a2 && !rgb24) return false;
     const auto* clip = output ? output->clipping : nullptr;
-    if (clip && clip->size() != pixels) return false;
+    const bool textureClipping = clip && clip->empty() && texture && texture->texture;
+    if (clip && clip->size() != pixels && !textureClipping) return false;
     const void* externalGpu = texture ? texture->gpu
         : bayer && (bayer->buffer || bayer->texture) ? bayer->gpu : nullptr;
     const bool bayerTexture = bayer && bayer->texture;
@@ -1399,19 +1407,22 @@ bool colorGalleryRgbVulkan(
     // Shared-image/storage-buffer output does not need a second full-frame
     // scratch buffer. Allocate it below only for paths that actually use it.
     if (!selected->reserve(paddedInput, paddedOutput, false)) return false;
-    const size_t clipBytes = clip ? (clip->size() + 3u) & ~size_t{3} : std::max(size_t(4),selected->previousClippingBytes);
+    const bool hasClipMask = clip && !clip->empty();
+    const size_t clipBytes = hasClipMask
+        ? (clip->size() + 3u) & ~size_t{3}
+        : std::max(size_t(4), selected->previousClippingBytes);
     if (!selected->reserveClipping(clipBytes)) return false;
     // Clear the retired mask once when disabling indication. Deferred GPU
     // thumbnail work must not retain the previous frame's clipping colors.
-    if (clip || selected->previousClippingBytes) {
+    if (hasClipMask || selected->previousClippingBytes) {
         std::vector<uint8_t> padded(clipBytes);
-        if(clip)std::memcpy(padded.data(), clip->data(), clip->size());
+        if (hasClipMask) std::memcpy(padded.data(), clip->data(), clip->size());
         pl_buf_write(selected->gpu, selected->clippingUpload, 0,
                      padded.data(), clipBytes);
         pl_buf_copy(selected->gpu, selected->clipping, 0,
                     selected->clippingUpload, 0, clipBytes);
     }
-    selected->previousClippingBytes=clip?clipBytes:0;
+    selected->previousClippingBytes = hasClipMask ? clipBytes : 0;
     const size_t hueCount = hueSat ? hueSat->values.size() : 0u;
     const size_t lookCount = look ? look->values.size() : 0u;
     if (hueCount > std::numeric_limits<uint32_t>::max() ||
@@ -1618,7 +1629,8 @@ bool colorGalleryRgbVulkan(
     constants.geometry[1] = sourceHeight;
     constants.geometry[2] = static_cast<uint32_t>(orientation);
     constants.geometry[3] = (rgb24 ? 1u : 0u) | (clip ? 2u : 0u) |
-        (rgb10a2 ? 4u : 0u) | (alignedRgb24 ? 8u : 0u);
+        (rgb10a2 ? 4u : 0u) | (alignedRgb24 ? 8u : 0u) |
+        (textureClipping ? 16u : 0u);
     if (bayer) {
         constants.bayer[0] = bayer->width;
         constants.bayer[1] = bayer->height;
@@ -1639,47 +1651,32 @@ bool colorGalleryRgbVulkan(
         constants.textureInverseRange[channel] = static_cast<float>(
             1.0 / (texture->white[channel] - texture->black[channel]));
     }
-    // A failed image handoff retries this frame once with image export disabled.
-retryOutput:
     pl_desc_binding bindings[5] = {};
     pl_buf exported = nullptr;
-    bool exportTexture = false;
+    bool sharedTexture = false;
     pl_tex frameOutputTexture = nullptr;
     bool exportNeedsCopy = false;
 #ifndef _WIN32
-    // Android Vulkan devices commonly expose opaque external-memory FDs but
-    // have no DRM modifier support. Linux retains DMA-BUF for its presenter.
+    // Android shares textures directly; Linux retains its DMA-BUF transport.
 #ifdef __ANDROID__
-    constexpr auto galleryHandle = PL_HANDLE_FD;
     const uint32_t outputWidth = orientation == 90 || orientation == 270
         ? sourceHeight : sourceWidth;
     const uint32_t outputHeight = orientation == 90 || orientation == 270
         ? sourceWidth : sourceHeight;
-    exportTexture = output && output->gpuBuffer && rgb24 &&
-        !selected->externalTextureRejected &&
+    sharedTexture = output && output->gpuBuffer && rgb24 &&
+        !selected->sharedTextureRejected && pl_vulkan_get(selected->gpu) && sharedVulkanDevice() &&
+        pl_vulkan_get(selected->gpu)->device == sharedVulkanDevice()->device &&
         selected->ensureColorImagePass(rgb10a2) &&
-        (selected->gpu->export_caps.tex & galleryHandle) &&
         (frameOutputTexture = selected->createOutputTexture(
-            outputWidth, outputHeight, galleryHandle, rgb10a2));
-    if (!exportTexture && output && output->gpuBuffer && rgb24)
-        selected->externalTextureRejected = true;
+            outputWidth, outputHeight, rgb10a2));
+    if (output && output->requireZeroCopy && !sharedTexture) return false;
 #else
     constexpr auto galleryHandle = PL_HANDLE_DMA_BUF;
-#endif
-    if (output && output->requireZeroCopy && !exportTexture) return false;
-    const bool exportGpu = !exportTexture && !selected->externalBufferRejected &&
+    if (output && output->requireZeroCopy) return false;
+    const bool exportGpu = !sharedTexture && !selected->externalBufferRejected &&
         output && output->gpuBuffer && rgb24 &&
         (selected->gpu->export_caps.buf & galleryHandle);
-    if (rgb10a2 && !exportGpu && !exportTexture) {
-#ifdef __ANDROID__
-        static std::atomic_bool loggedNoExport{false};
-        if (!loggedNoExport.exchange(true))
-            qWarning() << "Gallery Vulkan buffer export unsupported"
-                       << "caps" << int(selected->gpu->export_caps.buf)
-                       << "requested" << int(galleryHandle);
-#endif
-        selected->externalBufferRejected = true;
-    }
+    if (rgb10a2 && !exportGpu) selected->externalBufferRejected = true;
     if (exportGpu) {
         pl_buf_params params = {};
         params.size = paddedOutput;
@@ -1694,20 +1691,17 @@ retryOutput:
             params.storable = false;
             exported = pl_buf_create(selected->gpu, &params);
         }
-#ifdef __ANDROID__
-        if (!exported) qWarning() << "Gallery Vulkan export buffer creation failed"
-                                  << "bytes" << paddedOutput;
-#endif
         exportNeedsCopy = exported && !params.storable;
         if (!exported) selected->externalBufferRejected = true;
     }
 #endif
-    if (!exportTexture && (!exported || exportNeedsCopy) &&
+#endif
+    if (!sharedTexture && (!exported || exportNeedsCopy) &&
         !selected->reserveOutput(paddedOutput)) {
         if (exported) pl_buf_destroy(selected->gpu, &exported);
         return false;
     }
-    if (!exportTexture && !selected->ensureColorPass()) {
+    if (!sharedTexture && !selected->ensureColorPass()) {
         if (exported) pl_buf_destroy(selected->gpu, &exported);
         return false;
     }
@@ -1717,7 +1711,7 @@ retryOutput:
         : static_cast<const void*>(selected->directHostInput
             ? selected->upload : selected->source);
     bindings[0].sample_mode = PL_TEX_SAMPLE_NEAREST;
-    bindings[1].object = exportTexture
+    bindings[1].object = sharedTexture
         ? static_cast<const void*>(frameOutputTexture)
         : exported && !exportNeedsCopy
         ? exported : selected->output;
@@ -1726,18 +1720,19 @@ retryOutput:
     bindings[4].object = (texture && texture->gain) || (bayer && bayer->gain)
         ? selected->gain : selected->emptyGain;
     pl_pass_run_params run = {};
-    run.pass = exportTexture
+    run.pass = sharedTexture
         ? (rgb10a2 ? selected->colorImage10Pass : selected->colorImagePass)
         : selected->colorPass;
     run.desc_bindings = bindings;
     run.push_constants = &constants;
-    const uint32_t pixelsPerInvocation = exportTexture ? 1u : rgb24 ? 4u : 2u;
+    const uint32_t pixelsPerInvocation = sharedTexture ? 1u : rgb24 ? 4u : 2u;
     const uint32_t groups =
         (((pixels + pixelsPerInvocation - 1u) / pixelsPerInvocation) + 255u) / 256u;
     run.compute_groups[0] = std::min(groups, selected->gpu->limits.max_dispatch[0]);
     run.compute_groups[1] = (groups + run.compute_groups[0] - 1u) / run.compute_groups[0];
     run.compute_groups[2] = 1;
     if (run.compute_groups[1] > selected->gpu->limits.max_dispatch[1]) {
+        pl_tex_destroy(selected->gpu, &frameOutputTexture);
         if (exported) pl_buf_destroy(selected->gpu, &exported);
         return false;
     }
@@ -1854,87 +1849,69 @@ retryOutput:
         scheduledThumbnail=nullptr;
     };
 #ifdef __ANDROID__
-    if (exportTexture) {
-        pl_vulkan producerVk = pl_vulkan_get(selected->gpu);
-        VkSemaphore readySemaphore = motioncam::createAndroidReleaseSemaphore(producerVk);
-        int readyFenceFd = -1;
-        bool handedOff = false;
-        if (readySemaphore) {
-            pl_vulkan_hold_params hold{};
-            hold.tex = frameOutputTexture;
-            hold.layout = VK_IMAGE_LAYOUT_GENERAL;
-            hold.qf = VK_QUEUE_FAMILY_EXTERNAL;
-            hold.semaphore = {readySemaphore, 0};
-            if (pl_vulkan_hold_ex(selected->gpu, &hold)) {
-                if (!std::getenv("MOTIONCAM_GALLERY_TEST_IMAGE_HANDOFF_FAILURE"))
-                    readyFenceFd = motioncam::exportAndroidReleaseFence(producerVk, readySemaphore, &handedOff);
-                if (!handedOff) {
-                    pl_vulkan_release_params release{};
-                    release.tex = frameOutputTexture;
-                    release.layout = VK_IMAGE_LAYOUT_GENERAL;
-                    release.qf = VK_QUEUE_FAMILY_EXTERNAL;
-                    release.semaphore = {readySemaphore, 0};
-                    pl_vulkan_release_ex(selected->gpu, &release);
-                    pl_gpu_finish(selected->gpu);
-                }
-            }
-        }
-        if (!handedOff) {
-            while (pl_tex_poll(selected->gpu, frameOutputTexture, UINT64_MAX)) {}
-            if (readySemaphore) vkDestroySemaphore(producerVk->device, readySemaphore, nullptr);
-            readySemaphore = VK_NULL_HANDLE;
-            pl_tex_destroy(selected->gpu, &frameOutputTexture);
-            selected->externalTextureRejected = true;
-            spdlog::warn("GALLERY_PERF event=shared_image_rejected reason=handoff retry=buffer");
-            if (output->requireZeroCopy) return false;
-            goto retryOutput;
-        }
-        const int fd = ::dup(frameOutputTexture->shared_mem.handle.fd);
-        if (fd < 0) {
-            if (readyFenceFd >= 0) {
-                pollfd fence{readyFenceFd, POLLIN, 0};
-                while (::poll(&fence, 1, -1) < 0 && errno == EINTR) {}
-                ::close(readyFenceFd);
-            }
-            if (readySemaphore) vkDestroySemaphore(producerVk->device, readySemaphore, nullptr);
+    if (sharedTexture) {
+        const auto producer = pl_vulkan_get(selected->gpu);
+        auto waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(
+            vkGetDeviceProcAddr(producer->device, "vkWaitSemaphores"));
+        if (!waitSemaphores)
+            waitSemaphores = reinterpret_cast<PFN_vkWaitSemaphores>(
+                vkGetDeviceProcAddr(producer->device, "vkWaitSemaphoresKHR"));
+        if (!waitSemaphores) {
             pl_tex_destroy(selected->gpu, &frameOutputTexture);
             return false;
         }
+        VkSemaphoreTypeCreateInfo type{};
+        type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo create{};
+        create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        create.pNext = &type;
+        VkSemaphore ready = VK_NULL_HANDLE;
+        if (vkCreateSemaphore(producer->device, &create, nullptr, &ready) != VK_SUCCESS) {
+            pl_tex_destroy(selected->gpu, &frameOutputTexture);
+            return false;
+        }
+        pl_vulkan_hold_params hold{};
+        hold.tex = frameOutputTexture;
+        hold.layout = VK_IMAGE_LAYOUT_GENERAL;
+        hold.qf = VK_QUEUE_FAMILY_IGNORED;
+        hold.semaphore = {ready, 1};
+        if (!pl_vulkan_hold_ex(selected->gpu, &hold)) {
+            pl_tex_destroy(selected->gpu, &frameOutputTexture);
+            vkDestroySemaphore(producer->device, ready, nullptr);
+            return false;
+        }
+        pl_gpu_flush(selected->gpu);
         enqueueThumbnailReadback();
         auto gpuFrame = std::make_shared<VulkanGalleryGpuBuffer>();
-        gpuFrame->fd = fd;
-        gpuFrame->readyFenceFd = readyFenceFd;
-        gpuFrame->externalImageOwnership = handedOff;
-        gpuFrame->opaqueFd = true;
-        gpuFrame->vulkanTexture = true;
+        gpuFrame->gpu = selected->gpu;
+        gpuFrame->texture = frameOutputTexture;
         gpuFrame->rejectSharedImage = [weak = std::weak_ptr<Device>(selectedDevice)] {
             const auto owner = weak.lock();
-            return owner && !owner->externalTextureRejected.exchange(true);
+            return owner && !owner->sharedTextureRejected.exchange(true);
         };
+        gpuFrame->readySemaphore = reinterpret_cast<uint64_t>(ready);
         gpuFrame->rgb10a2 = rgb10a2;
-        gpuFrame->bytes = static_cast<size_t>(outputWidth) * outputHeight *
-            4u;
-        gpuFrame->allocationBytes = frameOutputTexture->shared_mem.size;
-        gpuFrame->allocationOffset = frameOutputTexture->shared_mem.offset;
         gpuFrame->width = outputWidth;
         gpuFrame->height = outputHeight;
         gpuFrame->sourceFrameIndex = output->thumbnailSourceFrame;
         gpuFrame->resourceLease = std::shared_ptr<void>(
-            new pl_tex(frameOutputTexture), [owner = selectedDevice, producerVk, readySemaphore, signalFence = readyFenceFd >= 0 ? ::dup(readyFenceFd) : -1](void* ptr) {
+            new pl_tex(frameOutputTexture), [owner = selectedDevice, producer, ready, waitSemaphores](void* ptr) {
+                const uint64_t value = 1;
+                VkSemaphoreWaitInfo wait{};
+                wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+                wait.semaphoreCount = 1;
+                wait.pSemaphores = &ready;
+                wait.pValues = &value;
+                waitSemaphores(producer->device, &wait, UINT64_MAX);
                 auto* texture = static_cast<pl_tex*>(ptr);
-                if (signalFence >= 0) {
-                    pollfd fence{signalFence, POLLIN, 0};
-                    while (::poll(&fence, 1, -1) < 0 && errno == EINTR) {}
-                    ::close(signalFence);
-                }
-                std::lock_guard lock(deviceMutex);
                 pl_tex_destroy(owner->gpu, texture);
-                if (readySemaphore) vkDestroySemaphore(producerVk->device, readySemaphore, nullptr);
+                vkDestroySemaphore(producer->device, ready, nullptr);
                 delete texture;
             });
         if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
-            spdlog::info("GALLERY_PERF event=gallery_shared_image width={} height={} asynchronous={} resident_input={}",
-                outputWidth, outputHeight, handedOff, externalGpu != nullptr);
+            spdlog::info("GALLERY_PERF event=gallery_shared_image width={} height={} direct=true resident_input={}",
+                outputWidth, outputHeight, externalGpu != nullptr);
         *output->gpuBuffer = std::move(gpuFrame);
         rgb.clear();
         return true;
@@ -1961,7 +1938,6 @@ retryOutput:
         enqueueThumbnailReadback();
         auto gpuFrame = std::make_shared<VulkanGalleryGpuBuffer>();
         gpuFrame->fd = fd;
-        gpuFrame->opaqueFd = galleryHandle == PL_HANDLE_FD;
         gpuFrame->bytes = paddedOutput;
         gpuFrame->allocationBytes = exported->shared_mem.size;
         gpuFrame->allocationOffset = exported->shared_mem.offset;

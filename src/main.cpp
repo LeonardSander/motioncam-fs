@@ -723,8 +723,6 @@ int main(int argc, char *argv[])
         {"noguipool", "QT_NO_GUI_THREADPOOL", "1"},
         {"guipool", "QT_NO_GUI_THREADPOOL", nullptr},
         {"zerocopy", "MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY", "1"},
-        {"failimagehandoff", "MOTIONCAM_GALLERY_TEST_IMAGE_HANDOFF_FAILURE", "1"},
-        {"failimageimport", "MOTIONCAM_GALLERY_TEST_IMAGE_IMPORT_FAILURE", "1"},
         {"unfuseddecode", "MOTIONCAM_ANDROID_FUSED_DECODE", "0"},
         {"hashpreview", "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW", "1"},
         {"jpegprofile", "MOTIONCAM_JPEG_DECODE_PROFILE", "1"},

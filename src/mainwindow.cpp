@@ -1124,12 +1124,40 @@ namespace {
             texture.white = preview.galleryGpuWhite;
             texture.gain = preview.galleryGpuGain.get();
         }
+        motioncam::VulkanGalleryOutput textureOutput;
+        if (!output && preview.clippingRequested && preview.clipping.empty() && texture.texture) {
+            textureOutput.width = preview.width;
+            textureOutput.height = preview.height;
+            textureOutput.clipping = &preview.clipping;
+            output = &textureOutput;
+        }
+        // Only materialize a CPU clipping mask if the GPU transform falls
+        // back. Resident RGB previews classify clipping in the color shader.
+        const std::function<bool(uint16_t*, size_t)> download =
+            [&preview](uint16_t* samples, size_t count) {
+                if (!preview.gallerySource.download ||
+                    !preview.gallerySource.download(samples, count)) return false;
+                if (preview.clippingRequested && preview.clipping.empty() && count % 3u == 0u) {
+                    preview.clipping.resize(count / 3u);
+                    for (size_t pixel = 0; pixel < count / 3u; ++pixel) {
+                        uint8_t high = 0;
+                        bool low = false;
+                        for (size_t channel = 0; channel < 3; ++channel) {
+                            const auto code = samples[pixel * 3u + channel];
+                            low |= code < preview.galleryGpuBlack[channel];
+                            if (code >= preview.galleryGpuWhite[channel]) high |= uint8_t(1u << channel);
+                        }
+                        preview.clipping[pixel] = low ? 1u : high ? uint8_t(2u + high) : 0u;
+                    }
+                }
+                return true;
+            };
         applyGalleryColorTransform(destination ? *destination : preview.rgb, preview.metadata,
                                    ignoreForwardMat, gainMapOnlyDebug,
                                    (bayer.samples || bayer.buffer || bayer.texture) ? &bayer : nullptr,
                                    output, gpuApplied, true,
                                    (texture.texture || texture.buffer) ? &texture : nullptr,
-                                   (texture.texture || texture.buffer) ? &preview.gallerySource.download : nullptr);
+                                   (texture.texture || texture.buffer) ? &download : nullptr);
     }
 
     motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
@@ -4036,7 +4064,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                     if (mGalleryGeneration.load() != generation || !player) return;
                                     if (strictZeroCopy)
                                         player->failRgb48Frames(QStringLiteral(
-                                            "Shared Vulkan image import failed in strict zero-copy mode"));
+                                            "Shared Vulkan texture wrapping failed in strict zero-copy mode"));
                                     else
                                         player->reloadCurrentClip();
                                 }, Qt::QueuedConnection);
@@ -4870,8 +4898,10 @@ void MainWindow::startGalleryPerformanceTest(
         mClipPlayer->setPerformanceAudioEnabled(true);
     spdlog::info("GALLERY_PERF event=playback_cadence mode={}",
                  cappedPlayback?"capped":"uncapped");
-    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING"))
+    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING")) {
+        mGalleryClippingEnabled = true;
         mClipPlayer->setClippingEnabled(true);
+    }
     mClipPlayer->setPerformanceOverlayPinned(
         !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUTO_FADE"));
     mClipPlayer->setHistogramEnabled(!qEnvironmentVariableIsSet(

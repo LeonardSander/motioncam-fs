@@ -507,6 +507,49 @@ int main() {
             }
         }
         {
+            // Resident RGB clipping must match the CPU mask without source
+            // readback, including thresholds, rotation and disabling it.
+            texture.black = {1000, 2000, 3000};
+            texture.white = {60000, 62000, 64000};
+            std::vector<uint8_t> mask(256), residentMask;
+            for (size_t pixel = 0; pixel < mask.size(); ++pixel) {
+                bool low = false;
+                uint8_t high = 0;
+                for (size_t channel = 0; channel < 3; ++channel) {
+                    const auto code = samples[pixel * 3u + channel];
+                    low |= code < texture.black[channel];
+                    if (code >= texture.white[channel]) high |= uint8_t(1u << channel);
+                }
+                mask[pixel] = low ? 1u : high ? uint8_t(2u + high) : 0u;
+            }
+            for (int orientation : {0, 90, 180, 270}) {
+                for (bool enabled : {true, false, true}) {
+                    motioncam::VulkanGalleryOutput output;
+                    output.width = output.height = 16;
+                    output.rgb24 = true;
+                    output.orientation = orientation;
+                    std::vector<uint8_t> expected, actual, expectedThumbnail, actualThumbnail;
+                    output.thumbnailWidth = 5;
+                    output.thumbnailHeight = 3;
+                    output.thumbnailPixels = &expectedThumbnail;
+                    output.clipping = enabled ? &mask : nullptr;
+                    if (!motioncam::colorGalleryRgbVulkan(expected, gains, matrix, matrix,
+                            1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture)) return 1;
+                    output.clipping = enabled ? &residentMask : nullptr;
+                    output.thumbnailPixels = &actualThumbnail;
+                    if (!motioncam::colorGalleryRgbVulkan(actual, gains, matrix, matrix,
+                            1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
+                        actual != expected || actualThumbnail.empty() ||
+                        actualThumbnail != expectedThumbnail) {
+                        std::fprintf(stderr, "Resident texture clipping differs from CPU mask\n");
+                        return 1;
+                    }
+                }
+            }
+            texture.black.fill(0);
+            texture.white.fill(65535);
+        }
+        {
             motioncam::VulkanGalleryOutput output;
             output.width=output.height=16;output.rgb24=true;
             output.thumbnailWidth=5;output.thumbnailHeight=3;

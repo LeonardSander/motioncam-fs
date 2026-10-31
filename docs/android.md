@@ -79,17 +79,14 @@ gallery presenter inside the existing Qt activity surface. The same presenter is
 selected by default on supported desktop builds. Gallery frames are presented
 by its Vulkan QWindow and swapchain; QWidget only hosts the window and controls.
 Android does not use a QWidget image-painting fallback. Qt backing-store backend
-settings are scoped to Android and do not override desktop backend selection. On the test Adreno
-750, Android can export an opaque-FD Vulkan sampled image from the gallery color
-pass and import it into the native Vulkan presenter. Gallery-perf confirmed
-texture export selection and continued presentation with host display readback
-disabled. The presenter samples the imported image directly, removing the
-producer buffer and presenter upload stages. The producer exports a Vulkan sync-file semaphore with the sampled image.
-The presenter imports that dependency and acquires the image in GENERAL layout
-from external queue ownership. Devices without usable semaphore export retain
-the producer readiness wait. Dropped-frame disposal retains the signal lifetime. The exported-buffer path remains as a fallback.
-Runtime creation and import determine whether sharing works; capability bits
-alone are not sufficient.
+settings are scoped to Android and do not override desktop backend selection.
+On Android, decoding, gallery processing and native presentation share one
+Vulkan device, with separate libplacebo command recorders and common queue
+locks. The presenter wraps the processed VkImage directly, with an in-device
+timeline semaphore for readiness. There are no exported memory descriptors or
+inter-device semaphore transfers. Unsupported image output retains the host
+upload fallback.
+Desktop retains its existing device and DMA-BUF transport.
 
 ## Current processing and lifetime rules
 
@@ -104,7 +101,7 @@ thumbnail readback on unified-memory GPUs; discrete GPUs retain staging and
 synchronous thumbnail readback. Allocation failures retain the staging fallback.
 Queued thumbnails carry the playback generation and are discarded after a seek
 or clip replacement.
-MediaCodec hardware-buffer import and the native shared-image transport remain
+MediaCodec hardware-buffer import and native surface creation remain
 platform adapters, independent of that memory policy. macOS requires validation
 on hardware; Android testing does not validate its import/presentation backend.
 
@@ -115,6 +112,9 @@ frames use packed RGB10A2 UNORM. Full-resolution deferred RGB decoding fuses
 HLG/LOG60 linearization into hardware-buffer sampling, so the gallery consumes
 that texture without a second full-frame libplacebo transfer pass. Scaled and
 CFA output retain the existing conversion path. No OpenGL presenter is used.
+Resident RGB clipping is classified in the gallery color shader, including
+thumbnail output, without a full-frame source readback. CPU fallback still
+builds its clipping mask from source samples.
 
 Controls and thumbnails are captured at the native display pixel ratio into a
 compact overlay atlas; empty screen areas are not uploaded. The same capture
@@ -153,11 +153,10 @@ LOG processing. Crop, proxy scaling, higher-CFA processing and incompatible
 preprocessing retain the shared CPU fallback. CFA and RGB sources use one
 DNGGpuImage storage/lifetime record, including recovery readback.
 
-Exported images carry a producer readiness fence. Their texture resources must
-be destroyed before the source decoder/device lease. The presenter borrows
-memory descriptors during libplacebo import because libplacebo duplicates them.
-A drain waits for the render thread to release every imported slot before
-returning. Switching to a still also retires the unused sequence slots.
+Shared textures retain their processing resources and source decoder/device
+lease until presentation has finished using them. A drain waits for the render
+thread to release every occupied slot before returning. Switching to a still
+also retires unused sequence slots.
 Qt SurfaceAboutToBeDestroyed stops the renderer and releases prepared native
 swapchains before the underlying Android window disappears. Desktop CPU sources
 retain device-local staging on discrete GPUs; unified-memory GPUs can use
@@ -195,7 +194,7 @@ popup is retained for Android compatibility.
 Use `scripts/build_android_apk.sh` with the SDK, NDK, vcpkg and matching Qt paths
 listed in its required environment variables. `scripts/install_qt_android.py`
 can install the pinned public Android Qt kit into a chosen directory. The
-vcpkg overlay supplies the libplacebo external-memory import patch.
+vcpkg overlay builds unmodified libplacebo; no external-buffer import patch is needed.
 
 Desktop regression targets include `motioncam-lossless-jpeg-test`,
 `motioncam-audio-finalize-test` and `motioncam-finalize-interpolation-test`.
@@ -277,21 +276,11 @@ Capture times are means over the last 80 captures of 35-second runs; displayed
 cadence comes from SurfaceFlinger, rather than the application's submission
 counter. These are device/clip-specific measurements, not universal limits.
 
-Image-sharing failures disable that path for the affected producer device.
-If semaphore handoff fails, the producer rerenders the same frame into an
-exported Vulkan buffer. If presentation cannot import an image or its acquire
-fence, the renderer stays alive and requests a preview reload through the
-buffer path. Paused playback stays paused. Strict `zerocopy` runs report the
-failure rather than using buffers.
+Shared-device textures do not require memory export/import or an external
+ownership handoff. If a suitable storage/sampleable texture cannot be created,
+ordinary playback retains host output; strict `zerocopy` runs report failure.
 
-For device regression checks, `failimagehandoff` injects a failed semaphore
-export after the ownership release, and `failimageimport` rejects presenter
-image import. Run each in a fresh process without `zerocopy`; expect
-`shared_image_rejected`, completed playback/seeking, positive `buffer_uploads`
-and zero `host_uploads`. A separate `zerocopy` run must retain shared images
-without buffer or host uploads.
-
-`gallery_shared_image` records resident input and asynchronous fence handoff;
+`gallery_shared_image` records resident input and direct texture sharing;
 `native_present` reports `shared_images`, `buffer_uploads` and `host_uploads`.
 Only the one-pixel startup placeholder is excluded from video upload counts.
 The shared-image path allocates its compute destination directly, without an
