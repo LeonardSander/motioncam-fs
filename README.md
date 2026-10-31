@@ -151,7 +151,7 @@ There are some more options configurable under Settings > Preferences. Here virt
 
 ### Building
 
-Windows (Visual Studio + Qt + vcpkg):
+Windows (Visual Studio + Qt + vcpkg; install LLVM for `clang-cl`, used by libplacebo):
 ```
 git submodule update --init --recursive
 .\build.bat

@@ -6,7 +6,6 @@ vcpkg_from_github(
     REF v7.360.1
     SHA512 209b1713cff34f06149af16fb3ea52e3662a566ef5df6b29811ad295aa8cb6388f827a93fc8e0eed1a72f35b3b3aae835520c933079e706a51d11136a8128799
     HEAD_REF master
-    PATCHES msvc-c11-atomics.patch
 )
 
 # GitHub release archives omit these submodules. Use pinned source packages
@@ -49,6 +48,27 @@ if(VCPKG_TARGET_IS_WINDOWS)
     set(vulkan_entrypoint -Dvk-proc-addr=disabled)
 else()
     set(vulkan_entrypoint -Dvk-proc-addr=auto)
+endif()
+
+# libplacebo uses Clang/GCC C flags. Use clang-cl for this port only while
+# preserving the selected Windows architecture and MSVC runtime/ABI.
+if(VCPKG_TARGET_IS_WINDOWS AND NOT VCPKG_TARGET_IS_MINGW)
+    find_program(CLANG_CL NAMES clang-cl
+        HINTS "$ENV{LLVMInstallDir}/bin" "$ENV{ProgramFiles}/LLVM/bin"
+              "$ENV{VCINSTALLDIR}/Tools/Llvm/x64/bin" "$ENV{VCINSTALLDIR}/Tools/Llvm/bin"
+        REQUIRED)
+    set(clang_arch_x64 x86_64)
+    set(clang_arch_x86 i686)
+    set(clang_arch_arm64 aarch64)
+    set(clang_arch_arm armv7)
+    set(clang_arch "${clang_arch_${VCPKG_TARGET_ARCHITECTURE}}")
+    if(NOT clang_arch)
+        message(FATAL_ERROR "Unsupported libplacebo Windows architecture: ${VCPKG_TARGET_ARCHITECTURE}")
+    endif()
+    string(APPEND VCPKG_C_FLAGS " --target=${clang_arch}-pc-windows-msvc")
+    string(APPEND VCPKG_CXX_FLAGS " --target=${clang_arch}-pc-windows-msvc")
+    list(APPEND VCPKG_CMAKE_CONFIGURE_OPTIONS
+        "-DCMAKE_C_COMPILER=${CLANG_CL}" "-DCMAKE_CXX_COMPILER=${CLANG_CL}")
 endif()
 
 vcpkg_configure_meson(
