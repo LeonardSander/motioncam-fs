@@ -666,7 +666,7 @@ int main() {
     const std::vector<float> rgbGrid{
         1.25f, 1.0f, 0.75f, 1.25f, 1.0f, 0.75f,
         1.25f, 1.0f, 0.75f, 1.25f, 1.0f, 0.75f};
-    auto gainMap = [](const std::vector<float>& data, uint32_t channels,
+    auto gainMap = [height](const std::vector<float>& data, uint32_t channels,
                       uint32_t left, uint32_t right, uint32_t pitch) {
         motioncam::VulkanRgbGainMap map;
         map.width = map.height = 2;

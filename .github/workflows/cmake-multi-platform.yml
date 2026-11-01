@@ -219,7 +219,6 @@ jobs:
       with:
         path: |
           ~/.cache/vcpkg
-          ~/Library/Caches/Homebrew
           ${{ matrix.build_dir }}/
         key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', '.github/workflows/**') }}
         restore-keys: |
@@ -253,6 +252,11 @@ jobs:
       shell: bash
       run: |
         set -euxo pipefail
+        # The runner's OpenSSL 4 links conflict with Qt's OpenSSL 3 dependency.
+        # Unlink first so Homebrew does not try to back up/overwrite them.
+        if brew list --versions openssl@4 >/dev/null 2>&1; then
+          brew unlink openssl@4
+        fi
         brew install qt@6
         echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
 
