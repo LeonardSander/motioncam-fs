@@ -41,6 +41,9 @@ private:
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    // Native Windows controls animate between paints. Pixel comparisons need
+    // a stable style when rendering the reference and capture separately.
+    QApplication::setStyle("Fusion");
     QWidget stage;
     stage.resize(800, 600);
     QWidget viewport(&stage);

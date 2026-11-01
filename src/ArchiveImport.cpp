@@ -146,12 +146,14 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
                 throw std::runtime_error("Could not create archive output directory");
             QSaveFile output(outputPath);
             if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("Could not create extracted file");
-            char buffer[1024 * 1024];
+            // Windows executables normally have a 1 MiB stack. Keep the
+            // extraction buffer on the heap, including on worker threads.
+            std::vector<char> buffer(1024 * 1024);
             for (;;) {
-                const la_ssize_t count = archive_read_data(input.get(), buffer, sizeof(buffer));
+                const la_ssize_t count = archive_read_data(input.get(), buffer.data(), buffer.size());
                 if (count == 0) break;
                 if (count < 0) throw std::runtime_error(archive_error_string(input.get()));
-                if (output.write(buffer, count) != count) throw std::runtime_error("Could not write extracted file");
+                if (output.write(buffer.data(), count) != count) throw std::runtime_error("Could not write extracted file");
             }
             if (!output.commit()) throw std::runtime_error("Could not finish extracted file");
             ++extractedCount;

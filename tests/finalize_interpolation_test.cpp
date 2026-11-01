@@ -2495,6 +2495,7 @@ int main(int argc, char** argv) {
     assert((readyTimestamps == std::vector<motioncam::Timestamp>{0, 1, 2}));
     std::ifstream stream(root / "out" / "frame-000001.dng", std::ios::binary);
     std::vector<uint8_t> dng{std::istreambuf_iterator<char>(stream), {}};
+    stream.close(); // Windows cannot remove the fixture while it is open.
     motioncam::PreviewFrame preview;
     assert(motioncam::DNGDecoder::decodePreview(
         dng, motioncam::RenderSettings{}, preview, false, true));
@@ -2761,6 +2762,7 @@ int main(int argc, char** argv) {
     motioncam::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});
     std::ifstream cfaStream(root / "cfa-out" / "frame-000001.dng", std::ios::binary);
     std::vector<uint8_t> cfa{std::istreambuf_iterator<char>(cfaStream), {}};
+    cfaStream.close();
     int repeat = 0;
     std::array<uint8_t, 4> phase{};
     assert(motioncam::DNGDecoder::getCFAMetadata(cfa, repeat, phase) && repeat == 2);
