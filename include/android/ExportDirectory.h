@@ -22,11 +22,11 @@ QString writeDocument(const QString& uri,const QByteArray& contents);
 void scanDirectoryForSidecars(const QString& importRoot,
                               const QString& targetImportPath = {});
 QString sidecarScanStatus();
-QString sourceDirectoryForUri(const QString& uri);
-void registerImportedClip(const QString& importPath, const QString& sourceUri);
-bool installSeekableSourceLink(const QString& importPath, int descriptor);
-bool reopenSeekableSourceLink(const QString& importPath);
-void releaseSeekableSourceLink(const QString& importPath);
+QString registerImportedClip(const QString& importPath, const QString& sourceUri);
+QString refreshImportedSource(const QString& importPath);
+bool sameImportedSource(const QString& first, const QString& second);
+QString importDisplayName(const QString& importPath);
+QString importSourceLocation(const QString& importPath);
 QString sourceDirectoryForImport(const QString& importPath);
 QString writeSidecarToSource(const QString& importPath, const QString& name,
                              const QString& contents);

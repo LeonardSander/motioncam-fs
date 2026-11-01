@@ -1,3 +1,4 @@
+#include "SourceMedia.h"
 #include "AudioWriter.h"
 #include <algorithm>
 #include <stdexcept>
@@ -127,10 +128,10 @@ void freeAudioPacket(AVPacket* p) { av_packet_free(&p); }
 class AudioInput {
 public:
     explicit AudioInput(const std::string& path)
-        : mFormat(nullptr, [](AVFormatContext* p) { avformat_close_input(&p); }),
+        : mFormat(nullptr, [](AVFormatContext* p) { motioncam::closeSourceMedia(&p); }),
           mDecoder(nullptr, [](AVCodecContext* p) { avcodec_free_context(&p); }) {
         AVFormatContext* raw = nullptr;
-        checkAudio(avformat_open_input(&raw, path.c_str(), nullptr, nullptr), "Open audio source");
+        checkAudio(motioncam::openSourceMedia(&raw, path), "Open audio source");
         mFormat.reset(raw);
         checkAudio(avformat_find_stream_info(mFormat.get(), nullptr), "Read audio source");
         mIndex = av_find_best_stream(mFormat.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);

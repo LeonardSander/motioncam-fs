@@ -3,6 +3,7 @@
 #include "android/PageCrossfade.h"
 #endif
 #include "ClipPlayerDialog.h"
+#include "ThumbnailDiskCache.h"
 #include "GalleryVulkanVideo.h"
 #include "VulkanGalleryPreview.h"
 #include <QCloseEvent>
@@ -39,7 +40,6 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QRegion>
-#include <QSaveFile>
 #include <QSettings>
 #include <QSlider>
 #include <QListView>
@@ -1500,7 +1500,12 @@ void ClipPlayerDialog::invalidateThumbnails(int mountId){
         QDir cacheDir(mThumbnailDiskCache->path());
         const auto files=cacheDir.entryList(
             {QStringLiteral("%1-*.jpg").arg(mountId)},QDir::Files);
-        for(const auto& file:files)cacheDir.remove(file);
+        for(const auto& file:files)
+            motioncam::removeThumbnailCacheFile(cacheDir.filePath(file)
+#ifdef __ANDROID__
+                ,mThumbnailDiskBytes.get()
+#endif
+            );
     }
     if(currentMountId()==mountId)rebuildThumbnailStrip();
 }
@@ -1906,11 +1911,20 @@ void ClipPlayerDialog::cacheThumbnail(int mountId,int sourceFrame,const QImage& 
                 const auto ticket=std::shared_ptr<void>(nullptr,[pending](void*){
                     pending->fetch_sub(1,std::memory_order_relaxed);
                 });
-                mThumbnailCacheWriter.start([path,image,ticket]{
-                    if(QFileInfo::exists(path))return;
-                    QSaveFile file(path);
-                    if(!file.open(QIODevice::WriteOnly)||
-                       !image.save(&file,"JPG",80)||!file.commit())
+#ifdef __ANDROID__
+                const auto diskBytes=mThumbnailDiskBytes;
+#endif
+                mThumbnailCacheWriter.start([path,image,ticket
+#ifdef __ANDROID__
+                    ,diskBytes
+#endif
+                ]{
+                    const auto result=motioncam::saveThumbnailCacheFile(path,image
+#ifdef __ANDROID__
+                        ,diskBytes.get()
+#endif
+                    );
+                    if(result==motioncam::ThumbnailCacheWrite::Failed)
                         spdlog::warn("Could not persist gallery thumbnail cache entry");
                 });
             }else{

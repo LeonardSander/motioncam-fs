@@ -1,4 +1,5 @@
 #include "android/ExportDirectory.h"
+#include "SourceInput.h"
 
 #include <QCoreApplication>
 #include <QJniObject>
@@ -8,16 +9,12 @@
 #include <QUrl>
 #include <cerrno>
 #include <fcntl.h>
-#include <map>
-#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace motioncam {
 namespace {
-std::mutex importDescriptorMutex;
-std::map<QString, int> importDescriptors;
 
 template<typename... Args>
 void callActivity(const char* method, const Args&... args) {
@@ -127,93 +124,28 @@ QString sidecarScanStatus() {
     return activityString(QStringLiteral("error:Android activity unavailable"), "sidecarScanStatus");
 }
 
-QString sourceDirectoryForUri(const QString& uri) {
-    return activityString(QString(), "sourceDirectoryForUri", uri);
+QString registerImportedClip(const QString& importPath, const QString& sourceUri) {
+    return activityString(QStringLiteral("Android activity unavailable"),
+                          "registerImportedClip", importPath, sourceUri);
 }
 
-void registerImportedClip(const QString& importPath, const QString& sourceUri) {
-    callActivity("registerImportedClip", importPath, sourceUri);
+QString refreshImportedSource(const QString& importPath) {
+    releaseSourceReadDescriptors(importPath.toStdString());
+    return activityString(QStringLiteral("Android activity unavailable"),
+                          "refreshImportedSource", importPath);
 }
 
-bool installSeekableSourceLink(const QString& importPath, int descriptor) {
-    if (descriptor < 0) return false;
-    if (::lseek(descriptor, 0, SEEK_SET) < 0 ||
-        ::fcntl(descriptor, F_SETFD, FD_CLOEXEC) < 0) {
-        ::close(descriptor);
-        return false;
-    }
-
-    // Serialize publication with release so an old source cannot unlink a
-    // newly installed descriptor. Keep the old link usable until rename.
-    std::lock_guard lock(importDescriptorMutex);
-    const QByteArray destination = QFile::encodeName(importPath);
-    struct stat existing{};
-    if (::lstat(destination.constData(), &existing) == 0) {
-        if (!S_ISLNK(existing.st_mode)) {
-            ::close(descriptor);
-            return false;
-        }
-    }
-
-    const QByteArray target = QByteArray("/proc/") +
-        QByteArray::number(static_cast<qlonglong>(::getpid())) + "/fd/" +
-        QByteArray::number(descriptor);
-    const QByteArray temporary = destination + ".fd-" + QByteArray::number(descriptor);
-    if (::symlink(target.constData(), temporary.constData()) != 0) {
-        ::close(descriptor);
-        return false;
-    }
-    if (::rename(temporary.constData(), destination.constData()) != 0) {
-        ::unlink(temporary.constData());
-        ::close(descriptor);
-        return false;
-    }
-
-    const QString key = QFileInfo(importPath).absoluteFilePath();
-    const auto existingFd = importDescriptors.find(key);
-    if (existingFd != importDescriptors.end()) {
-        ::close(existingFd->second);
-        existingFd->second = descriptor;
-    } else {
-        importDescriptors.emplace(key, descriptor);
-    }
-    return true;
-}
-
-bool reopenSeekableSourceLink(const QString& importPath) {
-    const QByteArray destination = QFile::encodeName(importPath);
-    struct stat info{};
-    const bool hasEntry = ::lstat(destination.constData(), &info) == 0;
-    if (hasEntry && !S_ISLNK(info.st_mode)) return false;
-    if (hasEntry) {
-        const QString key = QFileInfo(importPath).absoluteFilePath();
-        std::lock_guard lock(importDescriptorMutex);
-        const auto retained = importDescriptors.find(key);
-        if (retained != importDescriptors.end() && QFileInfo(importPath).exists())
-            return true;
-    }
-
+bool sameImportedSource(const QString& first, const QString& second) {
     const auto activity = QNativeInterface::QAndroidApplication::context();
-    if (!activity.isValid()) return false;
-    const QString sourceUri = activity.callMethod<QString>(
-        "sourceUriForImport", importPath);
-    if (sourceUri.isEmpty()) return false;
-    const int descriptor = activity.callMethod<jint>("openSourceUriFd", sourceUri);
-    return installSeekableSourceLink(importPath, descriptor);
+    return activity.isValid() && activity.callMethod<jboolean>("sameImportedSource", first, second);
 }
 
-void releaseSeekableSourceLink(const QString& importPath) {
-    const QString key = QFileInfo(importPath).absoluteFilePath();
-    std::lock_guard lock(importDescriptorMutex);
-    const auto retained = importDescriptors.find(key);
-    if (retained == importDescriptors.end()) return;
-    const int descriptor = retained->second;
-    importDescriptors.erase(retained);
-    const QByteArray destination = QFile::encodeName(importPath);
-    struct stat info{};
-    if (::lstat(destination.constData(), &info) == 0 && S_ISLNK(info.st_mode))
-        ::unlink(destination.constData());
-    ::close(descriptor);
+QString importDisplayName(const QString& importPath) {
+    return activityString(QString(), "importDisplayName", importPath);
+}
+
+QString importSourceLocation(const QString& importPath) {
+    return activityString(QStringLiteral("Source document"), "importSourceLocation", importPath);
 }
 
 QString sourceDirectoryForImport(const QString& importPath) {
@@ -226,7 +158,12 @@ QString writeSidecarToSource(const QString& importPath, const QString& name,
 }
 
 QString syncSidecarsForImport(const QString& importPath) {
-    return activityString(QStringLiteral("Android activity unavailable"), "syncSidecarsForImport", importPath);
+    const QString result = activityString(QStringLiteral("Android activity unavailable"),
+                                          "syncSidecarsForImport", importPath);
+    // An explicit refresh must reopen replaced files even if the provider
+    // omits timestamps or reports the same size and modification time.
+    releaseSourceReadDescriptors(importPath.toStdString());
+    return result;
 }
 
 QString editSidecarInExternalApp(const QString& importPath,

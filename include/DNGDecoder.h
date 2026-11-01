@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <array>
+#include <atomic>
 #include <functional>
 #include "DNGImage.h"
 
@@ -282,6 +283,7 @@ private:
 private:
     std::string mSequencePath;
     std::string mSequenceSignature;
+    std::atomic<int> mLastExtractedFrame{-1};
     DNGSequenceInfo mSequenceInfo;
     std::vector<DNGFrameInfo> mFrames;
     std::unordered_map<int, GainMap> mGainMapCache;

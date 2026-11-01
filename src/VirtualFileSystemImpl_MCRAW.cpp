@@ -1,3 +1,4 @@
+#include "SourceInput.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "VirtualFileSystemImpl.h"
 #include "CameraFrameMetadata.h"
@@ -215,8 +216,10 @@ void reorderNativeShadingMapToCfaPhases(
 std::string mcrawAnalysisCacheKey(const std::string& path) {
     std::error_code error;
     const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
-    const auto size = std::filesystem::file_size(absolute, error);
+    const auto size = motioncam::sourceFileSize(absolute, error);
     if (error) return absolute.string();
+    const auto revision = motioncam::sourceRevision(absolute.string());
+    if (!revision.empty()) return "timestamp-repair-v1:" + absolute.string() + ":" + std::to_string(size) + ":" + revision;
     const auto modified = std::filesystem::last_write_time(absolute, error);
     return "timestamp-repair-v1:" + absolute.string() + ":" + std::to_string(size) +
            (error ? "" : ":" + std::to_string(
@@ -251,7 +254,7 @@ void writeCacheString(std::ostream& output, const std::string& value) {
     output.write(value.data(), size);
 }
 bool loadPersistentMcrawAnalysis(const std::string& key, CachedMcrawAnalysis& cached) {
-    std::ifstream input(mcrawAnalysisCachePath(key), std::ios::binary);
+    motioncam::SourceInputStream input(mcrawAnalysisCachePath(key), std::ios::binary);
     uint64_t magic = 0, frameCount = 0, exposureCount = 0, neutralCount = 0;
     std::string storedKey;
     if (!readCacheValue(input, magic) || magic != mcrawAnalysisCacheMagic ||
@@ -307,6 +310,7 @@ void savePersistentMcrawAnalysis(const std::string& key, const CachedMcrawAnalys
         error.clear();
         std::filesystem::rename(temporary, path, error);
     }
+    motioncam::trimSourceAnalysisCache(path.parent_path().parent_path());
 }
 
 double elapsedMs(const std::chrono::steady_clock::time_point start) {
@@ -386,7 +390,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         vfs::referencedSidecarPath(
             mGyroflowSidecarPath, mSidecarMetadata, calibPath, "gyroflow"));
     if (!reusedAnalysis) {
-        Decoder decoder(mSrcPath);
+        Decoder decoder(motioncam::decoderSource(mSrcPath));
         auto frames = decoder.getFrames();
         std::sort(frames.begin(), frames.end());
         if(frames.empty()) return;
@@ -440,7 +444,7 @@ VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
 }
 
 void VirtualFileSystemImpl_MCRAW::init() {
-    Decoder decoder(mSrcPath);
+    Decoder decoder(motioncam::decoderSource(mSrcPath));
     const auto& frames = mSourceFrames;
 
     if(frames.empty())
@@ -804,7 +808,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
-            decoder = std::make_unique<Decoder>(mSrcPath);
+            decoder = std::make_unique<Decoder>(motioncam::decoderSource(mSrcPath));
         const auto timestamp = std::get<Timestamp>(entry.userData);
         const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
         if (frameIt == mFrameIndexByTimestamp.end())
@@ -990,7 +994,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
-            decoder = std::make_unique<Decoder>(mSrcPath);
+            decoder = std::make_unique<Decoder>(motioncam::decoderSource(mSrcPath));
         const bool hasNonGainMapSidecar = std::any_of(
             mManualVignetteSidecars.candidates.begin(),
             mManualVignetteSidecars.candidates.end(),

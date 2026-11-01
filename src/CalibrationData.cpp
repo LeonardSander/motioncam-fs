@@ -1,3 +1,4 @@
+#include "SourceInput.h"
 #include "CalibrationData.h"
 #include <algorithm>
 #include <fstream>
@@ -124,7 +125,7 @@ namespace {
 
 std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& filePath) {
     try {
-        std::ifstream file(filePath);
+        motioncam::SourceInputStream file(filePath);
         if (!file.is_open()) {
             spdlog::warn("Could not open calibration file: {}", filePath);
             return std::nullopt;

@@ -1,3 +1,4 @@
+#include "SourceInput.h"
 #include "VirtualFileSystemImpl.h"
 #include "VulkanGainBake.h"
 #include "VulkanJpegFullEncode.h"
@@ -962,7 +963,7 @@ void replaceSidecarGainMapOpcodes(
 nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
     if (!boost::filesystem::exists(path)) return {};
     try {
-        std::ifstream input(path.string());
+        motioncam::SourceInputStream input(path.string());
         if (!input) throw std::runtime_error("could not open file");
         std::ostringstream contents;
         contents << input.rdbuf();
@@ -1268,7 +1269,7 @@ ManualVignetteSidecars loadManualVignetteSidecars(
         ? referencedSidecarPath(discoveredDcp, *sidecar, *sidecarFile, "dcp")
         : discoveredDcp;
     if (boost::filesystem::is_regular_file(dcpPath)) {
-        std::ifstream profile(dcpPath.string(), std::ios::binary);
+        motioncam::SourceInputStream profile(dcpPath.string(), std::ios::binary);
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(profile)), {});
         // Adobe DCP uses a TIFF directory with the 'CR' version marker
         // instead of TIFF's 42. The remaining offsets and entries are TIFF.
@@ -1310,7 +1311,7 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     }
     auto loadCandidate = [&](const boost::filesystem::path& path, bool white,
                              std::string illuminant = {}, bool legacyGainMapName = false) {
-        std::ifstream input(path.string(), std::ios::binary);
+        motioncam::SourceInputStream input(path.string(), std::ios::binary);
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
         ManualVignetteSidecars::Candidate candidate;
         candidate.path = path.string();
@@ -2004,7 +2005,7 @@ std::string finalizedCfaBadPixelOptions(const std::string& sourceSidecar,
     if (!DNGDecoder::getImageLayout(finalizedDng, layout))
         throw std::runtime_error("Could not inspect finalized DNG pixel layout");
     if (layout.pixels != DNGPixelLayout::CFA) return {};
-    std::ifstream input(sourceSidecar);
+    motioncam::SourceInputStream input(sourceSidecar);
     if (!input) throw std::runtime_error("Could not read source bad-pixel options JSON");
     const auto source = nlohmann::json::parse(input);
     if (!source.is_object() || !source.contains("badPixels")) return {};
@@ -2061,7 +2062,7 @@ void finalize(
         return entry.name.size() >= 4 && entry.name.substr(entry.name.size() - 4) == ".dng";
     };
     auto readBytes = [](const stdfs::path& path) {
-        std::ifstream stream(path, std::ios::binary);
+        motioncam::SourceInputStream stream(path, std::ios::binary);
         if (!stream) throw std::runtime_error("Could not read " + path.string());
         return std::vector<uint8_t>((std::istreambuf_iterator<char>(stream)), {});
     };

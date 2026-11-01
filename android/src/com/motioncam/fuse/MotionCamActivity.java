@@ -25,7 +25,6 @@ import org.json.JSONObject;
 import org.qtproject.qt.android.bindings.QtActivity;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -49,6 +48,10 @@ public class MotionCamActivity extends QtActivity {
     private static final String FINALIZE_TREE_KEY = "finalize_tree_uri";
     private static final String CUSTOM_FINALIZE_TREE_KEY = "custom_finalize_tree_uri";
     private String pendingSidecarImportRoot;
+    private final ArrayList<String> pendingSidecarPaths = new ArrayList<>();
+    private final java.util.HashSet<String> scannedSidecarTrees = new java.util.HashSet<>();
+    private int pendingSidecarIndex;
+    private int indexedSidecars;
     private volatile String sidecarScanStatus = "idle";
     private PowerManager.WakeLock finalizeWakeLock;
     private boolean pendingFinalizeTree;
@@ -226,7 +229,7 @@ public class MotionCamActivity extends QtActivity {
                 if (sourceTree == null || sourceUri == null)
                     return "error:Scan this clip's source directory before using it as an output destination";
                 tree = Uri.parse(sourceTree);
-                Uri sourceDocument=Uri.parse(sourceUri);
+                Uri sourceDocument=sourceDocumentUri(sourceUri);
                 if(DocumentsContract.isTreeUri(sourceDocument)){
                     output=DocumentsContract.buildDocumentUriUsingTree(tree,
                             DocumentsContract.getTreeDocumentId(sourceDocument));
@@ -377,16 +380,57 @@ public class MotionCamActivity extends QtActivity {
 
     public String sidecarScanStatus() { return sidecarScanStatus; }
 
-    // The user chooses the source directory, which may differ for every clip.
-    // Scan that tree for imported clip names and copy every adjacent sidecar.
-    public void scanDirectoryForSidecars(String importRoot, String targetImportPath) {
-        sidecarScanStatus = "choosing";
+    // Reuse existing grants, then ask for the remaining source folders in turn.
+    public void scanDirectoryForSidecars(String importRoot, String importPaths) {
+        sidecarScanStatus = "scanning";
         runOnUiThread(() -> {
             if (pendingSidecarImportRoot != null) return;
             pendingSidecarImportRoot = importRoot;
-            requestTreeSelection(CHOOSE_SIDECAR_DIRECTORY,
-                    initialSourceDirectory(targetImportPath));
+            pendingSidecarPaths.clear();
+            for (String path : importPaths.split("\n"))
+                if (!path.isEmpty()) pendingSidecarPaths.add(path);
+            scannedSidecarTrees.clear();
+            pendingSidecarIndex = 0;
+            indexedSidecars = 0;
+            sidecarScanStatus = "scanning";
+            new Thread(this::scanNextSidecarDirectory, "mcFuse-sidecar-scan").start();
         });
+    }
+
+    private void scanNextSidecarDirectory() {
+        try {
+            while (pendingSidecarIndex < pendingSidecarPaths.size()) {
+                String path = pendingSidecarPaths.get(pendingSidecarIndex++);
+                File directory = importDirectory(new File(path));
+                sourceDirectoryForImport(path); // Link an existing grant covering this clip.
+                String value = getSharedPreferences(PREFS, MODE_PRIVATE)
+                        .getString("source_tree:" + directory.getName(), null);
+                Uri tree = value == null ? null : Uri.parse(value);
+                boolean granted = false;
+                for (UriPermission permission : getContentResolver().getPersistedUriPermissions())
+                    if (permission.getUri().equals(tree) && permission.isReadPermission()) {
+                        granted = true;
+                        break;
+                    }
+                if (granted) {
+                    if (scannedSidecarTrees.add(tree.toString()))
+                        indexedSidecars += scanSidecarTree(tree);
+                    continue;
+                }
+                Uri initial = initialSourceDirectory(path);
+                sidecarScanStatus = "choosing";
+                runOnUiThread(() -> {
+                    Toast.makeText(this, "Allow access to the source folder for " +
+                            new File(path).getName(), Toast.LENGTH_LONG).show();
+                    requestTreeSelection(CHOOSE_SIDECAR_DIRECTORY, initial);
+                });
+                return;
+            }
+            sidecarScanStatus = "done:" + indexedSidecars;
+        } catch (Exception error) {
+            sidecarScanStatus = "error:" + error.getMessage();
+        }
+        pendingSidecarImportRoot = null;
     }
 
     private Uri initialSourceDirectory(String importPath) {
@@ -402,18 +446,27 @@ public class MotionCamActivity extends QtActivity {
         try {
             String id = DocumentsContract.getDocumentId(uri);
             int slash = id.lastIndexOf('/');
-            if (slash <= 0) return null;
+            if (slash <= 0) return uri;
             return DocumentsContract.buildDocumentUri(uri.getAuthority(),
                     id.substring(0, slash));
         } catch (RuntimeException error) {
-            return null;
+            return uri;
         }
+    }
+
+    // Qt may return a display-decoded URL. Re-encode each path segment without
+    // turning the slashes inside a document ID into URI path separators.
+    private Uri sourceDocumentUri(String value) {
+        Uri uri = Uri.parse(value);
+        Uri.Builder builder = uri.buildUpon().path(null);
+        for (String segment : uri.getPathSegments()) builder.appendPath(segment);
+        return builder.build();
     }
 
     // The document URI can contain an opaque ID instead of the filename.
     // Query the provider for the name shown in Android's file picker.
     public String displayNameForUri(String sourceUri) {
-        Uri uri = Uri.parse(sourceUri);
+        Uri uri = sourceDocumentUri(sourceUri);
         if (!"content".equals(uri.getScheme())) return "";
         try (Cursor cursor = getContentResolver().query(uri,
                 new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
@@ -427,7 +480,7 @@ public class MotionCamActivity extends QtActivity {
     }
 
     public String sourceDirectoryForUri(String sourceUri) {
-        Uri uri = Uri.parse(sourceUri);
+        Uri uri = sourceDocumentUri(sourceUri);
         if (DocumentsContract.isDocumentUri(this, uri)) {
             try {
                 String id = DocumentsContract.getDocumentId(uri);
@@ -483,11 +536,11 @@ public class MotionCamActivity extends QtActivity {
                 sequenceFolderImportStatus = "error:Could not read the selected folder";
                 return;
             }
-            sequenceFolderImportStatus = "copying";
+            sequenceFolderImportStatus = "indexing";
             beginFinalizeWork();
             new Thread(() -> {
                 try {
-                    File imported = copyDngSequenceFolder(tree);
+                    File imported = indexDngSequenceFolder(tree);
                     synchronized (sequenceFolderImportPaths) {
                         sequenceFolderImportPaths.add(imported.getAbsolutePath());
                     }
@@ -507,10 +560,9 @@ public class MotionCamActivity extends QtActivity {
             return;
         }
         if (requestCode == CHOOSE_SIDECAR_DIRECTORY) {
-            String importRoot = pendingSidecarImportRoot;
-            pendingSidecarImportRoot = null;
             if (resultCode != Activity.RESULT_OK || data == null ||
-                    data.getData() == null || importRoot == null) {
+                    data.getData() == null || pendingSidecarImportRoot == null) {
+                pendingSidecarImportRoot = null;
                 sidecarScanStatus = "cancelled";
                 return;
             }
@@ -520,15 +572,18 @@ public class MotionCamActivity extends QtActivity {
                         Intent.FLAG_GRANT_READ_URI_PERMISSION |
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             } catch (SecurityException error) {
+                pendingSidecarImportRoot = null;
                 sidecarScanStatus = "error:Could not read the selected directory";
                 return;
             }
             sidecarScanStatus = "scanning";
             new Thread(() -> {
                 try {
-                    int count = scanSidecarTree(tree, new File(importRoot));
-                    sidecarScanStatus = "done:" + count;
+                    if (scannedSidecarTrees.add(tree.toString()))
+                        indexedSidecars += scanSidecarTree(tree);
+                    scanNextSidecarDirectory();
                 } catch (Exception error) {
+                    pendingSidecarImportRoot = null;
                     sidecarScanStatus = "error:" + error.getMessage();
                 }
             }, "mcFuse-sidecar-scan").start();
@@ -544,13 +599,29 @@ public class MotionCamActivity extends QtActivity {
                 lower.endsWith(".mp4") || lower.endsWith(".mkv");
     }
 
-    private int scanSidecarTree(Uri tree, File importRoot) throws IOException {
-        File[] folders = importRoot.listFiles();
-        if (folders == null) throw new IOException("Imported clips directory is missing");
+    private int scanSidecarTree(Uri tree) throws IOException {
+        int indexed = 0;
         Map<String, ArrayList<File>> imports = new HashMap<>();
-        for (File folder : folders) {
-            if (!folder.isDirectory()) continue;
-            File[] files = folder.listFiles();
+        for (String path : pendingSidecarPaths) {
+            File imported = new File(path);
+            File folder = importDirectory(imported);
+            if (imported.isDirectory()) {
+                String original = getSharedPreferences(PREFS, MODE_PRIVATE)
+                        .getString("source_uri:" + folder.getName(), "");
+                if (!original.isEmpty()) {
+                    Uri source = Uri.parse(original);
+                    if (tree.getAuthority().equals(source.getAuthority()) &&
+                            DocumentsContract.getTreeDocumentId(tree).equals(
+                                    DocumentsContract.getTreeDocumentId(source))) {
+                        indexDngSequenceFolder(tree, imported);
+                        File[] entries = imported.listFiles();
+                        if (entries != null)
+                            for (File entry : entries) if (entry.isFile() && !isClipFile(entry.getName())) indexed++;
+                    }
+                }
+                continue;
+            }
+            File[] files = new File[] {imported};
             if (files == null) continue;
             for (File file : files) {
                 if (file.isFile() && isClipFile(file.getName()))
@@ -560,7 +631,7 @@ public class MotionCamActivity extends QtActivity {
         }
         Uri root = DocumentsContract.buildDocumentUriUsingTree(tree,
                 DocumentsContract.getTreeDocumentId(tree));
-        return scanSidecarFolder(tree, root, imports);
+        return indexed + (imports.isEmpty() ? 0 : scanSidecarFolder(tree, root, imports));
     }
 
     private int scanSidecarFolder(Uri tree, Uri folder,
@@ -578,7 +649,7 @@ public class MotionCamActivity extends QtActivity {
                 entries.add(new String[] {cursor.getString(0), cursor.getString(1),
                         cursor.getString(2)});
         }
-        int copied = 0;
+        int indexed = 0;
         for (String[] clip : entries) {
             if (!isClipFile(clip[1])) continue;
             ArrayList<File> candidates = imports.get(clip[1].toLowerCase(Locale.ROOT));
@@ -603,30 +674,37 @@ public class MotionCamActivity extends QtActivity {
                 Uri source = DocumentsContract.buildDocumentUriUsingTree(tree, entry[0]);
                 for (File target : targets) {
                     File output = new File(target, sidecar);
-                    File temporary = new File(target, sidecar + ".partial");
-                    copyDocumentToFile(source, temporary, new byte[1024 * 1024]);
-                    if (!temporary.renameTo(output))
-                        throw new IOException("Could not save " + sidecar);
-                    copied++;
+                    bindDocument(output, source);
+                    indexed++;
                     if (lower.endsWith(".json"))
-                        copied += copyReferencedSidecars(output, tree, folder, target);
+                        indexed += indexReferencedSidecars(output, tree, folder, target);
                 }
             }
         }
-        return copied;
+        return indexed;
     }
 
-    private int copyReferencedSidecars(File jsonFile, Uri tree, Uri sourceFolder,
+    private int indexReferencedSidecars(File jsonFile, Uri tree, Uri sourceFolder,
             File targetFolder) throws IOException {
         if (jsonFile.length() > 8 * 1024 * 1024) return 0;
         JSONObject json;
         try {
-            json = new JSONObject(new String(Files.readAllBytes(jsonFile.toPath()),
-                    java.nio.charset.StandardCharsets.UTF_8));
+            Uri uri = Uri.parse(sourceUriForImport(jsonFile.getAbsolutePath()));
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) return 0;
+                java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                byte[] buffer = new byte[8192];
+                int count;
+                while ((count = input.read(buffer)) >= 0) {
+                    if (bytes.size() + count > 8 * 1024 * 1024) return 0;
+                    bytes.write(buffer, 0, count);
+                }
+                json = new JSONObject(bytes.toString("UTF-8"));
+            }
         } catch (Exception ignored) {
             return 0; // Other JSON sidecars need not contain calibration paths.
         }
-        int copied = 0;
+        int indexed = 0;
         for (String key : new String[] {"dng_white", "dng_opcode", "dcp", "gyroflow"}) {
             String path = json.optString(key, "");
             if (path.isEmpty() || path.startsWith("/") || path.contains("\\")) continue;
@@ -650,10 +728,10 @@ public class MotionCamActivity extends QtActivity {
             if (!target.isDirectory() && !target.mkdirs())
                 throw new IOException("Could not create referenced sidecar directory");
             File output = new File(target, leaf);
-            copyDocumentToFile(source, output, new byte[1024 * 1024]);
-            copied++;
+            bindDocument(output, source);
+            indexed++;
         }
-        return copied;
+        return indexed;
     }
 
     private String sourceDirectoryName(Uri tree) {
@@ -728,26 +806,20 @@ public class MotionCamActivity extends QtActivity {
     }
 
     private void retireWorkingSidecars(File importFile) throws IOException {
-        File folder = importFile.getParentFile();
-        File[] files = folder.listFiles();
+        File[] files = importFile.getParentFile().listFiles();
         if (files == null) return;
-        File legacy = new File(folder, "legacy-sidecars");
         for (File file : files) {
-            if (!file.isFile() || !isAdjacentSidecar(file.getName(),
-                    importFile.getName())) continue;
-            if (!legacy.isDirectory() && !legacy.mkdirs())
-                throw new IOException("Could not preserve previous sidecars");
-            File backup = new File(legacy, file.getName());
-            if (backup.exists()) {
-                if (!file.delete()) throw new IOException("Could not retire " + file.getName());
-            } else if (!file.renameTo(backup)) {
-                throw new IOException("Could not preserve " + file.getName());
+            if (file.isFile() && isAdjacentSidecar(file.getName(), importFile.getName())) {
+                String key = sourceKey(file);
+                Files.deleteIfExists(file.toPath());
+                if (key != null) getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .remove("document_uri:" + key).remove("document_size:" + key)
+                        .remove("document_modified:" + key).apply();
             }
         }
     }
 
-    // The granted source directory is authoritative. The private files are
-    // only decoder shadows, refreshed before mount and on explicit refresh.
+    // The granted source directory is authoritative; private entries only index URIs.
     public String syncSidecarsForImport(String importPath) {
         File imported = new File(importPath);
         File directory = importDirectory(imported);
@@ -755,9 +827,15 @@ public class MotionCamActivity extends QtActivity {
         try {
             String value = getSharedPreferences(PREFS, MODE_PRIVATE)
                     .getString("source_tree:" + directory.getName(), null);
-            // Keep the working copy until a source directory has been linked.
+            // A single-document grant cannot enumerate adjacent sidecars.
             if (value == null) return "";
             Uri tree = Uri.parse(value);
+            // Reindex sequences once, including sidecars, rather than rescanning
+            // their entire directory for every individual frame.
+            if (imported.isDirectory()) {
+                indexDngSequenceFolder(tree, directory);
+                return "";
+            }
             Uri root = DocumentsContract.buildDocumentUriUsingTree(tree,
                     DocumentsContract.getTreeDocumentId(tree));
             Map<String, ArrayList<File>> imports = new HashMap<>();
@@ -777,29 +855,152 @@ public class MotionCamActivity extends QtActivity {
         }
     }
 
-    public void registerImportedClip(String importPath, String sourceUri) {
-        String folder = importDirectory(new File(importPath)).getName();
-        Uri uri = Uri.parse(sourceUri);
+    private String sourceKey(File file) {
+        java.nio.file.Path root = new File(getFilesDir(), "imports").toPath().toAbsolutePath().normalize();
+        java.nio.file.Path path = file.toPath().toAbsolutePath().normalize();
+        return path.startsWith(root) ? root.relativize(path).toString() : null;
+    }
+
+    private void bindDocument(File target, Uri source, long size, long modified) throws IOException {
+        android.content.SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        bindDocument(target, source, size, modified, editor);
+        editor.apply();
+    }
+
+    private void bindDocument(File target, Uri source, long size, long modified,
+            android.content.SharedPreferences.Editor editor) throws IOException {
+        String key = sourceKey(target);
+        if (key == null) throw new IOException("Invalid document index path");
+        if (!target.getParentFile().isDirectory() && !target.getParentFile().mkdirs())
+            throw new IOException("Could not create document index");
+        // Index files contain no document bytes. Remove old links first so
+        // replacing a legacy entry can never truncate the original document.
+        if (Files.isSymbolicLink(target.toPath()) || target.length() != 0)
+            Files.deleteIfExists(target.toPath());
+        if (!target.exists() && !target.createNewFile())
+            throw new IOException("Could not create document index entry");
+        editor.putString("document_uri:" + key, source.toString())
+                .putLong("document_size:" + key, size)
+                .putLong("document_modified:" + key, modified);
+    }
+
+    private void bindDocument(File target, Uri source) throws IOException {
+        long size = -1, modified = 0;
+        try (Cursor cursor = getContentResolver().query(source,
+                new String[] {OpenableColumns.SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                if (!cursor.isNull(0)) size = cursor.getLong(0);
+                if (!cursor.isNull(1)) modified = cursor.getLong(1);
+            }
+        }
+        bindDocument(target, source, size, modified);
+    }
+
+    public String registerImportedClip(String importPath, String sourceUri) {
+        File imported = new File(importPath);
+        String folder = importDirectory(imported).getName();
+        Uri uri = sourceDocumentUri(sourceUri);
         try {
-            getContentResolver().takePersistableUriPermission(uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (SecurityException ignored) { }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString("source_uri:" + folder, sourceUri).apply();
+        try {
+            bindDocument(imported, uri);
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("source_uri:" + folder, uri.toString())
+                    .putBoolean("source_is_folder:" + folder, false).apply();
+            return "";
+        } catch (Exception error) {
+            return "Could not access source document: " + error.getMessage();
+        }
+    }
+
+    private String sourceIdentity(String value) {
+        if (!value.startsWith("content:")) {
+            String folder = importDirectory(new File(value)).getName();
+            value = getSharedPreferences(PREFS, MODE_PRIVATE).getString("source_uri:" + folder, "");
+        }
+        if (value.isEmpty()) return "";
+        Uri uri = sourceDocumentUri(value);
+        try {
+            String id = DocumentsContract.isDocumentUri(this, uri)
+                    ? DocumentsContract.getDocumentId(uri) : DocumentsContract.getTreeDocumentId(uri);
+            return uri.getAuthority() + ":" + id;
+        } catch (RuntimeException error) {
+            return uri.toString();
+        }
+    }
+
+    public boolean sameImportedSource(String first, String second) {
+        String identity = sourceIdentity(first);
+        return !identity.isEmpty() && identity.equals(sourceIdentity(second));
+    }
+
+    public String importSourceLocation(String importPath) {
+        File imported = new File(importPath);
+        String folder = importDirectory(imported).getName();
+        String location = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString("source_location:" + folder, "");
+        if (!location.isEmpty()) return location;
+        String source = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString("source_uri:" + folder, "");
+        return source.isEmpty() ? "Source document" : sourceDirectoryForUri(source);
+    }
+
+    public String importDisplayName(String importPath) {
+        File imported = new File(importPath);
+        if (!imported.isDirectory()) return imported.getName();
+        String location = importSourceLocation(importPath);
+        int slash = location.lastIndexOf('/');
+        return slash < 0 ? location : location.substring(slash + 1);
     }
 
     public String sourceUriForImport(String importPath) {
         File file = new File(importPath);
-        File parent = importDirectory(file);
-        if (parent == null) return "";
-        return getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getString("source_uri:" + parent.getName(), "");
+        String key = sourceKey(file);
+        if (key == null) return "";
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString("document_uri:" + key, "");
+    }
+
+    public long sourceSizeForImport(String importPath) {
+        String key = sourceKey(new File(importPath));
+        return key == null ? -1 : getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getLong("document_size:" + key, -1);
+    }
+
+    public String sourceRevisionForImport(String importPath) {
+        String key = sourceKey(new File(importPath));
+        if (key == null) return "";
+        String uri = sourceUriForImport(importPath);
+        if (uri.isEmpty()) return "";
+        return uri + ":" + getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getLong("document_modified:" + key, 0);
+    }
+
+    public String refreshImportedSource(String importPath) {
+        File file = new File(importPath);
+        String key = sourceKey(file);
+        if (key == null || key.isEmpty()) return "";
+        String folder = key.split("/", 2)[0];
+        String uri = getSharedPreferences(PREFS, MODE_PRIVATE).getString("source_uri:" + folder, "");
+        if (uri.isEmpty()) return "";
+        try {
+            if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(
+                    "source_is_folder:" + folder, DocumentsContract.isTreeUri(sourceDocumentUri(uri)))) {
+                indexDngSequenceFolder(sourceDocumentUri(uri), new File(new File(getFilesDir(), "imports"), folder));
+            } else {
+                bindDocument(file, sourceDocumentUri(uri));
+            }
+            return "";
+        } catch (Exception error) {
+            return "Could not access source: " + error.getMessage();
+        }
     }
 
     public int openSourceUriFd(String sourceUri) {
         if (sourceUri == null || sourceUri.isEmpty()) return -1;
         try (ParcelFileDescriptor descriptor = getContentResolver()
-                .openFileDescriptor(Uri.parse(sourceUri), "r")) {
+                .openFileDescriptor(sourceDocumentUri(sourceUri), "r")) {
             return descriptor == null ? -1 : descriptor.detachFd();
         } catch (IOException | SecurityException error) {
             return -1;
@@ -812,11 +1013,15 @@ public class MotionCamActivity extends QtActivity {
                 .getString("source_uri:" + target.getName(), null);
         if (source == null) return uniqueName;
         Uri uri = Uri.parse(source);
-        if (!tree.getAuthority().equals(uri.getAuthority())) return uniqueName;
+        if (!tree.getAuthority().equals(uri.getAuthority())) return false;
         try {
-            return documentId.equals(DocumentsContract.getDocumentId(uri)) || uniqueName;
+            String originalId = DocumentsContract.getDocumentId(uri);
+            if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(
+                    "source_is_folder:" + target.getName(), false))
+                return originalId.equals(DocumentsContract.getTreeDocumentId(tree));
+            return documentId.equals(originalId);
         } catch (RuntimeException error) {
-            return uniqueName;
+            return false;
         }
     }
 
@@ -840,6 +1045,7 @@ public class MotionCamActivity extends QtActivity {
                 if (output == null) throw new IOException("Could not open " + name);
                 output.write(contents.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
+            bindDocument(new File(importDirectory(new File(importPath)), name), document);
             return "";
         } catch (Exception error) {
             return "Could not write " + name + ": " + error.getMessage();
@@ -901,28 +1107,26 @@ public class MotionCamActivity extends QtActivity {
         return null;
     }
 
-    private static void copyStream(InputStream input, OutputStream output, byte[] buffer)
-            throws IOException {
-        int length;
-        while ((length = input.read(buffer)) != -1) output.write(buffer, 0, length);
-    }
-
-    private void copyDocumentToFile(Uri source, File target, byte[] buffer) throws IOException {
-        try (InputStream input = getContentResolver().openInputStream(source);
-             OutputStream output = new FileOutputStream(target)) {
-            if (input == null) throw new IOException("Could not read " + target.getName());
-            copyStream(input, output, buffer);
+    private File indexDngSequenceFolder(Uri tree) throws IOException {
+        for (Map.Entry<String, ?> entry : getSharedPreferences(PREFS, MODE_PRIVATE).getAll().entrySet()) {
+            if (!entry.getKey().startsWith("source_uri:") || !(entry.getValue() instanceof String)) continue;
+            String token = entry.getKey().substring("source_uri:".length());
+            if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("source_is_folder:" + token, false) &&
+                    sameImportedSource((String) entry.getValue(), tree.toString()))
+                return indexDngSequenceFolder(tree, new File(new File(getFilesDir(), "imports"), token));
         }
+        return indexDngSequenceFolder(tree, new File(new File(getFilesDir(), "imports"), UUID.randomUUID().toString()));
     }
 
-    private File copyDngSequenceFolder(Uri tree) throws IOException {
+    private File indexDngSequenceFolder(Uri tree, File destination) throws IOException {
         Uri root = DocumentsContract.buildDocumentUriUsingTree(tree,
                 DocumentsContract.getTreeDocumentId(tree));
         Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree,
                 DocumentsContract.getDocumentId(root));
         String[] columns = {DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                DocumentsContract.Document.COLUMN_MIME_TYPE};
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+                OpenableColumns.SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED};
         ArrayList<String[]> entries = new ArrayList<>();
         try (Cursor cursor = getContentResolver().query(children, columns,
                 null, null, null)) {
@@ -931,7 +1135,9 @@ public class MotionCamActivity extends QtActivity {
                 String name = cursor.getString(1);
                 if (DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(2)) ||
                         name == null || name.contains("/") || name.contains("\\")) continue;
-                entries.add(new String[] {cursor.getString(0), name});
+                entries.add(new String[] {cursor.getString(0), name,
+                        cursor.isNull(3) ? "-1" : cursor.getString(3),
+                        cursor.isNull(4) ? "0" : cursor.getString(4)});
             }
         }
         ArrayList<String[]> frames = new ArrayList<>();
@@ -947,17 +1153,31 @@ public class MotionCamActivity extends QtActivity {
         if (selected == null || !selected.isReadPermission())
             throw new IOException("The selected folder is no longer accessible");
 
-        String folderToken = UUID.randomUUID().toString();
-        File destination = new File(new File(getFilesDir(), "imports"), folderToken);
-        if (!destination.mkdirs()) throw new IOException("Could not create the import folder");
-        byte[] buffer = new byte[1024 * 1024];
+        String folderToken = destination.getName();
+        if (!destination.isDirectory() && !destination.mkdirs())
+            throw new IOException("Could not create the document index");
+        java.util.HashSet<String> currentNames = new java.util.HashSet<>();
+        for (String[] entry : entries) currentNames.add(entry[1]);
+        android.content.SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
         for (String[] entry : entries) {
             Uri document = DocumentsContract.buildDocumentUriUsingTree(tree, entry[0]);
             File target = new File(destination, entry[1]);
-            copyDocumentToFile(document, target, buffer);
+            bindDocument(target, document, Long.parseLong(entry[2]), Long.parseLong(entry[3]), editor);
+        }
+        // Removed source documents must disappear from the filename index too;
+        // otherwise a cached sequence can retain frames that no longer exist.
+        File[] previous = destination.listFiles();
+        if (previous == null) throw new IOException("Could not read document index");
+        for (File file : previous) {
+            if (!file.isFile() || currentNames.contains(file.getName())) continue;
+            String key = sourceKey(file);
+            Files.deleteIfExists(file.toPath());
+            editor.remove("document_uri:" + key).remove("document_size:" + key)
+                    .remove("document_modified:" + key);
         }
         String location = sourceDirectoryName(tree);
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+        editor
+                .putBoolean("source_is_folder:" + folderToken, true)
                 .putString("source_tree:" + folderToken, tree.toString())
                 .putString("source_uri:" + folderToken, tree.toString())
                 .putString("source_location:" + folderToken, location).apply();

@@ -215,6 +215,7 @@ elseif(ANDROID)
       include/android/MediaCodecImageReader.h
       src/android/ProcessingFileSystem.cpp
       include/android/ProcessingFileSystem.h
+      src/android/SourceAccess.cpp
       src/android/ExportDirectory.cpp
       include/android/ExportDirectory.h)
   find_library(ANDROID_LIB android REQUIRED)
@@ -791,6 +792,21 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    if(UNIX AND NOT ANDROID)
+        find_package(Threads REQUIRED)
+        add_executable(motioncam-source-input-test tests/source_input_test.cpp)
+        target_include_directories(motioncam-source-input-test PRIVATE include)
+        target_compile_definitions(motioncam-source-input-test PRIVATE MOTIONCAM_SOURCE_INPUT_TEST)
+        target_compile_options(motioncam-source-input-test PRIVATE -UNDEBUG)
+        target_link_libraries(motioncam-source-input-test PRIVATE Threads::Threads)
+        add_test(NAME motioncam-source-input-test COMMAND motioncam-source-input-test)
+    endif()
+
+    add_executable(motioncam-thumbnail-cache-test tests/thumbnail_cache_test.cpp)
+    target_include_directories(motioncam-thumbnail-cache-test PRIVATE include)
+    target_link_libraries(motioncam-thumbnail-cache-test PRIVATE Qt${QT_VERSION_MAJOR}::Gui)
+    add_test(NAME motioncam-thumbnail-cache-test COMMAND motioncam-thumbnail-cache-test)
+
     add_executable(motioncam-gallery-overlay-test
         tests/gallery_overlay_test.cpp src/GalleryVulkanVideo.cpp)
     target_include_directories(motioncam-gallery-overlay-test PRIVATE include)
@@ -945,7 +961,7 @@ if(BUILD_TESTING)
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations
     # are not compiled out.
-    foreach(test_target motioncam-audio-finalize-test motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test motioncam-finalize-interpolation-test)
+    foreach(test_target motioncam-thumbnail-cache-test motioncam-audio-finalize-test motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test motioncam-finalize-interpolation-test)
         if(MSVC)
             target_compile_options(${test_target} PRIVATE /UNDEBUG)
         else()

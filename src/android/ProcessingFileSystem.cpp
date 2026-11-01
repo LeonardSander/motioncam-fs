@@ -1,4 +1,5 @@
 #include "android/ProcessingFileSystem.h"
+#include "SourceInput.h"
 
 #include "LRUCache.h"
 #include "VirtualFileSystemImpl.h"
@@ -58,6 +59,8 @@ MountId ProcessingFileSystem::mount(const RenderSettings& settings,
 void ProcessingFileSystem::unmount(MountId id) {
     std::lock_guard<std::mutex> lock(mMutex);
     mPreviews.erase(id);
+    const auto found = mSessions.find(id);
+    if (found != mSessions.end()) releaseSourceReadDescriptors(found->second->source);
     mSessions.erase(id);
 }
 

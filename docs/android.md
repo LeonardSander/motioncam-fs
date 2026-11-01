@@ -11,31 +11,36 @@ needs a persistent release keystore and `QT_ANDROID_SIGN_APK`.
 Android cannot expose app-owned FUSE mounts. The `ProcessingFileSystem`
 backend keeps imported clips in-process for metadata, gallery previews, and
 finalization. The Android **Import clip** action uses the system picker. For a
-seekable document provider, Fuse retains its descriptor and exposes a
-process-local `/proc/<pid>/fd` link with the original extension, so path-based
-decoders can seek the source without copying the full clip. Providers that
-cannot supply a seekable descriptor use a private-file copy fallback. This
-path handles single-file clips;
-DNG sequences use the document-tree folder import flow. File and folder imports
-resolve source grants through the same import-directory identity, including
-source-directory finalization and sidecar refresh.
-**Scan directory for sidecars** grants access to a chosen source
-directory and scans that directory for already imported clip filenames. It
-copies adjacent files with the same clip stem into that clip's private import
-directory, preserving their original names and extensions. This includes
-calibration JSON, Gyroflow JSON, GCSV, PP3, XML, and other matching sidecars;
-clip media files are excluded. The scan also fetches exact relative files
-named by the per-clip JSON's `dng_white`, `dng_opcode`, `dcp`, and `gyroflow`
-fields. It does not otherwise descend into subdirectories. Run the scan again
-when importing clips from a
-different source directory. Imported clip metadata and previews refresh after
-the scan. The scan requires a directory selection, not a selection for each
-sidecar. The clip card displays the source directory; private storage remains
-the decoder's working copy. On mount or refresh, private sidecars are retired
-and resynced from the granted source directory; older private-only sidecars
-are preserved in `legacy-sidecars` and cannot drive calibration status.
+seekable document provider, readers use descriptors backed by the retained
+content URI. MCRAW, video/audio, DNG frames and calibration
+files are read through these descriptors, including seeking. Providers that
+cannot supply seekable input report an error; there is no private-copy fallback.
+DNG sequences use the document-tree folder picker. Private import directories
+contain only empty filename index entries; URI, size and revision metadata are
+stored with the retained grants. No imported document bytes are stored there.
+A bounded cache retains URI descriptors for reuse; positional reads give each
+reader an independent cursor. Cached handles are released when their clip is
+unmounted. Bounded lookahead overlaps opens during sequential playback. Reimporting an
+already mounted document or sequence is ignored.
+Session JSON selected through the picker is also read from its URI; the small
+automatic resume snapshot remains application state.
+
+**Scan source directories for clip sidecar files** grants access to a chosen
+source directory and indexes adjacent sidecars for mounted clips. Existing tree
+permissions are reused. Missing permissions are requested in turn, with the
+system folder picker starting at the clip's source directory when available;
+one grant covers other clips in that directory. DNG folders index documents
+and URI metadata in one pass, without per-frame sidecar scans. Import progress
+is shown while indexing and preparing sources. Provider queries and decoding
+run in workers, and progress overlays follow window resizing. Sidecars include
+calibration JSON, Gyroflow JSON, GCSV, PP3, XML, and other matching sidecars,
+and relative files named by `dng_white`, `dng_opcode`, `dcp`, and `gyroflow`.
+These remain at their original URIs. Refreshing reindexes the source rather
+than copying it. Gallery thumbnails have a 32 MiB memory cache and, on Android,
+a transient disk cache limited to 64 MiB of JPEG data. Generated timeline
+and analysis files share a separate 64 MiB disk budget, evicting oldest entries.
 **Create JSON** writes the per-clip file to the granted source directory and
-refreshes the working copy. If that clip has no linked source directory,
+refreshes the URI index. If that clip has no linked source directory,
 **Create JSON** opens the directory picker and continues after the clip is
 found. Previously granted directories are reused for other clips in the same
 folder. For newly imported clips, the picker starts at the clip's recorded

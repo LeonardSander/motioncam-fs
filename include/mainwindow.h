@@ -159,7 +159,7 @@ private slots:
     void finalizeCameraNative(QWidget* fileWidget, const QString& mode, bool metadataOnly,
                               bool allowHardwareEncoder = true);
     void createCalibrationJson(QWidget* fileWidget);
-    void reloadCalibration(QWidget* fileWidget);
+    void reloadCalibration(QWidget* fileWidget, bool allClips = false);
     void updateCalibrationButtonStates(QWidget* onlyFileWidget = nullptr);
 
 private:
@@ -222,6 +222,7 @@ private:
     QFutureWatcher<void>* mProcessingWatcher;
     bool mProcessingInProgress;
     bool mOptionsUpdatePending;
+    bool mCalibrationReloadInProgress = false;
     bool mMountInProgress = false;
     QString mMountPathInProgress;
     QPointer<QProgressDialog> mImportBatchProgress;

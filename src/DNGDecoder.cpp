@@ -1,3 +1,5 @@
+#include "SourceInput.h"
+#include <future>
 #include "DNGDecoder.h"
 #include "DataLevels.h"
 #include "Utils.h"
@@ -17,6 +19,7 @@
 #include <fstream>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstring>
 #include <cmath>
@@ -161,7 +164,7 @@ std::filesystem::path dngDuplicateCachePath(const std::string& key) {
 
 bool loadPersistentDngDuplicates(const std::string& key, size_t frames,
                                  std::vector<uint8_t>& mask) {
-    std::ifstream input(dngDuplicateCachePath(key), std::ios::binary);
+    motioncam::SourceInputStream input(dngDuplicateCachePath(key), std::ios::binary);
     uint64_t magic = 0, keySize = 0, count = 0;
     if (!input.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
         magic != dngDuplicateCacheMagic ||
@@ -208,6 +211,7 @@ void savePersistentDngDuplicates(const std::string& key,
         std::filesystem::rename(temporary, path, error);
         if (error) std::filesystem::remove(temporary, error);
     }
+    motioncam::trimSourceAnalysisCache(path.parent_path().parent_path());
 }
 
 std::string dngSequenceSignature(const std::string& path) {
@@ -227,8 +231,13 @@ std::string dngSequenceSignature(const std::string& path) {
     std::sort(files.begin(), files.end());
     std::string signature;
     for (const auto& file : files) {
-        const auto size = std::filesystem::file_size(file, error);
+        const auto size = motioncam::sourceFileSize(file, error);
         if (error) return {};
+        const auto revision = motioncam::sourceRevision(file.string());
+        if (!revision.empty()) {
+            signature += file.string() + ':' + std::to_string(size) + ':' + revision + ';';
+            continue;
+        }
         const auto modified = std::filesystem::last_write_time(file, error);
         if (error) return {};
         signature += file.string() + ':' + std::to_string(size) + ':' +
@@ -1135,15 +1144,9 @@ namespace {
         size_t entryOffset;
     };
 
-    std::vector<TiffEntry> findTiffEntries(const DngByteView& data, bool& little,
-                                           size_t* scanNeeded = nullptr) {
+    std::vector<TiffEntry> findTiffEntries(const DngByteView& data, bool& little) {
         std::vector<TiffEntry> result;
         if (data.size() < 8) return result;
-        const auto available = [&](size_t end) {
-            if (end <= data.size()) return true;
-            if (scanNeeded) *scanNeeded = std::max(*scanNeeded, end);
-            return false;
-        };
         const uint16_t order = read16(data.data(), true);
         if (order != TIFF_LITTLE_ENDIAN && order != TIFF_BIG_ENDIAN) return result;
         little = order == TIFF_LITTLE_ENDIAN;
@@ -1154,10 +1157,11 @@ namespace {
             const uint32_t ifd = pending.back();
             pending.pop_back();
             if (!ifd || !visited.insert(ifd).second ||
-                !available(static_cast<size_t>(ifd) + 2)) continue;
+                ifd > data.size() || data.size() - ifd < 2) continue;
             const uint16_t count = read16(data.data() + ifd, little);
-            const size_t entriesEnd = static_cast<size_t>(ifd) + 2 + static_cast<size_t>(count) * 12;
-            if (!available(entriesEnd + 4)) continue;
+            const size_t directoryBytes = 2 + size_t(count) * 12 + 4;
+            if (directoryBytes > data.size() - ifd) continue;
+            const size_t entriesEnd = size_t(ifd) + directoryBytes - 4;
             for (uint16_t i = 0; i < count; ++i) {
                 const size_t pos = static_cast<size_t>(ifd) + 2 + i * 12;
                 const uint16_t tag = read16(data.data() + pos, little);
@@ -1169,22 +1173,8 @@ namespace {
                     std::numeric_limits<size_t>::max() / itemCount)) continue;
                 const size_t bytes = typeSize * static_cast<size_t>(itemCount);
                 const size_t valueOffset = bytes <= 4 ? pos + 8 : rawOffset;
-                const bool scanTag = tag == TIFF_TAG_XMP || tag == TIFF_TAG_FRAME_RATE ||
-                    tag == TIFF_TAG_TIME_CODES || tag == TIFF_TAG_PHOTOMETRIC ||
-                    tag == TIFF_TAG_IMAGE_WIDTH || tag == TIFF_TAG_IMAGE_HEIGHT ||
-                    tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD ||
-                    tag == TIFF_TAG_SUB_IFDS ||
-                    tag == TIFF_TAG_STRIP_OFFSETS || tag == TIFF_TAG_TILE_OFFSETS ||
-                    tag == TIFF_TAG_STRIP_BYTE_COUNTS || tag == TIFF_TAG_TILE_BYTE_COUNTS;
-                // Payload arrays are needed to reject interrupted/truncated
-                // frames without entropy-decoding their pixels during indexing.
-                if ((!scanNeeded || scanTag) &&
-                    valueOffset <= data.size() &&
-                    bytes <= data.size() - valueOffset)
+                if (valueOffset <= data.size() && bytes <= data.size() - valueOffset)
                     result.push_back({tag, type, itemCount, valueOffset, ifd, pos});
-                else if (scanNeeded && scanTag &&
-                         valueOffset <= std::numeric_limits<size_t>::max() - bytes)
-                    available(valueOffset + bytes);
                 if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD) &&
                     type == TIFF_TYPE_LONG && itemCount == 1)
                     pending.push_back(rawOffset);
@@ -1196,6 +1186,96 @@ namespace {
             pending.push_back(read32(data.data() + entriesEnd, little));
         }
         return result;
+    }
+
+    bool readFrameMetadata(const std::vector<uint8_t>& data, DNGFrameMetadata& metadata) {
+        metadata = {};
+        if (!DNGDecoder::getColorMetadata(data, metadata)) return false;
+        DNGImageLayout layout;
+        if (DNGDecoder::getImageLayout(data, layout)) {
+            metadata.hasImageLayout = true;
+            metadata.imageHasCfa = layout.pixels == DNGPixelLayout::CFA;
+            metadata.imageCfaRepeatSize = layout.cfaRepeatSize;
+            metadata.imageCfaPhase = layout.cfaPhase;
+        }
+        metadata.hasExposure = metadata.iso > 0.0 && metadata.exposureTime > 0.0;
+        return true;
+    }
+
+    // Keep original offsets for the shared TIFF parsers, but read only directory
+    // and tag-value ranges. Image strips/tiles are referenced by tags, never read.
+    bool readDngMetadata(const std::string& path, std::vector<uint8_t>& data,
+                         uint64_t* bytesRead = nullptr) {
+        motioncam::SourceInputStream file(path, std::ios::binary);
+        std::error_code error;
+        const auto sourceSize = motioncam::sourceFileSize(path, error);
+        if (!file || error || sourceSize < 8 || sourceSize >
+                std::numeric_limits<size_t>::max()) return false;
+        const size_t size = static_cast<size_t>(sourceSize);
+        data.assign(size, 0);
+        std::map<size_t, size_t> loaded;
+        auto read = [&](size_t offset, size_t count) {
+            if (offset > size || count > size - offset) return false;
+            auto next = loaded.upper_bound(offset);
+            if (next != loaded.begin()) {
+                const auto previous = std::prev(next);
+                if (previous->second >= offset + count) return true;
+            }
+            count = std::min(size - offset, std::max(count, size_t{65536}));
+            file.clear();
+            file.seekg(static_cast<std::streamoff>(offset));
+            file.read(reinterpret_cast<char*>(data.data() + offset),
+                      static_cast<std::streamsize>(count));
+            if (file.gcount() != static_cast<std::streamsize>(count)) return false;
+            if (bytesRead) *bytesRead += count;
+            size_t finish = offset + count;
+            auto first = loaded.lower_bound(offset);
+            if (first != loaded.begin() && std::prev(first)->second >= offset) --first;
+            while (first != loaded.end() && first->first <= finish) {
+                offset = std::min(offset, first->first);
+                finish = std::max(finish, first->second);
+                first = loaded.erase(first);
+            }
+            loaded.emplace(offset, finish);
+            return true;
+        };
+        if (!read(0, 8)) return false;
+        const uint16_t order = read16(data.data(), true);
+        if (order != TIFF_LITTLE_ENDIAN && order != TIFF_BIG_ENDIAN) return false;
+        const bool little = order == TIFF_LITTLE_ENDIAN;
+        if (read16(data.data() + 2, little) != TIFF_MAGIC) return false;
+        std::vector<uint32_t> pending{read32(data.data() + 4, little)};
+        std::set<uint32_t> visited;
+        while (!pending.empty()) {
+            const uint32_t ifd = pending.back();
+            pending.pop_back();
+            if (!ifd || !visited.insert(ifd).second) continue;
+            if (!read(ifd, 2)) return false;
+            const uint16_t count = read16(data.data() + ifd, little);
+            const size_t directoryBytes = 2 + size_t(count) * 12 + 4;
+            if (!read(ifd, directoryBytes)) return false;
+            for (uint16_t i = 0; i < count; ++i) {
+                const size_t position = size_t(ifd) + 2 + size_t(i) * 12;
+                const uint16_t tag = read16(data.data() + position, little);
+                const uint16_t type = read16(data.data() + position + 2, little);
+                const uint32_t items = read32(data.data() + position + 4, little);
+                const uint32_t offset = read32(data.data() + position + 8, little);
+                const size_t width = tiffTypeSize(type);
+                if (!width || items > std::numeric_limits<size_t>::max() / width) continue;
+                const size_t bytes = size_t(items) * width;
+                const size_t value = bytes > 4 ? offset : position + 8;
+                // Invalid optional tag values are ignored by findTiffEntries too.
+                if (value > size || bytes > size - value) continue;
+                if (bytes > 4 && !read(value, bytes)) return false;
+                if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD) &&
+                    type == TIFF_TYPE_LONG && items == 1) pending.push_back(offset);
+                if (tag == TIFF_TAG_SUB_IFDS && type == TIFF_TYPE_LONG)
+                    for (uint32_t j = 0; j < items; ++j)
+                        pending.push_back(read32(data.data() + value + size_t(j) * 4, little));
+            }
+            pending.push_back(read32(data.data() + ifd + directoryBytes - 4, little));
+        }
+        return true;
     }
 
     std::optional<uint32_t> primaryImageIfd(
@@ -2111,153 +2191,182 @@ void DNGDecoder::findDNGFiles() {
 
     // Image geometry belongs to the raw IFD and is independent of its
     // compression. Read it instead of exposing the old 1920x1080 placeholder.
-    for (auto& frame : mFrames) {
-        // TIFF directory data is usually at the front of a DNG. Read only the
-        // prefix needed by its directory entries, expanding for remote IFDs
-        // or metadata values. A private buffer stays safe if the source file
-        // is truncated while an import is running.
-        std::ifstream file(frame.filePath, std::ios::binary | std::ios::ate);
-        if (!file) continue;
-        const auto end = file.tellg();
-        if (end < 8 || static_cast<uintmax_t>(end) >
-                static_cast<uintmax_t>(std::numeric_limits<size_t>::max())) continue;
-        const size_t fileSize = static_cast<size_t>(end);
-        frame.fileSize = fileSize;
+    std::vector<double> frameRates(mFrames.size(), 0.0);
+    auto indexFrames = [&](size_t begin, size_t end) {
+        uint64_t metadataReadBytes = 0;
         std::vector<uint8_t> bytes;
-        bool little = true;
-        std::vector<TiffEntry> entries;
-        size_t target = std::min(fileSize, size_t{64 * 1024});
-        bool readFailed = false;
-        for (;;) {
-            const size_t previous = bytes.size();
-            bytes.resize(target);
-            file.seekg(static_cast<std::streamoff>(previous));
-            file.read(reinterpret_cast<char*>(bytes.data() + previous),
-                      static_cast<std::streamsize>(target - previous));
-            if (file.gcount() != static_cast<std::streamsize>(target - previous)) {
-                readFailed = true;
-                break;
-            }
-            size_t needed = 0;
-            entries = findTiffEntries(bytes, little, &needed);
-            if (needed <= bytes.size() || needed > fileSize) break;
-            target = std::min(fileSize, std::max(needed, bytes.size() * 2));
-        }
-        if (readFailed) continue;
-        const DngByteView data(bytes);
-        double frameRate = 0.0;
-        for (const auto& entry : entries) {
-            if (entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count &&
-                entry.valueOffset + entry.count <= data.size()) {
-                const std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset),
-                                      entry.count);
-                frame.duplicateFrame = xmp.find("rpt:DuplicateFrame='true'") != std::string::npos ||
-                    xmp.find("rpt:DuplicateFrame=\"true\"") != std::string::npos;
-                frame.syntheticFrame = xmp.find("rpt:SyntheticFrame='true'") != std::string::npos ||
-                    xmp.find("rpt:SyntheticFrame=\"true\"") != std::string::npos;
-            }
-            Timestamp embeddedTimestamp = 0;
-            if (readRelativePresentationTimestamp(data, entry, embeddedTimestamp)) {
-                frame.timestamp = embeddedTimestamp;
-                frame.hasExactPresentationTimestamp = true;
-            }
-            if (entry.tag == TIFF_TAG_FRAME_RATE &&
-                (entry.type == TIFF_TYPE_RATIONAL || entry.type == TIFF_TYPE_SRATIONAL) &&
-                entry.count) {
-                frameRate = readRational(data, entry, 0, little);
-                if (!(mSequenceInfo.fps > 0.0)) mSequenceInfo.fps = frameRate;
-            }
-        }
-        if (!frame.hasExactPresentationTimestamp && frameRate > 0.0) {
+        for (size_t index = begin; index < end; ++index) {
+            auto& frame = mFrames[index];
+            if (!readDngMetadata(frame.filePath, bytes, &metadataReadBytes)) continue;
+            const size_t fileSize = bytes.size();
+            frame.fileSize = fileSize;
+            bool little = true;
+            const auto entries = findTiffEntries(bytes, little);
+            const DngByteView data(bytes);
+            double frameRate = 0.0;
             for (const auto& entry : entries) {
-                if (entry.tag != TIFF_TAG_TIME_CODES || entry.type != TIFF_TYPE_BYTE || entry.count < 8)
-                    continue;
-                const auto* tc = data.data() + entry.valueOffset;
-                const int nominal = frameRate >= 47.0 && frameRate <= 61.0
-                    ? static_cast<int>(std::lround(frameRate / 2.0))
-                    : std::max(1, std::min(30, static_cast<int>(std::lround(frameRate))));
-                const int fieldsPerCode = frameRate >= 47.0 && frameRate <= 61.0 ? 2 : 1;
-                const int field = fieldsPerCode == 2
-                    ? ((nominal == 25 ? tc[3] : tc[1]) & 0x80 ? 1 : 0) : 0;
-                const int secondsPart = fromBcd(tc[1] & 0x7f);
-                const int minutesPart = fromBcd(tc[2] & 0x7f);
-                const int hoursPart = fromBcd(tc[3] & 0x3f);
-                const int64_t seconds = secondsPart + 60LL * minutesPart + 3600LL * hoursPart;
-                const int timeCodeFrame = fromBcd(tc[0] & 0x3f);
-                int64_t addressFrame = seconds * nominal + timeCodeFrame;
-                if (tc[0] & 0x40) {
-                    const int64_t totalMinutes = hoursPart * 60LL + minutesPart;
-                    const int droppedPerMinute = nominal == 30 ? 2 : 4;
-                    addressFrame -= droppedPerMinute * (totalMinutes - totalMinutes / 10);
+                if (entry.tag == TIFF_TAG_XMP && entry.type == TIFF_TYPE_BYTE && entry.count &&
+                    entry.valueOffset + entry.count <= data.size()) {
+                    const std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset),
+                                          entry.count);
+                    frame.duplicateFrame = xmp.find("rpt:DuplicateFrame='true'") != std::string::npos ||
+                        xmp.find("rpt:DuplicateFrame=\"true\"") != std::string::npos;
+                    frame.syntheticFrame = xmp.find("rpt:SyntheticFrame='true'") != std::string::npos ||
+                        xmp.find("rpt:SyntheticFrame=\"true\"") != std::string::npos;
                 }
-                const int64_t sourceFrame = addressFrame * fieldsPerCode + field;
-                frame.timestamp = static_cast<Timestamp>(std::llround(sourceFrame * 1e9 / frameRate));
-                frame.hasTimeCodeTimestamp = true;
-                break;
+                Timestamp embeddedTimestamp = 0;
+                if (readRelativePresentationTimestamp(data, entry, embeddedTimestamp)) {
+                    frame.timestamp = embeddedTimestamp;
+                    frame.hasExactPresentationTimestamp = true;
+                }
+                if (entry.tag == TIFF_TAG_FRAME_RATE &&
+                    (entry.type == TIFF_TYPE_RATIONAL || entry.type == TIFF_TYPE_SRATIONAL) &&
+                    entry.count) {
+                    frameRate = readRational(data, entry, 0, little);
+                    if (!(frameRates[index] > 0.0)) frameRates[index] = frameRate;
+                }
             }
-        }
-        const TiffEntry* photo = nullptr;
-        for (const auto& entry : entries) {
-            if (entry.tag == TIFF_TAG_PHOTOMETRIC) {
-                const uint32_t value = entry.type == TIFF_TYPE_SHORT
-                    ? read16(data.data() + entry.valueOffset, little)
-                    : read32(data.data() + entry.valueOffset, little);
-                if (value == TIFF_PHOTOMETRIC_CFA || value == 34892 || value == 2) {
-                    photo = &entry;
+            if (!frame.hasExactPresentationTimestamp && frameRate > 0.0) {
+                for (const auto& entry : entries) {
+                    if (entry.tag != TIFF_TAG_TIME_CODES || entry.type != TIFF_TYPE_BYTE || entry.count < 8)
+                        continue;
+                    const auto* tc = data.data() + entry.valueOffset;
+                    const int nominal = frameRate >= 47.0 && frameRate <= 61.0
+                        ? static_cast<int>(std::lround(frameRate / 2.0))
+                        : std::max(1, std::min(30, static_cast<int>(std::lround(frameRate))));
+                    const int fieldsPerCode = frameRate >= 47.0 && frameRate <= 61.0 ? 2 : 1;
+                    const int field = fieldsPerCode == 2
+                        ? ((nominal == 25 ? tc[3] : tc[1]) & 0x80 ? 1 : 0) : 0;
+                    const int secondsPart = fromBcd(tc[1] & 0x7f);
+                    const int minutesPart = fromBcd(tc[2] & 0x7f);
+                    const int hoursPart = fromBcd(tc[3] & 0x3f);
+                    const int64_t seconds = secondsPart + 60LL * minutesPart + 3600LL * hoursPart;
+                    const int timeCodeFrame = fromBcd(tc[0] & 0x3f);
+                    int64_t addressFrame = seconds * nominal + timeCodeFrame;
+                    if (tc[0] & 0x40) {
+                        const int64_t totalMinutes = hoursPart * 60LL + minutesPart;
+                        const int droppedPerMinute = nominal == 30 ? 2 : 4;
+                        addressFrame -= droppedPerMinute * (totalMinutes - totalMinutes / 10);
+                    }
+                    const int64_t sourceFrame = addressFrame * fieldsPerCode + field;
+                    frame.timestamp = static_cast<Timestamp>(std::llround(sourceFrame * 1e9 / frameRate));
+                    frame.hasTimeCodeTimestamp = true;
                     break;
                 }
             }
-        }
-        if (!photo) continue;
-        frame.imageIfdOffset = photo->ifdOffset;
-        const TiffEntry* payloadOffsets = nullptr;
-        const TiffEntry* payloadCounts = nullptr;
-        for (const auto& entry : entries) {
-            if (entry.ifdOffset != photo->ifdOffset) continue;
-            if (entry.tag == TIFF_TAG_STRIP_OFFSETS || entry.tag == TIFF_TAG_TILE_OFFSETS)
-                payloadOffsets = &entry;
-            if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS || entry.tag == TIFF_TAG_TILE_BYTE_COUNTS)
-                payloadCounts = &entry;
-            const uint32_t value = entry.type == TIFF_TYPE_SHORT
-                ? read16(data.data() + entry.valueOffset, little)
-                : read32(data.data() + entry.valueOffset, little);
-            if (entry.tag == TIFF_TAG_IMAGE_WIDTH) frame.width = static_cast<int>(value);
-            if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) frame.height = static_cast<int>(value);
-            if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS ||
-                entry.tag == TIFF_TAG_TILE_BYTE_COUNTS) {
-                const size_t width = entry.type == TIFF_TYPE_SHORT ? 2 :
-                                     entry.type == TIFF_TYPE_LONG ? 4 : 0;
-                if (!width || !entry.count ||
-                    entry.valueOffset > data.size() ||
-                    entry.count > (data.size() - entry.valueOffset) / width)
-                    continue;
-                uint64_t total = 0;
-                for (uint32_t i = 0; i < entry.count; ++i) {
-                    const auto* item = data.data() + entry.valueOffset + i * width;
-                    total += width == 2 ? read16(item, little) : read32(item, little);
+            const TiffEntry* photo = nullptr;
+            for (const auto& entry : entries) {
+                if (entry.tag == TIFF_TAG_PHOTOMETRIC) {
+                    const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                        ? read16(data.data() + entry.valueOffset, little)
+                        : read32(data.data() + entry.valueOffset, little);
+                    if (value == TIFF_PHOTOMETRIC_CFA || value == 34892 || value == 2) {
+                        photo = &entry;
+                        break;
+                    }
                 }
-                frame.imagePayloadBytes = total;
+            }
+            if (!photo) continue;
+            frame.imageIfdOffset = photo->ifdOffset;
+            const TiffEntry* payloadOffsets = nullptr;
+            const TiffEntry* payloadCounts = nullptr;
+            for (const auto& entry : entries) {
+                if (entry.ifdOffset != photo->ifdOffset) continue;
+                if (entry.tag == TIFF_TAG_STRIP_OFFSETS || entry.tag == TIFF_TAG_TILE_OFFSETS)
+                    payloadOffsets = &entry;
+                if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS || entry.tag == TIFF_TAG_TILE_BYTE_COUNTS)
+                    payloadCounts = &entry;
+                const uint32_t value = entry.type == TIFF_TYPE_SHORT
+                    ? read16(data.data() + entry.valueOffset, little)
+                    : read32(data.data() + entry.valueOffset, little);
+                if (entry.tag == TIFF_TAG_IMAGE_WIDTH) frame.width = static_cast<int>(value);
+                if (entry.tag == TIFF_TAG_IMAGE_HEIGHT) frame.height = static_cast<int>(value);
+                if (entry.tag == TIFF_TAG_STRIP_BYTE_COUNTS ||
+                    entry.tag == TIFF_TAG_TILE_BYTE_COUNTS) {
+                    const size_t width = entry.type == TIFF_TYPE_SHORT ? 2 :
+                                         entry.type == TIFF_TYPE_LONG ? 4 : 0;
+                    if (!width || !entry.count ||
+                        entry.valueOffset > data.size() ||
+                        entry.count > (data.size() - entry.valueOffset) / width)
+                        continue;
+                    uint64_t total = 0;
+                    for (uint32_t i = 0; i < entry.count; ++i) {
+                        const auto* item = data.data() + entry.valueOffset + i * width;
+                        total += width == 2 ? read16(item, little) : read32(item, little);
+                    }
+                    frame.imagePayloadBytes = total;
+                }
+            }
+            auto payloadValue = [&](const TiffEntry* entry, uint32_t index, uint32_t& value) {
+                if (!entry || (entry->type != TIFF_TYPE_SHORT && entry->type != TIFF_TYPE_LONG)) return false;
+                const size_t step = entry->type == TIFF_TYPE_SHORT ? 2u : 4u;
+                if (entry->valueOffset > data.size() ||
+                    entry->count > (data.size() - entry->valueOffset) / step) return false;
+                const auto* at = data.data() + entry->valueOffset + size_t(index) * step;
+                value = step == 2 ? read16(at, little) : read32(at, little);
+                return true;
+            };
+            bool complete = payloadOffsets && payloadCounts && payloadOffsets->count &&
+                payloadOffsets->count == payloadCounts->count;
+            for (uint32_t index = 0; complete && index < payloadOffsets->count; ++index) {
+                uint32_t offset = 0, count = 0;
+                complete = payloadValue(payloadOffsets, index, offset) &&
+                    payloadValue(payloadCounts, index, count) && count &&
+                    offset <= fileSize && count <= fileSize - offset;
+            }
+            if (!complete) frame.width = frame.height = 0;
+            if (complete) {
+                DNGFrameMetadata metadata;
+                if (readFrameMetadata(bytes, metadata)) {
+                    const auto signature = dngSequenceSignature(frame.filePath);
+                    if (!signature.empty()) {
+                        std::lock_guard lock(dngMetadataCacheMutex);
+                        dngMetadataCache[signature] = std::move(metadata);
+                    }
+                }
+            }
+
+        }
+        return metadataReadBytes;
+    };
+    // Overlap independent provider opens, bounded by CPU and buffer memory.
+    // The same importer and ordering are used for local files on desktop.
+    uintmax_t largestFrame = 1;
+    for (const auto& frame : mFrames) {
+        std::error_code error;
+        const auto size = motioncam::sourceFileSize(frame.filePath, error);
+        if (error) { largestFrame = 128ULL * 1024 * 1024; break; }
+        largestFrame = std::max(largestFrame, size);
+    }
+    const size_t workers = std::max<size_t>(1, std::min({size_t{8}, mFrames.size(),
+        size_t(utils::availableCpuWorkers()), size_t((128ULL * 1024 * 1024) / largestFrame)}));
+    const auto indexingStarted = std::chrono::steady_clock::now();
+    uint64_t metadataReadBytes = 0;
+    if (workers == 1) metadataReadBytes = indexFrames(0, mFrames.size());
+    else {
+        std::vector<std::future<uint64_t>> tasks;
+        for (size_t worker = 0; worker < workers; ++worker) {
+            const size_t begin = mFrames.size() * worker / workers;
+            const size_t end = mFrames.size() * (worker + 1) / workers;
+            tasks.push_back(std::async(std::launch::async,
+                [&, begin, end] { return indexFrames(begin, end); }));
+        }
+        for (auto& task : tasks) metadataReadBytes += task.get();
+    }
+    // Choose the first positive rate in source order after all workers finish.
+    // Workers only write their own frame's slot.
+    if (!(mSequenceInfo.fps > 0.0)) {
+        for (const double rate : frameRates) {
+            if (rate > 0.0) {
+                mSequenceInfo.fps = rate;
+                break;
             }
         }
-        auto payloadValue = [&](const TiffEntry* entry, uint32_t index, uint32_t& value) {
-            if (!entry || (entry->type != TIFF_TYPE_SHORT && entry->type != TIFF_TYPE_LONG)) return false;
-            const size_t step = entry->type == TIFF_TYPE_SHORT ? 2u : 4u;
-            if (entry->valueOffset > data.size() ||
-                entry->count > (data.size() - entry->valueOffset) / step) return false;
-            const auto* at = data.data() + entry->valueOffset + size_t(index) * step;
-            value = step == 2 ? read16(at, little) : read32(at, little);
-            return true;
-        };
-        bool complete = payloadOffsets && payloadCounts && payloadOffsets->count &&
-            payloadOffsets->count == payloadCounts->count;
-        for (uint32_t index = 0; complete && index < payloadOffsets->count; ++index) {
-            uint32_t offset = 0, count = 0;
-            complete = payloadValue(payloadOffsets, index, offset) &&
-                payloadValue(payloadCounts, index, count) && count &&
-                offset <= fileSize && count <= fileSize - offset;
-        }
-        if (!complete) frame.width = frame.height = 0;
     }
+    spdlog::info("DNG metadata indexing: {} frames, {} source bytes, {} workers, {:.1f} ms",
+                 mFrames.size(), metadataReadBytes, workers,
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - indexingStarted).count());
     mFrames.erase(std::remove_if(mFrames.begin(), mFrames.end(), [&](const DNGFrameInfo& frame) {
         if (frame.width > 0 && frame.height > 0 && frame.imagePayloadBytes) return false;
         spdlog::warn("Skipping incomplete DNG frame: {} ({}x{}, {} image bytes)",
@@ -2334,7 +2443,7 @@ bool DNGDecoder::imagePayloadSampleHash(int frameNumber, uint64_t& hash) const {
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) return false;
     const auto& frame = mFrames[frameNumber];
     if (!frame.imagePayloadBytes || !frame.fileSize || !frame.imageIfdOffset) return false;
-    std::ifstream file(frame.filePath, std::ios::binary);
+    motioncam::SourceInputStream file(frame.filePath, std::ios::binary);
     if (!file) return false;
     // Some DNGs put the raw IFD after the image. Seek to the offset captured
     // during indexing instead of reading the entire file to find its strips.
@@ -2552,6 +2661,16 @@ bool DNGDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& dngData) {
         return false;
     }
     
+    if constexpr (sourceReadAheadEnabled) {
+        const int previous = mLastExtractedFrame.exchange(frameNumber, std::memory_order_relaxed);
+        // Sequential playback benefits from overlapping provider opens. Random
+        // thumbnail requests must not start lookahead for unrelated frames.
+        if (previous < 0 || (frameNumber > previous && frameNumber - previous <= 8)) {
+            for (size_t next = size_t(frameNumber) + 1;
+                 next < mFrames.size() && next <= size_t(frameNumber) + 8; ++next)
+                prefetchSourceReadDescriptor(mFrames[next].filePath);
+        }
+    }
     const DNGFrameInfo& frameInfo = mFrames[frameNumber];
     return readDNGFile(frameInfo.filePath, dngData);
 }
@@ -3119,16 +3238,8 @@ bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
         }
     }
     std::vector<uint8_t> data;
-    if (!extractFrame(frameNumber, data)) return false;
-    if (!getColorMetadata(data, metadata)) return false;
-    DNGImageLayout layout;
-    if (getImageLayout(data, layout)) {
-        metadata.hasImageLayout = true;
-        metadata.imageHasCfa = layout.pixels == DNGPixelLayout::CFA;
-        metadata.imageCfaRepeatSize = layout.cfaRepeatSize;
-        metadata.imageCfaPhase = layout.cfaPhase;
-    }
-    metadata.hasExposure = metadata.iso > 0.0 && metadata.exposureTime > 0.0;
+    if (!readDngMetadata(mFrames[frameNumber].filePath, data)) return false;
+    if (!readFrameMetadata(data, metadata)) return false;
     if (!signature.empty()) {
         std::lock_guard lock(dngMetadataCacheMutex);
         dngMetadataCache[signature] = metadata;
@@ -3394,7 +3505,7 @@ bool DNGDecoder::getCFAMetadata(int frameNumber, int& repeatSize,
         }
     }
     std::vector<uint8_t> data;
-    if (!extractFrame(frameNumber, data)) return false;
+    if (!readDngMetadata(mFrames[frameNumber].filePath, data)) return false;
     if (!getCFAMetadata(data, repeatSize, phase)) return false;
     if (!signature.empty()) {
         std::lock_guard lock(dngMetadataCacheMutex);
@@ -10364,17 +10475,19 @@ bool DNGDecoder::canonicalizeGainMapOpcodes(std::vector<uint8_t>& data) {
 }
 
 bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data) {
-    std::ifstream file(filePath, std::ios::binary);
+    motioncam::SourceInputStream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         spdlog::error("Could not open DNG file: {}", filePath);
         return false;
     }
     
-    // Get file size
-    file.seekg(0, std::ios::end);
-    size_t fileSize = file.tellg();
-    file.seekg(0, std::ios::beg);
-    
+    // Providers already reported the source size during URI indexing. Avoid
+    // SEEK_END, which forces a slow FUSE attribute refresh on Android.
+    std::error_code error;
+    const auto sourceSize = motioncam::sourceFileSize(filePath, error);
+    if (error || sourceSize > std::numeric_limits<size_t>::max()) return false;
+    const size_t fileSize = static_cast<size_t>(sourceSize);
+
     // Read entire file
     data.resize(fileSize);
     file.read(reinterpret_cast<char*>(data.data()), fileSize);

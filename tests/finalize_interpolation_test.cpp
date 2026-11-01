@@ -2068,6 +2068,42 @@ int main(int argc, char** argv) {
 
     const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
     fs::remove_all(root);
+    // Metadata import must handle TIFF directories after a large image area,
+    // while retaining out-of-line calibration values and full-frame reads.
+    fs::create_directories(root / "metadata-tail");
+    auto metadataTail = makeLogCfaDng(513, 0);
+    auto readLittle32 = [&](size_t offset) {
+        return uint32_t(metadataTail[offset]) | uint32_t(metadataTail[offset + 1]) << 8 |
+               uint32_t(metadataTail[offset + 2]) << 16 | uint32_t(metadataTail[offset + 3]) << 24;
+    };
+    const size_t oldIfd = readLittle32(4);
+    const size_t entries = metadataTail[oldIfd] | size_t(metadataTail[oldIfd + 1]) << 8;
+    const size_t directoryBytes = 2 + entries * 12 + 4;
+    const std::vector<uint8_t> directory(metadataTail.begin() + oldIfd,
+                                        metadataTail.begin() + oldIfd + directoryBytes);
+    const uint32_t tailOffset = 8 * 1024 * 1024;
+    metadataTail.resize(tailOffset);
+    metadataTail.insert(metadataTail.end(), directory.begin(), directory.end());
+    for (int byte = 0; byte < 4; ++byte) metadataTail[4 + byte] = uint8_t(tailOffset >> (byte * 8));
+    const auto tailPath = root / "metadata-tail" / "frame0001.dng";
+    {
+        std::ofstream output(tailPath, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(metadataTail.data()), metadataTail.size());
+    }
+    motioncam::DNGFrameMetadata expectedTailMetadata, actualTailMetadata;
+    assert(motioncam::DNGDecoder::getColorMetadata(metadataTail, expectedTailMetadata));
+    motioncam::DNGDecoder tailDecoder(tailPath.string());
+    assert(tailDecoder.getFrames().size() == 1);
+    assert(tailDecoder.getFrames()[0].width == 32 && tailDecoder.getFrames()[0].height == 32);
+    assert(tailDecoder.getFrames()[0].imageIfdOffset == tailOffset);
+    assert(tailDecoder.getFrameMetadata(0, actualTailMetadata));
+    assert(actualTailMetadata.iso == expectedTailMetadata.iso);
+    assert(actualTailMetadata.exposureTime == expectedTailMetadata.exposureTime);
+    assert(actualTailMetadata.inputBitDepth == expectedTailMetadata.inputBitDepth);
+    assert(actualTailMetadata.metadataBytes == expectedTailMetadata.metadataBytes);
+    assert(actualTailMetadata.hasImageLayout && actualTailMetadata.imageHasCfa);
+    std::vector<uint8_t> extractedTail;
+    assert(tailDecoder.extractFrame(0, extractedTail) && extractedTail == metadataTail);
     fs::create_directories(root / "rife");
     fs::create_directories(root / "calibration");
     std::ofstream(root / "calibration" / "profile.json") << "{}";

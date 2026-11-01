@@ -227,6 +227,11 @@ private:
     std::shared_ptr<std::atomic<QSize>> mThumbnailRenderBounds=
         std::make_shared<std::atomic<QSize>>(thumbnailMaximumSize()-QSize(2,2));
     std::unique_ptr<QTemporaryDir> mThumbnailDiskCache;
+#ifdef __ANDROID__
+    // Committed JPEG bytes plus reservations for the active writer.
+    std::shared_ptr<std::atomic<qint64>> mThumbnailDiskBytes =
+        std::make_shared<std::atomic<qint64>>(0);
+#endif
     std::shared_ptr<std::atomic<int>> mThumbnailWritesPending =
         std::make_shared<std::atomic<int>>(0);
     QThreadPool mThumbnailCacheWriter;

@@ -1,3 +1,5 @@
+#include "SourceMedia.h"
+#include "SourceInput.h"
 #include "DirectLogDecoder.h"
 #include "DirectLogGpuRgb.h"
 #include "CpuWorkerBudget.h"
@@ -92,8 +94,10 @@ constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000005ULL;
 std::string directLogTimelineCacheKey(const std::string& path) {
     std::error_code error;
     const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
-    const auto size = std::filesystem::file_size(absolute, error);
+    const auto size = motioncam::sourceFileSize(absolute, error);
     if (error) return absolute.string();
+    const auto revision = motioncam::sourceRevision(absolute.string());
+    if (!revision.empty()) return absolute.string() + ":" + std::to_string(size) + ":" + revision;
     const auto modified = std::filesystem::last_write_time(absolute, error);
     if (error) return absolute.string() + ":" + std::to_string(size);
     return absolute.string() + ":" + std::to_string(size) + ":" +
@@ -193,7 +197,7 @@ void writeString(std::ostream& output, const std::string& value) {
 }
 
 bool loadPersistentTimeline(const std::string& key, CachedDirectLogTimeline& cached) {
-    std::ifstream input(directLogTimelineCachePath(key), std::ios::binary);
+    motioncam::SourceInputStream input(directLogTimelineCachePath(key), std::ios::binary);
     uint64_t magic = 0;
     std::string storedKey;
     if (!readValue(input, magic) || magic != directLogTimelineCacheMagic ||
@@ -257,6 +261,7 @@ void savePersistentTimeline(const std::string& key, const CachedDirectLogTimelin
         error.clear();
         std::filesystem::rename(temporary, path, error);
     }
+    motioncam::trimSourceAnalysisCache(path.parent_path().parent_path());
 }
 
 void configureSoftwareThreading(AVCodecContext* context) {
@@ -339,8 +344,10 @@ DirectLogDecoder::~DirectLogDecoder() {
 
 void DirectLogDecoder::initFFmpeg() {
     // Open input file
-    if (avformat_open_input(&mFormatContext, mFilePath.c_str(), nullptr, nullptr) < 0) {
-        throw std::runtime_error("Could not open video file: " + mFilePath);
+    const int openResult = motioncam::openSourceMedia(&mFormatContext, mFilePath);
+    if (openResult < 0) {
+        throw std::runtime_error("Could not open video file: " + mFilePath +
+                                 " (" + ffmpegErrorString(openResult) + ")");
     }
     
     // Retrieve stream information
@@ -1927,7 +1934,7 @@ void DirectLogDecoder::cleanup() {
     }
     
     if (mFormatContext) {
-        avformat_close_input(&mFormatContext);
+        motioncam::closeSourceMedia(&mFormatContext);
     }
     mDecoderInitialized = false;
     mMediaCodecSurfaceActive = false;

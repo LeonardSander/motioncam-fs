@@ -1,3 +1,4 @@
+#include "SourceInput.h"
 #include "VirtualFileSystemImpl_DNG.h"
 #include "VirtualFileSystemImpl.h"
 #include "DNGDecoder.h"
@@ -294,7 +295,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             for (const char* name : {"audio.wav", "audio.flac", "audio.opus", "audio.aac"}) {
                 const auto audioPath = sourceDirectory / name;
                 if (!boost::filesystem::is_regular_file(audioPath)) continue;
-                std::ifstream audio(audioPath.string(), std::ios::binary);
+                motioncam::SourceInputStream audio(audioPath.string(), std::ios::binary);
                 std::vector<uint8_t> bytes(
                     std::istreambuf_iterator<char>(audio), {});
                 if (!audio.eof() && audio.fail())
