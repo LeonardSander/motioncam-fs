@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SourceAnalysisCache.h"
+
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -16,7 +18,6 @@ namespace motioncam {
 inline constexpr bool sourceReadAheadEnabled = true;
 void prefetchSourceReadDescriptor(const std::string& path) noexcept;
 int openSourceReadDescriptor(const std::string& path);
-void trimSourceAnalysisCache(const std::filesystem::path& root);
 void releaseSourceReadDescriptors(const std::string& path);
 FILE* openSourceFile(const std::string& path);
 uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error);
@@ -123,7 +124,6 @@ inline FILE* decoderSource(const std::string& path) { return openSourceFile(path
 inline constexpr bool sourceReadAheadEnabled = false;
 inline void prefetchSourceReadDescriptor(const std::string&) noexcept {}
 using SourceInputStream = std::ifstream;
-inline void trimSourceAnalysisCache(const std::filesystem::path&) {}
 inline const std::string& decoderSource(const std::string& path) { return path; }
 inline uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {
     return std::filesystem::file_size(path, error);

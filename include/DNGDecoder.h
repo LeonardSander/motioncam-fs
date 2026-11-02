@@ -53,8 +53,9 @@ public:
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
+    // sourceSize supplies the original file length for metadata-only TIFFs.
     static bool getColorMetadata(const std::vector<uint8_t>& dngData,
-                                 DNGFrameMetadata& metadata);
+                                 DNGFrameMetadata& metadata, size_t sourceSize = 0);
     static bool setOrientation(std::vector<uint8_t>& dngData, int clockwiseDegrees);
     static bool getGainMaps(const std::vector<uint8_t>& dngData,
                             int opcodeList, std::vector<GainMap>& gainMaps);
@@ -259,7 +260,7 @@ public:
     
     static bool isDNGSequence(const std::string& path);
     static std::pair<uintmax_t, size_t> analysisCacheUsage();
-    static void clearAnalysisCache();
+    static void clearAnalysisCache(bool includePersistent = true);
     bool loadDuplicateFrameDetection(std::vector<uint8_t>& mask) const;
     void cacheDuplicateFrameDetection(const std::vector<uint8_t>& mask) const;
     static bool imagePayloadsEqual(const std::vector<uint8_t>& left,
@@ -275,7 +276,8 @@ private:
     void analyzeSequence();
     void findDNGFiles();
     void extractTimestampsFromFilenames();
-    bool readDNGFile(const std::string& filePath, std::vector<uint8_t>& data);
+    bool readDNGFile(const std::string& filePath, std::vector<uint8_t>& data,
+                     uintmax_t indexedSize = 0);
     bool readDNGGainMap(const std::string& dngPath, GainMap& gainMap);
     static bool parseOpcodeGainMaps(const uint8_t* opcodeData, size_t opcodeSize,
                                     std::vector<GainMap>& gainMaps);

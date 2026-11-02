@@ -636,7 +636,6 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                 !(mCalibration && mCalibration->hasBadPixels && processesBadPixels(treatment)) &&
                 !(mConfig.options & (RENDER_OPT_CROPPING | RENDER_OPT_REMOSAIC_TO_BAYER |
                                      RENDER_OPT_BAKE_ISO)) &&
-                (!(mConfig.options & RENDER_OPT_DRAFT) || mConfig.draftScale <= 1) &&
                 (!prepared.hasCfa || (prepared.cfaSize == 2 &&
                     !(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ)));
             if (!DNGDecoder::decodeImage(std::move(prepared.dng), image, false, true, resident))

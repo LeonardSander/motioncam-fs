@@ -2115,9 +2115,11 @@ MainWindow::MainWindow(QWidget *parent)
     });
     importRow->addWidget(sessionButton,1);
     ui->verticalLayout_3->insertLayout(0,importRow);
-    auto* sidecarButton = new QPushButton(tr("Scan source directories for clip sidecar files"),
+    auto* sidecarButton = new QPushButton(tr("Grant source folder access / rescan sidecars"),
                                          ui->dragAndDropScrollArea->widget());
     sidecarButton->setObjectName(QStringLiteral("scanSidecarDirectoryButton"));
+    sidecarButton->setToolTip(tr("Sidecars are refreshed automatically on import and session load. "
+        "Grant access to a parent source folder once to include sidecars for its clips."));
     auto* utilityRow=new QHBoxLayout();
     utilityRow->setContentsMargins(0,0,0,0);utilityRow->setSpacing(4);
     utilityRow->addWidget(sidecarButton,1);
@@ -2170,18 +2172,22 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
         sidecarButton->setEnabled(false);
-        QStringList sourcePaths;
-        if (mPendingAndroidJsonCard)
-            sourcePaths << mPendingAndroidJsonCard->property("filePath").toString();
-        else
-            for (const auto& clip : mMountedFiles) sourcePaths << clip.importFile;
+        QStringList sourcePaths = sidecarButton->property("importedSidecarPaths").toStringList();
+        const bool automaticScan = !sourcePaths.isEmpty();
+        sidecarButton->setProperty("importedSidecarPaths", QVariant());
+        if (!automaticScan) {
+            if (mPendingAndroidJsonCard)
+                sourcePaths << mPendingAndroidJsonCard->property("filePath").toString();
+            else
+                for (const auto& clip : mMountedFiles) sourcePaths << clip.importFile;
+        }
         motioncam::scanDirectoryForSidecars(importRoot, sourcePaths.join(QChar('\n')));
         auto* poll = new QTimer(this);
-        connect(poll, &QTimer::timeout, this, [this, poll, sidecarButton] {
+        connect(poll, &QTimer::timeout, this, [this, poll, sidecarButton, automaticScan] {
             const QString status = motioncam::sidecarScanStatus();
             if (status == "choosing" || status == "scanning" || status == "idle") return;
             poll->stop();poll->deleteLater();sidecarButton->setEnabled(true);
-            if (status.startsWith("done:")) {
+            if (status.startsWith("done:") || status == "cancelled") {
                 for (const auto& mounted : mMountedFiles) {
                     auto* card = fileWidgetForMount(mounted.mountId);
                     if (!card) continue;
@@ -2206,7 +2212,7 @@ MainWindow::MainWindow(QWidget *parent)
                         QMessageBox::information(this, tr("Clip not found"),
                             tr("The selected directory does not contain this clip."));
                     }
-                } else {
+                } else if (!automaticScan && status.startsWith("done:")) {
                     QMessageBox::information(this, tr("Sidecar scan complete"),
                         tr("Indexed %1 source sidecar files.")
                             .arg(status.mid(5)));
@@ -2221,11 +2227,12 @@ MainWindow::MainWindow(QWidget *parent)
         poll->start(250);
     });
     connect(importButton, &QPushButton::clicked, importAction, &QAction::trigger);
-    connect(importAction, &QAction::triggered, this, [this] {
+    connect(importAction, &QAction::triggered, this, [this, sidecarButton] {
         const QStringList sourcePaths = QFileDialog::getOpenFileNames(
             this, tr("Import clip"));
         if (sourcePaths.isEmpty()) return;
         struct PreparedImport { QString path; QString error; };
+        QStringList preparedPaths;
         for (const QString& sourcePath : sourcePaths) {
             QStringList mountedSources;
             for (const auto& clip : mMountedFiles) mountedSources << clip.importFile;
@@ -2261,7 +2268,15 @@ MainWindow::MainWindow(QWidget *parent)
             const auto prepared = preparation.result();
             progress.close();
             if (!prepared.error.isEmpty()) showAndroidNotice(tr("Import failed"), prepared.error);
-            else if (!prepared.path.isEmpty()) mountFile(prepared.path);
+            else if (!prepared.path.isEmpty()) preparedPaths << prepared.path;
+        }
+        mountFiles(preparedPaths);
+        QStringList missingAccess;
+        for (const auto& path : preparedPaths)
+            if (motioncam::sourceDirectoryForImport(path).isEmpty()) missingAccess << path;
+        if (!missingAccess.isEmpty()) {
+            sidecarButton->setProperty("importedSidecarPaths", missingAccess);
+            sidecarButton->click();
         }
     });
 #endif
@@ -3714,6 +3729,12 @@ void MainWindow::mountFiles(
         const QStringList& filePaths,
         const std::function<void(const motioncam::MountedFile&)>& mounted) {
     if (filePaths.isEmpty()) return;
+#ifdef __ANDROID__
+    struct SourceImportBatch {
+        SourceImportBatch() { motioncam::beginSourceImportBatch(); }
+        ~SourceImportBatch() { motioncam::endSourceImportBatch(); }
+    } sourceImportBatch;
+#endif
     if (filePaths.size() == 1) {
         const int before = mMountedFiles.size();
         mountFile(filePaths.front());
@@ -4657,6 +4678,34 @@ void MainWindow::startGalleryPerformanceTest(
         return;
     }
 
+#ifdef __ANDROID__
+    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_SIDECAR_SCAN")) {
+        QStringList paths;
+        for (const auto& clip : mMountedFiles) paths << clip.importFile;
+        QElapsedTimer scanTimer;
+        scanTimer.start();
+        motioncam::scanDirectoryForSidecars(QStringLiteral("benchmark"), paths.join(QChar('\n')));
+        QEventLoop scanEvents;
+        QTimer poll;
+        QString result;
+        connect(&poll, &QTimer::timeout, &scanEvents, [&] {
+            result = motioncam::sidecarScanStatus();
+            if (result.startsWith("done:") || result.startsWith("error:") || result == "cancelled")
+                scanEvents.quit();
+        });
+        poll.start(20);
+        scanEvents.exec();
+        spdlog::info("GALLERY_PERF event=sidecar_scan_complete clips={} latency_ms={} result={}",
+                     paths.size(), scanTimer.elapsed(), result.toStdString());
+    }
+#endif
+    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_IMPORT_ONLY")) {
+        spdlog::info("GALLERY_PERF event=suite_complete mode=import clips={} latency_ms={:.3f}",
+                     mMountedFiles.size(), importMs);
+        QCoreApplication::exit(0);
+        return;
+    }
+
     if (!mountedMode)
         spdlog::info(
             "GALLERY_PERF event=cold_gallery_start clips={} thumbnails_enabled={} thumbnails_complete={} import_ms={:.3f}",
@@ -4885,7 +4934,7 @@ void MainWindow::startGalleryPerformanceTest(
 
     // Exercise full-resolution nearest-neighbour reconstruction by default so
     // the HQ demosaic cannot hide gallery scheduling and presentation costs.
-    // A proxy-preserving diagnostic run can opt out for scale-specific tests.
+    // Proxy-preserving runs retain the session's saved scale and quality.
     const bool preserveGalleryProxy = qEnvironmentVariableIsSet(
         "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY");
     const bool forceHighQuality = qEnvironmentVariableIsSet(
@@ -4894,10 +4943,8 @@ void MainWindow::startGalleryPerformanceTest(
         auto settings = settingsForMount(mountId);
         settings.options = static_cast<motioncam::FileRenderOptions>(
             static_cast<unsigned int>(settings.options) &
-            ~(static_cast<unsigned int>(preserveGalleryProxy
-                    ? motioncam::RENDER_OPT_HIGHER_CFA_HQ
-                    : (motioncam::RENDER_OPT_DRAFT |
-                       motioncam::RENDER_OPT_HIGHER_CFA_HQ))));
+            ~(preserveGalleryProxy ? 0u : static_cast<unsigned int>(
+                motioncam::RENDER_OPT_DRAFT | motioncam::RENDER_OPT_HIGHER_CFA_HQ)));
         if (forceHighQuality)
             settings.options = static_cast<motioncam::FileRenderOptions>(
                 settings.options | motioncam::RENDER_OPT_HIGHER_CFA_HQ);
@@ -8850,6 +8897,10 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
             reloads.push_back({mounted.mountId, mounted.srcFile,
                                settingsForMount(mounted.mountId)});
         auto reload = QtConcurrent::run([this, reloads = std::move(reloads)] {
+#ifdef __ANDROID__
+            motioncam::beginSourceImportBatch();
+            const auto endBatch = qScopeGuard([] { motioncam::endSourceImportBatch(); });
+#endif
             // A card refresh only reloads that clip. The directory rescan
             // explicitly selects all clips. Keep provider I/O off the UI.
             for (const auto& mounted : reloads) {

@@ -235,6 +235,11 @@ std::string dngSequenceSignature(const std::string& path) {
         if (error) return {};
         const auto revision = motioncam::sourceRevision(file.string());
         if (!revision.empty()) {
+            // Unknown provider timestamps cannot invalidate same-size edits.
+            // Disable both memory and disk analysis reuse for these documents.
+            if ((revision.size() >= 2 && revision.compare(revision.size() - 2, 2, ":0") == 0) ||
+                (revision.size() >= 3 && revision.compare(revision.size() - 3, 3, ":-1") == 0))
+                return {};
             signature += file.string() + ':' + std::to_string(size) + ':' + revision + ';';
             continue;
         }
@@ -245,6 +250,88 @@ std::string dngSequenceSignature(const std::string& path) {
                 modified.time_since_epoch().count())) + ';';
     }
     return signature;
+}
+
+// Cache source metadata only; calibration sidecars are read separately on every
+// mount/reload. URI revision, size and filesystem write time are in the key.
+constexpr uint64_t dngMetadataCacheMagic = 0x4d4346444d440001ULL;
+uint64_t metadataChecksum(const std::vector<uint8_t>& bytes,
+                          const std::map<uint32_t, uint32_t>& directories) {
+    uint64_t hash = 1469598103934665603ULL;
+    auto include = [&](uint8_t byte) { hash = (hash ^ byte) * 1099511628211ULL; };
+    for (uint8_t byte : bytes) include(byte);
+    for (const auto& [compact, original] : directories)
+        for (unsigned shift = 0; shift < 32; shift += 8) {
+            include(static_cast<uint8_t>(compact >> shift));
+            include(static_cast<uint8_t>(original >> shift));
+        }
+    return hash;
+}
+
+bool loadPersistentDngMetadata(const std::string& key, size_t sourceSize,
+        std::vector<uint8_t>& data, std::map<uint32_t, uint32_t>& directories) {
+    std::ifstream input(dngDuplicateCachePath("metadata:" + key), std::ios::binary);
+    auto read = [&](auto& value) {
+        return static_cast<bool>(input.read(reinterpret_cast<char*>(&value), sizeof(value)));
+    };
+    uint64_t magic = 0, keySize = 0, fileSize = 0, bytes = 0, count = 0, checksum = 0;
+    if (!read(magic) || magic != dngMetadataCacheMagic || !read(keySize) ||
+        keySize != key.size()) return false;
+    std::string storedKey(key.size(), '\0');
+    if (!input.read(storedKey.data(), storedKey.size()) || storedKey != key ||
+        !read(fileSize) || fileSize != sourceSize || !read(bytes) || bytes < 8 ||
+        bytes > 64ULL * 1024 * 1024 || !read(count) || !count || count > 4096 || count > bytes / 6)
+        return false;
+    std::map<uint32_t, uint32_t> loadedDirectories;
+    for (uint64_t i = 0; i < count; ++i) {
+        uint32_t compact = 0, original = 0;
+        if (!read(compact) || !read(original) || compact > bytes - 2 ||
+            original > sourceSize - 2 || !loadedDirectories.emplace(compact, original).second)
+            return false;
+    }
+    std::vector<uint8_t> loaded(bytes);
+    if (!input.read(reinterpret_cast<char*>(loaded.data()), loaded.size()) ||
+        !read(checksum) || checksum != metadataChecksum(loaded, loadedDirectories) ||
+        input.peek() != std::char_traits<char>::eof()) return false;
+    data = std::move(loaded);
+    directories = std::move(loadedDirectories);
+    return true;
+}
+
+void savePersistentDngMetadata(const std::string& key, size_t sourceSize,
+        const std::vector<uint8_t>& data, const std::map<uint32_t, uint32_t>& directories) {
+    if (data.size() > 64ULL * 1024 * 1024 || directories.empty()) return;
+    const auto path = dngDuplicateCachePath("metadata:" + key);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return;
+    static std::atomic_uint64_t serial{0};
+    const auto temporary = path.string() + "." + std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()) + "." +
+        std::to_string(serial.fetch_add(1)) + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    auto write = [&](const auto& value) {
+        output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    write(dngMetadataCacheMagic);
+    write(static_cast<uint64_t>(key.size()));
+    output.write(key.data(), key.size());
+    write(static_cast<uint64_t>(sourceSize));
+    write(static_cast<uint64_t>(data.size()));
+    write(static_cast<uint64_t>(directories.size()));
+    for (const auto& [compact, original] : directories) { write(compact); write(original); }
+    output.write(reinterpret_cast<const char*>(data.data()), data.size());
+    write(metadataChecksum(data, directories));
+    output.close();
+    if (output) {
+        std::filesystem::rename(temporary, path, error);
+        if (error) {
+            std::filesystem::remove(path, error);
+            error.clear();
+            std::filesystem::rename(temporary, path, error);
+        }
+    }
+    std::filesystem::remove(temporary, error);
 }
 
 static_assert(gainMapPhaseChannel(1, 1, 0, 0, 2) == 0); // 4x4 CFA
@@ -346,15 +433,16 @@ std::pair<uintmax_t, size_t> DNGDecoder::analysisCacheUsage() {
     return {bytes, cacheNames.size()};
 }
 
-void DNGDecoder::clearAnalysisCache() {
+void DNGDecoder::clearAnalysisCache(bool includePersistent) {
     std::scoped_lock lock(sequenceCacheMutex, dngMetadataCacheMutex);
     sequenceCache.clear();
     dngMetadataCache.clear();
     dngCfaCache.clear();
     std::error_code error;
-    std::filesystem::remove_all(dngDuplicateCachePath("").parent_path(), error);
+    if (includePersistent)
+        std::filesystem::remove_all(dngDuplicateCachePath("").parent_path(), error);
     if (error)
-        spdlog::warn("Could not clear DNG duplicate analysis cache: {}", error.message());
+        spdlog::warn("Could not clear DNG indexing cache: {}", error.message());
 }
 
 bool DNGDecoder::loadDuplicateFrameDetection(std::vector<uint8_t>& mask) const {
@@ -1188,9 +1276,10 @@ namespace {
         return result;
     }
 
-    bool readFrameMetadata(const std::vector<uint8_t>& data, DNGFrameMetadata& metadata) {
+    bool readFrameMetadata(const std::vector<uint8_t>& data, DNGFrameMetadata& metadata,
+                           size_t sourceSize = 0) {
         metadata = {};
-        if (!DNGDecoder::getColorMetadata(data, metadata)) return false;
+        if (!DNGDecoder::getColorMetadata(data, metadata, sourceSize)) return false;
         DNGImageLayout layout;
         if (DNGDecoder::getImageLayout(data, layout)) {
             metadata.hasImageLayout = true;
@@ -1202,60 +1291,80 @@ namespace {
         return true;
     }
 
-    // Keep original offsets for the shared TIFF parsers, but read only directory
-    // and tag-value ranges. Image strips/tiles are referenced by tags, never read.
+    // Rebuild a compact TIFF containing only directories and tag values. Pixel
+    // offsets keep referring to the original source, and callers validate them
+    // against fileSize. This also avoids image-sized buffers when metadata is
+    // stored after the pixels, as it is in many finalized sequences.
     bool readDngMetadata(const std::string& path, std::vector<uint8_t>& data,
-                         uint64_t* bytesRead = nullptr) {
-        motioncam::SourceInputStream file(path, std::ios::binary);
+                         uint64_t* bytesRead = nullptr, size_t* fileSize = nullptr,
+                         std::map<uint32_t, uint32_t>* originalIfds = nullptr) {
         std::error_code error;
         const auto sourceSize = motioncam::sourceFileSize(path, error);
-        if (!file || error || sourceSize < 8 || sourceSize >
+        if (error || sourceSize < 8 || sourceSize >
                 std::numeric_limits<size_t>::max()) return false;
         const size_t size = static_cast<size_t>(sourceSize);
-        data.assign(size, 0);
-        std::map<size_t, size_t> loaded;
-        auto read = [&](size_t offset, size_t count) {
+        if (fileSize) *fileSize = size;
+        const char* cacheMode = std::getenv("MOTIONCAM_DNG_METADATA_CACHE");
+        const std::string cacheKey = cacheMode && std::strcmp(cacheMode, "0") == 0
+            ? std::string() : dngSequenceSignature(path);
+        std::map<uint32_t, uint32_t> sourceIfds;
+        if (!cacheKey.empty() && loadPersistentDngMetadata(cacheKey, size, data, sourceIfds)) {
+            if (originalIfds) *originalIfds = std::move(sourceIfds);
+            return true;
+        }
+        motioncam::SourceInputStream file(path, std::ios::binary);
+        if (!file) return false;
+        constexpr size_t blockSize = 65536;
+        std::map<size_t, std::vector<uint8_t>> blocks;
+        auto read = [&](size_t offset, size_t count, uint8_t* output) {
             if (offset > size || count > size - offset) return false;
-            auto next = loaded.upper_bound(offset);
-            if (next != loaded.begin()) {
-                const auto previous = std::prev(next);
-                if (previous->second >= offset + count) return true;
+            while (count) {
+                const size_t start = offset / blockSize * blockSize;
+                auto [block, inserted] = blocks.try_emplace(start);
+                if (inserted) {
+                    auto& bytes = block->second;
+                    bytes.resize(std::min(blockSize, size - start));
+                    file.clear();
+                    file.seekg(static_cast<std::streamoff>(start));
+                    file.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
+                    if (file.gcount() != static_cast<std::streamsize>(bytes.size())) return false;
+                    if (bytesRead) *bytesRead += bytes.size();
+                }
+                const auto& bytes = block->second;
+                const size_t length = std::min(count, bytes.size() - (offset - start));
+                std::memcpy(output, bytes.data() + offset - start, length);
+                output += length;
+                offset += length;
+                count -= length;
             }
-            count = std::min(size - offset, std::max(count, size_t{65536}));
-            file.clear();
-            file.seekg(static_cast<std::streamoff>(offset));
-            file.read(reinterpret_cast<char*>(data.data() + offset),
-                      static_cast<std::streamsize>(count));
-            if (file.gcount() != static_cast<std::streamsize>(count)) return false;
-            if (bytesRead) *bytesRead += count;
-            size_t finish = offset + count;
-            auto first = loaded.lower_bound(offset);
-            if (first != loaded.begin() && std::prev(first)->second >= offset) --first;
-            while (first != loaded.end() && first->first <= finish) {
-                offset = std::min(offset, first->first);
-                finish = std::max(finish, first->second);
-                first = loaded.erase(first);
-            }
-            loaded.emplace(offset, finish);
             return true;
         };
-        if (!read(0, 8)) return false;
+        data.resize(8);
+        if (!read(0, 8, data.data())) return false;
         const uint16_t order = read16(data.data(), true);
         if (order != TIFF_LITTLE_ENDIAN && order != TIFF_BIG_ENDIAN) return false;
         const bool little = order == TIFF_LITTLE_ENDIAN;
         if (read16(data.data() + 2, little) != TIFF_MAGIC) return false;
-        std::vector<uint32_t> pending{read32(data.data() + 4, little)};
-        std::set<uint32_t> visited;
-        while (!pending.empty()) {
-            const uint32_t ifd = pending.back();
-            pending.pop_back();
-            if (!ifd || !visited.insert(ifd).second) continue;
-            if (!read(ifd, 2)) return false;
-            const uint16_t count = read16(data.data() + ifd, little);
+        // Patch all directory references after their compact locations are known.
+        std::vector<std::pair<size_t, uint32_t>> links{{4, read32(data.data() + 4, little)}};
+        std::map<uint32_t, uint32_t> directories;
+        for (size_t link = 0; link < links.size(); ++link) {
+            const uint32_t original = links[link].second;
+            if (!original || directories.count(original)) continue;
+            uint8_t header[2];
+            if (!read(original, 2, header)) return false;
+            const uint16_t count = read16(header, little);
             const size_t directoryBytes = 2 + size_t(count) * 12 + 4;
-            if (!read(ifd, directoryBytes)) return false;
+            const size_t compact = data.size();
+            if (compact > UINT32_MAX - directoryBytes) return false;
+            data.resize(compact + directoryBytes);
+            if (!read(original, directoryBytes, data.data() + compact)) return false;
+            directories.emplace(original, static_cast<uint32_t>(compact));
+            sourceIfds.emplace(static_cast<uint32_t>(compact), original);
+            links.emplace_back(compact + directoryBytes - 4,
+                               read32(data.data() + compact + directoryBytes - 4, little));
             for (uint16_t i = 0; i < count; ++i) {
-                const size_t position = size_t(ifd) + 2 + size_t(i) * 12;
+                const size_t position = compact + 2 + size_t(i) * 12;
                 const uint16_t tag = read16(data.data() + position, little);
                 const uint16_t type = read16(data.data() + position + 2, little);
                 const uint32_t items = read32(data.data() + position + 4, little);
@@ -1263,18 +1372,34 @@ namespace {
                 const size_t width = tiffTypeSize(type);
                 if (!width || items > std::numeric_limits<size_t>::max() / width) continue;
                 const size_t bytes = size_t(items) * width;
-                const size_t value = bytes > 4 ? offset : position + 8;
-                // Invalid optional tag values are ignored by findTiffEntries too.
-                if (value > size || bytes > size - value) continue;
-                if (bytes > 4 && !read(value, bytes)) return false;
-                if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD) &&
-                    type == TIFF_TYPE_LONG && items == 1) pending.push_back(offset);
-                if (tag == TIFF_TAG_SUB_IFDS && type == TIFF_TYPE_LONG)
-                    for (uint32_t j = 0; j < items; ++j)
-                        pending.push_back(read32(data.data() + value + size_t(j) * 4, little));
+                size_t value = position + 8;
+                if (bytes > 4) {
+                    if (offset > size || bytes > size - offset) {
+                        // Leave invalid optional values invalid in the compact TIFF.
+                        write32(data.data() + position + 4, 0, little);
+                        continue;
+                    }
+                    value = data.size();
+                    if (bytes > UINT32_MAX - value) return false;
+                    data.resize(value + bytes);
+                    if (!read(offset, bytes, data.data() + value)) return false;
+                    write32(data.data() + position + 8, static_cast<uint32_t>(value), little);
+                }
+                if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD ||
+                        tag == TIFF_TAG_SUB_IFDS) && type == TIFF_TYPE_LONG)
+                    for (uint32_t j = 0; j < items; ++j) {
+                        const size_t at = value + size_t(j) * 4;
+                        links.emplace_back(at, read32(data.data() + at, little));
+                    }
             }
-            pending.push_back(read32(data.data() + ifd + directoryBytes - 4, little));
         }
+        for (const auto& [at, original] : links) {
+            const auto found = directories.find(original);
+            write32(data.data() + at, found == directories.end() ? 0 : found->second, little);
+        }
+        if (directories.empty()) return false;
+        if (!cacheKey.empty()) savePersistentDngMetadata(cacheKey, size, data, sourceIfds);
+        if (originalIfds) *originalIfds = std::move(sourceIfds);
         return true;
     }
 
@@ -2197,8 +2322,9 @@ void DNGDecoder::findDNGFiles() {
         std::vector<uint8_t> bytes;
         for (size_t index = begin; index < end; ++index) {
             auto& frame = mFrames[index];
-            if (!readDngMetadata(frame.filePath, bytes, &metadataReadBytes)) continue;
-            const size_t fileSize = bytes.size();
+            size_t fileSize = 0;
+            std::map<uint32_t, uint32_t> originalIfds;
+            if (!readDngMetadata(frame.filePath, bytes, &metadataReadBytes, &fileSize, &originalIfds)) continue;
             frame.fileSize = fileSize;
             bool little = true;
             const auto entries = findTiffEntries(bytes, little);
@@ -2267,7 +2393,7 @@ void DNGDecoder::findDNGFiles() {
                 }
             }
             if (!photo) continue;
-            frame.imageIfdOffset = photo->ifdOffset;
+            frame.imageIfdOffset = originalIfds.at(photo->ifdOffset);
             const TiffEntry* payloadOffsets = nullptr;
             const TiffEntry* payloadCounts = nullptr;
             for (const auto& entry : entries) {
@@ -2317,7 +2443,7 @@ void DNGDecoder::findDNGFiles() {
             if (!complete) frame.width = frame.height = 0;
             if (complete) {
                 DNGFrameMetadata metadata;
-                if (readFrameMetadata(bytes, metadata)) {
+                if (readFrameMetadata(bytes, metadata, fileSize)) {
                     const auto signature = dngSequenceSignature(frame.filePath);
                     if (!signature.empty()) {
                         std::lock_guard lock(dngMetadataCacheMutex);
@@ -2353,6 +2479,7 @@ void DNGDecoder::findDNGFiles() {
         }
         for (auto& task : tasks) metadataReadBytes += task.get();
     }
+    motioncam::trimSourceAnalysisCache(dngDuplicateCachePath("").parent_path().parent_path());
     // Choose the first positive rate in source order after all workers finish.
     // Workers only write their own frame's slot.
     if (!(mSequenceInfo.fps > 0.0)) {
@@ -2672,7 +2799,8 @@ bool DNGDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& dngData) {
         }
     }
     const DNGFrameInfo& frameInfo = mFrames[frameNumber];
-    return readDNGFile(frameInfo.filePath, dngData);
+    return readDNGFile(frameInfo.filePath, dngData,
+                       sourceReadAheadEnabled ? frameInfo.fileSize : 0);
 }
 
 bool DNGDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
@@ -3238,8 +3366,9 @@ bool DNGDecoder::getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata) {
         }
     }
     std::vector<uint8_t> data;
-    if (!readDngMetadata(mFrames[frameNumber].filePath, data)) return false;
-    if (!readFrameMetadata(data, metadata)) return false;
+    size_t fileSize = 0;
+    if (!readDngMetadata(mFrames[frameNumber].filePath, data, nullptr, &fileSize)) return false;
+    if (!readFrameMetadata(data, metadata, fileSize)) return false;
     if (!signature.empty()) {
         std::lock_guard lock(dngMetadataCacheMutex);
         dngMetadataCache[signature] = metadata;
@@ -3271,7 +3400,7 @@ bool DNGDecoder::setOrientation(std::vector<uint8_t>& data, int clockwiseDegrees
 }
 
 bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
-                                  DNGFrameMetadata& metadata) {
+                                  DNGFrameMetadata& metadata, size_t sourceSize) {
     metadata.profileTables.reset();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -3477,7 +3606,8 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
         for (uint32_t i = 0; i < offsetEntry.count; ++i) {
             const size_t offset = unsignedValue(offsetEntry, i);
             const size_t bytes = unsignedValue(*countEntry, i);
-            if (offset <= data.size() && bytes <= data.size() - offset && bytes)
+            const size_t fileSize = sourceSize ? sourceSize : data.size();
+            if (offset <= fileSize && bytes <= fileSize - offset && bytes)
                 imageRanges.emplace_back(offset, offset + bytes);
         }
     }
@@ -3488,7 +3618,8 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
         imageBytes += range.second - std::max(end, range.first);
         end = range.second;
     }
-    metadata.metadataBytes = data.size() - std::min(data.size(), imageBytes);
+    const size_t fileSize = sourceSize ? sourceSize : data.size();
+    metadata.metadataBytes = fileSize - std::min(fileSize, imageBytes);
     return true;
 }
 
@@ -7188,7 +7319,8 @@ void applyCfaPreviewLog(DecodedDNGImage& image, const RenderSettings& settings,
 
 std::function<bool(std::vector<uint16_t>&)> makeCfaPreviewRecovery(
         const DecodedDNGImage& source, const RenderSettings& settings,
-        uint32_t sourceWidth, uint32_t sourceHeight, uint16_t logWhite) {
+        uint32_t sourceWidth, uint32_t sourceHeight, uint16_t logWhite,
+        uint32_t sourceScale = 1) {
     DecodedDNGImage fallback;
     fallback.layout = source.layout;
     fallback.storedBitsPerSample = source.storedBitsPerSample;
@@ -7196,13 +7328,13 @@ std::function<bool(std::vector<uint16_t>&)> makeCfaPreviewRecovery(
     fallback.opcodeList2 = source.opcodeList2;
     fallback.opcodeList3 = source.opcodeList3;
     fallback.ditherSeed = source.ditherSeed;
-    return [fallback = std::move(fallback), settings, sourceWidth, sourceHeight, logWhite]
+    return [fallback = std::move(fallback), settings, sourceWidth, sourceHeight, logWhite, sourceScale]
             (std::vector<uint16_t>& samples) {
         auto recovered = fallback;
         recovered.samples = samples;
         bool gainApplied = false;
         if (!bakeDecodedPreviewGainMaps(recovered, settings, sourceWidth,
-                sourceHeight, 1, &gainApplied, logWhite, nullptr, false)) return false;
+                sourceHeight, sourceScale, &gainApplied, logWhite, nullptr, false)) return false;
         if (logWhite && !gainApplied) applyCfaPreviewLog(recovered, settings, logWhite);
         samples = std::move(recovered.samples);
         return true;
@@ -7227,7 +7359,10 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                                bool applyPreviewScale,
                                bool retainSourceSamples) {
     if (image.gpuImage) {
-        const auto resident = image.gpuImage;
+        auto resident = image.gpuImage;
+        const uint32_t sourceWidth = image.layout.width, sourceHeight = image.layout.height;
+        const uint32_t proxyScale = applyPreviewScale && (settings.options & RENDER_OPT_DRAFT)
+            ? uint32_t(std::max(1, settings.draftScale)) : 1u;
         const bool cfa = image.layout.pixels == DNGPixelLayout::CFA;
         const bool gain = previewHasGainToBake(image, settings);
         const bool encodeLog = applyPreviewScale &&
@@ -7243,17 +7378,39 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             !frame.clippingRequested && !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
             !(settings.options & (RENDER_OPT_CROPPING | RENDER_OPT_REMOSAIC_TO_BAYER)) &&
             (!encodeLog || cfa) &&
-            (!applyPreviewScale || !(settings.options & RENDER_OPT_DRAFT) ||
-             settings.draftScale <= 1) &&
+            (proxyScale == 1 || !cfa || (proxyScale % 2u == 0)) &&
             (cfa ? image.layout.cfaRepeatSize == 2 &&
                    !(settings.options & RENDER_OPT_HIGHER_CFA_HQ)
                  : image.layout.samplesPerPixel == 3 && !gain);
         auto prepared = image;
         PreviewFrame deferred;
         deferred.sourceFrameIndex = frame.sourceFrameIndex;
-        if (compatible && (!gain || bakeDecodedPreviewGainMaps(prepared, settings,
+        bool residentReady = compatible && (!gain || bakeDecodedPreviewGainMaps(prepared, settings,
                 image.layout.width, image.layout.height, 1,
-                &deferred.gainMapApplied, logWhite, &deferred))) {
+                &deferred.gainMapApplied, logWhite, &deferred));
+        if (residentReady && proxyScale > 1) {
+            VulkanDecodedJpegImage input, reduced;
+            input.gpu = resident->gpu; input.buffer = resident->buffer;
+            input.width = resident->width; input.height = resident->height;
+            input.channels = resident->channels; input.bits = image.storedBitsPerSample;
+            input.wordsPerRow = input.width * input.channels / 2u;
+            input.lease = resident->lease;
+            if (downscaleVulkanDecodedJpegImage(input, proxyScale, cfa, reduced)) {
+                auto proxy = std::make_shared<DNGGpuImage>(*resident);
+                proxy->buffer = reduced.buffer;
+                proxy->width = reduced.width; proxy->height = reduced.height;
+                proxy->lease = reduced.lease;
+                proxy->download = [reduced](uint16_t* samples, size_t count) {
+                    return downloadVulkanDecodedJpegImage(reduced, samples, count);
+                };
+                resident = std::move(proxy);
+                image.layout.width = resident->width;
+                image.layout.height = resident->height;
+            }
+            // Reduction failures retain the original source for the CPU fallback.
+            residentReady = resident != image.gpuImage;
+        }
+        if (residentReady) {
             if (logWhite && !deferred.galleryCfaGain) {
                 auto parameters = std::make_shared<VulkanGalleryBayerGain>();
                 parameters->phase = image.layout.cfaPhase;
@@ -7316,9 +7473,13 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                     }
                     deferred.galleryCfaGain->sourceLinearization = image.residentLinearization;
                 }
-                if (deferred.galleryCfaGain)
+                if (deferred.galleryCfaGain) {
+                    deferred.galleryCfaGain->sourceWidth = sourceWidth;
+                    deferred.galleryCfaGain->sourceHeight = sourceHeight;
+                    deferred.galleryCfaGain->sourceScale = proxyScale;
                     deferred.galleryCfaRecoverCpu = makeCfaPreviewRecovery(
-                        image, settings, image.layout.width, image.layout.height, logWhite);
+                        image, settings, sourceWidth, sourceHeight, logWhite, proxyScale);
+                }
             } else {
                 for (size_t channel = 0; channel < 3; ++channel) {
                     deferred.galleryGpuBlack[channel] = image.metadata.blackLevelCount
@@ -7331,8 +7492,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             }
             frame = std::move(deferred);
             if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
-                spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_resident width={} height={} channels={} gain={}",
-                    resident->width, resident->height, resident->channels, frame.gainMapApplied);
+                spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_resident width={} height={} channels={} gain={} source_width={} source_height={} scale={}",
+                    resident->width, resident->height, resident->channels, frame.gainMapApplied,
+                    sourceWidth, sourceHeight, proxyScale);
             return true;
         }
         // Unsupported preview operations retain the ordinary shared processor.
@@ -10474,22 +10636,27 @@ bool DNGDecoder::canonicalizeGainMapOpcodes(std::vector<uint8_t>& data) {
            rewrite(TIFF_TAG_OPCODE_LIST_3, false);
 }
 
-bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data) {
+bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data,
+                             uintmax_t indexedSize) {
+    const auto started = std::chrono::steady_clock::now();
     motioncam::SourceInputStream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         spdlog::error("Could not open DNG file: {}", filePath);
         return false;
     }
     
-    // Providers already reported the source size during URI indexing. Avoid
-    // SEEK_END, which forces a slow FUSE attribute refresh on Android.
+    const auto opened = std::chrono::steady_clock::now();
+    // Frame indexing already validated this size. Reuse it rather than crossing
+    // JNI again for every frame; sidecar reads without an indexed size resolve
+    // it normally. Avoid SEEK_END/provider attribute refreshes.
     std::error_code error;
-    const auto sourceSize = motioncam::sourceFileSize(filePath, error);
+    const auto sourceSize = indexedSize ? indexedSize : motioncam::sourceFileSize(filePath, error);
     if (error || sourceSize > std::numeric_limits<size_t>::max()) return false;
     const size_t fileSize = static_cast<size_t>(sourceSize);
 
     // Read entire file
     data.resize(fileSize);
+    const auto allocated = std::chrono::steady_clock::now();
     file.read(reinterpret_cast<char*>(data.data()), fileSize);
     
     if (!file.good()) {
@@ -10497,6 +10664,13 @@ bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& 
         return false;
     }
     
+    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+        const auto finished = std::chrono::steady_clock::now();
+        spdlog::info("GALLERY_PERF event=dng_source_read bytes={} open_ms={:.3f} allocate_ms={:.3f} read_ms={:.3f}",
+            fileSize, std::chrono::duration<double, std::milli>(opened - started).count(),
+            std::chrono::duration<double, std::milli>(allocated - opened).count(),
+            std::chrono::duration<double, std::milli>(finished - allocated).count());
+    }
     spdlog::debug("DNGDecoder: Read DNG file {} ({} bytes)", filePath, fileSize);
     return true;
 }

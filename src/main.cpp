@@ -720,6 +720,9 @@ int main(int argc, char *argv[])
 #endif
     const struct { const char* flag; const char* environment; const char* value; } perfFlags[] = {
         {"profile", "MOTIONCAM_GALLERY_PERF_PROFILE", "1"},
+        {"importonly", "MOTIONCAM_GALLERY_PERF_IMPORT_ONLY", "1"},
+        {"sidecarscan", "MOTIONCAM_GALLERY_PERF_SIDECAR_SCAN", "1"},
+        {"noindexcache", "MOTIONCAM_DNG_METADATA_CACHE", "0"},
         {"noguipool", "QT_NO_GUI_THREADPOOL", "1"},
         {"guipool", "QT_NO_GUI_THREADPOOL", nullptr},
         {"zerocopy", "MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY", "1"},

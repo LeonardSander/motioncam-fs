@@ -798,6 +798,13 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+    add_executable(motioncam-source-analysis-cache-test tests/source_analysis_cache_test.cpp)
+    target_include_directories(motioncam-source-analysis-cache-test PRIVATE include)
+    target_link_libraries(motioncam-source-analysis-cache-test PRIVATE Threads::Threads)
+    add_test(NAME motioncam-source-analysis-cache-test COMMAND motioncam-source-analysis-cache-test)
+    set_tests_properties(motioncam-source-analysis-cache-test PROPERTIES LABELS portable)
+
     if(UNIX)
         find_package(Threads REQUIRED)
         add_executable(motioncam-source-input-test tests/source_input_test.cpp)

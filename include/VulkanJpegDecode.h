@@ -58,6 +58,11 @@ bool jpegDecodeTiledImageVulkanRetained(
     const std::vector<VulkanJpegTile>& tiles, uint32_t width, uint32_t height,
     uint32_t tileWidth, uint32_t tileHeight, VulkanDecodedJpegImage& image,
     const VulkanJpegContiguousSource* contiguous = nullptr);
+// Nearest-neighbor reduction of resident 16-bit CFA/RGB pixels. CFA sampling
+// preserves Bayer parity. No pixel readback; the returned allocation is owned.
+bool downscaleVulkanDecodedJpegImage(const VulkanDecodedJpegImage& source,
+                                     uint32_t scale, bool cfa,
+                                     VulkanDecodedJpegImage& result);
 bool downloadVulkanDecodedJpegImage(const VulkanDecodedJpegImage& image,
                                   uint16_t* pixels, size_t samples);
 // Waits for decode and tile assembly, then reads only the GPU validation word.

@@ -376,6 +376,28 @@ int main() {
             std::filesystem::path path;
             ~Cleanup() { std::error_code ignored; std::filesystem::remove_all(path, ignored); }
         } cleanup{directory};
+        struct CacheRoot {
+            std::string previous;
+            bool hadPrevious;
+            CacheRoot(const std::filesystem::path& root) {
+                const char* old = std::getenv("XDG_CACHE_HOME");
+                hadPrevious = old != nullptr;
+                if (old) previous = old;
+#ifdef _WIN32
+                _putenv_s("XDG_CACHE_HOME", root.string().c_str());
+#else
+                setenv("XDG_CACHE_HOME", root.string().c_str(), 1);
+#endif
+            }
+            ~CacheRoot() {
+#ifdef _WIN32
+                _putenv_s("XDG_CACHE_HOME", hadPrevious ? previous.c_str() : "");
+#else
+                if (hadPrevious) setenv("XDG_CACHE_HOME", previous.c_str(), 1);
+                else unsetenv("XDG_CACHE_HOME");
+#endif
+            }
+        } cacheRoot(directory / "cache");
         const auto complete = tiledLosslessJpegDng(std::vector<uint16_t>(256, 512),
                                                    16, 16, 8, 8, 10);
         auto write = [&](const char* name, size_t size) {
@@ -391,6 +413,81 @@ int main() {
         try { motioncam::DNGDecoder invalid((directory / "frame-000002.dng").string()); }
         catch (const std::runtime_error&) { rejected = true; }
         assert(rejected);
+
+        // Import reads a metadata prefix, but frame validation and projected
+        // metadata size must use the full file size. A large pixel payload
+        // should neither be mistaken for missing data nor counted as tags.
+        auto large = chunkedDng(512, 512, 16, 1, 1, 512, 256, false, false,
+            {std::vector<uint8_t>(512 * 256 * 2, 7),
+             std::vector<uint8_t>(512 * 256 * 2, 9)});
+        motioncam::DNGFrameMetadata fullMetadata;
+        assert(motioncam::DNGDecoder::getColorMetadata(large, fullMetadata));
+        auto prefix = large;
+        prefix.resize(65536);
+        motioncam::DNGFrameMetadata prefixMetadata;
+        assert(motioncam::DNGDecoder::getColorMetadata(prefix, prefixMetadata, large.size()));
+        assert(prefixMetadata.metadataBytes == fullMetadata.metadataBytes);
+        assert(fullMetadata.metadataBytes < 65536);
+        uint64_t originalHash = 0;
+        bool haveOriginalHash = false;
+        auto checkImportedMetadata = [&](const char* name) {
+            const auto path = directory / name;
+            {
+                std::ofstream output(path, std::ios::binary);
+                output.write(reinterpret_cast<const char*>(large.data()), large.size());
+            }
+            motioncam::DNGDecoder decoder(path.string());
+            assert(decoder.getFrames().size() == 1);
+            assert(decoder.getFrames()[0].fileSize == large.size());
+            motioncam::DNGFrameMetadata imported;
+            assert(decoder.getFrameMetadata(0, imported));
+            assert(imported.hasImageLayout);
+            assert(imported.metadataBytes == fullMetadata.metadataBytes);
+            assert(imported.orientation == fullMetadata.orientation);
+            uint64_t hash = 0;
+            assert(decoder.imagePayloadSampleHash(0, hash));
+            if (haveOriginalHash) assert(hash == originalHash);
+            originalHash = hash;
+            haveOriginalHash = true;
+            std::vector<uint8_t> extracted;
+            assert(decoder.extractFrame(0, extracted));
+            assert(extracted == large);
+            // A fresh decoder with no in-memory analysis must round-trip the
+            // persistent compact TIFF, including original payload locations.
+            motioncam::DNGDecoder::clearAnalysisCache(false);
+            motioncam::DNGDecoder cached(path.string());
+            motioncam::DNGFrameMetadata restored;
+            assert(cached.getFrameMetadata(0, restored));
+            assert(restored.metadataBytes == imported.metadataBytes);
+            assert(restored.orientation == imported.orientation);
+            uint64_t cachedHash = 0;
+            assert(cached.imagePayloadSampleHash(0, cachedHash) && cachedHash == hash);
+            // Interrupted cache writes must fall back to source metadata.
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(directory / "cache"))
+                if (entry.path().extension() == ".bin") {
+                    std::ofstream corrupt(entry.path(), std::ios::binary | std::ios::trunc);
+                    corrupt << "truncated";
+                }
+            motioncam::DNGDecoder::clearAnalysisCache(false);
+            motioncam::DNGDecoder recovered(path.string());
+            assert(recovered.getFrameMetadata(0, restored));
+            assert(restored.metadataBytes == imported.metadataBytes);
+            assert(restored.orientation == imported.orientation);
+        };
+        checkImportedMetadata("prefix.dng");
+        // Inserting a missing orientation appends an IFD after the pixels.
+        // Metadata at the end of the file must still be read correctly.
+        assert(motioncam::DNGDecoder::setOrientation(large, 90));
+        assert(motioncam::DNGDecoder::getColorMetadata(large, fullMetadata));
+        assert(fullMetadata.orientation == 90);
+        checkImportedMetadata("trailing.dng");
+        // Replacing an earlier source must invalidate its previous revision.
+        checkImportedMetadata("prefix.dng");
+        assert(motioncam::DNGDecoder::analysisCacheUsage().first > 0);
+        // Preferences uses the default clear operation: memory and disk.
+        motioncam::DNGDecoder::clearAnalysisCache();
+        assert(motioncam::DNGDecoder::analysisCacheUsage().first == 0);
+        assert(!std::filesystem::exists(directory / "cache" / "motioncam-fuse" / "dng-analysis"));
     }
     motioncam::GainMap region{};
     region.top = 0; region.left = 0; region.bottom = 8; region.right = 8;
@@ -2195,6 +2292,112 @@ int main() {
         }
     }
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+    if (std::getenv("MOTIONCAM_GPU_PROXY_TEST")) {
+        constexpr uint32_t width = 96, height = 64;
+        std::vector<uint16_t> pixels(width * height);
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x)
+                pixels[y * width + x] = uint16_t(1000 +
+                    (x * 91 + y * 173 + (x & 1) * 1200 + (y & 1) * 4000) % 50000);
+        const auto dng = tiledLosslessJpegDng(pixels, width, height, 16, 16, 16);
+        motioncam::DecodedDNGImage decoded;
+        assert(motioncam::DNGDecoder::decodeImage(dng, decoded, false, true, true));
+        assert(decoded.gpuImage && decoded.samples.empty());
+        auto render = [](const motioncam::PreviewFrame& frame) {
+            motioncam::VulkanGalleryBayerSource source;
+            source.gpu = frame.gallerySource.gpu;
+            source.buffer = frame.gallerySource.buffer;
+            source.samples = frame.galleryCfa.data();
+            source.width = frame.width; source.height = frame.height;
+            source.phase = frame.galleryCfaPhase;
+            source.black = frame.galleryBlack; source.white = frame.galleryWhite;
+            source.gain = frame.galleryCfaGain.get();
+            const std::array<float, 3> gains{1, 1, 1};
+            const std::array<float, 9> identity{1,0,0, 0,1,0, 0,0,1};
+            std::vector<uint8_t> rgb;
+            assert(motioncam::colorGalleryRgbVulkan(rgb, gains, identity, identity,
+                1, nullptr, nullptr, false, false, &source));
+            return rgb;
+        };
+        for (bool linearized : {false, true}) for (uint32_t gainChannels : {0u, 1u, 4u}) {
+            const bool gain = gainChannels != 0;
+            auto resident = decoded;
+            auto cpu = decoded;
+            cpu.gpuImage.reset();
+            cpu.samples = pixels;
+            if (linearized) {
+                resident.residentLinearization.resize(65536);
+                for (uint32_t i = 0; i < 65536; ++i)
+                    resident.residentLinearization[i] = uint16_t(uint64_t(i) * i / 65535);
+                for (auto& sample : cpu.samples) sample = resident.residentLinearization[sample];
+            }
+            if (gain) {
+                motioncam::GainMap map{};
+                map.left = 6; map.top = 4; map.right = width - 7; map.bottom = height - 9;
+                map.width = map.height = 2; map.channels = gainChannels;
+                map.rowPitch = map.colPitch = gainChannels == 1 ? 2 : 1;
+                map.spacingH = map.spacingV = 0.5;
+                map.data = {0.8f,0.9f,1.0f,1.1f, 0.9f,1.0f,1.1f,1.2f,
+                            1.0f,1.1f,1.2f,1.3f, 1.1f,1.2f,1.3f,1.4f};
+                if (gainChannels == 1) map.data = {0.8f, 0.9f, 1.2f, 1.4f};
+                resident.opcodeList2 = cpu.opcodeList2 = {map};
+            }
+            for (bool log : {false, true}) for (int scale : {2, 4, 8}) {
+                motioncam::RenderSettings settings;
+                settings.streamingPreview = true;
+                settings.options = static_cast<motioncam::FileRenderOptions>(
+                    motioncam::RENDER_OPT_DRAFT |
+                    (gain ? motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION : 0) |
+                    (log ? motioncam::RENDER_OPT_LOG_TRANSFORM : 0));
+                settings.logTransform = motioncam::LogTransformMode::ReduceBy4Bit;
+                settings.draftScale = scale;
+                motioncam::PreviewFrame gpuFrame, cpuFrame;
+                assert(motioncam::DNGDecoder::decodePreview(resident, settings, gpuFrame, true));
+                assert(gpuFrame.gallerySource.buffer && gpuFrame.rgb.empty());
+                assert(gpuFrame.width == width / scale && gpuFrame.height == height / scale);
+                std::vector<uint16_t> reduced;
+                assert(gpuFrame.gallerySource.downloadSamples(reduced));
+                for (uint32_t y = 0; y < gpuFrame.height; ++y)
+                    for (uint32_t x = 0; x < gpuFrame.width; ++x)
+                        assert(reduced[y * gpuFrame.width + x] ==
+                            cpu.samples[(y * scale + (y & 1)) * width + x * scale + (x & 1)]);
+                assert(motioncam::DNGDecoder::decodePreview(cpu, settings, cpuFrame, true));
+                if (gpuFrame.galleryCfaRecoverCpu) {
+                    auto recovered = reduced;
+                    assert(gpuFrame.galleryCfaRecoverCpu(recovered));
+                    assert(recovered == cpuFrame.galleryCfa);
+                }
+                const auto gpuRgb = render(gpuFrame), cpuRgb = render(cpuFrame);
+                assert(gpuRgb.size() == cpuRgb.size());
+                unsigned maximum = 0;
+                uint64_t sum = 0;
+                for (size_t at = 0; at < gpuRgb.size(); at += 2) {
+                    uint16_t a, b;
+                    std::memcpy(&a, gpuRgb.data() + at, 2);
+                    std::memcpy(&b, cpuRgb.data() + at, 2);
+                    const unsigned error = std::abs(int(a) - int(b));
+                    maximum = std::max(maximum, error); sum += error;
+                }
+                std::fprintf(stderr, "GPU proxy scale=%d gain=%d linearized=%d log=%d max_error=%u mean_error=%.6f\n",
+                    scale, gainChannels, linearized, log, maximum, double(sum) / (gpuRgb.size() / 2));
+                // Rounding at a LOG encode boundary can differ by one encoded
+                // code, amplified by LOG expansion and the display transfer.
+                assert(maximum <= (log ? 32u : 13u) && sum < gpuRgb.size() / 2);
+            }
+        }
+        // An odd CFA scale uses the established CPU processing path.
+        motioncam::RenderSettings fallbackSettings;
+        fallbackSettings.streamingPreview = true;
+        fallbackSettings.options = motioncam::RENDER_OPT_DRAFT;
+        fallbackSettings.draftScale = 3;
+        motioncam::PreviewFrame fallback, reference;
+        assert(motioncam::DNGDecoder::decodePreview(decoded, fallbackSettings, fallback, true));
+        auto cpu = decoded;
+        cpu.gpuImage.reset(); cpu.samples = pixels;
+        assert(motioncam::DNGDecoder::decodePreview(cpu, fallbackSettings, reference, true));
+        assert(!fallback.gallerySource.buffer && fallback.width == reference.width &&
+               fallback.height == reference.height && fallback.rgb == reference.rgb);
+    }
     if (std::getenv("MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST")) {
         constexpr uint32_t tileSide = 128, across = 8, tileCount = across * across;
         constexpr uint32_t width = tileSide * across, height = width;
@@ -2283,6 +2486,18 @@ int main() {
         assert(std::any_of(textureColor.begin(), textureColor.end(),
                            [](uint8_t value) { return value != 0; }));
         pl_tex_destroy(gpu, &rgbTexture);
+        for (uint32_t scale : {2u, 4u, 8u}) {
+            motioncam::VulkanDecodedJpegImage reduced;
+            assert(motioncam::downscaleVulkanDecodedJpegImage(retained, scale, false, reduced));
+            std::vector<uint16_t> samples(size_t(reduced.width) * reduced.height * 3);
+            assert(motioncam::downloadVulkanDecodedJpegImage(reduced, samples.data(), samples.size()));
+            for (uint32_t y = 0; y < reduced.height; ++y)
+                for (uint32_t x = 0; x < reduced.width; ++x)
+                    for (uint32_t c = 0; c < 3; ++c)
+                        assert(samples[(y * reduced.width + x) * 3 + c] == rgbImage.samples[
+                            ((y * scale + (scale - 1) / 2) * width +
+                             x * scale + (scale - 1) / 2) * 3 + c]);
+        }
         rgbImage.gpuImage.reset();
         motioncam::PreviewFrame cpuFrame;
         assert(motioncam::DNGDecoder::decodePreview(rgbImage, rgbSettings, cpuFrame));

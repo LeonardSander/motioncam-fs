@@ -133,6 +133,9 @@ void scanDirectoryForSidecars(const QString& importRoot,
     callActivity("scanDirectoryForSidecars", importRoot, targetImportPath);
 }
 
+void beginSourceImportBatch() { callActivity("beginSourceImportBatch"); }
+void endSourceImportBatch() { callActivity("endSourceImportBatch"); }
+
 QString sidecarScanStatus() {
     return activityString(QStringLiteral("error:Android activity unavailable"), "sidecarScanStatus");
 }
@@ -144,8 +147,11 @@ QString registerImportedClip(const QString& importPath, const QString& sourceUri
 
 QString refreshImportedSource(const QString& importPath) {
     releaseSourceReadDescriptors(importPath.toStdString());
-    return activityString(QStringLiteral("Android activity unavailable"),
-                          "refreshImportedSource", importPath);
+    const QString result = activityString(QStringLiteral("Android activity unavailable"),
+                                          "refreshImportedSource", importPath);
+    // A concurrent reader may have reopened a handle while the index changed.
+    releaseSourceReadDescriptors(importPath.toStdString());
+    return result;
 }
 
 bool sameImportedSource(const QString& first, const QString& second) {

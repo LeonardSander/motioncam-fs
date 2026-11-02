@@ -26,6 +26,28 @@ constexpr uint32_t kLookupSize = 1u << kLookupBits;
 // One invocation entropy-decodes each tile serially. Large, single-scan DNGs
 // are substantially slower than CPU decode and can monopolize the GPU.
 constexpr uint64_t kMaxSerialTileSamples = 65536;
+constexpr char proxyShader[] = R"glsl(#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Source { uint words[]; } src;
+layout(std430, binding = 1) writeonly buffer Destination { uint words[]; } dst;
+layout(push_constant) uniform Constants {
+    uint sourceWidth; uint width; uint height; uint channels; uint scale; uint cfa;
+} p;
+uint sampleAt(uint index) {
+    uint channel = index % p.channels;
+    uint pixel = index / p.channels;
+    uint x = pixel % p.width, y = pixel / p.width;
+    uint sx = x * p.scale + (p.cfa != 0u ? (x & 1u) : (p.scale - 1u) / 2u);
+    uint sy = y * p.scale + (p.cfa != 0u ? (y & 1u) : (p.scale - 1u) / 2u);
+    uint source = (sy * p.sourceWidth + sx) * p.channels + channel;
+    return (src.words[source / 2u] >> ((source & 1u) * 16u)) & 65535u;
+}
+void main() {
+    uint word = gl_GlobalInvocationID.x;
+    if (word >= p.width * p.height * p.channels / 2u) return;
+    dst.words[word] = sampleAt(word * 2u) | (sampleAt(word * 2u + 1u) << 16u);
+}
+)glsl";
 constexpr char residentMetaShader[] = R"glsl(#version 450
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) readonly buffer Lengths { uint words[]; } lengths;
@@ -550,6 +572,7 @@ struct DecodeState {
     pl_pass pass = nullptr;
     pl_pass residentDirect = nullptr;
     pl_pass scatter = nullptr;
+    pl_pass proxy = nullptr;
     pl_pass validate = nullptr;
     pl_timer timer = nullptr;
     pl_timer scatterTimer = nullptr;
@@ -576,6 +599,7 @@ struct DecodeState {
         pl_pass_destroy(gpu, &parser);
         pl_pass_destroy(gpu, &residentMeta);
         pl_pass_destroy(gpu, &scatter);
+        pl_pass_destroy(gpu, &proxy);
         pl_pass_destroy(gpu, &validate);
         pl_timer_destroy(gpu, &timer);
         pl_timer_destroy(gpu, &scatterTimer);
@@ -1136,6 +1160,70 @@ bool jpegDecodeTiledImageVulkanRetained(
     return true;
 }
 
+bool downscaleVulkanDecodedJpegImage(const VulkanDecodedJpegImage& source,
+                                     uint32_t scale, bool cfa,
+                                     VulkanDecodedJpegImage& result) {
+    if (!source.gpu || !source.buffer || !source.lease || scale <= 1 ||
+        (cfa ? source.channels != 1 || (scale & 1u) : source.channels != 3) ||
+        uint64_t(source.wordsPerRow) * 2u != uint64_t(source.width) * source.channels)
+        return false;
+    if (uint64_t(source.width) * source.height * source.channels > UINT32_MAX)
+        return false;
+    uint32_t width = source.width / scale, height = source.height / scale;
+    if (cfa) { width &= ~1u; height &= ~1u; }
+    // Gallery buffer inputs use tightly packed rows. Odd RGB row widths retain
+    // the CPU fallback rather than exposing padding as image samples.
+    if (!width || !height || (width & 1u)) return false;
+    const uint64_t samples = uint64_t(width) * height * source.channels;
+    if (samples > UINT32_MAX) return false;
+    auto& context = jpegContext();
+    std::lock_guard lock(context.mutex);
+    if (!context.init() || source.gpu != context.vulkan->gpu) return false;
+    auto& s = state();
+    if (!s.init(context.vulkan->gpu) ||
+        (samples / 2u + 255u) / 256u > uint32_t(s.gpu->limits.max_dispatch[0])) return false;
+    if (!s.proxy) {
+        pl_desc descriptors[] = {
+            {"src", PL_DESC_BUF_STORAGE, 0, PL_DESC_ACCESS_READONLY},
+            {"dst", PL_DESC_BUF_STORAGE, 1, PL_DESC_ACCESS_WRITEONLY},
+        };
+        pl_pass_params params{};
+        params.type = PL_PASS_COMPUTE;
+        params.glsl_shader = proxyShader;
+        params.descriptors = descriptors;
+        params.num_descriptors = 2;
+        params.push_constants_size = 6 * sizeof(uint32_t);
+        s.proxy = pl_pass_create(s.gpu, &params);
+    }
+    pl_buf buffer = nullptr;
+    if (!s.proxy || !s.buffer(buffer, samples * sizeof(uint16_t))) return false;
+    auto owner = std::shared_ptr<void>(new pl_buf(buffer), [gpu = s.gpu](void* pointer) {
+        auto* owned = static_cast<pl_buf*>(pointer);
+        pl_buf_destroy(gpu, owned);
+        delete owned;
+    });
+    uint32_t constants[] = {source.width, width, height, source.channels, scale, cfa ? 1u : 0u};
+    pl_desc_binding bindings[2]{};
+    bindings[0].object = static_cast<pl_buf>(source.buffer);
+    bindings[1].object = buffer;
+    pl_pass_run_params run{};
+    run.pass = s.proxy;
+    run.desc_bindings = bindings;
+    run.push_constants = constants;
+    run.compute_groups[0] = int((samples / 2u + 255u) / 256u);
+    run.compute_groups[1] = run.compute_groups[2] = 1;
+    pl_pass_run(s.gpu, &run);
+    result = source;
+    result.buffer = buffer;
+    result.width = width; result.height = height;
+    result.wordsPerRow = width * source.channels / 2u;
+    result.validationBuffer = nullptr;
+    // Keep source storage alive until queued GPU reads and this output finish.
+    struct Leases { std::shared_ptr<void> source, output; };
+    result.lease = std::make_shared<Leases>(Leases{source.lease, std::move(owner)});
+    return true;
+}
+
 bool downloadVulkanDecodedJpegImage(const VulkanDecodedJpegImage& image,
                                   uint16_t* pixels, size_t samples) {
     if (!pixels || !image.gpu || !image.buffer || !image.lease ||
@@ -1179,6 +1267,8 @@ bool jpegDecodeTiledImageVulkan(
 bool jpegDecodeTiledImageVulkanRetained(
     const std::vector<VulkanJpegTile>&, uint32_t, uint32_t, uint32_t, uint32_t,
     VulkanDecodedJpegImage&, const VulkanJpegContiguousSource*) { return false; }
+bool downscaleVulkanDecodedJpegImage(const VulkanDecodedJpegImage&, uint32_t, bool,
+                                     VulkanDecodedJpegImage&) { return false; }
 bool downloadVulkanDecodedJpegImage(const VulkanDecodedJpegImage&, uint16_t*, size_t) {
     return false;
 }

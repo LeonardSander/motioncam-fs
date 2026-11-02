@@ -40,32 +40,6 @@ int64_t seekMedia(void* opaque, int64_t offset, int origin) {
     return ::ftello(file);
 }
 }
-// Only generated analysis entries are eligible; source URI indexes live elsewhere.
-void trimSourceAnalysisCache(const std::filesystem::path& root) {
-    static std::mutex mutex;
-    const std::lock_guard lock(mutex);
-    constexpr uintmax_t limit = 64ULL * 1024 * 1024;
-    struct Entry { std::filesystem::path path; std::filesystem::file_time_type time; uintmax_t bytes; };
-    std::vector<Entry> files;
-    uintmax_t total = 0;
-    std::error_code error;
-    std::filesystem::recursive_directory_iterator it(root, error), end;
-    for (; !error && it != end; it.increment(error)) {
-        if (!it->is_regular_file(error) || it->path().extension() != ".bin") continue;
-        const auto bytes = it->file_size(error);
-        if (error) break;
-        const auto time = it->last_write_time(error);
-        if (error) break;
-        files.push_back({it->path(), time, bytes});
-        total += bytes;
-    }
-    std::sort(files.begin(), files.end(), [](const Entry& a, const Entry& b) { return a.time < b.time; });
-    for (const auto& file : files) {
-        if (total <= limit) break;
-        error.clear();
-        if (std::filesystem::remove(file.path, error)) total -= file.bytes;
-    }
-}
 namespace {
 int openSourceDescriptor(const QString& uri) {
     const auto activity = QNativeInterface::QAndroidApplication::context();
@@ -108,18 +82,41 @@ void releaseSourceReadDescriptors(const std::string& path) {
     }
 }
 int openSourceReadDescriptor(const std::string& path) {
-    const QString uri = sourceUri(path);
-    if (uri.isEmpty()) return ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    QString uri;
+    std::string version;
+    if (path.compare(0, 8, "content:") != 0) {
+        const auto activity = QNativeInterface::QAndroidApplication::context();
+        const QString info = activity.callMethod<QString>("sourceDescriptorInfoForImport",
+                                                          QString::fromStdString(path));
+        if (info.isEmpty()) return ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        const auto sizeStart = info.indexOf(QChar('\n'));
+        const auto revisionStart = info.indexOf(QChar('\n'), sizeStart + 1);
+        if (sizeStart < 0 || revisionStart < 0) { errno = EIO; return -1; }
+        uri = info.left(sizeStart);
+        QString size = info.mid(sizeStart + 1, revisionStart - sizeStart - 1);
+        bool knownSize = false;
+        const auto indexedSize = size.toLongLong(&knownSize);
+        if (!knownSize || indexedSize < 0) {
+            std::error_code error;
+            const auto bytes = sourceFileSize(path, error);
+            size = error ? QStringLiteral("unknown") : QString::number(bytes);
+        }
+        version = (uri + ':' + info.mid(revisionStart + 1) + ':' + size).toStdString();
+    } else {
+        uri = sourceUri(path);
+        if (uri.isEmpty()) return ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        const std::string revision = sourceRevision(path);
+        std::error_code error;
+        const auto bytes = sourceFileSize(path, error);
+        version = revision + ':' + (error ? "unknown" : std::to_string(bytes));
+    }
     static std::once_flag logged;
     std::call_once(logged, [] {
         spdlog::info("URI source descriptor cache: capacity={}", descriptorCache.limit);
     });
-    // Refreshing the URI index invalidates handles when a document is replaced.
-    const std::string revision = sourceRevision(path);
-    std::error_code error;
-    const auto bytes = sourceFileSize(path, error);
+    // Resolve URI, size and revision together on each open so source refreshes
+    // still invalidate replaced files without retaining stale native metadata.
     const std::string& key = path;
-    const std::string version = revision + ':' + (error ? "unknown" : std::to_string(bytes));
     uint64_t generation;
     {
         std::lock_guard lock(descriptorCache.mutex);

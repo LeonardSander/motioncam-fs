@@ -19,17 +19,24 @@ DNG sequences use the document-tree folder picker. Private import directories
 contain only empty filename index entries; URI, size and revision metadata are
 stored with the retained grants. No imported document bytes are stored there.
 A bounded cache retains URI descriptors for reuse; positional reads give each
-reader an independent cursor. Cached handles are released when their clip is
+reader an independent cursor. Descriptor lookup resolves URI, size and revision
+in one Java call; DNG playback reuses the frame size validated during import.
+Revision checks remain live on each open. Cached handles are released when their clip is
 unmounted. Bounded lookahead overlaps opens during sequential playback. Reimporting an
 already mounted document or sequence is ignored.
 Session JSON selected through the picker is also read from its URI; the small
 automatic resume snapshot remains application state.
 
-**Scan source directories for clip sidecar files** grants access to a chosen
-source directory and indexes adjacent sidecars for mounted clips. Existing tree
-permissions are reused. Missing permissions are requested in turn, with the
-system folder picker starting at the clip's source directory when available;
-one grant covers other clips in that directory. DNG folders index documents
+Sidecars are refreshed automatically during manual import and session load,
+using retained folder permissions. Manual clip import requests missing source
+folder access automatically; canceling leaves the clips imported. Session load
+uses existing grants without opening permission prompts.
+**Grant source folder access / rescan sidecars** can grant access later or
+refresh an open session. Choose a parent folder to cover its clips and nested
+source folders with one grant. The system picker starts at the clip's source
+folder when available. Directory listings and permission lists are shared for
+one import/scan operation and discarded afterward, so later refreshes still
+observe added, changed and removed sidecars. DNG folders index documents
 and URI metadata in one pass, without per-frame sidecar scans. Import progress
 is shown while indexing and preparing sources. Provider queries and decoding
 run in workers, and progress overlays follow window resizing. Sidecars include
@@ -38,7 +45,24 @@ and relative files named by `dng_white`, `dng_opcode`, `dcp`, and `gyroflow`.
 These remain at their original URIs. Refreshing reindexes the source rather
 than copying it. Gallery thumbnails have a 32 MiB memory cache and, on Android,
 a transient disk cache limited to 64 MiB of JPEG data. Generated timeline
-and analysis files share a separate 64 MiB disk budget, evicting oldest entries.
+and analysis files share a separate 64 MiB disk budget on Android and desktop,
+evicting oldest entries. Missing private sequence indexes are rebuilt using the
+stored source identity and retained grant when restoring a session.
+Supported tiled lossless-JPEG DNG previews keep decoded pixels resident on Vulkan
+through proxy reduction, color processing and shared-image presentation. Bayer
+proxy reduction preserves CFA phase; deferred gains sample the original sensor
+coordinates. RGB proxies use the same nearest-neighbor samples as the CPU path.
+Unsupported layouts or operations retain the CPU fallback. With histogram and
+thumbnail row disabled, `zerocopy,preserveproxy` enforces resident proxy input and
+shared-image presentation; `dng_gpu_jpeg_resident` records source/output dimensions
+and scale.
+
+DNG indexing reads compact TIFF directories and tag values rather than allocating
+full image buffers. Their persistent metadata indexes use the original document
+URI, size and revision to invalidate changed frames. Providers without a usable
+revision keep reading source metadata directly. Calibration sidecars are
+refreshed independently. **Preferences → Indexing Cache → Clear** removes these
+DNG metadata indexes along with the existing timeline and analysis caches.
 **Create JSON** writes the per-clip file to the granted source directory and
 refreshes the URI index. If that clip has no linked source directory,
 **Create JSON** opens the directory picker and continues after the clip is
@@ -273,6 +297,17 @@ fallback. Set `MOTIONCAM_GALLERY_PERF_FULLSCREEN=1` for actual fullscreen
 performance runs (`MOTIONCAM_GALLERY_PERF_VIEWPORT=1280x720` selects a window).
 Keep histogram settings identical when comparing runs: raw readback and
 histogram computation remain a separate cost.
+
+Import-only timing uses `--gallery-perf-thumbnails off --gallery-perf-flags importonly`
+on desktop, or the equivalent Android intent extras. The `session_import_complete`
+event covers source preparation and mounting without playback. Add `sidecarscan`
+on Android to time a separate explicit rescan (`sidecar_scan_complete`); this may
+open the folder picker if grants are missing. Repeat the import to measure a
+populated DNG index cache, or clear **Preferences → Indexing Cache** to measure
+rebuilding it. `noindexcache` bypasses the persistent DNG metadata cache for
+controlled comparisons without deleting it. `profile` also reports `dng_source_read`
+open, allocation and read timings. `preserveproxy` retains the session's saved
+proxy scale and reconstruction quality.
 
 Android gallery automation accepts `gallery-perf-session`,
 `gallery-perf-playback-ms`, `gallery-perf-thumbnails` and `gallery-perf-flags`

@@ -10,7 +10,6 @@ void prefetchSourceReadDescriptor(const std::string&) noexcept {}
 int openSourceReadDescriptor(const std::string& path) {
     return ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
 }
-void trimSourceAnalysisCache(const std::filesystem::path&) {}
 void releaseSourceReadDescriptors(const std::string&) {}
 FILE* openSourceFile(const std::string& path) { return std::fopen(path.c_str(), "rb"); }
 uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {

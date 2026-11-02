@@ -25,6 +25,8 @@ QString writeDocument(const QString& uri,const QByteArray& contents);
 void scanDirectoryForSidecars(const QString& importRoot,
                               const QString& targetImportPath = {});
 QString sidecarScanStatus();
+void beginSourceImportBatch();
+void endSourceImportBatch();
 QString registerImportedClip(const QString& importPath, const QString& sourceUri);
 QString refreshImportedSource(const QString& importPath);
 bool sameImportedSource(const QString& first, const QString& second);

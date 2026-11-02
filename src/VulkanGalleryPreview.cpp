@@ -57,6 +57,9 @@ void galleryPlaceboLog(void*, pl_log_level level, const char* message) {
 }
 #endif
 
+// Five header vectors followed by four arrays of 32 vectors in GalleryBayerGain.
+constexpr size_t bayerGainHeaderBytes = (5u + 4u * 32u) * 16u;
+
 constexpr char shader[] = R"glsl(#version 450
 layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer Source { uint words[]; } src;
@@ -149,6 +152,7 @@ layout(std430, binding = 4) readonly buffer GalleryBayerGain {
     vec4 black;
     vec4 scale;
     uvec4 lookup; // first float in values used by LOG linearization
+    uvec4 sourceGeometry; // original width, height, proxy scale, unused
     uvec4 bounds[32];
     vec4 axes[32];
     uvec4 shape[32]; // width, height, channels, float offset
@@ -273,18 +277,22 @@ uint bayerCode(int x, int y) {
     if (p.bayer.w != 2u) return raw;
     uint phase = uint(((y & 1) << 1) | (x & 1));
     uint color = (bayerGain.header.w >> (8u + phase * 2u)) & 3u;
+    uint sampleScale = max(1u, bayerGain.sourceGeometry.z);
+    uvec2 sourcePixel = uvec2(x, y) * sampleScale;
+    if (sampleScale > 1u) sourcePixel += uvec2(x, y) & uvec2(1u);
+    uvec2 sourceSize = bayerGain.sourceGeometry.xy;
     float gain = 1.0;
     for (uint mapIndex = 0u; mapIndex < bayerGain.header.x; ++mapIndex) {
         uvec4 bounds = bayerGain.bounds[mapIndex];
-        if (uint(x) < bounds.x || uint(y) < bounds.y ||
-            uint(x) >= bounds.z || uint(y) >= bounds.w) continue;
+        if (sourcePixel.x < bounds.x || sourcePixel.y < bounds.y ||
+            sourcePixel.x >= bounds.z || sourcePixel.y >= bounds.w) continue;
         uvec4 shape = bayerGain.shape[mapIndex];
         uvec4 pitch = bayerGain.pitch[mapIndex];
         if (shape.z == 1u &&
-            ((uint(y) - bounds.y) % pitch.x != 0u ||
-             (uint(x) - bounds.x) % pitch.y != 0u)) continue;
+            ((sourcePixel.y - bounds.y) % pitch.x != 0u ||
+             (sourcePixel.x - bounds.x) % pitch.y != 0u)) continue;
         vec4 axes = bayerGain.axes[mapIndex];
-        vec2 grid = ((vec2(x, y) + vec2(0.5)) / vec2(p.bayer.xy) -
+        vec2 grid = ((vec2(sourcePixel) + vec2(0.5)) / vec2(sourceSize) -
                      axes.xy) / axes.zw;
         vec2 base = floor(grid), fraction = clamp(grid - base, 0.0, 1.0);
         uvec2 a = uvec2(clamp(base, vec2(0), vec2(shape.xy - uvec2(1))));
@@ -879,7 +887,7 @@ struct Device {
             unifiedMemory = vulkanUsesUnifiedMemory(vulkan->instance,
                 vulkan->phys_device, vulkan->get_proc_addr);
         // Every shader reads this binding, including plain RGB with no bake.
-        const std::array<uint8_t, 2112> zero{};
+        const std::array<uint8_t, bayerGainHeaderBytes> zero{};
         pl_buf_params gainParams{};
         gainParams.size = zero.size();
         gainParams.storable = gainParams.host_writable = true;
@@ -1437,7 +1445,7 @@ bool colorGalleryRgbVulkan(
         const size_t encodeLookup = lookup ? 65536u : 0u;
         const size_t sourceLookup = gain->sourceLinearization.size();
         if (sourceLookup > 65536u) return false;
-        constexpr size_t headerBytes = 2112u;
+        constexpr size_t headerBytes = bayerGainHeaderBytes;
         if (values + lookup + sourceLookup + encodeLookup > (std::numeric_limits<size_t>::max() -
                                headerBytes) / sizeof(float)) return false;
         const size_t gainBytes = headerBytes + (values + lookup + sourceLookup + encodeLookup) * sizeof(float);
@@ -1459,6 +1467,11 @@ bool colorGalleryRgbVulkan(
         std::memcpy(data.data() + 16u, gain->black.data(), 16u);
         std::memcpy(data.data() + 32u, gain->scale.data(), 16u);
         std::memcpy(data.data() + 48u, lookupOffset, sizeof(lookupOffset));
+        const uint32_t sourceGeometry[4] = {
+            gain->sourceWidth ? gain->sourceWidth : bayer->width,
+            gain->sourceHeight ? gain->sourceHeight : bayer->height,
+            std::max(1u, gain->sourceScale), 0u};
+        std::memcpy(data.data() + 64u, sourceGeometry, sizeof(sourceGeometry));
         uint32_t offset = 0;
         for (size_t index = 0; index < gain->maps.size(); ++index) {
             const auto& map = gain->maps[index];
@@ -1470,10 +1483,10 @@ bool colorGalleryRgbVulkan(
                 map.width, map.height, map.channels, offset};
             const uint32_t pitch[4] = {
                 map.rowPitch, map.colPitch, 0u, 0u};
-            std::memcpy(data.data() + 64u + index * 16u, bounds, 16u);
-            std::memcpy(data.data() + 576u + index * 16u, axes, 16u);
-            std::memcpy(data.data() + 1088u + index * 16u, shape, 16u);
-            std::memcpy(data.data() + 1600u + index * 16u, pitch, 16u);
+            std::memcpy(data.data() + 80u + index * 16u, bounds, 16u);
+            std::memcpy(data.data() + 592u + index * 16u, axes, 16u);
+            std::memcpy(data.data() + 1104u + index * 16u, shape, 16u);
+            std::memcpy(data.data() + 1616u + index * 16u, pitch, 16u);
             std::memcpy(data.data() + headerBytes + offset * sizeof(float),
                 map.values.data(), map.values.size() * sizeof(float));
             offset += static_cast<uint32_t>(map.values.size());

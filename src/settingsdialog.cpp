@@ -241,9 +241,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     directLogCacheUsageLayout->addWidget(mClearDirectLogCacheButton);
     directLogCacheLayout->addLayout(directLogCacheUsageLayout);
     auto* directLogCacheHelpLabel = new QLabel(
-        helpSpan("Stores DirectLog timelines, MCRAW indexes, and DNG sequence analysis so "
-                 "previously imported clips open faster. Cleared entries are rebuilt on "
-                 "the next import."),
+        helpSpan("Stores DirectLog timelines, MCRAW indexes, and DNG frame metadata and "
+                 "sequence analysis so previously imported clips open faster. Clear removes "
+                 "these indexes from memory and disk; they are rebuilt on the next import."),
         this);
     directLogCacheHelpLabel->setWordWrap(true);
     directLogCacheLayout->addWidget(directLogCacheHelpLabel);
