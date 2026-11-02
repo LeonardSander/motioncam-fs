@@ -1,4 +1,3 @@
-
 # MotionCam Fuse – Virtual File System
 
 > **Ai-assisted work in progress**
