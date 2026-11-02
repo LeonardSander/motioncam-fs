@@ -8,7 +8,7 @@
 --- 
  
 <img width="2621" height="1396" alt="ui" src="https://github.com/user-attachments/assets/3fed84d2-77e2-4380-80f3-2e7443df2947" />
-
+ 
 ---
 
 When clips are mounted, folders containing respective frames will appear in their source directory if not defined otherwise under Settings > Preferences. As soon as the individual frames are accessed, their image contents are processed and cached.
