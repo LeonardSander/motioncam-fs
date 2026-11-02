@@ -5,6 +5,7 @@
 #include <QStandardItemModel>
 #include <QScrollBar>
 #include <QLabel>
+#include <QFont>
 #include <cstdio>
 
 // Capturing and recompositing adds a premultiplied-alpha rounding step.
@@ -44,6 +45,12 @@ int main(int argc, char** argv) {
     // Native Windows controls animate between paints. Pixel comparisons need
     // a stable style when rendering the reference and capture separately.
     QApplication::setStyle("Fusion");
+    // Transparent overlay captures must use grayscale text coverage. Windows
+    // LCD/subpixel glyphs depend on the destination surface and its origin,
+    // which differ between the reference canvas and compact cached layers.
+    QFont font = app.font();
+    font.setStyleStrategy(QFont::NoSubpixelAntialias);
+    QApplication::setFont(font);
     QWidget stage;
     stage.resize(800, 600);
     QWidget viewport(&stage);
@@ -74,7 +81,7 @@ int main(int argc, char** argv) {
                     if(excluded&&histogramVisible&&ratio==4.0)
                         roots.push_back({&histogram,opacity});
                     const QSize pixels(int(std::ceil(size.width() * ratio)), int(std::ceil(size.height() * ratio)));
-                    QImage expected(pixels, QImage::Format_RGBA8888_Premultiplied);
+                    QImage expected(pixels, QImage::Format_ARGB32_Premultiplied);
                     expected.fill(Qt::transparent);
                     {
                         QPainter painter(&expected);
@@ -154,7 +161,7 @@ int main(int argc, char** argv) {
             caption.setText(selected?"selected":"caption");
             view.horizontalScrollBar()->setValue(value);
             QApplication::processEvents();
-            QImage expected(host.size()*ratio,QImage::Format_RGBA8888_Premultiplied);
+            QImage expected(host.size()*ratio,QImage::Format_ARGB32_Premultiplied);
             expected.fill(Qt::transparent);
             {QPainter painter(&expected);painter.scale(ratio,ratio);
              view.render(&painter,view.pos(),QRegion(),QWidget::DrawChildren);
@@ -167,12 +174,20 @@ int main(int argc, char** argv) {
             {QPainter painter(&actual);for(const auto& part:captured.parts)
                 painter.drawImage(part.target,captured.image,part.source);}
             int count=0;
+            QRect differenceBounds;
             for(int y=0;y<actual.height();++y)for(int x=0;x<actual.width();++x){
                 const QRgb a=actual.pixel(x,y),b=expected.pixel(x,y);
-                count += pixelsDiffer(a, b);
+                if(pixelsDiffer(a,b)){
+                    if(!count)std::fprintf(stderr,"First item-view mismatch %d,%d: %08x vs %08x\n",x,y,a,b);
+                    ++count;
+                    differenceBounds=differenceBounds.united(QRect(x,y,1,1));
+                }
             }
             if(count){
                 std::fprintf(stderr,"Item-view overlay differs ratio=%g scroll=%d checked=%d pixels=%d\n",double(ratio),value,selected,count);
+                std::fprintf(stderr,"Mismatch bounds %d,%d %dx%d\n",differenceBounds.x(),differenceBounds.y(),differenceBounds.width(),differenceBounds.height());
+                actual.save("gallery-overlay-actual.png");
+                expected.save("gallery-overlay-expected.png");
                 return 1;
             }
         }

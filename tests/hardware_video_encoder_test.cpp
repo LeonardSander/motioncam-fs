@@ -2,8 +2,64 @@
 
 #include <QCoreApplication>
 #include <QFile>
-#include <QStandardPaths>
 #include <cstdio>
+
+namespace {
+// One black HEVC frame per fixture, 64x64 at 24 fps with BT.2020 primaries.
+// Generated with libx265 (info=0); embedded so every platform runs this test
+// without an external FFmpeg executable or loose binary fixtures.
+constexpr char full10Fixture[] =
+    "AAAAFGZ0eXBxdCAgAAACAHF0ICAAAAAId2lkZQAAABdtZGF0AAAACygBrHYNn/8UoWpHAAADOm1v"
+    "b3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAqAAEAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAA"
+    "AAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAKm"
+    "dHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAAqAAAAAAAAAAAAAAAAAAAAAAABAAAA"
+    "AAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAABAAAAAQAAAAAAAJGVkdHMAAAAcZWxzdAAA"
+    "AAAAAAABAAAAKgAAAAAAAQAAAAACHm1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAMAAAAAIAf/8A"
+    "AAAAAC1oZGxyAAAAAG1obHJ2aWRlAAAAAAAAAAAAAAAADFZpZGVvSGFuZGxlcgAAAcltaW5mAAAA"
+    "FHZtaGQAAAABAAAAAAAAAAAAAAAsaGRscgAAAABkaGxydXJsIAAAAAAAAAAAAAAAAAtEYXRhSGFu"
+    "ZGxlcgAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAV1zdGJsAAAA+XN0c2QA"
+    "AAAAAAAAAQAAAOloZXYxAAAAAAAAAAEAAAAARkZNUAAAAgAAAAIAAEAAQABIAAAASAAAAAAAAAAB"
+    "FExhdmM2My4xLjEwMiBsaWJ4MjY1AAAAAAAAAAAAAAAAGP//AAAAeWh2Y0MBAiAAAACQAAAAAAAe"
+    "8AD8/fr6AAAPAyAAAQAYQAEMAf//AiAAAAMAkAAAAwAAAwAelZQJIQABAC1CAQECIAAAAwCQAAAD"
+    "AAADAB6gIIEE2WVlSkwvAW4SBBIIAAADAAgAAAMAwEAiAAEABkQBwHPAiQAAAApmaWVsAQAAAAAQ"
+    "cGFzcAAAAAEAAAABAAAAGHN0dHMAAAAAAAAAAQAAAAEAAAIAAAAAHHN0c2MAAAAAAAAAAQAAAAEA"
+    "AAABAAAAAQAAABRzdHN6AAAAAAAAAA8AAAABAAAAFHN0Y28AAAAAAAAAAQAAACQAAAAgdWR0YQAA"
+    "ABipc3dyAAxVxExhdmY2My4xLjEwMg==";
+constexpr char limited10Fixture[] =
+    "AAAAFGZ0eXBxdCAgAAACAHF0ICAAAAAId2lkZQAAABdtZGF0AAAACygBrHYNn/7vVakcAAADOm1v"
+    "b3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAqAAEAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAA"
+    "AAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAKm"
+    "dHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAAqAAAAAAAAAAAAAAAAAAAAAAABAAAA"
+    "AAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAABAAAAAQAAAAAAAJGVkdHMAAAAcZWxzdAAA"
+    "AAAAAAABAAAAKgAAAAAAAQAAAAACHm1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAMAAAAAIAf/8A"
+    "AAAAAC1oZGxyAAAAAG1obHJ2aWRlAAAAAAAAAAAAAAAADFZpZGVvSGFuZGxlcgAAAcltaW5mAAAA"
+    "FHZtaGQAAAABAAAAAAAAAAAAAAAsaGRscgAAAABkaGxydXJsIAAAAAAAAAAAAAAAAAtEYXRhSGFu"
+    "ZGxlcgAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAV1zdGJsAAAA+XN0c2QA"
+    "AAAAAAAAAQAAAOloZXYxAAAAAAAAAAEAAAAARkZNUAAAAgAAAAIAAEAAQABIAAAASAAAAAAAAAAB"
+    "FExhdmM2My4xLjEwMiBsaWJ4MjY1AAAAAAAAAAAAAAAAGP//AAAAeWh2Y0MBAiAAAACQAAAAAAAe"
+    "8AD8/fr6AAAPAyAAAQAYQAEMAf//AiAAAAMAkAAAAwAAAwAelZQJIQABAC1CAQECIAAAAwCQAAAD"
+    "AAADAB6gIIEE2WVlSkwvAWoSBBIIAAADAAgAAAMAwEAiAAEABkQBwHPAiQAAAApmaWVsAQAAAAAQ"
+    "cGFzcAAAAAEAAAABAAAAGHN0dHMAAAAAAAAAAQAAAAEAAAIAAAAAHHN0c2MAAAAAAAAAAQAAAAEA"
+    "AAABAAAAAQAAABRzdHN6AAAAAAAAAA8AAAABAAAAFHN0Y28AAAAAAAAAAQAAACQAAAAgdWR0YQAA"
+    "ABipc3dyAAxVxExhdmY2My4xLjEwMg==";
+constexpr char full8Fixture[] =
+    "AAAAFGZ0eXBxdCAgAAACAHF0ICAAAAAId2lkZQAAABdtZGF0AAAACygBrHYNn/8UoWpHAAADOG1v"
+    "b3YAAABsbXZoZAAAAAAAAAAAAAAAAAAAA+gAAAAqAAEAAAEAAAAAAAAAAAAAAAABAAAAAAAAAAAA"
+    "AAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAKk"
+    "dHJhawAAAFx0a2hkAAAAAwAAAAAAAAAAAAAAAQAAAAAAAAAqAAAAAAAAAAAAAAAAAAAAAAABAAAA"
+    "AAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAQAAAAABAAAAAQAAAAAAAJGVkdHMAAAAcZWxzdAAA"
+    "AAAAAAABAAAAKgAAAAAAAQAAAAACHG1kaWEAAAAgbWRoZAAAAAAAAAAAAAAAAAAAMAAAAAIAf/8A"
+    "AAAAAC1oZGxyAAAAAG1obHJ2aWRlAAAAAAAAAAAAAAAADFZpZGVvSGFuZGxlcgAAAcdtaW5mAAAA"
+    "FHZtaGQAAAABAAAAAAAAAAAAAAAsaGRscgAAAABkaGxydXJsIAAAAAAAAAAAAAAAAAtEYXRhSGFu"
+    "ZGxlcgAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAVtzdGJsAAAA93N0c2QA"
+    "AAAAAAAAAQAAAOdoZXYxAAAAAAAAAAEAAAAARkZNUAAAAgAAAAIAAEAAQABIAAAASAAAAAAAAAAB"
+    "FExhdmM2My4xLjEwMiBsaWJ4MjY1AAAAAAAAAAAAAAAAGP//AAAAd2h2Y0MBAWAAAACQAAAAAAAe"
+    "8AD8/fj4AAAPAyAAAQAYQAEMAf//AWAAAAMAkAAAAwAAAwAelZQJIQABACtCAQEBYAAAAwCQAAAD"
+    "AAADAB6gIIEFllZUpMLwFuEgQSCAAAADAIAAAAwEIgABAAZEAcBzwIkAAAAKZmllbAEAAAAAEHBh"
+    "c3AAAAABAAAAAQAAABhzdHRzAAAAAAAAAAEAAAABAAACAAAAABxzdHNjAAAAAAAAAAEAAAABAAAA"
+    "AQAAAAEAAAAUc3RzegAAAAAAAAAPAAAAAQAAABRzdGNvAAAAAAAAAAEAAAAkAAAAIHVkdGEAAAAY"
+    "qXN3cgAMVcRMYXZmNjMuMS4xMDI=";
+}
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
@@ -20,29 +76,20 @@ int main(int argc, char** argv) {
         QFile::remove(args.last());
         return QFile::copy(qEnvironmentVariable("ENCODER_TEST_FIXTURE"), args.last()) ? 0 : 1;
     }
-    const auto ffmpeg = QStandardPaths::findExecutable("ffmpeg");
-    if (ffmpeg.isEmpty()) return 77;
     QTemporaryDir directory;
     if (!directory.isValid()) return 1;
-    auto fixture = [&](const QString& name, const QString& format, const QString& range) {
+    auto fixture = [&](const QString& name, const char* base64) {
         const auto output = directory.filePath(name + ".mov");
-        QProcess process;
-        process.setProcessChannelMode(QProcess::MergedChannels);
-        process.start(ffmpeg, {"-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
-            "-i", "color=black:size=64x64:rate=24", "-frames:v", "1", "-vf", "format=" + format,
-            "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "pools=1:frame-threads=1:log-level=error:colorprim=bt2020",
-            "-color_range", range, "-colorspace", "bt2020nc", "-color_primaries", "bt2020", output});
-        if (!process.waitForFinished(15000) || process.exitCode()) {
-            process.kill();
-            process.waitForFinished();
+        QFile file(output);
+        const auto bytes = QByteArray::fromBase64(base64);
+        if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size())
             return QString{};
-        }
         return output;
     };
-    const auto full10 = fixture("full10", "yuv420p10le", "pc");
-    const auto limited10 = fixture("limited10", "yuv420p10le", "tv");
-    const auto full8 = fixture("full8", "yuv420p", "pc");
-    if (full10.isEmpty() || limited10.isEmpty() || full8.isEmpty()) return 77;
+    const auto full10 = fixture("full10", full10Fixture);
+    const auto limited10 = fixture("limited10", limited10Fixture);
+    const auto full8 = fixture("full8", full8Fixture);
+    if (full10.isEmpty() || limited10.isEmpty() || full8.isEmpty()) return 1;
     auto select = [&](const QString& input, const QString& chroma = "420", int width = 64) {
         qputenv("ENCODER_TEST_FIXTURE", input.toUtf8());
         return motioncam::selectHardwareVideoEncoder(application.applicationFilePath(),

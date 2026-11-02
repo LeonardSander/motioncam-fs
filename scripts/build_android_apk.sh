@@ -25,21 +25,29 @@ if [[ ! -x "${JAVA_HOME}/bin/javac" ]]; then
 fi
 
 build_dir="${1:-${source_dir}/build-android-arm64}"
+phase="${2:-all}"
+case "$phase" in
+  all|configure|build) ;;
+  *) echo "Usage: $0 [BUILD_DIRECTORY] [all|configure|build]" >&2; exit 2 ;;
+esac
 
-"${QT_ANDROID_ROOT}/bin/qt-cmake" -S "${source_dir}" -B "${build_dir}" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_TESTING=OFF \
-  -DMOTIONCAM_REQUIRE_VULKAN=ON \
-  -DANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}" \
-  -DANDROID_NDK_ROOT="${ANDROID_NDK_ROOT}" \
-  -DANDROID_PLATFORM=android-28 \
-  -DQT_HOST_PATH="${QT_HOST_PATH}" \
-  -DQT_ANDROID_ABIS=arm64-v8a \
-  -DQT_CHAINLOAD_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-  -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
-  -DVCPKG_TARGET_TRIPLET=arm64-android \
-  -DVCPKG_OVERLAY_PORTS="${source_dir}/ports" \
-  -DQT_ANDROID_DEPLOYMENT_TYPE=Debug
+if [[ "$phase" != build ]]; then
+  "${QT_ANDROID_ROOT}/bin/qt-cmake" -S "${source_dir}" -B "${build_dir}" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING="${BUILD_TESTING:-OFF}" \
+    -DMOTIONCAM_REQUIRE_VULKAN=ON \
+    -DANDROID_SDK_ROOT="${ANDROID_SDK_ROOT}" \
+    -DANDROID_NDK_ROOT="${ANDROID_NDK_ROOT}" \
+    -DANDROID_PLATFORM=android-28 \
+    -DQT_HOST_PATH="${QT_HOST_PATH}" \
+    -DQT_ANDROID_ABIS="${QT_ANDROID_ABI:-arm64-v8a}" \
+    -DQT_CHAINLOAD_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
+    -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
+    -DVCPKG_TARGET_TRIPLET="${ANDROID_VCPKG_TRIPLET:-arm64-android}" \
+    -DVCPKG_OVERLAY_PORTS="${source_dir}/ports" \
+    -DQT_ANDROID_DEPLOYMENT_TYPE=Debug
+fi
+if [[ "$phase" == configure ]]; then exit 0; fi
 
 cmake --build "${build_dir}" --target apk --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
 apk="${build_dir}/android-build/build/outputs/apk/debug/android-build-debug.apk"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the public Qt 6.12.0 Android arm64 archives into a Qt kit directory."""
+"""Install the public Qt 6.12.0 Android archives into a Qt kit directory."""
 
 import hashlib
 import sys
@@ -46,13 +46,17 @@ def download(url, destination):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: install_qt_android.py DESTINATION_KIT_DIRECTORY")
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit("Usage: install_qt_android.py DESTINATION_KIT_DIRECTORY [arm64_v8a|x86_64]")
+    architecture = sys.argv[2] if len(sys.argv) == 3 else "arm64_v8a"
+    if architecture not in ("arm64_v8a", "x86_64"):
+        raise SystemExit(f"Unsupported Android architecture: {architecture}")
+    base = BASE.replace("arm64_v8a", architecture)
     target = Path(sys.argv[1]).resolve()
     target.mkdir(parents=True, exist_ok=True)
     urls = []
     for component, modules in COMPONENTS.items():
-        page = urljoin(BASE, component)
+        page = urljoin(base, component.replace("arm64_v8a", architecture))
         parser = Links()
         parser.feed(urlopen(page).read().decode())
         matches = [name for name in parser.links if name.endswith(".7z")
@@ -67,7 +71,7 @@ def main():
             list(pool.map(lambda url: download(url, temporary / url.rsplit("/", 1)[-1]), urls))
         for archive in temporary.glob("*.7z"):
             run(["7z", "x", "-y", "-bso0", f"-o{target}", str(archive)], check=True)
-    print(f"Installed Qt Android arm64 kit in {target}")
+    print(f"Installed Qt Android {architecture} kit in {target}")
 
 
 if __name__ == "__main__":

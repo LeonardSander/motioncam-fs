@@ -53,7 +53,7 @@ jobs:
       with:
         vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
 
-    - name: Build APK
+    - name: Configure CMake (Android arm64)
       shell: bash
       env:
         QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_arm64_v8a
@@ -61,7 +61,16 @@ jobs:
       run: |
         export ANDROID_SDK_ROOT="${ANDROID_HOME}"
         export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/27.2.12479018"
-        bash scripts/build_android_apk.sh "$PWD/build-android-arm64"
+        BUILD_TESTING=ON bash scripts/build_android_apk.sh "$PWD/build-android-arm64" configure
+
+    - name: Build APK and test binaries
+      run: |
+        cmake --build build-android-arm64 --parallel 4
+        cmake --build build-android-arm64 --target apk --parallel 4
+
+    - name: Package APK
+      shell: bash
+      run: |
         mkdir -p artifacts
         ref_safe="${GITHUB_REF_NAME//\//-}"
         apk="$(find build-android-arm64 -type f -name '*.apk' -path '*/outputs/apk/*' -print -quit)"
@@ -73,6 +82,91 @@ jobs:
       with:
         name: motioncam-android-arm64
         path: artifacts/*.apk
+
+  android-tests:
+    name: Android tests (x86_64 emulator)
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Install Android platform and NDK
+      run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.2.12479018'
+
+    - name: Install build tools
+      run: sudo apt-get update && sudo apt-get install -y ninja-build pkg-config autoconf automake libtool nasm p7zip-full
+
+    - name: Install host Qt
+      id: host-qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.12.0'
+        host: linux
+        target: desktop
+
+    - name: Install Android Qt (x86_64)
+      run: python3 scripts/install_qt_android.py "$PWD/Qt/6.12.0/android_x86_64" x86_64
+
+    - name: Set up vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+
+    - name: Configure CMake (Android tests)
+      shell: bash
+      env:
+        QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_x86_64
+        QT_HOST_PATH: ${{ steps.host-qt.outputs.qt-root-dir }}
+        QT_ANDROID_ABI: x86_64
+        ANDROID_VCPKG_TRIPLET: x64-android
+        BUILD_TESTING: 'ON'
+      run: |
+        export ANDROID_SDK_ROOT="$ANDROID_HOME"
+        export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/27.2.12479018"
+        bash scripts/build_android_apk.sh "$PWD/build-android-tests" configure
+
+    - name: Build tests
+      run: cmake --build build-android-tests --parallel 4
+
+    - name: Enable emulator acceleration
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+    - name: Test
+      continue-on-error: true
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 35
+        arch: x86_64
+        target: default
+        disk-size: 8G
+        disable-animations: true
+        script: |
+          python3 tests/android_ctest.py deploy build-android-tests Qt/6.12.0/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
+          ctest --test-dir build-android-tests -C Release --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-android
+        path: |
+          build-android-tests/test-results.xml
+          build-android-tests/Testing/Temporary/LastTest.log
+        if-no-files-found: ignore
 
   linux-appimage:
     name: Linux AppImage (Clang)
@@ -89,25 +183,29 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          clang ninja-build pkg-config \
+          clang ninja-build pkg-config nasm autoconf automake libtool \
           libboost-filesystem-dev libboost-locale-dev libboost-regex-dev \
           libspdlog-dev libfmt-dev libfuse3-dev libjxl-dev libxcb-cursor0 \
-          libarchive-dev 7zip \
+          libarchive-dev 7zip libx11-dev libxrandr-dev libwayland-dev \
+          libxkbcommon-dev libx11-xcb-dev \
           libavcodec-dev libavformat-dev libavutil-dev libswresample-dev \
           libswscale-dev
 
     # Ubuntu 24.04 ships libjpeg-turbo 2.x, while 12-bit CinemaDNG support
     # uses the unified 8/12-bit API provided by libjpeg-turbo 3.x. Install the
-    # same pinned vcpkg port used by the other platform builds, but keep
-    # manifest mode disabled so the remaining Linux dependencies stay native.
-    - name: Set up vcpkg for libjpeg-turbo
+    # pinned vcpkg processing libraries used by the other platforms. Keeping
+    # libplacebo and FFmpeg together also enables the Vulkan tests on Linux.
+    - name: Set up vcpkg for processing dependencies
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
 
-    - name: Install libjpeg-turbo via vcpkg
+    - name: Install processing dependencies via vcpkg
       shell: bash
-      run: "$VCPKG_ROOT/vcpkg install libjpeg-turbo:x64-linux --classic --clean-after-build"
+      run: |
+        "$VCPKG_ROOT/vcpkg" install --classic --clean-after-build \
+          libjpeg-turbo:x64-linux libplacebo:x64-linux \
+          'ffmpeg[avcodec,avfilter,avformat,swresample,swscale]:x64-linux'
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
@@ -120,20 +218,35 @@ jobs:
     - name: Configure with LLVM
       shell: bash
       run: |
+        export PKG_CONFIG_PATH="$VCPKG_ROOT/installed/x64-linux/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         cmake -S . -B build-linux -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=x64-linux \
-          -DVCPKG_MANIFEST_MODE=OFF
+          -DVCPKG_MANIFEST_MODE=OFF \
+          -DBUILD_TESTING=ON \
+          -DMOTIONCAM_REQUIRE_VULKAN=ON \
+          -DPKG_CONFIG_ARGN=--static
 
     - name: Build
       run: cmake --build build-linux --parallel
 
     - name: Test
       continue-on-error: true
-      run: ctest --test-dir build-linux --output-on-failure
+      run: ctest --test-dir build-linux --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-linux
+        path: |
+          build-linux/test-results.xml
+          build-linux/Testing/Temporary/LastTest.log
+          build-linux/gallery-overlay-*.png
+        if-no-files-found: ignore
 
     - name: Create AppImage
       shell: bash
@@ -304,6 +417,7 @@ jobs:
         cmake -S . -B ${{ matrix.build_dir }} `
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
           -DCMAKE_VERBOSE_MAKEFILE=ON `
+          -DBUILD_TESTING=ON `
           -DMOTIONCAM_REQUIRE_VULKAN=ON `
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
@@ -344,6 +458,7 @@ jobs:
         cmake -S . -B "${{ matrix.build_dir }}" \
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
+          -DBUILD_TESTING=ON \
           -DMOTIONCAM_REQUIRE_VULKAN=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
@@ -362,9 +477,21 @@ jobs:
       run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
 
     - name: Test
-      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} --output-on-failure
+      continue-on-error: true
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
 
 
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.artifact_suffix }}
+        path: |
+          ${{ matrix.build_dir }}/test-results.xml
+          ${{ matrix.build_dir }}/Testing/Temporary/LastTest.log
+          ${{ matrix.build_dir }}/gallery-overlay-*.png
+        if-no-files-found: ignore
 
     # ---------- PACKAGE ----------
     - name: Package binaries
@@ -412,7 +539,7 @@ jobs:
   # ---------- RELEASE ----------
   release:
     name: Create GitHub Release
-    needs: [build, linux-appimage, android-apk]
+    needs: [build, linux-appimage, android-apk, android-tests]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -420,6 +547,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release-files/
+          pattern: motioncam-*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

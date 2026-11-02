@@ -654,7 +654,7 @@ if(WIN32 AND _motioncam_vcpkg_prefix)
     endif()
   endif()
 elseif(PkgConfig_FOUND)
-  if(ANDROID OR (APPLE AND VCPKG_TARGET_TRIPLET))
+  if(VCPKG_TARGET_TRIPLET)
     # The host may have libplacebo installed too. Restrict this probe to the
     # target vcpkg tree so another installation cannot silently disable Vulkan.
     set(_saved_pkg_config_libdir "$ENV{PKG_CONFIG_LIBDIR}")
@@ -667,7 +667,7 @@ elseif(PkgConfig_FOUND)
     unset(pkgcfg_lib_DIRECTLOG_PLACEBO_placebo CACHE)
   endif()
   pkg_check_modules(DIRECTLOG_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.1)
-  if(ANDROID OR (APPLE AND VCPKG_TARGET_TRIPLET))
+  if(VCPKG_TARGET_TRIPLET)
     set(ENV{PKG_CONFIG_LIBDIR} "${_saved_pkg_config_libdir}")
     set(ENV{PKG_CONFIG_PATH} "${_saved_pkg_config_path}")
     set(PKG_CONFIG_ARGN "${_saved_pkg_config_argn}")
@@ -687,7 +687,7 @@ elseif(PkgConfig_FOUND)
       add_library(MotionCamPlacebo INTERFACE)
       target_link_libraries(MotionCamPlacebo INTERFACE PkgConfig::DIRECTLOG_PLACEBO)
       target_link_libraries(${PROJECT_NAME} PRIVATE MotionCamPlacebo)
-      if(ANDROID OR (APPLE AND VCPKG_TARGET_TRIPLET))
+      if(VCPKG_TARGET_TRIPLET)
         # The vcpkg shaderc .pc file omits static glslang/SPIRV-Tools links.
         # Its CMake target records the complete transitive dependency graph.
         find_package(unofficial-shaderc CONFIG REQUIRED)
@@ -792,7 +792,7 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
-    if(UNIX AND NOT ANDROID)
+    if(UNIX)
         find_package(Threads REQUIRED)
         add_executable(motioncam-source-input-test tests/source_input_test.cpp)
         target_include_directories(motioncam-source-input-test PRIVATE include)
@@ -828,7 +828,7 @@ if(BUILD_TESTING)
         add_test(NAME motioncam-vulkan-gain-layout-test
             COMMAND motioncam-vulkan-gain-layout-test)
         set_tests_properties(motioncam-vulkan-gain-layout-test PROPERTIES
-            SKIP_RETURN_CODE 77)
+            SKIP_RETURN_CODE 77 LABELS device)
     endif()
     add_executable(motioncam-archive-import-test
         tests/archive_import_test.cpp
@@ -928,8 +928,14 @@ if(BUILD_TESTING)
         Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex
         spdlog::spdlog motioncam-decoder JPEG::JPEG)
     target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
-        TINY_DNG_ENABLE_JPEG_XL
-        RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:motioncam-rife-fake>")
+        TINY_DNG_ENABLE_JPEG_XL)
+    if(ANDROID)
+        target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
+            RIFE_FAKE_EXECUTABLE="/data/local/tmp/motioncam-tests/bin/motioncam-rife-fake")
+    else()
+        target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
+            RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:motioncam-rife-fake>")
+    endif()
     if(MSVC)
         target_compile_options(motioncam-finalize-interpolation-test PRIVATE /UNDEBUG)
     else()
@@ -956,7 +962,45 @@ if(BUILD_TESTING)
     target_include_directories(motioncam-hardware-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
     target_link_libraries(motioncam-hardware-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
     add_test(NAME motioncam-hardware-video-encoder-test COMMAND motioncam-hardware-video-encoder-test)
-    set_tests_properties(motioncam-hardware-video-encoder-test PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Labels describe hardware requirements; CI intentionally runs both groups.
+    # These tests use CPU fallbacks or fixtures even when they exercise GPU APIs.
+    set_tests_properties(
+        motioncam-thumbnail-cache-test
+        motioncam-gallery-overlay-test
+        motioncam-archive-import-test
+        motioncam-demosaic-test
+        motioncam-core-tests
+        motioncam-lossless-jpeg-test
+        motioncam-jpeg-xl-test
+        motioncam-finalize-interpolation-test
+        motioncam-audio-finalize-test
+        motioncam-hardware-video-encoder-test
+        PROPERTIES LABELS portable)
+    if(TEST motioncam-source-input-test)
+        set_tests_properties(motioncam-source-input-test PROPERTIES LABELS portable)
+    endif()
+
+    if(ANDROID)
+        # These console tests use local fixtures, without a Java activity or
+        # document provider. Exercise the Android stream with POSIX file access.
+        add_library(motioncam-test-source-access STATIC tests/android_source_access.cpp)
+        target_include_directories(motioncam-test-source-access PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+        target_link_libraries(motioncam-test-source-access PUBLIC
+            Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
+        get_property(android_tests DIRECTORY PROPERTY TESTS)
+        set(android_test_files "$<TARGET_FILE:motioncam-rife-fake>\n")
+        foreach(test_target IN LISTS android_tests)
+            if(NOT test_target STREQUAL "motioncam-source-input-test")
+                target_link_libraries(${test_target} PRIVATE motioncam-test-source-access)
+            endif()
+            set_property(TARGET ${test_target} PROPERTY CROSSCOMPILING_EMULATOR
+                "python3;${CMAKE_CURRENT_SOURCE_DIR}/tests/android_ctest.py;run")
+            string(APPEND android_test_files "$<TARGET_FILE:${test_target}>\n")
+        endforeach()
+        file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/android-tests-$<CONFIG>.txt"
+            CONTENT "${android_test_files}")
+    endif()
 
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations
