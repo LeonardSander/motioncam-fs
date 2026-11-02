@@ -92,6 +92,19 @@ void ProcessingFileSystem::finalize(MountId id, const std::string& destination,
                   fileReady, writeFiles);
 }
 
+std::pair<std::string, std::shared_ptr<std::vector<uint8_t>>>
+ProcessingFileSystem::audioEntry(MountId id) {
+    auto mounted = session(id);
+    for (const char* name : {"audio.wav", "audio.flac", "audio.opus", "audio.aac"}) {
+        const auto entry = mounted->fs->findEntry(name);
+        if (!entry) continue;
+        auto bytes = mounted->fs->materializeFile(*entry, false, true);
+        if (!bytes) throw std::runtime_error("Could not read source audio");
+        return {name, std::move(bytes)};
+    }
+    return {};
+}
+
 void ProcessingFileSystem::finalizeToEntries(MountId id, bool jpegCompression,
     const FinalizeOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,

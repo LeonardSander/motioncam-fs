@@ -78,6 +78,7 @@ set(PROJECT_SOURCES
         src/CameraFrameMetadata.cpp
         src/CalibrationData.cpp
         src/CfaBadPixels.cpp
+        src/NativeVideoEncoder.cpp
         src/AudioWriter.cpp
         src/Utils.cpp
         src/IsoOverlay.cpp
@@ -212,6 +213,8 @@ elseif(ANDROID)
       src/android/VulkanHardwareBuffer.cpp
       include/android/VulkanHardwareBuffer.h
       src/android/MediaCodecImageReader.cpp
+      src/android/P010VideoEncoder.cpp
+      include/android/P010VideoEncoder.h
       include/android/MediaCodecImageReader.h
       src/android/ProcessingFileSystem.cpp
       include/android/ProcessingFileSystem.h
@@ -606,6 +609,9 @@ else()
     endif()
   endif()
 endif()
+if(ANDROID AND NOT MOTIONCAM_AVFILTER_TARGET)
+  message(FATAL_ERROR "Android Camera Native finalization requires linked FFmpeg avfilter support")
+endif()
 if(MOTIONCAM_AVFILTER_TARGET)
   target_link_libraries(${PROJECT_NAME} PRIVATE ${MOTIONCAM_AVFILTER_TARGET})
   target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_AVFILTER=1)
@@ -957,6 +963,19 @@ if(BUILD_TESTING)
     target_include_directories(motioncam-audio-finalize-test PRIVATE include)
     target_link_libraries(motioncam-audio-finalize-test PRIVATE motioncam-decoder ${FFMPEG_LIBRARIES})
     add_test(NAME motioncam-audio-finalize-test COMMAND motioncam-audio-finalize-test)
+
+    if(MOTIONCAM_AVFILTER_TARGET)
+        add_executable(motioncam-native-video-encoder-test tests/native_video_encoder_test.cpp src/NativeVideoEncoder.cpp src/AudioWriter.cpp)
+        target_include_directories(motioncam-native-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+        target_compile_definitions(motioncam-native-video-encoder-test PRIVATE MOTIONCAM_HAS_AVFILTER=1)
+        target_link_libraries(motioncam-native-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core motioncam-decoder ${FFMPEG_LIBRARIES} ${MOTIONCAM_AVFILTER_TARGET})
+        if(ANDROID)
+            target_sources(motioncam-native-video-encoder-test PRIVATE src/android/P010VideoEncoder.cpp)
+            target_link_libraries(motioncam-native-video-encoder-test PRIVATE ${ANDROID_MEDIANDK_LIB})
+        endif()
+        add_test(NAME motioncam-native-video-encoder-test COMMAND motioncam-native-video-encoder-test)
+        set_tests_properties(motioncam-native-video-encoder-test PROPERTIES LABELS "portable")
+    endif()
 
     add_executable(motioncam-hardware-video-encoder-test tests/hardware_video_encoder_test.cpp)
     target_include_directories(motioncam-hardware-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})

@@ -54,8 +54,45 @@ finalizer to Android's document provider. The first export asks for a retained
 document-tree grant; later exports reuse it. Destination preferences can select
 Documents, the source directory, or a custom granted directory. The output
 bytes are passed synchronously through a direct byte buffer, avoiding an
-app-private copy of the whole finalized sequence. Camera Native and 7z modes
-depend on external executables and are not part of this Android export path.
+app-private copy of the whole finalized sequence. Camera Native finalization uses
+linked FFmpeg libraries for LOG60 conversion, video encoding, and audio muxing;
+it does not launch an FFmpeg executable. ProRes and CineForm use the linked
+software encoders. Android-only device encoder formats include `H264 8b 100`,
+`HEVC 10b 100`, and `AV1 10b 100`. The second field selects 8 or 10 bits;
+the last number is the requested bitrate in Mbps, defaulting to 100 when omitted.
+The presets use 100 Mbps. Older saved formats are normalized to the shorter labels. Selection checks hardware
+acceleration, input layout, dimensions, frame rate, bitrate, and the 10-bit
+profile when requested. It never falls back to software HEVC/AV1 or reduces
+the requested bit depth. Dimensions currently must be divisible by 16.
+8-bit input uses FFmpeg's MediaCodec wrapper with NV12 or planar YUV420.
+10-bit input uses a direct NDK MediaCodec adapter with P010 on Android 13+
+(API 33+), requiring the device to advertise both P010 input and the matching
+10-bit codec profile. Devices offering 10-bit encoding only through surfaces
+are not supported by this byte-buffer path. H.264 High 10 is included only
+when the device advertises it; HEVC Main 10 and AV1 Main 10 are likewise
+capability-dependent. Software HEVC/AV1 and AV1 synth-noise modes remain
+disabled in Android's dependency build.
+
+H.264 and HEVC use MOV when copying uncompressed audio. AV1 uses MP4 and
+converts WAV audio to lossless FLAC when no audio codec suffix is requested.
+An explicit FLAC/Opus suffix or existing compressed audio selects MP4.
+
+Color conversion explicitly uses full data levels, and device encoder output
+is rejected when its reported range, bit depth, chroma, dimensions, or BT.2020
+matrix/primaries differ. No deprecated `yuvj*` pixel format is requested for
+encoding. FFmpeg may still report `yuvj420p` when *decoding* a full-range 8-bit
+bitstream; it is a legacy representation, not a separate encoded format.
+ProRes/MOV's older nclc tag has no range flag: the pixels remain full-range,
+and the native JSON sidecar declares `dataLevels: Full`. A temporary seekable MOV/MP4 and
+its sidecars are staged privately,
+then copied in bounded chunks directly into the selected Android destination.
+Only DNG sequences create a per-clip subfolder. Native video and metadata-only
+exports reserve a shared basename for their files; repeat exports add a numeric
+suffix instead of overwriting existing files. Video names retain `_LOG60_NATIVE`
+without a codec suffix. Cancelling a direct export removes only its newly
+created documents, never the destination directory or pre-existing files.
+Temporary files are removed on completion or failure. Display matrices use the
+same clockwise orientation as the importer, preserving 90° and 270° rotations. 7z mode still requires an external executable.
 
 The main window and gallery follow all four sensor rotations. In portrait, the
 main window stacks the clip list above settings, initially giving each half of

@@ -11,6 +11,12 @@
         "libarchive",
         "libjxl",
         {
+            "name": "ffmpeg",
+            "platform": "android",
+            "default-features": false,
+            "features": ["opus"]
+        },
+        {
             "name": "libplacebo",
             "platform": "android | linux | osx | windows"
         },

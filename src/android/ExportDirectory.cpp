@@ -27,12 +27,28 @@ QString activityString(const QString& fallback, const char* method, const Args&.
     const auto activity = QNativeInterface::QAndroidApplication::context();
     return activity.isValid() ? activity.callMethod<QString>(method, args...) : fallback;
 }
+// Use JNI directly so exceptions from document writes reach the transaction
+// caller; QJniObject::callMethod clears them before it returns.
+template<typename... Args>
+bool writeActivity(const char* methodName, const char* signature, Args... args) {
+    const auto activity = QNativeInterface::QAndroidApplication::context();
+    if (!activity.isValid()) return false;
+    QJniEnvironment env;
+    jclass type = env->GetObjectClass(activity.object());
+    jmethodID method = type ? env->GetMethodID(type, methodName, signature) : nullptr;
+    if (method) env->CallVoidMethod(activity.object(), method, args...);
+    const bool ok = method && !env->ExceptionCheck();
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (type) env->DeleteLocalRef(type);
+    return ok;
+}
+
 }
 
 QString prepareFinalizeOutput(const QString& folderName, const QString& mode,
-                              const QString& importPath) {
+                              const QString& importPath, bool createSubfolder) {
     return activityString(QStringLiteral("error:Android activity unavailable"),
-                          "prepareFinalizeOutput", folderName, mode, importPath);
+                          "prepareFinalizeOutput", folderName, mode, importPath, jboolean(createSubfolder));
 }
 
 QString finalizeTreeSelectionStatus() {
@@ -49,9 +65,7 @@ QString legacyCustomFinalizeDirectory() {
 
 bool writeFinalizeOutputEntry(const QString& name,
                               const std::vector<uint8_t>& bytes) {
-    const QJniObject activity = QNativeInterface::QAndroidApplication::context();
-    if (!activity.isValid() || bytes.size() > static_cast<size_t>(INT32_MAX))
-        return false;
+    if (bytes.size() > static_cast<size_t>(INT32_MAX)) return false;
     QJniEnvironment env;
     jobject payload = env->NewDirectByteBuffer(
         const_cast<uint8_t*>(bytes.data()), static_cast<jlong>(bytes.size()));
@@ -60,18 +74,17 @@ bool writeFinalizeOutputEntry(const QString& name,
         return false;
     }
     const auto entryName = QJniObject::fromString(name);
-    // QJniObject::callMethod clears Java exceptions before returning. Use JNI
-    // directly here so failed writes and renames reach the transaction caller.
-    jclass type = env->GetObjectClass(activity.object());
-    jmethodID method = type ? env->GetMethodID(type, "writeFinalizeOutputEntry",
-        "(Ljava/lang/String;Ljava/nio/ByteBuffer;)V") : nullptr;
-    if (method) env->CallVoidMethod(activity.object(), method,
-                                    entryName.object<jstring>(), payload);
-    const bool ok = method && !env->ExceptionCheck();
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    if (type) env->DeleteLocalRef(type);
+    const bool ok = writeActivity("writeFinalizeOutputEntry", "(Ljava/lang/String;Ljava/nio/ByteBuffer;)V",
+        entryName.object<jstring>(), payload);
     env->DeleteLocalRef(payload);
     return ok;
+}
+
+bool writeFinalizeOutputFile(const QString& name, const QString& path) {
+    const auto entryName = QJniObject::fromString(name);
+    const auto sourcePath = QJniObject::fromString(path);
+    return writeActivity("writeFinalizeOutputFile", "(Ljava/lang/String;Ljava/lang/String;)V",
+        entryName.object<jstring>(), sourcePath.object<jstring>());
 }
 
 void finishFinalizeOutput() {

@@ -17,6 +17,7 @@
 #include "ArchiveImport.h"
 #include "AudioWriter.h"
 #include "HardwareVideoEncoder.h"
+#include "NativeVideoEncoder.h"
 
 #include <motioncam/Decoder.hpp>
 
@@ -1421,9 +1422,27 @@ namespace {
         return output;
     }
 
+#ifdef __ANDROID__
+    QString androidNativeFormat(const QString& mode) {
+        auto parts = mode.simplified().split(' ', Qt::SkipEmptyParts);
+        if (parts.isEmpty() || (parts[0] != "H264" && parts[0] != "HEVC" && parts[0] != "AV1")) return mode;
+        if (parts.size() > 1 && parts[1] == "420") parts.removeAt(1);
+        if (parts.size() > 1 && parts[1].compare("hardware", Qt::CaseInsensitive) == 0) parts.removeAt(1);
+        if (parts.size() > 1) {
+            if (parts[1] == "8" || parts[1] == "10") parts[1] += 'b';
+            if (parts[1] == "8b" || parts[1] == "10b") return parts.join(' ');
+        }
+        return mode;
+    }
+#endif
+
     bool isCameraNativeFormat(const QString& mode) {
         const QString trimmed = mode.trimmed();
-        return trimmed.startsWith("HEVC ", Qt::CaseInsensitive) ||
+        return
+#ifdef __ANDROID__
+               trimmed.startsWith("H264 ", Qt::CaseInsensitive) ||
+#endif
+               trimmed.startsWith("HEVC ", Qt::CaseInsensitive) ||
                trimmed.startsWith("AV1 ", Qt::CaseInsensitive) ||
                trimmed.startsWith("ProRes ", Qt::CaseInsensitive) ||
                trimmed.startsWith("CineForm ", Qt::CaseInsensitive);
@@ -1974,14 +1993,28 @@ MainWindow::MainWindow(QWidget *parent)
             combo->installEventFilter(this);
         }
     }
+    for (int i = ui->dngCompressionModeComboBox->count() - 1; i >= 0; --i) {
+        const auto text = ui->dngCompressionModeComboBox->itemText(i);
+        if (text.startsWith("HEVC ") || text.startsWith("AV1 "))
+            ui->dngCompressionModeComboBox->removeItem(i);
+    }
+    ui->dngCompressionModeComboBox->addItems({
+        "H264 8b 100", "H264 10b 100", "HEVC 8b 100", "HEVC 10b 100",
+        "AV1 8b 100", "AV1 10b 100"});
 #endif
     ui->dngCompressionModeComboBox->addItems({
         "JPEG XL Lossless flac", "JPEG XL Lossless opus",
+#ifndef __ANDROID__
         "HEVC 420 slow 14 flac", "HEVC 420 slow 14 opus",
+#endif
         "Audio, GCSV, JSON Only"});
     ui->dngCompressionModeComboBox->setToolTip(
         tr("Append flac or opus to a DNG or Camera Native format to encode audio. "
            "Without a suffix, existing audio is copied unchanged. "
+#ifdef __ANDROID__
+           "Android format: H264|HEVC|AV1 8b|10b Mbps (device support required; 10-bit requires Android 13+ and P010 input). "
+           "AV1 MP4 converts WAV audio to lossless FLAC by default. "
+#endif
            "Audio, GCSV, JSON Only exports audio, gyro data, and per-clip metadata without video."));
     motioncam::warmVulkanGalleryPreview(
         QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
@@ -2702,6 +2735,9 @@ void MainWindow::restoreSettings() {
         if (savedMode == "AV1 HDR + Noise" || savedMode == "AV1 Synth Noise")
             savedMode = "AV1 420 2 12 synth noise";
         if (savedMode == "ProRes Standard") savedMode = "ProRes Std";
+#ifdef __ANDROID__
+        savedMode = androidNativeFormat(savedMode);
+#endif
         const int savedIndex = ui->dngCompressionModeComboBox->findText(savedMode);
         if (savedIndex >= 4) {
             compressionIndex = savedIndex;
@@ -2711,7 +2747,11 @@ void MainWindow::restoreSettings() {
             restoredNativeMode = true;
         }
     } else if (settings.value("cameraNativeFinalization", false).toBool()) {
+#ifdef __ANDROID__
+        compressionIndex = ui->dngCompressionModeComboBox->findText("ProRes HQ");
+#else
         compressionIndex = ui->dngCompressionModeComboBox->findText("HEVC 420 slow 14");
+#endif
         restoredNativeMode = true;
     }
     if (restoredNativeText.isEmpty())
@@ -5618,11 +5658,39 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                                       bool metadataOnly, bool allowHardwareEncoder) {
     QString mode=requestedMode;
     const QString audioCodec=finalizeAudioCodec(mode);
+#ifdef __ANDROID__
+    const QStringList modeParts = androidNativeFormat(mode).simplified().split(' ', Qt::SkipEmptyParts);
+#else
     const QStringList modeParts = mode.simplified().split(' ', Qt::SkipEmptyParts);
+#endif
     const bool hevc = !modeParts.isEmpty() &&
         modeParts.front().compare("HEVC", Qt::CaseInsensitive) == 0;
     const bool av1 = !modeParts.isEmpty() &&
         modeParts.front().compare("AV1", Qt::CaseInsensitive) == 0;
+    bool androidHardwareFormat = false;
+    bool h264 = false;
+    int hardwareBitrate = 0;
+    int hardwareBitDepth = 0;
+#ifdef __ANDROID__
+    h264 = !modeParts.isEmpty() && modeParts.front().compare("H264", Qt::CaseInsensitive) == 0;
+    if ((h264 || hevc || av1) && (modeParts.size() == 2 || modeParts.size() == 3)) {
+        bool validBitrate = false;
+        const double mbps = modeParts.size() == 3 ? modeParts[2].toDouble(&validBitrate) : 100.0;
+        if (modeParts.size() == 2) validBitrate = true;
+        hardwareBitDepth = modeParts[1] == "8b" ? 8 : modeParts[1] == "10b" ? 10 : 0;
+        if (!hardwareBitDepth || !validBitrate || !(mbps >= 1 && mbps <= 500)) {
+            showAndroidNotice(tr("Invalid hardware format"),
+                tr("Use ‘H264|HEVC|AV1 8b|10b Mbps’. Select a bitrate from 1 to 500 Mbps. 10-bit requires Android 13 or later and a compatible P010 hardware encoder."));
+            return;
+        }
+        androidHardwareFormat = true;
+        hardwareBitrate = qRound(mbps * 1000000);
+    } else if (h264 || hevc || av1) {
+        showAndroidNotice(tr("Unsupported finalize format"),
+            tr("On Android, select ‘H264|HEVC|AV1 8b|10b Mbps’, or a ProRes or CineForm format. Software HEVC/AV1 encoding is not enabled."));
+        return;
+    }
+#endif
     const bool hdrNoise = av1 && mode.endsWith("synth noise", Qt::CaseInsensitive);
     const bool proRes = mode.startsWith("ProRes ", Qt::CaseInsensitive);
     const bool cineForm = mode.startsWith("CineForm ", Qt::CaseInsensitive);
@@ -5632,7 +5700,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     QString encoderCrf;
     int av1Preset = 0;
     int av1Crf = 0;
-    if (hevc || av1) {
+    if (!androidHardwareFormat && (hevc || av1)) {
         bool validPreset = true;
         bool validCrf = true;
         if (modeParts.size() == (hdrNoise ? 6 : 4)) {
@@ -5672,6 +5740,29 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         QMessageBox::warning(this, "Camera Native finalization", "Mount information is unavailable.");
         return;
     }
+
+#ifdef __ANDROID__
+    const QString destinationMode = QSettings(PACKAGE_NAME, APP_NAME).value(
+        "android/finalizeDestination", "documents").toString();
+    const QString requestedOutputBase = QFileInfo(srcFile).completeBaseName() +
+        (metadataOnly ? "_METADATA" : "_LOG60_NATIVE");
+    const QString destination = motioncam::prepareFinalizeOutput(
+        requestedOutputBase, destinationMode,
+        fileWidget->property("importPath").toString(), false);
+    if (destination == "choose") {
+        mPendingAndroidFinalizeCard = fileWidget;
+        return;
+    }
+    if (!destination.startsWith("ready:")) {
+        showAndroidNotice(tr("Finalize failed"), destination.mid(6));
+        return;
+    }
+    const QString androidOutputBase = destination.mid(6);
+    bool androidOutputFinished = false;
+    const auto androidOutputGuard = qScopeGuard([&] {
+        if (!androidOutputFinished) motioncam::cancelFinalizeOutput();
+    });
+#endif
 
     const QFileInfo inputInfo(srcFile);
     QString calibrationPath = fileWidget->property("sidecarPath").toString();
@@ -5758,24 +5849,37 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         return;
     }
 
+#ifdef __ANDROID__
+    std::pair<std::string, std::shared_ptr<std::vector<uint8_t>>> androidAudio;
+    try {
+        auto* processing = dynamic_cast<motioncam::ProcessingFileSystem*>(mFuseFilesystem.get());
+        if (!processing) throw std::runtime_error("Android processing filesystem is unavailable");
+        const auto audioTask = QtConcurrent::run([processing, mountId] { return processing->audioEntry(mountId); });
+        waitForBackgroundTask(audioTask);
+        androidAudio = audioTask.result();
+    } catch (const std::exception& e) {
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        showAndroidNotice(tr("Camera Native finalization"), QString::fromUtf8(e.what()));
+        return;
+    }
+#endif
+
     const QFileInfo sourceInfo(srcFile);
-    QString codecSuffix;
-    if (hevc) codecSuffix = "_HEVC";
-    else if (av1) codecSuffix = hdrNoise ? "_AV1_HDR_NOISE" : "_AV1";
-    else if (mode.contains("ProRes LT")) codecSuffix = "_PRORES_LT";
-    else if (mode.contains("ProRes Std")) codecSuffix = "_PRORES_STANDARD";
-    else if (mode.contains("ProRes HQ")) codecSuffix = "_PRORES_HQ";
-    else if (mode.contains("ProRes 444")) codecSuffix = "_PRORES_444";
-    else if (mode.contains("ProRes XQ")) codecSuffix = "_PRORES_XQ";
-    else if (cineFormRgb) codecSuffix = "_CINEFORM_RGB";
-    else if (cineForm) codecSuffix = "_CINEFORM_422";
-    const QString outputBase = metadataOnly
-        ? sourceInfo.completeBaseName() + "_METADATA"
-        : sourceInfo.completeBaseName() + "_LOG60_NATIVE" + codecSuffix;
-    const bool compressedSourceAudio=QFile::exists(QDir(mountPath).absoluteFilePath("audio.flac"))||
+    const QString outputBase =
+#ifdef __ANDROID__
+        androidOutputBase;
+#else
+        sourceInfo.completeBaseName() + (metadataOnly ? "_METADATA" : "_LOG60_NATIVE");
+#endif
+    const bool compressedSourceAudio=
+#ifdef __ANDROID__
+        androidAudio.first == "audio.flac" || androidAudio.first == "audio.opus" ||
+#endif
+        QFile::exists(QDir(mountPath).absoluteFilePath("audio.flac"))||
         QFile::exists(QDir(mountPath).absoluteFilePath("audio.opus"));
     const bool compressedOutputAudio=!audioCodec.isEmpty()||compressedSourceAudio;
     if(!metadataOnly && compressedOutputAudio&&(proRes||cineForm)){
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
         QMessageBox::warning(this,tr("Unsupported audio and video combination"),
             tr("This FFmpeg build cannot embed FLAC or Opus with ProRes or CineForm "
                "in MOV or MP4. Select an HEVC or AV1 format, or use uncompressed "
@@ -5833,6 +5937,35 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     showAndroidProgress(progress,this);
 #endif
 
+#ifdef __ANDROID__
+    auto runNativeWork = [](const std::function<void()>& work) {
+        std::exception_ptr error;
+        auto task = QtConcurrent::run([&] {
+            try { work(); } catch (...) { error = std::current_exception(); }
+        });
+        waitForBackgroundTask(task);
+        task.waitForFinished();
+        if (error) std::rethrow_exception(error);
+    };
+    auto exportAndroidOutputs = [&](const QStringList& paths) {
+        progress.setLabelText(tr("Saving finalized files to the selected folder..."));
+        for (const auto& path : paths) {
+            if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+            const auto copy = QtConcurrent::run([path] {
+                return motioncam::writeFinalizeOutputFile(QFileInfo(path).fileName(), path);
+            });
+            waitForBackgroundTask(copy);
+            if (!copy.result()) throw std::runtime_error("Could not save finalized output to the selected folder");
+        }
+        if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+        motioncam::finishFinalizeOutput();
+        androidOutputFinished = true;
+        progress.close();
+        showAndroidNotice(tr("Finalize complete"),
+            tr("The finalized files were written to the selected output folder."));
+    };
+#endif
+
     bool retrySoftwareEncoder = false;
     try {
         motioncam::FinalizeOptions finalizeOptions;
@@ -5840,7 +5973,17 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         finalizeOptions.detectDuplicateDngs = false;
         finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
         QDir stageDir(staging.path());
+#ifdef __ANDROID__
+        if (androidAudio.second && !androidAudio.second->empty()) {
+            QFile audio(stageDir.filePath(QString::fromStdString(androidAudio.first)));
+            if (!audio.open(QIODevice::WriteOnly) ||
+                audio.write(reinterpret_cast<const char*>(androidAudio.second->data()), androidAudio.second->size()) !=
+                    static_cast<qint64>(androidAudio.second->size()) || !audio.flush())
+                throw std::runtime_error("Could not stage source audio");
+        }
+#endif
 
+#ifndef __ANDROID__
         QString ffmpeg;
 #ifdef _WIN32
         const QString bundled = QCoreApplication::applicationDirPath() + "/ffmpeg.exe";
@@ -5899,6 +6042,21 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                  " encoder. Install a compatible FFmpeg build or place it beside MotionCam Fuse.")
                     .toStdString());
         }
+
+#else
+        motioncam::HardwareVideoEncoder hardwareEncoder;
+        motioncam::NativeVideoEncoder::AndroidHardwareEncoder androidEncoder;
+        const QString av1Encoder;
+        if (!metadataOnly && androidHardwareFormat) {
+            if (info->width % 16 || info->height % 16)
+                throw std::runtime_error("Android hardware encoding currently requires width and height divisible by 16. Use ProRes or CineForm for this clip.");
+            androidEncoder = motioncam::NativeVideoEncoder::selectAndroidHardwareEncoder(
+                h264 ? "video/avc" : av1 ? "video/av01" : "video/hevc",
+                info->width, info->height, info->fps, hardwareBitrate, hardwareBitDepth);
+            hardwareEncoder.name = h264 ? "h264_mediacodec" : av1 ? "av1_mediacodec" : "hevc_mediacodec";
+            hardwareEncoder.pixelFormat = QString::fromStdString(androidEncoder.pixelFormat);
+        }
+#endif
 
         struct NativeFrame {
             std::vector<uint8_t> rgb;
@@ -5965,6 +6123,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                         queueChanged.notify_all();
                     }, false);
             } catch (...) {
+                std::lock_guard lock(queueMutex);
                 renderError = std::current_exception();
             }
             {
@@ -5984,8 +6143,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             }
         } rendererGuard{cancelled, queueChanged, renderer};
 
-        // Audio is the first finalized entry. Once the first video frame is
-        // queued, its staged WAV (if any) is ready and FFmpeg can start.
+        // Wait for the first rendered frame before opening the video encoder.
+        // Audio is staged separately because this callback streams only DNGs.
         while (true) {
             std::unique_lock lock(queueMutex);
             if (!frameQueue.empty() || renderDone) break;
@@ -6006,8 +6165,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             QApplication::processEvents();
             if (progress.wasCanceled()) cancelled.store(true);
         }
-        if (renderError) std::rethrow_exception(renderError);
-        if (frameQueue.empty()) throw std::runtime_error("The rendered sequence contains no DNG frames");
+        {
+            std::lock_guard lock(queueMutex);
+            if (renderError) std::rethrow_exception(renderError);
+            if (frameQueue.empty()) throw std::runtime_error("The rendered sequence contains no DNG frames");
+        }
 
         const int frameCount = info->totalFrames - info->droppedFrames + info->duplicatedFrames;
 
@@ -6017,9 +6179,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         const QString partialPath = stageDir.absoluteFilePath(outputBase + containerExtension);
         const QString partialJsonPath = stageDir.absoluteFilePath(outputBase + ".json");
         const QString partialGyroflowPath = stageDir.absoluteFilePath(outputBase + "_gyroflow.json");
-        if (!metadataOnly && QFile::exists(gyroflowPath) &&
-            !QFile::copy(gyroflowPath, partialGyroflowPath))
-            throw std::runtime_error("Could not stage the Gyroflow lens profile");
+        if (!metadataOnly && QFile::exists(gyroflowPath))
+            copyFileAtomically(gyroflowPath, partialGyroflowPath);
+#ifndef __ANDROID__
         for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
             const QString source=QDir(mountPath).absoluteFilePath(name);
             if(QFile::exists(source)){
@@ -6028,8 +6190,21 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 break;
             }
         }
+#endif
         const bool convertToCfr =
             stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+        QString audioPath;
+        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
+            const QString candidate=stageDir.absoluteFilePath(name);
+            if(QFile::exists(candidate)){audioPath=candidate;break;}
+        }
+        const bool proRes444 = mode.contains("ProRes 444") || mode.contains("ProRes XQ");
+        const QString pixelFormat = !hardwareEncoder.name.isEmpty() ? hardwareEncoder.pixelFormat
+            : cineFormRgb ? "gbrp12le"
+            : proRes444 ? "yuv444p10le"
+            : (proRes || cineForm || chroma == "422") ? "yuv422p10le"
+            : chroma == "444" ? "yuv444p10le" : "yuv420p10le";
+#ifndef __ANDROID__
         QStringList args{"-hide_banner", "-y"};
         const bool vaapiEncoder = hardwareEncoder.name.endsWith("_vaapi");
         if (vaapiEncoder)
@@ -6041,23 +6216,12 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             args << "-display_rotation:v:0" << QString::number(-outputOrientation)
                  << "-noautorotate";
         args << "-f" << "nut" << "-i" << "pipe:0";
-        QString audioPath;
-        for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
-            const QString candidate=stageDir.absoluteFilePath(name);
-            if(QFile::exists(candidate)){audioPath=candidate;break;}
-        }
         if (!audioPath.isEmpty())
             args << "-i" << audioPath;
         const QString log60Lut =
             "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:"
             "g=log(1+60*val/maxval)/log(61)*maxval:"
             "b=log(1+60*val/maxval)/log(61)*maxval";
-        const bool proRes444 = mode.contains("ProRes 444") || mode.contains("ProRes XQ");
-        const QString pixelFormat = !hardwareEncoder.name.isEmpty() ? hardwareEncoder.pixelFormat
-            : cineFormRgb ? "gbrp12le"
-            : proRes444 ? "yuv444p10le"
-            : (proRes || cineForm || chroma == "422") ? "yuv422p10le"
-            : chroma == "444" ? "yuv444p10le" : "yuv420p10le";
         const QString videoFilter = cineFormRgb
             ? log60Lut +
                 ",zscale=matrixin=gbr:matrix=gbr:rangein=full:range=full:dither=ordered,format=gbrp12le"
@@ -6072,49 +6236,61 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             if(audioCodec=="opus")args << "-b:a" << "288k";
         }
         args << "-vf" << (videoFilter + (vaapiEncoder ? ",hwupload" : ""));
+#endif
+#ifdef __ANDROID__
+        std::map<std::string, std::string> codecOptions;
+#endif
+        QString selectedEncoder;
+        auto codecOption = [&](const QString& key, const QString& value) {
+#ifndef __ANDROID__
+            args << "-" + key << value;
+#else
+            QString nativeKey = key;
+            if (nativeKey.endsWith(":v")) nativeKey.chop(2);
+            codecOptions[nativeKey.toStdString()] = value.toStdString();
+#endif
+        };
         if (!hardwareEncoder.name.isEmpty()) {
+            selectedEncoder = hardwareEncoder.name;
+#ifndef __ANDROID__
             args << hardwareEncoder.arguments;
-            spdlog::info("Camera Native: using hardware encoder {}",
-                         hardwareEncoder.name.toStdString());
-        } else if (av1) {
-            // SVT 4 defaults to parallelism level 6 (305 PPCS at 4K), which
-            // can exhaust a desktop process's memory during encoder startup.
-            // Level 4 keeps preset/quality unchanged while bounding its frame
-            // pipeline (148 PPCS in SVT-AV1 4.1).
-            if (av1Encoder == "libsvtav1") {
-                // Keep seeks within two seconds even for short native clips.
-                QString svtParams =
-                    "lp=4:keyint=2s:tune=1:sharpness=0:enable-overlays=1:scd=1:scm=0";
-                if (hdrNoise)
-                    svtParams =
-                        "lp=4:keyint=2s:tune=5:sharpness=0:noise=8:enable-overlays=1:scd=1:scm=0";
-                args << "-c:v" << av1Encoder << "-crf" << QString::number(av1Crf)
-                     << "-preset" << QString::number(av1Preset)
-                     << "-svtav1-params" << svtParams;
-            } else {
-                const QString av1Profile = chroma == "422" ? "2" : "1";
-                args << "-c:v" << "libaom-av1" << "-crf" << QString::number(av1Crf)
-                     << "-b:v" << "0" << "-cpu-used" << QString::number(av1Preset)
-                     << "-profile:v" << av1Profile << "-row-mt" << "1"
-                     << "-tune" << "psnr";
-            }
-        } else if (proRes) {
-            const QString profile = mode.contains("ProRes LT") ? "1"
-                : mode.contains("ProRes Std") ? "2"
-                : mode.contains("ProRes HQ") ? "3"
-                : mode.contains("ProRes 444") ? "4" : "5";
-            args << "-c:v" << "prores_ks" << "-profile:v" << profile
-                 << "-alpha_bits" << "0";
-        } else if (cineForm) {
-            args << "-c:v" << "cfhd" << "-quality" << "film3+";
+#endif
+            spdlog::info("Camera Native: using hardware encoder {}", selectedEncoder.toStdString());
         } else {
-            const QString hevcProfile = chroma == "422" ? "main422-10"
-                : chroma == "444" ? "main444-10" : "main10";
-            args << "-c:v" << "libx265" << "-preset" << encoderPreset
-                 << "-crf" << encoderCrf << "-profile:v" << hevcProfile
-                 << "-x265-params"
-                 << "range=full:colorprim=bt2020:colormatrix=bt2020nc:psy-rd=1.0";
+            selectedEncoder = av1 ? av1Encoder : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
+#ifndef __ANDROID__
+            args << "-c:v" << selectedEncoder;
+#endif
+            if (av1) {
+                codecOption("crf", QString::number(av1Crf));
+                if (av1Encoder == "libsvtav1") {
+                    // Bound SVT's frame pipeline on memory-constrained devices.
+                    codecOption("preset", QString::number(av1Preset));
+                    codecOption("svtav1-params", hdrNoise
+                        ? "lp=4:keyint=2s:tune=5:sharpness=0:noise=8:enable-overlays=1:scd=1:scm=0"
+                        : "lp=4:keyint=2s:tune=1:sharpness=0:enable-overlays=1:scd=1:scm=0");
+                } else {
+                    codecOption("b:v", "0");
+                    codecOption("cpu-used", QString::number(av1Preset));
+                    codecOption("profile:v", chroma == "422" ? "2" : chroma == "444" ? "1" : "0");
+                    codecOption("row-mt", "1");
+                    codecOption("tune", "psnr");
+                }
+            } else if (proRes) {
+                codecOption("profile:v", mode.contains("ProRes LT") ? "1"
+                    : mode.contains("ProRes Std") ? "2" : mode.contains("ProRes HQ") ? "3"
+                    : mode.contains("ProRes 444") ? "4" : "5");
+                codecOption("alpha_bits", "0");
+            } else if (cineForm) {
+                codecOption("quality", "film3+");
+            } else {
+                codecOption("preset", encoderPreset);
+                codecOption("crf", encoderCrf);
+                codecOption("profile:v", chroma == "422" ? "main422-10" : chroma == "444" ? "main444-10" : "main10");
+                codecOption("x265-params", "range=full:colorprim=bt2020:colormatrix=bt2020nc:psy-rd=1.0");
+            }
         }
+#ifndef __ANDROID__
         args << "-pix_fmt" << (vaapiEncoder ? QStringLiteral("vaapi") : pixelFormat)
              << "-color_range" << "pc";
         if (cineFormRgb)
@@ -6134,6 +6310,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
              // muxer, preserving sub-millisecond VFR presentation times.
              << "-video_track_timescale" << "1000000";
         args << "-frames:v" << QString::number(frameCount) << partialPath;
+#endif
 
         progress.setRange(0, frameCount);
         progress.setValue(0);
@@ -6141,6 +6318,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                                            : "Encoding LOG60 Camera Native frame 1...");
         progress.show();
         QApplication::processEvents();
+#ifndef __ANDROID__
         QProcess encoder;
         encoder.setProcessChannelMode(QProcess::MergedChannels);
         retrySoftwareEncoder = !hardwareEncoder.name.isEmpty();
@@ -6157,6 +6335,55 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         if (!metadataOnly)
             videoPipe = std::make_unique<NutVideoPipe>(
                 encoder, diagnostic, info->width, info->height, encoderNominalFps);
+#else
+        std::unique_ptr<motioncam::NativeVideoEncoder> videoPipe;
+        if (!metadataOnly) {
+            motioncam::NativeVideoEncoder::Options options;
+            options.outputPath = partialPath.toStdString();
+            options.width = info->width;
+            options.height = info->height;
+            options.fps = convertToCfr || androidHardwareFormat ? info->fps : info->frameRateInfo.medianFrameRate;
+            if (!(options.fps > 0)) options.fps = info->fps;
+            options.orientation = outputOrientation;
+            options.constantFrameRate = convertToCfr;
+            options.pixelFormat = pixelFormat.toStdString();
+            options.encoder = selectedEncoder.toStdString();
+            options.codecOptions = codecOptions;
+            if (androidHardwareFormat) {
+                options.androidHardware = androidEncoder;
+                options.hardwareBitrate = hardwareBitrate;
+            }
+            // FFmpeg 6.1 cannot mux PCM in MP4. AV1 requires MP4, so
+            // preserve WAV samples losslessly with FLAC unless a codec was requested.
+            const QString nativeAudioCodec = audioCodec.isEmpty() && av1 &&
+                audioPath.endsWith(".wav", Qt::CaseInsensitive) ? QStringLiteral("flac") : audioCodec;
+            if (!audioPath.isEmpty() && !nativeAudioCodec.isEmpty()) {
+                progress.setLabelText(tr("Encoding Camera Native audio..."));
+                const QString encodedAudio = stageDir.absoluteFilePath("native-audio." + nativeAudioCodec);
+                motioncam::AudioWriter::convertFile(audioPath.toStdString(), encodedAudio.toStdString(),
+                    nativeAudioCodec.toStdString(), false, [&] {
+                        QApplication::processEvents();
+                        return !progress.wasCanceled();
+                    });
+                audioPath = encodedAudio;
+            }
+            options.audioPath = audioPath.toStdString();
+            runNativeWork([&] {
+                videoPipe = std::make_unique<motioncam::NativeVideoEncoder>(options);
+            });
+        }
+#endif
+        auto writeVideoFrame = [&](const NativeFrame& frame, int64_t duration) {
+            if (!videoPipe) return;
+#ifdef __ANDROID__
+            runNativeWork([&] {
+                videoPipe->writeFrame(frame.rgb, frame.timestamp, duration);
+            });
+            if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+#else
+            videoPipe->writeFrame(frame.rgb, frame.timestamp, duration);
+#endif
+        };
         DNGFrameMetadata colorMetadata;
         nlohmann::json dynamicFrames = nlohmann::json::array();
         nlohmann::json gainMapFormats = nlohmann::json::array();
@@ -6295,8 +6522,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             if (progress.wasCanceled()) {
                 cancelled.store(true);
                 queueChanged.notify_all();
+#ifndef __ANDROID__
                 encoder.kill();
                 encoder.waitForFinished();
+#endif
                 throw std::runtime_error("Finalization cancelled");
             }
 
@@ -6325,8 +6554,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 if (!pendingFrame) colorMetadata = frame.colorMetadata;
                 if (pendingFrame) {
                     const int64_t duration = frame.timestamp - pendingFrame->timestamp;
-                    if (videoPipe) videoPipe->writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
-                        std::max<int64_t>(1, duration));
+                    writeVideoFrame(*pendingFrame, std::max<int64_t>(1, duration));
                     appendDynamicMetadata(*pendingFrame);
                     ++frameIndex;
                     progress.setValue(frameIndex);
@@ -6347,14 +6575,23 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             QApplication::processEvents();
         }
         if (!pendingFrame) throw std::runtime_error("The rendered sequence contains no frames");
-        if (videoPipe) videoPipe->writeFrame(pendingFrame->rgb, pendingFrame->timestamp,
+        writeVideoFrame(*pendingFrame,
             std::max<int64_t>(1, static_cast<int64_t>(std::llround(1e9 / info->fps))));
         appendDynamicMetadata(*pendingFrame);
         ++frameIndex;
         if (frameIndex != frameCount)
             throw std::runtime_error("Rendered frame count did not match the clip metadata");
         if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+#ifdef __ANDROID__
+        if (videoPipe) {
+            progress.setLabelText(tr("Finishing Camera Native video..."));
+            runNativeWork([&] { videoPipe->finish(); });
+            if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
+        }
+#else
         if (videoPipe) videoPipe->finish();
+#endif
+#ifndef __ANDROID__
         if (!metadataOnly) encoder.closeWriteChannel();
         if (!metadataOnly) progress.setLabelText(QString("Finishing LOG60 Camera Native %1...")
             .arg(containerExtension==".mp4" ? "MP4" : "MOV"));
@@ -6375,6 +6612,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 QString::fromUtf8(diagnostic.right(4000))).toStdString());
         }
 
+#endif
         retrySoftwareEncoder = false;
 
         // The source sidecar is authoritative for explicit calibration
@@ -6416,10 +6654,15 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         if (!metadataOnly) {
             sidecar["transferFunction"] = "LOG60";
             sidecar["dataLevels"] = "Full";
-            sidecar["videoCodec"] = av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
-            sidecar["encoder"] = !hardwareEncoder.name.isEmpty() ? hardwareEncoder.name.toStdString()
-                : av1 ? av1Encoder.toStdString()
-                : proRes ? "prores_ks" : cineForm ? "cfhd" : "libx265";
+            sidecar["videoCodec"] = h264 ? "H264" : av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
+            sidecar["encoder"] = selectedEncoder.toStdString();
+#ifdef __ANDROID__
+            if (androidHardwareFormat) {
+                sidecar["hardwareEncoder"] = androidEncoder.name;
+                sidecar["bitDepth"] = hardwareBitDepth;
+                sidecar["bitrate"] = hardwareBitrate;
+            }
+#endif
             sidecar["pixelFormat"] = pixelFormat.toStdString();
             if (hdrNoise) sidecar["noiseSynthesis"] = 8;
         }
@@ -6505,6 +6748,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             if (!partialAudio.isEmpty()) outputs.emplace_back(partialAudio, outputAudio);
             if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
 
+#ifdef __ANDROID__
+            QStringList androidPaths;
+            for (const auto& output : outputs) androidPaths << output.first;
+            exportAndroidOutputs(androidPaths);
+            mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+            return;
+#endif
+
             // Treat all files produced by this mode as one replacement set.
             // A rerun may switch audio extensions or have no gyro data.
             QStringList oldPaths{jsonPath, gcsvPath};
@@ -6540,6 +6791,14 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
             return;
         }
+
+#ifdef __ANDROID__
+        QStringList androidPaths{partialPath, partialJsonPath};
+        if (QFile::exists(partialGyroflowPath)) androidPaths << partialGyroflowPath;
+        exportAndroidOutputs(androidPaths);
+        mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
+        return;
+#endif
 
         // Commit the pair together. Existing outputs are retained until both
         // temporary files are complete and are restored if either rename fails.

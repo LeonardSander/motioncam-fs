@@ -30,6 +30,7 @@ public:
                   const std::function<bool(size_t, size_t, const std::string&)>&,
                   const std::function<void(const std::vector<uint8_t>&, Timestamp)>& = {},
                   bool = true) override;
+    std::pair<std::string, std::shared_ptr<std::vector<uint8_t>>> audioEntry(MountId);
     void finalizeToEntries(MountId, bool, const FinalizeOptions&,
         const std::function<bool(size_t, size_t, const std::string&)>&,
         const std::function<void(const std::string&, const std::vector<uint8_t>&)>&);

@@ -6,13 +6,16 @@
 #include <vector>
 
 namespace motioncam {
+// Folder exports return the created folder name; direct exports return a
+// collision-free basename shared by the video and sidecar files.
 QString prepareFinalizeOutput(const QString& folderName, const QString& mode,
-                              const QString& importPath);
+                              const QString& importPath, bool createSubfolder = true);
 QString finalizeTreeSelectionStatus();
 QString legacyCustomFinalizeDirectory();
 QString finalizeDirectoryPath(const QString& uri);
 bool writeFinalizeOutputEntry(const QString& name,
                               const std::vector<uint8_t>& bytes);
+bool writeFinalizeOutputFile(const QString& name, const QString& path);
 void finishFinalizeOutput();
 void cancelFinalizeOutput();
 void requestDngSequenceFolderImport();

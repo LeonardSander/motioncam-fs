@@ -12,6 +12,8 @@ import android.widget.ImageView;
 import android.widget.FrameLayout;
 import android.net.Uri;
 import android.os.Build;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.os.ParcelFileDescriptor;
@@ -27,6 +29,7 @@ import org.qtproject.qt.android.bindings.QtActivity;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.FileInputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.ByteBuffer;
@@ -36,6 +39,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
@@ -57,6 +62,9 @@ public class MotionCamActivity extends QtActivity {
     private boolean pendingFinalizeTree;
     private volatile String finalizeTreeSelectionStatus = "idle";
     private Uri activeFinalizeFolder;
+    private Uri activeFinalizeTree;
+    private boolean activeFinalizeOwnsFolder;
+    private final ArrayList<Uri> activeFinalizeDocuments = new ArrayList<>();
     private volatile String sequenceFolderImportStatus = "idle";
     private final ArrayList<String> sequenceFolderImportPaths = new ArrayList<>();
 
@@ -215,7 +223,7 @@ public class MotionCamActivity extends QtActivity {
     }
 
     public synchronized String prepareFinalizeOutput(String requestedFolderName,
-            String mode, String importPath) {
+            String mode, String importPath, boolean createSubfolder) {
         try {
             Uri output;
             Uri tree;
@@ -268,19 +276,51 @@ public class MotionCamActivity extends QtActivity {
             String name = requestedFolderName == null || requestedFolderName.isEmpty()
                     ? "Finalized Clip" : requestedFolderName;
             Uri clip = null;
+            String outputName = name;
+            Set<String> existingNames = createSubfolder ? null : childNames(tree, output);
             for (int suffix = 1; suffix < 10000 && clip == null; suffix++) {
                 String candidate = suffix == 1 ? name : name + " (" + suffix + ")";
-                if (findChild(tree, output, candidate,
-                        DocumentsContract.Document.MIME_TYPE_DIR) == null)
-                    clip = DocumentsContract.createDocument(getContentResolver(), output,
-                            DocumentsContract.Document.MIME_TYPE_DIR, candidate);
+                if (createSubfolder) {
+                    if (findChild(tree, output, candidate,
+                            DocumentsContract.Document.MIME_TYPE_DIR) == null)
+                        clip = DocumentsContract.createDocument(getContentResolver(), output,
+                                DocumentsContract.Document.MIME_TYPE_DIR, candidate);
+                } else if (nativeOutputNameAvailable(existingNames, candidate)) {
+                    clip = output;
+                }
+                if (clip != null) outputName = candidate;
             }
-            if (clip == null) throw new IOException("Could not create a unique output folder");
+            if (clip == null) throw new IOException("Could not reserve a unique output name");
             activeFinalizeFolder = clip;
-            return "ready:" + displayNameForUri(clip.toString());
+            activeFinalizeTree = tree;
+            activeFinalizeOwnsFolder = createSubfolder;
+            activeFinalizeDocuments.clear();
+            return "ready:" + (createSubfolder ? displayNameForUri(clip.toString()) : outputName);
         } catch (Exception error) {
             return "error:" + error.getMessage();
         }
+    }
+
+    private Set<String> childNames(Uri tree, Uri folder) throws IOException {
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree,
+                DocumentsContract.getDocumentId(folder));
+        Set<String> names = new HashSet<>();
+        try (Cursor cursor = getContentResolver().query(children,
+                new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null)) {
+            if (cursor == null) throw new IOException("Could not list the output directory");
+            while (cursor.moveToNext()) names.add(cursor.getString(0));
+        }
+        return names;
+    }
+
+    private boolean nativeOutputNameAvailable(Set<String> names, String base) {
+        // Reserve one basename for the complete video/metadata set so a repeat
+        // export never overwrites earlier files or splits matching sidecars.
+        for (String extension : new String[]{".mov", ".mp4", ".json", "_gyroflow.json",
+                ".gcsv", ".wav", ".flac", ".opus", ".aac"}) {
+            if (names.contains(base + extension)) return false;
+        }
+        return true;
     }
 
     private boolean hasWriteGrant(Uri tree) {
@@ -338,44 +378,153 @@ public class MotionCamActivity extends QtActivity {
         return sequenceFolderImportStatus;
     }
 
+    // Pick a real device encoder, never Android's software codec fallback.
+    // 10-bit input uses the direct NDK P010 adapter; 8-bit uses FFmpeg.
+    public String selectNativeHardwareEncoder(String mime, int width, int height,
+            double fps, int bitrate, int bitDepth) {
+        if (width <= 0 || height <= 0 || width % 16 != 0 || height % 16 != 0)
+            return ""; // Preserve exact dimensions and use a consistent aligned input contract.
+        if (bitDepth != 8 && bitDepth != 10) return "";
+        if (bitDepth == 10 && Build.VERSION.SDK_INT < 33) return "";
+        for (MediaCodecInfo info : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+            if (!info.isEncoder()) continue;
+            String name = info.getName();
+            if (Build.VERSION.SDK_INT >= 29) {
+                if (!info.isHardwareAccelerated()) continue;
+            } else if (name.startsWith("OMX.google.") || name.startsWith("c2.android.")) {
+                continue;
+            }
+            try {
+                MediaCodecInfo.CodecCapabilities caps = info.getCapabilitiesForType(mime);
+                MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
+                if (video == null || !video.areSizeAndRateSupported(width, height, fps)
+                        || !video.getBitrateRange().contains(bitrate)) continue;
+                int profile = 0;
+                if (bitDepth == 10) {
+                    profile = "video/avc".equals(mime) ? MediaCodecInfo.CodecProfileLevel.AVCProfileHigh10
+                            : "video/hevc".equals(mime) ? MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10
+                            : MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10;
+                    boolean supported = false;
+                    for (MediaCodecInfo.CodecProfileLevel level : caps.profileLevels)
+                        if (level.profile == profile) supported = true;
+                    if (!supported) continue;
+                }
+                String format = null;
+                for (int color : caps.colorFormats) {
+                    if (bitDepth == 10) {
+                        if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUVP010) {
+                            format = "p010le";
+                            break;
+                        }
+                    } else {
+                        if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) {
+                            format = "nv12";
+                            break;
+                        }
+                        if (color == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar)
+                            format = "yuv420p";
+                    }
+                }
+                if (format == null) continue;
+                MediaCodecInfo.EncoderCapabilities encoder = caps.getEncoderCapabilities();
+                String mode;
+                if (encoder.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR))
+                    mode = "vbr";
+                else if (encoder.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
+                    mode = "cbr";
+                else continue;
+                return name + "|" + format + "|" + mode + "|" + profile;
+            } catch (IllegalArgumentException ignored) {
+                // The codec does not provide this MIME type.
+            }
+        }
+        return "";
+    }
+
     public synchronized void writeFinalizeOutputEntry(String name, ByteBuffer bytes)
             throws IOException {
+        writeFinalizeEntry(name, output -> {
+            WritableByteChannel channel = Channels.newChannel(output);
+            while (bytes.hasRemaining()) channel.write(bytes);
+        });
+    }
+
+    public synchronized void writeFinalizeOutputFile(String name, String path) throws IOException {
+        writeFinalizeEntry(name, output -> {
+            try (InputStream input = new FileInputStream(path)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            }
+        });
+    }
+
+    private interface FinalizeEntryWriter {
+        void write(OutputStream output) throws IOException;
+    }
+
+    private void writeFinalizeEntry(String name, FinalizeEntryWriter writer) throws IOException {
         if (activeFinalizeFolder == null) throw new IOException("Output folder is not ready");
         if (name == null || name.isEmpty() || name.contains("/") || name.contains("\\"))
             throw new IOException("Invalid output filename");
-        // An interrupted write must not leave a file that looks like a DNG.
+        if (!activeFinalizeOwnsFolder && findChild(activeFinalizeTree, activeFinalizeFolder, name, null) != null)
+            throw new IOException("An output file already exists: " + name);
+        // Publish each file only after its complete contents have been written.
         Uri document = DocumentsContract.createDocument(getContentResolver(),
-                activeFinalizeFolder, "application/octet-stream", name + ".partial");
+                activeFinalizeFolder, "application/octet-stream", name + ".partial-" + UUID.randomUUID());
         if (document == null) throw new IOException("Could not create " + name);
+        if (!activeFinalizeOwnsFolder) activeFinalizeDocuments.add(document);
         try {
             try (OutputStream output = getContentResolver().openOutputStream(document, "w")) {
                 if (output == null) throw new IOException("Could not open " + name);
-                WritableByteChannel channel = Channels.newChannel(output);
-                while (bytes.hasRemaining()) channel.write(bytes);
+                writer.write(output);
                 output.flush();
             }
-            if (DocumentsContract.renameDocument(getContentResolver(), document, name) == null)
-                throw new IOException("Could not finish " + name);
+            Uri renamed = DocumentsContract.renameDocument(getContentResolver(), document, name);
+            if (renamed == null) throw new IOException("Could not finish " + name);
+            if (!activeFinalizeOwnsFolder) {
+                activeFinalizeDocuments.remove(document);
+                activeFinalizeDocuments.add(renamed);
+            }
+            document = renamed;
+            if (!name.equals(displayNameForUri(document.toString())))
+                throw new IOException("The output provider changed the finalized filename: " + name);
         } catch (IOException | RuntimeException error) {
-            try { DocumentsContract.deleteDocument(getContentResolver(), document); }
-            catch (Exception ignored) { }
+            try {
+                if (DocumentsContract.deleteDocument(getContentResolver(), document))
+                    activeFinalizeDocuments.remove(document);
+            } catch (Exception ignored) { }
             throw error;
         }
     }
 
     public synchronized void finishFinalizeOutput() {
         activeFinalizeFolder = null;
+        activeFinalizeTree = null;
+        activeFinalizeOwnsFolder = false;
+        activeFinalizeDocuments.clear();
         Toast.makeText(this, "Finalized files saved to the selected folder",
                 Toast.LENGTH_LONG).show();
     }
 
     public synchronized void cancelFinalizeOutput() {
         Uri folder = activeFinalizeFolder;
+        boolean owned = activeFinalizeOwnsFolder;
         activeFinalizeFolder = null;
-        if (folder != null) {
+        activeFinalizeTree = null;
+        activeFinalizeOwnsFolder = false;
+        if (owned && folder != null) {
             try { DocumentsContract.deleteDocument(getContentResolver(), folder); }
             catch (Exception ignored) { }
+        } else {
+            // Direct exports share a user-selected directory. Never delete it:
+            // roll back only documents created during this export.
+            for (Uri document : activeFinalizeDocuments) {
+                try { DocumentsContract.deleteDocument(getContentResolver(), document); }
+                catch (Exception ignored) { }
+            }
         }
+        activeFinalizeDocuments.clear();
     }
 
     public String sidecarScanStatus() { return sidecarScanStatus; }
