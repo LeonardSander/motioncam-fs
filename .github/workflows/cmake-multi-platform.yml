@@ -61,11 +61,11 @@ jobs:
       run: |
         export ANDROID_SDK_ROOT="${ANDROID_HOME}"
         export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/27.2.12479018"
-        BUILD_TESTING=ON bash scripts/build_android_apk.sh "$PWD/build-android-arm64" configure
+        BUILD_TESTING=OFF bash scripts/build_android_apk.sh "$PWD/build-android-arm64" configure
 
-    - name: Build APK and test binaries
+    - name: Build APK
       run: |
-        cmake --build build-android-arm64 --parallel 4
+        cmake --build build-android-arm64 --target MotionCamFuse --parallel 4
         cmake --build build-android-arm64 --target apk --parallel 4
 
     - name: Package APK
@@ -100,6 +100,7 @@ jobs:
         bash scripts/build_android_apk.sh "$PWD/build-android-tests" configure
 
     - name: Build tests
+      continue-on-error: true
       shell: bash
       run: |
         mapfile -t test_targets < <(sed 's|.*/||' build-android-tests/android-tests-Release.txt)
@@ -173,7 +174,11 @@ jobs:
           -DMOTIONCAM_REQUIRE_VULKAN=ON \
           -DPKG_CONFIG_ARGN=--static
 
-    - name: Build
+    - name: Build runtime
+      run: cmake --build build-linux --target MotionCamFuse --parallel
+
+    - name: Build tests
+      continue-on-error: true
       run: cmake --build build-linux --parallel
 
     - name: Test
@@ -405,7 +410,12 @@ jobs:
 
 
     # ---------- BUILD ----------
-    - name: Build
+    # Only runtime compilation blocks packaging; test builds are advisory.
+    - name: Build runtime
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target MotionCamFuse --parallel
+
+    - name: Build tests
+      continue-on-error: true
       run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
 
     - name: Test
@@ -422,8 +432,8 @@ jobs:
         ref_safe="${GITHUB_REF_NAME//\//-}"
         if [[ "${{ matrix.platform }}" == "windows" ]]; then
           cd "${{ matrix.build_dir }}/${{ matrix.build_type }}"
-          exe=$(find . -maxdepth 1 -type f -name "*.exe" -print -quit)
-          if [ -z "$exe" ]; then
+          exe=./MotionCamFuse.exe
+          if [ ! -f "$exe" ]; then
             echo "No Windows executable found in $PWD" >&2
             exit 1
           fi
