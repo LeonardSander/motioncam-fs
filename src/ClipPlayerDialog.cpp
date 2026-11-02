@@ -2865,6 +2865,13 @@ void ClipPlayerDialog::updateDisplayedImage(){
     // refresh is pending. Suppressing it here made all wheel/drag input appear
     // ignored until the replacement frame arrived, especially during play.
     if(mLastPresentedImage.isNull()&&!mLastPresentedGpuBuffer)return;
+    if(nativeVulkanPresenter()&&!mFirstFrameReady){
+        // Android also draws the grey startup surface through the native
+        // presenter. Remove its preparation text before submitting any first
+        // video frame, even when the periodic overlay capture is not due.
+        captureNativeOverlay(false);
+        mGpuVideo->setOverlay(mCapturedNativeOverlay,mCapturedNativeOverlayParts,false);
+    }
 #ifdef Q_OS_ANDROID
     const bool fastTouchPreview=mTouchActive;
 #else
