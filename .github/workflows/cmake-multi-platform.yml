@@ -124,16 +124,6 @@ jobs:
           python3 tests/android_ctest.py deploy build-android-tests Qt/6.12.0/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
           ctest --test-dir build-android-tests -C Release --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
 
-    - name: Upload test results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-results-android
-        path: |
-          build-android-tests/test-results.xml
-          build-android-tests/Testing/Temporary/LastTest.log
-        if-no-files-found: ignore
-
   linux-appimage:
     name: Linux AppImage (Clang)
     runs-on: ubuntu-24.04
@@ -189,17 +179,6 @@ jobs:
     - name: Test
       continue-on-error: true
       run: ctest --test-dir build-linux --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
-
-    - name: Upload test results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-results-linux
-        path: |
-          build-linux/test-results.xml
-          build-linux/Testing/Temporary/LastTest.log
-          build-linux/gallery-overlay-*.png
-        if-no-files-found: ignore
 
     - name: Create AppImage
       shell: bash
@@ -434,17 +413,6 @@ jobs:
       run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
 
 
-
-    - name: Upload test results
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-results-${{ matrix.artifact_suffix }}
-        path: |
-          ${{ matrix.build_dir }}/test-results.xml
-          ${{ matrix.build_dir }}/Testing/Temporary/LastTest.log
-          ${{ matrix.build_dir }}/gallery-overlay-*.png
-        if-no-files-found: ignore
 
     # ---------- PACKAGE ----------
     - name: Package binaries

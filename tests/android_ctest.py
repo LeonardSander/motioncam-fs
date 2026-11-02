@@ -67,7 +67,16 @@ def run(executable, *args):
     command = ["env", *(f"{key}={value}" for key, value in environment.items()),
                REMOTE + "/bin/" + Path(executable).name, *args]
     # adb shell propagates the remote exit status, including CTest's skip 77.
-    return subprocess.run(["adb", "shell", f"cd {shlex.quote(REMOTE)} && {shlex.join(command)}"]).returncode
+    result = subprocess.run(["adb", "shell", f"cd {shlex.quote(REMOTE)} && {shlex.join(command)}"])
+    if result.returncode not in (0, 77):
+        # Native crashes otherwise reach CTest as only "Segmentation fault".
+        # Keep the emulator's tombstone backtrace in the job log.
+        print("Android crash log (most recent entries):", flush=True)
+        try:
+            subprocess.run(["adb", "logcat", "-b", "crash", "-d", "-t", "200"], timeout=15)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"Could not collect Android crash log: {error}", flush=True)
+    return result.returncode
 
 
 if __name__ == "__main__":
