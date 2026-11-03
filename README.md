@@ -318,3 +318,13 @@ JSON sidecar also allow to set a DNG path. Further JSON parameters, beyond what 
 - **Bad and PDAF Pixels (unfinished)**
 
 Calibration sidecars may contain a `badPixels` array. `start` names one full-sensor position or the absolute origin of a repeating PDAF lattice. `repeat` sets its horizontal and vertical spacing; optional `end` gives its inclusive full-sensor `[x,y]` limit. `treatment` is `brighten`, `dampen`, or `interpolate`; adjustment `amount` and `threshold.above`/`threshold.below` accept normalized values or percentages. Thresholds are evaluated against that pixel's own black-subtracted value, normalized so black is 0 and white is 1. Optional `minIso` and `minExposure` gates accept values such as `800`, `"1/30"`, or `"20ms"`. The Bad Pixel Treatment selector can bake corrections, emit eligible interpolation positions in DNG OpcodeList1 while retaining stored raw samples, transfer the source `badPixels` array and `fullSensorResolution` to a finalized CFA DNG clip's JSON sidecar (or to one JSON sidecar per selected CFA frame) while retaining stored raw samples, mark treated samples full black for inspection, or disable treatment. Demosaiced output bakes the corrections. Vignette Correction set to Resample also bakes enabled bad-pixel treatment, regardless of the Bad Pixel Treatment selector; Disabled remains disabled. Repeating entries use `{ "start": [13, 48], "repeat": [16, 16], "end": [4095, 3071], "treatment": "interpolate" }`.
+
+---
+
+### Acknowledgements
+
+- **MotionCam Fuse:** Mirsad Makalic (upstream creator), Sebastian Merca (maintainer), and Leonard Sander (contributor and fork maintainer).
+- **Third-party components:** TinyDNG syoyo, liblj92 (MLV), libjpeg-turbo, libjxl, libfuse, macFUSE, and Microsoft ProjFS, FFmpeg, libplacebo, Vulkan, Qt.
+- **[Decode](https://github.com/LeonardSander/motioncam-decoder)-only formats:** MotionCam .MCRAW, [Unspektrawesome](https://github.com/JohnTheFarm3r/Unspektrawesome-Releases/releases) .unspektra, and mcpro24fps .MCPRO.
+- **Frame-time graph inspiration:** cooky451’s [vchart](https://cooky451.github.io/vchart/) and [frame-time analysis](https://www.reddit.com/r/VideoEditing/comments/1b5hvd7/testing_how_variable_the_framrate_in_iphone/).
+- **Frame interpolation:** may-son’s [RIFE-FixDropFrames-and-ConvertFPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS).
