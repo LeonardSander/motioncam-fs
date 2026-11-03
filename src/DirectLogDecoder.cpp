@@ -89,7 +89,8 @@ std::unordered_map<std::string, CachedDirectLogTimeline> directLogTimelineCache;
 // Version 5 timelines omit packets marked for discard. Some cameras append a
 // final, timestamped HEVC access unit which the decoder intentionally emits no
 // frame for; retaining it creates a phantom still at the end of the clip.
-constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000005ULL;
+// Version 6 refreshes pixel-format labels, including CineForm RGB.
+constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000006ULL;
 
 std::string directLogTimelineCacheKey(const std::string& path) {
     std::error_code error;
@@ -570,10 +571,8 @@ void DirectLogDecoder::analyzeVideo() {
     // Determine pixel format
     switch (static_cast<AVPixelFormat>(codecpar->format)) {
         case AV_PIX_FMT_YUV420P:
-            mVideoInfo.pixelFormat = "yuv420p";
-            break;
         case AV_PIX_FMT_YUVJ420P:
-            mVideoInfo.pixelFormat = "yuvj420p";
+            mVideoInfo.pixelFormat = "yuv420p";
             break;
         case AV_PIX_FMT_YUV422P:
             mVideoInfo.pixelFormat = "yuv422p";
@@ -600,6 +599,11 @@ void DirectLogDecoder::analyzeVideo() {
             mVideoInfo.pixelFormat = "unknown";
             break;
     }
+    const auto* pixelDescription = av_pix_fmt_desc_get(
+        static_cast<AVPixelFormat>(codecpar->format));
+    if (codecpar->codec_id == AV_CODEC_ID_CFHD && pixelDescription &&
+        (pixelDescription->flags & AV_PIX_FMT_FLAG_RGB))
+        mVideoInfo.pixelFormat = "CineRGB";
     
     // Check if HLG based on filename
     mVideoInfo.isHLG = boost::icontains(mFilePath, "HLG_NATIVE");
