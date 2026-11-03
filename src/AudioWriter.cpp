@@ -2,6 +2,9 @@
 #include "AudioWriter.h"
 #include <algorithm>
 #include <stdexcept>
+#include <cmath>
+#include <cstring>
+#include <limits>
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -237,6 +240,82 @@ std::shared_ptr<std::vector<uint8_t>> motioncam::AudioWriter::decodeWav(
             });
     }
     return bytes;
+}
+
+void motioncam::AudioWriter::offsetWav(std::vector<uint8_t>& bytes, int64_t offsetUs) {
+    if (!offsetUs) return;
+    const auto read16 = [&](size_t p) { return unsigned(bytes[p]) | unsigned(bytes[p + 1]) << 8; };
+    const auto read32 = [&](size_t p) { return read16(p) | uint32_t(read16(p + 2)) << 16; };
+    const auto write32 = [&](size_t p, uint32_t value) {
+        for (unsigned i = 0; i < 4; ++i) bytes[p + i] = static_cast<uint8_t>(value >> (8 * i));
+    };
+    if (bytes.size() < 12 || std::memcmp(bytes.data(), "RIFF", 4) ||
+        std::memcmp(bytes.data() + 8, "WAVE", 4))
+        throw std::runtime_error("Audio offset requires a PCM/float RIFF WAV");
+    uint32_t rate = 0, alignment = 0, bits = 0, format = 0, channels = 0;
+    size_t dataHeader = 0, dataSize = 0, fact = 0;
+    for (size_t p = 12; p + 8 <= bytes.size();) {
+        const auto size = read32(p + 4);
+        if (size > bytes.size() - p - 8)
+            throw std::runtime_error("Truncated WAV chunk");
+        if (!std::memcmp(bytes.data() + p, "fmt ", 4) && size >= 16) {
+            format = read16(p + 8);
+            channels = read16(p + 10);
+            rate = read32(p + 12);
+            alignment = read16(p + 20);
+            bits = read16(p + 22);
+            if (format == 0xfffe) {
+                // Resolve KSDATAFORMAT_SUBTYPE_PCM/IEEE_FLOAT without changing
+                // the original extensible header or sample representation.
+                static constexpr uint8_t guidTail[] = {
+                    0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71
+                };
+                if (size < 40 || read16(p + 24) < 22 || read16(p + 24) > size - 18 ||
+                    std::memcmp(bytes.data() + p + 36, guidTail, sizeof(guidTail)))
+                    throw std::runtime_error("Unsupported extensible WAV format for audio offset");
+                format = read32(p + 32);
+                const auto validBits = read16(p + 26);
+                if (!validBits || validBits > bits || (format == 3 && validBits != bits))
+                    throw std::runtime_error("Invalid extensible WAV sample precision");
+            }
+        }
+        if (!std::memcmp(bytes.data() + p, "fact", 4) && size >= 4) fact = p + 8;
+        if (!std::memcmp(bytes.data() + p, "data", 4)) {
+            dataHeader = p;
+            dataSize = size;
+        }
+        p += 8 + size_t(size) + (size & 1u);
+    }
+    if (!dataHeader || !rate || !channels || !alignment || !bits || bits % 8 ||
+        alignment != channels * (bits / 8) || dataSize % alignment ||
+        (format == 1 ? bits > 32 : format != 3 || (bits != 32 && bits != 64)))
+        throw std::runtime_error("Unsupported WAV format for audio offset");
+    const long double frames = std::round(std::abs(static_cast<long double>(offsetUs)) * rate / 1000000);
+    if (frames > std::numeric_limits<uint32_t>::max() / alignment)
+        throw std::runtime_error("Audio offset exceeds WAV size limits");
+    const size_t shift = static_cast<size_t>(frames) * alignment;
+    const size_t removed = offsetUs < 0 ? std::min(shift, dataSize) : 0;
+    const size_t inserted = offsetUs > 0 ? shift : 0;
+    const uint64_t newDataSize = uint64_t(dataSize) - removed + inserted;
+    const size_t oldEnd = dataHeader + 8 + dataSize + (dataSize & 1u);
+    if (oldEnd > bytes.size()) throw std::runtime_error("Truncated WAV data padding");
+    const uint64_t newFileSize = uint64_t(bytes.size()) - dataSize - (dataSize & 1u) +
+        newDataSize + (newDataSize & 1u);
+    if (newDataSize > UINT32_MAX || newFileSize - 8 > UINT32_MAX || newFileSize > bytes.max_size())
+        throw std::runtime_error("Aligned audio exceeds WAV size limits");
+    const auto newSize = static_cast<size_t>(newDataSize);
+    // Update optional sample count before splicing, since it can follow data.
+    if (fact) write32(fact, static_cast<uint32_t>(newSize / alignment));
+    bytes.erase(bytes.begin() + dataHeader + 8, bytes.begin() + dataHeader + 8 + removed);
+    bytes.insert(bytes.begin() + dataHeader + 8, inserted,
+                 format == 1 && bits == 8 ? uint8_t{128} : uint8_t{0});
+    if ((dataSize & 1u) != (newSize & 1u)) {
+        const auto padding = bytes.begin() + dataHeader + 8 + newSize;
+        if (newSize & 1u) bytes.insert(padding, 0);
+        else bytes.erase(padding);
+    }
+    write32(dataHeader + 4, static_cast<uint32_t>(newSize));
+    write32(4, static_cast<uint32_t>(bytes.size() - 8));
 }
 
 // Use the already linked FFmpeg libraries, including on Android where an

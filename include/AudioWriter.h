@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <functional>
@@ -19,6 +20,10 @@ namespace motioncam {
         void write(const std::vector<float>& data, int numFrames);
         
         static std::shared_ptr<std::vector<uint8_t>> decodeWav(const std::string& source, double fps);
+
+        // Positive offsets delay the track with silence; negative offsets trim its start.
+        // PCM and float samples retain their original precision.
+        static void offsetWav(std::vector<uint8_t>& bytes, int64_t offsetUs);
 
         static void convertFile(const std::string& source, const std::string& destination,
                                 const std::string& codec, bool copy,

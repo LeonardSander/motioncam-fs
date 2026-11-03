@@ -2248,6 +2248,7 @@ MainWindow::MainWindow(QWidget *parent)
                 name = QFileInfo(name).fileName();
                 const QStringList supportedSuffixes{
                     QStringLiteral("mcraw"), QStringLiteral("unspektra"), QStringLiteral("mcpro"),
+                    QStringLiteral("zip"), QStringLiteral("7z"),
                     QStringLiteral("dng"), QStringLiteral("mov"),
                     QStringLiteral("mp4"), QStringLiteral("mkv")};
                 if (!supportedSuffixes.contains(QFileInfo(name).suffix().toLower()))
@@ -2495,6 +2496,7 @@ MainWindow::MainWindow(QWidget *parent)
                    name.endsWith(".unspektra", Qt::CaseInsensitive) ||
                    name.endsWith(".mcpro", Qt::CaseInsensitive) ||
                    name.endsWith(".7z", Qt::CaseInsensitive) ||
+                   name.endsWith(".zip", Qt::CaseInsensitive) ||
                    name.endsWith(".dng", Qt::CaseInsensitive) ||
                    (name.contains("NATIVE", Qt::CaseInsensitive) &&
                     (name.endsWith(".mov", Qt::CaseInsensitive) ||
@@ -3040,6 +3042,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                         filePath.endsWith(".unspektra", Qt::CaseInsensitive) ||
                         filePath.endsWith(".mcpro", Qt::CaseInsensitive) ||
                         filePath.endsWith(".7z", Qt::CaseInsensitive) ||
+                        filePath.endsWith(".zip", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
                           filePath.endsWith(".mp4", Qt::CaseInsensitive) ||
@@ -3064,7 +3067,8 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
 }
 
 void MainWindow::mountFile(const QString& filePath) {
-    if (filePath.endsWith(".7z", Qt::CaseInsensitive)) {
+    if (filePath.endsWith(".7z", Qt::CaseInsensitive) ||
+        filePath.endsWith(".zip", Qt::CaseInsensitive)) {
         std::unique_ptr<QProgressDialog> progress;
 #ifndef __ANDROID__
         if (!mImportBatchProgress) {

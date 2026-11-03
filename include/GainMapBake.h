@@ -213,6 +213,8 @@ template<typename Map>
 struct GainMapLuminanceSeparation {
     Map luminance{};
     bool colorSeparated = false;
+    // Phase-dependent end bounds require a bounded luminance remainder.
+    bool phaseSpecificBounds = false;
     bool valid = false;
 };
 
@@ -242,7 +244,6 @@ inline GainMapLuminanceSeparation<Map> separateGainMapLuminance(
         };
         scalarCfa &= map.channels == 1 && map.rowPitch == 2 && map.colPitch == 2 &&
             map.width == maps.front().width && map.height == maps.front().height &&
-            map.bottom == maps.front().bottom && map.right == maps.front().right &&
             map.plane == maps.front().plane && map.planes == maps.front().planes &&
             equivalent(map.spacingV, maps.front().spacingV) &&
             equivalent(map.spacingH, maps.front().spacingH) &&
@@ -265,8 +266,35 @@ inline GainMapLuminanceSeparation<Map> separateGainMapLuminance(
         if (map.width != maps.front().width || map.height != maps.front().height ||
             !map.channels || map.data.size() != expectedPoints * map.channels)
             return result;
+    uint32_t commonBottom = 0, commonRight = 0;
+    if (scalarCfa) {
+        // End bounds may differ by phase (for example mcpro24fps uses H-top,
+        // W-left). Compare the pixels visited by the 2x2 pitch, not raw bounds.
+        // A shared area must reproduce every phase's last affected sample.
+        const auto lastSample = [](uint32_t begin, uint32_t end) {
+            return begin + ((end - begin - 1u) / 2u) * 2u;
+        };
+        for (const auto& map : maps) {
+            if (map.top >= map.bottom || map.left >= map.right) return result;
+            result.phaseSpecificBounds |= map.bottom != maps.front().bottom ||
+                                          map.right != maps.front().right;
+            commonBottom = std::max(commonBottom, lastSample(map.top, map.bottom) + 1u);
+            commonRight = std::max(commonRight, lastSample(map.left, map.right) + 1u);
+        }
+        for (const auto& map : maps)
+            if (lastSample(map.top, commonBottom) != lastSample(map.top, map.bottom) ||
+                lastSample(map.left, commonRight) != lastSample(map.left, map.right))
+                return result;
+    }
     result.luminance = maps.front();
     result.luminance.channels = 1;
+    if (scalarCfa) {
+        result.luminance.top = baseTop;
+        result.luminance.left = baseLeft;
+        result.luminance.bottom = commonBottom;
+        result.luminance.right = commonRight;
+    }
+    result.luminance.rowPitch = result.luminance.colPitch = 1;
     const size_t points = static_cast<size_t>(result.luminance.width) *
                           result.luminance.height;
     result.luminance.data.assign(points, 1.0f);

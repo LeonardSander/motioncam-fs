@@ -506,6 +506,41 @@ int main() {
     for (size_t i = 0; i < unrelatedRegions.size(); ++i)
         assert(unrelatedRegions[i].data == originalRegions[i].data);
 
+    // Four Bayer phases can encode slightly different exclusive end bounds.
+    // Accept them only when one common area visits exactly the same samples.
+    for (const uint32_t extent : {8u, 9u}) {
+        std::vector<motioncam::GainMap> phaseMaps(4, region);
+        for (uint32_t phase = 0; phase < 4; ++phase) {
+            auto& map = phaseMaps[phase];
+            map.top = phase / 2; map.left = phase % 2;
+            map.bottom = extent - map.top; map.right = extent - map.left;
+            map.data.assign(4, 2.0f + phase);
+        }
+        const auto sourceMaps = phaseMaps;
+        const auto separation = motioncam::separateGainMapLuminance(phaseMaps);
+        assert(separation.valid && separation.colorSeparated);
+        const uint32_t commonEnd = extent - ((extent & 1u) ? 0 : 1);
+        assert(separation.luminance.bottom == commonEnd && separation.luminance.right == commonEnd);
+        for (uint32_t y = 0; y < extent; ++y) {
+            for (uint32_t x = 0; x < extent; ++x) {
+                const auto phase = (y % 2) * 2 + x % 2;
+                const auto& source = sourceMaps[phase];
+                const bool affected = x >= source.left && x < source.right &&
+                    y >= source.top && y < source.bottom;
+                const float original = affected ? source.data[0] : 1.0f;
+                const float color = affected ? phaseMaps[phase].data[0] : 1.0f;
+                const auto& luminance = separation.luminance;
+                const bool applyLuminance = x >= luminance.left && x < luminance.right &&
+                    y >= luminance.top && y < luminance.bottom;
+                const float luma = applyLuminance ? luminance.data[0] : 1.0f;
+                assert(original == color * luma);
+            }
+        }
+        auto incompatible = sourceMaps;
+        incompatible[0].bottom += 4;
+        assert(!motioncam::separateGainMapLuminance(incompatible).valid);
+    }
+
     // Uncompressed tiles, compressed strips, planar LinearRaw, and omitted
     // TIFF defaults all normalize to one chunky, uncompressed strip.
     {
@@ -1291,6 +1326,34 @@ int main() {
     assert(motioncam::DNGDecoder::decodePreview(
         scalarSpatialDng, motioncam::RenderSettings{}, scalarUnprocessedPreview, false));
     assert(colorPreview.rgb == scalarUnprocessedPreview.rgb);
+    {
+        auto phaseDng = std::vector<uint8_t>(gainMapDng.begin(), gainMapDng.end());
+        std::vector<motioncam::GainMap> phases(4, originalMaps.front());
+        for (uint32_t phase = 0; phase < 4; ++phase) {
+            auto& map = phases[phase];
+            map.top = phase / 2; map.left = phase % 2;
+            map.bottom = height - map.top; map.right = width - map.left;
+            map.channels = 1; map.rowPitch = map.colPitch = 2;
+            map.data.assign(size_t(map.width) * map.height, 2.0f + phase);
+        }
+        assert(motioncam::DNGDecoder::replaceGainMaps(phaseDng, 2, phases));
+        for (bool bake : {false, true}) {
+            auto output = phaseDng;
+            const bool ok = bake ? motioncam::DNGDecoder::bakeGainMaps(output, false, true)
+                                 : motioncam::DNGDecoder::transformGainMaps(output, false, true, false);
+            assert(ok);
+            std::vector<motioncam::GainMap> luminance;
+            assert(motioncam::DNGDecoder::getGainMaps(output, 3, luminance));
+            assert(luminance.size() == 1 && luminance[0].channels == 1);
+            assert(luminance[0].right == width - 1 && luminance[0].bottom == height - 1);
+        }
+        motioncam::RenderSettings colorOnly;
+        colorOnly.options = motioncam::FileRenderOptions(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+                                                        motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR);
+        motioncam::PreviewFrame frame;
+        assert(motioncam::DNGDecoder::decodePreview(phaseDng, colorOnly, frame, false));
+        assert(frame.gainMapApplied);
+    }
     std::vector<uint8_t> clearedGainMapDng(gainMapDng.begin(), gainMapDng.end());
     assert(motioncam::DNGDecoder::replaceGainMaps(clearedGainMapDng, 2, {}));
     std::vector<motioncam::GainMap> clearedMaps;

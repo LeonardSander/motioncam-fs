@@ -743,7 +743,7 @@ public class MotionCamActivity extends QtActivity {
         if (name == null) return false;
         String lower = name.toLowerCase(Locale.ROOT);
         return lower.endsWith(".mcraw") || lower.endsWith(".unspektra") || lower.endsWith(".mcpro") ||
-                lower.endsWith(".dng") || lower.endsWith(".mov") ||
+                lower.endsWith(".zip") || lower.endsWith(".7z") || lower.endsWith(".dng") || lower.endsWith(".mov") ||
                 lower.endsWith(".mp4") || lower.endsWith(".mkv");
     }
 

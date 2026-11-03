@@ -166,17 +166,8 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     // Initialize DirectLogDecoder
     try {
         mDecoder = std::make_unique<DirectLogDecoder>(mSrcPath);
-        if (mSidecarMetadata.contains("dynamic") &&
-            mSidecarMetadata["dynamic"].contains("frames")) {
-            const auto& metadataFrames = mSidecarMetadata["dynamic"]["frames"];
-            std::vector<Timestamp> exactTimestamps;
-            exactTimestamps.reserve(metadataFrames.size());
-            for (const auto& metadata : metadataFrames) {
-                if (!metadata.contains("timestampNs")) { exactTimestamps.clear(); break; }
-                exactTimestamps.push_back(metadata["timestampNs"].get<Timestamp>());
-            }
-            mDecoder->overrideTimestamps(exactTimestamps);
-        }
+        mDecoder->overrideTimestamps(vfs::sidecarTimestamps(
+            mSidecarMetadata, mDecoder->getFrames().size()));
         if (mCalibration && mCalibration->hasDataLevels) {
             if (mCalibration->dataLevels == "Full")
                 mDecoder->setFullRangeOverride(true);

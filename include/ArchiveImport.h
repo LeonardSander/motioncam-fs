@@ -18,7 +18,7 @@ struct ArchiveImportResult {
     QString gyroflowSidecarPath;
 };
 
-// Extracts the first supported clip directory in a 7z archive. Files in the
+// Extracts the first supported clip directory in a 7z or ZIP archive. Files in the
 // archive root take precedence; subdirectories are considered only when the
 // root contains no MCRAW or DNG files.
 ArchiveImportResult extractReviewArchive(const QString& archivePath);

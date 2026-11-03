@@ -46,12 +46,15 @@ public:
     DNGDecoder(const std::string& sequencePath);
     ~DNGDecoder();
 
+    // Import-time sidecar override; frame arrays follow filename order.
+    void overrideTimestamps(const std::vector<Timestamp>& timestamps, double nominalFrameRate = 0.0);
     const DNGSequenceInfo& getSequenceInfo() const { return mSequenceInfo; }
     const std::vector<DNGFrameInfo>& getFrames() const { return mFrames; }
     bool imagePayloadSampleHash(int frameNumber, uint64_t& hash) const;
     
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
+    bool getLinearizationTable(int frameNumber, std::vector<uint16_t>& table);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
     // sourceSize supplies the original file length for metadata-only TIFFs.
     static bool getColorMetadata(const std::vector<uint8_t>& dngData,

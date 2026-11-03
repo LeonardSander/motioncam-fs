@@ -370,6 +370,13 @@ std::optional<GyroflowLensProfile> loadGyroflowLensProfile(
 void applyGyroflowLensProfile(
     std::vector<uint8_t>& dng, const GyroflowLensProfile& profile);
 
+// Incomplete or non-increasing overrides leave source timing available as fallback.
+std::vector<Timestamp> sidecarTimestamps(const nlohmann::json& metadata, size_t expectedFrames);
+std::string dngSequencePrefix(const std::string& frameName);
+// Adapt mcpro24fps CSV/comment metadata to the ordinary clip sidecar schema.
+nlohmann::json readDngTimingSidecar(const std::string& directory,
+                                   std::vector<std::string> frameNames);
+
 void loadSidecar(
     const boost::filesystem::path& path,
     nlohmann::json& metadata,
@@ -467,7 +474,8 @@ std::string getDisplayDataLevels(
     float statWhiteLevel, std::array<float, 4> statBlackLevel, 
     std::string levels, std::string logTransform,
     bool applyShadingMap, bool normalizeShadingMap,
-    uint32_t inputBitDepth = 0);
+    uint32_t inputBitDepth = 0,
+    const std::vector<uint16_t>* linearizationTable = nullptr);
 
 } // namespace vfs
 } // namespace motioncam

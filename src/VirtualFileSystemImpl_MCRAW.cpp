@@ -753,13 +753,8 @@ void VirtualFileSystemImpl_MCRAW::init() {
             ? std::string() : logTransformModeToString(displayPlan.logTransform),
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
         mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-        isMc24 ? containerMetadata.value("mc24InputBitDepth", 0u) : 0u);
-    if (isMc24 && !cameraFrameMetadata.linearizationTable.empty()) {
-        const auto slash = mFileInfo.levelsInfo.find('/');
-        if (slash != std::string::npos)
-            mFileInfo.levelsInfo.replace(0, slash,
-                std::to_string(cameraFrameMetadata.linearizationTable.size() - 1));
-    }
+        isMc24 ? containerMetadata.value("mc24InputBitDepth", 0u) : 0u,
+        isMc24 ? &cameraFrameMetadata.linearizationTable : nullptr);
     const bool retainsSourceLog = displayPlan.logTransform != LogTransformMode::Disabled ||
         !(mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
         cameraFrameMetadata.lensShadingMap.empty();

@@ -1,4 +1,5 @@
 #include "ArchiveImport.h"
+#include "SourceInput.h"
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -11,8 +12,10 @@
 #include <QUuid>
 
 #include <algorithm>
-#include <memory>
+#include <cstring>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -27,16 +30,32 @@ struct Entry {
     qint64 size = 0;
 };
 
-using ArchivePtr = std::unique_ptr<archive, decltype(&archive_read_free)>;
+struct ArchiveCloser {
+    FILE* file = nullptr;
+    void operator()(archive* input) const {
+        archive_read_free(input);
+        if (file) std::fclose(file);
+    }
+};
+using ArchivePtr = std::unique_ptr<archive, ArchiveCloser>;
 
 ArchivePtr openArchive(const QString& path) {
-    ArchivePtr input(archive_read_new(), archive_read_free);
-    if (!input) throw std::runtime_error("Could not allocate 7z archive reader");
+    ArchivePtr input(archive_read_new());
+    if (!input) throw std::runtime_error("Could not allocate archive reader");
     archive_read_support_filter_all(input.get());
     archive_read_support_format_7zip(input.get());
-    if (archive_read_open_filename(input.get(), QFile::encodeName(path).constData(), 1024 * 1024) != ARCHIVE_OK) {
+    archive_read_support_format_zip(input.get());
+#ifdef __ANDROID__
+    input.get_deleter().file = openSourceFile(path.toStdString());
+#elif defined(_WIN32)
+    input.get_deleter().file = _wfopen(reinterpret_cast<const wchar_t*>(path.utf16()), L"rb");
+#else
+    input.get_deleter().file = std::fopen(QFile::encodeName(path).constData(), "rb");
+#endif
+    if (!input.get_deleter().file ||
+        archive_read_open_FILE(input.get(), input.get_deleter().file) != ARCHIVE_OK) {
         const char* detail = archive_error_string(input.get());
-        throw std::runtime_error(detail ? detail : "Could not open 7z archive");
+        throw std::runtime_error(detail ? detail : "Could not open archive");
     }
     return input;
 }
@@ -44,7 +63,7 @@ ArchivePtr openArchive(const QString& path) {
 void requireCleanArchiveStatus(archive* input, int status) {
     if (status == ARCHIVE_EOF) return;
     const char* detail = archive_error_string(input);
-    throw std::runtime_error(detail ? detail : "Could not read 7z archive");
+    throw std::runtime_error(detail ? detail : "Could not read archive");
 }
 
 QString safeEntryPath(const char* raw) {
@@ -57,6 +76,28 @@ QString safeEntryPath(const char* raw) {
     return path;
 }
 
+// The ZIP end record is always present, including in ZIP64 archives. Read only
+// its bounded comment rather than scanning gigabytes of image payloads.
+QByteArray zipComment(const QString& path) {
+    if (!path.endsWith(".zip", Qt::CaseInsensitive)) return {};
+    SourceInputStream file(path.toStdString(), std::ios::binary);
+    if (!file) return {};
+    constexpr std::streamoff endSize = 22, maxComment = 65535;
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    if (size < endSize) return {};
+    file.seekg(std::max<std::streamoff>(0, size - endSize - maxComment));
+    const std::string bytes(std::istreambuf_iterator<char>(file), {});
+    const auto tail = QByteArray::fromStdString(bytes);
+    for (qint64 pos = tail.size() - endSize; pos >= 0; --pos) {
+        if (std::memcmp(tail.constData() + pos, "PK\x05\x06", 4) != 0) continue;
+        const auto* p = reinterpret_cast<const unsigned char*>(tail.constData() + pos);
+        const unsigned length = p[20] | unsigned(p[21]) << 8;
+        if (pos + endSize + length == tail.size()) return tail.mid(pos + endSize, length);
+    }
+    return {};
+}
+
 QString externalSidecar(const QString& archivePath, const QString& suffix) {
     const QFileInfo archive(archivePath);
     return QDir(archive.absolutePath()).absoluteFilePath(archive.completeBaseName() + suffix);
@@ -66,6 +107,8 @@ QString externalSidecar(const QString& archivePath, const QString& suffix) {
 
 ArchiveImportResult extractReviewArchive(const QString& archivePath) {
     std::vector<Entry> entries;
+    std::vector<Entry> companions;
+    const auto comment = zipComment(archivePath);
     {
         auto input = openArchive(archivePath);
         archive_entry* item = nullptr;
@@ -74,12 +117,19 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
         while ((status = archive_read_next_header(input.get(), &item)) == ARCHIVE_OK) {
             const QString path = safeEntryPath(archive_entry_pathname_utf8(item));
             const QFileInfo info(path);
-            const bool regular = archive_entry_filetype(item) == AE_IFREG;
+            const bool regular = archive_entry_filetype(item) == AE_IFREG &&
+                !archive_entry_symlink(item) && !archive_entry_hardlink(item);
             const bool mcraw = regular && info.suffix().compare("mcraw", Qt::CaseInsensitive) == 0;
             const bool dng = regular && info.suffix().compare("dng", Qt::CaseInsensitive) == 0;
             if (!path.isEmpty() && (mcraw || dng))
                 entries.push_back({path, info.path() == "." ? QString() : info.path(),
                                    mcraw, dng, order, archive_entry_size(item)});
+            const QString suffix = info.suffix().toLower();
+            if (!path.isEmpty() && regular &&
+                (suffix == "wav" || suffix == "flac" || suffix == "opus" ||
+                 suffix == "aac" || suffix == "csv" || suffix == "jsonl" || suffix == "gcsv"))
+                companions.push_back({path, info.path() == "." ? QString() : info.path(),
+                                      false, false, order, archive_entry_size(item)});
             ++order;
             archive_read_data_skip(input.get());
         }
@@ -102,8 +152,17 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
     for (const auto& entry : entries)
         if (entry.parent == selectedParent) selected.push_back(entry);
     auto firstMcraw = std::find_if(selected.begin(), selected.end(), [](const Entry& e) { return e.mcraw; });
-    if (firstMcraw != selected.end()) selected = {*firstMcraw};
-    else selected.erase(std::remove_if(selected.begin(), selected.end(), [](const Entry& e) { return !e.dng; }), selected.end());
+    const bool dngSequence = firstMcraw == selected.end();
+    if (!dngSequence) selected = {*firstMcraw};
+    else {
+        selected.erase(std::remove_if(selected.begin(), selected.end(), [](const Entry& e) { return !e.dng; }), selected.end());
+        for (const auto& entry : companions)
+            if (entry.parent == selectedParent) selected.push_back(entry);
+    }
+    std::sort(selected.begin(), selected.end(), [](const Entry& a, const Entry& b) { return a.path < b.path; });
+    if (std::adjacent_find(selected.begin(), selected.end(), [](const Entry& a, const Entry& b) {
+            return a.path == b.path;
+        }) != selected.end()) throw std::runtime_error("Archive contains duplicate file paths");
 
     quint64 decompressedBytes = 0;
     for (const auto& entry : selected) {
@@ -130,31 +189,37 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
     }
 
     const QString temporaryRoot = QDir::temp().absoluteFilePath(
-        "motioncam-fuse-7z-" + QUuid::createUuid().toString(QUuid::WithoutBraces));
+        "motioncam-fuse-archive-" + QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!QDir().mkpath(temporaryRoot)) throw std::runtime_error("Could not create archive staging directory");
     try {
         auto input = openArchive(archivePath);
         archive_entry* item = nullptr;
         size_t extractedCount = 0;
         int status = ARCHIVE_OK;
+        // Reuse heap storage across entries; worker stacks can be small on Windows.
+        std::vector<char> buffer(1024 * 1024);
         while ((status = archive_read_next_header(input.get(), &item)) == ARCHIVE_OK) {
             const QString path = safeEntryPath(archive_entry_pathname_utf8(item));
-            const auto wanted = std::find_if(selected.begin(), selected.end(), [&](const Entry& e) { return e.path == path; });
-            if (wanted == selected.end()) { archive_read_data_skip(input.get()); continue; }
+            const auto wanted = std::lower_bound(selected.begin(), selected.end(), path,
+                [](const Entry& entry, const QString& key) { return entry.path < key; });
+            if (wanted == selected.end() || wanted->path != path) { archive_read_data_skip(input.get()); continue; }
             const QString outputPath = QDir(temporaryRoot).absoluteFilePath(path);
             if (!QDir().mkpath(QFileInfo(outputPath).absolutePath()))
                 throw std::runtime_error("Could not create archive output directory");
             QSaveFile output(outputPath);
             if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("Could not create extracted file");
-            // Windows executables normally have a 1 MiB stack. Keep the
-            // extraction buffer on the heap, including on worker threads.
-            std::vector<char> buffer(1024 * 1024);
+            qint64 extractedBytes = 0;
             for (;;) {
                 const la_ssize_t count = archive_read_data(input.get(), buffer.data(), buffer.size());
                 if (count == 0) break;
                 if (count < 0) throw std::runtime_error(archive_error_string(input.get()));
+                if (count > wanted->size - extractedBytes)
+                    throw std::runtime_error("Archive entry exceeds its declared size");
+                extractedBytes += count;
                 if (output.write(buffer.data(), count) != count) throw std::runtime_error("Could not write extracted file");
             }
+            if (extractedBytes != wanted->size)
+                throw std::runtime_error("Archive entry is shorter than its declared size");
             if (!output.commit()) throw std::runtime_error("Could not finish extracted file");
             ++extractedCount;
         }
@@ -162,12 +227,15 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
         if (extractedCount != selected.size())
             throw std::runtime_error("Archive ended before all selected media files were extracted");
 
-        QString sourcePath;
-        if (selected.size() == 1)
-            sourcePath = QDir(temporaryRoot).absoluteFilePath(selected.front().path);
-        else
-            sourcePath = selectedParent.isEmpty() ? temporaryRoot
-                                                  : QDir(temporaryRoot).absoluteFilePath(selectedParent);
+        const QString sourceDirectory = selectedParent.isEmpty() ? temporaryRoot
+            : QDir(temporaryRoot).absoluteFilePath(selectedParent);
+        if (dngSequence && comment.contains("AppVersion:mcpro24fps")) {
+            QSaveFile metadata(QDir(sourceDirectory).absoluteFilePath(".mcpro24fps.txt"));
+            if (!metadata.open(QIODevice::WriteOnly) || metadata.write(comment) != comment.size() ||
+                !metadata.commit()) throw std::runtime_error("Could not retain mcpro24fps archive metadata");
+        }
+        const QString sourcePath = dngSequence ? sourceDirectory
+            : QDir(temporaryRoot).absoluteFilePath(selected.front().path);
         return {sourcePath, temporaryRoot,
                 externalSidecar(archivePath, ".json"),
                 externalSidecar(archivePath, "_gyroflow.json")};

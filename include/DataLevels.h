@@ -1,11 +1,23 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace motioncam {
+
+// Display only: locate black in the stored-code domain without altering the
+// table or discarding codes below it. Ties choose the first matching code.
+inline uint32_t encodedBlackPoint(const std::vector<uint16_t>& table, float linearBlack) {
+    if (table.empty()) return 0;
+    const auto first = std::find_if(table.begin(), table.end(),
+        [linearBlack](uint16_t value) { return value >= linearBlack; });
+    return static_cast<uint32_t>(first == table.end() ? table.size() - 1 : first - table.begin());
+}
 
 struct ResolvedDataLevels {
     float white;

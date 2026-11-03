@@ -1,6 +1,7 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "DataLevels.h"
 #include "CalibrationData.h"
 #include "LRUCache.h"
 #include "VirtualFileSystemImpl.h"
@@ -815,6 +816,21 @@ int main(int argc, char** argv) {
         65535.0f, zeroBlack, 65535.0f, zeroBlack,
         "46915/0", "", true, false, 16) ==
         "46915/0 -> 65535/0 16b");
+    const std::vector<uint16_t> displayTable{0, 1, 1, 3, 7, 15};
+    assert(motioncam::encodedBlackPoint(displayTable, -1.0f) == 0);
+    assert(motioncam::encodedBlackPoint(displayTable, 1.0f) == 1);
+    assert(motioncam::encodedBlackPoint(displayTable, 1.5f) == 3);
+    assert(motioncam::encodedBlackPoint(displayTable, 100.0f) == 5);
+    const std::array<float, 4> tableBlack{7, 7, 7, 7};
+    assert(motioncam::vfs::getDisplayDataLevels(
+        15, tableBlack, 15, tableBlack, "Dynamic", "", false, false, 4,
+        &displayTable) == "5/4 4b");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        15, tableBlack, 15, tableBlack, "Dynamic/1.5", "", false, false, 4,
+        &displayTable) == "5/3 4b");
+    assert(motioncam::vfs::getDisplayDataLevels(
+        15, tableBlack, 15, tableBlack, "Dynamic", "", true, false, 4,
+        &displayTable) == "5/4 -> 63/16 6b");
     assert(motioncam::utils::evenBitsNeeded(32000) == 16);
     assert(motioncam::vfs::getDisplayDataType(false, 2) == "2x2");
     assert(motioncam::vfs::getDisplayDataType(false, 8) == "8x8");
@@ -2093,6 +2109,108 @@ int main(int argc, char** argv) {
 
     const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
     fs::remove_all(root);
+    // mcpro24fps CSV timestamps override filename slot timing exactly, including
+    // non-grid intervals and large absolute sensor timestamps.
+    fs::create_directories(root / "mc24-timing");
+    motioncam::Timestamp embedded = 40000000;
+    for (const auto* name : {"clip-00000000.DNG", "clip-00000002.DNG", "clip-00000013.DNG"}) {
+        auto bytes = uncompressedA;
+        assert(motioncam::DNGDecoder::setTimingMetadata(bytes, 60.0, embedded));
+        embedded -= 20000000;
+        std::ofstream out(root / "mc24-timing" / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+    const auto csv = root / "mc24-timing" / "clip.frames.csv";
+    const auto writeTiming = [&](int64_t last) {
+        std::ofstream(csv) << "name,sensor_timestamp_ns,slot\n"
+            << "clip-00000000.DNG,1708783772168520,0\n"
+            << "clip-00000002.DNG,1708783805495603,2\n"
+            << "clip-00000013.DNG," << last << ",13\n";
+    };
+    const std::vector<std::string> timingNames{
+        "clip-00000000.DNG", "clip-00000002.DNG", "clip-00000013.DNG"};
+    const auto applyCsvTiming = [&](motioncam::DNGDecoder& decoder) {
+        // Embedded timing deliberately reverses filename order. Sidecar timing
+        // must restore the correct association rather than attach PTS by that order.
+        assert(fs::path(decoder.getFrames().front().filePath).filename() == "clip-00000013.DNG");
+        std::vector<std::string> names;
+        for (const auto& frame : decoder.getFrames()) names.push_back(fs::path(frame.filePath).filename().string());
+        const auto metadata = motioncam::vfs::readDngTimingSidecar((root / "mc24-timing").string(), names);
+        decoder.overrideTimestamps(motioncam::vfs::sidecarTimestamps(metadata, names.size()));
+    };
+    writeTiming(1708783991190968);
+    {
+        motioncam::DNGDecoder decoder((root / "mc24-timing").string());
+        applyCsvTiming(decoder);
+        assert(decoder.getSequenceInfo().hasFrameNumberSequence);
+        const auto& frames = decoder.getFrames();
+        assert(frames.size() == 3 && frames[0].timestamp == 0);
+        assert(frames[1].timestamp == 33327083 && frames[2].timestamp == 219022448);
+        assert(frames[2].frameNumber == 13 && frames[2].hasExactPresentationTimestamp);
+    }
+    writeTiming(1708783991190969);
+    {
+        motioncam::DNGDecoder decoder((root / "mc24-timing").string());
+        applyCsvTiming(decoder);
+        assert(decoder.getFrames()[2].timestamp == 219022449);
+    }
+    // A CSV for one clip must not turn a mixed still collection into that clip.
+    fs::create_directories(root / "mixed-csv");
+    for (const auto* name : {"clip-00000000.DNG", "other-00000002.DNG"}) {
+        std::ofstream out(root / "mixed-csv" / name, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(uncompressedA.data()), uncompressedA.size());
+    }
+    std::ofstream(root / "mixed-csv" / "clip.frames.csv")
+        << "name,sensor_timestamp_ns,slot\nclip-00000000.DNG,1708783772168520,0\n";
+    {
+        motioncam::DNGDecoder decoder((root / "mixed-csv").string());
+        const auto sidecar = motioncam::vfs::readDngTimingSidecar((root / "mixed-csv").string(),
+            {"clip-00000000.DNG", "other-00000002.DNG"});
+        assert(motioncam::vfs::sidecarTimestamps(sidecar, 2).empty());
+        assert(motioncam::vfs::sidecarTimestamps(nlohmann::json{}, 3).empty());
+        for (const auto& invalid : {
+                nlohmann::json::array({0, 17, 17}),
+                nlohmann::json::array({0, 17, 16}),
+                nlohmann::json::array({0, 17, 17.5}),
+                nlohmann::json::array({0, 17, UINT64_MAX})}) {
+            auto bad = sidecar;
+            for (size_t i = 0; i < 3; ++i) bad["dynamic"]["frames"][i]["timestampNs"] = invalid[i];
+            assert(motioncam::vfs::sidecarTimestamps(bad, 3).empty());
+        }
+        assert(!decoder.getSequenceInfo().hasFrameNumberSequence);
+        assert(decoder.getFrames().size() == 2);
+        for (const auto& frame : decoder.getFrames()) assert(!frame.hasExactPresentationTimestamp);
+    }
+    // JSON clip sidecars and CSV adapters use the same timestamp reader.
+    {
+        const nlohmann::json sidecar{{"dynamic", {{"frames", {
+            {{"timestampNs", 0}}, {{"timestampNs", 17000001}}, {{"timestampNs", 41000003}}
+        }}}}};
+        motioncam::DNGDecoder decoder((root / "mc24-timing").string());
+        decoder.overrideTimestamps(motioncam::vfs::sidecarTimestamps(sidecar, 3));
+        assert(decoder.getFrames()[1].timestamp == 17000001);
+        assert(decoder.getFrames()[2].timestamp == 41000003);
+        assert(motioncam::vfs::sidecarTimestamps(sidecar, 2).empty());
+        assert(motioncam::vfs::sidecarTimestamps(nlohmann::json{}, 3).empty());
+        for (const auto& invalid : {
+                nlohmann::json::array({0, 17, 17}),
+                nlohmann::json::array({0, 17, 16}),
+                nlohmann::json::array({0, 17, 17.5}),
+                nlohmann::json::array({0, 17, UINT64_MAX})}) {
+            auto bad = sidecar;
+            for (size_t i = 0; i < 3; ++i) bad["dynamic"]["frames"][i]["timestampNs"] = invalid[i];
+            assert(motioncam::vfs::sidecarTimestamps(bad, 3).empty());
+        }
+    }
+    for (const auto& text : {"", "name,sensor_timestamp_ns,slot\n",
+            "name,sensor_timestamp_ns,slot\nclip.DNG,123junk,0\n",
+            "name,sensor_timestamp_ns,slot\nclip.DNG,123,0\nclip.DNG,456,1\n"}) {
+        std::ofstream(csv) << text;
+        bool rejected = false;
+        try { motioncam::vfs::readDngTimingSidecar((root / "mc24-timing").string(), timingNames); }
+        catch (const std::runtime_error&) { rejected = true; }
+        assert(rejected);
+    }
     // Metadata import must handle TIFF directories after a large image area,
     // while retaining out-of-line calibration values and full-frame reads.
     fs::create_directories(root / "metadata-tail");
@@ -2119,6 +2237,12 @@ int main(int argc, char** argv) {
     assert(motioncam::DNGDecoder::getColorMetadata(metadataTail, expectedTailMetadata));
     motioncam::DNGDecoder tailDecoder(tailPath.string());
     assert(tailDecoder.getFrames().size() == 1);
+    std::vector<uint16_t> importedTable;
+    assert(tailDecoder.getLinearizationTable(0, importedTable));
+    assert(importedTable.size() == 1024 && importedTable[0] == 0 && importedTable[7] == 448);
+    assert(motioncam::encodedBlackPoint(importedTable, 448.0f) == 7);
+    assert(!tailDecoder.getLinearizationTable(-1, importedTable) && importedTable.empty());
+
     assert(tailDecoder.getFrames()[0].width == 32 && tailDecoder.getFrames()[0].height == 32);
     assert(tailDecoder.getFrames()[0].imageIfdOffset == tailOffset);
     assert(tailDecoder.getFrameMetadata(0, actualTailMetadata));

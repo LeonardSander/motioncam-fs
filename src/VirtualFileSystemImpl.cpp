@@ -9,6 +9,7 @@
 #include "GainMapBake.h"
 #include "Utils.h"
 #include <motioncam/Decoder.hpp>
+#include <charconv>
 #include <algorithm>
 #include <cmath>
 #include <locale>
@@ -1908,6 +1909,108 @@ void applyGyroflowLensProfile(
         throw std::runtime_error("Could not resample Gyroflow warp for cropped DNG");
 }
 
+std::vector<Timestamp> sidecarTimestamps(const nlohmann::json& metadata, size_t expectedFrames) {
+    if (!metadata.contains("dynamic") || !metadata["dynamic"].is_object() ||
+        !metadata["dynamic"].contains("frames")) return {};
+    const auto& frames = metadata["dynamic"]["frames"];
+    if (!frames.is_array() || frames.size() != expectedFrames) return {};
+    std::vector<Timestamp> timestamps;
+    timestamps.reserve(frames.size());
+    for (const auto& frame : frames) {
+        if (!frame.is_object() || !frame.contains("timestampNs")) return {};
+        const auto& value = frame["timestampNs"];
+        if (!value.is_number_integer() ||
+            (value.is_number_unsigned() && value.get<uint64_t>() > uint64_t(INT64_MAX))) return {};
+        const auto timestamp = value.get<Timestamp>();
+        if (!timestamps.empty() && timestamp <= timestamps.back()) return {};
+        timestamps.push_back(timestamp);
+    }
+    return timestamps;
+}
+
+std::string dngSequencePrefix(const std::string& frameName) {
+    const auto stem = std::filesystem::path(frameName).stem().string();
+    const auto separator = stem.find_last_of('-');
+    return separator == std::string::npos ? stem : stem.substr(0, separator);
+}
+
+nlohmann::json readDngTimingSidecar(const std::string& directory,
+                                   std::vector<std::string> frameNames) {
+    const auto integer = [](const std::string& text) {
+        Timestamp value = 0;
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+            throw std::runtime_error("Invalid mcpro24fps sequence timing value");
+        return value;
+    };
+    const auto trimCr = [](std::string& line) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+    };
+    const std::filesystem::path root(directory);
+    nlohmann::json result = nlohmann::json::object();
+    SourceInputStream comment(root / ".mcpro24fps.txt");
+    std::string line;
+    while (std::getline(comment, line)) {
+        trimCr(line);
+        const auto colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        const auto key = line.substr(0, colon), value = line.substr(colon + 1);
+        if (key == "AudioOffsetUs") result["audioOffsetUs"] = integer(value);
+        if (key == "FrameRate") {
+            std::istringstream rate(value);
+            rate.imbue(std::locale::classic());
+            double fps = 0.0;
+            rate >> std::noskipws >> fps;
+            if (!rate || rate.peek() != std::char_traits<char>::eof() || !std::isfinite(fps) || fps <= 0.0)
+                throw std::runtime_error("Invalid mcpro24fps sequence frame rate");
+            result["frameRate"] = fps;
+        }
+    }
+    if (frameNames.empty()) return result;
+    const auto prefix = dngSequencePrefix(frameNames.front());
+    if (!std::all_of(frameNames.begin(), frameNames.end(), [&](const auto& name) {
+            return dngSequencePrefix(name) == prefix;
+        })) return result;
+    std::sort(frameNames.begin(), frameNames.end());
+    SourceInputStream csv(root / (prefix + ".frames.csv"));
+    if (!std::getline(csv, line)) {
+        if (csv.is_open()) throw std::runtime_error("Empty mcpro24fps frame timing CSV");
+        return result;
+    }
+    trimCr(line);
+    if (line != "name,sensor_timestamp_ns,slot")
+        throw std::runtime_error("Invalid mcpro24fps frame timing CSV header");
+    std::map<std::string, Timestamp> byName;
+    while (std::getline(csv, line)) {
+        trimCr(line);
+        if (line.empty()) continue;
+        const auto first = line.find(','), last = line.find_last_of(',');
+        if (first == std::string::npos || first == last)
+            throw std::runtime_error("Invalid mcpro24fps frame timing CSV row");
+        const auto name = line.substr(0, first);
+        const auto timestamp = integer(line.substr(first + 1, last - first - 1));
+        const auto slot = integer(line.substr(last + 1));
+        if (name.empty() || timestamp < 0 || slot < 0 || slot > INT32_MAX ||
+            !byName.emplace(name, timestamp).second)
+            throw std::runtime_error("Invalid or duplicated mcpro24fps frame timing entry");
+    }
+    if (!csv.eof()) throw std::runtime_error("Could not read mcpro24fps frame timing CSV");
+    if (byName.empty()) throw std::runtime_error("No frames in mcpro24fps timing CSV");
+    auto& frames = result["dynamic"]["frames"] = nlohmann::json::array();
+    Timestamp origin = 0, previous = -1;
+    for (const auto& name : frameNames) {
+        const auto entry = byName.find(name);
+        if (entry == byName.end()) throw std::runtime_error("DNG missing from timing CSV: " + name);
+        if (frames.empty()) origin = entry->second;
+        const auto relative = entry->second - origin;
+        if (relative < 0 || relative <= previous)
+            throw std::runtime_error("Non-increasing mcpro24fps sensor timestamp");
+        frames.push_back({{"timestampNs", relative}});
+        previous = relative;
+    }
+    return result;
+}
+
 void loadSidecar(
         const boost::filesystem::path& path, nlohmann::json& metadata,
         std::optional<CalibrationData>& calibration, bool refresh) {
@@ -2709,7 +2812,8 @@ std::string getDisplayDataLevels(
     float statWhiteLevel, std::array<float, 4> statBlackLevel, 
     std::string levels, std::string logTransform,
     bool applyShadingMap, bool normalizeShadingMap,
-    uint32_t inputBitDepth) {
+    uint32_t inputBitDepth,
+    const std::vector<uint16_t>* linearizationTable) {
 
     const auto resolvedLevels = resolveDataLevels(
         levels, dynWhiteLevel, dynBlackLevel, statWhiteLevel, statBlackLevel);
@@ -2763,14 +2867,22 @@ std::string getDisplayDataLevels(
             v = 0;
     }    
     
-    std::string result = std::to_string(static_cast<int>(srcWhiteLevel)) + "/" + 
-                         std::to_string(static_cast<int>(srcBlackLevel[0]));    // Build levels info string
-    
-    if (srcWhiteLevel != dstWhiteLevel || srcBlackLevel[0] != dstBlackLevel[0]) {
-        result += " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" + 
-                           std::to_string(static_cast<int>(dstBlackLevel[0]));
-    }       // Show transformation if levels changed
-    
+    float displayInputWhite = srcWhiteLevel, displayInputBlack = srcBlackLevel[0];
+    if (linearizationTable && !linearizationTable->empty()) {
+        displayInputWhite = static_cast<float>(linearizationTable->size() - 1);
+        displayInputBlack = static_cast<float>(encodedBlackPoint(*linearizationTable, srcBlackLevel[0]));
+        if (logTransform.empty() && !applyShadingMap) {
+            dstWhiteLevel = displayInputWhite;
+            dstBlackLevel[0] = displayInputBlack;
+        }
+    }
+    std::string result = std::to_string(static_cast<int>(displayInputWhite)) + "/" +
+                         std::to_string(static_cast<int>(displayInputBlack));
+    if (displayInputWhite != dstWhiteLevel || displayInputBlack != dstBlackLevel[0]) {
+        result += " -> " + std::to_string(static_cast<int>(dstWhiteLevel)) + "/" +
+                  std::to_string(static_cast<int>(dstBlackLevel[0]));
+    }
+
     result += " " + std::to_string(std::min(16, useBits)) + "b";
     if (!logTransform.empty()) 
         result += " log";    

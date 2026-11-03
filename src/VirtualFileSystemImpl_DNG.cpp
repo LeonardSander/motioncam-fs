@@ -138,6 +138,19 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
     // Initialize DNGDecoder
     try {
         mDecoder = std::make_unique<DNGDecoder>(mSrcPath);
+        std::vector<std::string> frameNames;
+        for (const auto& frame : mDecoder->getFrames())
+            frameNames.push_back(boost::filesystem::path(frame.filePath).filename().string());
+        auto timestamps = vfs::sidecarTimestamps(mSidecarMetadata, frameNames.size());
+        if (!timestamps.empty() && timestamps.front() < 0) timestamps.clear();
+        const auto captureSidecar = vfs::readDngTimingSidecar(mDecoder->getSequenceInfo().basePath,
+            timestamps.empty() ? frameNames : std::vector<std::string>{});
+        if (timestamps.empty()) timestamps = vfs::sidecarTimestamps(captureSidecar, frameNames.size());
+        const auto& timingOverrides = mSidecarMetadata.is_object() ? mSidecarMetadata : captureSidecar;
+        mDecoder->overrideTimestamps(timestamps,
+            timingOverrides.value("frameRate", captureSidecar.value("frameRate", 0.0)));
+        mSourceAudioOffsetUs = timingOverrides.value("audioOffsetUs",
+            captureSidecar.value("audioOffsetUs", int64_t{0}));
         const auto& sequenceInfo = mDecoder->getSequenceInfo();
         
         mWidth = sequenceInfo.width;
@@ -226,7 +239,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 mSourceBlackLevel = metadata[0].blackLevel;
             if (metadata[0].inputBitDepth > 0)
                 mSourceInputBitDepth = metadata[0].inputBitDepth;
-            mSourceLinearizationInputMax = metadata[0].linearizationInputMax;
+            mDecoder->getLinearizationTable(0, mSourceLinearizationTable);
         }
         if (!mSourceFrameLayouts.empty() && mSourceFrameLayouts[0].valid) {
             const auto& layout = mSourceFrameLayouts[0];
@@ -292,7 +305,11 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             const boost::filesystem::path source(mSrcPath);
             const auto sourceDirectory = boost::filesystem::is_directory(source)
                 ? source : source.parent_path();
-            for (const char* name : {"audio.wav", "audio.flac", "audio.opus", "audio.aac"}) {
+            const auto prefix = vfs::dngSequencePrefix(
+                boost::filesystem::path(frames.front().filePath).filename().string());
+            const std::vector<std::string> audioNames = {"audio.wav", "audio.flac", "audio.opus", "audio.aac",
+                                                         prefix + "-audio.wav"};
+            for (const auto& name : audioNames) {
                 const auto audioPath = sourceDirectory / name;
                 if (!boost::filesystem::is_regular_file(audioPath)) continue;
                 motioncam::SourceInputStream audio(audioPath.string(), std::ios::binary);
@@ -301,12 +318,15 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
                 if (!audio.eof() && audio.fail())
                     throw std::runtime_error("Could not read DNG sequence audio: " +
                                              audioPath.string());
-                if (std::string(name) == "audio.wav") {
+                if (boost::iequals(audioPath.extension().string(), ".wav")) {
+                    AudioWriter::offsetWav(bytes, mSourceAudioOffsetUs);
                     if (!bytes.empty())
                         mAudioData = std::make_shared<const std::vector<uint8_t>>(
                             std::move(bytes));
                 } else {
-                    mAudioData = AudioWriter::decodeWav(audioPath.string(), mFps);
+                    auto decoded = AudioWriter::decodeWav(audioPath.string(), mFps);
+                    if (decoded) AudioWriter::offsetWav(*decoded, mSourceAudioOffsetUs);
+                    mAudioData = std::move(decoded);
                 }
                 mAudioFileName = "audio.wav";
                 break;
@@ -1298,25 +1318,8 @@ FileInfo VirtualFileSystemImpl_DNG::getFileInfo() const {
         applyLogCurve ? logTransformModeToString(mConfig.logTransform) : std::string(),
         mSourceHasGainMap && (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION),
         mConfig.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
-        mSourceInputBitDepth);
-    if (mSourceLinearizationInputMax > 0) {
-        // Only replace the displayed input code range. Output levels and bit
-        // depth still derive from the DNG's post-linearization WhiteLevel.
-        const auto slash = info.levelsInfo.find('/');
-        if (slash != std::string::npos)
-            info.levelsInfo.replace(0, slash,
-                std::to_string(mSourceLinearizationInputMax));
-        const auto arrow = info.levelsInfo.find(" -> ");
-        if (arrow != std::string::npos) {
-            const auto outputEnd = info.levelsInfo.find(' ', arrow + 4);
-            if (outputEnd != std::string::npos) {
-                const auto inputRange = info.levelsInfo.substr(0, arrow);
-                const auto outputRange = info.levelsInfo.substr(
-                    arrow + 4, outputEnd - arrow - 4);
-                if (inputRange == outputRange)
-                    info.levelsInfo.erase(arrow, outputEnd - arrow);
-            }
-        }
+        mSourceInputBitDepth, &mSourceLinearizationTable);
+    if (!mSourceLinearizationTable.empty()) {
         // A baked gain map without output log materializes linear samples.
         // Only label output that retains or rewrites log encoding.
         if (applyLogCurve || !mSourceHasGainMap ||

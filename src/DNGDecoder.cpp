@@ -2234,7 +2234,6 @@ void DNGDecoder::analyzeSequence() {
     }
     findDNGFiles();
     extractTimestampsFromFilenames();
-    
     if (!mFrames.empty()) {
         mSequenceInfo.totalFrames = mFrames.size();
         mSequenceInfo.width = mFrames[0].width;
@@ -2801,6 +2800,48 @@ bool DNGDecoder::extractFrame(int frameNumber, std::vector<uint8_t>& dngData) {
     const DNGFrameInfo& frameInfo = mFrames[frameNumber];
     return readDNGFile(frameInfo.filePath, dngData,
                        sourceReadAheadEnabled ? frameInfo.fileSize : 0);
+}
+
+void DNGDecoder::overrideTimestamps(const std::vector<Timestamp>& timestamps, double nominalFrameRate) {
+    if (timestamps.empty() || timestamps.size() != mFrames.size() || timestamps.front() < 0) return;
+    for (size_t i = 1; i < timestamps.size(); ++i)
+        if (timestamps[i] <= timestamps[i - 1]) return;
+    // DNG sidecar frame arrays follow filename order. Embedded timecodes can
+    // be inaccurate; they must not reorder authoritative external timestamps.
+    std::sort(mFrames.begin(), mFrames.end(), [](const auto& a, const auto& b) {
+        return a.filePath < b.filePath;
+    });
+    mGainMapCache.clear();
+    mLastExtractedFrame.store(-1, std::memory_order_relaxed);
+    mSequenceInfo.width = mFrames.front().width;
+    mSequenceInfo.height = mFrames.front().height;
+    const auto origin = timestamps.front();
+    for (size_t i = 0; i < mFrames.size(); ++i) {
+        mFrames[i].timestamp = timestamps[i] - origin;
+        mFrames[i].hasExactPresentationTimestamp = true;
+    }
+    mSequenceInfo.hasFrameNumberSequence = true;
+    if (mFrames.size() > 1)
+        mSequenceInfo.fps = (mFrames.size() - 1) * 1e9 / mFrames.back().timestamp;
+    else if (std::isfinite(nominalFrameRate) && nominalFrameRate > 0.0)
+        mSequenceInfo.fps = nominalFrameRate;
+}
+
+bool DNGDecoder::getLinearizationTable(int frameNumber, std::vector<uint16_t>& table) {
+    table.clear();
+    if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) return false;
+    std::vector<uint8_t> metadata;
+    if (!readDngMetadata(mFrames[frameNumber].filePath, metadata)) return false;
+    bool little = true;
+    for (const auto& entry : findTiffEntries(metadata, little)) {
+        if (entry.tag != TIFF_TAG_LINEARIZATION_TABLE) continue;
+        if (entry.type != TIFF_TYPE_SHORT || !entry.count || entry.count > 65536) return false;
+        table.resize(entry.count);
+        for (size_t i = 0; i < table.size(); ++i)
+            table[i] = read16(metadata.data() + entry.valueOffset + i * 2, little);
+        return true;
+    }
+    return false;
 }
 
 bool DNGDecoder::getGainMap(int frameNumber, GainMap& gainMap) {
@@ -9373,8 +9414,14 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             return false;
         }
         GainMap luminance = std::move(separation.luminance);
-        luminance.top = 0; luminance.left = 0;
-        luminance.bottom = height; luminance.right = width;
+        if (separation.phaseSpecificBounds) {
+            // Preserve the edge coverage encoded by phase-dependent bounds.
+            luminance.bottom = std::min(luminance.bottom, height);
+            luminance.right = std::min(luminance.right, width);
+        } else {
+            luminance.top = 0; luminance.left = 0;
+            luminance.bottom = height; luminance.right = width;
+        }
         luminance.plane = 0; luminance.planes = 3;
         luminance.rowPitch = 1; luminance.colPitch = 1;
         gridColorSeparated = separation.colorSeparated;
@@ -10338,10 +10385,15 @@ bool DNGDecoder::transformGainMaps(std::vector<uint8_t>& data, bool normalizeGai
         separatedLuminance = std::move(separation.luminance);
         DNGImageLayout layout;
         if (!getImageLayout(data, layout)) return false;
-        separatedLuminance->top = 0;
-        separatedLuminance->left = 0;
-        separatedLuminance->bottom = layout.height;
-        separatedLuminance->right = layout.width;
+        if (separation.phaseSpecificBounds) {
+            separatedLuminance->bottom = std::min(separatedLuminance->bottom, layout.height);
+            separatedLuminance->right = std::min(separatedLuminance->right, layout.width);
+        } else {
+            separatedLuminance->top = 0;
+            separatedLuminance->left = 0;
+            separatedLuminance->bottom = layout.height;
+            separatedLuminance->right = layout.width;
+        }
         separatedLuminance->plane = 0;
         separatedLuminance->planes = 3;
         separatedLuminance->rowPitch = 1;

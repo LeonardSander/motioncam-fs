@@ -88,7 +88,7 @@ private:
     int mWidth;
     int mHeight;
     float mSourceWhiteLevel = 65535.0f;
-    uint32_t mSourceLinearizationInputMax = 0;
+    std::vector<uint16_t> mSourceLinearizationTable;
     std::array<float, 4> mSourceBlackLevel{};
     bool mSourceHasGainMap = false;
     bool mHasCfa = false;
@@ -98,6 +98,7 @@ private:
     std::optional<CalibrationData> mCalibration;
     std::optional<GyroflowLensProfile> mGyroflowLensProfile;
     nlohmann::json mSidecarMetadata;
+    int64_t mSourceAudioOffsetUs = 0;
     vfs::ManualVignetteSidecars mManualVignetteSidecars;
     std::map<Timestamp, float> mNormalizedExposureOffsets;
     std::map<Timestamp, float> mSmoothedExposureOffsets;
