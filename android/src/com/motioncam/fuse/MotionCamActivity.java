@@ -742,7 +742,7 @@ public class MotionCamActivity extends QtActivity {
     private boolean isClipFile(String name) {
         if (name == null) return false;
         String lower = name.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".mcraw") || lower.endsWith(".unspektra") ||
+        return lower.endsWith(".mcraw") || lower.endsWith(".unspektra") || lower.endsWith(".mcpro") ||
                 lower.endsWith(".dng") || lower.endsWith(".mov") ||
                 lower.endsWith(".mp4") || lower.endsWith(".mkv");
     }

@@ -98,6 +98,8 @@ CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     frame.timestamp = j.value("timestamp", "");
     frame.type = j.value("type", "");
     frame.width = j.value("width", 0);
+    if (j.contains("linearizationTable"))
+        frame.linearizationTable = j.at("linearizationTable").get<std::vector<uint16_t>>();
 
     return frame;
 }

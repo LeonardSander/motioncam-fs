@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include <cstdint>
 #include <vector>
 #include <string>
 #include <array>
@@ -43,6 +44,7 @@ struct CameraFrameMetadata {
     std::string timestamp;
     std::string type;
     int width;
+    std::vector<uint16_t> linearizationTable;
     std::vector<double> noiseProfile;
     bool hasNoiseProfile = false;
     std::array<float, 9> colorMatrix1{};

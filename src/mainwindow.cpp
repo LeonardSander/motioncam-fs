@@ -2247,7 +2247,7 @@ MainWindow::MainWindow(QWidget *parent)
                 if (name.isEmpty()) name = QFileInfo(QUrl(sourcePath).path()).fileName();
                 name = QFileInfo(name).fileName();
                 const QStringList supportedSuffixes{
-                    QStringLiteral("mcraw"), QStringLiteral("unspektra"),
+                    QStringLiteral("mcraw"), QStringLiteral("unspektra"), QStringLiteral("mcpro"),
                     QStringLiteral("dng"), QStringLiteral("mov"),
                     QStringLiteral("mp4"), QStringLiteral("mkv")};
                 if (!supportedSuffixes.contains(QFileInfo(name).suffix().toLower()))
@@ -2493,6 +2493,7 @@ MainWindow::MainWindow(QWidget *parent)
             const QString name = info.fileName();
             return name.endsWith(".mcraw", Qt::CaseInsensitive) ||
                    name.endsWith(".unspektra", Qt::CaseInsensitive) ||
+                   name.endsWith(".mcpro", Qt::CaseInsensitive) ||
                    name.endsWith(".7z", Qt::CaseInsensitive) ||
                    name.endsWith(".dng", Qt::CaseInsensitive) ||
                    (name.contains("NATIVE", Qt::CaseInsensitive) &&
@@ -3037,6 +3038,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
                     auto filePath = url.toLocalFile();
                     if (filePath.endsWith(".mcraw", Qt::CaseInsensitive) ||
                         filePath.endsWith(".unspektra", Qt::CaseInsensitive) ||
+                        filePath.endsWith(".mcpro", Qt::CaseInsensitive) ||
                         filePath.endsWith(".7z", Qt::CaseInsensitive) ||
                         (filePath.contains("NATIVE", Qt::CaseInsensitive) &&
                          (filePath.endsWith(".mov", Qt::CaseInsensitive) ||
@@ -5866,7 +5868,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         const int cfaSizeOverride = calibration && calibration->hasCfaSize && calibration->cfaSize > 0
             ? calibration->cfaSize : 0;
         if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive) ||
-            srcFile.endsWith(".unspektra", Qt::CaseInsensitive)) {
+            srcFile.endsWith(".unspektra", Qt::CaseInsensitive) ||
+            srcFile.endsWith(".mcpro", Qt::CaseInsensitive)) {
             Decoder decoder(motioncam::decoderSource(srcFile.toStdString()));
             const auto frames = decoder.getFrames();
             if (!frames.empty()) {

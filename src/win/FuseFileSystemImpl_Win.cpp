@@ -644,7 +644,9 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
 
     spdlog::debug("Mounting file {} to {}", srcFile, dstPath);
 
-    if((boost::iequals(extension, ".mcraw") || boost::iequals(extension, ".unspektra"))) {
+    if (boost::iequals(extension, ".mcraw") ||
+        boost::iequals(extension, ".unspektra") ||
+        boost::iequals(extension, ".mcpro")) {
         auto mountId = mNextMountId++;
 
         try {

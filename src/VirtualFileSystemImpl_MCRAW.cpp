@@ -718,8 +718,15 @@ void VirtualFileSystemImpl_MCRAW::init() {
     int displayCfaSize = cameraFrameMetadata.cfaSize;
     if (mCalibration && mCalibration->hasCfaSize && mCalibration->cfaSize > 0)
         displayCfaSize = mCalibration->cfaSize;
-    mFileInfo.dataType = (boost::algorithm::iends_with(mSrcPath, ".unspektra")
-        ? "UNSPK " : "MCRAW ") + vfs::getDisplayDataType(false, displayCfaSize);
+    const auto& containerMetadata = decoder.getContainerMetadata();
+    const bool isMc24 = boost::algorithm::iends_with(mSrcPath, ".mcpro");
+    const auto mc24Compression = containerMetadata.value("mc24Compression", std::string{});
+    const std::string mc24Suffix = mc24Compression == "Lossless" ? "LL"
+        : mc24Compression == "HQ" ? "H" : mc24Compression == "SQ" ? "S"
+        : mc24Compression == "LT" ? "L" : "";
+    const std::string sourceFormat = isMc24 ? "MC24" + mc24Suffix + " "
+        : boost::algorithm::iends_with(mSrcPath, ".unspektra") ? "UNSPK " : "MCRAW ";
+    mFileInfo.dataType = sourceFormat + vfs::getDisplayDataType(false, displayCfaSize);
     const auto displayPlan = utils::planDngFrameProcessing(
         mSettings, cameraFrameMetadata, mCalibration);
     int outputCfaSize = displayPlan.cfaRepeatSize;
@@ -745,7 +752,20 @@ void VirtualFileSystemImpl_MCRAW::init() {
         displayPlan.logTransform == LogTransformMode::Disabled
             ? std::string() : logTransformModeToString(displayPlan.logTransform),
         mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION,
-        mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP);
+        mSettings.options & RENDER_OPT_NORMALIZE_SHADING_MAP,
+        isMc24 ? containerMetadata.value("mc24InputBitDepth", 0u) : 0u);
+    if (isMc24 && !cameraFrameMetadata.linearizationTable.empty()) {
+        const auto slash = mFileInfo.levelsInfo.find('/');
+        if (slash != std::string::npos)
+            mFileInfo.levelsInfo.replace(0, slash,
+                std::to_string(cameraFrameMetadata.linearizationTable.size() - 1));
+    }
+    const bool retainsSourceLog = displayPlan.logTransform != LogTransformMode::Disabled ||
+        !(mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
+        cameraFrameMetadata.lensShadingMap.empty();
+    if (isMc24 && retainsSourceLog && containerMetadata.value("mc24InputLog", false) &&
+        mFileInfo.levelsInfo.find(" log") == std::string::npos)
+        mFileInfo.levelsInfo += " log";
     // Video timestamps/frame mapping define clip duration. Audio capture can
     // start late or end early and must not shorten or extend the image stream.
     if (applyCFRConversion) {
@@ -855,7 +875,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         // an otherwise canonical, uncompressed CFA DNG.
         // All source-independent pixel operations run below through the same
         // DNG pipeline used by imported DNG and DirectLog frames.
-        const bool earlyProxy = !jpegCompression && !frameSettings.streamingPreview &&
+        const bool earlyProxy = frameMetadata.linearizationTable.empty() &&
+            !jpegCompression && !frameSettings.streamingPreview &&
             renderPlan.scale > 1 &&
             !(frameSettings.options & (RENDER_OPT_CROPPING |
                                        RENDER_OPT_HIGHER_CFA_HQ |
@@ -873,11 +894,13 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             (frameSettings.quadBayerOption == QuadBayerMode::Demosaic ||
              frameSettings.quadBayerOption == QuadBayerMode::DemosaicColor ||
              frameSettings.quadBayerOption == QuadBayerMode::DemosaicOCL);
-        const auto generationSettings = canonicalMcrawGenerationSettings(
+        auto generationSettings = canonicalMcrawGenerationSettings(
             frameSettings, earlyProxy);
+        if (!frameMetadata.linearizationTable.empty())
+            generationSettings.levels = "Dynamic";
         const auto nativePlan = utils::planDngFrameProcessing(
             frameSettings, frameMetadata, mCalibration);
-        const bool unpackedIntermediate =
+        const bool unpackedIntermediate = !frameMetadata.linearizationTable.empty() ||
             (frameSettings.options &
              (RENDER_OPT_APPLY_VIGNETTE_CORRECTION | RENDER_OPT_LOG_TRANSFORM |
               RENDER_OPT_REMOSAIC_TO_BAYER)) ||
@@ -917,14 +940,26 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         pixels.hasCfa = true;
         pixels.outputScale = renderPlan.scale;
         pixels.preScaledProxy = earlyProxy;
-        const uint32_t inputBits = utils::bitsNeeded(static_cast<uint16_t>(
+        uint32_t inputBits = utils::bitsNeeded(static_cast<uint16_t>(
             std::clamp(cameraConfig.whiteLevel, 1.0f, 65535.0f)));
+        if (!frameMetadata.linearizationTable.empty()) {
+            // Resolve the encoded source depth exactly as for an imported DNG,
+            // rather than using its post-linearization sensor white level.
+            DNGFrameMetadata sourceMetadata;
+            if (!DNGDecoder::getColorMetadata(timed, sourceMetadata))
+                throw std::runtime_error("Could not resolve MC24 input precision");
+            const auto separator = frameSettings.levels.find('/');
+            const auto selectedWhite = frameSettings.levels.substr(0, separator);
+            const bool usesSourceWhite = selectedWhite.empty() || selectedWhite == "Dynamic" ||
+                selectedWhite == "Static";
+            inputBits = usesSourceWhite ? sourceMetadata.inputBitDepth : 0;
+        }
         pixels.inputQuantizationWhite = inputBits < 16
             ? (uint32_t{1} << inputBits) - 1 : 65535;
         pixels.calibration = mCalibration ? &*mCalibration : nullptr;
         pixels.iso = frameMetadata.iso;
         pixels.exposureTime = frameMetadata.exposureTime / 1.0e9;
-        pixels.sourceName = "MCRAW";
+        pixels.sourceName = boost::algorithm::iends_with(mSrcPath, ".mcpro") ? "mc24" : "MCRAW";
         pixels.ditherSeed = static_cast<uint32_t>(renderPlan.outputFrameNumber + 1);
         vfs::processDngPixels(timed, frameSettings, pixels);
         const auto processedAt = std::chrono::steady_clock::now();
@@ -939,13 +974,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         finalize.gpuJpegTiles = pixels.gpuJpegTiles;
         finalize.gyroflowLensProfile = mGyroflowLensProfile && !mSettings.cameraNativeStaging
             ? &*mGyroflowLensProfile : nullptr;
-        finalize.sourceName = "MCRAW";
+        finalize.sourceName = pixels.sourceName;
         vfs::finalizeDng(timed, frameSettings, finalize);
-        if (boost::algorithm::iends_with(mSrcPath, ".unspektra")) {
+        if (boost::algorithm::iends_with(mSrcPath, ".unspektra") ||
+            boost::algorithm::iends_with(mSrcPath, ".mcpro")) {
             const int orientationDegrees = frameSettings.orientation >= 0
                 ? frameSettings.orientation : mFileInfo.orientation;
             if (!DNGDecoder::setOrientation(timed, orientationDegrees))
-                throw std::runtime_error("Could not set Unspektra DNG orientation");
+                throw std::runtime_error("Could not set raw container DNG orientation");
         }
         const auto finalizedAt = std::chrono::steady_clock::now();
         if (!jpegCompression && !mSettings.streamingPreview && mSettings.projectedFileSizes && !savedOutput) {
@@ -1027,6 +1063,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                     auto samples = std::make_shared<std::vector<uint16_t>>(sampleCount);
                     std::memcpy(samples->data(), sourceData.data(),
                                 sampleCount * sizeof(uint16_t));
+                    if (!sourceMetadata.linearizationTable.empty())
+                        for (auto& value : *samples)
+                            value = sourceMetadata.linearizationTable[std::min<size_t>(
+                                value, sourceMetadata.linearizationTable.size() - 1)];
                     preview.rawSamples = std::move(samples);
                     preview.rawWidth = sourceMetadata.width;
                     preview.rawHeight = sourceMetadata.height;
@@ -1170,10 +1210,11 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
                 std::chrono::duration<double, std::milli>(loadFinished-loadStarted).count(),
                 std::chrono::duration<double, std::milli>(generateStarted-loadFinished).count(),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-generateStarted).count());
-        preview.gainMapApplied =
-            (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
-            (mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
-            !frameMetadata.lensShadingMap.empty();
+        if (frameMetadata.linearizationTable.empty())
+            preview.gainMapApplied =
+                (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
+                (mSettings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+                !frameMetadata.lensShadingMap.empty();
         preview.timestamp = vfs::outputTimestamp(
             entry, timestamp, mSourceFrames.front(), mFps,
             mSettings.options & RENDER_OPT_FRAMERATE_CONVERSION);

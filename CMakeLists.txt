@@ -328,6 +328,8 @@ endif()
 # Add motioncam decoder as static library
 add_library(motioncam-decoder STATIC
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Decoder.cpp
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Mc24.cpp
+    ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Mc24Raw.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Unspektra.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/RawData_Legacy.cpp
@@ -798,6 +800,10 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-mc24-test deps/motioncam-decoder/tests/DecoderMc24Test.cpp)
+    target_link_libraries(motioncam-mc24-test PRIVATE motioncam-decoder)
+    add_test(NAME motioncam-mc24-test COMMAND motioncam-mc24-test)
+    set_tests_properties(motioncam-mc24-test PROPERTIES LABELS portable)
     find_package(Threads REQUIRED)
     add_executable(motioncam-source-analysis-cache-test tests/source_analysis_cache_test.cpp)
     target_include_directories(motioncam-source-analysis-cache-test PRIVATE include)

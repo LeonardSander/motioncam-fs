@@ -1607,6 +1607,63 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     bool unpackedIntermediate)
 {
     Measure m("generateDng");
+    if (!metadata.linearizationTable.empty() && previewFrame) {
+        // Stage stored codes and the original table as an ordinary DNG source.
+        // DNGDecoder owns linearization, including its ordering before gain maps.
+        auto canonical = settings;
+        canonical.options = static_cast<FileRenderOptions>(0);
+        canonical.quadBayerOption = QuadBayerMode::CorrectQBCFAMetadata;
+        canonical.badPixelTreatment = BadPixelTreatment::Disabled;
+        canonical.cameraNativeStaging = false;
+        canonical.streamingPreview = false;
+        canonical.levels = "Dynamic";
+        auto source = generateDng(data, metadata, cameraConfiguration, recordingFps,
+            frameNumber, baselineExpValue, canonical, calibration, false,
+            baselineExposureOverride, asShotNeutralOverride, nullptr, false, nullptr, true);
+        if (source && calibration && calibration->hasBadPixels &&
+            !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
+            processesBadPixels(effectiveBadPixelTreatment(
+                settings.badPixelTreatment, settings.vignetteCorrection))) {
+            DNGImageLayout layout;
+            if (!DNGDecoder::getImageLayout(*source, layout))
+                throw std::runtime_error("Could not inspect table-backed bad-pixel source");
+            auto defectSettings = canonical;
+            defectSettings.badPixelTreatment = settings.badPixelTreatment;
+            defectSettings.vignetteCorrection = settings.vignetteCorrection;
+            vfs::DngPixelPipelineOptions defects;
+            defects.hasCfa = true;
+            defects.cfaRepeatSize = layout.cfaRepeatSize;
+            defects.cfaPhase = layout.cfaPhase;
+            defects.calibration = &*calibration;
+            defects.iso = metadata.iso;
+            defects.exposureTime = metadata.exposureTime / 1.0e9;
+            defects.sourceName = "table-backed preview";
+            vfs::processDngPixels(*source, defectSettings, defects);
+        }
+        DecodedDNGImage image;
+        if (!source || !DNGDecoder::decodeImage(std::move(*source), image))
+            throw std::runtime_error("Could not stage source linearization table");
+        if (stagedImage) {
+            if (retainSourceSamples) {
+                previewFrame->rawSamples = std::make_shared<std::vector<uint16_t>>(image.samples);
+                previewFrame->rawWidth = image.layout.width;
+                previewFrame->rawHeight = image.layout.height;
+                previewFrame->rawChannels = 1;
+                previewFrame->rawBlack = image.metadata.blackLevel[0];
+                for (size_t i = 0; i < 4; ++i)
+                    previewFrame->rawBlackLevels[i] = image.metadata.blackLevel[i];
+                previewFrame->rawWhite = image.metadata.whiteLevel[0];
+                previewFrame->rawCfaSize = image.layout.cfaRepeatSize;
+                previewFrame->rawCfaPhase = image.layout.cfaPhase;
+            }
+            *stagedImage = std::move(image);
+        } else if (!DNGDecoder::decodePreview(std::move(image), settings, *previewFrame,
+                                              true, retainSourceSamples)) {
+            throw std::runtime_error("Could not preview source linearization table");
+        }
+        return nullptr;
+    }
+
     const auto previewProfileStarted = std::chrono::steady_clock::now();
     if (previewFrame) {
         previewFrame->galleryCfa.clear();
@@ -2658,7 +2715,12 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     const bool needsLinearization =
         effectiveLogTransform != LogTransformMode::Disabled;
     
-    if (needsLinearization && dstWhiteLevel > 0) {
+    if (!metadata.linearizationTable.empty()) {
+        dng.SetLinearizationTable(static_cast<unsigned int>(metadata.linearizationTable.size()),
+                                 metadata.linearizationTable.data());
+        dng.SetBlackLevel(samplesPerPixel == 3 ? 3 : 4, dstBlackLevel.data());
+        dng.SetWhiteLevel(dstWhiteLevel);
+    } else if (needsLinearization && dstWhiteLevel > 0) {
         spdlog::debug("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}", 
                      logTransformModeToString(effectiveLogTransform), applyShadingMap, dstWhiteLevel);
         auto linearizationTable = makeLogLinearizationTable(dstWhiteLevel);

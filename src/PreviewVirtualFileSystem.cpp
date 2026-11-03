@@ -146,7 +146,9 @@ std::unique_ptr<IVirtualFileSystem> createVirtualFileSystem(
     const boost::filesystem::path path(source);
     const std::string extension = path.extension().string();
     const std::string filename = path.filename().string();
-    if ((boost::iequals(extension, ".mcraw") || boost::iequals(extension, ".unspektra")))
+    if (boost::iequals(extension, ".mcraw") ||
+        boost::iequals(extension, ".unspektra") ||
+        boost::iequals(extension, ".mcpro"))
         return std::make_unique<VirtualFileSystemImpl_MCRAW>(
             ioThreadPool, processingThreadPool, cache, settings, source, baseName);
     if ((boost::iequals(extension, ".mov") || boost::iequals(extension, ".mp4") ||

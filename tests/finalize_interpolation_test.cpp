@@ -1661,6 +1661,31 @@ int main(int argc, char** argv) {
     badPixelBakeSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
     auto badPixelPipeline = cfaPipeline;
     badPixelPipeline.calibration = &interpolateOne;
+    // Table-backed preview staging must use the same bad-pixel treatment as
+    // an imported DNG, retaining the table and linearizing exactly once.
+    auto tableBadPixelDng = makeLogCfaDng(10, 0);
+    motioncam::CalibrationData tableDefect;
+    tableDefect.hasBadPixels = true;
+    motioncam::CalibrationData::BadPixel tablePixel;
+    tablePixel.x = tablePixel.y = 1;
+    tablePixel.action = motioncam::CalibrationData::BadPixelAction::Dampen;
+    tablePixel.amount = 0.5f;
+    tableDefect.badPixels.push_back(tablePixel);
+    auto tablePipeline = cfaPipeline;
+    tablePipeline.calibration = &tableDefect;
+    tablePipeline.cfaRepeatSize = 2;
+    tablePipeline.outputScale = 1;
+    motioncam::RenderSettings tableSettings;
+    tableSettings.options = static_cast<motioncam::FileRenderOptions>(0);
+    tableSettings.quadBayerOption = motioncam::QuadBayerMode::CorrectQBCFAMetadata;
+    tableSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
+    motioncam::vfs::processDngPixels(tableBadPixelDng, tableSettings, tablePipeline);
+    motioncam::DecodedDNGImage correctedTableImage;
+    assert(motioncam::DNGDecoder::decodeImage(tableBadPixelDng, correctedTableImage));
+    assert(correctedTableImage.samples[33] == 320);
+    assert(correctedTableImage.samples[0] == 640);
+    assert(motioncam::DNGDecoder::getLinearizationTableCount(tableBadPixelDng) == 1024);
+
     motioncam::vfs::processDngPixels(
         directBadPixelDng, badPixelBakeSettings, badPixelPipeline);
 #ifdef _WIN32
