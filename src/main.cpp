@@ -624,6 +624,15 @@ int main(int argc, char *argv[])
     qputenv("QT_WIDGETS_RHI", "1");
     qputenv("QT_WIDGETS_RHI_BACKEND", "vulkan");
 #endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    // Qt tries each platform in order if initialization fails. Preserve user
+    // overrides (including -platform, which Qt handles itself).
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        const bool waylandSession = !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") ||
+            qgetenv("XDG_SESSION_TYPE") == "wayland";
+        qputenv("QT_QPA_PLATFORM", waylandSession ? "wayland;xcb" : "xcb");
+    }
+#endif
     SingleApplication app(argc, argv);
 #ifdef __ANDROID__
     QFont androidFont = app.font();
