@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "SourceInput.h"
 #include "VirtualFileSystemImpl.h"
 #include "VulkanGainBake.h"
@@ -134,8 +135,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
         const DngPixelPipelineOptions& options) {
     if (options.gpuJpeg) options.gpuJpeg->clear();
     if (options.gpuJpegTiles) options.gpuJpegTiles->bytes.clear();
-    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    const auto pipelineStarted = std::chrono::steady_clock::now();
+    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const auto pipelineStarted = motioncam::diagnosticNow();
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
     const int scale = options.preScaledProxy ? 1 : options.outputScale;
@@ -196,7 +197,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         DNGImageLayout stripLayout;
         DNGFrameMetadata stripMetadata;
         const bool directStrip =
-            !std::getenv("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE") &&
+            !motioncam::debugEnvironment("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE") &&
             DNGDecoder::getImageLayout(dng, stripLayout) &&
             stripLayout.pixels == DNGPixelLayout::CFA &&
             DNGDecoder::getColorMetadata(dng, stripMetadata) &&
@@ -271,14 +272,14 @@ void processDngPixels(std::vector<uint8_t>& dng,
          (remosaic && !options.textureSource) ||
          (!options.hasCfa && remosaic) ||
          (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
-    const auto texturePreparationStarted = std::chrono::steady_clock::now();
+    const auto texturePreparationStarted = motioncam::diagnosticNow();
     const VulkanGainBakeTextureSource* textureSource = options.textureSource;
     // A DirectLog texture with no remaining pixel operation can go straight
     // to JPEG. Metadata edits below still run against the DNG template; the
     // finalizer replaces its placeholder strip with the encoded payload.
     if ((options.gpuJpeg || options.gpuJpegTiles) && textureSource &&
-        !std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
-        !std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
+        !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") &&
+        !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
         !bakeGain && !debugGainMap &&
         !remosaic && scale == 1 && options.cfaRepeatSize == 2 &&
         !settings.cameraNativeStaging &&
@@ -331,7 +332,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     }
     bool logFused = false;
     bool logMetadataDone = false;
-    if (!std::getenv("MOTIONCAM_DIRECTLOG_GPU_LOG_DISABLE") && textureSource &&
+    if (!motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_LOG_DISABLE") && textureSource &&
         !bakeGain && !topologyBeforeBake && !options.hasCfa && scale == 1 &&
         (settings.options & RENDER_OPT_LOG_TRANSFORM) && !debugGainMap &&
         logReductionBits(settings.logTransform) > 0 &&
@@ -370,20 +371,20 @@ void processDngPixels(std::vector<uint8_t>& dng,
         if (options.textureMaterialized) options.textureMaterialized();
     }
     if (profile && options.textureSource) {
-        const auto textureFinished = std::chrono::steady_clock::now();
+        const auto textureFinished = motioncam::diagnosticNow();
         spdlog::info("GALLERY_PERF event=dng_texture_setup source={} metadata_ms={:.3f} materialize_ms={:.3f} deferred={}",
             source,
             std::chrono::duration<double, std::milli>(texturePreparationStarted-pipelineStarted).count(),
             std::chrono::duration<double, std::milli>(textureFinished-texturePreparationStarted).count(),
             textureSource != nullptr);
     }
-    const auto setupFinished = std::chrono::steady_clock::now();
+    const auto setupFinished = motioncam::diagnosticNow();
     if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
             dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
             scale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
             false, true))
         throw std::runtime_error("Unsupported pre-gain topology conversion for " + source);
-    const auto preTopologyFinished = std::chrono::steady_clock::now();
+    const auto preTopologyFinished = motioncam::diagnosticNow();
     const bool normalizeGainMaps = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     const bool optimizeGainMaps = settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
     const bool postTopologyAfterBake =
@@ -418,7 +419,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
             !postTopologyAfterBake && options.gpuJpegTiles
                 ? &options.gpuJpegTiles->bytes : nullptr))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
-    const auto gainFinished = std::chrono::steady_clock::now();
+    const auto gainFinished = motioncam::diagnosticNow();
     if (!topologyBeforeBake &&
         (options.cfaRepeatSize > 2 ||
          (options.hasCfa && settings.cameraNativeStaging) ||
@@ -433,7 +434,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !DNGDecoder::processHigherCFA(
             dng, 2, options.cfaPhase, mode, false, 1, false))
         throw std::runtime_error("Unsupported post-gain demosaic for " + source);
-    const auto postTopologyFinished = std::chrono::steady_clock::now();
+    const auto postTopologyFinished = motioncam::diagnosticNow();
     bool applyLog = settings.logTransform != LogTransformMode::KeepInput || bakeGain;
     if (options.linearInputBitDepth) {
         uint32_t outputBits = 1;
@@ -447,7 +448,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
         applyLog && !logFused && !logMetadataDone &&
-        !std::getenv("MOTIONCAM_GPU_LOG_STRIP_DISABLE") &&
+        !motioncam::debugEnvironment("MOTIONCAM_GPU_LOG_STRIP_DISABLE") &&
         DNGDecoder::bakeLogStripVulkan(
             dng, settings.logTransform, options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
@@ -505,25 +506,25 @@ void processDngPixels(std::vector<uint8_t>& dng,
         options.gpuJpegTiles->width = shape.width;
         options.gpuJpegTiles->height = shape.height;
     }
-    if (profile || (source == "DirectLog" && std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS")))
+    if (profile || (source == "DirectLog" && motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS")))
         spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} log_fused={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
                      source, options.preScaledProxy, options.outputScale, logFused,
                      std::chrono::duration<double, std::milli>(setupFinished-pipelineStarted).count(),
                      std::chrono::duration<double, std::milli>(preTopologyFinished-setupFinished).count(),
                      std::chrono::duration<double, std::milli>(gainFinished-preTopologyFinished).count(),
                      std::chrono::duration<double, std::milli>(postTopologyFinished-gainFinished).count(),
-                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-postTopologyFinished).count());
+                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-postTopologyFinished).count());
 }
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
                  const DngFinalizeOptions& options) {
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
-    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    auto stageStarted = std::chrono::steady_clock::now();
+    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    auto stageStarted = motioncam::diagnosticNow();
     auto profileStage = [&](const char* stage) {
         if (profile) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = motioncam::diagnosticNow();
             spdlog::info("GALLERY_PERF event=dng_finalize_stage source={} stage={} elapsed_ms={:.3f} bytes={}",
                          source, stage,
                          std::chrono::duration<double, std::milli>(now-stageStarted).count(),
@@ -590,7 +591,7 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
             : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance, fusedJxlPacking);
     if (!compressed)
         throw std::runtime_error("Could not compress " + source + " DNG");
-    if (gpuJpegReady && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (gpuJpegReady && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_attach source={} bytes={}",
                      source, options.gpuJpeg->size());
     profileStage("compression");

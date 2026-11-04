@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "SourceInput.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "VirtualFileSystemImpl.h"
@@ -315,10 +316,10 @@ void savePersistentMcrawAnalysis(const std::string& key, const CachedMcrawAnalys
 
 double elapsedMs(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
+        motioncam::diagnosticNow() - start).count();
 }
 bool galleryDiagnosticsEnabled() {
-    const char* value = std::getenv("MOTIONCAM_GALLERY_DIAGNOSTICS");
+    const char* value = motioncam::debugEnvironment("MOTIONCAM_GALLERY_DIAGNOSTICS");
     return value && value[0] != '\0' && std::string(value) != "0";
 }
 }
@@ -342,7 +343,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mSettings(settings) {
     if (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
         warmVulkanGainBake();
-    const auto initializationStarted = std::chrono::steady_clock::now();
+    const auto initializationStarted = motioncam::diagnosticNow();
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     
@@ -450,7 +451,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
     if(frames.empty())
         return;
 
-    spdlog::debug("VirtualFileSystemImpl_MCRAW::init(options={})", optionsToString(mSettings.options));
+    SPDLOG_DEBUG("VirtualFileSystemImpl_MCRAW::init(options={})", optionsToString(mSettings.options));
 
     // Clear everything
     mFiles.clear();
@@ -818,8 +819,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         return std::make_shared<std::vector<uint8_t>>(mAudioFile.begin(), mAudioFile.end());
 
     return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
-        const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-        const auto materializeStarted = std::chrono::steady_clock::now();
+        const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+        const auto materializeStarted = motioncam::diagnosticNow();
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
@@ -835,7 +836,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
-        const auto loadedAt = std::chrono::steady_clock::now();
+        const auto loadedAt = motioncam::diagnosticNow();
         RenderSettings frameSettings = mSettings;
         const auto renderPlan = vfs::planDngRender(
             entry, timestamp, mSourceFrames.front(), frameSettings, mFps,
@@ -916,7 +917,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             nullptr, false, nullptr, unpackedIntermediate);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
-        const auto generatedAt = std::chrono::steady_clock::now();
+        const auto generatedAt = motioncam::diagnosticNow();
         std::vector<uint8_t>& timed = *output;
         attachSidecarGainMapOpcodes(timed, frameIt->second);
         vfs::DngPixelPipelineOptions pixels;
@@ -957,7 +958,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         pixels.sourceName = boost::algorithm::iends_with(mSrcPath, ".mcpro") ? "mc24" : "MCRAW";
         pixels.ditherSeed = static_cast<uint32_t>(renderPlan.outputFrameNumber + 1);
         vfs::processDngPixels(timed, frameSettings, pixels);
-        const auto processedAt = std::chrono::steady_clock::now();
+        const auto processedAt = motioncam::diagnosticNow();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
         finalize.timestamp = renderPlan.outputTimestamp;
@@ -978,20 +979,20 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             if (!DNGDecoder::setOrientation(timed, orientationDegrees))
                 throw std::runtime_error("Could not set raw container DNG orientation");
         }
-        const auto finalizedAt = std::chrono::steady_clock::now();
+        const auto finalizedAt = motioncam::diagnosticNow();
         if (!jpegCompression && !mSettings.streamingPreview && mSettings.projectedFileSizes && !savedOutput) {
             if (timed.size() > entry.size)
                 throw std::runtime_error(
                     "Generated MCRAW DNG exceeds advertised mounted size");
             timed.resize(entry.size, 0);
         }
-        spdlog::info("MCRAW timing [{} frame={}]: load {:.1f} ms, generate {:.1f} ms, process {:.1f} ms, finalize {:.1f} ms, total {:.1f} ms, output {:.2f} MiB",
+        MOTIONCAM_DIAGNOSTIC_INFO("MCRAW timing [{} frame={}]: load {:.1f} ms, generate {:.1f} ms, process {:.1f} ms, finalize {:.1f} ms, total {:.1f} ms, output {:.2f} MiB",
                      mSrcPath, vfs::outputFrameNumber(entry),
                      std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
                      std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
                      std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
                      std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
-                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-materializeStarted).count(),
+                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-materializeStarted).count(),
                      static_cast<double>(timed.size()) / (1024.0 * 1024.0));
         if (profile) {
             spdlog::info("GALLERY_PERF event=mcraw_mounted_stage source={} frame={} early_proxy={} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f}",
@@ -1000,14 +1001,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
                          std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
                          std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
                          std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
-                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-materializeStarted).count());
+                         std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-materializeStarted).count());
             spdlog::info("GALLERY_PERF event=mounted_frame_stage source=MCRAW source_path={} frame={} queue_ms=0 load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
                          mSrcPath, vfs::outputFrameNumber(entry),
                          std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
                          std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
                          std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
                          std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
-                         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-materializeStarted).count(),
+                         std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-materializeStarted).count(),
                          output->size());
         }
         return output;
@@ -1094,10 +1095,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight,
                                    strideOverride);
-        const auto loadStarted = std::chrono::steady_clock::now();
+        const auto loadStarted = motioncam::diagnosticNow();
         decoder->loadFrame(timestamp, frameData, metadata,
                            static_cast<int>(strideOverride));
-        const auto loadFinished = std::chrono::steady_clock::now();
+        const auto loadFinished = motioncam::diagnosticNow();
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
         frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
         const auto sidecarMaps = vfs::loadSidecarGainMaps(
@@ -1189,7 +1190,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
             cropPreviewRawToVisibleTopLeft(preview, mSettings);
             return !preview.rgb.empty() || preview.hasGalleryCfa();
         }
-        const auto generateStarted = std::chrono::steady_clock::now();
+        const auto generateStarted = motioncam::diagnosticNow();
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
                            previewSettings, mCalibration, false, exposureOverride,
@@ -1199,12 +1200,12 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         vfs::mergeManualDngMetadata(preview.metadata, mManualVignetteSidecars,
                                      mCalibration ? &*mCalibration : nullptr, false);
         vfs::applyPreviewExposureOffset(preview.metadata, mSettings);
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=mcraw_preview_stage source={} load_ms={:.3f} prepare_ms={:.3f} generate_ms={:.3f}",
                 mSrcPath,
                 std::chrono::duration<double, std::milli>(loadFinished-loadStarted).count(),
                 std::chrono::duration<double, std::milli>(generateStarted-loadFinished).count(),
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-generateStarted).count());
+                std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-generateStarted).count());
         if (frameMetadata.linearizationTable.empty())
             preview.gainMapApplied =
                 (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&

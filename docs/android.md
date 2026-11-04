@@ -4,9 +4,18 @@
 
 The `android-apk` workflow builds a single `arm64-v8a` APK with Qt 6.12.0 and
 the same pinned vcpkg dependency snapshot as the desktop jobs. The package is
-signed with a debug key, so it can be sideloaded from a GitHub Actions artifact.
+built in Release configuration and signed with a local debug key for sideloading
+from a GitHub Actions artifact. The signing key does not enable debugging.
 It is not a stable upgrade identity across different builders; a public release
-needs a persistent release keystore and `QT_ANDROID_SIGN_APK`.
+needs a persistent release keystore. Supply `ANDROID_SIGNING_KEYSTORE`,
+`ANDROID_SIGNING_ALIAS`, `ANDROID_SIGNING_STORE_PASSWORD`, and
+`ANDROID_SIGNING_KEY_PASSWORD` to the signing helper.
+
+Release APKs retain `--gallery-perf-session` benchmarking and its scenario
+controls. Detailed profiling, diagnostic file sinks, GPU validation/hash checks,
+and developer environment overrides require a separate Debug native build;
+they are ignored by delivered Release APKs. The build script and automated
+jobs compile only Release application code and Release vcpkg dependencies.
 
 Android cannot expose app-owned FUSE mounts. The `ProcessingFileSystem`
 backend keeps imported clips in-process for metadata, gallery previews, and
@@ -263,7 +272,7 @@ popup is retained for Android compatibility.
 ## Build and verification
 
 Run `bash scripts/build_android_apk.sh` from the repository root. Its default
-output is `build-android-arm64/android-build/build/outputs/apk/debug/android-build-debug.apk`;
+output is `build-android-arm64/android-build-release.apk`;
 an optional first argument selects another build directory.
 
 Copy `scripts/android-build.env.example` to the ignored `android-build.env`

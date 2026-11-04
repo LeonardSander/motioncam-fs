@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "mainwindow.h"
 #include "SingleApplication.h"
 #include "DirectLogDecoder.h"
@@ -72,6 +73,7 @@ public:
 };
 #endif
 
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
 std::vector<uint8_t> benchmarkCfaDng(const uint8_t* payload, size_t bytes,
                                      uint32_t width, uint32_t height,
                                      bool jpeg) {
@@ -158,10 +160,12 @@ std::vector<uint8_t> benchmarkRgbDng(const uint8_t* payload, size_t bytes,
     return dng;
 }
 
+#endif
+
 void messageHandler(QtMsgType type, const QMessageLogContext&, const QString& message) {
     const auto text = message.toLocal8Bit();
     switch (type) {
-    case QtDebugMsg: spdlog::debug("Qt: {}", text.constData()); break;
+    case QtDebugMsg: SPDLOG_DEBUG("Qt: {}", text.constData()); break;
     case QtInfoMsg: spdlog::info("Qt: {}", text.constData()); break;
     case QtWarningMsg: spdlog::warn("Qt: {}", text.constData()); break;
     case QtCriticalMsg: spdlog::error("Qt: {}", text.constData()); break;
@@ -170,6 +174,7 @@ void messageHandler(QtMsgType type, const QMessageLogContext&, const QString& me
 }
 
 #ifdef __APPLE__
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
 int crashLogFd = -1;
 void crashHandler(int signal) {
     const char header[] = "\n==== MotionCamFuse crash ====\n";
@@ -194,6 +199,8 @@ void installCrashHandler() {
         sigaction(signal, &action, nullptr);
     std::set_terminate([] { crashHandler(SIGABRT); });
 }
+
+#endif
 
 bool platformReady() {
     const QStringList candidates{"/Library/Filesystems/macfuse.fs",
@@ -256,6 +263,7 @@ bool platformReady() {
     return false;
 }
 #endif
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
 bool benchmarkDirectLogSingleScan(
         const uint8_t* fullJpeg, size_t fullBytes,
         const std::vector<uint16_t>& source, uint32_t width,
@@ -318,7 +326,7 @@ bool benchmarkDirectLogSingleScan(
         }
         return true;
     };
-    const char* sideSetting = std::getenv(
+    const char* sideSetting = motioncam::debugEnvironment(
         "MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SIDE");
     const uint32_t side = sideSetting
         ? static_cast<uint32_t>(std::atoi(sideSetting)) : 128u;
@@ -339,7 +347,7 @@ bool benchmarkDirectLogSingleScan(
                                  side, side, "crop");
     std::free(cropJpeg);
     return cropOkay &&
-        (std::getenv("MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SKIP_FULL") ||
+        (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SKIP_FULL") ||
          decode(fullJpeg, fullBytes, source, width, height, "full"));
 }
 
@@ -603,6 +611,7 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
         contiguousSize, equal);
     return true;
 }
+#endif
 } // namespace
 
 int main(int argc, char *argv[])
@@ -641,7 +650,7 @@ int main(int argc, char *argv[])
 #endif
     const auto applicationConstructed = std::chrono::steady_clock::now();
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && MOTIONCAM_DEBUG_INSTRUMENTATION
     installCrashHandler();
 #endif
 
@@ -684,7 +693,7 @@ int main(int argc, char *argv[])
                                   "filename");
     QCommandLineOption galleryPerfOption(
         QStringList() << "gallery-perf-session",
-        "Load a session and automate gallery playback diagnostics",
+        "Load a session and benchmark gallery playback",
         "session");
     QCommandLineOption galleryPerfPlaybackOption(
         QStringList() << "gallery-perf-playback-ms",
@@ -696,19 +705,23 @@ int main(int argc, char *argv[])
         "mode", "on");
     QCommandLineOption galleryPerfFlagsOption(
         QStringList() << "gallery-perf-flags",
-        "Comma separated gallery perf switches for Android automation",
+        "Comma separated gallery benchmark scenario flags",
         "flags");
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
     QCommandLineOption directLogJpegBenchmarkOption(
         QStringList() << "directlog-jpeg-benchmark",
         "Compare remosaiced DirectLog GPU JPEG with raw pixel download",
         "video");
+#endif
 
     parser.addOption(fileOption);
     parser.addOption(galleryPerfOption);
     parser.addOption(galleryPerfPlaybackOption);
     parser.addOption(galleryPerfThumbnailsOption);
     parser.addOption(galleryPerfFlagsOption);
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
     parser.addOption(directLogJpegBenchmarkOption);
+#endif
     QStringList arguments = app.arguments();
 #ifdef __ANDROID__
     const auto activity = QNativeInterface::QAndroidApplication::context();
@@ -727,10 +740,15 @@ int main(int argc, char *argv[])
     // costs more than drawing them on the GUI thread on Android.
     qputenv("QT_NO_GUI_THREADPOOL", "1");
 #endif
-    const struct { const char* flag; const char* environment; const char* value; } perfFlags[] = {
+    const struct {
+        const char* flag;
+        const char* environment;
+        const char* value;
+        bool releaseBenchmark = false;
+    } perfFlags[] = {
         {"profile", "MOTIONCAM_GALLERY_PERF_PROFILE", "1"},
-        {"importonly", "MOTIONCAM_GALLERY_PERF_IMPORT_ONLY", "1"},
-        {"sidecarscan", "MOTIONCAM_GALLERY_PERF_SIDECAR_SCAN", "1"},
+        {"importonly", "MOTIONCAM_GALLERY_PERF_IMPORT_ONLY", "1", true},
+        {"sidecarscan", "MOTIONCAM_GALLERY_PERF_SIDECAR_SCAN", "1", true},
         {"noindexcache", "MOTIONCAM_DNG_METADATA_CACHE", "0"},
         {"noguipool", "QT_NO_GUI_THREADPOOL", "1"},
         {"guipool", "QT_NO_GUI_THREADPOOL", nullptr},
@@ -738,28 +756,30 @@ int main(int argc, char *argv[])
         {"unfuseddecode", "MOTIONCAM_ANDROID_FUSED_DECODE", "0"},
         {"hashpreview", "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW", "1"},
         {"jpegprofile", "MOTIONCAM_JPEG_DECODE_PROFILE", "1"},
-        {"nohist", "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM", "1"},
-        {"hidethumbnails", "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS", "1"},
-        {"openthumbnails", "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK", "500"},
-        {"autofade", "MOTIONCAM_GALLERY_PERF_AUTO_FADE", "1"},
+        {"nohist", "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM", "1", true},
+        {"hidethumbnails", "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS", "1", true},
+        {"openthumbnails", "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK", "500", true},
+        {"autofade", "MOTIONCAM_GALLERY_PERF_AUTO_FADE", "1", true},
         {"presenttrace", "MOTIONCAM_GALLERY_PERF_PRESENT_TRACE", "1"},
-        {"gestures", "MOTIONCAM_GALLERY_PERF_GESTURES", "1"},
-        {"skipbackfill", "MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL", "1"},
-        {"preserveproxy", "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY", "1"},
-        {"capped", "MOTIONCAM_GALLERY_PERF_CAPPED", "1"},
-        {"audio", "MOTIONCAM_GALLERY_PERF_AUDIO", "1"},
-        {"clipping", "MOTIONCAM_GALLERY_PERF_CLIPPING", "1"},
-        {"expandhistogram", "MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM", "1"},
+        {"gestures", "MOTIONCAM_GALLERY_PERF_GESTURES", "1", true},
+        {"skipbackfill", "MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL", "1", true},
+        {"preserveproxy", "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY", "1", true},
+        {"capped", "MOTIONCAM_GALLERY_PERF_CAPPED", "1", true},
+        {"audio", "MOTIONCAM_GALLERY_PERF_AUDIO", "1", true},
+        {"clipping", "MOTIONCAM_GALLERY_PERF_CLIPPING", "1", true},
+        {"expandhistogram", "MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM", "1", true},
         {"histpaint", "MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT", "1"},
-        {"keepalive", "MOTIONCAM_GALLERY_PERF_KEEP_ALIVE", "1"},
+        {"keepalive", "MOTIONCAM_GALLERY_PERF_KEEP_ALIVE", "1", true},
     };
     for (const QString& flag : parser.value(galleryPerfFlagsOption).split(',', Qt::SkipEmptyParts))
         for (const auto& option : perfFlags)
             if (flag.trimmed().compare(QLatin1String(option.flag), Qt::CaseInsensitive) == 0) {
+                if (!motioncam::debugInstrumentation && !option.releaseBenchmark) continue;
                 if (option.value) qputenv(option.environment, option.value);
                 else qunsetenv(option.environment);
             }
 
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
     if (parser.isSet(directLogJpegBenchmarkOption)) {
         try {
             motioncam::DirectLogDecoder decoder(
@@ -842,7 +862,7 @@ int main(int argc, char *argv[])
                 jpegBytes == warmJpegBytes &&
                 std::memcmp(jpeg, warmJpeg, jpegBytes) == 0 && dngEqual;
             if (handle) lj92_close(handle);
-            const char* singleScanSetting = std::getenv(
+            const char* singleScanSetting = motioncam::debugEnvironment(
                 "MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_BENCHMARK");
             if (singleScanSetting && std::strcmp(singleScanSetting, "rgb") != 0 &&
                 !benchmarkDirectLogSingleScan(
@@ -865,10 +885,10 @@ int main(int argc, char *argv[])
                 ms(stagedWarmStart, stagedWarmEnd), rawDng.size(),
                 jpegDng.size(), stagedJpegDng.size(), equal);
             if (!equal) return 7;
-            if (std::getenv("MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK")) {
-                const char* widthSetting = std::getenv(
+            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK")) {
+                const char* widthSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH");
-                const char* heightSetting = std::getenv(
+                const char* heightSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT");
                 const uint32_t tileWidth = widthSetting
                     ? uint32_t(std::atoi(widthSetting)) : 16u;
@@ -987,10 +1007,10 @@ int main(int argc, char *argv[])
                 ms(rgbWarmEnd, rgbDownloadEnd),
                 ms(rgbDownloadEnd, rgbCpuEnd), rgbWarmBytes, rgbEqual);
             if (!rgbEqual) return 20;
-            if (std::getenv("MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK")) {
-                const char* widthSetting = std::getenv(
+            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK")) {
+                const char* widthSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH");
-                const char* heightSetting = std::getenv(
+                const char* heightSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT");
                 const uint32_t tileWidth = widthSetting
                     ? uint32_t(std::atoi(widthSetting)) : 8u;
@@ -1085,16 +1105,16 @@ int main(int argc, char *argv[])
                 ms(borrowedDngStart, borrowedDngEnd),
                 rawRgbDng.size(), borrowedRgbDng.size(), rawRgbEqual,
                 borrowedRgbDng == ownedRgbDng);
-            if (std::getenv("MOTIONCAM_DIRECTLOG_JPEG_DECODE_BENCHMARK")) {
-                const char* tileSetting = std::getenv(
+            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_DECODE_BENCHMARK")) {
+                const char* tileSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_SIZE");
                 const uint32_t cfaTileSize = tileSetting
                     ? static_cast<uint32_t>(std::atoi(tileSetting)) : 64u;
                 const uint32_t rgbTileSize = tileSetting
                     ? static_cast<uint32_t>(std::atoi(tileSetting)) : 32u;
-                const char* widthSetting = std::getenv(
+                const char* widthSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH");
-                const char* heightSetting = std::getenv(
+                const char* heightSetting = motioncam::debugEnvironment(
                     "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT");
                 const uint32_t cfaTileWidth = widthSetting
                     ? static_cast<uint32_t>(std::atoi(widthSetting)) : cfaTileSize;
@@ -1123,18 +1143,21 @@ int main(int argc, char *argv[])
         }
     }
 
+#endif
+
     const auto commandLineParsed = std::chrono::steady_clock::now();
 
     // Get file parameter if provided
     QString fileToMount;
     const QString galleryPerfSession = parser.value(galleryPerfOption);
+    motioncam::galleryBenchmarkActive.store(!galleryPerfSession.isEmpty());
     bool galleryPerfDurationOk = false;
     const int galleryPerfPlaybackMs = parser.value(galleryPerfPlaybackOption)
         .toInt(&galleryPerfDurationOk);
     const bool galleryPerfThumbnails =
         parser.value(galleryPerfThumbnailsOption).compare("off", Qt::CaseInsensitive) != 0;
     if (!galleryPerfSession.isEmpty()) {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && MOTIONCAM_DEBUG_INSTRUMENTATION
         // Android logcat can be unavailable or aggressively truncated during
         // long GPU profiling sessions. Keep the same structured events in a
         // bounded app-private file so gallery-perf results remain retrievable
@@ -1166,8 +1189,10 @@ int main(int argc, char *argv[])
                           diagnosticsDir.toStdString());
         }
 #endif
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
         qputenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS", "1");
         qputenv("MOTIONCAM_GALLERY_DIAGNOSTICS", "1");
+#endif
         const auto milliseconds = [](auto duration) {
             return std::chrono::duration<double, std::milli>(duration).count();
         };

@@ -92,7 +92,7 @@ public:
         mInProgress.erase(key);
         mCondition.notify_all();
 
-        spdlog::debug("Cache size is {} bytes", mCurrentSize);
+        SPDLOG_DEBUG("Cache size is {} bytes", mCurrentSize);
     }
 
     // Remove an entry from the cache

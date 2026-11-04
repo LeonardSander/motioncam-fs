@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "GalleryVulkanVideo.h"
 #include "SharedVulkanDevice.h"
 #include <cstring>
@@ -117,11 +118,13 @@ GalleryOverlayCapture captureGalleryOverlay(
                     (qobject_cast<QAbstractButton*>(widget)||qobject_cast<QAbstractSlider*>(widget)||
                      qobject_cast<QLabel*>(widget));
                 if(!reusable){
-                    QElapsedTimer timer;timer.start();++result.paintedWidgets;
+                    QElapsedTimer timer;
+                    if constexpr (motioncam::debugInstrumentation) timer.start();
+                    ++result.paintedWidgets;
                     RestoreUpdates updates(widget);
                     widget->render(&target,localRegion.boundingRect().topLeft()+origin,
                                    localRegion,QWidget::DrawChildren);
-                    result.paintNanoseconds+=timer.nsecsElapsed();
+                    if constexpr (motioncam::debugInstrumentation) result.paintNanoseconds+=timer.nsecsElapsed();
                     return;
                 }
                 const QPointF deviceOrigin=target.worldTransform().map(QPointF(origin));
@@ -139,11 +142,13 @@ GalleryOverlayCapture captureGalleryOverlay(
                     entry.widget=widget;entry.signature=signature;
                     entry.image=QImage(pixelSize,QImage::Format_ARGB32_Premultiplied);
                     entry.image.fill(Qt::transparent);
-                    QElapsedTimer timer;timer.start();++result.paintedWidgets;
+                    QElapsedTimer timer;
+                    if constexpr (motioncam::debugInstrumentation) timer.start();
+                    ++result.paintedWidgets;
                     {RestoreUpdates updates(widget);
                      QPainter capture(&entry.image);capture.translate(phase);capture.scale(ratio,ratio);
                      widget->render(&capture,QPoint(),QRegion(widget->rect()),QWidget::DrawChildren);}
-                    result.paintNanoseconds+=timer.nsecsElapsed();
+                    if constexpr (motioncam::debugInstrumentation) result.paintNanoseconds+=timer.nsecsElapsed();
                 }else ++result.reusedWidgets;
                 target.save();target.setClipRegion(localRegion.translated(origin),Qt::IntersectClip);
                 target.resetTransform();
@@ -222,6 +227,7 @@ void galleryVulkanLog(void*, enum pl_log_level level, const char* message) {
 #endif
 }
 
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
 uint64_t samplePackedFrame(pl_gpu gpu, pl_buf source,
                            uint32_t width, uint32_t height) {
     pl_buf_params params{};
@@ -245,7 +251,8 @@ uint64_t samplePackedFrame(pl_gpu gpu, pl_buf source,
     for (uint8_t byte : bytes) { hash ^= byte; hash *= 1099511628211ull; }
     return hash;
 }
-}
+#endif
+} // namespace
 
 class GalleryVulkanSurface final : public QWindow {
 public:
@@ -303,10 +310,10 @@ public:
 #ifndef __ANDROID__
         mHealthy = bool(mPreparedVk && mPreparedSwapchain);
 #endif
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_device_prewarm device={} swapchain={}",
                 bool(mPreparedVk), bool(mPreparedSwapchain));
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             for (QScreen* screen : QGuiApplication::screens())
                 spdlog::info("GALLERY_PERF event=qt_screen name={} dpr={:.3f} logical={}x{}",
                     screen->name().toStdString(), double(screen->devicePixelRatio()),
@@ -344,7 +351,7 @@ public:
         if (mOutputWidth != previousWidth || mOutputHeight != previousHeight) {
             ++mSerial;
             mReady.notify_one();
-            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=native_pixel_ratio_change logical={}x{} dpr={:.3f} pixels={}x{}",
                     width(), height(), double(devicePixelRatio()),
                     mOutputWidth, mOutputHeight);
@@ -467,13 +474,13 @@ private:
         const qreal ratio = devicePixelRatio();
         int outputWidth = std::max(1, qRound(width() * ratio));
         int outputHeight = std::max(1, qRound(height() * ratio));
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_surface_pixels logical={}x{} dpr={:.3f} requested={}x{}",
                 width(), height(), double(ratio), outputWidth, outputHeight);
         pl_swapchain_frame swapFrame{};
         const bool resized = pl_swapchain_resize(mPreparedSwapchain,
             &outputWidth, &outputHeight);
-        if (resized && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (resized && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_swapchain_pixels actual={}x{}",
                 outputWidth, outputHeight);
         const bool started = resized &&
@@ -496,7 +503,7 @@ private:
             return;
         }
         pl_swapchain_swap_buffers(mPreparedSwapchain);
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_initial_grey_present");
         const VkInstance instance = vulkanInstance()->vkInstance();
         {
@@ -581,10 +588,10 @@ private:
                 break;
             }
         }
-        if(rgb8&&std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if(rgb8&&motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_format name={} texel_size={} texel_align={} emulated={}",
                 rgb8->name,rgb8->texel_size,rgb8->texel_align,rgb8->emulated);
-        if(rgb10a2&&std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if(rgb10a2&&motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_packed_format name={} texel_size={} emulated={}",
                 rgb10a2->name,rgb10a2->texel_size,rgb10a2->emulated);
         if (!swapchain || !renderer || !rgba8) {
@@ -616,7 +623,7 @@ private:
         unsigned presentCount = 0;
         unsigned sharedImageFrames = 0, bufferUploadFrames = 0, hostUploadFrames = 0;
         bool placeholderLogged = false;
-        auto presentWindow = std::chrono::steady_clock::now();
+        auto presentWindow = motioncam::diagnosticNow();
         double setupTotal = 0.0, uploadTotal = 0.0, startTotal = 0.0,
             drawTotal = 0.0, submitTotal = 0.0, swapTotal = 0.0,
             releaseTotal = 0.0;
@@ -666,7 +673,7 @@ private:
                 outputWidth <= 0 || outputHeight <= 0) continue;
             if (placeholder) target = QRectF(0, 0, outputWidth, outputHeight);
 
-            const auto setupStarted = std::chrono::steady_clock::now();
+            const auto setupStarted = motioncam::diagnosticNow();
             if (overlaySerial != uploadedOverlaySerial) {
                 if (!overlayImage.isNull()) {
                     // Keep Qt's native raster format through upload. Painting
@@ -683,7 +690,7 @@ private:
                         if (upload.format() != QImage::Format_RGBA8888_Premultiplied)
                             upload = upload.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
                     }
-                    if(uploadedOverlaySerial==0&&std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                    if(uploadedOverlaySerial==0&&motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
                         spdlog::info("GALLERY_PERF event=native_overlay_format name={} converted={}",
                             format->name,upload.cacheKey()!=overlayImage.cacheKey());
                     pl_tex_params overlayParams{};
@@ -711,7 +718,7 @@ private:
             }
 
             pl_buf imported = nullptr;
-            const auto uploadStarted = std::chrono::steady_clock::now();
+            const auto uploadStarted = motioncam::diagnosticNow();
             if (frameSerial != uploadedFrameSerial || !haveFrameTexture) {
                 // Stills arrive far apart and do not need three resident
                 // full-resolution textures. Reuse the first slot after its
@@ -816,10 +823,11 @@ private:
                     mHealthy = false;
                     break;
                 }
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
                 if (imported && gpuBuffer->debugSampleHash) {
                     const uint64_t importedHash = samplePackedFrame(vk->gpu,
                         imported, gpuBuffer->width, gpuBuffer->height);
-                    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
                         spdlog::info("GALLERY_PERF event=native_buffer_compare frame={} producer_hash={} presenter_hash={}",
                             gpuBuffer->sourceFrameIndex, gpuBuffer->debugSampleHash, importedHash);
                     if (importedHash != gpuBuffer->debugSampleHash)
@@ -827,6 +835,7 @@ private:
                             gpuBuffer->sourceFrameIndex, gpuBuffer->debugSampleHash,
                             importedHash);
                 }
+#endif
                 if (imported) {
                     importedFrameBuffers[nextSlot] = imported;
                     importedFrameOwners[nextSlot] = gpuBuffer;
@@ -837,7 +846,7 @@ private:
                 uploadedFrameSerial = frameSerial;
                 }
             }
-            const auto uploadedAt = std::chrono::steady_clock::now();
+            const auto uploadedAt = motioncam::diagnosticNow();
 
             if (!pl_swapchain_resize(swapchain, &outputWidth, &outputHeight)) {
 #ifdef __ANDROID__
@@ -856,7 +865,7 @@ private:
                 pl_buf_destroy(vk->gpu, &imported);
                 continue;
             }
-            const auto startedAt = std::chrono::steady_clock::now();
+            const auto startedAt = motioncam::diagnosticNow();
             pl_frame output{};
             pl_frame_from_swapchain(&output, &swapFrame);
             const float background[3] = {96.0f / 255.0f,
@@ -927,10 +936,10 @@ private:
             renderParams.background_color[2] = 96.0f / 255.0f;
             const bool rendered = pl_render_image(renderer, &input, &output,
                 &renderParams);
-            const auto drawnAt = std::chrono::steady_clock::now();
+            const auto drawnAt = motioncam::diagnosticNow();
             const bool submitted = pl_swapchain_submit_frame(swapchain);
-            const auto renderedAt = std::chrono::steady_clock::now();
-            if (std::getenv("MOTIONCAM_GALLERY_PERF_DRAW_TRACE"))
+            const auto renderedAt = motioncam::diagnosticNow();
+            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_DRAW_TRACE"))
                 spdlog::info("GALLERY_PERF event=native_draw_trace draw_ms={:.3f} submit_ms={:.3f} target={}x{} output={}x{} smooth={}",
                     std::chrono::duration<double, std::milli>(drawnAt-startedAt).count(),
                     std::chrono::duration<double, std::milli>(renderedAt-drawnAt).count(),
@@ -942,9 +951,9 @@ private:
                 break;
             }
             pl_swapchain_swap_buffers(swapchain);
-            const auto swappedAt = std::chrono::steady_clock::now();
+            const auto swappedAt = motioncam::diagnosticNow();
             if (gpuBuffer && uploadedFrameSerial == frameSerial &&
-                std::getenv("MOTIONCAM_GALLERY_PERF_PRESENT_TRACE")) {
+                motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PRESENT_TRACE")) {
                 const int frameIndex = gpuBuffer->sourceFrameIndex;
                 if (frameIndex <= lastSubmittedFrameIndex &&
                     frameIndex != lastSubmittedFrameIndex)
@@ -957,12 +966,13 @@ private:
                 lastSubmittedFrameIndex = frameIndex;
             }
             if (placeholder && !placeholderLogged &&
-                std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+                motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
                 spdlog::info("GALLERY_PERF event=native_placeholder_present");
                 placeholderLogged = true;
             }
             pl_buf_destroy(vk->gpu, &imported);
-            const auto releasedAt = std::chrono::steady_clock::now();
+            const auto releasedAt = motioncam::diagnosticNow();
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
             ++presentCount;
             setupTotal += std::chrono::duration<double, std::milli>(uploadStarted - setupStarted).count();
             uploadTotal += std::chrono::duration<double, std::milli>(uploadedAt - uploadStarted).count();
@@ -988,6 +998,7 @@ private:
                 setupTotal = uploadTotal = startTotal = drawTotal = submitTotal =
                     swapTotal = releaseTotal = 0.0;
             }
+#endif
         }
         if (vk)
             for (size_t slot = 0; slot < frameTextures.size(); ++slot)

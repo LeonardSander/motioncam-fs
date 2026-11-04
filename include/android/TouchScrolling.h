@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DebugInstrumentation.h"
+
 #include <QAbstractScrollArea>
 #include "WidgetPaintSignature.h"
 #include <QGraphicsEffect>
@@ -112,7 +114,7 @@ public:
             }
         });
         connect(mScroller, &QScroller::stateChanged, this, [this](QScroller::State state) {
-            if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")){
+            if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")){
                 if(mProfileClock.isValid()&&mProfileFrames)
                     qInfo().nospace()<<"TOUCH_SCROLL state="<<mProfileState
                         <<" duration_ms="<<mProfileClock.elapsed()<<" position_updates="<<mProfileFrames

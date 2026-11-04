@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "Utils.h"
 #include "Measure.h"
 
@@ -1285,7 +1286,7 @@ std::tuple<std::vector<uint8_t>, std::array<unsigned short, 4>, unsigned short,
         throw std::runtime_error("Invalid white level in preprocessData");
     }
     
-    spdlog::debug("preprocessData: newWidth={}, newHeight={}, originalWidth={}, dstWhiteLevel={}, applyShadingMap={}, logTransform='{}'",
+    SPDLOG_DEBUG("preprocessData: newWidth={}, newHeight={}, originalWidth={}, dstWhiteLevel={}, applyShadingMap={}, logTransform='{}'",
                   newWidth, newHeight, originalWidth, dstWhiteLevel, applyShadingMap, logTransformModeToString(logTransform));
 
     // Reinterpret the input data as uint16_t for reading
@@ -1664,7 +1665,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         return nullptr;
     }
 
-    const auto previewProfileStarted = std::chrono::steady_clock::now();
+    const auto previewProfileStarted = motioncam::diagnosticNow();
     if (previewFrame) {
         previewFrame->galleryCfa.clear();
         previewFrame->galleryCfaBytes.clear();
@@ -1704,7 +1705,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
         if (phase == "bggr" || phase == "rggb" || phase == "grbg" || phase == "gbrg") {
             sensorArrangement = phase;
-            spdlog::debug("CFA phase override applied: {}", sensorArrangement);
+            SPDLOG_DEBUG("CFA phase override applied: {}", sensorArrangement);
         }
     }
     // Apply calibration cfaPhase if no UI override and calibration exists
@@ -1713,7 +1714,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
         if (phase == "bggr" || phase == "rggb" || phase == "grbg" || phase == "gbrg") {
             sensorArrangement = phase;
-            spdlog::debug("CFA phase from calibration: {}", sensorArrangement);
+            SPDLOG_DEBUG("CFA phase from calibration: {}", sensorArrangement);
         }
     }
 
@@ -1819,7 +1820,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
 
     const bool linearizePreviewCfa = previewFrame && !stagedImage &&
         effectiveLogTransform != LogTransformMode::Disabled && !debugShadingMap;
-    const auto preprocessStarted = std::chrono::steady_clock::now();
+    const auto preprocessStarted = motioncam::diagnosticNow();
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
         width, height,
@@ -1854,7 +1855,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
       dstBlackLevel.fill(0);
       dstWhiteLevel = 65535;
     }
-    const auto preprocessFinished = std::chrono::steady_clock::now();
+    const auto preprocessFinished = motioncam::diagnosticNow();
 
     int processedRepeatSize = cfaRepeatSize;
     // preprocessData's sparse draft path emits ordinary Bayer, regardless of
@@ -2022,7 +2023,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         stagedImage->samples.resize(expectedSamples);
         std::memcpy(stagedImage->samples.data(), processedData.data(), processedData.size());
       }
-      const auto previewStarted = std::chrono::steady_clock::now();
+      const auto previewStarted = motioncam::diagnosticNow();
       if (!stagedImage) {
       std::vector<uint16_t> rgbSamples;
       const uint16_t* previewRgb = nullptr;
@@ -2071,7 +2072,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         // reconstruct every Bayer preview with bilinear interpolation.
         const bool fastGalleryPreview =
             !(settings.options & RENDER_OPT_HIGHER_CFA_HQ);
-        const auto demosaicStarted = std::chrono::steady_clock::now();
+        const auto demosaicStarted = motioncam::diagnosticNow();
         if (fastGalleryPreview) {
           const std::array<double, 3> previewBlack{
               rgbBlack[0], rgbBlack[1], rgbBlack[2]};
@@ -2103,22 +2104,22 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
           previewRgbSamples = rgbSamples.size();
         }
         demosaicMs = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - demosaicStarted).count();
+            motioncam::diagnosticNow() - demosaicStarted).count();
         if (!previewReady && rgbSamples.empty())
           throw std::runtime_error("Could not demosaic preview image");
       }
       const double previewWhite = dstWhiteLevel;
-      const auto normalizeStarted = std::chrono::steady_clock::now();
+      const auto normalizeStarted = motioncam::diagnosticNow();
       if (!previewReady && !normalizeRgb16Bytes(
               previewRgb, previewRgbSamples, previewFrame->rgb,
               {rgbBlack[0], rgbBlack[1], rgbBlack[2]},
               {previewWhite, previewWhite, previewWhite}))
         throw std::runtime_error("Could not normalize preview image");
-      if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+      if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=mcraw_preview_detail width={} height={} demosaic_ms={:.3f} normalize_ms={:.3f}",
             previewWidth, previewHeight, demosaicMs,
             std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - normalizeStarted).count());
+                motioncam::diagnosticNow() - normalizeStarted).count());
       previewFrame->width = previewWidth;
       previewFrame->height = previewHeight;
       if (previewFrame->clippingRequested &&
@@ -2296,17 +2297,17 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         copyGainMaps(opcodeList3, stagedImage->opcodeList3);
         return nullptr;
       }
-      if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+      if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=mcraw_generate_stage width={} height={} setup_ms={:.3f} preprocess_ms={:.3f} intermediate_ms={:.3f} preview_ms={:.3f}",
             width, height,
             std::chrono::duration<double, std::milli>(preprocessStarted-previewProfileStarted).count(),
             std::chrono::duration<double, std::milli>(preprocessFinished-preprocessStarted).count(),
             std::chrono::duration<double, std::milli>(previewStarted-preprocessFinished).count(),
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());
+            std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-previewStarted).count());
       return nullptr;
     }
 
-    spdlog::debug("New black level {},{},{},{} and white level {}",
+    SPDLOG_DEBUG("New black level {},{},{},{} and white level {}",
                   dstBlackLevel[0], dstBlackLevel[1], dstBlackLevel[2], dstBlackLevel[3], dstWhiteLevel);
 
     // Encode to reduce size in container
@@ -2690,18 +2691,18 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
 
     if (!opcodeList1.IsEmpty()) {
         dng.SetOpcodeList1(opcodeList1);
-        spdlog::debug("Added OpcodeList1 (bad pixels)");
+        SPDLOG_DEBUG("Added OpcodeList1 (bad pixels)");
     }
     // Add lens shading map as opcode list 2 if not applied to image data
     if (!opcodeList2.IsEmpty()) {
         dng.SetOpcodeList2(opcodeList2);
-        spdlog::debug("Added OpcodeList2 (lens shading map)");
+        SPDLOG_DEBUG("Added OpcodeList2 (lens shading map)");
     } else {
-        spdlog::debug("No OpcodeList2 lens shading map generated");
+        SPDLOG_DEBUG("No OpcodeList2 lens shading map generated");
     }
     if (!opcodeList3.IsEmpty()) {
         dng.SetOpcodeList3(opcodeList3);
-        spdlog::debug("Added OpcodeList3 (deferred luminance vignette correction)");
+        SPDLOG_DEBUG("Added OpcodeList3 (deferred luminance vignette correction)");
     }
 
 
@@ -2721,7 +2722,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         dng.SetBlackLevel(samplesPerPixel == 3 ? 3 : 4, dstBlackLevel.data());
         dng.SetWhiteLevel(dstWhiteLevel);
     } else if (needsLinearization && dstWhiteLevel > 0) {
-        spdlog::debug("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}", 
+        SPDLOG_DEBUG("Adding linearization table: logTransform='{}', applyShadingMap={}, dstWhiteLevel={}",
                      logTransformModeToString(effectiveLogTransform), applyShadingMap, dstWhiteLevel);
         auto linearizationTable = makeLogLinearizationTable(dstWhiteLevel);
         if (linearizationTable.empty()) {
@@ -2729,7 +2730,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         } else {
             dng.SetLinearizationTable(static_cast<unsigned int>(linearizationTable.size()),
                                       linearizationTable.data());
-            spdlog::debug("Added linearization table with {} entries for log transform",
+            SPDLOG_DEBUG("Added linearization table with {} entries for log transform",
                           linearizationTable.size());
             std::array<unsigned short, 4> linearBlackLevel = {0, 0, 0, 0};  // Linear black is 0
             dng.SetBlackLevel(samplesPerPixel == 3 ? 3 : 4, linearBlackLevel.data());
@@ -2741,7 +2742,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     }    
 
     // Set image data AFTER all metadata is configured (including BitsPerSample and Compression)
-    spdlog::debug("Calling SetImageData with {} bytes, compression={}", processedData.size(), writerCompression);
+    SPDLOG_DEBUG("Calling SetImageData with {} bytes, compression={}", processedData.size(), writerCompression);
     const auto* imageData = reinterpret_cast<const unsigned char*>(processedData.data());
     const bool attached = writerCompression
         ? dng.SetImageData(imageData, processedData.size())

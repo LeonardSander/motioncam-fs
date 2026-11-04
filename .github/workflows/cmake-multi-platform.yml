@@ -73,9 +73,10 @@ jobs:
       run: |
         mkdir -p artifacts
         ref_safe="${GITHUB_REF_NAME//\//-}"
-        apk="$(find build-android-arm64 -type f -name '*.apk' -path '*/outputs/apk/*' -print -quit)"
-        test -n "$apk"
-        cp "$apk" "artifacts/motioncam-${ref_safe}-android-arm64.apk"
+        export ANDROID_SDK_ROOT="$ANDROID_HOME"
+        bash scripts/sign_android_apk.sh \
+          build-android-arm64/android-build/build/outputs/apk/release/android-build-release-unsigned.apk \
+          "artifacts/motioncam-${ref_safe}-android-arm64.apk"
 
     - name: Upload APK
       uses: actions/upload-artifact@v4
@@ -92,7 +93,7 @@ jobs:
         QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_x86_64
         QT_HOST_PATH: ${{ steps.host-qt.outputs.qt-root-dir }}
         QT_ANDROID_ABI: x86_64
-        ANDROID_VCPKG_TRIPLET: x64-android
+        ANDROID_VCPKG_TRIPLET: x64-android-release
         BUILD_TESTING: 'ON'
       run: |
         export ANDROID_SDK_ROOT="$ANDROID_HOME"
@@ -162,24 +163,26 @@ jobs:
     - name: Configure with LLVM
       shell: bash
       run: |
-        export PKG_CONFIG_PATH="$PWD/build-linux/vcpkg_installed/x64-linux/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export PKG_CONFIG_PATH="$PWD/build-linux/vcpkg_installed/x64-linux-release/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         cmake -S . -B build-linux -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DVCPKG_TARGET_TRIPLET=x64-linux \
+          -DVCPKG_TARGET_TRIPLET=x64-linux-release \
+          -DVCPKG_HOST_TRIPLET=x64-linux-release \
+          -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" \
           -DVCPKG_MANIFEST_MODE=ON \
           -DBUILD_TESTING=ON \
           -DMOTIONCAM_REQUIRE_VULKAN=ON \
           -DPKG_CONFIG_ARGN=--static
 
     - name: Build runtime
-      run: cmake --build build-linux --target MotionCamFuse --parallel
+      run: cmake --build build-linux --config Release --target MotionCamFuse --parallel
 
     - name: Build tests
       continue-on-error: true
-      run: cmake --build build-linux --parallel
+      run: cmake --build build-linux --config Release --parallel
 
     - name: Test
       continue-on-error: true
@@ -255,7 +258,7 @@ jobs:
             build_type: Release
             build_dir: build-windows
             qt_arch: win64_msvc2019_64
-            vcpkg_triplet: x64-windows
+            vcpkg_triplet: x64-windows-release
             artifact_suffix: windows-x86_64
           - os: macos-15-intel
             platform: macos
@@ -263,7 +266,7 @@ jobs:
             build_dir: build-macos-x86
             mac_arch: x86_64
             qt_arch: clang_64
-            vcpkg_triplet: x64-osx
+            vcpkg_triplet: x64-osx-release
             artifact_suffix: macos-x86_64
             qt_version: 6.7.2
             qt_install: aqt
@@ -274,7 +277,7 @@ jobs:
             build_dir: build-macos-arm64
             mac_arch: arm64
             qt_arch: clang_arm64
-            vcpkg_triplet: arm64-osx
+            vcpkg_triplet: arm64-osx-release
             artifact_suffix: macos-arm64
             qt_version: 6.7.2
             qt_install: brew
@@ -294,7 +297,7 @@ jobs:
         path: |
           ~/.cache/vcpkg
           ${{ matrix.build_dir }}/
-        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', '.github/workflows/**') }}
+        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', 'scripts/vcpkg-triplets/**', '.github/workflows/**') }}
         restore-keys: |
           ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-
 
@@ -335,15 +338,13 @@ jobs:
         echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
 
     # ---------- VCPKG ----------
-    - name: Install spdlog via vcpkg
+    - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
       with:
         # Keep the ports and tool version reproducible. The action's old
         # implicit snapshot referenced MSYS2 archives that are no longer
         # available, which prevented libjxl's dependencies from installing.
         vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
-        vcpkgArguments: spdlog
-        vcpkgTriplet: ${{ matrix.vcpkg_triplet }}
 
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macOS build tools
@@ -382,6 +383,9 @@ jobs:
           -DMOTIONCAM_REQUIRE_VULKAN=ON `
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
+          -DVCPKG_HOST_TRIPLET=${{ matrix.vcpkg_triplet }} `
+          -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" `
+          -DCMAKE_CONFIGURATION_TYPES=Release `
           -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}" `
           -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
 
@@ -423,6 +427,8 @@ jobs:
           -DMOTIONCAM_REQUIRE_VULKAN=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
+          -DVCPKG_HOST_TRIPLET=${{ matrix.vcpkg_triplet }} \
+          -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" \
           -DVCPKG_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
           -DCMAKE_OSX_ARCHITECTURES=${{ matrix.mac_arch }} \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
@@ -462,7 +468,7 @@ jobs:
             exit 1
           fi
           echo "Running windeployqt on $exe"
-          "${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}/bin/windeployqt.exe" "$exe" || echo "windeployqt failed"
+          "${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}/bin/windeployqt.exe" --release "$exe"
           sevenzip_dir="$(dirname "$(command -v 7z)")"
           cp "$sevenzip_dir/7z.exe" .
           if [ -f "$sevenzip_dir/7z.dll" ]; then cp "$sevenzip_dir/7z.dll" .; fi
@@ -475,6 +481,9 @@ jobs:
             exit 1
           fi
           echo "Packaging $app"
+          dsymutil "$app/Contents/MacOS/MotionCamFuse" -o MotionCamFuse.dSYM
+          ditto -c -k --keepParent MotionCamFuse.dSYM \
+            "../artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}-symbols.zip"
           cp "$(command -v 7zz)" "$app/Contents/MacOS/7zz"
           bash "${{ github.workspace }}/scripts/package_macos_app.sh" "$app"
           ditto -c -k --sequesterRsrc --keepParent \

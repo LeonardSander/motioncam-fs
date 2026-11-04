@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VulkanGainBake.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
@@ -87,13 +88,13 @@ struct Device {
         pl_log_destroy(&log);
     }
     bool init() {
-        const auto started = std::chrono::steady_clock::now();
+        const auto started = motioncam::diagnosticNow();
         log = pl_log_create(PL_API_VER, nullptr);
         if (!log) return false;
         vk = createGalleryVulkanContext(log);
         if (!vk || !vk->gpu->glsl.compute) return false;
         gpu = vk->gpu;
-        const auto vulkanReady = std::chrono::steady_clock::now();
+        const auto vulkanReady = motioncam::diagnosticNow();
         pl_desc desc[4] = {};
         desc[0] = {"src", PL_DESC_BUF_STORAGE, 0, PL_DESC_ACCESS_READONLY};
         desc[1] = {"gainMap", PL_DESC_BUF_STORAGE, 1, PL_DESC_ACCESS_READONLY};
@@ -108,16 +109,16 @@ struct Device {
         pass = pl_pass_create(vk->gpu, &pp);
         pp.glsl_shader = vulkanCfaGainBakeShader;
         cfaPass = pl_pass_create(vk->gpu, &pp);
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             passTimer = pl_timer_create(gpu);
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
             const auto millis = [](auto a, auto b) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
             std::fprintf(stderr,
                 "GALLERY_PERF event=vulkan_gain_init vulkan_ms=%.3f shader_ms=%.3f\n",
                 millis(started, vulkanReady),
-                millis(vulkanReady, std::chrono::steady_clock::now()));
+                millis(vulkanReady, motioncam::diagnosticNow()));
         }
         return pass && cfaPass;
     }
@@ -152,7 +153,7 @@ struct Device {
         pass = pl_pass_create(gpu, &pp);
         pp.glsl_shader = cfa.c_str();
         cfaPass = pl_pass_create(gpu, &pp);
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             passTimer = pl_timer_create(gpu);
         return pass && cfaPass;
     }
@@ -331,7 +332,7 @@ bool bakeGainVulkan(const uint16_t* source,
         params.bufferSource->gpu && params.bufferSource->buffer;
     const bool externalSource = externalTexture || externalBuffer;
     if (externalTexture && externalBuffer) return false;
-    if (externalSource && std::getenv("MOTIONCAM_TEST_FAIL_VULKAN_GAIN_BAKE"))
+    if (externalSource && motioncam::debugEnvironment("MOTIONCAM_TEST_FAIL_VULKAN_GAIN_BAKE"))
         return false;
     if ((!source && !externalSource) || !destination || !params.width || !params.height ||
         params.channels != (cfa ? 1u : 3u) ||
@@ -366,7 +367,7 @@ bool bakeGainVulkan(const uint16_t* source,
             current.data->size() != static_cast<size_t>(current.width) *
                 current.height * current.channels) return false;
     }
-    const auto packStarted = std::chrono::steady_clock::now();
+    const auto packStarted = motioncam::diagnosticNow();
     const size_t rowSamples = static_cast<size_t>(params.width) * params.channels;
     const size_t totalSamples = rowSamples * params.height;
     uint32_t sourceBits = params.sourceNominalWhite <= 255u ? 8u :
@@ -466,12 +467,12 @@ bool bakeGainVulkan(const uint16_t* source,
         if (!buffer->params.storable || buffer->params.size < sourceBytes)
             return false;
     }
-    const auto packFinished = std::chrono::steady_clock::now();
+    const auto packFinished = motioncam::diagnosticNow();
     // Mounted reads run on different FUSE workers. Share one Vulkan device
     // instead of allocating a device and full-frame buffers per worker.
     auto& state = bakeState();
     std::lock_guard deviceLock(state.mutex);
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = motioncam::diagnosticNow();
     auto& device = externalTexture
         ? state.textureDevices[static_cast<pl_gpu>(params.textureSource->gpu)]
         : externalBuffer
@@ -509,7 +510,7 @@ bool bakeGainVulkan(const uint16_t* source,
         destinationBytes != rowBytes * params.height ||
         !device->reserve(sourceBytes, mapBytes, outputBytes,
                          linearizationBytes)) return false;
-    const auto reserved = std::chrono::steady_clock::now();
+    const auto reserved = motioncam::diagnosticNow();
     Constants constants = {};
     std::copy(params.black.begin(), params.black.end(), constants.black);
     std::copy(params.destinationBlack.begin(), params.destinationBlack.end(),
@@ -634,7 +635,7 @@ bool bakeGainVulkan(const uint16_t* source,
         pl_buf_copy(device->gpu, device->linearization, 0,
                     device->linearizationStage, 0, linearizationBytes);
     }
-    const auto uploaded = std::chrono::steady_clock::now();
+    const auto uploaded = motioncam::diagnosticNow();
     pl_desc_binding bindings[4] = {};
     bindings[0].object = externalTexture
         ? params.textureSource->texture
@@ -668,7 +669,7 @@ bool bakeGainVulkan(const uint16_t* source,
         static_cast<uint32_t>(wordsPerRow)};
     if (params.consumePackedOutput &&
         params.consumePackedOutput(packedImage)) {
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             std::fprintf(stderr,
                 "GALLERY_PERF event=vulkan_gain_gpu_jpeg_handoff width=%u height=%u channels=%u bits=%u\n",
                 params.width, params.height, params.channels,
@@ -688,7 +689,7 @@ bool bakeGainVulkan(const uint16_t* source,
                     device->output, firstDownloadBytes,
                     outputBytes - firstDownloadBytes);
     }
-    const auto submitted = std::chrono::steady_clock::now();
+    const auto submitted = motioncam::diagnosticNow();
     const bool alignedRows = rowBytes == wordsPerRow * sizeof(uint32_t);
     std::vector<uint32_t> words;
     if (!alignedRows) words.resize(wordsPerRow * params.height);
@@ -702,9 +703,9 @@ bool bakeGainVulkan(const uint16_t* source,
     if (device->mappedOutput) {
         auto copyMapped = [&](pl_buf stage, size_t destinationOffset,
                               size_t bytes) {
-            const auto waiting = std::chrono::steady_clock::now();
+            const auto waiting = motioncam::diagnosticNow();
             while (pl_buf_poll(device->gpu, stage, UINT64_MAX)) {}
-            const auto ready = std::chrono::steady_clock::now();
+            const auto ready = motioncam::diagnosticNow();
             gpuWaitMs += elapsedMs(waiting, ready);
             if (pl_gpu_is_failed(device->gpu)) return false;
             const auto* sourceBytes = stage->data;
@@ -731,7 +732,7 @@ bool bakeGainVulkan(const uint16_t* source,
                 threads.emplace_back(copyPart, index);
             copyPart(0);
             for (auto& thread : threads) thread.join();
-            hostCopyMs += elapsedMs(ready, std::chrono::steady_clock::now());
+            hostCopyMs += elapsedMs(ready, motioncam::diagnosticNow());
             return true;
         };
         readOk = copyMapped(device->directOutput
@@ -743,18 +744,18 @@ bool bakeGainVulkan(const uint16_t* source,
     } else {
         readOk = pl_buf_read(device->gpu, device->outputStage, 0,
                              readTarget, outputBytes);
-        gpuWaitMs = elapsedMs(submitted, std::chrono::steady_clock::now());
+        gpuWaitMs = elapsedMs(submitted, motioncam::diagnosticNow());
     }
     if (!readOk || pl_gpu_is_failed(device->gpu)) {
         device.reset();
         return false;
     }
-    const auto downloaded = std::chrono::steady_clock::now();
+    const auto downloaded = motioncam::diagnosticNow();
     if (!alignedRows)
         for (uint32_t y = 0; y < params.height; ++y)
             std::memcpy(destination + static_cast<size_t>(y) * rowBytes,
                         words.data() + static_cast<size_t>(y) * wordsPerRow, rowBytes);
-    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
         const auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
@@ -765,7 +766,7 @@ bool bakeGainVulkan(const uint16_t* source,
             ms(uploaded, submitted), ms(submitted, downloaded),
             gpuWaitMs, double(pl_timer_query(device->gpu, device->passTimer)) / 1e6,
             hostCopyMs,
-            ms(downloaded, std::chrono::steady_clock::now()),
+            ms(downloaded, motioncam::diagnosticNow()),
             device->mappedOutput ? 1 : 0, device->splitOutput ? 1 : 0,
             device->directOutput ? 1 : 0,
             sourceBits, externalSource ? 0u : sourceBytes, rowBytes * params.height);

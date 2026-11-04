@@ -112,7 +112,7 @@ Input resolution is being reduced by discarding pixel values to increase playbac
 
 ### Finalization
 
-Supported GPU decode, processing, and lossless JPEG encode paths take precedence regardless of preview size or memory topology, with CPU fallback for unsupported layouts or GPU failures. HEVC and AV1 Camera Native export tries compatible NVENC, QSV, AMF, VAAPI, and VideoToolbox encoders supplied by FFmpeg before software. An actual encode probe must preserve resolution, 10-bit chroma, and full-range BT.2020 metadata; a later hardware failure retries in software. Quality values map to each encoder's quality control and are not numerically equivalent to software CRF; hardware uses its quality-oriented preset. SVT noise synthesis and codecs without a compatible hardware implementation retain software encoding. Explicit CPU/debug overrides remain available.
+Supported GPU decode, processing, and lossless JPEG encode paths take precedence regardless of preview size or memory topology, with CPU fallback for unsupported layouts or GPU failures. HEVC and AV1 Camera Native export tries compatible NVENC, QSV, AMF, VAAPI, and VideoToolbox encoders supplied by FFmpeg before software. An actual encode probe must preserve resolution, 10-bit chroma, and full-range BT.2020 metadata; a later hardware failure retries in software. Quality values map to each encoder's quality control and are not numerically equivalent to software CRF; hardware uses its quality-oriented preset. SVT noise synthesis and codecs without a compatible hardware implementation retain software encoding. Explicit CPU/debug overrides remain available in Debug builds.
 
 To store processed clips persistently many compression options are available. For DNG output there are lossless JPEG 92, lossy 12b JPEG DCT (Davinci only), lossless and lossy JPEG-XL options. Video compression options are available as well namely HEVC, AV1, CineForm and ProRes, relying on a RGB to YUV pixel format conversion assuming Rec.2020. JSON sidecars containing otherwise lost metadata are written automatically and resulting files can be imported again in Fuse. When specific frames from mounted clips are selected in Gallery, these can be finalized by themselves instead of the entire sequence.
 
@@ -124,11 +124,11 @@ For a DirectLog clip, `MotionCamFuse --directlog-jpeg-benchmark <video>` benchma
 
 `motioncam-finalize-interpolation-test --jpeg-gpu-benchmark` times large synthetic CFA and interleaved RGB JPEG encodes, including RGB from a GPU texture. It checks JPEG bytes against liblj92 and compares malloc-owned and borrowed-buffer RGB DNG writing byte for byte.
 
-An experimental Vulkan lossless JPEG **decoder** for independent CFA or RGB tiles is exercised by `MOTIONCAM_REQUIRE_GPU_JPEG_DECODE_TEST=1 MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST=1 ./build-linux-release/motioncam-lossless-jpeg-test`. Add `MOTIONCAM_JPEG_DECODE_RESIDENT_TEST=1` to validate decode → gain → JPEG encode with decoded pixels staying on the GPU; `MOTIONCAM_JPEG_DECODE_LOG_TEST=1` includes LOG processing. `MOTIONCAM_JPEG_DECODE_LARGE_BENCHMARK=1` runs a synthetic 12 MP image with 128×128 tiles, while `MOTIONCAM_JPEG_DECODE_SMALL_TILES=1` uses 32×32 tiles. For the HLG DirectLog clip, `MOTIONCAM_DIRECTLOG_JPEG_DECODE_BENCHMARK=1 ./build-linux-release/MotionCamFuse --directlog-jpeg-benchmark <video>` encodes actual remosaiced CFA and RGB frame pixels into independent tiles, then checks GPU decode and resident JPEG re-encode against the source. The default tile size is 64×64 for CFA and 32×32 for RGB; set `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_SIZE` to test another size. It compares the GPU path with CPU tile decode followed by GPU JPEG encode. Contiguous input uploads JPEG bytes plus seven layout words per tile; GPU header parsing builds the full metadata. DNG import uses GPU decode for regular, full-size JPEG92 CFA or RGB tile grids, with CPU fallback for other layouts or GPU failures.
+An experimental Vulkan lossless JPEG **decoder** for independent CFA or RGB tiles is exercised by `MOTIONCAM_REQUIRE_GPU_JPEG_DECODE_TEST=1 MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST=1 ./build-linux-release/motioncam-lossless-jpeg-test`. Add `MOTIONCAM_JPEG_DECODE_RESIDENT_TEST=1` to validate decode → gain → JPEG encode with decoded pixels staying on the GPU; `MOTIONCAM_JPEG_DECODE_LOG_TEST=1` includes LOG processing. `MOTIONCAM_JPEG_DECODE_LARGE_BENCHMARK=1` runs a synthetic 12 MP image with 128×128 tiles, while `MOTIONCAM_JPEG_DECODE_SMALL_TILES=1` uses 32×32 tiles. For the HLG DirectLog clip, `MOTIONCAM_DIRECTLOG_JPEG_DECODE_BENCHMARK=1 ./build-linux-debug/MotionCamFuse --directlog-jpeg-benchmark <video>` encodes actual remosaiced CFA and RGB frame pixels into independent tiles, then checks GPU decode and resident JPEG re-encode against the source. The default tile size is 64×64 for CFA and 32×32 for RGB; set `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_SIZE` to test another size. It compares the GPU path with CPU tile decode followed by GPU JPEG encode. Contiguous input uploads JPEG bytes plus seven layout words per tile; GPU header parsing builds the full metadata. DNG import uses GPU decode for regular, full-size JPEG92 CFA or RGB tile grids, with CPU fallback for other layouts or GPU failures.
 
 `MOTIONCAM_GPU_JPEG_REAL_DNG_BENCHMARK=<path> ./build-linux-release/motioncam-lossless-jpeg-test` inspects and CPU-decodes a real single-strip JPEG DNG. The HLG DirectLog DNG in the saved session has one 4096×3072 JPEG scan; a per-tile GPU decoder would launch only one serial entropy task for it. The experimental decoder rejects streams above 65,536 samples per tile so this layout uses the CPU path rather than stalling the GPU. Accelerating these existing DNGs requires a parallel entropy decoder, or independently tiled JPEG at DNG creation time.
 
-`MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_BENCHMARK=both ./build-linux-release/MotionCamFuse --directlog-jpeg-benchmark <video>` feeds the GPU encoder's full CFA and RGB JPEG payloads to the decoder and compares a 128×128 crop in each mode with CPU decode. Set `MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SIDE=256` to test a larger crop, and `MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SKIP_FULL=1` to omit full payloads. `MOTIONCAM_GPU_JPEG_ALLOW_LARGE_SCAN=1` overrides the large-scan guard for bounded diagnostic runs only. The current full-frame encoder writes no JPEG restart markers, so one scan has no independent entropy starting points.
+`MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_BENCHMARK=both ./build-linux-debug/MotionCamFuse --directlog-jpeg-benchmark <video>` feeds the GPU encoder's full CFA and RGB JPEG payloads to the decoder and compares a 128×128 crop in each mode with CPU decode. Set `MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SIDE=256` to test a larger crop, and `MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SKIP_FULL=1` to omit full payloads. `MOTIONCAM_GPU_JPEG_ALLOW_LARGE_SCAN=1` overrides the large-scan guard for bounded diagnostic runs only. The current full-frame encoder writes no JPEG restart markers, so one scan has no independent entropy starting points.
 
 For tiled decode measurements, `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH` and `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT` can override the default tile dimensions. Set `MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK=1` to encode HLG CFA and RGB textures into independent GPU JPEG tiles. The `DirectLog GPU resident JPEG roundtrip` line reports the median of five warm GPU encode → decode runs; the JPEG payload stays on the GPU, and exact pixels are checked in a separate pass. The `DirectLog JPEG transfer benchmark` line includes a final JPEG readback and decoder reupload for comparison. The benchmark also checks tiled DNG roundtrips. On the measured HLG frame, 16×64 CFA and 8×128 RGB were the fastest tested tile dimensions and are the current texture-encode defaults.
 
@@ -206,10 +206,11 @@ this ignored file automatically, so subsequent builds only need
 `bash scripts/build_android_apk.sh`. Build files and dependencies are kept in
 `build-android-arm64` by default.
 
-The script prints the APK path. The APK has optimized native code and Qt's
-debug signature for direct installation; rebuilds use the same debug key on
-one build machine. GitHub Actions uploads the APK with the other platform
-artifacts and includes it in tagged releases. See [Android notes](docs/android.md)
+The script prints the APK path. Both native code and the Android package use
+Release configuration. The signing helper uses the existing local debug key
+for sideloading, or a supplied distribution keystore; signing does not enable
+debugging. Rebuilds use the same key on one build machine. GitHub Actions
+uploads the APK with the other platform artifacts and includes it in tagged releases. See [Android notes](docs/android.md)
 for the current feature scope and runtime performance opportunities.
 
 ---
@@ -218,18 +219,41 @@ for the current feature scope and runtime performance opportunities.
 
 See `HELP.md` for usage, preferences, and feature details.
 
-Gallery playback profiling can be run from a release build with:
+Release builds disable developer environment overrides, detailed profiling,
+GPU timestamp-query resources, validation/hash comparisons, diagnostic dumps,
+and failure injection. These are enabled only in CMake's `Debug` configuration;
+`RelWithDebInfo` also uses the Release instrumentation policy. Gallery benchmark
+scenario controls, including compression and quality workloads, remain available
+inside `--gallery-perf-session`. The standalone
+`--directlog-jpeg-benchmark` command requires a Debug app build; environment
+controls in separate test executables are independent of the shipped app.
+`MOTIONCAM_RELEASE_IPO=ON` enables link-time optimization when the toolchain
+supports it. Distribution builds retain portable compiler targets and normal
+floating-point semantics.
+
+macOS Release apps use Apple's native crash reports. CI retains a separate
+`*-symbols.zip` containing the matching dSYM for each architecture; keep it with
+that build to decode a user's crash report. The custom in-process crash handler
+is enabled only in Debug builds.
+
+The Debug-only `MOTIONCAM_TEST_FAIL_VULKAN_GAIN_BAKE=1` hook makes gain baking
+return failure for externally supplied GPU textures/buffers. It exercises CPU
+fallback or an explicit error when zero-copy output is required. It does not
+inject a crash and is ignored by Release builds.
+
+Gallery playback benchmarking remains available in a Release build with:
 
 ```bash
-MOTIONCAM_GALLERY_PERF_PROFILE=1 MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1 \
+MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1 \
   MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1 \
   ./build/MotionCamFuse --gallery-perf-session /path/to/session.json \
   --gallery-perf-playback-ms 3000
 ```
 
 The runner enables the histogram, keeps its overlay visible throughout the
-run, and logs per-frame materialization, color processing, and histogram
-timings. `MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1`
+run, and logs benchmark startup, playback, seek, and throughput summaries.
+Detailed per-frame profiling requires a Debug build and
+`MOTIONCAM_GALLERY_PERF_PROFILE=1`. `MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1`
 uses the session's draft scale with HQ off; omit it for full-resolution playback.
 `MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1` keeps the run focused on playback and
 seeks; omit it to include paused thumbnail backfill.

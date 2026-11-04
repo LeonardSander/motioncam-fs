@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VulkanJpegEntropy.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
@@ -244,7 +245,7 @@ bool stuffJoined(const std::vector<uint32_t>& joined, size_t rawBytes,
 bool joinOnGpu(pl_gpu gpu, State& s, const std::vector<uint32_t>& blockBits,
                uint32_t wordsPerBlock, uint8_t* output, int capacity,
                int* written) {
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = motioncam::diagnosticNow();
     if (!s.initJoin() || blockBits.empty() || blockBits.size() > UINT32_MAX)
         return false;
     std::vector<uint32_t> offsets(blockBits.size());
@@ -303,14 +304,14 @@ bool joinOnGpu(pl_gpu gpu, State& s, const std::vector<uint32_t>& blockBits,
     pl_buf_copy(gpu, s.joinedStage, 0, s.joined, 0, joinedBytes);
     if (!pl_buf_read(gpu, s.joinedStage, 0, joined.data(), joinedBytes))
         return false;
-    const auto readAt = std::chrono::steady_clock::now();
+    const auto readAt = motioncam::diagnosticNow();
     const size_t rawBytes = static_cast<size_t>((totalBits + 7u) / 8u);
     if (!stuffJoined(joined, rawBytes, output, capacity, written)) return false;
-    if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
         std::fprintf(stderr, "JPEG encode GPU join: gpu_ms=%.3f stuffing_ms=%.3f raw_bytes=%zu bytes=%d\n",
                      std::chrono::duration<double, std::milli>(readAt - started).count(),
                      std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - readAt).count(),
+                         motioncam::diagnosticNow() - readAt).count(),
                      rawBytes, *written);
     return true;
 }
@@ -323,7 +324,7 @@ int jpegEntropyVulkan(const int16_t* residuals, int sampleCount,
                       const uint16_t codeBits[18],
                       uint8_t* output, int capacity,
                       int* written, void* callbackContext) {
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = motioncam::diagnosticNow();
     auto* imageSource = residuals ? nullptr :
         static_cast<JpegEntropyImageSource*>(callbackContext);
     if ((!residuals && !imageSource) || !codes || !codeBits || !output || !written ||
@@ -414,7 +415,7 @@ int jpegEntropyVulkan(const int16_t* residuals, int sampleCount,
     if (!resident)
         pl_buf_copy(gpu, s.source, 0, s.sourceStage, 0, sourceBytes);
     pl_buf_copy(gpu, s.codes, 0, s.codesStage, 0, table.size);
-    const auto uploaded = std::chrono::steady_clock::now();
+    const auto uploaded = motioncam::diagnosticNow();
     uint32_t constants[7] = {
         static_cast<uint32_t>(samples), wordsPerBlock,
         imageSource ? imageSource->width : 0u,
@@ -448,7 +449,7 @@ int jpegEntropyVulkan(const int16_t* residuals, int sampleCount,
     std::vector<uint32_t> packedWords(packedBytes / 4u);
     if (!pl_buf_read(gpu, s.packedStage, 0,
                      packedWords.data(), packedBytes)) return 1;
-    const auto packedReady = std::chrono::steady_clock::now();
+    const auto packedReady = motioncam::diagnosticNow();
     uint64_t pending = 0;
     unsigned pendingBits = 0;
     int bytes = 0;
@@ -505,12 +506,12 @@ int jpegEntropyVulkan(const int16_t* residuals, int sampleCount,
         !emit(static_cast<uint8_t>(pending << (8u - pendingBits)))) return 1;
     *written = bytes;
     if (imageSource && imageSource->gpuUsed) *imageSource->gpuUsed = true;
-    if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
         std::fprintf(stderr, "JPEG encode GPU entropy: upload_ms=%.3f pack_read_ms=%.3f join_ms=%.3f samples=%zu bytes=%d\n",
                      std::chrono::duration<double, std::milli>(uploaded - started).count(),
                      std::chrono::duration<double, std::milli>(packedReady - uploaded).count(),
                      std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - packedReady).count(),
+                         motioncam::diagnosticNow() - packedReady).count(),
                      samples, bytes);
     return 0;
 }

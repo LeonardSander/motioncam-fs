@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #ifdef __ANDROID__
 #include "android/TouchScrolling.h"
 #include "android/PageCrossfade.h"
@@ -258,7 +259,7 @@ public:
         const double next=std::clamp(mDistribution+steps*0.5,-1.0,1.0);
         if(next==mDistribution)return;
         mDistribution=next;
-        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=histogram_distribution value={:.3f}",
                 mDistribution);
         if(distributionChanged)distributionChanged();
@@ -340,7 +341,7 @@ protected:
     }
     void paintEvent(QPaintEvent*) override {
         if(property("nativeCaptureOnly").toBool()&&!mNativeCapture)return;
-        const auto paintStarted=std::chrono::steady_clock::now();
+        const auto paintStarted=motioncam::diagnosticNow();
         QPainter painter(this);
         painter.fillRect(rect(),QColor(0,0,0,165));
         const QRect graph(8,8,width()-16,height()-16);
@@ -430,7 +431,7 @@ protected:
             }
         }
         painter.drawImage(graph.topLeft(),fill);
-        const auto fillFinished=std::chrono::steady_clock::now();
+        const auto fillFinished=motioncam::diagnosticNow();
         const std::array<QRgb,8> lineColors={
             qRgb(0,0,0),qRgb(255,75,75),qRgb(80,255,80),qRgb(230,195,65),
             qRgb(85,130,255),qRgb(175,75,205),qRgb(70,225,235),qRgb(255,255,255)};
@@ -465,7 +466,7 @@ protected:
             if(inRun)lines.emplace_back(previous,QPointF(graph.right(),baseline));
             if(!lines.empty())maskPainter.drawLines(lines.data(),static_cast<int>(lines.size()));
         }
-        const auto masksFinished=std::chrono::steady_clock::now();
+        const auto masksFinished=motioncam::diagnosticNow();
         QImage strokes(graph.size(),QImage::Format_ARGB32);
         strokes.fill(Qt::transparent);
         for(int y=0;y<strokes.height();++y) {
@@ -484,7 +485,7 @@ protected:
             }
         }
         painter.drawImage(graph.topLeft(),strokes);
-        const auto strokesFinished=std::chrono::steady_clock::now();
+        const auto strokesFinished=motioncam::diagnosticNow();
         painter.restore();
         painter.setPen(QPen(QColor(150,105,45,95),1.5));
         std::array<int,4> blackMarkerXs{};
@@ -540,8 +541,8 @@ protected:
             painter.drawText(QRect(labelX,graph.top(),labelWidth,
                 painter.fontMetrics().height()),Qt::AlignCenter,label);
         }
-        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT")) {
-            const auto now=std::chrono::steady_clock::now();
+        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT")) {
+            const auto now=motioncam::diagnosticNow();
             auto ms=[](auto end,auto start) {
                 return std::chrono::duration<double,std::milli>(end-start).count();
             };
@@ -821,7 +822,7 @@ public:
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode,
                             UpdatePaintNodeData*) override {
-        const auto started = std::chrono::steady_clock::now();
+        const auto started = motioncam::diagnosticNow();
         if (!mLoggedRenderApi && window()) {
             mLoggedRenderApi = true;
             spdlog::info("Gallery active scene graph API: {}",
@@ -847,12 +848,12 @@ protected:
         node->setRect(mTarget);
         node->setFiltering(mSmooth?QSGTexture::Linear:QSGTexture::Nearest);
         mUploadedFrameKey=mFrame.cacheKey();
-        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+        if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
             !mFrame.isNull())
             spdlog::info("GALLERY_PERF event=gpu_present source={}x{} viewport={}x{} cpu_ms={:.3f}",
                 mFrame.width(), mFrame.height(), width(), height(),
                 std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - started).count());
+                    motioncam::diagnosticNow() - started).count());
         return node;
     }
 
@@ -1577,7 +1578,7 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
     mNativeOverlayCapturePending=false;
     const QSize logicalSize=mGpuVideo->size();
     if(logicalSize.isEmpty())return;
-    const auto started=std::chrono::steady_clock::now();
+    const auto started=motioncam::diagnosticNow();
     mOverlayOpacity->setEnabled(false);
     // Native presentation owns the pixels. These widgets remain input targets
     // and are painted only by the synchronous offscreen atlas capture.
@@ -1600,11 +1601,11 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
         {mHistogram,opacity},
         {mThumbnailScroll,opacity},{mFpsLabel,1.0},{mPreparingLabel,1.0}};
     static_cast<RawHistogram*>(mHistogram)->setNativeCapture(true);
-    const auto prepared=std::chrono::steady_clock::now();
+    const auto prepared=motioncam::diagnosticNow();
     if(!mNativeOverlayCache)mNativeOverlayCache=std::make_unique<GalleryOverlayCache>();
     auto capture=captureGalleryOverlay(*mGpuVideo,roots,mGpuVideo->nativePixelRatio(),mNativeOverlayCache.get());
     static_cast<RawHistogram*>(mHistogram)->setNativeCapture(false);
-    const auto captured=std::chrono::steady_clock::now();
+    const auto captured=motioncam::diagnosticNow();
     const auto* thumbnailDelegate=static_cast<FrameThumbnailDelegate*>(mThumbnailScroll->itemDelegate());
     const auto rasters=thumbnailDelegate->takeRasterCounts();
     if(capture.parts.empty())mCapturedNativeOverlay={};
@@ -1616,7 +1617,7 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
         !mPresentationClock.isValid()||mLastPresentationNs<0||
         mPresentationClock.nsecsElapsed()-mLastPresentationNs>=100000000;
     if(submit)mGpuVideo->setOverlay(mCapturedNativeOverlay,mCapturedNativeOverlayParts,redraw);
-    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=native_overlay_capture viewport={}x{} atlas={}x{} parts={} opacity={:.3f} painted={} reused={} thumbnail_rasters={} thumbnail_reused={} thumbnail_bytes={} thumbnail_pixmap_kib={} paint_ms={:.3f} prepare_ms={:.3f} capture_ms={:.3f} elapsed_ms={:.3f}",
             logicalSize.width(),logicalSize.height(),mCapturedNativeOverlay.width(),
             mCapturedNativeOverlay.height(),mCapturedNativeOverlayParts.size(),double(opacity),capture.paintedWidgets,capture.reusedWidgets,rasters.first,rasters.second,mThumbnailCachedBytes,
@@ -1624,7 +1625,7 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
             double(capture.paintNanoseconds)/1000000.0,
             std::chrono::duration<double,std::milli>(prepared-started).count(),
             std::chrono::duration<double,std::milli>(captured-prepared).count(),
-            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count());
+            std::chrono::duration<double,std::milli>(motioncam::diagnosticNow()-started).count());
 }
 
 
@@ -1694,8 +1695,8 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     // increase the FFmpeg output pipe and copy cost.
     mDirectSequencePresentation=mClips[index].isSequence &&
         (mClips[index].directPresentation ||
-         qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_DIRECT_PRESENT")) &&
-        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
+         motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_DIRECT_PRESENT")) &&
+        !motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
     const bool nativeStillPresentation = !mClips[index].isSequence;
 #else
@@ -1740,7 +1741,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     }
     if(mGpuVideo&&!mGpuVideo->native())
         mGpuVideo->hide();
-    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=gallery_presenter mount={} mode={}",
             mClips[index].mountId,
             mDirectSequencePresentation?"direct":
@@ -1960,7 +1961,7 @@ void ClipPlayerDialog::setSourceFrameThumbnailImage(int sourceFrame,const QImage
     const bool visible=mThumbnailCollectionEnabled->load();
     if((!visible&&!cacheWhenHidden)||image.isNull())return;
     cacheThumbnail(currentMountId(),sourceFrame,image,visible);
-    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
        (sourceFrame<10 || sourceFrame%30==0))
         spdlog::info("GALLERY_PERF event=thumbnail_applied source={} current={} visible={}",
             sourceFrame,mCurrentThumbnailSource,
@@ -2457,7 +2458,7 @@ void ClipPlayerDialog::setHistogramExpanded(bool expanded){
 }
 
 void ClipPlayerDialog::updateHistogram(){
-    const auto histogramStarted=std::chrono::steady_clock::now();
+    const auto histogramStarted=motioncam::diagnosticNow();
     const auto& raw=mPresentedRawFrame;
     mIntensitySamples=nullptr;
     mDetectedClipValue.reset();
@@ -2599,11 +2600,11 @@ void ClipPlayerDialog::updateHistogram(){
                 raw.cfaPhase,raw.samples && raw.white>raw.black && raw.white>0.0f
                 ? (raw.channels==3?3:4) : 0);
     updateTitle();
-    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=histogram_frame width={} height={} channels={} bins={} latency_ms={:.3f}",
             raw.width,raw.height,raw.channels,binCount,
             std::chrono::duration<double,std::milli>(
-                std::chrono::steady_clock::now()-histogramStarted).count());
+                motioncam::diagnosticNow()-histogramStarted).count());
 }
 
 void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
@@ -3358,7 +3359,7 @@ void ClipPlayerDialog::consumeOutput(){
         QTimer::singleShot(0,this,&ClipPlayerDialog::showNextFrame);
 }
 void ClipPlayerDialog::showNextFrame(){
-    const auto showStarted=std::chrono::steady_clock::now();
+    const auto showStarted=motioncam::diagnosticNow();
     consumeOutput();
     if(!mPaused&&mAudioEnabled&&!mAudioStartPending&&mAudioClock.isValid()&&
        mIndex>=0&&mClips[mIndex].autoAdvance&&mThumbnailScroll&&
@@ -3473,13 +3474,13 @@ void ClipPlayerDialog::showNextFrame(){
             captureNativeOverlay(false);
             if(!mNativeOverlayCaptureTimer.isActive())mNativeOverlayCaptureTimer.start();
         }
-        const auto displayUiStarted=std::chrono::steady_clock::now();
+        const auto displayUiStarted=motioncam::diagnosticNow();
         updateDisplayedImage();
-        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=gallery_display_ui elapsed_ms={:.3f}",
                 std::chrono::duration<double,std::milli>(
-                    std::chrono::steady_clock::now()-displayUiStarted).count());
+                    motioncam::diagnosticNow()-displayUiStarted).count());
         if(!mFirstFrameReady){
             mFirstFrameReady=true;
             emit firstFramePresented(currentMountId());
@@ -3503,11 +3504,11 @@ void ClipPlayerDialog::showNextFrame(){
             updateFpsIndicator();
         }
         emit framePresented(currentMountId(),presentedFrame);
-        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=gallery_show_ui elapsed_ms={:.3f}",
                 std::chrono::duration<double,std::milli>(
-                    std::chrono::steady_clock::now()-showStarted).count());
+                    motioncam::diagnosticNow()-showStarted).count());
         mPositionSeconds=(presentedFrame+1)/fps;
         completeFrameStep();
         // A paused surface refresh still needs to consume and present its
@@ -4221,14 +4222,14 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     if(mSubmittedFrames.size()+mFrames.size()>=maximumPending)
         return FramePushResult::Retry;
     if(!mClips[mIndex].isSequence||mDirectSequencePresentation){
-        const auto convertStarted=std::chrono::steady_clock::now();
+        const auto convertStarted=motioncam::diagnosticNow();
         const QImage image=gpuBuffer ? QImage{} : rgb48Image(frame,width,height,
             std::move(frameBacking),framePreOriented,std::move(framePixels));
-        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=direct_present_convert source={}x{} ms={:.3f}",
                 width,height,std::chrono::duration<double,std::milli>(
-                    std::chrono::steady_clock::now()-convertStarted).count());
+                    motioncam::diagnosticNow()-convertStarted).count());
         if(image.isNull()&&!gpuBuffer)return FramePushResult::Stopped;
         const int sourceFrame=mClips[mIndex].isSequence
             ?incomingSourceFrame:std::max(mNextInputFrame,incomingSourceFrame);
@@ -4306,7 +4307,8 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
     if(mAudioEnabled&&mAudioStartPending&&!mPaused){
         startAudioAt(mPositionSeconds);mAudioStartPending=false;
     }
-    spdlog::info("Gallery presented processed RGB48 frame {}x{}",width,height);
+    if constexpr (motioncam::debugInstrumentation)
+        spdlog::info("Gallery presented processed RGB48 frame {}x{}",width,height);
 }
 void ClipPlayerDialog::finishRgb48Frames(){
     if(mIndex<0||mClips[mIndex].sourceFrames<=1)return;

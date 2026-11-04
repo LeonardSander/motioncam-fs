@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DebugInstrumentation.h"
+
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
 #include <libplacebo/vulkan.h>
 #include "VulkanDevicePolicy.h"
@@ -40,7 +42,7 @@ inline PFN_vkGetInstanceProcAddr galleryVulkanGetInstanceProcAddr() {
 // stages. The device outlives Qt and source-frame leases.
 inline pl_vulkan sharedVulkanDevice() {
     static const pl_vulkan device = [] {
-        const char* requested = std::getenv("MOTIONCAM_GALLERY_SHARED_DEVICE");
+        const char* requested = motioncam::debugEnvironment("MOTIONCAM_GALLERY_SHARED_DEVICE");
         if (requested && requested[0] == '0')
             return pl_vulkan{};
         const bool forced = requested && requested[0] == '1';

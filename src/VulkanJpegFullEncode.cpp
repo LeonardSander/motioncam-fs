@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VulkanJpegFullEncode.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
@@ -1206,22 +1207,26 @@ bool encodeOnGpu(pl_gpu gpu, State &s, const uint16_t *pixels, pl_tex texture,
   if (!(directTexture ? s.initTexture(gpu, channels == 3u) : s.init(gpu)))
     return false;
   const bool stageProfile =
-      std::getenv("MOTIONCAM_JPEG_STAGE_PROFILE") != nullptr;
+      motioncam::debugEnvironment("MOTIONCAM_JPEG_STAGE_PROFILE") != nullptr;
   // RGB's larger reserved payload is cheaper to read through the completed
   // mapped staging buffer and copy at the exact JPEG length. CFA is faster
   // through pl_buf_read on the measured Vulkan device.
   const bool mappedReadback = channels == 3u || consume != nullptr;
-  auto stageStart = std::chrono::steady_clock::now();
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
+  auto stageStart = motioncam::diagnosticNow();
   auto markStage = [&](const char *name) {
     if (!stageProfile)
       return;
     pl_gpu_finish(gpu);
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = motioncam::diagnosticNow();
     std::fprintf(
         stderr, "JPEG GPU stage %s %.3f ms\n", name,
         std::chrono::duration<double, std::milli>(now - stageStart).count());
     stageStart = now;
   };
+#else
+  const auto markStage = [](const char*) {};
+#endif
   const bool reuse = s.lastWidth == width && s.lastHeight == height &&
                      s.lastChannels == channels && s.lastBits == bits;
   const size_t joinedBytes =
@@ -1263,7 +1268,7 @@ bool encodeOnGpu(pl_gpu gpu, State &s, const uint16_t *pixels, pl_tex texture,
       (uint64_t(blocks) * 8u + 63u) / 64u >
           uint64_t(gpu->limits.max_dispatch[0]) ||
       stuffGroups > uint32_t(gpu->limits.max_dispatch[0])) {
-    if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
       std::fprintf(stderr,
                    "JPEG GPU limits: samples=%u packed=%zu output=%zu "
                    "max_ssbo=%zu max_dispatch=%d\n",
@@ -1300,7 +1305,7 @@ bool encodeOnGpu(pl_gpu gpu, State &s, const uint16_t *pixels, pl_tex texture,
   for (const auto &item : buffers)
     if (!s.buffer(item.index, item.size, item.readable, item.writable,
                   item.index == OutputStage && mappedReadback)) {
-      if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+      if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
         std::fprintf(stderr, "JPEG GPU buffer failed: index=%d bytes=%zu\n",
                      item.index, item.size);
       return false;
@@ -1416,7 +1421,7 @@ bool encodeOnGpu(pl_gpu gpu, State &s, const uint16_t *pixels, pl_tex texture,
     if (!mappedReadback) std::free(readback);
     return false;
   }
-  if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+  if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
     std::fprintf(stderr,
                  "JPEG full GPU: jpeg=%u raw=%u stuffed=%u header=%u "
                  "joined_capacity=%u output_capacity=%zu\n",
@@ -1518,7 +1523,7 @@ static bool encodeTextureOnGpu(const void *gpuHandle,
                       : format->num_components < 3) ||
       (channels == 1u ? format->texel_size != sizeof(uint16_t)
                       : format->texel_size < 3u * sizeof(uint16_t))) {
-    if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
       std::fprintf(stderr,
                    "JPEG GPU texture format rejected: type=%d components=%d "
                    "texel_size=%zu opaque=%d emulated=%d\n",
@@ -1529,7 +1534,7 @@ static bool encodeTextureOnGpu(const void *gpuHandle,
   for (uint32_t component = 0; component < channels; ++component)
     if (format->host_bits[component] != 16 ||
         format->sample_order[component] != int(component)) {
-      if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+      if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
         std::fprintf(stderr,
                      "JPEG GPU texture component rejected: index=%u "
                      "bits=%d order=%d\n",
@@ -1609,17 +1614,21 @@ static bool encodeTiledVulkanTexture(
   auto &slot = external.states[gpu];
   if (!slot) slot = std::make_unique<State>();
   State &s = *slot;
-  const bool profile = std::getenv("MOTIONCAM_GPU_TILED_JPEG_PROFILE") != nullptr;
-  auto stageStarted = std::chrono::steady_clock::now();
+  const bool profile = motioncam::debugEnvironment("MOTIONCAM_GPU_TILED_JPEG_PROFILE") != nullptr;
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
+  auto stageStarted = motioncam::diagnosticNow();
   auto stage = [&](const char* name) {
     if (!profile) return;
     pl_gpu_finish(gpu);
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = motioncam::diagnosticNow();
     std::fprintf(stderr, "GPU tiled JPEG stage channels=%u %s=%.3f ms\n",
                  channels, name,
                  std::chrono::duration<double, std::milli>(now - stageStarted).count());
     stageStarted = now;
   };
+#else
+  const auto stage = [](const char*) {};
+#endif
   if (!(packedBuffer ? s.initTiledBuffer(gpu) :
         s.initTiledTexture(gpu) && s.initTexture(gpu, channels == 3u))) {
     std::fprintf(stderr, "GPU tiled JPEG: shader initialization failed\n");
@@ -1629,9 +1638,9 @@ static bool encodeTiledVulkanTexture(
   const size_t lengthBytes = size_t(tileCount64) * 4u;
   const bool compact = channels == 3u;
   const bool gpuAssemble = residentConsumer ||
-      std::getenv("MOTIONCAM_GPU_TILED_JPEG_GPU_ASSEMBLE_DISABLE") == nullptr;
+      motioncam::debugEnvironment("MOTIONCAM_GPU_TILED_JPEG_GPU_ASSEMBLE_DISABLE") == nullptr;
   const bool directResident = residentConsumer &&
-      std::getenv("MOTIONCAM_GPU_TILED_JPEG_DIRECT_DISABLE") == nullptr;
+      motioncam::debugEnvironment("MOTIONCAM_GPU_TILED_JPEG_DIRECT_DISABLE") == nullptr;
   const bool sameLayout = s.lastTiledWidth == width &&
       s.lastTiledHeight == height && s.lastTiledChannels == channels &&
       s.lastTiledBits == sourceBits &&

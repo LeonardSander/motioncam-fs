@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VirtualFileSystemImpl.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include "VirtualFileSystemImpl_DirectLog.h"
@@ -33,7 +34,7 @@ bool sameSettings(const RenderSettings& a, const RenderSettings& b) {
 }
 
 bool galleryDiagnosticsEnabled() {
-    static const bool enabled = std::getenv("MOTIONCAM_GALLERY_DIAGNOSTICS") != nullptr;
+    static const bool enabled = motioncam::debugEnvironment("MOTIONCAM_GALLERY_DIAGNOSTICS") != nullptr;
     return enabled;
 }
 
@@ -65,13 +66,13 @@ void PreviewRenderer::render(
     const RenderSettings& settings, const PreviewOptions& options,
     const std::function<bool(size_t, size_t, const std::string&)>& progress,
     const std::function<void(PreviewFrame&&)>& frameReady) {
-    const auto requestStarted = std::chrono::steady_clock::now();
+    const auto requestStarted = motioncam::diagnosticNow();
     std::shared_ptr<State> state;
     bool rebuilt = false;
     {
         std::lock_guard<std::mutex> lock(mMutex);
         if (!mState || !sameSettings(mState->settings, settings)) {
-            const auto initStarted = std::chrono::steady_clock::now();
+            const auto initStarted = motioncam::diagnosticNow();
             state = std::make_shared<State>(settings);
             auto filesystem = createVirtualFileSystem(
                 mIoThreadPool, mProcessingThreadPool, state->cache, settings,
@@ -82,16 +83,16 @@ void PreviewRenderer::render(
             if (galleryDiagnosticsEnabled())
                 spdlog::info("GALLERY_PERF event=preview_vfs_init source={} latency_ms={:.3f}",
                     mSource, std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - initStarted).count());
+                        motioncam::diagnosticNow() - initStarted).count());
         } else {
             state = mState;
         }
     }
-    const auto waitStarted = std::chrono::steady_clock::now();
+    const auto waitStarted = motioncam::diagnosticNow();
     std::lock_guard<std::mutex> executionLock(state->executionMutex);
     const double waitMs = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - waitStarted).count();
-    const auto renderStarted = std::chrono::steady_clock::now();
+        motioncam::diagnosticNow() - waitStarted).count();
+    const auto renderStarted = motioncam::diagnosticNow();
     auto entries = state->filesystem->listFiles("");
     entries.erase(std::remove_if(entries.begin(), entries.end(), [](const Entry& entry) {
         return entry.type != EntryType::FILE_ENTRY ||
@@ -99,7 +100,7 @@ void PreviewRenderer::render(
     }), entries.end());
     const size_t firstFrame = std::min(options.firstFrame, entries.size());
     size_t completed = 0;
-    const bool profileFrames = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
+    const bool profileFrames = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
     for (size_t index = firstFrame; index < entries.size() && index <= options.lastFrame; ++index) {
         if (progress && !progress(completed, entries.size() - firstFrame,
                 "Rendering " + entries[index].name))
@@ -108,14 +109,14 @@ void PreviewRenderer::render(
             ++completed;
             continue;
         }
-        const auto materializeStarted = std::chrono::steady_clock::now();
+        const auto materializeStarted = motioncam::diagnosticNow();
         PreviewFrame frame;
         frame.sourceFrameIndex = index;
         frame.clippingRequested = options.clippingEnabled;
         if (!state->filesystem->materializePreviewFrame(
                 entries[index], frame, options.retainSourceSamples))
             throw std::runtime_error("Could not render preview " + entries[index].name);
-        const auto materializeFinished = std::chrono::steady_clock::now();
+        const auto materializeFinished = motioncam::diagnosticNow();
         // A queued GPU frame may outlive this render and a later settings
         // change. Keep the exact filesystem/decoder state that owns its GPU.
         frame.galleryStateLease = state;
@@ -126,7 +127,7 @@ void PreviewRenderer::render(
                 mSource, index,
                 std::chrono::duration<double, std::milli>(materializeFinished - materializeStarted).count(),
                 std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - materializeFinished).count());
+                    motioncam::diagnosticNow() - materializeFinished).count());
         ++completed;
     }
     if (galleryDiagnosticsEnabled())
@@ -134,9 +135,9 @@ void PreviewRenderer::render(
             "GALLERY_PERF event=preview_render source={} rebuilt={} queue_ms={:.3f} render_ms={:.3f} total_ms={:.3f}",
             mSource, rebuilt, waitMs,
             std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - renderStarted).count(),
+                motioncam::diagnosticNow() - renderStarted).count(),
             std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - requestStarted).count());
+                motioncam::diagnosticNow() - requestStarted).count());
 }
 
 std::unique_ptr<IVirtualFileSystem> createVirtualFileSystem(

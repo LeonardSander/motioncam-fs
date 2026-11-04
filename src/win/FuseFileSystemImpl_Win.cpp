@@ -281,7 +281,7 @@ void Session::finalize(
 }
 
 HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
-    spdlog::debug("StartDirEnum(): Path [{}] triggered by [{}]",
+    SPDLOG_DEBUG("StartDirEnum(): Path [{}] triggered by [{}]",
         toUTF8(CallbackData->FilePathName),
         toUTF8(CallbackData->TriggeringProcessImageFileName));
 
@@ -293,7 +293,7 @@ HRESULT Session::StartDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ c
 }
 
 HRESULT Session::EndDirEnum(_In_ const PRJ_CALLBACK_DATA* CallbackData, _In_ const GUID* EnumerationId) {
-    spdlog::debug("EndDirEnum()");
+    SPDLOG_DEBUG("EndDirEnum()");
 
     std::lock_guard<std::mutex> guard(mOpLock);
 
@@ -310,7 +310,7 @@ HRESULT Session::GetDirEnum(
     _In_ PRJ_DIR_ENTRY_BUFFER_HANDLE DirEntryBufferHandle)
 {
     // Then your log statement becomes:
-    spdlog::debug("GetDirEnum(): Path [{}] SearchExpression [{}]",
+    SPDLOG_DEBUG("GetDirEnum(): Path [{}] SearchExpression [{}]",
         toUTF8(CallbackData->FilePathName),
         toUTF8(SearchExpression));
 
@@ -325,7 +325,7 @@ HRESULT Session::GetDirEnum(
         // We were asked for an enumeration we don't know about.
         hr = E_INVALIDARG;
 
-        spdlog::debug("GetDirEnum(): return 0x{:08x}", static_cast<unsigned int>(hr));
+        SPDLOG_DEBUG("GetDirEnum(): return 0x{:08x}", static_cast<unsigned int>(hr));
 
         return hr;
     }
@@ -381,7 +381,7 @@ HRESULT Session::GetDirEnum(
 HRESULT Session::GetPlaceholderInfo(_In_ const PRJ_CALLBACK_DATA* CallbackData) {
     const auto filename = toUTF8(CallbackData->FilePathName);
 
-    spdlog::debug("GetPlaceholderInfo(): Path [{}] triggered by [{}]",
+    SPDLOG_DEBUG("GetPlaceholderInfo(): Path [{}] triggered by [{}]",
         filename,
         toUTF8(CallbackData->TriggeringProcessImageFileName));
 
@@ -413,7 +413,7 @@ HRESULT Session::GetPlaceholderInfo(_In_ const PRJ_CALLBACK_DATA* CallbackData) 
 }
 
 HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UINT64 byteOffset, _In_ UINT32 length) {
-    spdlog::debug("GetFileData(): Path [{}] (byteOffset: {} and length: {}) triggered by [{}]",
+    SPDLOG_DEBUG("GetFileData(): Path [{}] (byteOffset: {} and length: {}) triggered by [{}]",
                   toUTF8(callbackData->FilePathName),
                   byteOffset,
                   length,
@@ -462,7 +462,7 @@ HRESULT Session::GetFileData(_In_ const PRJ_CALLBACK_DATA* callbackData, _In_ UI
             hr = WriteFileData(&dataStramId, reinterpret_cast<PVOID>(writeBuffer), byteOffset, static_cast<DWORD>(readBytes));
             
             if(readBytes < length) {
-                spdlog::debug("GetFileData(): Wrote {} bytes (requested {}), file may be compressed", readBytes, length);
+                SPDLOG_DEBUG("GetFileData(): Wrote {} bytes (requested {}), file may be compressed", readBytes, length);
             }
         }
         else {
@@ -513,7 +513,7 @@ HRESULT Session::Notify(
     _In_opt_ PCWSTR DestinationFileName,
     _Inout_ PRJ_NOTIFICATION_PARAMETERS* NotificationParameters) {
 
-    spdlog::debug("{}: Path [{}] triggered by [{}] Notification: 0x{:08x}",
+    SPDLOG_DEBUG("{}: Path [{}] triggered by [{}] Notification: 0x{:08x}",
                  __FUNCTION__,
                  toUTF8(CallbackData->FilePathName),
                  toUTF8(CallbackData->TriggeringProcessImageFileName),
@@ -642,7 +642,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
     if (normalizedSource == normalizedDestination)
         throw std::runtime_error("Source and mount destination must be different paths");
 
-    spdlog::debug("Mounting file {} to {}", srcFile, dstPath);
+    SPDLOG_DEBUG("Mounting file {} to {}", srcFile, dstPath);
 
     if (boost::iequals(extension, ".mcraw") ||
         boost::iequals(extension, ".unspektra") ||
@@ -804,7 +804,7 @@ void FuseFileSystemImpl_Win::cleanupCacheExpired() {
         if (totalBytes <= mCacheQuotaBytes) break;
         const HRESULT result = candidate.session->dehydrate(candidate.relativePath);
         if (SUCCEEDED(result)) totalBytes -= (std::min)(totalBytes, candidate.allocatedBytes);
-        else spdlog::debug("Could not evict projected DNG {} (0x{:08x})",
+        else SPDLOG_DEBUG("Could not evict projected DNG {} (0x{:08x})",
                            candidate.relativePath.string(), static_cast<unsigned int>(result));
     }
 }

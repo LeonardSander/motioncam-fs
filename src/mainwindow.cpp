@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "SourceInput.h"
 #include "mainwindow.h"
 #include "FrameTimingDialog.h"
@@ -635,7 +636,7 @@ namespace {
             ? static_cast<size_t>(bayer->width) * bayer->height
             : texture ? static_cast<size_t>(texture->width) * texture->height
             : bytes.size() / 6;
-        const auto transformStarted = std::chrono::steady_clock::now();
+        const auto transformStarted = motioncam::diagnosticNow();
         static const std::array<uint16_t, 65536> srgbTransfer = [] {
             std::array<uint16_t, 65536> result{};
             for (size_t index = 0; index < result.size(); ++index) {
@@ -778,7 +779,7 @@ namespace {
             (!metadata.profileTables->hueSat1.values.empty() ||
              !metadata.profileTables->hueSat2.values.empty() ||
              !metadata.profileTables->look.values.empty());
-        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=color_transform pixels={} matrix={} tables={} hue_values={} hue_value_divisions={} hue_encoding={} look_values={} look_value_divisions={} look_encoding={}",
                 pixelCount, useMatrix, useProfileTables,
                 metadata.profileTables ? metadata.profileTables->hueSat1.values.size() : 0,
@@ -810,7 +811,7 @@ namespace {
             }
         }
         const bool validateGpu = enableGpu && !output &&
-            qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_VALIDATE_GPU");
+            motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_VALIDATE_GPU");
         std::vector<uint8_t> original;
         if (validateGpu) original = bytes;
         if (enableGpu && motioncam::colorGalleryRgbVulkan(
@@ -842,11 +843,11 @@ namespace {
                     bytes.empty() ? 0.0 : double(sum) / (bytes.size() / 2),
                     aboveTwo, aboveEight);
             }
-            if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=gallery_color_stage pixels={} tables={} gpu=true final={} elapsed_ms={:.3f}",
                     pixelCount, useProfileTables, output != nullptr,
                     std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - transformStarted).count());
+                        motioncam::diagnosticNow() - transformStarted).count());
             return;
         }
         if (output && output->requireZeroCopy)
@@ -1095,11 +1096,11 @@ namespace {
         }
         convertRange(0, pixelCount / workers);
         for (auto& thread : threads) thread.join();
-        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=gallery_color_stage pixels={} tables={} workers={} elapsed_ms={:.3f}",
                 pixelCount, useProfileTables, workers,
                 std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - transformStarted).count());
+                    motioncam::diagnosticNow() - transformStarted).count());
     }
 
     void applyGalleryPreviewColorTransform(motioncam::PreviewFrame& preview,
@@ -2577,7 +2578,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow() {
     QElapsedTimer shutdownTimer;
-    shutdownTimer.start();
+    if (motioncam::debugInstrumentation || mGalleryPerformanceTestActive) shutdownTimer.start();
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=window_shutdown_start");
     if (!mGalleryPerformanceTestActive) autoSaveSession();
@@ -3110,12 +3111,15 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                const QString& sidecarPath,
                                const QString& gyroflowSidecarPath) {
     QElapsedTimer mountTimer;
-    mountTimer.start();
+    if (motioncam::debugInstrumentation || mGalleryPerformanceTestActive) mountTimer.start();
+    const auto mountElapsed = [&mountTimer] {
+        return mountTimer.isValid() ? mountTimer.elapsed() : qint64{0};
+    };
     const int importIndex = mMountedFiles.size();
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=clip_import_start clip={} path={}",
                      importIndex, filePath.toStdString());
-    spdlog::info("Mount timing [{}]: request started", filePath.toStdString());
+    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: request started", filePath.toStdString());
     const QString normalizedPath = QFileInfo(importPath).absoluteFilePath();
     for (const auto& mounted : mMountedFiles) {
         bool sameSource = QFileInfo(mounted.importFile).absoluteFilePath() == normalizedPath;
@@ -3206,7 +3210,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 #ifdef __APPLE__
     if (mFuseMountingEnabled) cleanupStaleMacFuseMounts();
 #elif defined(__linux__) && !defined(__ANDROID__)
-    const qint64 cleanupStarted = mountTimer.elapsed();
+    const qint64 cleanupStarted = mountElapsed();
     if (mFuseMountingEnabled && !cleanupStaleLinuxFuseMount(dstPath, mountError)) {
         if (singleProgress) mountProgress->close();
         mMountInProgress = false;
@@ -3215,11 +3219,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         QMessageBox::critical(this, tr("Error"), mountError);
         return;
     }
-    spdlog::info("Mount timing [{}]: stale-mount check {:.1f} ms",
+    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: stale-mount check {:.1f} ms",
                  filePath.toStdString(),
-                 static_cast<double>(mountTimer.elapsed() - cleanupStarted));
+                 static_cast<double>(mountElapsed() - cleanupStarted));
 #endif
-    const qint64 backendStarted = mountTimer.elapsed();
+    const qint64 backendStarted = mountElapsed();
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=fuse_startup_start clip={} path={}",
                      importIndex, filePath.toStdString());
@@ -3237,16 +3241,16 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     waitForBackgroundTask(future);
     if (singleProgress) mountProgress->close();
     mountId = future.result();
-    const qint64 fuseElapsed = mountTimer.elapsed() - backendStarted;
+    const qint64 fuseElapsed = mountElapsed() - backendStarted;
     if (mGalleryPerformanceTestActive)
         spdlog::info(
             "GALLERY_PERF event=fuse_startup_complete clip={} mount={} success={} latency_ms={}",
             importIndex, mountId, mountId != motioncam::InvalidMountId,
             fuseElapsed);
-    spdlog::info("Mount timing [{}]: backend mount {:.1f} ms (total {:.1f} ms)",
+    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: backend mount {:.1f} ms (total {:.1f} ms)",
                  filePath.toStdString(),
-                 static_cast<double>(mountTimer.elapsed() - backendStarted),
-                 static_cast<double>(mountTimer.elapsed()));
+                 static_cast<double>(mountElapsed() - backendStarted),
+                 static_cast<double>(mountElapsed()));
     mMountInProgress = false;
     mMountPathInProgress.clear();
     if (mountId == motioncam::InvalidMountId) {
@@ -3716,10 +3720,10 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // especially visible in automated multi-clip diagnostics.
     if (!mGalleryPerformanceTestActive && !mImportBatchActive) autoSaveSession();
 
-    spdlog::info("Mount timing [{}]: UI/card/session complete {:.1f} ms",
-                 filePath.toStdString(), static_cast<double>(mountTimer.elapsed()));
+    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: UI/card/session complete {:.1f} ms",
+                 filePath.toStdString(), static_cast<double>(mountElapsed()));
     if (mGalleryPerformanceTestActive) {
-        const qint64 importElapsed = mountTimer.elapsed();
+        const qint64 importElapsed = mountElapsed();
         spdlog::info(
             "GALLERY_PERF event=clip_import_complete clip={} mount={} latency_ms={} pre_fuse_ms={} fuse_ms={} post_fuse_ms={}",
             importIndex, mountId, importElapsed, backendStarted,
@@ -3876,7 +3880,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                    thumbnailCollectionEnabled, thumbnailPrecacheEnabled,
                    diagnostics, clippingEnabled,
                    histogramEnabled, nativePresenter, directPresenter, thumbnailPixelRatio, thumbnailRenderBounds] {
-        const auto taskStarted = std::chrono::steady_clock::now();
+        const auto taskStarted = motioncam::galleryBenchmarkNow();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
         double displayDecodeMs = 0.0;
@@ -3884,17 +3888,17 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
         if (diagnostics)
             spdlog::info("GALLERY_PERF event=gallery_render_task_start mount={} generation={} first_frame={}",
                          mountId, generation, firstFrame);
-        const auto handoffStarted = std::chrono::steady_clock::now();
+        const auto handoffStarted = motioncam::galleryBenchmarkNow();
         std::unique_lock gallerySlot(mGalleryRenderMutex);
         const double handoffMs = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - handoffStarted).count();
+            motioncam::galleryBenchmarkNow() - handoffStarted).count();
         if (mGalleryGeneration.load() != generation) {
             if (diagnostics)
                 spdlog::info(
                     "GALLERY_PERF event=gallery_render_task_cancelled mount={} generation={} stage=handoff wait_ms={:.3f} total_ms={:.3f}",
                     mountId, generation, handoffMs,
                     std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - taskStarted).count());
+                        motioncam::galleryBenchmarkNow() - taskStarted).count());
             return;
         }
         if (diagnostics && handoffMs >= 1.0)
@@ -3929,7 +3933,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     // the gallery closes. Do not touch the dialog or process
                     // that frame once its preview generation is cancelled.
                     if (mGalleryGeneration.load() != generation) return;
-                    const auto decodeStarted = std::chrono::steady_clock::now();
+                    const auto decodeStarted = motioncam::galleryBenchmarkNow();
                     const bool collectThumbnail = thumbnailCollectionEnabled->load();
                     const int rawOrientation = !isSequence
                         ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
@@ -3938,12 +3942,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     // full playback depth for FFmpeg sequences.
                     const bool rgb24 = (preview.displayBitDepth <= 8 ||
                         (collectThumbnail && directPresenter)) &&
-                        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
+                        !motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
                     const bool hashPreview =
-                        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
+                        motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
                     motioncam::VulkanGalleryOutput gpuOutput;
                     gpuOutput.requireZeroCopy =
-                        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY");
+                        motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY");
                     gpuOutput.width = preview.width;
                     gpuOutput.height = preview.height;
                     // Direct presentation can use the GPU's rotated RGB24
@@ -4019,7 +4023,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         frame->sourceLease = std::make_shared<std::pair<std::shared_ptr<void>,std::shared_ptr<void>>>(
                             std::move(preview.galleryStateLease),std::move(preview.gallerySource.deviceLease));
                     }
-                    const auto colorFinished = std::chrono::steady_clock::now();
+                    const auto colorFinished = motioncam::galleryBenchmarkNow();
                     if (hashPreview) gpuFinal = false;
                     const bool gpuPreOriented = gpuFinal && isSequence &&
                         gpuOutput.orientation != 0;
@@ -4102,9 +4106,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     }
                     const uint32_t width = preview.width, height = preview.height;
                     displayDecodeMs += std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - decodeStarted).count();
+                        motioncam::galleryBenchmarkNow() - decodeStarted).count();
                     if (mGalleryGeneration.load() != generation) return;
-                    const auto deliveryStarted = std::chrono::steady_clock::now();
+                    const auto deliveryStarted = motioncam::galleryBenchmarkNow();
                     // Keep the processed frame alive across queued thumbnail
                     // delivery without copying its full RGB48 payload. The
                     // playback handoff below is synchronous, so the view also
@@ -4191,13 +4195,13 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     if(backfillThumbnails)return;
                     if (!presentedFirstFrame) {
                         const double readyMs = std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - taskStarted).count();
+                            motioncam::galleryBenchmarkNow() - taskStarted).count();
                         if (diagnostics)
                             spdlog::info(
                                 "GALLERY_PERF event=gallery_first_frame_ready mount={} generation={} width={} height={} display_bpc={} latency_ms={:.3f}",
                                 mountId, generation, width, height,
                                 rgb24 ? 8 : 16, readyMs);
-                        const auto presentationStarted = std::chrono::steady_clock::now();
+                        const auto presentationStarted = motioncam::galleryBenchmarkNow();
                         QMetaObject::invokeMethod(this, [&, width, height] {
                             if (mGalleryGeneration.load() != generation) return;
                             if (player) player->presentRgb48Frame(
@@ -4216,17 +4220,17 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 "GALLERY_PERF event=gallery_first_frame_handoff mount={} generation={} presentation_ms={:.3f} total_ms={:.3f}",
                                 mountId, generation,
                                 std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - presentationStarted).count(),
+                                    motioncam::galleryBenchmarkNow() - presentationStarted).count(),
                                 std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - taskStarted).count());
+                                    motioncam::galleryBenchmarkNow() - taskStarted).count());
                     }
-                    const auto pushStarted = std::chrono::steady_clock::now();
+                    const auto pushStarted = motioncam::galleryBenchmarkNow();
                     auto pushResult = ClipPlayerDialog::FramePushResult::Retry;
                     size_t pushRetries = 0;
                     while (pushResult == ClipPlayerDialog::FramePushResult::Retry &&
                            mGalleryGeneration.load() == generation) {
                         QMetaObject::invokeMethod(this, [&] {
-                            const auto uiStarted = std::chrono::steady_clock::now();
+                            const auto uiStarted = motioncam::galleryBenchmarkNow();
                             if (mGalleryGeneration.load() != generation)
                                 pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                             else if (player) pushResult = player->pushRgb48Frame(
@@ -4243,7 +4247,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             if (diagnostics)
                                 spdlog::info("GALLERY_PERF event=gallery_push_ui elapsed_ms={:.3f}",
                                     std::chrono::duration<double, std::milli>(
-                                        std::chrono::steady_clock::now()-uiStarted).count());
+                                        motioncam::galleryBenchmarkNow()-uiStarted).count());
                         }, Qt::BlockingQueuedConnection);
                         if (pushResult == ClipPlayerDialog::FramePushResult::Retry) {
                             ++pushRetries;
@@ -4254,12 +4258,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         spdlog::info("GALLERY_PERF event=gallery_callback_detail color_ms={:.3f} prepare_ms={:.3f} push_ms={:.3f} push_retries={}",
                             std::chrono::duration<double, std::milli>(colorFinished-decodeStarted).count(),
                             std::chrono::duration<double, std::milli>(pushStarted-colorFinished).count(),
-                            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-pushStarted).count(),
+                            std::chrono::duration<double, std::milli>(motioncam::galleryBenchmarkNow()-pushStarted).count(),
                             pushRetries);
                     if (pushResult == ClipPlayerDialog::FramePushResult::Stopped)
                         throw std::runtime_error("Gallery decoder stopped accepting frames");
                     deliveryWaitMs += std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - deliveryStarted).count();
+                        motioncam::galleryBenchmarkNow() - deliveryStarted).count();
                     ++deliveredFrames;
                 };
             const auto renderRange=[&](size_t begin,size_t last){
@@ -4284,7 +4288,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                 emit galleryThumbnailBackfillFinished(
                     mountId, static_cast<int>(thumbnailFrames),
                     static_cast<qint64>(std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - taskStarted).count()));
+                        motioncam::galleryBenchmarkNow() - taskStarted).count()));
             if (diagnostics) {
                 const bool cancelled = mGalleryGeneration.load() != generation;
                 spdlog::info(
@@ -4294,10 +4298,10 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     deliveredFrames, thumbnailFrames,
                     thumbnailFrames * 1000.0 / std::max(1.0,
                         std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - taskStarted).count()),
+                            motioncam::galleryBenchmarkNow() - taskStarted).count()),
                     displayDecodeMs, deliveryWaitMs,
                     std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - taskStarted).count());
+                        motioncam::galleryBenchmarkNow() - taskStarted).count());
             }
         } catch (const std::exception& error) {
             if (mGalleryGeneration.load() != generation) {
@@ -4307,7 +4311,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         mountId, generation, deliveredFrames, displayDecodeMs,
                         deliveryWaitMs,
                         std::chrono::duration<double, std::milli>(
-                            std::chrono::steady_clock::now() - taskStarted).count());
+                            motioncam::galleryBenchmarkNow() - taskStarted).count());
                 return;
             }
             const QString detail = QString::fromUtf8(error.what());
@@ -4654,7 +4658,7 @@ void MainWindow::startGalleryPerformanceTest(
         return;
     }
 
-    const auto suiteStarted = std::chrono::steady_clock::now();
+    const auto suiteStarted = motioncam::galleryBenchmarkNow();
     mGalleryPerformanceTestActive = true;
     spdlog::info("GALLERY_PERF event=suite_start session={} mode={} playback_ms={} thumbnails={}",
                  session.absoluteFilePath().toStdString(),
@@ -4669,13 +4673,13 @@ void MainWindow::startGalleryPerformanceTest(
                 mountId, success, elapsedMs);
             thumbnailsFinished->insert(mountId);
         });
-    const auto importStarted = std::chrono::steady_clock::now();
+    const auto importStarted = motioncam::galleryBenchmarkNow();
     spdlog::info("GALLERY_PERF event=import_thumbnail_pipeline_start");
     mPerformanceThumbnailRun = generateThumbnails;
     loadSessionFromFile(session.absoluteFilePath());
     mPerformanceThumbnailRun = false;
     const double importMs = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - importStarted).count();
+        motioncam::galleryBenchmarkNow() - importStarted).count();
     spdlog::info("GALLERY_PERF event=session_import_complete clips={} latency_ms={:.3f}",
                  mMountedFiles.size(), importMs);
     if (mMountedFiles.isEmpty()) {
@@ -4717,7 +4721,7 @@ void MainWindow::startGalleryPerformanceTest(
             "GALLERY_PERF event=cold_gallery_start clips={} thumbnails_enabled={} thumbnails_complete={} import_ms={:.3f}",
             mMountedFiles.size(), generateThumbnails, thumbnailsFinished->size(),
             std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - importStarted).count());
+                motioncam::galleryBenchmarkNow() - importStarted).count());
 
     // Keep mounted reads off the UI thread. FUSE callbacks and mount setup can
     // need that thread while a client is blocked waiting for a frame.
@@ -4828,8 +4832,8 @@ void MainWindow::startGalleryPerformanceTest(
                         ? motioncam::DNGDecoder::getLinearizationTableCount(dng) : 0;
                     const qint64 layoutMs = timer.elapsed();
                     if (clip.index == 0 && frame == 0) {
-                        const QString dumpPath = qEnvironmentVariable(
-                            "MOTIONCAM_GALLERY_PERF_DUMP_DNG");
+                        const QString dumpPath = QString::fromLocal8Bit(motioncam::debugEnvironment(
+                            "MOTIONCAM_GALLERY_PERF_DUMP_DNG"));
                         if (!dumpPath.isEmpty()) {
                             QFile dump(dumpPath);
                             if (dump.open(QIODevice::WriteOnly))
@@ -4846,7 +4850,7 @@ void MainWindow::startGalleryPerformanceTest(
                             std::move(dng), motioncam::RenderSettings{},
                             preview, false));
                     const qint64 previewMs = timer.elapsed() - previewStartedMs;
-                    const bool hashPreview = qEnvironmentVariableIsSet(
+                    const bool hashPreview = motioncam::debugEnvironmentIsSet(
                         "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
                     uint64_t pixelHash = hashPreview ? 1469598103934665603ull : 0;
                     if (decoded && hashPreview)
@@ -4855,7 +4859,7 @@ void MainWindow::startGalleryPerformanceTest(
                             pixelHash *= 1099511628211ull;
                         }
                     const qint64 decodeMs = timer.elapsed();
-                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                    if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
                         spdlog::info("GALLERY_PERF event=mounted_decode_breakdown clip={} frame={} layout_ms={} dump_ms={} preview_ms={} hash_ms={} total_ms={}",
                                      clip.index, frame, layoutMs,
                                      previewStartedMs - layoutMs, previewMs,
@@ -5031,7 +5035,7 @@ void MainWindow::startGalleryPerformanceTest(
 
     auto finishSuite = [this, state, suiteStarted, previousClippingEnabled] {
         const double totalMs = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - suiteStarted).count();
+            motioncam::galleryBenchmarkNow() - suiteStarted).count();
         spdlog::info("GALLERY_PERF event=suite_complete clips={} total_ms={:.3f}",
                      state->mounts.size(), totalMs);
         if (mClipPlayer) mClipPlayer->setClippingEnabled(previousClippingEnabled);
@@ -8001,7 +8005,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
     if (settings.orientation < 0) {
         if (info) settings.orientation = info->orientation;
     }
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = motioncam::galleryBenchmarkNow();
     const bool performanceRun = mPerformanceThumbnailRun;
     auto render = [this, mountId, settings, guardedLabel, cancelled, started,
                    performanceRun] {
@@ -8035,7 +8039,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
             if (cancelled->load()) return;
             const qint64 elapsedMs = static_cast<qint64>(
                 std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - started).count());
+                    motioncam::galleryBenchmarkNow() - started).count());
             if (performanceRun)
                 emit thumbnailPerformanceFinished(mountId, !image.isNull(), elapsedMs);
             if (!guardedLabel) return;

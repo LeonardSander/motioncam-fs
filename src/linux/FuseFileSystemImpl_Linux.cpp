@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #define FUSE_USE_VERSION 31
 
 #include "linux/FuseFileSystemImpl_Linux.h"
@@ -346,11 +347,11 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
                                         const std::string& srcFile,
                                         const std::string& dstPath,
                                         bool projectFiles) {
-    const auto mountStarted = std::chrono::steady_clock::now();
+    const auto mountStarted = motioncam::diagnosticNow();
     auto stageStarted = mountStarted;
     auto logStage = [&](const char* stage) {
-        const auto now = std::chrono::steady_clock::now();
-        spdlog::info("Mount timing [{}]: {} {:.1f} ms (total {:.1f} ms)", srcFile, stage,
+        const auto now = motioncam::diagnosticNow();
+        MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: {} {:.1f} ms (total {:.1f} ms)", srcFile, stage,
                      std::chrono::duration<double, std::milli>(now - stageStarted).count(),
                      std::chrono::duration<double, std::milli>(now - mountStarted).count());
         stageStarted = now;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DebugInstrumentation.h"
+
 #include <jxl/decode.h>
 #include <jxl/encode.h>
 #include <jxl/thread_parallel_runner.h>
@@ -21,7 +23,7 @@ public:
         if (sampleCount < 1024 * 1024) return;
         const unsigned int cores = std::thread::hardware_concurrency();
         size_t workers = std::min<size_t>(cores > 0 ? cores - 1 : 0, maxWorkers);
-        if (const char* configured = std::getenv("MOTIONCAM_GALLERY_PERF_JXL_WORKERS")) {
+        if (const char* configured = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_JXL_WORKERS")) {
             char* end = nullptr;
             const long requested = std::strtol(configured, &end, 10);
             if (end != configured && *end == '\0' && requested >= 0 && requested <= 16)

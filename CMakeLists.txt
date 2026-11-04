@@ -23,6 +23,11 @@ project(MotionCamFuse VERSION 1.0 LANGUAGES C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+add_compile_definitions(
+    MOTIONCAM_DEBUG_INSTRUMENTATION=$<IF:$<CONFIG:Debug>,1,0>
+    SPDLOG_ACTIVE_LEVEL=$<IF:$<CONFIG:Debug>,SPDLOG_LEVEL_DEBUG,SPDLOG_LEVEL_INFO>
+    $<$<NOT:$<CONFIG:Debug>>:QT_NO_DEBUG_OUTPUT>)
+
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -282,6 +287,32 @@ endif()
 target_include_directories(${PROJECT_NAME} PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64)
+option(MOTIONCAM_RELEASE_IPO "Enable supported link-time optimization in Release" ON)
+if(MOTIONCAM_RELEASE_IPO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT motioncam_ipo_supported OUTPUT motioncam_ipo_error LANGUAGES C CXX)
+    if(motioncam_ipo_supported)
+        set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    else()
+        message(STATUS "Release IPO unavailable: ${motioncam_ipo_error}")
+    endif()
+endif()
+# Retain symbol files separately in CI for native Apple crash report decoding.
+if(APPLE)
+    target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:-g>)
+    if(MOTIONCAM_RELEASE_IPO AND motioncam_ipo_supported)
+        # Keep Darwin LTO objects until CI has generated the matching dSYM.
+        if("-flto=thin" IN_LIST CMAKE_CXX_COMPILE_OPTIONS_IPO)
+            set(motioncam_lto_objects "${CMAKE_CURRENT_BINARY_DIR}/MotionCamFuse-lto")
+            file(MAKE_DIRECTORY "${motioncam_lto_objects}")
+        else()
+            set(motioncam_lto_objects "${CMAKE_CURRENT_BINARY_DIR}/MotionCamFuse-lto.o")
+        endif()
+        target_link_options(${PROJECT_NAME} PRIVATE
+            "$<$<CONFIG:Release>:-Wl,-object_path_lto,${motioncam_lto_objects}>")
+    endif()
+endif()
+
 if(ANDROID)
     target_link_options(${PROJECT_NAME} PRIVATE -Wl,--strip-debug)
 endif()
@@ -628,7 +659,7 @@ if(VCPKG_TARGET_TRIPLET)
 endif()
 if(WIN32 AND _motioncam_vcpkg_prefix)
   # pkg-config cannot reliably select the MSVC Debug/Release runtime. Import
-  # both archives and let CMake select the matching configuration instead.
+  # the release archive; add Debug only when that dependency was built.
   find_path(DIRECTLOG_VULKAN_INCLUDE_DIR vulkan/vulkan.h
     PATHS "${_motioncam_vcpkg_prefix}/include" NO_DEFAULT_PATH)
   find_path(DIRECTLOG_PLACEBO_INCLUDE_DIR libplacebo/config.h
@@ -638,20 +669,26 @@ if(WIN32 AND _motioncam_vcpkg_prefix)
   find_library(DIRECTLOG_PLACEBO_DEBUG NAMES placebo libplacebo
     PATHS "${_motioncam_vcpkg_prefix}/debug/lib" NO_DEFAULT_PATH)
   if(DIRECTLOG_PLACEBO_INCLUDE_DIR AND DIRECTLOG_VULKAN_INCLUDE_DIR AND
-     DIRECTLOG_PLACEBO_RELEASE AND DIRECTLOG_PLACEBO_DEBUG)
+     DIRECTLOG_PLACEBO_RELEASE)
     file(STRINGS "${DIRECTLOG_PLACEBO_INCLUDE_DIR}/libplacebo/config.h"
       _motioncam_placebo_api REGEX "^#define PL_API_VER +[0-9]+")
     if(_motioncam_placebo_api MATCHES "PL_API_VER +([0-9]+)" AND CMAKE_MATCH_1 GREATER_EQUAL 360)
       find_package(unofficial-shaderc CONFIG REQUIRED)
       add_library(MotionCamPlaceboArchive STATIC IMPORTED)
       set_target_properties(MotionCamPlaceboArchive PROPERTIES
-        IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+        IMPORTED_CONFIGURATIONS "RELEASE"
+        IMPORTED_LOCATION "${DIRECTLOG_PLACEBO_RELEASE}"
         IMPORTED_LOCATION_RELEASE "${DIRECTLOG_PLACEBO_RELEASE}"
-        IMPORTED_LOCATION_DEBUG "${DIRECTLOG_PLACEBO_DEBUG}"
         MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
         MAP_IMPORTED_CONFIG_MINSIZEREL Release
         INTERFACE_INCLUDE_DIRECTORIES "${DIRECTLOG_PLACEBO_INCLUDE_DIR}"
         INTERFACE_COMPILE_DEFINITIONS PL_STATIC)
+      if(DIRECTLOG_PLACEBO_DEBUG)
+        set_property(TARGET MotionCamPlaceboArchive APPEND PROPERTY IMPORTED_CONFIGURATIONS DEBUG)
+        set_property(TARGET MotionCamPlaceboArchive PROPERTY IMPORTED_LOCATION_DEBUG "${DIRECTLOG_PLACEBO_DEBUG}")
+      elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        message(FATAL_ERROR "Debug configuration requires debug libplacebo dependencies")
+      endif()
       add_library(MotionCamPlacebo INTERFACE)
       target_link_libraries(MotionCamPlacebo INTERFACE MotionCamPlaceboArchive
         unofficial::shaderc::shaderc shlwapi)
@@ -800,6 +837,11 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-debug-instrumentation-test tests/debug_instrumentation_test.cpp)
+    target_include_directories(motioncam-debug-instrumentation-test PRIVATE include)
+    add_test(NAME motioncam-debug-instrumentation-test COMMAND motioncam-debug-instrumentation-test)
+    set_tests_properties(motioncam-debug-instrumentation-test PROPERTIES LABELS portable)
+
     add_executable(motioncam-mc24-test deps/motioncam-decoder/tests/DecoderMc24Test.cpp)
     target_link_libraries(motioncam-mc24-test PRIVATE motioncam-decoder)
     add_test(NAME motioncam-mc24-test COMMAND motioncam-mc24-test)
@@ -1055,10 +1097,10 @@ if(QT_VERSION_MAJOR EQUAL 6)
         get_target_property(QT_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
         get_filename_component(QT_BIN_DIR "${QT_QMAKE_EXECUTABLE}" DIRECTORY)
         
-        # Use windeployqt to copy all required Qt dependencies
+        # Deploy exactly the runtime matching the selected configuration.
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND "${QT_BIN_DIR}/windeployqt.exe"
-                --debug
+                $<IF:$<CONFIG:Debug>,--debug,--release>
                 --no-translations
                 --no-system-d3d-compiler
                 --no-opengl-sw
@@ -1066,14 +1108,5 @@ if(QT_VERSION_MAJOR EQUAL 6)
                 --verbose 2
                 $<TARGET_FILE:${PROJECT_NAME}>
         )
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-            COMMAND "${QT_BIN_DIR}/windeployqt.exe"
-                --no-translations
-                --no-system-d3d-compiler
-                --no-opengl-sw
-                --no-compiler-runtime
-                --verbose 2
-                $<TARGET_FILE:${PROJECT_NAME}>
-        )       # add both release and debug qt dlls because im lazy
     endif()
 endif()

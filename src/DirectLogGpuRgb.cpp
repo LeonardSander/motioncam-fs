@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #ifdef __ANDROID__
 #include "android/VulkanHardwareBuffer.h"
 #include "android/VulkanInteropFence.h"
@@ -315,7 +316,7 @@ vec4 hook() {
         if (!tagged->hw_frames_ctx) inputParams.tex = sourceTextures;
         inputParams.map_dovi = false;
         pl_frame input = externalInput ? *externalInput : pl_frame{};
-        const auto mapStarted = std::chrono::steady_clock::now();
+        const auto mapStarted = motioncam::diagnosticNow();
         const bool mapped = externalInput || pl_map_avframe_ex(vulkan->gpu, &input, &inputParams);
         av_frame_free(&tagged);
         if (!mapped) {
@@ -400,16 +401,16 @@ vec4 hook() {
                 hooks[params.num_hooks++] = mosaicHook;
             }
             params.hooks = hooks;
-            const auto renderStart = std::chrono::steady_clock::now();
+            const auto renderStart = motioncam::diagnosticNow();
             const bool renderOk = pl_render_image(renderer, &input, &target, &params);
-            const auto downloadStart = std::chrono::steady_clock::now();
+            const auto downloadStart = motioncam::diagnosticNow();
             rendered = renderOk && (deferDownload || downloadRgb(target, packedRgb));
             if (rendered && deferDownload) {
                 pendingTarget = target;
                 pending = true;
             }
-            const auto downloadEnd = std::chrono::steady_clock::now();
-            if (std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB_PROFILE")) {
+            const auto downloadEnd = motioncam::diagnosticNow();
+            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB_PROFILE")) {
                 const auto ms = [](auto a, auto b) {
                     return std::chrono::duration<double, std::milli>(b - a).count();
                 };
@@ -556,7 +557,7 @@ bool DirectLogGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
     hold.qf = lease->vk->queue_compute.index;
     hold.semaphore = {lease->available, 0};
     if (!pl_vulkan_hold_ex(lease->vk->gpu, &hold)) return fail();
-    const char* fusionSetting = std::getenv("MOTIONCAM_ANDROID_FUSED_DECODE");
+    const char* fusionSetting = motioncam::debugEnvironment("MOTIONCAM_ANDROID_FUSED_DECODE");
     const bool fused = deferDownload && !cfaPhase &&
         width == source->width && height == source->height &&
         (!fusionSetting || fusionSetting[0] != '0');
@@ -597,7 +598,7 @@ bool DirectLogGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
         rendered = mState->render(source, smoothChroma, curve, fullRange,
             packedRgb, cfaPhase, deferDownload, &input);
     }
-    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=android_decode_pipeline fused={} width={} height={}",
             fused, width, height);
     // Keep both the imported decoder allocation and output sampler alive until
@@ -631,7 +632,7 @@ bool DirectLogGpuRgb::pendingTexture(const void*& gpu, const void*& texture) con
 
 bool DirectLogGpuRgb::downloadPending(uint16_t* pixels, size_t samples) {
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
-    if (std::getenv("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
+    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
         spdlog::error("Full-frame DirectLog readback rejected by zero-copy validation");
         return false;
     }

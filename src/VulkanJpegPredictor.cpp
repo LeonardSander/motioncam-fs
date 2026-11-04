@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VulkanJpegPredictor.h"
 #include "SharedVulkanDevice.h"
 
@@ -209,7 +210,7 @@ bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,
                                   uint32_t bits, int& predictor,
                                   int histogram[18],
                                   std::vector<int16_t>* residuals) {
-    const auto started = std::chrono::steady_clock::now();
+    const auto started = motioncam::diagnosticNow();
     if (residuals) residuals->clear();
     if (!pixels || !histogram || !width || !height ||
         (channels != 1 && channels != 3) || bits < 8 || bits > 16 ||
@@ -270,7 +271,7 @@ bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,
     s.residentHeight = height;
     s.residentChannels = channels;
     s.residentBits = bits;
-    const auto histogramReady = std::chrono::steady_clock::now();
+    const auto histogramReady = motioncam::diagnosticNow();
     predictor = 1;
     uint64_t best = UINT64_MAX;
     for (int mode = 1; mode <= 7; ++mode) {
@@ -322,11 +323,11 @@ bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,
             else residuals->clear();
         }
     }
-    if (std::getenv("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
         std::fprintf(stderr, "JPEG encode GPU predictor: histogram_ms=%.3f residual_ms=%.3f samples=%zu\n",
                      std::chrono::duration<double, std::milli>(histogramReady - started).count(),
                      std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - histogramReady).count(),
+                         motioncam::diagnosticNow() - histogramReady).count(),
                      samples);
     return true;
 }

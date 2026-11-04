@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VulkanJpegDecode.h"
 
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
@@ -671,9 +672,11 @@ struct DecodeState {
         params.num_descriptors = 2;
         params.push_constants_size = sizeof(uint32_t);
         validate = pl_pass_create(gpu, &params);
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
         timer = pl_timer_create(gpu);
         scatterTimer = pl_timer_create(gpu);
         parserTimer = pl_timer_create(gpu);
+#endif
         return parser && residentMeta && pass && residentDirect &&
                scatter && validate;
     }
@@ -778,9 +781,9 @@ bool jpegDecodeResidentTiledImageVulkan(
     auto& slot = owner.states[gpu];
     if (!slot) slot = std::make_unique<DecodeState>();
     DecodeState& s = *slot;
-    const bool profile = std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE") != nullptr;
+    const bool profile = motioncam::debugEnvironment("MOTIONCAM_JPEG_DECODE_PROFILE") != nullptr;
     const bool directOutput =
-        std::getenv("MOTIONCAM_JPEG_RESIDENT_SCATTER") == nullptr;
+        motioncam::debugEnvironment("MOTIONCAM_JPEG_RESIDENT_SCATTER") == nullptr;
     const size_t metadataBytes = size_t(tileCount) * kMetaWords * 4u;
     const size_t lookupBytes = kLookupSize * 4u;
     if (!s.init(gpu) ||
@@ -836,12 +839,12 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
                         const std::function<bool(const VulkanDecodedJpegImage&)>* consume,
                         const VulkanJpegContiguousSource* contiguous,
                         bool readValidation = false) {
-    const bool profile = std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE") != nullptr;
+    const bool profile = motioncam::debugEnvironment("MOTIONCAM_JPEG_DECODE_PROFILE") != nullptr;
     const bool gpuParse = contiguous ||
-        std::getenv("MOTIONCAM_GPU_JPEG_GPU_PARSE") != nullptr;
-    const auto started = std::chrono::steady_clock::now();
+        motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_GPU_PARSE") != nullptr;
+    const auto started = motioncam::diagnosticNow();
     if (tiles.empty() || tiles.size() > UINT32_MAX ||
-        std::getenv("MOTIONCAM_GPU_JPEG_DECODE_DISABLE")) return false;
+        motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DECODE_DISABLE")) return false;
     if (contiguous && (!contiguous->bytes || !contiguous->size ||
                        contiguous->size > UINT32_MAX)) return false;
     std::vector<ParsedTile> parsed;
@@ -868,7 +871,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
                            tiles[i].channels;
         const size_t bytes = gpuParse ? tiles[i].size : parsed[i].scanLength;
         if ((n > kMaxSerialTileSamples &&
-             !std::getenv("MOTIONCAM_GPU_JPEG_ALLOW_LARGE_SCAN")) ||
+             !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_ALLOW_LARGE_SCAN")) ||
             scanBytes + bytes > UINT32_MAX ||
             sampleCount + ((n + 1u) & ~1ull) > UINT32_MAX) return false;
         if (contiguous) {
@@ -913,7 +916,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
             tile.meta[7] = *match;
         }
     }
-    const auto parsedAt = std::chrono::steady_clock::now();
+    const auto parsedAt = motioncam::diagnosticNow();
     auto& context = jpegContext();
     std::lock_guard lock(context.mutex);
     if (!context.init()) return false;
@@ -925,7 +928,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
     const size_t imageSize = size_t(sampleCount) * 2u;
     // Reuse the encoder round-trip decoder's direct CFA output layout.
     const bool directOutput = consume && tiles.front().channels == 1u &&
-        !std::getenv("MOTIONCAM_JPEG_RESIDENT_SCATTER");
+        !motioncam::debugEnvironment("MOTIONCAM_JPEG_RESIDENT_SCATTER");
     const size_t statusSize = tiles.size() * 4u;
     const size_t metaSize = tiles.size() * kMetaWords * 4u;
     const size_t seedSize = seeds.size() * 4u;
@@ -1025,7 +1028,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
     } else {
         pl_buf_copy(gpu, s.lookup, 0, s.lookupUpload, 0, lookupSize);
     }
-    const auto uploadedAt = std::chrono::steady_clock::now();
+    const auto uploadedAt = motioncam::diagnosticNow();
     uint32_t tileCount = uint32_t(tiles.size());
     s.decodeImage(s.stream, tileCount, directOutput, width, tileWidth, tileHeight, profile);
     if (!consume)
@@ -1034,7 +1037,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
         pl_buf_copy(gpu, s.statusReadback, 0, s.status, 0, statusSize);
     }
     if (consume) s.validateTiles(tileCount);
-    const auto dispatchedAt = std::chrono::steady_clock::now();
+    const auto dispatchedAt = motioncam::diagnosticNow();
     if (consume && !directOutput)
         s.scatterImage(width, height, tileWidth, tileHeight, tiles.front().channels, profile);
     if (consume) {
@@ -1047,7 +1050,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
         const VulkanDecodedJpegImage image{
             gpu, s.assembled, s.valid, width, height, tiles.front().channels,
             tiles.front().bits, width * tiles.front().channels / 2u};
-        const auto preparedForConsumer = std::chrono::steady_clock::now();
+        const auto preparedForConsumer = motioncam::diagnosticNow();
         const bool consumed = (*consume)(image);
         if (profile) {
             std::array<uint32_t, 8> predictorCounts{};
@@ -1065,7 +1068,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
                 tiles.front().channels, tiles.size(), uniqueLookups.size(),
                 ms(started, parsedAt), ms(parsedAt, uploadedAt),
                 ms(uploadedAt, preparedForConsumer),
-                ms(preparedForConsumer, std::chrono::steady_clock::now()),
+                ms(preparedForConsumer, motioncam::diagnosticNow()),
                 double(pl_timer_query(gpu, s.parserTimer)) / 1000000.0,
                 double(pl_timer_query(gpu, s.timer)) / 1000000.0,
                 double(pl_timer_query(gpu, s.scatterTimer)) / 1000000.0);
@@ -1083,7 +1086,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
                      [](uint32_t value) { return value == 1u; })) return false;
     std::vector<uint16_t> decoded(sampleCount);
     if (!pl_buf_read(gpu, s.readback, 0, decoded.data(), imageSize)) return false;
-    const auto readAt = std::chrono::steady_clock::now();
+    const auto readAt = motioncam::diagnosticNow();
     std::vector<std::vector<uint16_t>> result(tiles.size());
     for (size_t i = 0; i < tiles.size(); ++i) {
         const size_t first = gpuParse ? seeds[i * 7u + 5u]
@@ -1101,7 +1104,7 @@ static bool decodeTiles(const std::vector<VulkanJpegTile>& tiles,
         std::fprintf(stderr, "GPU JPEG decode stages: parse=%.3f prepare=%.3f submit=%.3f wait/read=%.3f copy=%.3f ms\n",
                      ms(started, parsedAt), ms(parsedAt, uploadedAt),
                      ms(uploadedAt, dispatchedAt), ms(dispatchedAt, readAt),
-                     ms(readAt, std::chrono::steady_clock::now()));
+                     ms(readAt, motioncam::diagnosticNow()));
         if (gpuParse)
             std::fprintf(stderr,
                          "GPU JPEG first tile header parsed on GPU; stream_bytes=%u\n",

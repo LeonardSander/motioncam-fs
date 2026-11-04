@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "SourceMedia.h"
 #include "SourceInput.h"
 #include "DirectLogDecoder.h"
@@ -67,7 +68,7 @@ bool gpuYuvUploadSupported(int format) {
 
 bool directLogDiagnosticsEnabled() {
     static const bool enabled = [] {
-        const char* value = std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
+        const char* value = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
         return value && value[0] != '\0' && std::string(value) != "0";
     }();
     return enabled;
@@ -75,7 +76,7 @@ bool directLogDiagnosticsEnabled() {
 
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
+        motioncam::diagnosticNow() - start).count();
 }
 
 
@@ -126,7 +127,7 @@ AVBufferRef* acquireHardwareDevice(AVHWDeviceType type) {
     if (!shared.reference) {
         AVDictionary* options = nullptr;
         if (type == AV_HWDEVICE_TYPE_VULKAN &&
-            std::getenv("MOTIONCAM_GALLERY_PRESENT_EXTENSIONS")) {
+            motioncam::debugEnvironment("MOTIONCAM_GALLERY_PRESENT_EXTENSIONS")) {
             av_dict_set(&options, "instance_extensions",
                 "VK_KHR_surface+VK_KHR_wayland_surface+VK_KHR_xcb_surface", 0);
             av_dict_set(&options, "device_extensions", "VK_KHR_swapchain", 0);
@@ -317,7 +318,7 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
       mLastDecodedFrame(-1) {
     
     spdlog::info("DirectLogDecoder: Initializing for {}", filePath);
-    const auto initializationStarted = std::chrono::steady_clock::now();
+    const auto initializationStarted = motioncam::diagnosticNow();
     std::lock_guard initializationLock(directLogInitializationMutex);
     auto stageStarted = initializationStarted;
     try {
@@ -326,7 +327,7 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
             spdlog::info(
                 "DirectLog diagnostic: decoder_init stage=demuxer_open latency_ms={:.3f}",
                 elapsedMilliseconds(stageStarted));
-        stageStarted = std::chrono::steady_clock::now();
+        stageStarted = motioncam::diagnosticNow();
         analyzeVideo();
     } catch (...) {
         cleanup();
@@ -414,7 +415,7 @@ void DirectLogDecoder::initDecoder() {
         throw std::runtime_error("Could not copy codec parameters");
     }
     
-    const char* forceSoftwareValue = std::getenv("MOTIONCAM_DIRECTLOG_FORCE_SOFTWARE");
+    const char* forceSoftwareValue = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_FORCE_SOFTWARE");
     const bool forceSoftware = mForceSoftwareDecoder ||
         (forceSoftwareValue && forceSoftwareValue[0] != '\0' &&
          std::string(forceSoftwareValue) != "0");
@@ -470,7 +471,7 @@ void DirectLogDecoder::initDecoder() {
     // with the software decoder before rejecting an otherwise valid source.
 #ifdef __ANDROID__
     if (mediaCodecDecoder && !mMediaCodecSurfaceRejected) {
-        const char* surface = std::getenv("MOTIONCAM_ANDROID_MEDIACODEC_SURFACE");
+        const char* surface = motioncam::debugEnvironment("MOTIONCAM_ANDROID_MEDIACODEC_SURFACE");
         if (!surface || surface[0] != '0') {
             mCodecContext->hw_device_ctx = MediaCodecImageReader::createDevice(
                 codecpar->width, codecpar->height);
@@ -723,7 +724,7 @@ bool DirectLogDecoder::extractFrameTextureDeferred(int frameNumber,
 
 bool DirectLogDecoder::canExtractFrameTexture() {
 #if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && defined(MOTIONCAM_HAS_AVFILTER)
-    const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
+    const char* enabled = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB");
     if (enabled && enabled[0] == '0') return false;
     initDecoder();
     // Software YUV can also be uploaded to the common Vulkan renderer;
@@ -865,7 +866,7 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
         bool preserveLogEncoded, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase,
         bool deferDownload, bool textureOnly) {
-    const auto lockStarted = std::chrono::steady_clock::now();
+    const auto lockStarted = motioncam::diagnosticNow();
     std::lock_guard<std::mutex> lock(mMutex);
     if (directLogDiagnosticsEnabled())
         spdlog::info("DirectLog diagnostic: frame={} decoder_lock_wait_ms={:.3f}",
@@ -892,7 +893,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         const std::array<uint8_t, 4>* cfaPhase,
         bool deferDownload, bool textureOnly) {
     const bool diagnostics = directLogDiagnosticsEnabled();
-    const auto extractStart = std::chrono::steady_clock::now();
+    const auto extractStart = motioncam::diagnosticNow();
 
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) {
         return false;
@@ -900,13 +901,13 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     initDecoder();
     
     const DirectLogFrameInfo& frameInfo = mFrames[frameNumber];
-    const char* cacheSetting = std::getenv("MOTIONCAM_DIRECTLOG_FRAME_CACHE");
+    const char* cacheSetting = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_FRAME_CACHE");
     const bool cacheEnabled = (!cacheSetting || cacheSetting[0] != '0') && !mMediaCodecSurfaceActive;
     auto convertDecoded = [&](AVFrame* decoded, bool advanceDecoder) {
         // Decoding advances independently of conversion. Keep the received
         // frame available if GPU conversion fails and the caller retries.
         if (advanceDecoder) mLastDecodedFrame = frameNumber;
-        const auto conversionStart = std::chrono::steady_clock::now();
+        const auto conversionStart = motioncam::diagnosticNow();
 #if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
         if (mMediaCodecSurfaceActive && decoded->format == AV_PIX_FMT_MEDIACODEC) {
             const int width = outputWidth > 0 ? outputWidth : decoded->width;
@@ -933,7 +934,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
 #endif
 
 #ifdef __ANDROID__
-        if (std::getenv("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
             spdlog::error("Zero-copy DirectLog requires MediaCodec hardware-buffer output");
             return false;
         }
@@ -1224,7 +1225,7 @@ void DirectLogDecoder::overrideTimestamps(const std::vector<Timestamp>& timestam
 bool DirectLogDecoder::initHardwareDecoder() {
     std::vector<AVHWDeviceType> preferred;
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
-    const char* gpuRgb = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
+    const char* gpuRgb = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB");
     const bool preferVulkan = !gpuRgb || gpuRgb[0] != '0';
     if (preferVulkan) preferred.push_back(AV_HWDEVICE_TYPE_VULKAN);
 #endif
@@ -1290,7 +1291,7 @@ AVPixelFormat DirectLogDecoder::selectPixelFormat(
 
 #ifdef MOTIONCAM_HAS_AVFILTER
 AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int height) {
-    const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_PROXY");
+    const char* enabled = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_PROXY");
     if ((enabled && enabled[0] == '0') ||
         frame->format != mHardwarePixelFormat || !mHardwareDeviceContext ||
         !frame->hw_frames_ctx ||
@@ -1429,7 +1430,7 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
     (void)cfaPhase; (void)deferDownload;
     return false;
 #else
-    const char* enabled = std::getenv("MOTIONCAM_DIRECTLOG_GPU_RGB");
+    const char* enabled = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB");
     if ((enabled && enabled[0] == '0') || mGpuRgbRejected || !rgbData)
         return false;
     const bool vulkanFrame = frame->format == AV_PIX_FMT_VULKAN &&
@@ -1502,7 +1503,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
                                        int outputWidth, int outputHeight,
                                        bool preserveLogEncoded, bool smoothChroma) {
     const bool diagnostics = directLogDiagnosticsEnabled();
-    const auto conversionStart = std::chrono::steady_clock::now();
+    const auto conversionStart = motioncam::diagnosticNow();
     const int width = yuvFrame->width;
     const int height = yuvFrame->height;
     if (outputWidth <= 0) outputWidth = width;
@@ -1529,7 +1530,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
 
     // Area filtering keeps the fast proxy path while averaging the source
     // region. The override supports direct comparisons with point/bicubic.
-    const char* proxyScaler = std::getenv("MOTIONCAM_DIRECTLOG_PROXY_SCALER");
+    const char* proxyScaler = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_PROXY_SCALER");
     const int proxyFlags = proxyScaler && std::string(proxyScaler) == "point"
         ? SWS_POINT : proxyScaler && std::string(proxyScaler) == "bicubic"
             ? SWS_BICUBIC : SWS_AREA;
@@ -1561,7 +1562,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
     const bool tenBit = pixelFormat == AV_PIX_FMT_YUV420P10LE ||
                         pixelFormat == AV_PIX_FMT_YUV422P10LE;
     if (!fullRange && tenBit) {
-        const auto rangeStart = std::chrono::steady_clock::now();
+        const auto rangeStart = motioncam::diagnosticNow();
         const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(pixelFormat);
         if (!descriptor) return false;
         const int chromaWidth = AV_CEIL_RSHIFT(width, descriptor->log2_chroma_w);
@@ -1596,7 +1597,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
                          elapsedMilliseconds(rangeStart));
     }
 
-    const auto scaleStart = std::chrono::steady_clock::now();
+    const auto scaleStart = motioncam::diagnosticNow();
     uint8_t* output[] = {reinterpret_cast<uint8_t*>(rgbData)};
     int outputStride[] = {outputWidth * 3 * static_cast<int>(sizeof(uint16_t))};
     const AVPixFmtDescriptor* scaleDescriptor = av_pix_fmt_desc_get(pixelFormat);

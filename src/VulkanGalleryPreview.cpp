@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VulkanGalleryPreview.h"
 #include "SharedVulkanDevice.h"
 #include "DNGImage.h"
@@ -1186,8 +1187,8 @@ bool demosaicGalleryBayerVulkan(
     const std::array<uint8_t, 4>& phase,
     const std::array<double, 3>& black,
     const std::array<double, 3>& white) {
-    if (std::getenv("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
-    const auto started = std::chrono::steady_clock::now();
+    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
+    const auto started = motioncam::diagnosticNow();
     if (!cfa || width < 2 || height < 2 ||
         width > std::numeric_limits<uint32_t>::max() / height / 3u ||
         (phase != std::array<uint8_t, 4>{0, 1, 1, 2} &&
@@ -1257,11 +1258,11 @@ bool demosaicGalleryBayerVulkan(
     }
     result.resize(static_cast<size_t>(width) * height * 6);
     rgb = std::move(result);
-    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
         std::fprintf(stderr,
             "GALLERY_PERF event=vulkan_gallery_demosaic width=%u height=%u elapsed_ms=%.3f\n",
             width, height, std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - started).count());
+                motioncam::diagnosticNow() - started).count());
     return true;
 }
 
@@ -1276,7 +1277,7 @@ bool colorGalleryRgbVulkan(
     const VulkanGalleryBayerSource* bayer,
     const VulkanGalleryOutput* output,
     const VulkanGalleryTextureSource* texture) {
-    if (std::getenv("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
+    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
     // Device warmup runs on another thread. Keep host previews responsive
     // through the CPU fallback instead of blocking on device creation.
     // Resident sources need their final shader variant before playback starts.
@@ -1353,7 +1354,7 @@ bool colorGalleryRgbVulkan(
         : externalBuffer
         ? bufferDevices[static_cast<pl_gpu>(externalGpu)]
         : texture ? textureDevices[static_cast<pl_gpu>(externalGpu)] : device;
-    if (texture && std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+    if (texture && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
         static std::atomic_bool loggedExternalCaps{false};
         if (!loggedExternalCaps.exchange(true))
             std::fprintf(stderr, "GALLERY_PERF event=gallery_external_caps export_buf=%d import_buf=%d export_tex=%d import_tex=%d\n",
@@ -1901,7 +1902,7 @@ bool colorGalleryRgbVulkan(
                 destroySemaphore(producer->device, ready, nullptr);
                 delete texture;
             });
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=gallery_shared_image width={} height={} direct=true resident_input={}",
                 outputWidth, outputHeight, externalGpu != nullptr);
         *output->gpuBuffer = std::move(gpuFrame);
@@ -1911,7 +1912,7 @@ bool colorGalleryRgbVulkan(
 #ifndef _WIN32
     if (exported) {
         const uint64_t debugSampleHash =
-            std::getenv("MOTIONCAM_GALLERY_PERF_GPU_HASH")
+            motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_GPU_HASH")
             ? samplePackedFrame(selected->gpu, exported,
                 orientation == 90 || orientation == 270 ? sourceHeight : sourceWidth,
                 orientation == 90 || orientation == 270 ? sourceWidth : sourceHeight)
@@ -1950,11 +1951,11 @@ bool colorGalleryRgbVulkan(
     }
 #endif
     if (output && output->requireZeroCopy) return false;
-    const bool hostImport = texture && !std::getenv("MOTIONCAM_GALLERY_STAGED_READBACK") &&
+    const bool hostImport = texture && !motioncam::debugEnvironment("MOTIONCAM_GALLERY_STAGED_READBACK") &&
         (selected->gpu->import_caps.buf & PL_HANDLE_HOST_PTR);
     const bool directView = hostImport && output && output->hostPixels && rgb24 &&
         !alignedRgb24 && !rgb10a2 &&
-        !std::getenv("MOTIONCAM_GALLERY_VECTOR_READBACK");
+        !motioncam::debugEnvironment("MOTIONCAM_GALLERY_VECTOR_READBACK");
     std::shared_ptr<uint8_t> owned;
     pl_buf imported = nullptr;
     const bool pooled = directView &&

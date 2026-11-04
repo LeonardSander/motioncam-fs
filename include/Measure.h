@@ -1,23 +1,26 @@
 #pragma once
 
+#include "DebugInstrumentation.h"
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <spdlog/spdlog.h>
 
 namespace motioncam {
 
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
 class Measure {
 public:
-    explicit Measure(const std::string& name)
+    explicit Measure(std::string_view name)
         : mName(name)
-        , mStart(std::chrono::high_resolution_clock::now()) {
+        , mStart(std::chrono::steady_clock::now()) {
     }
 
     ~Measure() {
-        const auto end = std::chrono::high_resolution_clock::now();
+        const auto end = std::chrono::steady_clock::now();
         const auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - mStart).count();
 
-        spdlog::debug("{}: {} ms", mName, duration / 1000.0);
+        SPDLOG_DEBUG("{}: {} ms", mName, duration / 1000.0);
     }
 
     // Prevent copying and moving
@@ -28,7 +31,16 @@ public:
 
 private:
     std::string mName;
-    std::chrono::time_point<std::chrono::high_resolution_clock> mStart;
+    std::chrono::time_point<std::chrono::steady_clock> mStart;
 };
+
+#else
+class Measure {
+public:
+    explicit Measure(std::string_view) {}
+    Measure(const Measure&) = delete;
+    Measure& operator=(const Measure&) = delete;
+};
+#endif
 
 } // namespace motioncam

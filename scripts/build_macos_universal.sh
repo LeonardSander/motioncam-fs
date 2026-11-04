@@ -13,11 +13,15 @@ if [[ -z "${VCPKG_ROOT:-}" ]]; then
   fi
 fi
 
+host_arch="$(uname -m)"
+if [[ "$host_arch" == x86_64 ]]; then host_arch=x64; fi
+
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
   -DMOTIONCAMFUSE_MACOS_UNIVERSAL=ON \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_OVERLAY_TRIPLETS="${ROOT_DIR}/scripts/vcpkg-triplets" \
+  -DVCPKG_HOST_TRIPLET="${host_arch}-osx-release" \
   -DVCPKG_TARGET_TRIPLET=universal-osx
 
 cmake --build "${BUILD_DIR}" --config Release

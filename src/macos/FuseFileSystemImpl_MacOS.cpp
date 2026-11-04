@@ -166,7 +166,7 @@ Session::~Session() {
     if (projected && !dst.rmdir(mDstPath.c_str()))
         spdlog::warn("Failed to remove {}", mDstPath);
 
-    spdlog::debug("Exiting session for {}", mSrcFile);
+    SPDLOG_DEBUG("Exiting session for {}", mSrcFile);
 }
 
 void Session::init(IVirtualFileSystem* fs) {
@@ -314,7 +314,7 @@ void* Session::fuseInit(struct fuse_conn_info* conn) {
 }
 
 void Session::fuseDestroy(void* privateData) {
-    spdlog::debug("fuseDestroy() entering");
+    SPDLOG_DEBUG("fuseDestroy() entering");
 
     auto* context = reinterpret_cast<FuseContext*>(privateData);
 
@@ -323,11 +323,11 @@ void Session::fuseDestroy(void* privateData) {
 
     delete context;
 
-    spdlog::debug("fuseDestroy() exiting");
+    SPDLOG_DEBUG("fuseDestroy() exiting");
 }
 
 int Session::fuseGetattr(const char* path, struct stat* stbuf) {
-    spdlog::debug("fuse_get_attr(path: {})", path);
+    SPDLOG_DEBUG("fuse_get_attr(path: {})", path);
 
     memset(stbuf, 0, sizeof(struct stat));
 
@@ -370,7 +370,7 @@ int Session::fuseGetattr(const char* path, struct stat* stbuf) {
 }
 
 int Session::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info* fi) {
-    spdlog::debug("fuse_read_dir(path: {})", path);
+    SPDLOG_DEBUG("fuse_read_dir(path: {})", path);
 
     auto* context = fuseGetContext();
     std::string pathStr(path);
@@ -391,7 +391,7 @@ int Session::fuseReaddir(const char* path, void* buf, fuse_fill_dir_t filler, of
 }
 
 int Session::fuseOpen(const char* path, struct fuse_file_info* fi) {
-    spdlog::debug("fuse_open(path: {})", path);
+    SPDLOG_DEBUG("fuse_open(path: {})", path);
 
     auto* context = fuseGetContext();
     std::string pathStr(path);
@@ -413,7 +413,7 @@ int Session::fuseOpen(const char* path, struct fuse_file_info* fi) {
 }
 
 int Session::fuseRead(const char* path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi) {
-    spdlog::debug("fuse_read(path: {}, size: {}, offset: {})", path, size, offset);
+    SPDLOG_DEBUG("fuse_read(path: {}, size: {}, offset: {})", path, size, offset);
 
     auto* context = fuseGetContext();
     std::string pathStr(path);
@@ -474,7 +474,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
         fs::absolute(fs::path(dstPath)).lexically_normal())
         throw std::runtime_error("Source and mount destination must be different paths");
 
-    spdlog::debug("Mounting file {} to {}", srcFile, dstPath);
+    SPDLOG_DEBUG("Mounting file {} to {}", srcFile, dstPath);
 
     QDir dst(dstPath.c_str());
 

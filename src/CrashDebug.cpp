@@ -1,4 +1,5 @@
-#ifdef __APPLE__
+#include "DebugInstrumentation.h"
+#if defined(__APPLE__) && MOTIONCAM_DEBUG_INSTRUMENTATION
 #include "CrashDebug.h"
 
 #include <atomic>

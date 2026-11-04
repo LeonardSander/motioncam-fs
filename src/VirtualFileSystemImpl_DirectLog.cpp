@@ -1,3 +1,4 @@
+#include "DebugInstrumentation.h"
 #include "VirtualFileSystemImpl_DirectLog.h"
 #include "VirtualFileSystemImpl.h"
 #include "DirectLogDecoder.h"
@@ -87,7 +88,7 @@ uint32_t directLogQuantizationWhite(const motioncam::RenderSettings& settings) {
 
 bool directLogDiagnosticsEnabled() {
     static const bool enabled = [] {
-        const char* value = std::getenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
+        const char* value = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
         return value && value[0] != '\0' && std::string(value) != "0";
     }();
     return enabled;
@@ -108,7 +109,7 @@ std::array<uint8_t, 4> directLogCfaPhase(
 
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - start).count();
+        motioncam::diagnosticNow() - start).count();
 }
 
 
@@ -224,7 +225,7 @@ int VirtualFileSystemImpl_DirectLog::readFile(
     const int count = MountedDngSource::readFile(
         entry, pos, len, dst, std::move(result), async);
     if (async || count <= 0 ||
-        std::getenv("MOTIONCAM_DIRECTLOG_PREFETCH_DISABLE") ||
+        motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_PREFETCH_DISABLE") ||
         entry.name.size() < 4 ||
         entry.name.compare(entry.name.size() - 4, 4, ".dng") != 0)
         return count;
@@ -257,7 +258,7 @@ int VirtualFileSystemImpl_DirectLog::readFile(
 }
 
 void VirtualFileSystemImpl_DirectLog::init() {
-    spdlog::debug("VirtualFileSystemImpl_DirectLog::init(options={})", optionsToString(mConfig.options));
+    SPDLOG_DEBUG("VirtualFileSystemImpl_DirectLog::init(options={})", optionsToString(mConfig.options));
     
     mFiles.clear();
 
@@ -606,7 +607,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
 
     try {
         const bool diagnostics = directLogDiagnosticsEnabled();
-        auto diagnosticStage = std::chrono::steady_clock::now();
+        auto diagnosticStage = motioncam::diagnosticNow();
         const auto& videoInfo = mDecoder->getVideoInfo();
         int width = decodedWidth > 0 ? decodedWidth : videoInfo.width;
         int height = decodedHeight > 0 ? decodedHeight : videoInfo.height;
@@ -633,7 +634,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                          frameNumber, elapsedMilliseconds(diagnosticStage),
                          prepopulatedImage ? expectedImageBytes / 2 : imageSamples.size(),
                          samplesPerPixel);
-            diagnosticStage = std::chrono::steady_clock::now();
+            diagnosticStage = motioncam::diagnosticNow();
         }
 
         const uint8_t* imageData = prepopulatedImage
@@ -860,7 +861,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
             prepopulatedImage = false;
         }
-        diagnosticStage = std::chrono::steady_clock::now();
+        diagnosticStage = motioncam::diagnosticNow();
         if (!dng.SetImageDataBorrowed(imageData, imageDataSize))
             throw std::runtime_error("Failed to attach DirectLog image data");
         if (diagnostics)
@@ -877,7 +878,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         writer.AddImage(&dng);
         
         std::string err;
-        diagnosticStage = std::chrono::steady_clock::now();
+        diagnosticStage = motioncam::diagnosticNow();
         if (!writer.WriteToFile(stream, &err)) {
             spdlog::error("Failed to write DNG for frame {}: {}", frameNumber, err);
             return false;
@@ -887,7 +888,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                          frameNumber, elapsedMilliseconds(diagnosticStage));
 
         // Apply metadata directly to the vector-backed DNG.
-        diagnosticStage = std::chrono::steady_clock::now();
+        diagnosticStage = motioncam::diagnosticNow();
         if (!vfs::applyManualOpcodeSidecar(dngData, mManualVignetteSidecars))
             throw std::runtime_error("Could not apply DirectLog opcode sidecar");
         // A cropped frame already carries remapped gain maps from processFrame.
@@ -943,8 +944,8 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
                                                bool deferGpuDownload,
                                                bool textureOnly,
                                                bool packedGpuDng) {
-    const bool profile = std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE");
-    const auto processStarted = std::chrono::steady_clock::now();
+    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE");
+    const auto processStarted = motioncam::diagnosticNow();
     ProcessedFrame result;
     result.timestamp = std::get<Timestamp>(entry.userData);
     const auto frameIt = mFrameIndexByTimestamp.find(result.timestamp);
@@ -953,7 +954,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     result.frameNumber = static_cast<int>(frameIt->second);
 
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
-    const auto sidecarsFinished = std::chrono::steady_clock::now();
+    const auto sidecarsFinished = motioncam::diagnosticNow();
     if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude) {
         DNGImageLayout manualTarget;
         manualTarget.width = static_cast<uint32_t>(mWidth);
@@ -1070,7 +1071,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     if (packedGpuStrip && !result.gpuPending)
         return processFrame(entry, previewScale, prepopulateDng, outputBayer,
                             deferGpuDownload, textureOnly, false);
-    const auto extracted = std::chrono::steady_clock::now();
+    const auto extracted = motioncam::diagnosticNow();
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;
     if (packedGpuStrip && result.gpuPending) {
@@ -1172,7 +1173,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         spdlog::info("GALLERY_PERF event=directlog_process_stage sidecars_ms={:.3f} extract_ms={:.3f} remaining_ms={:.3f}",
             std::chrono::duration<double, std::milli>(sidecarsFinished-processStarted).count(),
             std::chrono::duration<double, std::milli>(extracted-sidecarsFinished).count(),
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-extracted).count());
+            std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-extracted).count());
     return result;
 }
 
@@ -1188,7 +1189,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
         std::unique_lock gpuFrameLock(mGpuFrameMutex);
-        const auto materializeStart = std::chrono::steady_clock::now();
+        const auto materializeStart = motioncam::diagnosticNow();
         const auto& frames = mDecoder->getFrames();
         const int configuredScale = std::max(1,
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
@@ -1198,7 +1199,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                                  RENDER_OPT_HIGHER_CFA_HQ)) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
-        const auto acquiredAt = std::chrono::steady_clock::now();
+        const auto acquiredAt = motioncam::diagnosticNow();
         // The per-clip center crop is applied later by processDngPixels().
         // Keep the strip buffer here; only the source's left/top crop needs
         // to compact rows before the DNG writer runs.
@@ -1212,20 +1213,20 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             !(mCalibration && mCalibration->hasLeftTopCropStride);
         const bool deferGpuDownload = (configuredScale == 1 || directProxy) &&
             (!mConfig.streamingPreview ||
-             (bakedGallery && !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU"))) &&
+             (bakedGallery && !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU"))) &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
              (jpegCompression && isLosslessJpeg92(mConfig.jxlDistance) &&
-              !std::getenv("MOTIONCAM_GPU_JPEG_DISABLE") &&
-              !std::getenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
-              !std::getenv("MOTIONCAM_JPEG_TILED")));
+              !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") &&
+              !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
+              !motioncam::debugEnvironment("MOTIONCAM_JPEG_TILED")));
         const uint32_t inputBits = utils::evenBitsNeeded(
             static_cast<uint16_t>(std::min<uint32_t>(
                 directLogQuantizationWhite(mConfig), 65535u)));
         const bool packedGpuDng = prepopulateDng && deferGpuDownload &&
-            !std::getenv("MOTIONCAM_DIRECTLOG_PACKED_GPU_DISABLE") &&
-            !std::getenv("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE") &&
+            !motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_PACKED_GPU_DISABLE") &&
+            !motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE") &&
             !mConfig.streamingPreview && !directProxy && !outputBayer &&
             !mConfig.cameraNativeStaging &&
             !(mConfig.options & (RENDER_OPT_BAKE_ISO |
@@ -1236,14 +1237,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
                                       prepopulateDng, outputBayer,
                                       deferGpuDownload, false, packedGpuDng);
-        const auto decodedAt = std::chrono::steady_clock::now();
+        const auto decodedAt = motioncam::diagnosticNow();
         const bool preScaledProxy = directProxy &&
             processed.width == mWidth / configuredScale &&
             processed.height == mHeight / configuredScale;
         const auto timestamp = processed.timestamp;
         const int frameNumber = processed.frameNumber;
         const bool diagnostics = directLogDiagnosticsEnabled();
-        auto stageStart = std::chrono::steady_clock::now();
+        auto stageStart = motioncam::diagnosticNow();
         if (diagnostics)
             spdlog::info("DirectLog diagnostic: frame={} materialize begin name={}",
                          frameNumber, entry.name);
@@ -1255,7 +1256,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         if (diagnostics) {
             spdlog::info("DirectLog diagnostic: frame={} metadata_ms={:.3f}; DNG construction begin",
                          frameNumber, elapsedMilliseconds(stageStart));
-            stageStart = std::chrono::steady_clock::now();
+            stageStart = motioncam::diagnosticNow();
         }
         std::vector<uint8_t> dngData = std::move(processed.dngStripBuffer);
         const bool prepopulatedImage = !dngData.empty();
@@ -1271,7 +1272,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                              processed.width, processed.height, prepopulatedImage,
                              processed.bayer))
             throw std::runtime_error("Could not generate DirectLog DNG");
-        const auto generatedAt = std::chrono::steady_clock::now();
+        const auto generatedAt = motioncam::diagnosticNow();
         vfs::DngPixelPipelineOptions pixels;
         std::vector<uint8_t> gpuJpeg;
         vfs::GpuJpegTiles gpuJpegTiles;
@@ -1327,7 +1328,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                 pixelSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
         vfs::processDngPixels(dngData, pixelSettings, pixels);
         if (gpuFrameLock.owns_lock()) gpuFrameLock.unlock();
-        const auto processedAt = std::chrono::steady_clock::now();
+        const auto processedAt = motioncam::diagnosticNow();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
         finalize.timestamp = renderPlan.outputTimestamp;
@@ -1341,7 +1342,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             ? &*mGyroflowLensProfile : nullptr;
         finalize.sourceName = "DirectLog";
         vfs::finalizeDng(dngData, mConfig, finalize);
-        const auto finalizedAt = std::chrono::steady_clock::now();
+        const auto finalizedAt = motioncam::diagnosticNow();
         if (!jpegCompression && !mConfig.streamingPreview && mConfig.projectedFileSizes && !savedOutput) {
             if (dngData.size() > entry.size)
                 throw std::runtime_error(
@@ -1349,7 +1350,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             dngData.resize(entry.size, 0);
         }
         auto output = std::make_shared<std::vector<uint8_t>>(std::move(dngData));
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
             spdlog::info("GALLERY_PERF event=directlog_mounted_proxy frame={} pre_scaled_proxy={} width={} height={}",
                          frameNumber, preScaledProxy, processed.width,
                          processed.height);
@@ -1384,7 +1385,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         currentSettings = mConfig;
     }
     const bool fastBakedGalleryCandidate =
-        !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
         !currentSettings.thumbnailPreview &&
         (((currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) && hasSourceGainMaps()) ||
          directLogAppliesLogTransform(currentSettings, hasSourceGainMaps())) &&
@@ -1425,7 +1426,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
     }
     std::shared_lock renderLock(mRenderMutex);
     try {
-        const auto processStarted = std::chrono::steady_clock::now();
+        const auto processStarted = motioncam::diagnosticNow();
         const int configuredScale = std::max(1,
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
         const bool directProxy = configuredScale > 1 &&
@@ -1438,12 +1439,12 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
         const bool residentBayerCandidate = gpuBayer && configuredScale == 1 &&
-            !std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+            !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
             !(mConfig.options & (RENDER_OPT_HIGHER_CFA_HQ | RENDER_OPT_BAKE_ISO)) &&
             !(mCalibration && mCalibration->hasBadPixels &&
                 processesBadPixels(mConfig.badPixelTreatment)) &&
             mDecoder->canExtractFrameTexture();
-        const bool textureCandidate = residentBayerCandidate || (!std::getenv("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        const bool textureCandidate = residentBayerCandidate || (!motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
             !remosaic &&
             !(mConfig.options & (RENDER_OPT_CROPPING |
                                  RENDER_OPT_BAKE_ISO)) &&
@@ -1482,7 +1483,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             processed.rgb = std::move(bayer);
             processed.bayer = true;
         }
-        const auto processFinished = std::chrono::steady_clock::now();
+        const auto processFinished = motioncam::diagnosticNow();
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
         image.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
@@ -1559,7 +1560,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.timestamp = vfs::outputTimestamp(
             entry, processed.timestamp, mDecoder->getFrames().front().timestamp,
             mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-        const auto previewStarted = std::chrono::steady_clock::now();
+        const auto previewStarted = motioncam::diagnosticNow();
         auto previewSettings = mConfig;
         if (processed.bayer)
             previewSettings.options = static_cast<FileRenderOptions>(
@@ -1723,7 +1724,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                     // Software recovery replaces the decoder state. Rebuild
                     // the preview rather than mix its previous GPU texture
                     // with recovered CPU samples.
-                    if(std::getenv("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")||
+                    if(motioncam::debugEnvironment("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")||
                        !mDecoder->recoverFrameInSoftware(processed.frameNumber,source->data(),
                            source->size(),processed.width,processed.height,true,nullptr))
                         throw std::runtime_error("DirectLog gallery source readback failed");
@@ -1764,19 +1765,19 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             }
             preview.gallerySource.lease =
                 std::make_shared<std::unique_lock<std::mutex>>(std::move(gpuFrameLock));
-            if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=directlog_texture_preview source={} width={} height={}",
                     mSrcPath, processed.width, processed.height);
             return true;
         }
         const bool decoded = DNGDecoder::decodePreview(
             std::move(image), previewSettings, preview, true, retainSourceSamples);
-        if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} pre_scaled_proxy={} width={} height={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
                 mSrcPath, preScaledProxy, processed.width, processed.height,
                 std::chrono::duration<double, std::milli>(processFinished-processStarted).count(),
                 std::chrono::duration<double, std::milli>(previewStarted-processFinished).count(),
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-previewStarted).count());
+                std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-previewStarted).count());
         return decoded;
     } catch (const std::exception& error) {
         if (fastBakedGallery) {
@@ -1983,7 +1984,7 @@ void VirtualFileSystemImpl_DirectLog::calculateFrameRateStats() {
     
     mFrameRateInfo = vfs::calculateFrameRate(timestamps);
     
-    spdlog::debug("DirectLog frame rate stats: avg={:.2f}fps, median={:.2f}fps", mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
+    SPDLOG_DEBUG("DirectLog frame rate stats: avg={:.2f}fps, median={:.2f}fps", mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
 }
 
 } // namespace motioncam

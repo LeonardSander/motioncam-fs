@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a sideloadable, debug-key-signed arm64 APK with optimized native code.
+# Build a Release APK and sign it for sideloading (signing identity is separate
+# from the native/Gradle build configuration).
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Local machines can retain their toolchain paths without changing CI's env.
 if [[ -f "${source_dir}/android-build.env" ]]; then
@@ -43,16 +44,20 @@ if [[ "$phase" != build ]]; then
     -DQT_ANDROID_ABIS="${QT_ANDROID_ABI:-arm64-v8a}" \
     -DQT_CHAINLOAD_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
     -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="${ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake" \
-    -DVCPKG_TARGET_TRIPLET="${ANDROID_VCPKG_TRIPLET:-arm64-android}" \
+    -DVCPKG_TARGET_TRIPLET="${ANDROID_VCPKG_TRIPLET:-arm64-android-release}" \
+    -DVCPKG_HOST_TRIPLET=x64-linux-release \
+    -DVCPKG_OVERLAY_TRIPLETS="${source_dir}/scripts/vcpkg-triplets" \
     -DVCPKG_OVERLAY_PORTS="${source_dir}/ports" \
-    -DQT_ANDROID_DEPLOYMENT_TYPE=Debug
+    -DQT_ANDROID_DEPLOYMENT_TYPE=Release
 fi
 if [[ "$phase" == configure ]]; then exit 0; fi
 
 cmake --build "${build_dir}" --target apk --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
-apk="${build_dir}/android-build/build/outputs/apk/debug/android-build-debug.apk"
+apk="${build_dir}/android-build/build/outputs/apk/release/android-build-release-unsigned.apk"
 if [[ ! -f "${apk}" ]]; then
   echo "APK target completed without an APK in ${build_dir}" >&2
   exit 1
 fi
-echo "${apk}"
+signed_apk="${build_dir}/android-build-release.apk"
+bash "${source_dir}/scripts/sign_android_apk.sh" "${apk}" "${signed_apk}"
+echo "${signed_apk}"
