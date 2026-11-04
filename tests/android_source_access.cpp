@@ -12,10 +12,10 @@ int openSourceReadDescriptor(const std::string& path) {
 }
 void releaseSourceReadDescriptors(const std::string&) {}
 FILE* openSourceFile(const std::string& path) { return std::fopen(path.c_str(), "rb"); }
-uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {
+uintmax_t nativeSourceFileSize(const std::filesystem::path& path, std::error_code& error) {
     return std::filesystem::file_size(path, error);
 }
-std::string sourceRevision(const std::string&) { return {}; }
+std::string nativeSourceRevision(const std::string&) { return {}; }
 int openSourceMedia(AVFormatContext** context, const std::string& path) {
     return avformat_open_input(context, path.c_str(), nullptr, nullptr);
 }

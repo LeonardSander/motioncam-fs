@@ -3074,7 +3074,9 @@ void MainWindow::mountFile(const QString& filePath) {
 #ifndef __ANDROID__
         if (!mImportBatchProgress) {
             progress = std::make_unique<QProgressDialog>(
-                tr("Decompressing %1...").arg(QFileInfo(filePath).fileName()),
+                (filePath.endsWith(".zip", Qt::CaseInsensitive)
+                    ? tr("Reading %1...") : tr("Decompressing %1..."))
+                    .arg(QFileInfo(filePath).fileName()),
                 QString(), 0, 0, this);
             progress->setWindowModality(Qt::WindowModal);
             progress->setCancelButton(nullptr);
@@ -3083,11 +3085,21 @@ void MainWindow::mountFile(const QString& filePath) {
         }
 #endif
         try {
-            auto future = QtConcurrent::run([filePath] {
-                return motioncam::extractReviewArchive(filePath);
+            // QtConcurrent wraps non-QException failures in QUnhandledException,
+            // losing their type and message. Transport the original exception so
+            // the space check and other import errors reach the handlers below.
+            std::exception_ptr importError;
+            auto future = QtConcurrent::run([filePath, &importError] {
+                try {
+                    return motioncam::extractReviewArchive(filePath);
+                } catch (...) {
+                    importError = std::current_exception();
+                    return motioncam::ArchiveImportResult{};
+                }
             });
             waitForBackgroundTask(future);
             const auto extracted = future.result();
+            if (importError) std::rethrow_exception(importError);
             if (progress) progress->close();
             mountFileImpl(extracted.sourcePath, filePath, extracted.temporaryRoot,
                           extracted.sidecarPath, extracted.gyroflowSidecarPath);
@@ -3127,17 +3139,17 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         sameSource = sameSource || motioncam::sameImportedSource(mounted.importFile, importPath);
 #endif
         if (sameSource) {
-            if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
+            if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
             return;
         }
     }
     if (mMountInProgress) {
         if (mMountPathInProgress == normalizedPath) {
-            if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
+            if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
             return;
         }
         QTimer::singleShot(200, this, [this, importPath] { mountFile(importPath); });
-        if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
+        if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
         return;
     }
     mMountInProgress = true;
@@ -3215,7 +3227,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         if (singleProgress) mountProgress->close();
         mMountInProgress = false;
         mMountPathInProgress.clear();
-        if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
+        if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
         QMessageBox::critical(this, tr("Error"), mountError);
         return;
     }
@@ -3254,7 +3266,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     mMountInProgress = false;
     mMountPathInProgress.clear();
     if (mountId == motioncam::InvalidMountId) {
-        if (!temporaryRoot.isEmpty()) QDir(temporaryRoot).removeRecursively();
+        if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
         QMessageBox::critical(this, "Error",
             QString("There was an error importing the file. (error: %1)").arg(mountError));
         return;
@@ -5433,7 +5445,7 @@ void MainWindow::removeFile(QWidget* fileWidget, bool releaseMount) {
 
 void MainWindow::cleanupArchiveMount(motioncam::MountId mountId) {
     const QString root = mArchiveTemporaryRoots.take(mountId);
-    if (!root.isEmpty() && QDir(root).exists() && !QDir(root).removeRecursively())
+    if (!root.isEmpty() && !motioncam::removeReviewArchive(root))
         spdlog::warn("Could not remove archive staging directory: {}", root.toStdString());
 }
 

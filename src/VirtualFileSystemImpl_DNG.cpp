@@ -301,8 +301,10 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
 
         // Finalized DNG sequences store their audio beside the frames. Carry
         // that file into the projected sequence just like native MCRAW audio.
-        // Preview-only filesystems do not need to retain the complete track.
-        if (mHasFrameNumberSequence && !mConfig.streamingPreview) {
+        // ZIP previews retain the track in memory so the player never opens
+        // a discovery placeholder as a native audio file.
+        if (mHasFrameNumberSequence && (!mConfig.streamingPreview ||
+            motioncam::isZipSource(frames.front().filePath))) {
             const boost::filesystem::path source(mSrcPath);
             const auto sourceDirectory = boost::filesystem::is_directory(source)
                 ? source : source.parent_path();

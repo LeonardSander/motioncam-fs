@@ -415,6 +415,10 @@ target_link_libraries(motioncam-decoder PRIVATE
   ${MOTIONCAM_SPDLOG_TARGET}
   ${MOTIONCAM_FMT_TARGET})
 find_package(ZLIB REQUIRED)
+add_library(MotionCamZipSource STATIC src/ZipSource.cpp)
+set_target_properties(MotionCamZipSource PROPERTIES AUTOMOC OFF AUTOUIC OFF)
+target_include_directories(MotionCamZipSource PUBLIC include)
+target_link_libraries(MotionCamZipSource PUBLIC LibArchive::LibArchive ZLIB::ZLIB)
 target_link_libraries(motioncam-decoder PUBLIC ZLIB::ZLIB)
 
 if(MSVC)
@@ -599,7 +603,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   Boost::regex
   ${MOTIONCAM_SPDLOG_TARGET}
   ${MOTIONCAM_FMT_TARGET}
-  LibArchive::LibArchive
+  MotionCamZipSource
   motioncam-decoder
   JPEG::JPEG
   ${JXL_TARGET}
@@ -859,7 +863,7 @@ if(BUILD_TESTING)
         target_include_directories(motioncam-source-input-test PRIVATE include)
         target_compile_definitions(motioncam-source-input-test PRIVATE MOTIONCAM_SOURCE_INPUT_TEST)
         target_compile_options(motioncam-source-input-test PRIVATE -UNDEBUG)
-        target_link_libraries(motioncam-source-input-test PRIVATE Threads::Threads)
+        target_link_libraries(motioncam-source-input-test PRIVATE Threads::Threads MotionCamZipSource)
         add_test(NAME motioncam-source-input-test COMMAND motioncam-source-input-test)
     endif()
 
@@ -896,7 +900,7 @@ if(BUILD_TESTING)
         src/ArchiveImport.cpp)
     target_include_directories(motioncam-archive-import-test PRIVATE include)
     target_link_libraries(motioncam-archive-import-test PRIVATE
-        Qt${QT_VERSION_MAJOR}::Core LibArchive::LibArchive)
+        Qt${QT_VERSION_MAJOR}::Core MotionCamZipSource)
     add_test(NAME motioncam-archive-import-test COMMAND motioncam-archive-import-test)
 
     add_executable(motioncam-demosaic-test
@@ -913,7 +917,7 @@ if(BUILD_TESTING)
     target_include_directories(motioncam-core-tests PRIVATE
         include
         deps/motioncam-decoder/thirdparty)
-    target_link_libraries(motioncam-core-tests PRIVATE spdlog::spdlog)
+    target_link_libraries(motioncam-core-tests PRIVATE spdlog::spdlog MotionCamZipSource)
     add_test(NAME motioncam-core-tests COMMAND motioncam-core-tests)
 
     add_executable(motioncam-lossless-jpeg-test
@@ -934,7 +938,7 @@ if(BUILD_TESTING)
     target_include_directories(motioncam-lossless-jpeg-test PRIVATE
         include "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
-        Boost::filesystem Boost::regex spdlog::spdlog JPEG::JPEG ${JXL_TARGET})
+        Boost::filesystem Boost::regex spdlog::spdlog JPEG::JPEG ${JXL_TARGET} MotionCamZipSource)
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
         target_include_directories(motioncam-lossless-jpeg-test PRIVATE
             ${DIRECTLOG_VULKAN_INCLUDE_DIR})
@@ -961,13 +965,14 @@ if(BUILD_TESTING)
         deps/motioncam-decoder/thirdparty)
     target_include_directories(motioncam-jpeg-xl-test PRIVATE include)
     target_link_libraries(motioncam-jpeg-xl-test PRIVATE
-        ${JXL_TARGET} JPEG::JPEG Boost::filesystem Boost::regex spdlog::spdlog)
+        ${JXL_TARGET} JPEG::JPEG Boost::filesystem Boost::regex spdlog::spdlog MotionCamZipSource)
     target_compile_definitions(motioncam-jpeg-xl-test PRIVATE TINY_DNG_ENABLE_JPEG_XL)
     add_test(NAME motioncam-jpeg-xl-test COMMAND motioncam-jpeg-xl-test)
 
     add_executable(motioncam-rife-fake tests/rife_fake.cpp)
     add_executable(motioncam-finalize-interpolation-test
         tests/finalize_interpolation_test.cpp
+        src/ArchiveImport.cpp
         src/IsoOverlay.cpp
         src/VirtualFileSystemImpl.cpp
         src/CalibrationData.cpp
@@ -987,7 +992,7 @@ if(BUILD_TESTING)
         include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
     target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex
-        spdlog::spdlog motioncam-decoder JPEG::JPEG)
+        spdlog::spdlog motioncam-decoder MotionCamZipSource JPEG::JPEG)
     target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
         TINY_DNG_ENABLE_JPEG_XL)
     if(ANDROID)
@@ -1013,17 +1018,20 @@ if(BUILD_TESTING)
     add_dependencies(motioncam-finalize-interpolation-test motioncam-rife-fake)
     add_test(NAME motioncam-finalize-interpolation-test
         COMMAND motioncam-finalize-interpolation-test)
+    add_test(NAME motioncam-zip-dng-test
+        COMMAND motioncam-finalize-interpolation-test --zip-source-self-test)
+    set_tests_properties(motioncam-zip-dng-test PROPERTIES LABELS portable)
 
     add_executable(motioncam-audio-finalize-test tests/audio_finalize_test.cpp src/AudioWriter.cpp)
     target_include_directories(motioncam-audio-finalize-test PRIVATE include)
-    target_link_libraries(motioncam-audio-finalize-test PRIVATE motioncam-decoder ${FFMPEG_LIBRARIES})
+    target_link_libraries(motioncam-audio-finalize-test PRIVATE motioncam-decoder MotionCamZipSource ${FFMPEG_LIBRARIES})
     add_test(NAME motioncam-audio-finalize-test COMMAND motioncam-audio-finalize-test)
 
     if(MOTIONCAM_AVFILTER_TARGET)
         add_executable(motioncam-native-video-encoder-test tests/native_video_encoder_test.cpp src/NativeVideoEncoder.cpp src/AudioWriter.cpp)
         target_include_directories(motioncam-native-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
         target_compile_definitions(motioncam-native-video-encoder-test PRIVATE MOTIONCAM_HAS_AVFILTER=1)
-        target_link_libraries(motioncam-native-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core motioncam-decoder ${FFMPEG_LIBRARIES} ${MOTIONCAM_AVFILTER_TARGET})
+        target_link_libraries(motioncam-native-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core motioncam-decoder MotionCamZipSource ${FFMPEG_LIBRARIES} ${MOTIONCAM_AVFILTER_TARGET})
         if(ANDROID)
             target_sources(motioncam-native-video-encoder-test PRIVATE src/android/P010VideoEncoder.cpp)
             target_link_libraries(motioncam-native-video-encoder-test PRIVATE ${ANDROID_MEDIANDK_LIB})
@@ -1065,6 +1073,9 @@ if(BUILD_TESTING)
         get_property(android_tests DIRECTORY PROPERTY TESTS)
         set(android_test_files "$<TARGET_FILE:motioncam-rife-fake>\n")
         foreach(test_target IN LISTS android_tests)
+            if(test_target STREQUAL "motioncam-zip-dng-test")
+                continue()
+            endif()
             if(NOT test_target STREQUAL "motioncam-source-input-test")
                 target_link_libraries(${test_target} PRIVATE motioncam-test-source-access)
             endif()

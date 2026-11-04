@@ -15,7 +15,9 @@ namespace motioncam {
 int openSourceReadDescriptor(const std::string& path) {
     return path == sourcePath ? ::dup(sourceFd) : ::open(path.c_str(), O_RDONLY);
 }
-uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {
+FILE* openSourceFile(const std::string& path) { return std::fopen(path.c_str(), "rb"); }
+std::string nativeSourceRevision(const std::string&) { return {}; }
+uintmax_t nativeSourceFileSize(const std::filesystem::path& path, std::error_code& error) {
     return std::filesystem::file_size(path, error);
 }
 }

@@ -109,28 +109,33 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
     std::vector<Entry> entries;
     std::vector<Entry> companions;
     const auto comment = zipComment(archivePath);
-    {
+    const bool zip = archivePath.endsWith(".zip", Qt::CaseInsensitive);
+    const auto zipIndex = zip ? indexZipSource(archivePath.toStdString()) : std::vector<ZipSourceEntry>{};
+    const auto addEntry = [&](const QString& path, bool regular, qint64 size, int order) {
+        const QFileInfo info(path);
+        const bool mcraw = regular && info.suffix().compare("mcraw", Qt::CaseInsensitive) == 0;
+        const bool dng = regular && info.suffix().compare("dng", Qt::CaseInsensitive) == 0;
+        const QString parent = info.path() == "." ? QString() : info.path();
+        if (!path.isEmpty() && (mcraw || dng)) entries.push_back({path, parent, mcraw, dng, order, size});
+        const QString suffix = info.suffix().toLower();
+        if (!path.isEmpty() && regular &&
+            (suffix == "wav" || suffix == "flac" || suffix == "opus" ||
+             suffix == "aac" || suffix == "csv" || suffix == "jsonl" || suffix == "gcsv"))
+            companions.push_back({path, parent, false, false, order, size});
+    };
+    if (zip) {
+        int order = 0;
+        for (const auto& entry : zipIndex)
+            addEntry(safeEntryPath(entry.name.c_str()), entry.regular, static_cast<qint64>(entry.size), order++);
+    } else {
         auto input = openArchive(archivePath);
         archive_entry* item = nullptr;
         int order = 0;
         int status = ARCHIVE_OK;
         while ((status = archive_read_next_header(input.get(), &item)) == ARCHIVE_OK) {
-            const QString path = safeEntryPath(archive_entry_pathname_utf8(item));
-            const QFileInfo info(path);
-            const bool regular = archive_entry_filetype(item) == AE_IFREG &&
-                !archive_entry_symlink(item) && !archive_entry_hardlink(item);
-            const bool mcraw = regular && info.suffix().compare("mcraw", Qt::CaseInsensitive) == 0;
-            const bool dng = regular && info.suffix().compare("dng", Qt::CaseInsensitive) == 0;
-            if (!path.isEmpty() && (mcraw || dng))
-                entries.push_back({path, info.path() == "." ? QString() : info.path(),
-                                   mcraw, dng, order, archive_entry_size(item)});
-            const QString suffix = info.suffix().toLower();
-            if (!path.isEmpty() && regular &&
-                (suffix == "wav" || suffix == "flac" || suffix == "opus" ||
-                 suffix == "aac" || suffix == "csv" || suffix == "jsonl" || suffix == "gcsv"))
-                companions.push_back({path, info.path() == "." ? QString() : info.path(),
-                                      false, false, order, archive_entry_size(item)});
-            ++order;
+            addEntry(safeEntryPath(archive_entry_pathname_utf8(item)),
+                archive_entry_filetype(item) == AE_IFREG && !archive_entry_symlink(item) && !archive_entry_hardlink(item),
+                archive_entry_size(item), order++);
             archive_read_data_skip(input.get());
         }
         requireCleanArchiveStatus(input.get(), status);
@@ -164,68 +169,96 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
             return a.path == b.path;
         }) != selected.end()) throw std::runtime_error("Archive contains duplicate file paths");
 
-    quint64 decompressedBytes = 0;
-    for (const auto& entry : selected) {
-        if (entry.size < 0 || static_cast<quint64>(entry.size) >
-                std::numeric_limits<quint64>::max() - decompressedBytes)
-            throw std::runtime_error("Archive contains an invalid uncompressed size");
-        decompressedBytes += static_cast<quint64>(entry.size);
-    }
-    constexpr quint64 reserveBytes = 5ULL * 1024 * 1024 * 1024;
-    const QStorageInfo temporaryStorage(QDir::tempPath());
-    if (!temporaryStorage.isValid() || !temporaryStorage.isReady())
-        throw std::runtime_error("Could not determine free space for the temporary directory");
-    const qint64 reportedAvailableBytes = temporaryStorage.bytesAvailable();
-    if (reportedAvailableBytes < 0)
-        throw std::runtime_error("Could not determine free space for the temporary directory");
-    const quint64 availableBytes = static_cast<quint64>(reportedAvailableBytes);
-    if (availableBytes < reserveBytes || decompressedBytes > availableBytes - reserveBytes) {
-        throw InsufficientArchiveSpace(
-            QString("Import needs %1 GiB of temporary space, but only %2 GiB can be used while leaving 5 GiB free")
-                .arg(decompressedBytes / 1073741824.0, 0, 'f', 2)
-                .arg(availableBytes > reserveBytes
-                         ? (availableBytes - reserveBytes) / 1073741824.0 : 0.0,
-                     0, 'f', 2).toStdString());
+    const bool directZip = dngSequence && zip;
+    if (!directZip) {
+        quint64 decompressedBytes = 0;
+        for (const auto& entry : selected) {
+            if (entry.size < 0 || static_cast<quint64>(entry.size) >
+                    std::numeric_limits<quint64>::max() - decompressedBytes)
+                throw std::runtime_error("Archive contains an invalid uncompressed size");
+            decompressedBytes += static_cast<quint64>(entry.size);
+        }
+        constexpr quint64 reserveBytes = 5ULL * 1024 * 1024 * 1024;
+        const QStorageInfo temporaryStorage(QDir::tempPath());
+        if (!temporaryStorage.isValid() || !temporaryStorage.isReady())
+            throw std::runtime_error("Could not determine free space for the temporary directory");
+        const qint64 reportedAvailableBytes = temporaryStorage.bytesAvailable();
+        if (reportedAvailableBytes < 0)
+            throw std::runtime_error("Could not determine free space for the temporary directory");
+        const quint64 availableBytes = static_cast<quint64>(reportedAvailableBytes);
+        if (availableBytes < reserveBytes || decompressedBytes > availableBytes - reserveBytes) {
+            throw InsufficientArchiveSpace(
+                QString("Import needs %1 GiB of temporary space, but only %2 GiB can be used while leaving 5 GiB free")
+                    .arg(decompressedBytes / 1073741824.0, 0, 'f', 2)
+                    .arg(availableBytes > reserveBytes
+                             ? (availableBytes - reserveBytes) / 1073741824.0 : 0.0,
+                         0, 'f', 2).toStdString());
+        }
     }
 
     const QString temporaryRoot = QDir::temp().absoluteFilePath(
         "motioncam-fuse-archive-" + QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!QDir().mkpath(temporaryRoot)) throw std::runtime_error("Could not create archive staging directory");
     try {
-        auto input = openArchive(archivePath);
-        archive_entry* item = nullptr;
-        size_t extractedCount = 0;
-        int status = ARCHIVE_OK;
-        // Reuse heap storage across entries; worker stacks can be small on Windows.
-        std::vector<char> buffer(1024 * 1024);
-        while ((status = archive_read_next_header(input.get(), &item)) == ARCHIVE_OK) {
-            const QString path = safeEntryPath(archive_entry_pathname_utf8(item));
-            const auto wanted = std::lower_bound(selected.begin(), selected.end(), path,
-                [](const Entry& entry, const QString& key) { return entry.path < key; });
-            if (wanted == selected.end() || wanted->path != path) { archive_read_data_skip(input.get()); continue; }
-            const QString outputPath = QDir(temporaryRoot).absoluteFilePath(path);
-            if (!QDir().mkpath(QFileInfo(outputPath).absolutePath()))
-                throw std::runtime_error("Could not create archive output directory");
-            QSaveFile output(outputPath);
-            if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("Could not create extracted file");
-            qint64 extractedBytes = 0;
-            for (;;) {
-                const la_ssize_t count = archive_read_data(input.get(), buffer.data(), buffer.size());
-                if (count == 0) break;
-                if (count < 0) throw std::runtime_error(archive_error_string(input.get()));
-                if (count > wanted->size - extractedBytes)
-                    throw std::runtime_error("Archive entry exceeds its declared size");
-                extractedBytes += count;
-                if (output.write(buffer.data(), count) != count) throw std::runtime_error("Could not write extracted file");
+        if (directZip) {
+            std::vector<ZipSourceEntry> members;
+            for (const auto& entry : zipIndex) {
+                if (!entry.regular) continue;
+                const auto path = safeEntryPath(entry.name.c_str());
+                const auto wanted = std::lower_bound(selected.begin(), selected.end(), path,
+                    [](const Entry& candidate, const QString& name) { return candidate.path < name; });
+                if (wanted == selected.end() || wanted->path != path) continue;
+                if ((entry.flags & (1 | 64)) || (entry.method != 0 && entry.method != 8 && entry.method != 93))
+                    throw std::runtime_error("ZIP media must be unencrypted and use Store, Deflate, or Zstandard compression");
+                if (wanted->size < 0 || entry.size != static_cast<uint64_t>(wanted->size))
+                    throw std::runtime_error("ZIP directory contains inconsistent entry sizes");
+                const QString outputPath = QDir(temporaryRoot).absoluteFilePath(path);
+                if (!QDir().mkpath(QFileInfo(outputPath).absolutePath()))
+                    throw std::runtime_error("Could not create ZIP index directory");
+                QFile placeholder(outputPath);
+                if (!placeholder.open(QIODevice::WriteOnly | QIODevice::NewOnly))
+                    throw std::runtime_error("Could not create ZIP index entry");
+                members.push_back(entry);
             }
-            if (extractedBytes != wanted->size)
-                throw std::runtime_error("Archive entry is shorter than its declared size");
-            if (!output.commit()) throw std::runtime_error("Could not finish extracted file");
-            ++extractedCount;
+            if (members.size() != selected.size())
+                throw std::runtime_error("ZIP directory is missing selected media files");
+            registerZipSource(archivePath.toStdString(), temporaryRoot.toStdString(), members);
+        } else {
+            auto input = openArchive(archivePath);
+            archive_entry* item = nullptr;
+            size_t extractedCount = 0;
+            int status = ARCHIVE_OK;
+            // Reuse heap storage across entries; worker stacks can be small on Windows.
+            std::vector<char> buffer(1024 * 1024);
+            while ((status = archive_read_next_header(input.get(), &item)) == ARCHIVE_OK) {
+                const QString path = safeEntryPath(archive_entry_pathname_utf8(item));
+                const auto wanted = std::lower_bound(selected.begin(), selected.end(), path,
+                    [](const Entry& entry, const QString& key) { return entry.path < key; });
+                if (wanted == selected.end() || wanted->path != path) { archive_read_data_skip(input.get()); continue; }
+                const QString outputPath = QDir(temporaryRoot).absoluteFilePath(path);
+                if (!QDir().mkpath(QFileInfo(outputPath).absolutePath()))
+                    throw std::runtime_error("Could not create archive output directory");
+                QSaveFile output(outputPath);
+                if (!output.open(QIODevice::WriteOnly)) throw std::runtime_error("Could not create extracted file");
+                qint64 extractedBytes = 0;
+                for (;;) {
+                    const la_ssize_t count = archive_read_data(input.get(), buffer.data(), buffer.size());
+                    if (count == 0) break;
+                    if (count < 0) throw std::runtime_error(archive_error_string(input.get()));
+                    if (count > wanted->size - extractedBytes)
+                        throw std::runtime_error("Archive entry exceeds its declared size");
+                    extractedBytes += count;
+                    if (output.write(buffer.data(), count) != count) throw std::runtime_error("Could not write extracted file");
+                }
+                if (extractedBytes != wanted->size)
+                    throw std::runtime_error("Archive entry is shorter than its declared size");
+                if (!output.commit()) throw std::runtime_error("Could not finish extracted file");
+                ++extractedCount;
+            }
+            requireCleanArchiveStatus(input.get(), status);
+            if (extractedCount != selected.size())
+                throw std::runtime_error("Archive ended before all selected media files were extracted");
         }
-        requireCleanArchiveStatus(input.get(), status);
-        if (extractedCount != selected.size())
-            throw std::runtime_error("Archive ended before all selected media files were extracted");
 
         const QString sourceDirectory = selectedParent.isEmpty() ? temporaryRoot
             : QDir(temporaryRoot).absoluteFilePath(selectedParent);
@@ -240,8 +273,15 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
                 externalSidecar(archivePath, ".json"),
                 externalSidecar(archivePath, "_gyroflow.json")};
     } catch (...) {
-        QDir(temporaryRoot).removeRecursively();
+        removeReviewArchive(temporaryRoot);
         throw;
     }
+}
+
+bool removeReviewArchive(const QString& temporaryRoot) {
+    if (temporaryRoot.isEmpty()) return true;
+    unregisterZipSource(temporaryRoot.toStdString());
+    QDir directory(temporaryRoot);
+    return !directory.exists() || directory.removeRecursively();
 }
 }

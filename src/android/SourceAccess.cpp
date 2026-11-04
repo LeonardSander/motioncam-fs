@@ -199,7 +199,7 @@ FILE* openSourceFile(const std::string& path) {
     if (!file) ::close(fd);
     return file;
 }
-uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {
+uintmax_t nativeSourceFileSize(const std::filesystem::path& path, std::error_code& error) {
     const auto activity = QNativeInterface::QAndroidApplication::context();
     const auto size = activity.callMethod<jlong>("sourceSizeForImport", QString::fromStdString(path.string()));
     if (size >= 0) { error.clear(); return uintmax_t(size); }
@@ -214,7 +214,7 @@ uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& err
     error.clear();
     return uintmax_t(length);
 }
-std::string sourceRevision(const std::string& path) {
+std::string nativeSourceRevision(const std::string& path) {
     const auto activity = QNativeInterface::QAndroidApplication::context();
     return activity.callMethod<QString>("sourceRevisionForImport", QString::fromStdString(path)).toStdString();
 }

@@ -1,6 +1,8 @@
 #include "SourceMedia.h"
+#include "SourceInput.h"
 #include "AudioWriter.h"
 #include <algorithm>
+#include <cerrno>
 #include <stdexcept>
 #include <cmath>
 #include <cstring>
@@ -127,14 +129,66 @@ using AudioPacket = std::unique_ptr<AVPacket, void(*)(AVPacket*)>;
 void freeAudioFrame(AVFrame* p) { av_frame_free(&p); }
 void freeAudioPacket(AVPacket* p) { av_packet_free(&p); }
 
+// FFmpeg reads ZIP companions through the same seekable source interface as
+// DNG frames, including compressed audio tracks. No temporary audio file.
+struct ZipAudioInput {
+    motioncam::SourceInputStream input;
+    AVIOContext* io = nullptr;
+    explicit ZipAudioInput(const std::string& path) : input(path, std::ios::binary) {
+        if (!input) throw std::runtime_error("Could not open ZIP audio source");
+        auto* buffer = static_cast<uint8_t*>(av_malloc(65536));
+        io = buffer ? avio_alloc_context(buffer, 65536, 0, this, read, nullptr, seek) : nullptr;
+        if (!io) { av_free(buffer); throw std::bad_alloc(); }
+    }
+    ~ZipAudioInput() {
+        if (io) { av_freep(&io->buffer); avio_context_free(&io); }
+    }
+    static int read(void* opaque, uint8_t* bytes, int size) {
+        try {
+            auto& input = static_cast<ZipAudioInput*>(opaque)->input;
+            input.read(reinterpret_cast<char*>(bytes), size);
+            if (input.bad()) return AVERROR(EIO);
+            return input.gcount() ? static_cast<int>(input.gcount()) : AVERROR_EOF;
+        } catch (...) { return AVERROR(EIO); }
+    }
+    static int64_t seek(void* opaque, int64_t offset, int whence) {
+        try {
+            auto& input = static_cast<ZipAudioInput*>(opaque)->input;
+            input.clear();
+            if (whence & AVSEEK_SIZE) {
+                const auto position = input.tellg();
+                input.seekg(0, std::ios::end);
+                const auto size = input.tellg();
+                input.seekg(position);
+                return static_cast<int64_t>(size);
+            }
+            whence &= ~AVSEEK_FORCE;
+            if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) return AVERROR(EINVAL);
+            input.seekg(offset, whence == SEEK_SET ? std::ios::beg : whence == SEEK_CUR ? std::ios::cur : std::ios::end);
+            return input ? static_cast<int64_t>(input.tellg()) : AVERROR(EIO);
+        } catch (...) { return AVERROR(EIO); }
+    }
+};
+
 // One input/decode/resample implementation for mounted WAV audio and exports.
 class AudioInput {
 public:
     explicit AudioInput(const std::string& path)
-        : mFormat(nullptr, [](AVFormatContext* p) { motioncam::closeSourceMedia(&p); }),
+        : mFormat(nullptr, [](AVFormatContext* p) {
+              if (p && (p->flags & AVFMT_FLAG_CUSTOM_IO) && p->pb && p->pb->read_packet == ZipAudioInput::read)
+                  avformat_close_input(&p);
+              else motioncam::closeSourceMedia(&p);
+          }),
           mDecoder(nullptr, [](AVCodecContext* p) { avcodec_free_context(&p); }) {
         AVFormatContext* raw = nullptr;
-        checkAudio(motioncam::openSourceMedia(&raw, path), "Open audio source");
+        if (motioncam::isZipSource(path)) {
+            mZipInput = std::make_unique<ZipAudioInput>(path);
+            raw = avformat_alloc_context();
+            if (!raw) throw std::bad_alloc();
+            raw->pb = mZipInput->io;
+            raw->flags |= AVFMT_FLAG_CUSTOM_IO;
+            checkAudio(avformat_open_input(&raw, path.c_str(), nullptr, nullptr), "Open ZIP audio source");
+        } else checkAudio(motioncam::openSourceMedia(&raw, path), "Open audio source");
         mFormat.reset(raw);
         checkAudio(avformat_find_stream_info(mFormat.get(), nullptr), "Read audio source");
         mIndex = av_find_best_stream(mFormat.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
@@ -218,6 +272,7 @@ public:
         while (convertFrame(nullptr)) audioProgress(keepGoing);
     }
 private:
+    std::unique_ptr<ZipAudioInput> mZipInput;
     std::unique_ptr<AVFormatContext, void(*)(AVFormatContext*)> mFormat;
     AudioCodec mDecoder;
     int mIndex = -1;

@@ -1,6 +1,9 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "ArchiveImport.h"
+#include <archive.h>
+#include <archive_entry.h>
 #include "DataLevels.h"
 #include "CalibrationData.h"
 #include "LRUCache.h"
@@ -262,6 +265,59 @@ private:
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--zip-source-self-test") == 0) {
+        namespace fs = std::filesystem;
+        const auto root = fs::temp_directory_path() / ("motioncam-zip-dng-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(root);
+        struct Cleanup { fs::path path; ~Cleanup() { fs::remove_all(path); } } cleanup{root};
+        const auto uncompressedA = makeDng(1234, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
+        const std::vector<std::string> timingNames{
+            "clip-00000000.DNG", "clip-00000002.DNG", "clip-00000013.DNG"};
+        // ZIP streams must preserve TIFF metadata seeks, complete frame payloads,
+        // sequence discovery, and sensor timestamps across all supported methods.
+        for (const char* compression : {"store", "deflate", "zstd"}) {
+            const auto zipPath = root / (std::string(compression) + "-dng.zip");
+            auto* output = archive_write_new();
+            assert(archive_write_set_format_zip(output) == ARCHIVE_OK);
+            assert(archive_write_set_format_option(output, "zip", "compression", compression) == ARCHIVE_OK);
+            assert(archive_write_open_filename(output, zipPath.string().c_str()) == ARCHIVE_OK);
+            const auto add = [&](const std::string& name, const void* data, size_t size) {
+                auto* entry = archive_entry_new();
+                archive_entry_set_pathname(entry, name.c_str());
+                archive_entry_set_filetype(entry, AE_IFREG);
+                archive_entry_set_perm(entry, 0600);
+                archive_entry_set_size(entry, size);
+                assert(archive_write_header(output, entry) == ARCHIVE_OK);
+                assert(archive_write_data(output, data, size) == static_cast<la_ssize_t>(size));
+                archive_entry_free(entry);
+            };
+            for (const auto& name : timingNames) add(name, uncompressedA.data(), uncompressedA.size());
+            const std::string timing = "name,sensor_timestamp_ns,slot\n"
+                "clip-00000000.DNG,1708783772168520,0\n"
+                "clip-00000002.DNG,1708783805495603,2\n"
+                "clip-00000013.DNG,1708783991190968,13\n";
+            add("clip.frames.csv", timing.data(), timing.size());
+            assert(archive_write_close(output) == ARCHIVE_OK);
+            archive_write_free(output);
+            const auto imported = motioncam::extractReviewArchive(QString::fromStdString(zipPath.string()));
+            motioncam::DNGDecoder decoder(imported.sourcePath.toStdString());
+            const auto metadata = motioncam::vfs::readDngTimingSidecar(imported.sourcePath.toStdString(), timingNames);
+            decoder.overrideTimestamps(motioncam::vfs::sidecarTimestamps(metadata, timingNames.size()));
+            assert(decoder.getFrames().size() == 3);
+            assert(decoder.getFrames()[1].timestamp == 33327083);
+            assert(decoder.getFrames()[2].timestamp == 219022448);
+            for (int i : {2, 0, 1}) {
+                motioncam::DNGFrameMetadata frameMetadata;
+                assert(decoder.getFrameMetadata(i, frameMetadata));
+                std::vector<uint8_t> frame;
+                assert(decoder.extractFrame(i, frame) && frame == uncompressedA);
+                assert(fs::file_size(decoder.getFrames()[i].filePath) == 0);
+            }
+            motioncam::removeReviewArchive(imported.temporaryRoot);
+        }
+        return 0;
+    }
     if (argc == 2 && std::strcmp(argv[1], "--jpeg-gpu-benchmark") == 0) {
         for (const int channels : {1, 3}) {
             const int width = channels == 1 ? 4096 : 2051;

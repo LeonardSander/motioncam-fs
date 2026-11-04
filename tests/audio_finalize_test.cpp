@@ -1,4 +1,7 @@
 #include "AudioWriter.h"
+#include "ZipSource.h"
+#include <archive.h>
+#include <archive_entry.h>
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -69,6 +72,41 @@ int main() {
     const auto flac = (root / "audio.flac").string();
     motioncam::AudioWriter::convertFile(wav, flac, "flac", false);
     assert(decode(flac, AV_CODEC_ID_FLAC) == input);
+    // Both WAV and encoded audio companions are decoded directly from ZIPs.
+    for (const char* compression : {"store", "deflate", "zstd"}) {
+        const auto zip = (root / (std::string(compression) + ".zip")).string();
+        auto* output = archive_write_new();
+        assert(archive_write_set_format_zip(output) == ARCHIVE_OK);
+        assert(archive_write_set_format_option(output, "zip", "compression", compression) == ARCHIVE_OK);
+        assert(archive_write_open_filename(output, zip.c_str()) == ARCHIVE_OK);
+        for (const auto& source : {wav, flac}) {
+            std::ifstream inputFile(source, std::ios::binary);
+            const std::vector<char> content((std::istreambuf_iterator<char>(inputFile)), {});
+            auto* entry = archive_entry_new();
+            archive_entry_set_pathname(entry, std::filesystem::path(source).filename().string().c_str());
+            archive_entry_set_filetype(entry, AE_IFREG);
+            archive_entry_set_perm(entry, 0600);
+            archive_entry_set_size(entry, content.size());
+            assert(archive_write_header(output, entry) == ARCHIVE_OK);
+            assert(archive_write_data(output, content.data(), content.size()) == static_cast<la_ssize_t>(content.size()));
+            archive_entry_free(entry);
+        }
+        assert(archive_write_close(output) == ARCHIVE_OK);
+        archive_write_free(output);
+        const auto index = root / compression;
+        std::filesystem::create_directories(index);
+        for (const char* name : {"audio.wav", "audio.flac"}) std::ofstream(index / name);
+        motioncam::registerZipSource(zip, index.string(), motioncam::indexZipSource(zip));
+        for (const char* name : {"audio.wav", "audio.flac"}) {
+            const auto restored = motioncam::AudioWriter::decodeWav((index / name).string(), 24.0);
+            assert(restored && !restored->empty());
+            const auto decoded = root / "zip-decoded.wav";
+            { std::ofstream out(decoded, std::ios::binary);
+              out.write(reinterpret_cast<const char*>(restored->data()), restored->size()); }
+            assert(decode(decoded.string(), AV_CODEC_ID_PCM_S16LE) == input);
+            assert(std::filesystem::file_size(index / name) == 0);
+        }
+    }
     const auto copied = (root / "copy.flac").string();
     motioncam::AudioWriter::convertFile(flac, copied, "flac", true);
     assert(decode(copied, AV_CODEC_ID_FLAC) == input);

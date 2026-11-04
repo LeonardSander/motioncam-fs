@@ -1,10 +1,12 @@
 #pragma once
 
 #include "SourceAnalysisCache.h"
+#include "ZipSource.h"
 
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #if defined(__ANDROID__) || defined(MOTIONCAM_SOURCE_INPUT_TEST)
 #include <algorithm>
@@ -20,12 +22,12 @@ void prefetchSourceReadDescriptor(const std::string& path) noexcept;
 int openSourceReadDescriptor(const std::string& path);
 void releaseSourceReadDescriptors(const std::string& path);
 FILE* openSourceFile(const std::string& path);
-uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error);
-std::string sourceRevision(const std::string& path);
+uintmax_t nativeSourceFileSize(const std::filesystem::path& path, std::error_code& error);
+std::string nativeSourceRevision(const std::string& path);
 
 // Each stream owns a descriptor and uses pread so duplicated URI handles
 // never share a mutable seek position.
-class SourceInputStream : public std::istream {
+class NativeSourceInputStream : public std::istream {
     class Buffer : public std::streambuf {
     public:
         Buffer(int fd, const std::filesystem::path& path) : mFd(fd), mPath(path) {}
@@ -74,7 +76,7 @@ class SourceInputStream : public std::istream {
             if (direction == std::ios::cur) base = mOffset - (gptr() ? egptr() - gptr() : 0);
             else if (direction == std::ios::end) {
                 std::error_code error;
-                const auto size = sourceFileSize(mPath, error);
+                const auto size = nativeSourceFileSize(mPath, error);
                 if (error || size > uintmax_t(std::numeric_limits<off_type>::max()))
                     return pos_type(off_type(-1));
                 base = static_cast<off_type>(size);
@@ -103,15 +105,15 @@ class SourceInputStream : public std::istream {
         char mBytes[65536];
     };
 public:
-    explicit SourceInputStream(const std::filesystem::path& path,
-                               std::ios::openmode mode = std::ios::in)
+    explicit NativeSourceInputStream(const std::filesystem::path& path,
+                                     std::ios::openmode mode = std::ios::in)
         : std::istream(nullptr), mBuffer(-1, path) {
         mBuffer.attach(openSourceReadDescriptor(path.string()));
         rdbuf(&mBuffer);
         if (!mBuffer.isOpen()) setstate(std::ios::failbit);
         else if (mode & std::ios::ate) seekg(0, std::ios::end);
     }
-    ~SourceInputStream() override { close(); }
+    ~NativeSourceInputStream() override { close(); }
     void close() {
         mBuffer.detach();
     }
@@ -123,11 +125,46 @@ inline FILE* decoderSource(const std::string& path) { return openSourceFile(path
 #else
 inline constexpr bool sourceReadAheadEnabled = false;
 inline void prefetchSourceReadDescriptor(const std::string&) noexcept {}
-using SourceInputStream = std::ifstream;
+using NativeSourceInputStream = std::ifstream;
 inline const std::string& decoderSource(const std::string& path) { return path; }
-inline uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {
+inline uintmax_t nativeSourceFileSize(const std::filesystem::path& path, std::error_code& error) {
     return std::filesystem::file_size(path, error);
 }
-inline std::string sourceRevision(const std::string&) { return {}; }
+inline std::string nativeSourceRevision(const std::string&) { return {}; }
 #endif
+
+inline uintmax_t sourceFileSize(const std::filesystem::path& path, std::error_code& error) {
+    if (const auto size = zipSourceSize(path)) { error.clear(); return *size; }
+    return nativeSourceFileSize(path, error);
+}
+inline std::string sourceRevision(const std::string& path) {
+    const auto revision = zipSourceRevision(path);
+    return revision.empty() ? nativeSourceRevision(path) : revision;
+}
+
+// ZIP entries expose the same seekable interface as local/provider files.
+class SourceInputStream : public std::istream {
+public:
+    explicit SourceInputStream(const std::filesystem::path& path,
+                               std::ios::openmode mode = std::ios::in)
+        : std::istream(nullptr), mZip(openZipSource(path)) {
+        if (mZip) rdbuf(mZip.get());
+        else {
+            mFile = std::make_unique<NativeSourceInputStream>(path, mode & ~std::ios::ate);
+            rdbuf(mFile->rdbuf());
+            if (!*mFile) setstate(mFile->rdstate());
+        }
+        if (is_open() && (mode & std::ios::ate)) seekg(0, std::ios::end);
+    }
+    bool is_open() const { return mZip || (mFile && mFile->is_open()); }
+    void close() {
+        rdbuf(nullptr);
+        mZip.reset();
+        mFile.reset();
+    }
+private:
+    std::unique_ptr<std::streambuf> mZip;
+    std::unique_ptr<NativeSourceInputStream> mFile;
+};
+
 }
