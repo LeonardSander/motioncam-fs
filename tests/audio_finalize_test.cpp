@@ -54,11 +54,55 @@ static std::vector<int16_t> decode(const std::string& path, AVCodecID expected) 
     return samples;
 }
 
+// Exercise container extraction with sample bits that a 16-bit projection loses.
+static void checkOriginalPrecision(const std::filesystem::path& root, AVCodecID codec, int bits) {
+    const auto source = (root / (std::to_string(bits) + ".mov")).string();
+    std::vector<uint8_t> samples(64 * 2 * (bits / 8));
+    for (size_t i = 0; i < samples.size(); ++i) samples[i] = static_cast<uint8_t>(i * 37 + 1);
+    AVFormatContext* output = nullptr;
+    assert(avformat_alloc_output_context2(&output, nullptr, "mov", source.c_str()) >= 0 && output);
+    auto* stream = avformat_new_stream(output, nullptr);
+    assert(stream);
+    stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+    stream->codecpar->codec_id = codec;
+    stream->codecpar->sample_rate = 48000;
+    stream->codecpar->bits_per_coded_sample = bits;
+    stream->codecpar->block_align = 2 * (bits / 8);
+    av_channel_layout_default(&stream->codecpar->ch_layout, 2);
+    stream->time_base = {1,48000};
+    assert(avio_open(&output->pb, source.c_str(), AVIO_FLAG_WRITE) >= 0);
+    assert(avformat_write_header(output, nullptr) >= 0);
+    auto* packet = av_packet_alloc();
+    assert(packet && av_new_packet(packet, samples.size()) >= 0);
+    std::copy(samples.begin(), samples.end(), packet->data);
+    packet->pts = packet->dts = 0; packet->duration = 64; packet->stream_index = stream->index;
+    assert(av_interleaved_write_frame(output, packet) >= 0);
+    assert(av_write_trailer(output) >= 0);
+    avio_closep(&output->pb); avformat_free_context(output);
+    const auto extracted = motioncam::AudioWriter::extractOriginalTrack(source,
+        (root / ("original-" + std::to_string(bits))).string());
+    AVFormatContext* input = nullptr;
+    assert(avformat_open_input(&input, extracted.c_str(), nullptr, nullptr) >= 0);
+    assert(avformat_find_stream_info(input, nullptr) >= 0);
+    const int audio = av_find_best_stream(input, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+    assert(audio >= 0 && input->streams[audio]->codecpar->codec_id == codec);
+    std::vector<uint8_t> restored;
+    while (av_read_frame(input, packet) >= 0) {
+        if (packet->stream_index == audio)
+            restored.insert(restored.end(), packet->data, packet->data + packet->size);
+        av_packet_unref(packet);
+    }
+    assert(restored == samples);
+    av_packet_free(&packet); avformat_close_input(&input);
+}
+
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
         ("mcfuse-audio-finalize-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);
     struct Cleanup { std::filesystem::path root; ~Cleanup() { std::filesystem::remove_all(root); } } cleanup{root};
+    checkOriginalPrecision(root, AV_CODEC_ID_PCM_S24LE, 24);
+    checkOriginalPrecision(root, AV_CODEC_ID_PCM_F32LE, 32);
     // A non-frame-aligned duration exercises codec tail and resampler flushing.
     std::vector<int16_t> input(48037 * 2);
     for (size_t i = 0; i < input.size(); ++i) input[i] = int16_t((i * 101u) % 20001u - 10000);
@@ -107,6 +151,10 @@ int main() {
             assert(std::filesystem::file_size(index / name) == 0);
         }
     }
+    const auto extractedWav = motioncam::AudioWriter::extractOriginalTrack(wav, (root / "extracted-pcm").string());
+    const auto extractedFlac = motioncam::AudioWriter::extractOriginalTrack(flac, (root / "extracted-flac").string());
+    assert(decode(extractedWav, AV_CODEC_ID_PCM_S16LE) == input);
+    assert(decode(extractedFlac, AV_CODEC_ID_FLAC) == input);
     const auto copied = (root / "copy.flac").string();
     motioncam::AudioWriter::convertFile(flac, copied, "flac", true);
     assert(decode(copied, AV_CODEC_ID_FLAC) == input);

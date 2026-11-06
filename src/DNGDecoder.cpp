@@ -255,7 +255,7 @@ std::string dngSequenceSignature(const std::string& path) {
 
 // Cache source metadata only; calibration sidecars are read separately on every
 // mount/reload. URI revision, size and filesystem write time are in the key.
-constexpr uint64_t dngMetadataCacheMagic = 0x4d4346444d440001ULL;
+constexpr uint64_t dngMetadataCacheMagic = 0x4d4346444d440002ULL;
 uint64_t metadataChecksum(const std::vector<uint8_t>& bytes,
                           const std::map<uint32_t, uint32_t>& directories) {
     uint64_t hash = 1469598103934665603ULL;
@@ -572,6 +572,12 @@ namespace {
     constexpr uint16_t TIFF_TYPE_RATIONAL = 5;
     constexpr uint16_t TIFF_TYPE_UNDEFINED = 7;
     constexpr uint16_t TIFF_TYPE_SRATIONAL = 10;
+
+    constexpr uint16_t TIFF_TYPE_IFD = 13;
+
+    bool isTiffIfdPointerType(uint16_t type) {
+        return type == TIFF_TYPE_LONG || type == TIFF_TYPE_IFD;
+    }
 
     size_t tiffTypeSize(uint16_t type) {
         switch (type) {
@@ -1265,9 +1271,9 @@ namespace {
                 if (valueOffset <= data.size() && bytes <= data.size() - valueOffset)
                     result.push_back({tag, type, itemCount, valueOffset, ifd, pos});
                 if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD) &&
-                    type == TIFF_TYPE_LONG && itemCount == 1)
+                    isTiffIfdPointerType(type) && itemCount == 1)
                     pending.push_back(rawOffset);
-                if (tag == TIFF_TAG_SUB_IFDS && (type == TIFF_TYPE_LONG)) {
+                if (tag == TIFF_TAG_SUB_IFDS && isTiffIfdPointerType(type)) {
                     for (uint32_t j = 0; j < itemCount && valueOffset + j * 4 + 4 <= data.size(); ++j)
                         pending.push_back(read32(data.data() + valueOffset + j * 4, little));
                 }
@@ -1387,7 +1393,7 @@ namespace {
                     write32(data.data() + position + 8, static_cast<uint32_t>(value), little);
                 }
                 if ((tag == TIFF_TAG_EXIF_IFD || tag == TIFF_TAG_GPS_IFD ||
-                        tag == TIFF_TAG_SUB_IFDS) && type == TIFF_TYPE_LONG)
+                        tag == TIFF_TAG_SUB_IFDS) && isTiffIfdPointerType(type))
                     for (uint32_t j = 0; j < items; ++j) {
                         const size_t at = value + size_t(j) * 4;
                         links.emplace_back(at, read32(data.data() + at, little));
@@ -1498,7 +1504,7 @@ namespace {
                     read32(data.data() + entry.entryOffset + 8, little)});
             if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_GPS_IFD ||
                  entry.tag == TIFF_TAG_SUB_IFDS) &&
-                entry.type == TIFF_TYPE_LONG) {
+                isTiffIfdPointerType(entry.type)) {
                 const uint32_t rawOffset = read32(data.data() + entry.entryOffset + 8, little);
                 if (entry.count == 1)
                     inlineIfdPointers.push_back({entry.entryOffset, rawOffset});
@@ -1642,7 +1648,7 @@ namespace {
                     read32(data.data() + entry.entryOffset + 8, little)});
             if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_GPS_IFD ||
                  entry.tag == TIFF_TAG_SUB_IFDS) &&
-                entry.type == TIFF_TYPE_LONG) {
+                isTiffIfdPointerType(entry.type)) {
                 const uint32_t rawOffset = read32(data.data() + entry.entryOffset + 8, little);
                 if (entry.count == 1) inlineIfdPointers.push_back({entry.entryOffset, rawOffset});
                 else subIfdArrays.push_back({entry.entryOffset, rawOffset});
@@ -1765,7 +1771,7 @@ namespace {
                 externalPointers.push_back({static_cast<uint32_t>(entry.entryOffset), raw});
             if ((entry.tag == TIFF_TAG_EXIF_IFD || entry.tag == TIFF_TAG_GPS_IFD ||
                  entry.tag == TIFF_TAG_SUB_IFDS) &&
-                entry.type == TIFF_TYPE_LONG) {
+                isTiffIfdPointerType(entry.type)) {
                 if (entry.count == 1) {
                     inlineIfdPointers.push_back({static_cast<uint32_t>(entry.entryOffset), raw});
                 } else {
@@ -3937,7 +3943,7 @@ bool DNGDecoder::fillMissingSidecarMetadata(
         bool hasNestedPointer = false;
         if (nested) {
             for (const auto& entry : destinationEntries)
-                if (entry.tag == pointerTag && entry.type == TIFF_TYPE_LONG && entry.count) {
+                if (entry.tag == pointerTag && isTiffIfdPointerType(entry.type) && entry.count) {
                     nestedPointer = entry;
                     hasNestedPointer = true;
                     targetIfd = read32(data.data() + entry.valueOffset, little);
@@ -3949,7 +3955,7 @@ bool DNGDecoder::fillMissingSidecarMetadata(
                                            TIFF_TYPE_LONG, 0, little)) return false;
                 destinationEntries = findTiffEntries(data, little);
                 for (const auto& entry : destinationEntries)
-                    if (entry.tag == pointerTag && entry.type == TIFF_TYPE_LONG && entry.count) {
+                    if (entry.tag == pointerTag && isTiffIfdPointerType(entry.type) && entry.count) {
                         nestedPointer = entry;
                         hasNestedPointer = true;
                         break;

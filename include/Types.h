@@ -447,6 +447,7 @@ struct RenderSettings {
     bool thumbnailPreview;
     // Internal source overrides used by temporary archive staging. These are
     // intentionally not serialized with user render settings.
+    std::string sourceTelemetryPath; // Original import path, including archives.
     std::string sourceSidecarPath;
     std::string sourceGyroflowSidecarPath;
 

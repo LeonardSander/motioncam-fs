@@ -1,7 +1,9 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "DebugInstrumentation.h"
 #include "ArchiveImport.h"
+#include "GyroTelemetry.h"
 #include <archive.h>
 #include <archive_entry.h>
 #include "DataLevels.h"
@@ -298,6 +300,16 @@ int main(int argc, char** argv) {
                 "clip-00000002.DNG,1708783805495603,2\n"
                 "clip-00000013.DNG,1708783991190968,13\n";
             add("clip.frames.csv", timing.data(), timing.size());
+            const nlohmann::json captureHeader = {{"camera", {{"cameraBrand", "Telemetry"}, {"cameraModel", "Camera"},
+                {"lensModel", "Telemetry Lens"}, {"additionalData", {{"clock_base_us", 1000000}}}}},
+                {"clip", {{"fileFrameRate", 60}, {"frameReadoutTimeUs", 13602}}}};
+            std::string gyroJsonl = nlohmann::json{{"magicString", "GyroflowProtobuf"},
+                {"protocolVersion", 1}, {"header", captureHeader}}.dump() + '\n';
+            for (int i = 0; i < 3; ++i) gyroJsonl += nlohmann::json{{"magicString", "GyroflowProtobuf"}, {"protocolVersion", 1},
+                {"frame", {{"frameNumber", i + 1}, {"startTimestampUs", i * 16667}, {"endTimestampUs", i * 16667 + 13602},
+                    {"iso", 800}, {"exposureTimeUs", 8333}, {"lens", nlohmann::json::array({{
+                        {"focalLengthMm", 6.06}, {"fNumber", 1.6}, {"focusDistanceMm", 500}}})}}}}.dump() + '\n';
+            add("clip-00000000.jsonl", gyroJsonl.data(), gyroJsonl.size());
             assert(archive_write_close(output) == ARCHIVE_OK);
             archive_write_free(output);
             const auto imported = motioncam::extractReviewArchive(QString::fromStdString(zipPath.string()));
@@ -314,7 +326,84 @@ int main(int argc, char** argv) {
                 assert(decoder.extractFrame(i, frame) && frame == uncompressedA);
                 assert(fs::file_size(decoder.getFrames()[i].filePath) == 0);
             }
+            const auto telemetry = motioncam::GyroTelemetry::load(imported.sourcePath.toStdString());
+            // Protobuf sensor timing deliberately conflicts with CSV timing.
+            auto preferredTimes = telemetry->frameTimestamps(timingNames.size());
+            assert(preferredTimes == std::vector<int64_t>({0,16667000,33334000}));
+            decoder.overrideTimestamps(preferredTimes);
+            assert(decoder.getFrames()[1].timestamp == 16667000);
+            assert(decoder.getFrames()[2].timestamp == 33334000);
+            auto filled = uncompressedA;
+            assert(telemetry->fillMissingDngMetadata(filled, 0));
+            motioncam::DNGFrameMetadata retained;
+            assert(motioncam::DNGDecoder::getColorMetadata(filled, retained));
+            assert(retained.iso == 100 && std::abs(retained.exposureTime - 0.01) < 1e-6);
+            assert(nestedIfdHasTag(filled, 34665, 33437) && nestedIfdHasTag(filled, 34665, 37386));
+            assert(motioncam::DNGDecoder::imagePayloadsEqual(filled, uncompressedA));
+            const auto once = filled;
+            assert(telemetry->fillMissingDngMetadata(filled, 0) && filled == once);
+            // mcpro24fps uses TIFF IFD (13), rather than LONG (4), for Exif links.
+            auto ifdPointer = filled;
+            assert(setTagType(ifdPointer, 34665, 13));
+            assert(motioncam::DNGDecoder::removeMetadataTags(ifdPointer, {33437}));
+            assert(telemetry->fillMissingDngMetadata(ifdPointer, 0));
+            assert(nestedIfdHasTag(ifdPointer, 34665, 33437));
+            assert(nestedIfdHasTag(ifdPointer, 34665, 37386));
+            assert(motioncam::DNGDecoder::imagePayloadsEqual(ifdPointer, uncompressedA));
+            // Adding a new GPS directory inserts a root pointer and relocates
+            // the existing type-13 Exif directory and its external values.
+            motioncam::DNGSidecarMetadataEntry gps;
+            gps.tag = 18; gps.type = 2; gps.count = 7; gps.gps = true;
+            gps.value = {'W', 'G', 'S', '-', '8', '4', 0};
+            assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(ifdPointer, {gps}));
+            assert(nestedIfdHasTag(ifdPointer, 34665, 33437));
+            assert(nestedIfdHasTag(ifdPointer, 34665, 37386));
+            assert(nestedIfdHasTag(ifdPointer, 34853, 18));
+            assert(motioncam::DNGDecoder::imagePayloadsEqual(ifdPointer, uncompressedA));
+            const auto ifdOnce = ifdPointer;
+            assert(telemetry->fillMissingDngMetadata(ifdPointer, 0) && ifdPointer == ifdOnce);
+            auto missingExposure = uncompressedA;
+            assert(motioncam::DNGDecoder::removeMetadataTags(missingExposure, {34855,33434}));
+            assert(telemetry->fillMissingDngMetadata(missingExposure, 0));
+            assert(motioncam::DNGDecoder::getColorMetadata(missingExposure, retained));
+            assert(retained.iso == 800 && std::abs(retained.exposureTime - 0.008333) < 1e-6);
             motioncam::removeReviewArchive(imported.temporaryRoot);
+        }
+        return 0;
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--zip-capture-metadata") == 0) {
+        for (int arg = 2; arg < argc; ++arg) {
+            const auto imported = motioncam::extractReviewArchive(QString::fromLocal8Bit(argv[arg]));
+            struct Cleanup {
+                QString root;
+                ~Cleanup() { motioncam::removeReviewArchive(root); }
+            } cleanup{imported.temporaryRoot};
+            motioncam::DNGDecoder decoder(imported.sourcePath.toStdString());
+            const auto telemetry = motioncam::GyroTelemetry::load(imported.sourcePath.toStdString());
+            const auto count = decoder.getFrames().size();
+            assert(count > 0 && telemetry->frames().size() == count);
+            const auto protobufTimes = telemetry->frameTimestamps(count);
+            assert(protobufTimes.size() == count);
+            decoder.overrideTimestamps(protobufTimes);
+            for (const auto index : {size_t{0}, count / 2, count - 1}) {
+                std::vector<uint8_t> bytes;
+                assert(decoder.getFrames()[index].timestamp == protobufTimes[index]);
+                assert(decoder.extractFrame(index, bytes));
+                const auto original = bytes;
+                motioncam::DNGFrameMetadata before, after, fromFile;
+                assert(motioncam::DNGDecoder::getColorMetadata(bytes, before));
+                assert(decoder.getFrameMetadata(index, fromFile));
+                assert(before.iso > 0 && before.exposureTime > 0);
+                assert(before.iso == fromFile.iso && before.exposureTime == fromFile.exposureTime);
+                assert(telemetry->fillMissingDngMetadata(bytes, index));
+                assert(motioncam::DNGDecoder::getColorMetadata(bytes, after));
+                assert(after.iso == before.iso && after.exposureTime == before.exposureTime);
+                assert(motioncam::DNGDecoder::imagePayloadsEqual(bytes, original));
+                const auto once = bytes;
+                assert(telemetry->fillMissingDngMetadata(bytes, index) && bytes == once);
+            }
+            std::fprintf(stderr, "%s: capture metadata and image payload verified (first/middle/last of %zu frames)\n",
+                argv[arg], count);
         }
         return 0;
     }
@@ -500,22 +589,22 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
         _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "");
         _putenv_s("MOTIONCAM_JPEG_ENCODE_PROFILE", "1");
-        if (tiled) _putenv_s("MOTIONCAM_JPEG_TILED", "1");
 #else
         unsetenv("MOTIONCAM_GPU_JPEG_DISABLE");
         setenv("MOTIONCAM_JPEG_ENCODE_PROFILE", "1", 1);
-        if (tiled) setenv("MOTIONCAM_JPEG_TILED", "1", 1);
 #endif
-        if (!motioncam::DNGDecoder::compressLosslessJPEG(gpu)) return 5;
+        const auto compress = [&](auto& bytes) {
+            return tiled ? motioncam::DNGDecoder::compressLosslessJPEGTiled(bytes)
+                         : motioncam::DNGDecoder::compressLosslessJPEG(bytes);
+        };
+        if (!compress(gpu)) return 5;
         const auto gpuEnd = std::chrono::steady_clock::now();
-        if (!motioncam::DNGDecoder::compressLosslessJPEG(warmGpu)) return 6;
+        if (!compress(warmGpu)) return 6;
         const auto warmEnd = std::chrono::steady_clock::now();
 #ifdef _WIN32
         _putenv_s("MOTIONCAM_JPEG_ENCODE_PROFILE", "");
-        if (tiled) _putenv_s("MOTIONCAM_JPEG_TILED", "");
 #else
         unsetenv("MOTIONCAM_JPEG_ENCODE_PROFILE");
-        if (tiled) unsetenv("MOTIONCAM_JPEG_TILED");
 #endif
         const bool byteEqual = cpu == gpu && cpu == warmGpu;
         bool equal = byteEqual;
@@ -773,7 +862,6 @@ int main(int argc, char** argv) {
         assert(writer.WriteToFile(output, &error));
         const auto bytes = output.str();
         std::vector<uint8_t> dng(bytes.begin(), bytes.end());
-        auto tiled = dng;
         assert(motioncam::DNGDecoder::compressLosslessJPEG(dng));
         motioncam::DecodedDNGImage decoded;
         assert(motioncam::DNGDecoder::decodeImage(dng, decoded));
@@ -797,6 +885,9 @@ int main(int argc, char** argv) {
         auto finalizedStrip = std::vector<uint8_t>(bytes.begin(), bytes.end());
         motioncam::vfs::finalizeDng(finalizedStrip, jpeg92Settings, jpeg92Finalize);
         assert(tagValue(finalizedStrip, 273).count == 1);
+#if MOTIONCAM_DEBUG_INSTRUMENTATION
+        // Legacy developer overrides are intentionally ignored in Release.
+        auto tiled = std::vector<uint8_t>(bytes.begin(), bytes.end());
 #ifdef _WIN32
         _putenv_s("MOTIONCAM_JPEG_TILED", "1");
 #else
@@ -812,6 +903,7 @@ int main(int argc, char** argv) {
         motioncam::DecodedDNGImage tiledDecoded;
         assert(motioncam::DNGDecoder::decodeImage(tiled, tiledDecoded));
         assert(tiledDecoded.samples == pixels);
+#endif
     }
     assert((motioncam::vfs::inferLegacyGainMapSensorResolution(1920, 1080, 1920, 1080) ==
             std::array<int, 2>{2048, 1536}));

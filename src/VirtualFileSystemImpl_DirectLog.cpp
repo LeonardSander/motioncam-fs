@@ -129,6 +129,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
         const std::string& baseName) :
         MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
+        mTelemetry(GyroTelemetry::load(file, config.sourceTelemetryPath)),
         mBaseName(baseName),
         mTypicalDngSize(0),
         mFps(0),
@@ -439,6 +440,10 @@ VirtualFileSystemImpl_DirectLog::frameMetadata(int frameNumber) const {
         if (mSidecarMetadata.contains(name)) return &mSidecarMetadata.at(name);
         return nullptr;
     };
+    if (const auto* capture = mTelemetry->frame(static_cast<size_t>(frameNumber))) {
+        if (!field("iso")) result.iso = capture->value("iso", 0.0);
+        if (!field("shutterSpeedSeconds")) result.shutterSpeed = capture->value("exposureTimeUs", 0.0) / 1e6;
+    }
     if (const auto* value = field("iso")) result.iso = value->get<double>();
     if (const auto* value = field("shutterSpeedSeconds")) result.shutterSpeed = value->get<double>();
     if (const auto* value = field("baselineExposure")) result.baselineExposure = value->get<double>();
@@ -1272,6 +1277,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                              processed.width, processed.height, prepopulatedImage,
                              processed.bayer))
             throw std::runtime_error("Could not generate DirectLog DNG");
+        if (!mTelemetry->fillMissingDngMetadata(dngData, frameNumber))
+            throw std::runtime_error("Could not fill DirectLog capture metadata");
         const auto generatedAt = motioncam::diagnosticNow();
         vfs::DngPixelPipelineOptions pixels;
         std::vector<uint8_t> gpuJpeg;

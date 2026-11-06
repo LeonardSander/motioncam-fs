@@ -25,6 +25,11 @@ namespace motioncam {
         // PCM and float samples retain their original precision.
         static void offsetWav(std::vector<uint8_t>& bytes, int64_t offsetUs);
 
+        // Extracts the original audio packets, preserving their codec and precision.
+        // Returns the staged filename, or an empty string if no audio is present.
+        static std::string extractOriginalTrack(const std::string& source,
+            const std::string& outputBase);
+
         static void convertFile(const std::string& source, const std::string& destination,
                                 const std::string& codec, bool copy,
                                 const std::function<bool()>& keepGoing = {});

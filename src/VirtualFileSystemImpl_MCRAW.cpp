@@ -335,6 +335,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         const std::string& baseName) :
         MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
+        mTelemetry(GyroTelemetry::load(file, settings.sourceTelemetryPath)),
         mBaseName(baseName),
         mSidecarPath(settings.sourceSidecarPath.empty()
             ? vfs::sidecarPath(file) : settings.sourceSidecarPath),
@@ -919,6 +920,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             throw std::runtime_error("DNG generation returned no data");
         const auto generatedAt = motioncam::diagnosticNow();
         std::vector<uint8_t>& timed = *output;
+        if (!mTelemetry->fillMissingDngMetadata(timed, frameIt->second))
+            throw std::runtime_error("Could not fill raw-container capture metadata");
         attachSidecarGainMapOpcodes(timed, frameIt->second);
         vfs::DngPixelPipelineOptions pixels;
         std::vector<uint8_t> gpuJpeg;

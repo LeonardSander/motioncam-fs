@@ -317,7 +317,7 @@ public class MotionCamActivity extends QtActivity {
         // Reserve one basename for the complete video/metadata set so a repeat
         // export never overwrites earlier files or splits matching sidecars.
         for (String extension : new String[]{".mov", ".mp4", ".json", "_gyroflow.json",
-                ".gcsv", ".wav", ".flac", ".opus", ".aac"}) {
+                ".gcsv", ".jsonl", ".wav", ".flac", ".opus", ".aac", ".mka"}) {
             if (names.contains(base + extension)) return false;
         }
         return true;

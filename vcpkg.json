@@ -9,6 +9,7 @@
         "spdlog",
         "libjpeg-turbo",
         "libarchive",
+        "protobuf",
         "libjxl",
         {
             "name": "ffmpeg",

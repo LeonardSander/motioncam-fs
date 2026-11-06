@@ -101,6 +101,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         const std::string& baseName) :
         MountedDngSource(lruCache, processingThreadPool),
         mSrcPath(file),
+        mTelemetry(GyroTelemetry::load(file, config.sourceTelemetryPath)),
         mBaseName(baseName),
         mSidecarPath(config.sourceSidecarPath.empty()
             ? vfs::sidecarPath(file) : config.sourceSidecarPath),
@@ -144,6 +145,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             frameNames.push_back(boost::filesystem::path(frame.filePath).filename().string());
         auto timestamps = vfs::sidecarTimestamps(mSidecarMetadata, frameNames.size());
         if (!timestamps.empty() && timestamps.front() < 0) timestamps.clear();
+        if (timestamps.empty()) timestamps = mTelemetry->frameTimestamps(frameNames.size());
         const auto captureSidecar = vfs::readDngTimingSidecar(mDecoder->getSequenceInfo().basePath,
             timestamps.empty() ? frameNames : std::vector<std::string>{});
         if (timestamps.empty()) timestamps = vfs::sidecarTimestamps(captureSidecar, frameNames.size());
@@ -794,6 +796,8 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
     PreparedFrame result;
     if (!mDecoder->extractFrame(static_cast<int>(frameIndex), result.dng))
         throw std::runtime_error("Could not read source DNG");
+    if (!mTelemetry->fillMissingDngMetadata(result.dng, frameIndex))
+        throw std::runtime_error("Could not fill missing DNG capture metadata");
     const auto extractedAt = motioncam::diagnosticNow();
     // The frame is already in memory. getFrameMetadata can reopen and read the
     // entire source DNG on a cache miss, which is costly during sequence reads.

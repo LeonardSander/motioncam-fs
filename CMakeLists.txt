@@ -419,6 +419,20 @@ add_library(MotionCamZipSource STATIC src/ZipSource.cpp)
 set_target_properties(MotionCamZipSource PROPERTIES AUTOMOC OFF AUTOUIC OFF)
 target_include_directories(MotionCamZipSource PUBLIC include)
 target_link_libraries(MotionCamZipSource PUBLIC LibArchive::LibArchive ZLIB::ZLIB)
+find_package(Protobuf CONFIG REQUIRED)
+add_library(MotionCamTelemetry STATIC
+    src/GyroTelemetry.cpp
+    src/GyroTelemetryDng.cpp
+    src/GyroTelemetryMux.cpp
+    deps/gyroflow/gyroflow.proto)
+set_target_properties(MotionCamTelemetry PROPERTIES AUTOMOC OFF AUTOUIC OFF)
+protobuf_generate(TARGET MotionCamTelemetry LANGUAGE cpp APPEND_PATH
+    IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/gyroflow"
+    PROTOC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+target_include_directories(MotionCamTelemetry PUBLIC include
+    PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/deps/gyroflow")
+target_link_libraries(MotionCamTelemetry PUBLIC MotionCamZipSource motioncam-decoder
+    PRIVATE protobuf::libprotobuf)
 target_link_libraries(motioncam-decoder PUBLIC ZLIB::ZLIB)
 
 if(MSVC)
@@ -593,7 +607,11 @@ FetchContent_MakeAvailable(bs_thread_pool)
 target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
     ${bs_thread_pool_SOURCE_DIR}/include)
 
+target_link_libraries(MotionCamTelemetry PRIVATE ${FFMPEG_LIBRARIES})
+target_include_directories(MotionCamTelemetry PRIVATE ${FFMPEG_INCLUDE_DIRS})
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
+  MotionCamTelemetry
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Network
   Qt${QT_VERSION_MAJOR}::Concurrent
@@ -841,6 +859,11 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-telemetry-test tests/gyro_telemetry_test.cpp src/ArchiveImport.cpp)
+    target_include_directories(motioncam-telemetry-test PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(motioncam-telemetry-test PRIVATE MotionCamTelemetry protobuf::libprotobuf Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
+    add_test(NAME motioncam-telemetry-test COMMAND motioncam-telemetry-test)
+    set_tests_properties(motioncam-telemetry-test PROPERTIES LABELS portable)
     add_executable(motioncam-debug-instrumentation-test tests/debug_instrumentation_test.cpp)
     target_include_directories(motioncam-debug-instrumentation-test PRIVATE include)
     add_test(NAME motioncam-debug-instrumentation-test COMMAND motioncam-debug-instrumentation-test)
@@ -992,7 +1015,7 @@ if(BUILD_TESTING)
         include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
     target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex
-        spdlog::spdlog motioncam-decoder MotionCamZipSource JPEG::JPEG)
+        spdlog::spdlog motioncam-decoder MotionCamTelemetry JPEG::JPEG)
     target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
         TINY_DNG_ENABLE_JPEG_XL)
     if(ANDROID)

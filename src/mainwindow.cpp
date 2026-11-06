@@ -16,6 +16,7 @@
 #include "CpuWorkerBudget.h"
 #include "VirtualFileSystemImpl.h"
 #include "ArchiveImport.h"
+#include "GyroTelemetry.h"
 #include "AudioWriter.h"
 #include "HardwareVideoEncoder.h"
 #include "NativeVideoEncoder.h"
@@ -1454,7 +1455,21 @@ namespace {
     }
 
     bool isMetadataOnlyFinalizeFormat(const QString& mode) {
-        return mode.trimmed().compare("Audio, GCSV, JSON Only", Qt::CaseInsensitive) == 0;
+        auto value = mode.trimmed();
+        for (const auto& suffix : {QStringLiteral(" flac"), QStringLiteral(" opus")})
+            if (value.endsWith(suffix, Qt::CaseInsensitive)) value.chop(suffix.size());
+        return value.compare("Audio Only", Qt::CaseInsensitive) == 0 ||
+               value.compare("JSON Only", Qt::CaseInsensitive) == 0 ||
+               value.compare("GCSV / JSONL Only", Qt::CaseInsensitive) == 0;
+    }
+
+    std::vector<int64_t> telemetryOutputTimeline(const motioncam::FileInfo& info) {
+        std::vector<int64_t> timestamps;
+        if (!info.timingUsesCfrMapping || !(info.fps > 0)) return timestamps;
+        const int count = info.totalFrames - info.droppedFrames + info.duplicatedFrames;
+        timestamps.reserve(std::max(0, count));
+        for (int i = 0; i < count; ++i) timestamps.push_back(static_cast<int64_t>(std::llround(i * 1e9 / info.fps)));
+        return timestamps;
     }
 
     QString finalizeAudioCodec(QString& mode) {
@@ -2008,7 +2023,8 @@ MainWindow::MainWindow(QWidget *parent)
 #ifndef __ANDROID__
         "HEVC 420 slow 14 flac", "HEVC 420 slow 14 opus",
 #endif
-        "Audio, GCSV, JSON Only"});
+        "Audio Only",
+        "JSON Only", "GCSV / JSONL Only"});
     ui->dngCompressionModeComboBox->setToolTip(
         tr("Append flac or opus to a DNG or Camera Native format to encode audio. "
            "Without a suffix, existing audio is copied unchanged. "
@@ -2016,7 +2032,8 @@ MainWindow::MainWindow(QWidget *parent)
            "Android format: H264|HEVC|AV1 8b|10b Mbps (device support required; 10-bit requires Android 13+ and P010 input). "
            "AV1 MP4 converts WAV audio to lossless FLAC by default. "
 #endif
-           "Audio, GCSV, JSON Only exports audio, gyro data, and per-clip metadata without video."));
+           "Audio Only exports audio; JSON Only exports per-clip metadata; "
+           "GCSV / JSONL Only exports gyro telemetry in its original format."));
     motioncam::warmVulkanGalleryPreview(
         QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
             .filePath(QStringLiteral("gallery-vulkan-shaders")).toStdString());
@@ -2749,6 +2766,7 @@ void MainWindow::restoreSettings() {
         QString savedMode = settings.value("cameraNativeMode").toString();
         if (savedMode.startsWith("Camera Native (") && savedMode.endsWith(')'))
             savedMode = savedMode.mid(15, savedMode.size() - 16);
+        if (savedMode == "Audio, GCSV, JSON Only") savedMode = "JSON Only";
         if (savedMode == "HEVC") savedMode = "HEVC 420 slow 14";
         if (savedMode == "AV1") savedMode = "AV1 420 3 7";
         if (savedMode == "AV1 HDR + Noise" || savedMode == "AV1 Synth Noise")
@@ -2761,7 +2779,7 @@ void MainWindow::restoreSettings() {
         if (savedIndex >= 4) {
             compressionIndex = savedIndex;
             restoredNativeMode = true;
-        } else if (isCameraNativeFormat(savedMode)) {
+        } else if (isCameraNativeFormat(savedMode) || isMetadataOnlyFinalizeFormat(savedMode)) {
             restoredNativeText = savedMode;
             restoredNativeMode = true;
         }
@@ -3091,6 +3109,10 @@ void MainWindow::mountFile(const QString& filePath) {
             std::exception_ptr importError;
             auto future = QtConcurrent::run([filePath, &importError] {
                 try {
+#ifdef __ANDROID__
+                    const auto sidecarError = motioncam::syncSidecarsForImport(filePath);
+                    if (!sidecarError.isEmpty()) spdlog::warn("{}", sidecarError.toStdString());
+#endif
                     return motioncam::extractReviewArchive(filePath);
                 } catch (...) {
                     importError = std::current_exception();
@@ -3217,6 +3239,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 #endif
     QString mountError;
     auto settings = buildRenderSettings();
+    settings.sourceTelemetryPath = importPath.toStdString();
     settings.sourceSidecarPath = sidecarPath.toStdString();
     settings.sourceGyroflowSidecarPath = gyroflowSidecarPath.toStdString();
 #ifdef __APPLE__
@@ -3824,6 +3847,7 @@ motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountI
     // the per-card routing in every settings snapshot used for thumbnails and
     // gallery playback.
     if (const auto* fileWidget = fileWidgetForMount(mountId)) {
+        settings.sourceTelemetryPath = fileWidget->property("importPath").toString().toStdString();
         settings.sourceSidecarPath =
             fileWidget->property("sidecarPath").toString().toStdString();
         settings.sourceGyroflowSidecarPath =
@@ -5723,6 +5747,122 @@ subprocess.check_call([str(python), '-m', 'pip', 'install', '-r', str(root / 're
     return runtimeRoot;
 }
 
+void MainWindow::finalizeAncillaryOnly(QWidget* fileWidget, const QString& requestedMode) {
+    QString mode = requestedMode;
+    const auto audioCodec = finalizeAudioCodec(mode);
+    const bool audioOnly = mode.compare("Audio Only", Qt::CaseInsensitive) == 0;
+    const auto source = fileWidget->property("filePath").toString();
+    const auto importPath = fileWidget->property("importPath").toString();
+    const QFileInfo input(importPath.isEmpty() ? source : importPath);
+    const QString base = input.completeBaseName() + "_METADATA";
+    const auto mountId = fileWidget->property("mountId").toInt();
+    QProgressDialog progress(audioOnly ? tr("Exporting audio...") : tr("Exporting gyro telemetry..."),
+                             QString(), 0, 0, this);
+    progress.setCancelButton(nullptr);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.show();
+    QApplication::processEvents();
+    try {
+        QTemporaryDir staging;
+        if (!staging.isValid()) throw std::runtime_error("Could not create export staging directory");
+        QString extension;
+        QString staged;
+        if (audioOnly) {
+            // Container audio must precede the mount's decoded 16-bit WAV projection.
+            if (source.endsWith(".mov", Qt::CaseInsensitive) ||
+                source.endsWith(".mp4", Qt::CaseInsensitive) ||
+                source.endsWith(".mkv", Qt::CaseInsensitive)) {
+                staged = QString::fromStdString(AudioWriter::extractOriginalTrack(source.toStdString(),
+                    QDir(staging.path()).filePath(base).toStdString()));
+                if (!staged.isEmpty()) extension = "." + QFileInfo(staged).suffix();
+            }
+            if (staged.isEmpty()) {
+#ifdef __ANDROID__
+                auto* processing = dynamic_cast<motioncam::ProcessingFileSystem*>(mFuseFilesystem.get());
+                if (!processing) throw std::runtime_error("Audio processing is unavailable");
+                const auto entry = processing->audioEntry(mountId);
+                if (entry.second && !entry.second->empty()) {
+                    extension = "." + QFileInfo(QString::fromStdString(entry.first)).suffix();
+                    staged = QDir(staging.path()).filePath(base + extension);
+                    QSaveFile output(staged);
+                    if (!output.open(QIODevice::WriteOnly) ||
+                        output.write(reinterpret_cast<const char*>(entry.second->data()), entry.second->size()) != static_cast<qint64>(entry.second->size()) ||
+                        !output.commit()) throw std::runtime_error("Could not stage source audio");
+                }
+#else
+                const QDir mount(fileWidget->property("mountPath").toString());
+                for (const char* suffix : {"wav", "flac", "opus", "aac"}) {
+                    const auto candidate = mount.filePath(QStringLiteral("audio.") + suffix);
+                    if (!QFile::exists(candidate)) continue;
+                    extension = QStringLiteral(".") + suffix;
+                    staged = QDir(staging.path()).filePath(base + extension);
+                    copyFileAtomically(candidate, staged);
+                    break;
+                }
+#endif
+                if (staged.isEmpty()) {
+                    const auto info = mFuseFilesystem->getFileInfo(mountId);
+                    if (info && info->audioWav && !info->audioWav->empty()) {
+                        extension = ".wav";
+                        staged = QDir(staging.path()).filePath(base + extension);
+                        QSaveFile output(staged);
+                        if (!output.open(QIODevice::WriteOnly) ||
+                            output.write(reinterpret_cast<const char*>(info->audioWav->data()), info->audioWav->size()) != static_cast<qint64>(info->audioWav->size()) ||
+                            !output.commit()) throw std::runtime_error("Could not write source audio");
+                    }
+                }
+            }
+            if (staged.isEmpty()) throw std::runtime_error("This clip has no audio");
+            if (!audioCodec.isEmpty() && extension != "." + audioCodec) {
+                const auto encoded = QDir(staging.path()).filePath(base + "." + audioCodec);
+                AudioWriter::convertFile(staged.toStdString(), encoded.toStdString(), audioCodec.toStdString(), false);
+                staged = encoded;
+                extension = "." + audioCodec;
+            }
+        } else {
+            std::shared_ptr<const motioncam::GyroTelemetry> telemetry;
+            std::exception_ptr error;
+            auto task = QtConcurrent::run([&] {
+                try { telemetry = motioncam::GyroTelemetry::load(source.toStdString(), importPath.toStdString()); }
+                catch (...) { error = std::current_exception(); }
+            });
+            waitForBackgroundTask(task); task.waitForFinished();
+            if (error) std::rethrow_exception(error);
+            if (telemetry->format() == motioncam::GyroTelemetry::Format::None)
+                throw std::runtime_error("This clip has no gyro telemetry");
+            extension = QString::fromStdString(telemetry->extension());
+            staged = QDir(staging.path()).filePath(base + extension);
+            const auto info = mFuseFilesystem->getFileInfo(mountId);
+            const auto bytes = info ? telemetry->serialize(telemetryOutputTimeline(*info),
+                info->timingUsesCfrMapping ? info->fps : 0) : telemetry->serialize();
+            QSaveFile output(staged);
+            if (!output.open(QIODevice::WriteOnly) || output.write(bytes.data(), bytes.size()) != static_cast<qint64>(bytes.size()) ||
+                !output.commit()) throw std::runtime_error("Could not write gyro telemetry");
+        }
+#ifdef __ANDROID__
+        const auto destinationMode = QSettings(PACKAGE_NAME, APP_NAME).value("android/finalizeDestination", "documents").toString();
+        const auto destination = motioncam::prepareFinalizeOutput(base, destinationMode, importPath, false);
+        if (destination == "choose") { mPendingAndroidFinalizeCard = fileWidget; return; }
+        if (!destination.startsWith("ready:")) throw std::runtime_error(destination.toStdString());
+        try {
+            if (!motioncam::writeFinalizeOutputFile(destination.mid(6) + extension, staged))
+                throw std::runtime_error("Could not export to the selected folder");
+            motioncam::finishFinalizeOutput();
+        } catch (...) { motioncam::cancelFinalizeOutput(); throw; }
+#else
+        const auto output = QDir(QFileInfo(fileWidget->property("mountPath").toString()).absolutePath()).filePath(base + extension);
+        if (QFile::exists(output) && QMessageBox::question(this, tr("Replace existing output?"), output,
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+        copyFileAtomically(staged, output);
+#endif
+        progress.close();
+        QMessageBox::information(this, tr("Finalize complete"), tr("Exported %1%2").arg(base, extension));
+    } catch (const std::exception& error) {
+        progress.close();
+        QMessageBox::critical(this, tr("Finalize failed"), QString::fromUtf8(error.what()));
+    }
+}
+
 void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& requestedMode,
                                       bool metadataOnly, bool allowHardwareEncoder) {
     QString mode=requestedMode;
@@ -5912,7 +6052,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     } catch (const std::exception& e) {
         spdlog::warn("Could not preflight Camera Native CFA metadata: {}", e.what());
     }
-    if (unsupportedBayer) {
+    if (unsupportedBayer && !metadataOnly) {
         mFuseFilesystem->updateOptions(mountId, buildRenderSettings());
         QMessageBox::warning(this, "Camera Native finalization",
             "Camera Native requires an RGB sequence. Enable CFA demosaic before finalizing.");
@@ -5934,7 +6074,8 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     }
 #endif
 
-    const QFileInfo sourceInfo(srcFile);
+    const QFileInfo sourceInfo(fileWidget->property("importPath").toString().isEmpty()
+        ? srcFile : fileWidget->property("importPath").toString());
     const QString outputBase =
 #ifdef __ANDROID__
         androidOutputBase;
@@ -5961,13 +6102,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     const QString outputPath = outputDir.absoluteFilePath(outputBase + containerExtension);
     const QString jsonPath = outputDir.absoluteFilePath(outputBase + ".json");
     const QString outputGyroflowPath = outputDir.absoluteFilePath(outputBase + "_gyroflow.json");
-    const QString gcsvPath = outputDir.absoluteFilePath(outputBase + ".gcsv");
-    const QString audioBasePath = outputDir.absoluteFilePath(outputBase);
-    bool hasExistingAudio = false;
-    for (const char* extension : {"wav", "flac", "opus", "aac"})
-        hasExistingAudio |= QFile::exists(audioBasePath + "." + extension);
     if (allowHardwareEncoder && ((!metadataOnly && QFile::exists(outputPath)) || QFile::exists(jsonPath) ||
-         (metadataOnly && (QFile::exists(gcsvPath) || hasExistingAudio)) ||
          (!metadataOnly && QFile::exists(gyroflowPath) && QFile::exists(outputGyroflowPath))) &&
         QMessageBox::question(this, metadataOnly ? "Replace metadata output?"
                                                 : "Replace Camera Native output?",
@@ -5987,7 +6122,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     const bool hasDuplicateFrames = info->duplicateFrameMask &&
         std::any_of(info->duplicateFrameMask->begin(), info->duplicateFrameMask->end(),
                     [](bool duplicate) { return duplicate; });
-    const bool interpolateFrames = RIFE_SUPPORTED && ui->rifeInterpolationCheckBox->isChecked() &&
+    const bool interpolateFrames = !metadataOnly && RIFE_SUPPORTED && ui->rifeInterpolationCheckBox->isChecked() &&
         (info->duplicatedFrames > 0 || hasDuplicateFrames);
     const auto rifeRuntime = interpolateFrames ? ensureRifeRuntime() : std::optional<QString>{QString{}};
     if (!rifeRuntime) {
@@ -6166,7 +6301,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                         PreviewFrame decoded;
                         RenderSettings decodeSettings;
                         DNGImageLayout layout;
-                        if (!DNGDecoder::getImageLayout(dng, layout) ||
+                        if (metadataOnly) {
+                            if (!DNGDecoder::getColorMetadata(dng, decoded.metadata))
+                                throw std::runtime_error("Could not read DNG metadata");
+                        } else if (!DNGDecoder::getImageLayout(dng, layout) ||
                             layout.pixels == DNGPixelLayout::CFA ||
                             !DNGDecoder::decodePreview(dng, decodeSettings, decoded, false) ||
                             decoded.width != static_cast<uint32_t>(info->width) ||
@@ -6762,6 +6900,21 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             {"gainMapPayloads", std::move(gainMapPayloads)},
             {"frames", std::move(dynamicFrames)}
         };
+        if (!metadataOnly) {
+            progress.setLabelText(tr("Embedding gyro telemetry..."));
+            auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
+            std::vector<int64_t> videoTimeline;
+            for (const auto& item : sidecar["dynamic"]["frames"])
+                videoTimeline.push_back(item.at("timestampNs").get<int64_t>());
+            double telemetryRate = convertToCfr || androidHardwareFormat ? info->fps : info->frameRateInfo.medianFrameRate;
+            if (!(telemetryRate > 0)) telemetryRate = info->fps;
+            telemetry->embed(partialPath.toStdString(), videoTimeline, telemetryRate,
+                info->width, info->height, outputOrientation, [&] {
+                    QApplication::processEvents();
+                    return !progress.wasCanceled();
+                });
+        }
+
         std::ofstream jsonFile(partialJsonPath.toStdString(), std::ios::trunc);
         if (!jsonFile)
             throw std::runtime_error("Could not create Camera Native JSON sidecar");
@@ -6771,51 +6924,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         jsonFile.close();
 
         if (metadataOnly) {
-            const QString sourceGcsv = sourceInfo.absolutePath() + "/" +
-                sourceInfo.completeBaseName() + ".gcsv";
-            const QString partialGcsv = stageDir.absoluteFilePath(outputBase + ".gcsv");
-            if (QFile::exists(sourceGcsv)) {
-                copyFileAtomically(sourceGcsv, partialGcsv);
-            } else if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive)) {
-                Decoder decoder(motioncam::decoderSource(srcFile.toStdString()));
-                if (decoder.hasGyroData()) {
-                    std::vector<MotionSample> samples;
-                    decoder.loadGyroData(samples);
-                    if (!samples.empty()) {
-                        std::ofstream gcsv(partialGcsv.toStdString(), std::ios::trunc);
-                        if (!gcsv) throw std::runtime_error("Could not create GCSV sidecar");
-                        gcsv << "GYROFLOW IMU LOG\nversion,1.2\nid,MotionCam\n"
-                             << "orientation,XYZ\nvendor,MotionCam\n"
-                             << "tscale,0.000000001\ngscale,1\nt,gx,gy,gz\n"
-                             << std::setprecision(9);
-                        const auto& sourceFrames = decoder.getFrames();
-                        if (sourceFrames.empty())
-                            throw std::runtime_error("Could not find the first source frame for GCSV timing");
-                        const int64_t firstTimestamp = sourceFrames.front();
-                        for (const auto& sample : samples)
-                            gcsv << sample.timestampNs - firstTimestamp << ','
-                                 << sample.x << ',' << sample.y << ',' << sample.z << '\n';
-                        if (!gcsv) throw std::runtime_error("Could not write GCSV sidecar");
-                    }
-                }
-            }
-
-            QString partialAudio;
-            QString outputAudio;
-            for (const QString& extension : {QStringLiteral("wav"), QStringLiteral("flac"),
-                                             QStringLiteral("opus"), QStringLiteral("aac")}) {
-                const QString candidate = stageDir.absoluteFilePath("audio." + extension);
-                if (QFile::exists(candidate)) {
-                    partialAudio = stageDir.absoluteFilePath(outputBase + "." + extension);
-                    outputAudio = audioBasePath + "." + extension;
-                    copyFileAtomically(candidate, partialAudio);
-                    break;
-                }
-            }
-
             std::vector<std::pair<QString, QString>> outputs{{partialJsonPath, jsonPath}};
-            if (QFile::exists(partialGcsv)) outputs.emplace_back(partialGcsv, gcsvPath);
-            if (!partialAudio.isEmpty()) outputs.emplace_back(partialAudio, outputAudio);
             if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
 
 #ifdef __ANDROID__
@@ -6826,35 +6935,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             return;
 #endif
 
-            // Treat all files produced by this mode as one replacement set.
-            // A rerun may switch audio extensions or have no gyro data.
-            QStringList oldPaths{jsonPath, gcsvPath};
-            for (const char* extension : {"wav", "flac", "opus", "aac"})
-                oldPaths << audioBasePath + "." + extension;
-            const QString backupId = ".metadata-backup-" +
-                QUuid::createUuid().toString(QUuid::WithoutBraces);
-            std::vector<std::pair<QString, QString>> backups;
-            std::vector<QString> committed;
-            try {
-                for (const QString& destination : oldPaths) {
-                    if (!QFile::exists(destination)) continue;
-                    const QString backup = destination + backupId;
-                    if (!QFile::rename(destination, backup))
-                        throw std::runtime_error("Could not preserve existing metadata output");
-                    backups.emplace_back(backup, destination);
-                }
-                for (const auto& [partial, destination] : outputs) {
-                    if (!QFile::rename(partial, destination))
-                        throw std::runtime_error("Could not commit metadata output");
-                    committed.push_back(destination);
-                }
-            } catch (...) {
-                for (const auto& destination : committed) QFile::remove(destination);
-                for (const auto& [backup, destination] : backups)
-                    QFile::rename(backup, destination);
-                throw;
-            }
-            for (const auto& [backup, destination] : backups) QFile::remove(backup);
+            copyFileAtomically(partialJsonPath, jsonPath);
             progress.close();
             QMessageBox::information(this, "Metadata finalization",
                 QString("Created %1 output file(s) beside the source clip.").arg(outputs.size()));
@@ -6944,6 +7025,11 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     const bool archiveDngs = ui->dngCompressionCheckBox->isChecked() &&
         isSevenZipFinalizeFormat(compressionMode);
     if (ui->dngCompressionCheckBox->isChecked()) {
+        if (compressionMode.compare("Audio Only", Qt::CaseInsensitive) == 0 ||
+            compressionMode.compare("GCSV / JSONL Only", Qt::CaseInsensitive) == 0) {
+            finalizeAncillaryOnly(fileWidget, requestedMode);
+            return;
+        }
         if (isCameraNativeFormat(compressionMode) ||
             isMetadataOnlyFinalizeFormat(compressionMode)) {
             finalizeCameraNative(fileWidget, requestedMode,
@@ -7028,6 +7114,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     QString archivePath;
     QString archiveSidecarPath;
     QString archiveGyroflowPath;
+    QString archiveTelemetryBase;
     QString sourceSidecarPath;
     QString sourceGyroflowPath;
     QString archiver;
@@ -7042,6 +7129,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         const QFileInfo archiveInfo(archivePath);
         const QString archiveBase = QDir(archiveInfo.absolutePath()).absoluteFilePath(
             archiveInfo.completeBaseName());
+        archiveTelemetryBase = archiveBase;
         archiveSidecarPath = archiveBase + ".json";
         archiveGyroflowPath = archiveBase + "_gyroflow.json";
         sourceSidecarPath = fileWidget->property("sidecarPath").toString();
@@ -7059,6 +7147,8 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             return;
         }
         if ((QFileInfo::exists(archivePath) ||
+             QFileInfo::exists(archiveTelemetryBase + ".jsonl") ||
+             QFileInfo::exists(archiveTelemetryBase + ".gcsv") ||
              (QFileInfo::exists(sourceSidecarPath) && QFileInfo::exists(archiveSidecarPath) &&
               QFileInfo(sourceSidecarPath).absoluteFilePath() != QFileInfo(archiveSidecarPath).absoluteFilePath()) ||
              (QFileInfo::exists(sourceGyroflowPath) && QFileInfo::exists(archiveGyroflowPath) &&
@@ -7268,6 +7358,27 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         }
 
         if (!progress.wasCanceled()) {
+            if (!archiveDngs) {
+                // DNG sequences cannot carry a video metadata track. Preserve
+                // their telemetry as the same source-format companion file.
+                const auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
+                if (telemetry->format() != motioncam::GyroTelemetry::Format::None) {
+                    const auto data = telemetry->serialize(telemetryOutputTimeline(*fileInfo),
+                        fileInfo->timingUsesCfrMapping ? fileInfo->fps : 0);
+                    const auto name = QFileInfo(mountPath).fileName() + QString::fromStdString(telemetry->extension());
+#ifdef __ANDROID__
+                    if (androidDirectOutput) {
+                        if (!motioncam::writeFinalizeOutputEntry(name, std::vector<uint8_t>(data.begin(), data.end())))
+                            throw std::runtime_error("Could not preserve finalized gyro telemetry");
+                    } else
+#endif
+                    {
+                        QSaveFile output(QDir(tempPath).filePath(name));
+                        if (!output.open(QIODevice::WriteOnly) || output.write(data.data(), data.size()) != static_cast<qint64>(data.size()) ||
+                            !output.commit()) throw std::runtime_error("Could not preserve finalized gyro telemetry");
+                    }
+                }
+            }
             if (!archiveDngs)
                 spdlog::info("Rendered {} frames to temp directory", totalFrames);
             if (!androidDirectOutput && exportBadPixelOptions)
@@ -7307,7 +7418,23 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 const QString partialArchive = archivePath + transactionId;
                 const QString partialSidecar = archiveSidecarPath + transactionId;
                 const QString partialGyroflow = archiveGyroflowPath + transactionId;
-                RemoveFilesOnExit partialFiles{{partialArchive, partialSidecar, partialGyroflow}};
+                const QString partialJsonl = archiveTelemetryBase + ".jsonl" + transactionId;
+                const QString partialGcsv = archiveTelemetryBase + ".gcsv" + transactionId;
+                RemoveFilesOnExit partialFiles{{partialArchive, partialSidecar, partialGyroflow,
+                                               partialJsonl, partialGcsv}};
+                // The archive retains the original raw timeline. Preserve the selected
+                // override on that timeline, rather than the rendered DNG mapping.
+                const auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(),
+                    fileWidget->property("importPath").toString().toStdString());
+                if (telemetry->format() != motioncam::GyroTelemetry::Format::None) {
+                    const auto bytes = telemetry->serialize();
+                    QSaveFile output(telemetry->format() == motioncam::GyroTelemetry::Format::Jsonl
+                        ? partialJsonl : partialGcsv);
+                    if (!output.open(QIODevice::WriteOnly) ||
+                        output.write(bytes.data(), bytes.size()) != static_cast<qint64>(bytes.size()) ||
+                        !output.commit())
+                        throw std::runtime_error("Could not stage archive gyro telemetry");
+                }
                 QProcess compressor;
                 const QFileInfo sourceInfo(srcFile);
                 compressor.setWorkingDirectory(sourceInfo.absolutePath());
@@ -7343,48 +7470,37 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 copyFileAtomically(sourceGyroflowPath, partialGyroflow);
                 const QString backupId = ".backup-" +
                     QUuid::createUuid().toString(QUuid::WithoutBraces);
-                const QString archiveBackup = archivePath + backupId;
-                const QString sidecarBackup = archiveSidecarPath + backupId;
-                const QString gyroflowBackup = archiveGyroflowPath + backupId;
-                const bool stageSidecar = QFileInfo::exists(partialSidecar);
-                const bool stageGyroflow = QFileInfo::exists(partialGyroflow);
-                const bool hadArchive = QFileInfo::exists(archivePath);
-                // Existing companions belong to the archive being replaced.
-                // Preserve them even when this render has no replacement so a
-                // successful commit removes stale metadata, while a failed
-                // commit can still restore the complete previous output.
-                const bool hadSidecar = QFileInfo::exists(archiveSidecarPath);
-                const bool hadGyroflow = QFileInfo::exists(archiveGyroflowPath);
-                auto preserve = [](const QString& path, const QString& backup, bool exists) {
-                    return !exists || QFile::rename(path, backup);
-                };
-                if (!preserve(archivePath, archiveBackup, hadArchive) ||
-                    !preserve(archiveSidecarPath, sidecarBackup, hadSidecar) ||
-                    !preserve(archiveGyroflowPath, gyroflowBackup, hadGyroflow)) {
-                    if (QFileInfo::exists(archiveBackup)) QFile::rename(archiveBackup, archivePath);
-                    if (QFileInfo::exists(sidecarBackup)) QFile::rename(sidecarBackup, archiveSidecarPath);
-                    if (QFileInfo::exists(gyroflowBackup)) QFile::rename(gyroflowBackup, archiveGyroflowPath);
-                    throw std::runtime_error("Could not preserve existing 7z output files");
+                const std::vector<std::pair<QString, QString>> outputs{
+                    {partialArchive, archivePath},
+                    {partialSidecar, archiveSidecarPath},
+                    {partialGyroflow, archiveGyroflowPath},
+                    {partialJsonl, archiveTelemetryBase + ".jsonl"},
+                    {partialGcsv, archiveTelemetryBase + ".gcsv"}};
+                std::vector<std::pair<QString, QString>> backups;
+                std::vector<QString> committed;
+                try {
+                    // Back up both telemetry formats so switching formats cannot
+                    // leave an old JSONL overriding the new GCSV on reimport.
+                    for (const auto& [partial, destination] : outputs) {
+                        if (!QFileInfo::exists(destination)) continue;
+                        const auto backup = destination + backupId;
+                        if (!QFile::rename(destination, backup))
+                            throw std::runtime_error("Could not preserve existing 7z output files");
+                        backups.emplace_back(backup, destination);
+                    }
+                    for (const auto& [partial, destination] : outputs) {
+                        if (!QFileInfo::exists(partial)) continue;
+                        if (!QFile::rename(partial, destination))
+                            throw std::runtime_error("Could not commit the completed 7z archive and sidecars");
+                        committed.push_back(destination);
+                    }
+                } catch (...) {
+                    for (const auto& destination : committed) QFile::remove(destination);
+                    for (const auto& [backup, destination] : backups)
+                        QFile::rename(backup, destination);
+                    throw;
                 }
-                const bool archiveCommitted = QFile::rename(partialArchive, archivePath);
-                const bool sidecarCommitted = archiveCommitted &&
-                    (!stageSidecar || QFile::rename(partialSidecar, archiveSidecarPath));
-                const bool gyroflowCommitted = sidecarCommitted &&
-                    (!stageGyroflow || QFile::rename(partialGyroflow, archiveGyroflowPath));
-                if (!gyroflowCommitted) {
-                    if (archiveCommitted) QFile::remove(archivePath);
-                    if (sidecarCommitted && stageSidecar) QFile::remove(archiveSidecarPath);
-                    if (QFileInfo::exists(archiveBackup)) QFile::rename(archiveBackup, archivePath);
-                    if (QFileInfo::exists(sidecarBackup)) QFile::rename(sidecarBackup, archiveSidecarPath);
-                    if (QFileInfo::exists(gyroflowBackup)) QFile::rename(gyroflowBackup, archiveGyroflowPath);
-                    QFile::remove(partialArchive);
-                    QFile::remove(partialSidecar);
-                    QFile::remove(partialGyroflow);
-                    throw std::runtime_error("Could not commit the completed 7z archive and sidecars");
-                }
-                QFile::remove(archiveBackup);
-                QFile::remove(sidecarBackup);
-                QFile::remove(gyroflowBackup);
+                for (const auto& [backup, destination] : backups) QFile::remove(backup);
                 if (!tempDir.removeRecursively())
                     spdlog::warn("Could not remove temporary DNG render: {}", tempPath.toStdString());
 

@@ -350,5 +350,6 @@ Calibration sidecars may contain a `badPixels` array. `start` names one full-sen
 - **MotionCam Fuse:** Mirsad Makalic (upstream creator), Sebastian Merca (maintainer), and Leonard Sander (contributor and fork maintainer).
 - **Third-party components:** TinyDNG syoyo, liblj92 (MLV), libjpeg-turbo, libjxl, libfuse, macFUSE, and Microsoft ProjFS, FFmpeg, libplacebo, Vulkan, Qt.
 - **[Decode](https://github.com/LeonardSander/motioncam-decoder)-only formats:** MotionCam .MCRAW, [Unspektrawesome](https://github.com/JohnTheFarm3r/Unspektrawesome-Releases/releases) .unspektra, and mcpro24fps .MCPRO.
+- **Gyroflow protobuf:** [telemetry-parser](https://github.com/AdrianEddy/telemetry-parser/blob/master/src/gyroflow/gyroflow.proto) by Adrian Eddy.
 - **Frame-time graph inspiration:** cooky451’s [vchart](https://cooky451.github.io/vchart/) and [frame-time analysis](https://www.reddit.com/r/VideoEditing/comments/1b5hvd7/testing_how_variable_the_framrate_in_iphone/).
 - **Frame interpolation:** may-son’s [RIFE-FixDropFrames-and-ConvertFPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS).

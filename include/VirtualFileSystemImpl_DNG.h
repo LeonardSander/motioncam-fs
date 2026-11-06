@@ -1,4 +1,5 @@
 #pragma once
+#include "GyroTelemetry.h"
 
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
@@ -73,6 +74,7 @@ private:
 
 private:
     const std::string mSrcPath;
+    std::shared_ptr<const GyroTelemetry> mTelemetry;
     const std::string mBaseName;
     const boost::filesystem::path mSidecarPath;
     const boost::filesystem::path mGyroflowSidecarPath;

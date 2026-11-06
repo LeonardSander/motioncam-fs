@@ -279,6 +279,19 @@ private:
 };
 } // namespace
 
+std::string motioncam::AudioWriter::extractOriginalTrack(const std::string& source,
+                                                        const std::string& outputBase) {
+    AudioInput input(source);
+    if (!input.stream()) return {};
+    const auto id = input.stream()->codecpar->codec_id;
+    const std::string extension = id == AV_CODEC_ID_FLAC ? ".flac" :
+        id == AV_CODEC_ID_OPUS ? ".opus" : id == AV_CODEC_ID_AAC ? ".aac" :
+        std::strncmp(avcodec_get_name(id), "pcm_", 4) == 0 ? ".wav" : ".mka";
+    const auto target = outputBase + extension;
+    convertFile(source, target, "", true);
+    return target;
+}
+
 std::shared_ptr<std::vector<uint8_t>> motioncam::AudioWriter::decodeWav(
         const std::string& source, double fps) {
     AudioInput input(source);

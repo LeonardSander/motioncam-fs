@@ -1,4 +1,5 @@
 #pragma once
+#include "GyroTelemetry.h"
 
 #include <IVirtualFileSystem.h>
 #include <IFuseFileSystem.h>
@@ -104,6 +105,7 @@ private:
 
 private:
     const std::string mSrcPath;
+    std::shared_ptr<const GyroTelemetry> mTelemetry;
     const std::string mBaseName;
     size_t mTypicalDngSize;
     RenderSettings mConfig;
