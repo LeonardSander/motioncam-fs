@@ -211,6 +211,16 @@ int main(int argc, char** argv) {
         write(root / "frame-only.jsonl", frame(1, 0, 12).dump() + '\n');
         require(motioncam::GyroTelemetry::load((root / "frame-only.jsonl").string())->frames().size() == 1,
                 "frame-only JSONL recognized as telemetry");
+        auto gpsFrame = frame(1, 0, 12);
+        gpsFrame["gps"] = Json::array({{{"latitude", 51.5}, {"longitude", 13.4}}});
+        write(root / "gps.jsonl", jsonl(header(0), {gpsFrame}));
+        const auto gpsTelemetry = motioncam::GyroTelemetry::load((root / "gps.jsonl").string());
+        require(gpsTelemetry->serialize().find("latitude") != std::string::npos,
+                "GPS retained by default");
+        const auto privateTelemetry = gpsTelemetry->serialize({}, 0, 0, 0, -1, true);
+        require(privateTelemetry.find("latitude") == std::string::npos &&
+                privateTelemetry.find("gyroscopeX") != std::string::npos,
+                "GPS excluded while gyro retained");
         const auto merged = rich->serialize({0, 33333333, 66667000}, 30);
         write(root / "held.jsonl", merged);
         const auto held = motioncam::GyroTelemetry::load((root / "held.jsonl").string());

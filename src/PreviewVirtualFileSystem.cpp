@@ -14,7 +14,8 @@
 namespace motioncam {
 namespace {
 bool sameSettings(const RenderSettings& a, const RenderSettings& b) {
-    return a.options == b.options &&
+    return a.excludeGps == b.excludeGps &&
+           a.options == b.options &&
            a.draftScale == b.draftScale &&
            a.cfrTarget.mode == b.cfrTarget.mode &&
            a.cfrTarget.customValue == b.cfrTarget.customValue &&

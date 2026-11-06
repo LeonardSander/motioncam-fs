@@ -859,6 +859,11 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(motioncam-sidecar-privacy-test tests/sidecar_privacy_test.cpp)
+    target_include_directories(motioncam-sidecar-privacy-test PRIVATE include)
+    target_link_libraries(motioncam-sidecar-privacy-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+    add_test(NAME motioncam-sidecar-privacy-test COMMAND motioncam-sidecar-privacy-test)
+    set_tests_properties(motioncam-sidecar-privacy-test PROPERTIES LABELS portable)
     add_executable(motioncam-telemetry-test tests/gyro_telemetry_test.cpp src/ArchiveImport.cpp)
     target_include_directories(motioncam-telemetry-test PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
     target_link_libraries(motioncam-telemetry-test PRIVATE MotionCamTelemetry protobuf::libprotobuf Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})

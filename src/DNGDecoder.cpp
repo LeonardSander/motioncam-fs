@@ -17,6 +17,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/regex.hpp>
+#include <boost/property_tree/xml_parser.hpp>
 #include <fstream>
 #include <algorithm>
 #include <atomic>
@@ -3879,6 +3880,69 @@ bool DNGDecoder::replaceSidecarMetadata(
     for (uint32_t ifd : affected)
         if (!sortTiffIfdEntries(data, ifd, little)) return false;
     return fillMissingSidecarMetadata(data, metadata);
+}
+
+bool DNGDecoder::removeGpsMetadata(std::vector<uint8_t>& data) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    std::set<uint32_t> gpsDirectories;
+    for (const auto& entry : entries) {
+        if (entry.tag == TIFF_TAG_GPS_IFD)
+            gpsDirectories.insert(read32(data.data() + entry.entryOffset + 8, little));
+    }
+    for (const auto& entry : entries) {
+        if (gpsDirectories.count(entry.ifdOffset)) {
+            const size_t bytes = tiffTypeSize(entry.type) * size_t(entry.count);
+            std::fill_n(data.begin() + entry.valueOffset, bytes, 0);
+        }
+        if (entry.tag != 700) continue; // Embedded XMP can repeat EXIF GPS fields.
+        std::string packet(reinterpret_cast<const char*>(data.data() + entry.valueOffset),
+                           size_t(entry.count) * tiffTypeSize(entry.type));
+        boost::property_tree::ptree tree;
+        bool changed = false;
+        try {
+            std::istringstream input(packet);
+            boost::property_tree::read_xml(input, tree);
+            const auto strip = [&](auto&& self, boost::property_tree::ptree& node) -> void {
+                for (auto it = node.begin(); it != node.end();) {
+                    const auto colon = it->first.rfind(':');
+                    const auto name = it->first.substr(colon == std::string::npos ? 0 : colon + 1);
+                    if (boost::istarts_with(name, "GPS")) {
+                        it = node.erase(it);
+                        changed = true;
+                    } else {
+                        self(self, it->second);
+                        ++it;
+                    }
+                }
+            };
+            strip(strip, tree);
+            if (!changed) continue;
+            std::ostringstream output;
+            boost::property_tree::write_xml(output, tree);
+            const auto cleaned = output.str();
+            // Erase the old payload as well as its references. Preserve other
+            // XMP fields even when XML serialization needs a larger allocation.
+            std::fill_n(data.begin() + entry.valueOffset, packet.size(), 0);
+            if (cleaned.size() <= packet.size()) {
+                std::copy(cleaned.begin(), cleaned.end(), data.begin() + entry.valueOffset);
+            } else {
+                if (data.size() > std::numeric_limits<uint32_t>::max() - cleaned.size())
+                    return false;
+                const auto offset = static_cast<uint32_t>(data.size());
+                data.insert(data.end(), cleaned.begin(), cleaned.end());
+                write32(data.data() + entry.entryOffset + 8, offset, little);
+            }
+            write32(data.data() + entry.entryOffset + 4,
+                    static_cast<uint32_t>(cleaned.size()), little);
+        } catch (const boost::property_tree::xml_parser_error&) {
+            // An unreadable XMP packet cannot be certified free of location data.
+            std::fill_n(data.begin() + entry.valueOffset, packet.size(), 0);
+            write16(data.data() + entry.entryOffset, 0, little);
+        }
+    }
+    return removeMetadataTags(data, {TIFF_TAG_GPS_IFD, 0});
 }
 
 bool DNGDecoder::removeMetadataTags(std::vector<uint8_t>& data,

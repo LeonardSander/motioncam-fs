@@ -532,6 +532,8 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
             stageStarted = now;
         }
     };
+    if (settings.excludeGps && !DNGDecoder::removeGpsMetadata(dng))
+        throw std::runtime_error("Could not remove GPS metadata from " + source);
     const double exposureOffset = configuredExposureOffset(settings);
     if (exposureOffset != 0.0) {
         DNGFrameMetadata metadata;

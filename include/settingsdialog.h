@@ -39,6 +39,8 @@ public:
 
     void setAutoApplyClipSettings(bool enabled);
     bool getAutoApplyClipSettings() const;
+    void setExcludeGps(bool enabled);
+    bool getExcludeGps() const;
     void setDetectDuplicateDngs(bool enabled);
     bool getDetectDuplicateDngs() const;
     void setGalleryFpsIndicatorEnabled(bool enabled);
@@ -83,6 +85,7 @@ private:
     QCheckBox* mAutoApplyClipSettingsCheckBox;
     QCheckBox* mGalleryFpsIndicatorCheckBox;
     QCheckBox* mDetectDuplicateDngsCheckBox;
+    QCheckBox* mExcludeGpsCheckBox;
     QCheckBox* mUnmountOnFinalizeCheckBox;
     QCheckBox* mFinalizeSelectionToSingleDirectoryCheckBox;
     QCheckBox* mInheritHeroFrameSidecarsCheckBox;

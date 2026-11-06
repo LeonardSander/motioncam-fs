@@ -114,6 +114,7 @@ public:
     static bool replaceSidecarMetadata(
         std::vector<uint8_t>& data,
         const std::vector<DNGSidecarMetadataEntry>& metadata);
+    static bool removeGpsMetadata(std::vector<uint8_t>& data);
     static bool removeMetadataTags(std::vector<uint8_t>& data,
                                    const std::vector<uint16_t>& tags);
     static bool requireDngVersion(std::vector<uint8_t>& data, uint8_t minor);

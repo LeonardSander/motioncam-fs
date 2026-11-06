@@ -26,7 +26,7 @@ class GyroTelemetry {
     Format format() const { return mFormat; }
     std::string extension() const;
     std::string serialize(const std::vector<int64_t>& outputTimestamps = {}, double fps = 0, int width = 0,
-                          int height = 0, int orientation = -1) const;
+                          int height = 0, int orientation = -1, bool excludeGps = false) const;
     const nlohmann::json& header() const { return mHeader; }
     const nlohmann::json* frame(size_t index) const;
     const std::vector<Frame>& frames() const { return mFrames; }
@@ -37,10 +37,12 @@ class GyroTelemetry {
     // Writes telemetry into MOV/MP4 without an external gyro sidecar. GCSV
     // remains GCSV; protobuf/JSONL remains the complete protobuf schema.
     void embed(const std::string& videoPath, const std::vector<int64_t>& outputTimestamps, double fps,
-               int width, int height, int orientation, const std::function<bool()>& keepGoing = {}) const;
+               int width, int height, int orientation, const std::function<bool()>& keepGoing = {},
+               bool excludeGps = false) const;
     bool fillMissingDngMetadata(std::vector<uint8_t>& bytes, size_t frameIndex) const;
 
   private:
+    static void stripGps(nlohmann::json& value);
     nlohmann::json outputHeader(const std::vector<int64_t>& timestamps, double fps, int width, int height,
                                 int orientation) const;
     std::vector<Frame> outputFrames(const std::vector<int64_t>& timestamps) const;

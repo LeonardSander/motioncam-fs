@@ -281,6 +281,7 @@ private:
     bool mUnmountOnFinalize = true;
     bool mFinalizeSelectionToSingleDirectory = false;
     bool mInheritHeroFrameSidecars = false;
+    bool mExcludeGps = false;
     bool mFuseMountingEnabled = true;
     bool mFuseMountingAvailable = true;
     bool mGalleryPerformanceTestActive = false;

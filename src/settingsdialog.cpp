@@ -306,6 +306,9 @@ SettingsDialog::SettingsDialog(QWidget *parent)
                  "timestamps and duplicate tags take precedence. Applies to newly imported clips."), this);
     duplicateHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(duplicateHelpLabel);
+    mExcludeGpsCheckBox = new QCheckBox("Exclude GPS", this);
+    mExcludeGpsCheckBox->setToolTip("Always exclude GPS metadata from output files.");
+    clipSettingsLayout->addWidget(mExcludeGpsCheckBox);
     mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
     mGalleryFpsIndicatorCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
@@ -542,6 +545,16 @@ void SettingsDialog::setAutoApplyClipSettings(bool enabled)
 bool SettingsDialog::getAutoApplyClipSettings() const
 {
     return mAutoApplyClipSettingsCheckBox->isChecked();
+}
+
+void SettingsDialog::setExcludeGps(bool enabled)
+{
+    mExcludeGpsCheckBox->setChecked(enabled);
+}
+
+bool SettingsDialog::getExcludeGps() const
+{
+    return mExcludeGpsCheckBox->isChecked();
 }
 
 void SettingsDialog::setDetectDuplicateDngs(bool enabled)

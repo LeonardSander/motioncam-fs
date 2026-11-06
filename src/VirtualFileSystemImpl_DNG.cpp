@@ -72,7 +72,8 @@ private:
 };
 
 bool sameRenderSettings(const RenderSettings& left, const RenderSettings& right) {
-    return left.options == right.options &&
+    return left.excludeGps == right.excludeGps &&
+           left.options == right.options &&
            left.draftScale == right.draftScale &&
            left.cfrTarget.mode == right.cfrTarget.mode &&
            left.cfrTarget.customValue == right.cfrTarget.customValue &&

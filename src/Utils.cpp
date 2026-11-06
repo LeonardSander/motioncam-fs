@@ -2791,7 +2791,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
             34855, static_cast<uint16_t>(std::clamp<long>(
                 std::lround(metadata.iso), 1, 65535)), true)); // ISOSpeedRatings
     const auto& capturePost = cameraConfiguration.extraData.postProcessSettings;
-    if (validGpsCoordinates(capturePost.gpsLatitude,
+    if (!settings.excludeGps && validGpsCoordinates(capturePost.gpsLatitude,
                             capturePost.gpsLongitude)) {
         captureMetadata.push_back(gpsBytes(0, {2, 3, 0, 0})); // GPSVersionID
         captureMetadata.push_back(gpsAscii(
@@ -2872,6 +2872,9 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         if (!DNGDecoder::fillMissingSidecarMetadata(*output, captureMetadata))
             throw std::runtime_error("Failed to attach MCRAW capture metadata");
     }
+
+    if (settings.excludeGps && !DNGDecoder::removeGpsMetadata(*output))
+        throw std::runtime_error("Failed to remove GPS capture metadata");
 
     if (lossyJpegDct) {
         if (!DNGDecoder::compressLossyJPEG(*output))

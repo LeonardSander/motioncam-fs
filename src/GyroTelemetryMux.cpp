@@ -95,7 +95,7 @@ std::string protobuf(nlohmann::json message) {
 
 void GyroTelemetry::embed(const std::string& videoPath, const std::vector<int64_t>& timestamps, double fps,
                           int width, int height, int orientation,
-                          const std::function<bool()>& keepGoing) const {
+                          const std::function<bool()>& keepGoing, bool excludeGps) const {
     if (mFormat == Format::None) return;
     if (timestamps.empty() || !std::is_sorted(timestamps.begin(), timestamps.end()) ||
         std::adjacent_find(timestamps.begin(), timestamps.end()) != timestamps.end())
@@ -173,9 +173,13 @@ void GyroTelemetry::embed(const std::string& videoPath, const std::vector<int64_
           "Open telemetry staging output");
     check(avformat_write_header(media.output, nullptr), "Write embedded telemetry header");
 
-    const auto frames = mFormat == Format::Jsonl ? outputFrames(timestamps) : std::vector<Frame>{};
+    auto frames = mFormat == Format::Jsonl ? outputFrames(timestamps) : std::vector<Frame>{};
     auto header = mFormat == Format::Jsonl ? outputHeader(timestamps, fps, width, height, orientation)
                                            : nlohmann::json{};
+    if (excludeGps) {
+        stripGps(header);
+        for (auto& frame : frames) stripGps(frame.message);
+    }
     // Native frame metadata can exceed a single protobuf packet on long clips.
     // Preserve the complete extensible data in bounded header-only packets.
     // All packets still use the official Gyroflow schema; standard camera/clip

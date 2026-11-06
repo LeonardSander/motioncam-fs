@@ -1011,6 +1011,29 @@ int main(int argc, char** argv) {
     assert(motioncam::DNGDecoder::compressLosslessJPEG(gpsDng));
     assert(nestedIfdHasTag(gpsDng, 34853, 0));
     assert(nestedIfdHasTag(gpsDng, 34853, 1));
+    {
+        auto excluded = gpsDng;
+        motioncam::DNGSidecarMetadataEntry xmp;
+        xmp.tag = 700; xmp.type = 1;
+        const std::string packet = "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description xmlns:exif='http://ns.adobe.com/exif/1.0/' exif:GPSLatitude='51,30N' exif:GPSLongitude='13,24E'><exif:GPSTimeStamp>private timestamp</exif:GPSTimeStamp><exif:LensModel>Keep lens</exif:LensModel></rdf:Description></rdf:RDF></x:xmpmeta>";
+        xmp.count = packet.size();
+        xmp.value.assign(packet.begin(), packet.end());
+        assert(motioncam::DNGDecoder::replaceSidecarMetadata(excluded, {xmp}));
+        motioncam::RenderSettings settings;
+        assert(!settings.excludeGps);
+        settings.excludeGps = true;
+        motioncam::vfs::DngFinalizeOptions options;
+        options.writeTiming = false;
+        options.packToWhiteLevel = false;
+        motioncam::vfs::finalizeDng(excluded, settings, options);
+        assert(!nestedIfdHasTag(excluded, 34853, 1));
+        const std::string bytes(excluded.begin(), excluded.end());
+        assert(bytes.find("51,30N") == std::string::npos);
+        assert(bytes.find("private timestamp") == std::string::npos);
+        assert(bytes.find("Keep lens") != std::string::npos);
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(excluded, gpsDng));
+        assert(nestedIfdHasTag(gpsDng, 34853, 1));
+    }
     assert(motioncam::DNGDecoder::imagePayloadsEqual(uncompressedA, uncompressedB));
     assert(!motioncam::DNGDecoder::imagePayloadsEqual(
         uncompressedA, uncompressedDifferent));

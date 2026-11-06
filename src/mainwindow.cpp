@@ -17,6 +17,7 @@
 #include "VirtualFileSystemImpl.h"
 #include "ArchiveImport.h"
 #include "GyroTelemetry.h"
+#include "SidecarPrivacy.h"
 #include "AudioWriter.h"
 #include "HardwareVideoEncoder.h"
 #include "NativeVideoEncoder.h"
@@ -461,7 +462,7 @@ namespace {
     }
 
     bool inheritHeroFrameSidecars(const QString& sourcePath, const QString& destinationPath,
-                                  bool flatten, QString& error) {
+                                  bool flatten, bool excludeGps, QString& error) {
         struct HeroFrame {
             QString prefix;
             QString fileName;
@@ -567,7 +568,22 @@ namespace {
                 if (!selected) continue;
                 const QString stagedSidecar = generatedPath + QLatin1Char('.') + sidecar.second;
                 try {
-                    copyFileAtomically(selected->*sidecar.first, stagedSidecar);
+                    if (excludeGps) {
+                        QFile input(selected->*sidecar.first);
+                        if (!input.open(QIODevice::ReadOnly))
+                            throw std::runtime_error("Could not read inherited sidecar");
+                        const auto bytes = input.readAll();
+                        if (input.error() != QFileDevice::NoError)
+                            throw std::runtime_error("Could not read inherited sidecar");
+                        const auto cleaned = motioncam::excludeSidecarGps(
+                            bytes, sidecar.second == QStringLiteral("xml"));
+                        QSaveFile output(stagedSidecar);
+                        if (!output.open(QIODevice::WriteOnly) ||
+                            output.write(cleaned) != cleaned.size() || !output.commit())
+                            throw std::runtime_error("Could not write inherited sidecar");
+                    } else {
+                        copyFileAtomically(selected->*sidecar.first, stagedSidecar);
+                    }
                     ++copiedSidecars;
                 } catch (const std::exception& exception) {
                     error = QString::fromUtf8(exception.what());
@@ -1792,6 +1808,7 @@ namespace {
 motioncam::RenderSettings MainWindow::buildRenderSettings() const {
     motioncam::RenderSettings settings;
     settings.detectDuplicateDngs = mDetectDuplicateDngs;
+    settings.excludeGps = mExcludeGps;
 
     // Build options bitfield
     settings.options = motioncam::RENDER_OPT_NONE;
@@ -2663,6 +2680,7 @@ void MainWindow::saveSettings() {
     settings.setValue("cfrConversion", ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("rifeInterpolation", ui->rifeInterpolationCheckBox->isChecked());
     settings.setValue("detectDuplicateDngs", mDetectDuplicateDngs);
+    settings.setValue("excludeGps", mExcludeGps);
     settings.setValue("cropEnabled", ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("camModelOverrideEnabled", ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("logTransformEnabled", ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked);
@@ -2739,6 +2757,8 @@ void MainWindow::restoreSettings() {
         (settings.value("cfrConversion").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked));
     ui->rifeInterpolationCheckBox->setChecked(RIFE_SUPPORTED && settings.value("rifeInterpolation", false).toBool());
     mDetectDuplicateDngs = settings.value("detectDuplicateDngs", true).toBool();
+    mExcludeGps = settings.value("excludeGps", false).toBool();
+    mRenderSettings.excludeGps = mExcludeGps;
 
     ui->cropEnableCheckBox->setCheckState(
         settings.value("cropEnabled").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
@@ -3840,6 +3860,7 @@ void MainWindow::mountFiles(
 
 motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
     auto settings = mLocalSettings.value(mountId, mGlobalRenderSettings);
+    settings.excludeGps = mExcludeGps;
     // Source sidecars can be routed somewhere other than the conventional
     // path (for example when a clip was opened from an archive).  These paths
     // were previously attached only to the settings used for the initial
@@ -4642,7 +4663,7 @@ void MainWindow::finalizeSelectedFrames(){
             if(mInheritHeroFrameSidecars){
                 QString sidecarError;
                 if(!inheritHeroFrameSidecars(temporary,output,mFinalizeSelectionToSingleDirectory,
-                                             sidecarError))
+                                             mExcludeGps,sidecarError))
                     throw std::runtime_error(sidecarError.toStdString());
             }
             if(motioncam::effectiveBadPixelTreatment(original.badPixelTreatment,
@@ -5834,7 +5855,8 @@ void MainWindow::finalizeAncillaryOnly(QWidget* fileWidget, const QString& reque
             staged = QDir(staging.path()).filePath(base + extension);
             const auto info = mFuseFilesystem->getFileInfo(mountId);
             const auto bytes = info ? telemetry->serialize(telemetryOutputTimeline(*info),
-                info->timingUsesCfrMapping ? info->fps : 0) : telemetry->serialize();
+                info->timingUsesCfrMapping ? info->fps : 0, 0, 0, -1, mExcludeGps)
+                : telemetry->serialize({}, 0, 0, 0, -1, mExcludeGps);
             QSaveFile output(staged);
             if (!output.open(QIODevice::WriteOnly) || output.write(bytes.data(), bytes.size()) != static_cast<qint64>(bytes.size()) ||
                 !output.commit()) throw std::runtime_error("Could not write gyro telemetry");
@@ -6912,7 +6934,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                 info->width, info->height, outputOrientation, [&] {
                     QApplication::processEvents();
                     return !progress.wasCanceled();
-                });
+                }, mExcludeGps);
         }
 
         std::ofstream jsonFile(partialJsonPath.toStdString(), std::ios::trunc);
@@ -7364,7 +7386,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 const auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
                 if (telemetry->format() != motioncam::GyroTelemetry::Format::None) {
                     const auto data = telemetry->serialize(telemetryOutputTimeline(*fileInfo),
-                        fileInfo->timingUsesCfrMapping ? fileInfo->fps : 0);
+                        fileInfo->timingUsesCfrMapping ? fileInfo->fps : 0, 0, 0, -1, mExcludeGps);
                     const auto name = QFileInfo(mountPath).fileName() + QString::fromStdString(telemetry->extension());
 #ifdef __ANDROID__
                     if (androidDirectOutput) {
@@ -7427,7 +7449,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 const auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(),
                     fileWidget->property("importPath").toString().toStdString());
                 if (telemetry->format() != motioncam::GyroTelemetry::Format::None) {
-                    const auto bytes = telemetry->serialize();
+                    const auto bytes = telemetry->serialize({}, 0, 0, 0, -1, mExcludeGps);
                     QSaveFile output(telemetry->format() == motioncam::GyroTelemetry::Format::Jsonl
                         ? partialJsonl : partialGcsv);
                     if (!output.open(QIODevice::WriteOnly) ||
@@ -8314,6 +8336,7 @@ void MainWindow::onOpenPreferences() {
     dialog->setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog->setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
     dialog->setDetectDuplicateDngs(mDetectDuplicateDngs);
+    dialog->setExcludeGps(mExcludeGps);
     dialog->setUnmountOnFinalize(mUnmountOnFinalize);
     dialog->setFinalizeSelectionToSingleDirectory(mFinalizeSelectionToSingleDirectory);
     dialog->setInheritHeroFrameSidecars(mInheritHeroFrameSidecars);
@@ -8375,6 +8398,16 @@ void MainWindow::restoreSecondaryWindowsAfterGallery() {
 
 void MainWindow::applyPreferences(SettingsDialog& dialog) {
     const bool wasAutoApply = mAutoApplyClipSettings;
+    const bool gpsChanged = mExcludeGps != dialog.getExcludeGps();
+    mExcludeGps = dialog.getExcludeGps();
+    mRenderSettings.excludeGps = mExcludeGps;
+    mGlobalRenderSettings.excludeGps = mExcludeGps;
+    for (auto it = mLocalSettings.begin(); it != mLocalSettings.end(); ++it)
+        it.value().excludeGps = mExcludeGps;
+    if (gpsChanged) {
+        for (const auto& file : mMountedFiles)
+            mFuseFilesystem->updateOptions(file.mountId, settingsForMount(file.mountId));
+    }
     mCacheRootFolder = dialog.getCacheFolder();
     mAutoApplyClipSettings = dialog.getAutoApplyClipSettings();
     mGalleryFpsIndicatorEnabled = dialog.getGalleryFpsIndicatorEnabled();
@@ -8538,7 +8571,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         QMessageBox::warning(this, tr("Load Session"), tr("Invalid session file"));
         return;
     }
-    auto decode = [](const QJsonObject& object) {
+    auto decode = [this](const QJsonObject& object) {
         motioncam::RenderSettings settings;
         settings.options = static_cast<motioncam::FileRenderOptions>(object["options"].toInt());
         settings.draftScale = object["draftScale"].toInt(1);
@@ -8556,6 +8589,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         settings.jxlDistance = static_cast<float>(object["jxlDistance"].toDouble(-1.0));
         settings.orientation = normalizedGalleryOrientation(object["orientation"].toInt(-1));
         settings.ignoreForwardMat = object["ignoreForwardMat"].toBool(false);
+        settings.excludeGps = mExcludeGps;
         return settings;
     };
     const auto root = document.object();

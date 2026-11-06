@@ -667,12 +667,32 @@ nlohmann::json GyroTelemetry::outputHeader(const std::vector<int64_t>& timestamp
     return header;
 }
 
+void GyroTelemetry::stripGps(nlohmann::json& value) {
+    if (value.is_object()) {
+        for (auto it = value.begin(); it != value.end();) {
+            if (lower(it.key()).find("gps") != std::string::npos)
+                it = value.erase(it);
+            else { stripGps(it.value()); ++it; }
+        }
+    } else if (value.is_array()) {
+        for (auto& item : value) stripGps(item);
+    } else if (value.is_string()) {
+        // Extensible telemetry fields can contain another JSON document.
+        auto nested = nlohmann::json::parse(value.get_ref<const std::string&>(), nullptr, false);
+        if (nested.is_object() || nested.is_array()) {
+            stripGps(nested);
+            value = nested.dump();
+        }
+    }
+}
+
 std::string GyroTelemetry::serialize(const std::vector<int64_t>& timestamps, double fps, int width,
-                                     int height, int orientation) const {
+                                     int height, int orientation, bool excludeGps) const {
     if (mFormat == Format::Gcsv) return mGcsv;
     if (mFormat == Format::None) return {};
     const auto rendered = outputFrames(timestamps);
-    const auto header = outputHeader(timestamps, fps, width, height, orientation);
+    auto header = outputHeader(timestamps, fps, width, height, orientation);
+    if (excludeGps) stripGps(header);
     std::string output =
         nlohmann::json{{"magicString", "GyroflowProtobuf"}, {"protocolVersion", 1}, {"header", header}}
             .dump() +
@@ -680,6 +700,7 @@ std::string GyroTelemetry::serialize(const std::vector<int64_t>& timestamps, dou
     for (const auto& frame : rendered) {
         auto message = frame.message;
         message.erase("header");
+        if (excludeGps) stripGps(message);
         output += message.dump() + '\n';
     }
     return output;
