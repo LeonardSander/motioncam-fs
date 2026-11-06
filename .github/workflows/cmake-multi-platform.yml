@@ -9,6 +9,9 @@ on:
     branches: [ "master", "experimental", "v10" ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   android-apk:
     name: Android APK (arm64) and tests (x86_64)
@@ -101,7 +104,6 @@ jobs:
         bash scripts/build_android_apk.sh "$PWD/build-android-tests" configure
 
     - name: Build tests
-      continue-on-error: true
       shell: bash
       run: |
         mapfile -t test_targets < <(sed 's|.*/||' build-android-tests/android-tests-Release.txt)
@@ -113,8 +115,7 @@ jobs:
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
 
-    - name: Test
-      continue-on-error: true
+    - name: Test portable suite
       uses: reactivecircus/android-emulator-runner@v2
       with:
         api-level: 35
@@ -124,7 +125,8 @@ jobs:
         disable-animations: true
         script: |
           python3 tests/android_ctest.py deploy build-android-tests Qt/6.12.0/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
-          ctest --test-dir build-android-tests -C Release --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+          ctest --test-dir build-android-tests -C Release -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+          ctest --test-dir build-android-tests -C Release -LE '^portable$' --output-on-failure --timeout 300 --output-junit nonportable-test-results.xml || echo '::warning::Nonportable Android tests failed (advisory)'
 
   linux-appimage:
     name: Linux AppImage (Clang)
@@ -181,12 +183,14 @@ jobs:
       run: cmake --build build-linux --config Release --target MotionCamFuse --parallel
 
     - name: Build tests
-      continue-on-error: true
       run: cmake --build build-linux --config Release --parallel
 
-    - name: Test
+    - name: Test portable suite
+      run: ctest --test-dir build-linux -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+
+    - name: Test nonportable suite (advisory)
       continue-on-error: true
-      run: ctest --test-dir build-linux --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+      run: ctest --test-dir build-linux -LE '^portable$' --output-on-failure --timeout 300 --output-junit nonportable-test-results.xml
 
     - name: Create AppImage
       shell: bash
@@ -440,17 +444,19 @@ jobs:
 
 
     # ---------- BUILD ----------
-    # Only runtime compilation blocks packaging; test builds are advisory.
+    # Runtime compilation, test compilation and portable tests must all pass.
     - name: Build runtime
       run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target MotionCamFuse --parallel
 
     - name: Build tests
-      continue-on-error: true
       run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
 
-    - name: Test
+    - name: Test portable suite
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+
+    - name: Test nonportable suite (advisory)
       continue-on-error: true
-      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -LE '^portable$' --output-on-failure --timeout 300 --output-junit nonportable-test-results.xml
 
 
 
@@ -505,7 +511,9 @@ jobs:
     name: Create GitHub Release
     needs: [build, linux-appimage, android-apk]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -519,5 +527,37 @@ jobs:
           files: release-files/**/*
           tag_name: ${{ github.ref_name }}
           name: "MotionCam-FS ${{ github.ref_name }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  prerelease:
+    name: Create GitHub prerelease
+    needs: [build, linux-appimage, android-apk]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref_type == 'branch'
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-files/
+          pattern: motioncam-*
+
+      - name: Create GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/**/*
+          fail_on_unmatched_files: true
+          tag_name: prerelease-${{ github.ref_name }}-${{ github.run_id }}
+          target_commitish: ${{ github.sha }}
+          name: "MotionCam-FS ${{ github.ref_name }} build ${{ github.run_number }}"
+          prerelease: true
+          make_latest: false
+          body: |
+            Automated build of `${{ github.ref_name }}` at `${{ github.sha }}`.
+            All platform builds and portable tests passed.
+
+            [Build and test results](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
