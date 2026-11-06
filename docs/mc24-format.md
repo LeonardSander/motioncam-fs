@@ -66,7 +66,7 @@ by mcpro24fps 044 on a OnePlus CPH2581, 4096×3072, approximately 60 fps.
   gyro, acceleration, core, audio-finalization and interpolation tests passed.
 
 Reference binary used only during format analysis:
-[official mcpro24fps RAW Converter](https://mcpro24fps.com/downloads/raw-converter/mcpro24fpsRawConverter-0.4.0-x64.exe).
+[official mcpro24fps RAW Converter](https://mcpro24fps.com/downloads/raw-converter/mcpro24fpsRawConverter-0.5.1-x64.exe).
 
 The clip UI uses `MC24LL`, `MC24H`, `MC24S`, or `MC24L` for lossless, HQ,
 SQ, and LT. Source bit depth and the recording log flag are kept separately
