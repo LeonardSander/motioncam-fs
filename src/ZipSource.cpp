@@ -1,3 +1,8 @@
+// libarchive can include Windows headers; keep their min/max macros out.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "ZipSource.h"
 #include "SourceInput.h"
 
@@ -7,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <cerrno>
 #include <limits>
@@ -102,7 +108,10 @@ std::string revision(const std::string& path) {
     if (version.empty()) {
         const auto time = std::filesystem::last_write_time(path, error);
         if (error) throw std::runtime_error("ZIP source is unavailable: " + path);
-        version = std::to_string(time.time_since_epoch().count());
+        // libc++ uses a 128-bit file clock representation, which has no
+        // std::to_string overload. Normalize to a standard nanosecond count.
+        version = std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            time.time_since_epoch()).count());
     }
     return path + ':' + std::to_string(size) + ':' + version;
 }

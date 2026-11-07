@@ -5,6 +5,7 @@
         "boost-locale",
         "boost-iostreams",
         "boost-regex",
+        "boost-property-tree",
         "fmt",
         "spdlog",
         "libjpeg-turbo",
