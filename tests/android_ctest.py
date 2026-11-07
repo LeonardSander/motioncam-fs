@@ -52,7 +52,11 @@ def deploy(build, qt, ndk):
         libraries.append(runtime)
         for library in libraries:
             shutil.copy2(library.resolve(), stage / "lib" / library.name)
-        shutil.copytree(qt / "plugins", stage / "plugins", symlinks=False)
+        # Android QFactoryLoader searches one flat directory for
+        # libplugins_<category>_*.so, as in an APK's native library directory.
+        (stage / "plugins").mkdir()
+        for plugin in (qt / "plugins").rglob("*.so"):
+            shutil.copy2(plugin.resolve(), stage / "plugins" / plugin.name)
         adb("shell", "mkdir", "-p", REMOTE)
         adb("push", str(stage) + "/.", REMOTE + "/")
         adb("shell", "chmod", "-R", "755", REMOTE)

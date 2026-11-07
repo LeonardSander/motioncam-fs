@@ -8,7 +8,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#ifndef __ANDROID__
 #include <QStorageInfo>
+#else
+#include <filesystem>
+#endif
 #include <QUuid>
 
 #include <algorithm>
@@ -68,10 +72,10 @@ ArchivePtr openArchive(const QString& path) {
     return input;
 }
 
-void requireCleanArchiveStatus(archive* input, int status) {
+void requireCleanArchiveStatus(archive* input, int status, const QString& path) {
     if (status == ARCHIVE_EOF) return;
     const char* detail = archive_error_string(input);
-    throw std::runtime_error(detail ? detail : "Could not read archive");
+    throw std::runtime_error(path.toStdString() + ": " + (detail ? detail : "Could not read archive"));
 }
 
 QString safeEntryPath(const char* raw) {
@@ -146,7 +150,7 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
                 archive_entry_size(item), order++);
             archive_read_data_skip(input.get());
         }
-        requireCleanArchiveStatus(input.get(), status);
+        requireCleanArchiveStatus(input.get(), status, archivePath);
     }
     if (entries.empty()) throw std::runtime_error("The archive contains no MCRAW or DNG files");
 
@@ -187,6 +191,15 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
             decompressedBytes += static_cast<quint64>(entry.size);
         }
         constexpr quint64 reserveBytes = 5ULL * 1024 * 1024 * 1024;
+#ifdef __ANDROID__
+        // QStorageInfo queries Android's Java runtime for APK mount data.
+        // Temporary staging is a native path, so query it without JNI.
+        std::error_code spaceError;
+        const auto space = std::filesystem::space(QDir::tempPath().toStdString(), spaceError);
+        if (spaceError || space.available == static_cast<std::uintmax_t>(-1))
+            throw std::runtime_error("Could not determine free space for the temporary directory");
+        const quint64 availableBytes = space.available;
+#else
         const QStorageInfo temporaryStorage(QDir::tempPath());
         if (!temporaryStorage.isValid() || !temporaryStorage.isReady())
             throw std::runtime_error("Could not determine free space for the temporary directory");
@@ -194,6 +207,7 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
         if (reportedAvailableBytes < 0)
             throw std::runtime_error("Could not determine free space for the temporary directory");
         const quint64 availableBytes = static_cast<quint64>(reportedAvailableBytes);
+#endif
         if (availableBytes < reserveBytes || decompressedBytes > availableBytes - reserveBytes) {
             throw InsufficientArchiveSpace(
                 QString("Import needs %1 GiB of temporary space, but only %2 GiB can be used while leaving 5 GiB free")
@@ -263,7 +277,7 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
                 if (!output.commit()) throw std::runtime_error("Could not finish extracted file");
                 ++extractedCount;
             }
-            requireCleanArchiveStatus(input.get(), status);
+            requireCleanArchiveStatus(input.get(), status, archivePath);
             if (extractedCount != selected.size())
                 throw std::runtime_error("Archive ended before all selected media files were extracted");
         }

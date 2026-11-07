@@ -2,6 +2,7 @@
 #include "SourceInput.h"
 #include <array>
 #include <cstring>
+#include <clocale>
 #include <future>
 #include <zlib.h>
 
@@ -22,13 +23,20 @@ namespace {
 void createArchive(const QString& path,
                    const std::vector<std::pair<QString, QByteArray>>& files, const char* compression = nullptr, bool zip64 = false) {
     archive* output = archive_write_new();
+    const auto check = [&](int status) {
+        if (status != ARCHIVE_OK) {
+            const auto* error = archive_error_string(output);
+            throw std::runtime_error(path.toStdString() + ": " + (error ? error : "archive writer failed"));
+        }
+    };
     if (path.endsWith(".zip")) {
-        archive_write_set_format_zip(output);
+        check(archive_write_set_format_zip(output));
+        check(archive_write_set_format_option(output, "zip", "hdrcharset", "UTF-8"));
         if (zip64 && archive_write_set_format_option(output, "zip", "zip64", "1") != ARCHIVE_OK)
             throw std::runtime_error(archive_error_string(output));
         if (compression && archive_write_set_format_option(output, "zip", "compression", compression) != ARCHIVE_OK)
             throw std::runtime_error(archive_error_string(output));
-    } else archive_write_set_format_7zip(output);
+    } else check(archive_write_set_format_7zip(output));
     if (archive_write_open_filename(output, QFile::encodeName(path).constData()) != ARCHIVE_OK)
         throw std::runtime_error(archive_error_string(output));
     for (const auto& [name, data] : files) {
@@ -37,11 +45,12 @@ void createArchive(const QString& path,
         archive_entry_set_filetype(entry, AE_IFREG);
         archive_entry_set_perm(entry, 0600);
         archive_entry_set_size(entry, data.size());
-        archive_write_header(output, entry);
-        archive_write_data(output, data.constData(), data.size());
+        check(archive_write_header(output, entry));
+        if (archive_write_data(output, data.constData(), data.size()) != data.size())
+            throw std::runtime_error(path.toStdString() + ": could not write fixture data");
         archive_entry_free(entry);
     }
-    archive_write_close(output);
+    check(archive_write_close(output));
     archive_write_free(output);
 }
 
@@ -90,6 +99,12 @@ std::string readSource(const QString& path) {
 } // namespace
 
 int main() {
+    // This console test has no QCoreApplication to initialize the locale.
+    // libarchive's Unicode ZIP fixtures require a UTF-8 native character set.
+    if (!std::setlocale(LC_CTYPE, "C.UTF-8") &&
+        !std::setlocale(LC_CTYPE, "en_US.UTF-8") &&
+        !std::setlocale(LC_CTYPE, ".UTF-8"))
+        throw std::runtime_error("Could not initialize a UTF-8 locale for archive fixtures");
     QTemporaryDir directory;
     if (!directory.isValid()) return 1;
     const QString archivePath = QDir(directory.path()).absoluteFilePath("review.7z");

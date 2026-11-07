@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   android-apk:
+    outputs:
+      portable-tests: ${{ format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) }}
     name: Android APK (arm64) and tests (x86_64)
     runs-on: ubuntu-24.04
     steps:
@@ -135,25 +137,13 @@ jobs:
         disable-animations: true
         script: |
           python3 tests/android_ctest.py deploy build-android-tests Qt/6.12.0/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
-          ctest --test-dir build-android-tests -C Release -LE '^portable$' --output-on-failure --timeout 300 --output-junit device-test-results.xml || echo '::warning::Device Android tests failed (advisory)'
-          ctest --test-dir build-android-tests -C Release -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+          ctest --test-dir build-android-tests -C Release -LE '^portable$' --output-on-failure --timeout 300 || echo '::warning::Device Android tests failed (advisory)'
+          ctest --test-dir build-android-tests -C Release -L '^portable$' --output-on-failure --no-tests=error --timeout 300
 
-    - name: Record portable test result
-      if: always()
-      shell: bash
-      run: |
-        mkdir -p portable-test-result
-        printf '%s\n' '${{ steps.test-build.outcome }}' '${{ steps.portable-tests.outcome }}' > portable-test-result/status.txt
-
-    - name: Upload portable test result
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: portable-test-android-arm64-x86_64
-        path: portable-test-result/status.txt
-        if-no-files-found: error
 
   linux-appimage:
+    outputs:
+      portable-tests: ${{ format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) }}
     name: Linux AppImage (Clang)
     runs-on: ubuntu-24.04
     steps:
@@ -219,11 +209,11 @@ jobs:
     - name: Test portable suite
       id: portable-tests
       continue-on-error: true
-      run: ctest --test-dir build-linux -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+      run: ctest --test-dir build-linux -L '^portable$' --output-on-failure --no-tests=error --timeout 300
 
     - name: Test device suite (advisory)
       continue-on-error: true
-      run: ctest --test-dir build-linux -LE '^portable$' --output-on-failure --timeout 300 --output-junit device-test-results.xml
+      run: ctest --test-dir build-linux -LE '^portable$' --output-on-failure --timeout 300
 
 
     - name: Create AppImage
@@ -285,22 +275,12 @@ jobs:
         name: motioncam-Linux-AppImage
         path: artifacts/*.AppImage
 
-    - name: Record portable test result
-      if: always()
-      shell: bash
-      run: |
-        mkdir -p portable-test-result
-        printf '%s\n' '${{ steps.test-build.outcome }}' '${{ steps.portable-tests.outcome }}' > portable-test-result/status.txt
-
-    - name: Upload portable test result
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: portable-test-linux-x86_64
-        path: portable-test-result/status.txt
-        if-no-files-found: error
 
   build:
+    outputs:
+      windows-x86_64: ${{ matrix.artifact_suffix == 'windows-x86_64' && format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) || '' }}
+      macos-x86_64: ${{ matrix.artifact_suffix == 'macos-x86_64' && format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) || '' }}
+      macos-arm64: ${{ matrix.artifact_suffix == 'macos-arm64' && format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) || '' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -439,7 +419,7 @@ jobs:
           -DVCPKG_HOST_TRIPLET=${{ matrix.vcpkg_triplet }} `
           -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" `
           -DCMAKE_CONFIGURATION_TYPES=Release `
-          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}" `
+          -DCMAKE_PREFIX_PATH="$env:Qt6_DIR" `
           -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
 
     - name: Configure CMake (macOS)
@@ -509,11 +489,11 @@ jobs:
     - name: Test portable suite
       id: portable-tests
       continue-on-error: true
-      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -L '^portable$' --output-on-failure --no-tests=error --timeout 300
 
     - name: Test device suite (advisory)
       continue-on-error: true
-      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -LE '^portable$' --output-on-failure --timeout 300 --output-junit device-test-results.xml
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -LE '^portable$' --output-on-failure --timeout 300
 
 
 
@@ -532,7 +512,7 @@ jobs:
             exit 1
           fi
           echo "Running windeployqt on $exe"
-          "${{ github.workspace }}/Qt/6.7.2/${{ matrix.qt_arch }}/bin/windeployqt.exe" --release "$exe"
+          windeployqt.exe --release "$exe"
           sevenzip_dir="$(dirname "$(command -v 7z)")"
           cp "$sevenzip_dir/7z.exe" .
           if [ -f "$sevenzip_dir/7z.dll" ]; then cp "$sevenzip_dir/7z.dll" .; fi
@@ -564,20 +544,6 @@ jobs:
         name: motioncam-${{ matrix.artifact_suffix }}
         path: artifacts/*
 
-    - name: Record portable test result
-      if: always()
-      shell: bash
-      run: |
-        mkdir -p portable-test-result
-        printf '%s\n' '${{ steps.test-build.outcome }}' '${{ steps.portable-tests.outcome }}' > portable-test-result/status.txt
-
-    - name: Upload portable test result
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: portable-test-${{ matrix.artifact_suffix }}
-        path: portable-test-result/status.txt
-        if-no-files-found: error
 
   # Device tests are compiled and run as advisory checks.
   # Build jobs publish artifacts even if tests fail. Check each platform's
@@ -587,26 +553,21 @@ jobs:
     needs: [build, linux-appimage, android-apk]
     runs-on: ubuntu-latest
     steps:
-      - name: Download portable test results
-        uses: actions/download-artifact@v4
-        with:
-          path: portable-test-results/
-          pattern: portable-test-*
-
       - name: Check every platform passed test compilation and portable tests
         shell: python
+        env:
+          ANDROID_TESTS: ${{ needs.android-apk.outputs.portable-tests }}
+          LINUX_TESTS: ${{ needs.linux-appimage.outputs.portable-tests }}
+          WINDOWS_TESTS: ${{ needs.build.outputs.windows-x86_64 }}
+          MACOS_INTEL_TESTS: ${{ needs.build.outputs.macos-x86_64 }}
+          MACOS_ARM_TESTS: ${{ needs.build.outputs.macos-arm64 }}
         run: |
-          from pathlib import Path
-          platforms = (
-              "android-arm64-x86_64", "linux-x86_64", "windows-x86_64",
-              "macos-x86_64", "macos-arm64",
-          )
-          failures = []
-          for platform in platforms:
-              report = Path("portable-test-results") / f"portable-test-{platform}" / "status.txt"
-              outcomes = report.read_text().splitlines() if report.is_file() else []
-              if outcomes != ["success", "success"]:
-                  failures.append(f"{platform}: {outcomes or 'missing result'}")
+          import os
+          platforms = ("ANDROID_TESTS", "LINUX_TESTS", "WINDOWS_TESTS",
+                       "MACOS_INTEL_TESTS", "MACOS_ARM_TESTS")
+          failures = [f"{platform}: {os.environ.get(platform) or 'missing result'}"
+                      for platform in platforms
+                      if os.environ.get(platform) != "success:success"]
           if failures:
               raise SystemExit("Portable test gate failed:\n" + "\n".join(failures))
 
