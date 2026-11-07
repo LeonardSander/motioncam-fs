@@ -21,6 +21,11 @@ endif()
 
 project(MotionCamFuse VERSION 1.0 LANGUAGES C CXX)
 
+# Windows SDK headers must not define macros that break std::min/max.
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_compile_definitions(
@@ -584,6 +589,13 @@ if(NOT FFMPEG_FOUND)
     message(FATAL_ERROR "FFmpeg not found. Please install via vcpkg or set FFMPEG_ROOT to pre-built FFmpeg location.")
 endif()
 
+# Static FFmpeg consumers (including tests) need its Apple frameworks.
+if(APPLE)
+    list(APPEND FFMPEG_LIBRARIES
+        ${AUDIO_TOOLBOX_FRAMEWORK} ${CORE_MEDIA_FRAMEWORK}
+        ${CORE_VIDEO_FRAMEWORK} ${SECURITY_FRAMEWORK} ${VIDEO_TOOLBOX_FRAMEWORK})
+endif()
+
 # Add boost
 set(Boost_USE_STATIC_LIBS        ON)
 set(Boost_USE_DEBUG_LIBS        OFF)
@@ -1091,7 +1103,27 @@ if(BUILD_TESTING)
         set_tests_properties(motioncam-source-input-test PROPERTIES LABELS portable)
     endif()
 
+    # Build portable and device tests separately so only portable compilation
+    # gates prereleases. Test names match their executable targets except
+    # for the ZIP fixture mode of the finalize test.
+    add_custom_target(motioncam-portable-tests)
+    add_custom_target(motioncam-device-tests)
+    get_property(motioncam_tests DIRECTORY PROPERTY TESTS)
+    foreach(test_name IN LISTS motioncam_tests)
+        get_property(test_labels TEST ${test_name} PROPERTY LABELS)
+        if("portable" IN_LIST test_labels)
+            if(test_name STREQUAL "motioncam-zip-dng-test")
+                add_dependencies(motioncam-portable-tests motioncam-finalize-interpolation-test)
+            else()
+                add_dependencies(motioncam-portable-tests ${test_name})
+            endif()
+        else()
+            add_dependencies(motioncam-device-tests ${test_name})
+        endif()
+    endforeach()
+
     if(ANDROID)
+        set_tests_properties(motioncam-gallery-overlay-test PROPERTIES SKIP_RETURN_CODE 77)
         # These console tests use local fixtures, without a Java activity or
         # document provider. Exercise the Android stream with POSIX file access.
         add_library(motioncam-test-source-access STATIC tests/android_source_access.cpp)

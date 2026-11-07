@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <cstdio>
 
 namespace {
@@ -62,8 +63,12 @@ constexpr char full8Fixture[] =
 }
 
 int main(int argc, char** argv) {
+    // Parse console arguments without initializing Android JNI.
+#ifndef __ANDROID__
     QCoreApplication application(argc, argv);
-    const auto args = application.arguments();
+#endif
+    QStringList args;
+    for (int i = 0; i < argc; ++i) args.append(QString::fromLocal8Bit(argv[i]));
     // Act as FFmpeg for the selection subprocesses, supplying real encoded
     // fixtures so format validation is exercised independently of GPU access.
     if (args.contains("-hide_banner")) {
@@ -92,7 +97,7 @@ int main(int argc, char** argv) {
     if (full10.isEmpty() || limited10.isEmpty() || full8.isEmpty()) return 1;
     auto select = [&](const QString& input, const QString& chroma = "420", int width = 64) {
         qputenv("ENCODER_TEST_FIXTURE", input.toUtf8());
-        return motioncam::selectHardwareVideoEncoder(application.applicationFilePath(),
+        return motioncam::selectHardwareVideoEncoder(QFileInfo(QString::fromLocal8Bit(argv[0])).absoluteFilePath(),
             false, chroma, width, 64, 24, 18);
     };
     const auto accepted = select(full10);

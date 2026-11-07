@@ -52,8 +52,16 @@ ArchivePtr openArchive(const QString& path) {
 #else
     input.get_deleter().file = std::fopen(QFile::encodeName(path).constData(), "rb");
 #endif
+    // The fd reader provides seeking, which the 7z reader requires.
+    // archive_read_open_FILE does not install a seek callback.
     if (!input.get_deleter().file ||
-        archive_read_open_FILE(input.get(), input.get_deleter().file) != ARCHIVE_OK) {
+        archive_read_open_fd(input.get(),
+#ifdef _WIN32
+            _fileno(input.get_deleter().file),
+#else
+            fileno(input.get_deleter().file),
+#endif
+            65536) != ARCHIVE_OK) {
         const char* detail = archive_error_string(input.get());
         throw std::runtime_error(detail ? detail : "Could not open archive");
     }

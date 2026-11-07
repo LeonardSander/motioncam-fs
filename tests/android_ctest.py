@@ -39,6 +39,11 @@ def deploy(build, qt, ndk):
         (stage / "lib").mkdir()
         for line in (build / f"android-tests-{configuration}.txt").read_text().splitlines():
             executable = Path(line)
+            # A failed advisory device-test build must not prevent deployment
+            # of the portable suite. CTest reports missing executables itself.
+            if not executable.is_file():
+                print(f"::warning::Test executable was not built: {executable}")
+                continue
             shutil.copy2(executable, stage / "bin" / executable.name)
         # Include indirect dependencies too. Android's linker does not use
         # the build machine's RUNPATHs when these binaries run on the device.

@@ -4,7 +4,10 @@
 #include <cassert>
 
 int main(int argc, char** argv) {
+    // Android console tests have no JVM; QCoreApplication initializes JNI.
+#ifndef __ANDROID__
     QCoreApplication app(argc, argv);
+#endif
     QTemporaryDir directory;
     assert(directory.isValid());
     const QString first = directory.filePath("first.jpg");

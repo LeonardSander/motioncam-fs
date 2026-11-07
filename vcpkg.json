@@ -9,7 +9,7 @@
         "fmt",
         "spdlog",
         "libjpeg-turbo",
-        "libarchive",
+        { "name": "libarchive", "version>=": "3.8.7" },
         "protobuf",
         "libjxl",
         {

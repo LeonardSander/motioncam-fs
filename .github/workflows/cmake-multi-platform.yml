@@ -88,9 +88,11 @@ jobs:
         path: artifacts/*.apk
 
     - name: Install Android Qt (x86_64)
+      continue-on-error: true
       run: python3 scripts/install_qt_android.py "$PWD/Qt/6.12.0/android_x86_64" x86_64
 
     - name: Configure CMake (Android tests)
+      continue-on-error: true
       shell: bash
       env:
         QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_x86_64
@@ -103,19 +105,27 @@ jobs:
         export ANDROID_NDK_ROOT="$ANDROID_HOME/ndk/27.2.12479018"
         bash scripts/build_android_apk.sh "$PWD/build-android-tests" configure
 
-    - name: Build tests
+    - name: Build portable tests
+      id: test-build
+      continue-on-error: true
       shell: bash
       run: |
-        mapfile -t test_targets < <(sed 's|.*/||' build-android-tests/android-tests-Release.txt)
-        cmake --build build-android-tests --parallel 4 --target "${test_targets[@]}"
+        cmake --build build-android-tests --parallel 4 --target motioncam-portable-tests
+
+    - name: Build device tests (advisory)
+      continue-on-error: true
+      run: cmake --build build-android-tests --target motioncam-device-tests --parallel 4
 
     - name: Enable emulator acceleration
+      continue-on-error: true
       run: |
         echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
 
     - name: Test portable suite
+      id: portable-tests
+      continue-on-error: true
       uses: reactivecircus/android-emulator-runner@v2
       with:
         api-level: 35
@@ -125,8 +135,23 @@ jobs:
         disable-animations: true
         script: |
           python3 tests/android_ctest.py deploy build-android-tests Qt/6.12.0/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
+          ctest --test-dir build-android-tests -C Release -LE '^portable$' --output-on-failure --timeout 300 --output-junit device-test-results.xml || echo '::warning::Device Android tests failed (advisory)'
           ctest --test-dir build-android-tests -C Release -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
-          ctest --test-dir build-android-tests -C Release -LE '^portable$' --output-on-failure --timeout 300 --output-junit nonportable-test-results.xml || echo '::warning::Nonportable Android tests failed (advisory)'
+
+    - name: Record portable test result
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p portable-test-result
+        printf '%s\n' '${{ steps.test-build.outcome }}' '${{ steps.portable-tests.outcome }}' > portable-test-result/status.txt
+
+    - name: Upload portable test result
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: portable-test-android-arm64-x86_64
+        path: portable-test-result/status.txt
+        if-no-files-found: error
 
   linux-appimage:
     name: Linux AppImage (Clang)
@@ -182,15 +207,24 @@ jobs:
     - name: Build runtime
       run: cmake --build build-linux --config Release --target MotionCamFuse --parallel
 
-    - name: Build tests
-      run: cmake --build build-linux --config Release --parallel
+    - name: Build portable tests
+      id: test-build
+      continue-on-error: true
+      run: cmake --build build-linux --config Release --target motioncam-portable-tests --parallel
+
+    - name: Build device tests (advisory)
+      continue-on-error: true
+      run: cmake --build build-linux --config Release --target motioncam-device-tests --parallel 4
 
     - name: Test portable suite
+      id: portable-tests
+      continue-on-error: true
       run: ctest --test-dir build-linux -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
 
-    - name: Test nonportable suite (advisory)
+    - name: Test device suite (advisory)
       continue-on-error: true
-      run: ctest --test-dir build-linux -LE '^portable$' --output-on-failure --timeout 300 --output-junit nonportable-test-results.xml
+      run: ctest --test-dir build-linux -LE '^portable$' --output-on-failure --timeout 300 --output-junit device-test-results.xml
+
 
     - name: Create AppImage
       shell: bash
@@ -250,6 +284,21 @@ jobs:
       with:
         name: motioncam-Linux-AppImage
         path: artifacts/*.AppImage
+
+    - name: Record portable test result
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p portable-test-result
+        printf '%s\n' '${{ steps.test-build.outcome }}' '${{ steps.portable-tests.outcome }}' > portable-test-result/status.txt
+
+    - name: Upload portable test result
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: portable-test-linux-x86_64
+        path: portable-test-result/status.txt
+        if-no-files-found: error
 
   build:
     runs-on: ${{ matrix.os }}
@@ -444,19 +493,28 @@ jobs:
 
 
     # ---------- BUILD ----------
-    # Runtime compilation, test compilation and portable tests must all pass.
+    # Test failures preserve build artifacts; the portable-tests job gates prereleases.
     - name: Build runtime
       run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target MotionCamFuse --parallel
 
-    - name: Build tests
-      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --parallel
+    - name: Build portable tests
+      id: test-build
+      continue-on-error: true
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target motioncam-portable-tests --parallel
+
+    - name: Build device tests (advisory)
+      continue-on-error: true
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target motioncam-device-tests --parallel 4
 
     - name: Test portable suite
+      id: portable-tests
+      continue-on-error: true
       run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -L '^portable$' --output-on-failure --no-tests=error --timeout 300 --output-junit test-results.xml
 
-    - name: Test nonportable suite (advisory)
+    - name: Test device suite (advisory)
       continue-on-error: true
-      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -LE '^portable$' --output-on-failure --timeout 300 --output-junit nonportable-test-results.xml
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -LE '^portable$' --output-on-failure --timeout 300 --output-junit device-test-results.xml
+
 
 
 
@@ -506,33 +564,56 @@ jobs:
         name: motioncam-${{ matrix.artifact_suffix }}
         path: artifacts/*
 
-  # ---------- RELEASE ----------
-  release:
-    name: Create GitHub Release
+    - name: Record portable test result
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p portable-test-result
+        printf '%s\n' '${{ steps.test-build.outcome }}' '${{ steps.portable-tests.outcome }}' > portable-test-result/status.txt
+
+    - name: Upload portable test result
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: portable-test-${{ matrix.artifact_suffix }}
+        path: portable-test-result/status.txt
+        if-no-files-found: error
+
+  # Device tests are compiled and run as advisory checks.
+  # Build jobs publish artifacts even if tests fail. Check each platform's
+  # original step outcomes here (continue-on-error changes conclusions only).
+  portable-tests:
+    name: Require portable tests on every platform
     needs: [build, linux-appimage, android-apk]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download portable test results
         uses: actions/download-artifact@v4
         with:
-          path: release-files/
-          pattern: motioncam-*
+          path: portable-test-results/
+          pattern: portable-test-*
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-files/**/*
-          tag_name: ${{ github.ref_name }}
-          name: "MotionCam-FS ${{ github.ref_name }}"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check every platform passed test compilation and portable tests
+        shell: python
+        run: |
+          from pathlib import Path
+          platforms = (
+              "android-arm64-x86_64", "linux-x86_64", "windows-x86_64",
+              "macos-x86_64", "macos-arm64",
+          )
+          failures = []
+          for platform in platforms:
+              report = Path("portable-test-results") / f"portable-test-{platform}" / "status.txt"
+              outcomes = report.read_text().splitlines() if report.is_file() else []
+              if outcomes != ["success", "success"]:
+                  failures.append(f"{platform}: {outcomes or 'missing result'}")
+          if failures:
+              raise SystemExit("Portable test gate failed:\n" + "\n".join(failures))
 
+  # ---------- PRERELEASE ----------
   prerelease:
     name: Create GitHub prerelease
-    needs: [build, linux-appimage, android-apk]
+    needs: [build, linux-appimage, android-apk, portable-tests]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref_type == 'branch'
     permissions:

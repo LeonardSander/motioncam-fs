@@ -7,6 +7,12 @@
   "overlay-ports": ["./ports"],
   "registries": [
     {
+      "kind": "git",
+      "repository": "https://github.com/microsoft/vcpkg",
+      "baseline": "0bab79f3c6bc9cbe867686df00b108c0c0e9c274",
+      "packages": ["libarchive"]
+    },
+    {
       "kind": "artifact",
       "location": "https://github.com/microsoft/vcpkg-ce-catalog/archive/refs/heads/main.zip",
       "name": "microsoft"

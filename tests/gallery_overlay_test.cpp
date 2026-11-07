@@ -1,6 +1,7 @@
 #include "GalleryVulkanVideo.h"
 #include <QPainter>
 #include <QApplication>
+#include <cstdio>
 #include <QListView>
 #include <QStandardItemModel>
 #include <QScrollBar>
@@ -41,6 +42,12 @@ private:
 };
 
 int main(int argc, char** argv) {
+    // Android Qt GUI initialization requires a Java Activity, unavailable
+    // to adb console tests. Desktop CI still exercises the rendering checks.
+#ifdef __ANDROID__
+    std::fprintf(stderr, "SKIP: Android GUI test requires a Java Activity\n");
+    return 77;
+#endif
     QApplication app(argc, argv);
     // Native Windows controls animate between paints. Pixel comparisons need
     // a stable style when rendering the reference and capture separately.

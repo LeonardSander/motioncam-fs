@@ -185,7 +185,10 @@ void zip(const std::filesystem::path& path, const std::string& content) {
 }
 } // namespace
 int main(int argc, char** argv) {
+    // Android console tests have no JVM; QCoreApplication initializes JNI.
+#ifndef __ANDROID__
     QCoreApplication app(argc, argv);
+#endif
     try {
         QTemporaryDir temporary;
         require(temporary.isValid(), "temporary directory");
