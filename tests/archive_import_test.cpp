@@ -289,6 +289,17 @@ int main() {
         const auto imported = motioncam::extractReviewArchive(zipPath);
         const auto path = QDir(imported.sourcePath).filePath(QString::fromUtf8("café-00000000.dng"));
         if (readSource(path) != payload.toStdString() || QFileInfo(path).size() != 0) return failedCheck(__LINE__);
+#ifdef __APPLE__
+        // Finder, Qt and ZIP producers can use different canonical Unicode
+        // forms for the same file on macOS. Neither spelling may read the
+        // empty discovery placeholder instead of the registered payload.
+        for (const auto form : {QString::NormalizationForm_C, QString::NormalizationForm_D}) {
+            const auto alias = path.normalized(form);
+            if (!motioncam::isZipSource(alias.toStdString()) ||
+                readSource(alias) != payload.toStdString() || QFileInfo(alias).size() != 0)
+                return failedCheck(__LINE__);
+        }
+#endif
         motioncam::removeReviewArchive(imported.temporaryRoot);
     }
     for (const char* compression : {"store", "deflate", "zstd"}) {

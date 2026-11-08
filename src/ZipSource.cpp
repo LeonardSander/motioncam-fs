@@ -20,6 +20,10 @@
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#include <type_traits>
+#endif
 
 namespace motioncam {
 namespace {
@@ -39,7 +43,30 @@ void readAt(std::istream& file, uint64_t offset, void* bytes, size_t size) {
         throw std::runtime_error("Truncated ZIP archive");
 }
 std::string key(const std::filesystem::path& path) {
-    return std::filesystem::absolute(path).lexically_normal().string();
+    auto result = std::filesystem::absolute(path).lexically_normal().string();
+#ifdef __APPLE__
+    // macOS file APIs can return decomposed names even when the ZIP directory
+    // contains composed UTF-8. Both spellings refer to the same placeholder;
+    // they must also find the same registered ZIP payload.
+    if (std::any_of(result.begin(), result.end(), [](unsigned char c) { return c >= 128; })) {
+        using String = std::unique_ptr<std::remove_pointer_t<CFStringRef>, decltype(&CFRelease)>;
+        using MutableString = std::unique_ptr<std::remove_pointer_t<CFMutableStringRef>, decltype(&CFRelease)>;
+        String original(CFStringCreateWithBytes(kCFAllocatorDefault,
+            reinterpret_cast<const UInt8*>(result.data()), result.size(), kCFStringEncodingUTF8, false), CFRelease);
+        if (!original) throw std::runtime_error("Invalid UTF-8 ZIP source path");
+        MutableString normalized(CFStringCreateMutableCopy(kCFAllocatorDefault, 0, original.get()), CFRelease);
+        if (!normalized) throw std::bad_alloc();
+        CFStringNormalize(normalized.get(), kCFStringNormalizationFormC);
+        const auto capacity = CFStringGetMaximumSizeForEncoding(
+            CFStringGetLength(normalized.get()), kCFStringEncodingUTF8) + 1;
+        std::string utf8(static_cast<size_t>(capacity), '\0');
+        if (!CFStringGetCString(normalized.get(), utf8.data(), capacity, kCFStringEncodingUTF8))
+            throw std::runtime_error("Could not normalize ZIP source path");
+        utf8.resize(std::strlen(utf8.c_str()));
+        result = std::move(utf8);
+    }
+#endif
+    return result;
 }
 std::filesystem::path entryPath(std::string name) {
     std::replace(name.begin(), name.end(), '\\', '/');

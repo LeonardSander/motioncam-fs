@@ -424,6 +424,9 @@ add_library(MotionCamZipSource STATIC src/ZipSource.cpp)
 set_target_properties(MotionCamZipSource PROPERTIES AUTOMOC OFF AUTOUIC OFF)
 target_include_directories(MotionCamZipSource PUBLIC include)
 target_link_libraries(MotionCamZipSource PUBLIC LibArchive::LibArchive ZLIB::ZLIB)
+if(APPLE)
+    target_link_libraries(MotionCamZipSource PUBLIC "-framework CoreFoundation")
+endif()
 find_package(Protobuf CONFIG REQUIRED)
 add_library(MotionCamTelemetry STATIC
     src/GyroTelemetry.cpp
