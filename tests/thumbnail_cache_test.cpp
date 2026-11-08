@@ -2,11 +2,38 @@
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <cassert>
+#ifdef __ANDROID__
+#include <QDir>
+#include <QtPlugin>
+#include <dlfcn.h>
+#include <stdexcept>
+
+namespace {
+void registerConsoleJpegPlugin() {
+    // Qt's Android dynamic loader queries Java's SDK version. Console tests
+    // have no JVM, so load the real JPEG plugin through the native loader and
+    // register its factory with Qt as a static plugin for this process.
+    const QDir plugins(qEnvironmentVariable("QT_PLUGIN_PATH"));
+    const auto files = plugins.entryList({"libplugins_imageformats_qjpeg_*.so"}, QDir::Files);
+    if (files.size() != 1) throw std::runtime_error("Expected one Android JPEG plugin");
+    void* handle = dlopen(plugins.filePath(files.front()).toUtf8().constData(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle) throw std::runtime_error(dlerror());
+    auto instance = reinterpret_cast<QtPluginInstanceFunction>(dlsym(handle, "qt_plugin_instance"));
+    auto metadata = reinterpret_cast<QtPluginMetaDataFunction>(dlsym(handle, "qt_plugin_query_metadata_v2"));
+    if (!instance || !metadata) throw std::runtime_error("Invalid JPEG plugin exports");
+    // Keep the handle loaded for Qt's static plugin lifetime.
+    QCoreApplication::setLibraryPaths({});
+    qRegisterStaticPluginFunction(QStaticPlugin(instance, metadata));
+}
+}
+#endif
 
 int main(int argc, char** argv) {
     // Android console tests have no JVM; QCoreApplication initializes JNI.
 #ifndef __ANDROID__
     QCoreApplication app(argc, argv);
+#else
+    registerConsoleJpegPlugin();
 #endif
     QTemporaryDir directory;
     assert(directory.isValid());
