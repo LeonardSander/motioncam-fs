@@ -55,6 +55,7 @@ public:
     bool extractFrame(int frameNumber, std::vector<uint8_t>& dngData);
     bool getGainMap(int frameNumber, GainMap& gainMap);
     bool getLinearizationTable(int frameNumber, std::vector<uint16_t>& table);
+    static bool discardIdentityLinearizationTables(std::vector<uint8_t>& dngData);
     bool getFrameMetadata(int frameNumber, DNGFrameMetadata& metadata);
     // sourceSize supplies the original file length for metadata-only TIFFs.
     static bool getColorMetadata(const std::vector<uint8_t>& dngData,

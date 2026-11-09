@@ -19,6 +19,12 @@
             "features": ["opus"]
         },
         {
+            "name": "ffmpeg",
+            "platform": "linux",
+            "default-features": false,
+            "features": ["nvcodec"]
+        },
+        {
             "name": "libplacebo",
             "platform": "android | linux | osx | windows"
         },

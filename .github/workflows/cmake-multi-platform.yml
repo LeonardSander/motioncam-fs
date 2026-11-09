@@ -241,15 +241,21 @@ jobs:
         export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
         qt_plugins="$(qmake -query QT_INSTALL_PLUGINS)"
         mkdir -p AppDir/usr/plugins
-        for group in wayland-decoration-client wayland-graphics-integration-client wayland-shell-integration; do
+        for group in iconengines wayland-decoration-client wayland-graphics-integration-client wayland-shell-integration; do
           cp -a "$qt_plugins/$group" AppDir/usr/plugins/
         done
         ./linuxdeploy.AppImage --appimage-extract-and-run \
           --appdir AppDir \
           --desktop-file packaging/linux/com.motioncam.fuse.desktop \
           --icon-file assets/app_icon_linux.png \
-          --plugin qt \
-          --output appimage
+          --plugin qt
+        # Qt opens the unversioned Vulkan name. Without this alias it can load
+        # the host loader alongside the bundled SONAME used by libplacebo,
+        # then fail to resolve surface functions for the foreign instance.
+        test -f AppDir/usr/lib/libvulkan.so.1
+        ln -sf libvulkan.so.1 AppDir/usr/lib/libvulkan.so
+        ./linuxdeploy.AppImage --appimage-extract-and-run \
+          --appdir AppDir --output appimage
         mkdir -p artifacts
         ref_safe="${GITHUB_REF_NAME//\//-}"
         mv MotionCam_Fuse-*.AppImage artifacts/motioncam-${ref_safe}-linux-x86_64.AppImage
@@ -261,6 +267,9 @@ jobs:
         test -f AppDir/usr/plugins/platforms/libqxcb.so
         test -f AppDir/usr/plugins/platforms/libqwayland-generic.so
         test -f AppDir/usr/plugins/platforms/libqwayland-egl.so
+        test -f AppDir/usr/plugins/iconengines/libqsvgicon.so
+        test "$(readlink -f AppDir/usr/lib/libvulkan.so)" = \
+             "$(readlink -f AppDir/usr/lib/libvulkan.so.1)"
         # Test the deployed runtime and libraries without requiring a GPU.
         export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib"
         export QT_PLUGIN_PATH="$PWD/AppDir/usr/plugins"

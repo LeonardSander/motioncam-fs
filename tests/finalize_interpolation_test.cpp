@@ -152,7 +152,7 @@ std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
 std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp,
                                    bool withLinearization = true,
                                    uint32_t width = 32, bool patterned = false,
-                                   uint32_t repeatSize = 2) {
+                                   uint32_t repeatSize = 2, uint32_t identityBits = 0) {
     constexpr uint32_t height = 32;
     std::vector<uint16_t> pixels(width * height, value);
     if (patterned)
@@ -160,9 +160,10 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
             for (uint32_t x = 0; x < width; ++x)
                 pixels[static_cast<size_t>(y) * width + x] =
                     static_cast<uint16_t>((y * 37 + x * 53) & 1023);
-    std::vector<uint16_t> linearization(1024);
+    std::vector<uint16_t> linearization(identityBits ? 1u << identityBits : 1024);
     for (size_t i = 0; i < linearization.size(); ++i)
-        linearization[i] = static_cast<uint16_t>(std::min<size_t>(65535, i * 64));
+        linearization[i] = static_cast<uint16_t>(identityBits ? i :
+            std::min<size_t>(65535, i * 64));
     const unsigned short bits = 16, black[4] = {0, 0, 0, 0};
     const unsigned char phase[4] = {0, 1, 1, 2};
     std::vector<unsigned char> pattern(repeatSize * repeatSize);
@@ -368,6 +369,47 @@ int main(int argc, char** argv) {
             assert(motioncam::DNGDecoder::getColorMetadata(missingExposure, retained));
             assert(retained.iso == 800 && std::abs(retained.exposureTime - 0.008333) < 1e-6);
             motioncam::removeReviewArchive(imported.temporaryRoot);
+        }
+        return 0;
+    }
+    if (argc >= 3 && std::strcmp(argv[1], "--zip-linear-levels") == 0) {
+        for (int arg = 2; arg < argc; ++arg) {
+            const auto imported = motioncam::extractReviewArchive(QString::fromLocal8Bit(argv[arg]));
+            struct Cleanup {
+                QString root;
+                ~Cleanup() { motioncam::removeReviewArchive(root); }
+            } cleanup{imported.temporaryRoot};
+            motioncam::DNGDecoder decoder(imported.sourcePath.toStdString());
+            const auto count = decoder.getFrames().size();
+            assert(count > 0);
+            for (const auto index : {size_t{0}, count / 2, count - 1}) {
+                std::vector<uint8_t> bytes;
+                motioncam::DNGFrameMetadata before;
+                assert(decoder.extractFrame(index, bytes));
+                assert(decoder.getFrameMetadata(index, before));
+                std::vector<uint16_t> table;
+                assert(!decoder.getLinearizationTable(index, table) && table.empty());
+                assert(before.inputBitDepth == motioncam::utils::evenBitsNeeded(
+                    static_cast<uint16_t>(before.whiteLevel[0])));
+                const auto projected = motioncam::vfs::projectedDngSize(
+                    decoder.getFrames()[index].width, decoder.getFrames()[index].height,
+                    1, before.inputBitDepth, before.metadataBytes, 256 * 1024);
+                motioncam::RenderSettings settings;
+                settings.options = static_cast<motioncam::FileRenderOptions>(0);
+                motioncam::vfs::DngFinalizeOptions finalize;
+                finalize.writeTiming = false;
+                finalize.packToWhiteLevel = true;
+                assert(motioncam::DNGDecoder::ensureUncompressed(bytes));
+                motioncam::vfs::finalizeDng(bytes, settings, finalize);
+                assert(bytes.size() <= projected);
+                assert(motioncam::DNGDecoder::getLinearizationTableCount(bytes) == 0);
+                motioncam::DNGFrameMetadata after;
+                assert(motioncam::DNGDecoder::getColorMetadata(bytes, after));
+                assert(after.whiteLevel == before.whiteLevel);
+                assert(after.blackLevel == before.blackLevel);
+                std::fprintf(stderr, "%s frame %zu: %ub, white %.0f, output %zu bytes fits projection\n",
+                    argv[arg], index, before.inputBitDepth, before.whiteLevel[0], bytes.size());
+            }
         }
         return 0;
     }
@@ -1049,6 +1091,69 @@ int main(int argc, char** argv) {
     motioncam::DecodedDNGImage oddWhiteImage;
     assert(motioncam::DNGDecoder::decodeImage(oddWhiteDng, oddWhiteImage));
     assert(oddWhiteImage.layout.bitsPerSample == 12);
+    // Container width only caps level-derived depth. These fixtures exercise
+    // metadata at supported storage depths without decoding pixels.
+    for (uint32_t storedBits : {8u, 10u, 12u, 14u, 16u}) {
+        for (uint32_t white : {63u, 255u, 1023u, 4095u, 65535u}) {
+            auto dng = makeLogCfaDng(15, 0, false);
+            assert(motioncam::DNGDecoder::overrideDataLevels(
+                dng, std::to_string(white) + "/0"));
+            // This fixture has one SHORT BitsPerSample in its root IFD.
+            const auto ifd = static_cast<uint32_t>(dng[4] | dng[5] << 8 |
+                dng[6] << 16 | dng[7] << 24);
+            const auto count = dng[ifd] | dng[ifd + 1] << 8;
+            bool changed = false;
+            for (int i = 0; i < count; ++i) {
+                const auto at = ifd + 2 + i * 12;
+                if ((dng[at] | dng[at + 1] << 8) != 258) continue;
+                dng[at + 8] = storedBits;
+                dng[at + 9] = 0;
+                changed = true;
+            }
+            assert(changed);
+            motioncam::DNGFrameMetadata metadata;
+            assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
+            assert(metadata.inputBitDepth == std::min<uint32_t>(storedBits,
+                motioncam::utils::evenBitsNeeded(static_cast<uint16_t>(white))));
+            assert(motioncam::DNGDecoder::removeMetadataTags(dng, {50717}));
+            assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
+            assert(metadata.inputBitDepth == storedBits);
+        }
+    }
+    // mcpro24fps linear captures include identity tables and can declare a
+    // 10-bit clipping white even when their stored code range is 12/14 bits.
+    for (uint32_t bits : {10u, 12u, 14u}) {
+        auto identityDng = makeLogCfaDng(511, 0, true, 32, false, 2, bits);
+        assert(motioncam::DNGDecoder::overrideDataLevels(identityDng, "1023/64"));
+        motioncam::DNGFrameMetadata metadata;
+        assert(motioncam::DNGDecoder::getColorMetadata(identityDng, metadata));
+        assert(metadata.inputBitDepth == 10);
+        assert(metadata.linearizationInputMax == 0);
+        const auto original = identityDng;
+        motioncam::DecodedDNGImage identityDecoded;
+        assert(motioncam::DNGDecoder::decodeImage(original, identityDecoded));
+        assert(!identityDecoded.linearizationApplied);
+        assert(identityDecoded.residentLinearization.empty());
+        assert(motioncam::DNGDecoder::discardIdentityLinearizationTables(identityDng));
+        assert(motioncam::DNGDecoder::getLinearizationTableCount(identityDng) == 0);
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(original, identityDng));
+        auto finalizedIdentity = original;
+        motioncam::RenderSettings settings;
+        motioncam::vfs::DngFinalizeOptions finalize;
+        finalize.writeTiming = false;
+        finalize.packToWhiteLevel = false;
+        motioncam::vfs::finalizeDng(finalizedIdentity, settings, finalize);
+        assert(motioncam::DNGDecoder::getLinearizationTableCount(finalizedIdentity) == 0);
+        assert(motioncam::DNGDecoder::imagePayloadsEqual(original, finalizedIdentity));
+        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(identityDng));
+        motioncam::DecodedDNGImage image;
+        assert(motioncam::DNGDecoder::decodeImage(identityDng, image, false, false));
+        assert(image.layout.bitsPerSample == metadata.inputBitDepth);
+    }
+    auto nonlinearDng = makeLogCfaDng(511, 0);
+    const auto originalNonlinear = nonlinearDng;
+    assert(motioncam::DNGDecoder::discardIdentityLinearizationTables(nonlinearDng));
+    assert(nonlinearDng == originalNonlinear);
     // Configured exposure compensation is a metadata-only operation. Gallery
     // applies BaselineExposure while color-transforming its decoded preview;
     // the DNG sample payload itself must remain byte-for-byte equivalent.

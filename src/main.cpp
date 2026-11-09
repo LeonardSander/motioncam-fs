@@ -658,6 +658,10 @@ int main(int argc, char *argv[])
     app.setApplicationName("MotionCam Fuse");
     app.setApplicationVersion("1.0");
     app.setOrganizationName("MotionCam");
+#if defined(__linux__) && !defined(__ANDROID__)
+    // Wayland associates the window with its installed desktop entry/icon.
+    app.setDesktopFileName("com.motioncam.fuse");
+#endif
 #ifdef __APPLE__
     app.setWindowIcon(QIcon(":/assets/app_icon_mac.png"));
     QFont appFont = app.font();

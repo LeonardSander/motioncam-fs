@@ -1240,6 +1240,17 @@ namespace {
         size_t entryOffset;
     };
 
+    bool isIdentityLinearization(const DngByteView& data,
+                                const TiffEntry& entry, bool little) {
+        if (entry.type != TIFF_TYPE_SHORT || !entry.count || entry.count > 65536 ||
+            entry.valueOffset > data.size() ||
+            entry.count > (data.size() - entry.valueOffset) / 2) return false;
+        for (uint32_t i = 0; i < entry.count; ++i)
+            if (read16(data.data() + entry.valueOffset + i * 2, little) != i)
+                return false;
+        return true;
+    }
+
     std::vector<TiffEntry> findTiffEntries(const DngByteView& data, bool& little) {
         std::vector<TiffEntry> result;
         if (data.size() < 8) return result;
@@ -2843,6 +2854,7 @@ bool DNGDecoder::getLinearizationTable(int frameNumber, std::vector<uint16_t>& t
     bool little = true;
     for (const auto& entry : findTiffEntries(metadata, little)) {
         if (entry.tag != TIFF_TAG_LINEARIZATION_TABLE) continue;
+        if (isIdentityLinearization(metadata, entry, little)) return false;
         if (entry.type != TIFF_TYPE_SHORT || !entry.count || entry.count > 65536) return false;
         table.resize(entry.count);
         for (size_t i = 0; i < table.size(); ++i)
@@ -3536,8 +3548,10 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
             // The table is indexed by the stored sample code. Its highest
             // possible input is therefore count - 1, independently of the
             // post-linearization WhiteLevel values contained in the table.
-            hasLinearization = true;
-            linearizationInputMax = std::max(linearizationInputMax, entry.count - 1);
+            if (!isIdentityLinearization(data, entry, little)) {
+                hasLinearization = true;
+                linearizationInputMax = std::max(linearizationInputMax, entry.count - 1);
+            }
         } else if (entry.tag == TIFF_TAG_BITS_PER_SAMPLE && entry.count &&
                    entry.type == TIFF_TYPE_SHORT) {
             for (uint32_t i = 0; i < entry.count; ++i)
@@ -3616,19 +3630,19 @@ bool DNGDecoder::getColorMetadata(const std::vector<uint8_t>& data,
         while (bits < 16 && ((uint32_t{1} << bits) - 1) < maximum) ++bits;
         return bits;
     };
-    metadata.inputBitDepth = 0;
-    auto includeDepth = [&](uint32_t depth) {
-        if (!depth) return;
-        depth = std::min<uint32_t>(16, depth);
-        metadata.inputBitDepth = metadata.inputBitDepth
-            ? std::min(metadata.inputBitDepth, depth) : depth;
-    };
-    if (reportedWhiteLevelMax) includeDepth(bitsForMaximum(reportedWhiteLevelMax));
-    includeDepth(packedBitDepth);
-    if (hasLinearization) includeDepth(bitsForMaximum(linearizationInputMax));
-    metadata.linearizationInputMax = hasLinearization ? linearizationInputMax : 0;
+    // Effective depth comes from levels in the stored-code domain. WhiteLevel
+    // is already in that domain for linear data; a non-identity LUT describes
+    // it for encoded data. BitsPerSample caps that result and supplies the
+    // default range when neither levels nor a non-identity LUT are present.
+    metadata.inputBitDepth = hasLinearization
+        ? bitsForMaximum(linearizationInputMax)
+        : reportedWhiteLevelMax ? bitsForMaximum(reportedWhiteLevelMax)
+                                : std::min(16u, packedBitDepth);
     if (metadata.inputBitDepth & 1u)
         metadata.inputBitDepth = std::min(16u, metadata.inputBitDepth + 1u);
+    if (packedBitDepth)
+        metadata.inputBitDepth = std::min(metadata.inputBitDepth, packedBitDepth);
+    metadata.linearizationInputMax = hasLinearization ? linearizationInputMax : 0;
     std::vector<std::pair<size_t, size_t>> imageRanges;
     for (const auto& offsetEntry : entries) {
         if (offsetEntry.tag != TIFF_TAG_STRIP_OFFSETS &&
@@ -3953,6 +3967,22 @@ bool DNGDecoder::removeMetadataTags(std::vector<uint8_t>& data,
     std::set<uint32_t> affected;
     for (const auto& entry : entries) {
         if (std::find(tags.begin(), tags.end(), entry.tag) == tags.end()) continue;
+        write16(data.data() + entry.entryOffset, 0, little);
+        affected.insert(entry.ifdOffset);
+    }
+    for (uint32_t ifd : affected)
+        if (!sortTiffIfdEntries(data, ifd, little)) return false;
+    return true;
+}
+
+bool DNGDecoder::discardIdentityLinearizationTables(std::vector<uint8_t>& data) {
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    if (entries.empty()) return false;
+    std::set<uint32_t> affected;
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_LINEARIZATION_TABLE ||
+            !isIdentityLinearization(data, entry, little)) continue;
         write16(data.data() + entry.entryOffset, 0, little);
         affected.insert(entry.ifdOffset);
     }
@@ -5737,7 +5767,8 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
     std::vector<uint16_t> linearization;
     for (const auto& entry : entries)
         if (entry.tag == TIFF_TAG_LINEARIZATION_TABLE &&
-            entry.type == TIFF_TYPE_SHORT && entry.count) {
+            entry.type == TIFF_TYPE_SHORT && entry.count &&
+            !isIdentityLinearization(data, entry, little)) {
             linearization.resize(entry.count);
             for (uint32_t i = 0; i < entry.count; ++i)
                 linearization[i] = read16(data.data() + entry.valueOffset +
@@ -6093,6 +6124,7 @@ bool DNGDecoder::overrideDataLevels(std::vector<uint8_t>& data, const std::strin
 }
 
 bool DNGDecoder::packUncompressedToWhiteLevel(std::vector<uint8_t>& data) {
+    if (!discardIdentityLinearizationTables(data)) return false;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     auto scalar = [&](const TiffEntry& entry) -> uint32_t {

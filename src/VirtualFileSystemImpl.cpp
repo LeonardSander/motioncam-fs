@@ -139,6 +139,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
     const auto pipelineStarted = motioncam::diagnosticNow();
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
+    if (!DNGDecoder::discardIdentityLinearizationTables(dng))
+        throw std::runtime_error("Could not discard identity linearization tables for " + source);
     const int scale = options.preScaledProxy ? 1 : options.outputScale;
     // All three source adapters converge here after native and sidecar maps
     // have been attached. Do not carry no-op gain metadata into output DNGs.
@@ -518,6 +520,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
                  const DngFinalizeOptions& options) {
+    if (!DNGDecoder::discardIdentityLinearizationTables(dng))
+        throw std::runtime_error("Could not discard identity DNG linearization tables");
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
     const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;

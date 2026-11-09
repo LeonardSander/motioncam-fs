@@ -1061,6 +1061,14 @@ GalleryVulkanVideo::GalleryVulkanVideo(QWidget* parent) : QWidget(parent) {
 #endif
         return;
     }
+    // An imported instance is only usable when Qt resolves its WSI functions
+    // through the same loader. Incomplete packaged runtimes must fall back
+    // before Qt creates a surface and calls a missing function pointer.
+    if (!mInstance->getInstanceProcAddr("vkGetPhysicalDeviceSurfaceSupportKHR") ||
+        !mInstance->getInstanceProcAddr("vkDestroySurfaceKHR")) {
+        spdlog::warn("Gallery native Vulkan surface functions unavailable; using fallback");
+        return;
+    }
     mSurface = new GalleryVulkanSurface(mInstance.get(), shared);
     mContainer = QWidget::createWindowContainer(mSurface, this);
 #ifndef __ANDROID__

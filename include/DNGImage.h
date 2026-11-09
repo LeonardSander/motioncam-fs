@@ -43,6 +43,9 @@ struct DNGFrameMetadata {
     std::array<float, 4> whiteLevel{};
     uint32_t blackLevelCount = 0;
     uint32_t whiteLevelCount = 0;
+    // Effective stored-code depth from levels/LUT, capped by BitsPerSample,
+    // or BitsPerSample itself when levels/LUT are absent.
+    // Zero means the effective range is unknown.
     uint32_t inputBitDepth = 0;
     uint32_t linearizationInputMax = 0;
     int orientation = -1;
