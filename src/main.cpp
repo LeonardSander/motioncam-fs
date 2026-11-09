@@ -661,6 +661,24 @@ int main(int argc, char *argv[])
 #if defined(__linux__) && !defined(__ANDROID__)
     // Wayland associates the window with its installed desktop entry/icon.
     app.setDesktopFileName("com.motioncam.fuse");
+    // Bundled libva's compiled driver directory belongs to the build machine.
+    // Locate host drivers while preserving any explicit user configuration.
+    if ((qEnvironmentVariableIsSet("APPIMAGE") || qEnvironmentVariableIsSet("APPDIR")) &&
+        !qEnvironmentVariableIsSet("LIBVA_DRIVERS_PATH")) {
+        QStringList driverPaths;
+        QStringList roots{QStringLiteral("/usr/lib"), QStringLiteral("/usr/lib64"),
+                          QStringLiteral("/run/opengl-driver/lib")};
+        const QDir systemLib(QStringLiteral("/usr/lib"));
+        for (const auto& directory : systemLib.entryList({QStringLiteral("*-linux-gnu")}, QDir::Dirs))
+            roots.append(systemLib.filePath(directory));
+        for (const auto& root : roots) {
+            const QDir drivers(root + QStringLiteral("/dri"));
+            if (!drivers.entryList({QStringLiteral("*_drv_video.so")}, QDir::Files).isEmpty())
+                driverPaths.append(drivers.absolutePath());
+        }
+        if (!driverPaths.isEmpty())
+            qputenv("LIBVA_DRIVERS_PATH", driverPaths.join(':').toLocal8Bit());
+    }
 #endif
 #ifdef __APPLE__
     app.setWindowIcon(QIcon(":/assets/app_icon_mac.png"));

@@ -190,7 +190,12 @@ struct DirectLogGpuRgb::State {
         if (!softwareSource && (!hw || !hw->lock_queue || !hw->unlock_queue))
             return false;
 
-        log = pl_log_create(PL_API_VER, nullptr);
+        pl_log_params logParams{};
+        logParams.log_level = PL_LOG_WARN;
+        logParams.log_cb = [](void*, pl_log_level, const char* message) {
+            spdlog::warn("DirectLog GPU conversion: {}", message);
+        };
+        log = pl_log_create(PL_API_VER, &logParams);
         if (!log) return false;
         if (softwareSource) {
             vulkan = createGalleryVulkanContext(log);
@@ -403,8 +408,19 @@ vec4 hook() {
             params.hooks = hooks;
             const auto renderStart = motioncam::diagnosticNow();
             const bool renderOk = pl_render_image(renderer, &input, &target, &params);
+            // A failed intermediate allocation/hook can still return an image
+            // with the transfer curve omitted. Do not publish it or reuse the
+            // damaged renderer cache on the next frame (libplacebo 7.360 can
+            // leave a null FBO in that cache). The caller releases this state
+            // and converts the hardware-decoded frame on CPU instead.
+            const auto errors = pl_renderer_get_errors(renderer).errors;
+            const bool requiredPassFailed = errors & (PL_RENDER_ERR_FBO | PL_RENDER_ERR_HOOKS);
+            if (requiredPassFailed)
+                spdlog::warn("DirectLog GPU conversion required render pass failed (flags={})",
+                             static_cast<unsigned int>(errors));
             const auto downloadStart = motioncam::diagnosticNow();
-            rendered = renderOk && (deferDownload || downloadRgb(target, packedRgb));
+            rendered = renderOk && !requiredPassFailed &&
+                (deferDownload || downloadRgb(target, packedRgb));
             if (rendered && deferDownload) {
                 pendingTarget = target;
                 pending = true;

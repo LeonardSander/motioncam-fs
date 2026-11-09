@@ -10,7 +10,20 @@
       "kind": "git",
       "repository": "https://github.com/microsoft/vcpkg",
       "baseline": "0bab79f3c6bc9cbe867686df00b108c0c0e9c274",
-      "packages": ["libarchive"]
+      "packages": [
+        "dav1d",
+        "ffmpeg",
+        "ffmpeg-bin2c",
+        "ffnvcodec",
+        "glslang",
+        "libarchive",
+        "libva",
+        "libvpl",
+        "shaderc",
+        "spirv-headers",
+        "spirv-tools",
+        "vcpkg-pkgconfig-get-modules"
+      ]
     },
     {
       "kind": "artifact",

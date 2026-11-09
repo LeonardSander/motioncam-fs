@@ -20,9 +20,21 @@
         },
         {
             "name": "ffmpeg",
+            "platform": "(linux | windows) & (x86 | x64)",
+            "default-features": false,
+            "features": ["nvcodec", "qsv"]
+        },
+        {
+            "name": "ffmpeg",
             "platform": "linux",
             "default-features": false,
-            "features": ["nvcodec"]
+            "features": ["vaapi", "vulkan"]
+        },
+        {
+            "name": "ffmpeg",
+            "platform": "windows",
+            "default-features": false,
+            "features": ["vulkan"]
         },
         {
             "name": "libplacebo",
@@ -30,9 +42,9 @@
         },
         {
             "name": "ffmpeg",
-            "version>=": "6.1.1",
+            "version>=": "9.0.1",
             "default-features": false,
-            "features": ["avcodec", "avfilter", "avformat", "swresample", "swscale"]
+            "features": ["avcodec", "avfilter", "avformat", "dav1d", "swresample", "swscale"]
         }
     ],
     "overrides": [
@@ -46,11 +58,7 @@
         },
         {
             "name": "ffmpeg",
-            "version": "6.1.1"
-        },
-        {
-            "name": "ffnvcodec",
-            "version": "12.1.14.0"
+            "version": "9.0.1"
         }
     ]
 }

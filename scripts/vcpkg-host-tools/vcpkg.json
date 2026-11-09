@@ -1,0 +1,6 @@
+{
+  "name": "motioncam-host-tools",
+  "version-string": "1",
+  "builtin-baseline": "0bab79f3c6bc9cbe867686df00b108c0c0e9c274",
+  "dependencies": ["shaderc"]
+}

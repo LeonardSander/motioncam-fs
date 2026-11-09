@@ -182,6 +182,7 @@ private:
     bool mVerifiedBandFullRange = false;
     AVBufferRef* mHardwareDeviceContext;
     AVPixelFormat mHardwarePixelFormat;
+    AVPixelFormat mReportedFrameFormat = AV_PIX_FMT_NONE;
     bool mDecoderInitialized;
     bool mHardwareDecoderActive;
     bool mForceSoftwareDecoder = false;

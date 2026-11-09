@@ -84,10 +84,11 @@ jobs:
           "artifacts/motioncam-${ref_safe}-android-arm64.apk"
 
     - name: Upload APK
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: motioncam-android-arm64
         path: artifacts/*.apk
+        archive: false
+        if-no-files-found: error
 
     - name: Install Android Qt (x86_64)
       continue-on-error: true
@@ -159,6 +160,7 @@ jobs:
         sudo apt-get install -y \
           clang ninja-build pkg-config nasm autoconf automake libtool \
           libfuse3-dev libxcb-cursor0 libgl1-mesa-dev 7zip \
+          libdrm-dev \
           libx11-dev libxrandr-dev libwayland-dev libxkbcommon-dev libx11-xcb-dev xvfb xauth
 
     # Use the same manifest, version pins and local libplacebo overlay as
@@ -176,6 +178,18 @@ jobs:
         host: linux
         target: desktop
         modules: qtmultimedia
+
+    # FFmpeg's port probes glslc but does not depend on it. Install it first
+    # in a separate prefix so manifest reconciliation cannot remove the tool.
+    - name: Build FFmpeg shader compiler
+      shell: bash
+      run: |
+        "$VCPKG_ROOT/vcpkg" install \
+          --x-manifest-root="$PWD/scripts/vcpkg-host-tools" \
+          --x-install-root="$PWD/build-tools/vcpkg_installed" \
+          --overlay-triplets="$PWD/scripts/vcpkg-triplets" \
+          --triplet=x64-linux-release --host-triplet=x64-linux-release
+        echo "$PWD/build-tools/vcpkg_installed/x64-linux-release/tools/shaderc" >> "$GITHUB_PATH"
 
     - name: Configure with LLVM
       id: linux-configure
@@ -206,7 +220,10 @@ jobs:
           vcpkg/buildtrees/ffmpeg/*.log
 
     - name: Build runtime
-      run: cmake --build build-linux --config Release --target MotionCamFuse --parallel
+      run: cmake --build build-linux --config Release --target MotionCamFuse motioncam-hardware-video-decoder-test --parallel
+
+    - name: Check Linux hardware decoder coverage
+      run: ctest --test-dir build-linux -R '^motioncam-hardware-video-decoder-test$' --output-on-failure --no-tests=error
 
     - name: Build portable tests
       id: test-build
@@ -290,10 +307,11 @@ jobs:
           WAYLAND_DISPLAY=motioncam-missing-compositor AppDir/usr/bin/MotionCamFuse --help
 
     - name: Upload AppImage
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: motioncam-Linux-AppImage
         path: artifacts/*.AppImage
+        archive: false
+        if-no-files-found: error
 
 
   build:
@@ -423,6 +441,18 @@ jobs:
       shell: bash
       run: rm -rf "${{ matrix.build_dir }}"
 
+    - name: Build FFmpeg shader compiler (Windows)
+      if: matrix.platform == 'windows'
+      shell: pwsh
+      run: |
+        & "$env:VCPKG_ROOT/vcpkg.exe" install `
+          --x-manifest-root="$PWD/scripts/vcpkg-host-tools" `
+          --x-install-root="$PWD/build-tools/vcpkg_installed" `
+          --overlay-triplets="$PWD/scripts/vcpkg-triplets" `
+          --triplet=${{ matrix.vcpkg_triplet }} --host-triplet=${{ matrix.vcpkg_triplet }}
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        "$PWD/build-tools/vcpkg_installed/${{ matrix.vcpkg_triplet }}/tools/shaderc" >> $env:GITHUB_PATH
+
     - name: Configure CMake (Windows)
       if: matrix.platform == 'windows'
       shell: pwsh
@@ -495,7 +525,10 @@ jobs:
     # ---------- BUILD ----------
     # Test failures preserve build artifacts; the portable-tests job gates prereleases.
     - name: Build runtime
-      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target MotionCamFuse --parallel
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target MotionCamFuse motioncam-hardware-video-decoder-test --parallel
+
+    - name: Check platform hardware decoder coverage
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -R '^motioncam-hardware-video-decoder-test$' --output-on-failure --no-tests=error
 
     - name: Build portable tests
       id: test-build
@@ -624,7 +657,7 @@ jobs:
           printf 'version=0.10.%s\n' "$commit_count" >> "$GITHUB_OUTPUT"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-files/
           pattern: motioncam-*

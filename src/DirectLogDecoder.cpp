@@ -2,6 +2,7 @@
 #include "SourceMedia.h"
 #include "SourceInput.h"
 #include "DirectLogDecoder.h"
+#include "HardwareVideoDecoder.h"
 #include "DirectLogGpuRgb.h"
 #include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
@@ -31,6 +32,9 @@ extern "C" {
 extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/dict.h>
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#include <libavutil/hwcontext_vulkan.h>
+#endif
 }
 #ifdef MOTIONCAM_HAS_AVFILTER
 extern "C" {
@@ -422,8 +426,9 @@ void DirectLogDecoder::initDecoder() {
     bool hardwareDecoder = !forceSoftware && initHardwareDecoder();
     bool mediaCodecDecoder = false;
 #ifdef __ANDROID__
-    if (!hardwareDecoder && !forceSoftware &&
-        codecpar->codec_id == AV_CODEC_ID_HEVC) {
+    const AVCodec* mediaCodec = !hardwareDecoder && !forceSoftware
+        ? motioncam::findWrappedHardwareDecoder(codecpar->codec_id, "mediacodec") : nullptr;
+    if (mediaCodec) {
         static std::once_flag mediaCodecJni;
         static int mediaCodecJniStatus = AVERROR(EINVAL);
         std::call_once(mediaCodecJni, [] {
@@ -434,8 +439,7 @@ void DirectLogDecoder::initDecoder() {
         if (mediaCodecJniStatus < 0) {
             qWarning() << "DirectLog could not register the Android Java VM with FFmpeg"
                        << mediaCodecJniStatus;
-        } else if (const AVCodec* mediaCodec =
-                avcodec_find_decoder_by_name("hevc_mediacodec")) {
+        } else {
             AVCodecContext* context = avcodec_alloc_context3(mediaCodec);
             if (context && avcodec_parameters_to_context(context, codecpar) >= 0) {
                 avcodec_free_context(&mCodecContext);
@@ -450,7 +454,7 @@ void DirectLogDecoder::initDecoder() {
 #endif
     if (forceSoftware)
         spdlog::info("DirectLogDecoder: software decoding forced");
-    if (!hardwareDecoder && codecpar->codec_id == AV_CODEC_ID_AV1) {
+    if (!hardwareDecoder && !mediaCodecDecoder && codecpar->codec_id == AV_CODEC_ID_AV1) {
         if (const AVCodec* dav1d = avcodec_find_decoder_by_name("libdav1d")) {
             avcodec_free_context(&mCodecContext);
             mCodec = dav1d;
@@ -506,7 +510,7 @@ void DirectLogDecoder::initDecoder() {
                 std::string(mCodec ? mCodec->name : "(unknown)") + ": " +
                 ffmpegErrorString(decoderOpenResult));
         spdlog::warn("DirectLogDecoder: {} decoder failed to open clip ({}); retrying in software",
-                     mediaCodecDecoder ? "MediaCodec" : "Vulkan hardware",
+                     mediaCodecDecoder ? "MediaCodec" : "hardware",
                      ffmpegErrorString(decoderOpenResult));
         avcodec_free_context(&mCodecContext);
         releaseHardwareDevice(&mHardwareDeviceContext);
@@ -904,6 +908,14 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     const char* cacheSetting = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_FRAME_CACHE");
     const bool cacheEnabled = (!cacheSetting || cacheSetting[0] != '0') && !mMediaCodecSurfaceActive;
     auto convertDecoded = [&](AVFrame* decoded, bool advanceDecoder) {
+        if (decoded->format != mReportedFrameFormat) {
+            mReportedFrameFormat = static_cast<AVPixelFormat>(decoded->format);
+            const auto* description = av_pix_fmt_desc_get(mReportedFrameFormat);
+            spdlog::info("DirectLogDecoder: decoded frame format={} hardware={} decoder={} source={}",
+                         description ? description->name : "unknown",
+                         description && (description->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0,
+                         mCodec->name, mFilePath);
+        }
         // Decoding advances independently of conversion. Keep the received
         // frame available if GPU conversion fails and the caller retries.
         if (advanceDecoder) mLastDecodedFrame = frameNumber;
@@ -1231,18 +1243,29 @@ bool DirectLogDecoder::initHardwareDecoder() {
 #endif
 #ifdef _WIN32
     preferred.insert(preferred.end(), {
-        AV_HWDEVICE_TYPE_D3D11VA, AV_HWDEVICE_TYPE_CUDA, AV_HWDEVICE_TYPE_QSV});
+        AV_HWDEVICE_TYPE_D3D11VA,
+#if LIBAVUTIL_VERSION_MAJOR >= 59
+        AV_HWDEVICE_TYPE_D3D12VA,
+#endif
+        AV_HWDEVICE_TYPE_DXVA2, AV_HWDEVICE_TYPE_CUDA, AV_HWDEVICE_TYPE_QSV});
 #elif defined(__APPLE__)
     preferred.push_back(AV_HWDEVICE_TYPE_VIDEOTOOLBOX);
 #else
     preferred.insert(preferred.end(), {
-        AV_HWDEVICE_TYPE_CUDA, AV_HWDEVICE_TYPE_VAAPI, AV_HWDEVICE_TYPE_QSV});
+        AV_HWDEVICE_TYPE_CUDA, AV_HWDEVICE_TYPE_VAAPI,
+        AV_HWDEVICE_TYPE_QSV, AV_HWDEVICE_TYPE_VDPAU});
 #endif
     if (preferred.empty() || preferred.front() != AV_HWDEVICE_TYPE_VULKAN)
         preferred.push_back(AV_HWDEVICE_TYPE_VULKAN);
     for (AVHWDeviceType deviceType : preferred) {
+        const AVCodec* candidate = mCodec;
+        // QSV uses dedicated decoders rather than the native decoder's HW configs.
+        if (deviceType == AV_HWDEVICE_TYPE_QSV) {
+            candidate = motioncam::findWrappedHardwareDecoder(mCodec->id, "qsv");
+            if (!candidate) continue;
+        }
         for (int index = 0;; ++index) {
-            const AVCodecHWConfig* config = avcodec_get_hw_config(mCodec, index);
+            const AVCodecHWConfig* config = avcodec_get_hw_config(candidate, index);
             if (!config) break;
             if (config->device_type != deviceType ||
                 !(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
@@ -1255,14 +1278,52 @@ bool DirectLogDecoder::initHardwareDecoder() {
                         av_hwdevice_get_type_name(deviceType));
                 continue;
             }
-            mHardwareDeviceContext = device;
-            mHardwarePixelFormat = config->pix_fmt;
-            mCodecContext->hw_device_ctx = av_buffer_ref(mHardwareDeviceContext);
-            if (!mCodecContext->hw_device_ctx) {
-                releaseHardwareDevice(&mHardwareDeviceContext);
-                mHardwarePixelFormat = AV_PIX_FMT_NONE;
+#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+            // A Vulkan compute device can exist without video decode queues.
+            // Reject that candidate before get_format falls back to software
+            // and prevents CUDA/VAAPI/QSV from being tried.
+            if (deviceType == AV_HWDEVICE_TYPE_VULKAN) {
+                const char* extension = nullptr;
+                switch (candidate->id) {
+                case AV_CODEC_ID_H264: extension = "VK_KHR_video_decode_h264"; break;
+                case AV_CODEC_ID_HEVC: extension = "VK_KHR_video_decode_h265"; break;
+                case AV_CODEC_ID_AV1: extension = "VK_KHR_video_decode_av1"; break;
+                default: break; // Compute decoders, including ProRes, need no video extension.
+                }
+                if (extension) {
+                    const auto* context = reinterpret_cast<const AVHWDeviceContext*>(device->data);
+                    const auto* vulkan = static_cast<const AVVulkanDeviceContext*>(context->hwctx);
+                    bool supported = false;
+                    for (int i = 0; i < vulkan->nb_enabled_dev_extensions; ++i)
+                        supported |= std::strcmp(vulkan->enabled_dev_extensions[i], extension) == 0;
+                    if (!supported) {
+                        releaseHardwareDevice(&device);
+                        continue;
+                    }
+                }
+            }
+#endif
+            AVBufferRef* contextDevice = av_buffer_ref(device);
+            if (!contextDevice) {
+                releaseHardwareDevice(&device);
                 continue;
             }
+            if (candidate != mCodec) {
+                AVCodecContext* context = avcodec_alloc_context3(candidate);
+                const auto* parameters = mFormatContext->streams[mVideoStreamIndex]->codecpar;
+                if (!context || avcodec_parameters_to_context(context, parameters) < 0) {
+                    avcodec_free_context(&context);
+                    av_buffer_unref(&contextDevice);
+                    releaseHardwareDevice(&device);
+                    continue;
+                }
+                avcodec_free_context(&mCodecContext);
+                mCodecContext = context;
+                mCodec = candidate;
+            }
+            mHardwareDeviceContext = device;
+            mHardwarePixelFormat = config->pix_fmt;
+            mCodecContext->hw_device_ctx = contextDevice;
             mCodecContext->opaque = this;
             mCodecContext->get_format = &DirectLogDecoder::selectPixelFormat;
             spdlog::info("DirectLogDecoder: using {} hardware decoding",
@@ -1945,6 +2006,7 @@ void DirectLogDecoder::cleanup() {
     mMediaCodecSurfaceActive = false;
     mHardwarePixelFormat = AV_PIX_FMT_NONE;
     mLastDecodedFrame = -1;
+    mReportedFrameFormat = AV_PIX_FMT_NONE;
 }
 
 } // namespace motioncam

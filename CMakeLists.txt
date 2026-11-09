@@ -1091,6 +1091,11 @@ if(BUILD_TESTING)
     target_link_libraries(motioncam-hardware-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
     add_test(NAME motioncam-hardware-video-encoder-test COMMAND motioncam-hardware-video-encoder-test)
 
+    add_executable(motioncam-hardware-video-decoder-test tests/hardware_video_decoder_test.cpp)
+    target_include_directories(motioncam-hardware-video-decoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(motioncam-hardware-video-decoder-test PRIVATE ${FFMPEG_LIBRARIES})
+    add_test(NAME motioncam-hardware-video-decoder-test COMMAND motioncam-hardware-video-decoder-test)
+
     # Labels describe hardware requirements; CI intentionally runs both groups.
     # These tests use CPU fallbacks or fixtures even when they exercise GPU APIs.
     set_tests_properties(
@@ -1104,6 +1109,7 @@ if(BUILD_TESTING)
         motioncam-finalize-interpolation-test
         motioncam-audio-finalize-test
         motioncam-hardware-video-encoder-test
+        motioncam-hardware-video-decoder-test
         PROPERTIES LABELS portable)
     if(TEST motioncam-source-input-test)
         set_tests_properties(motioncam-source-input-test PROPERTIES LABELS portable)
