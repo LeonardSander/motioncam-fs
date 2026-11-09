@@ -178,6 +178,7 @@ jobs:
         modules: qtmultimedia
 
     - name: Configure with LLVM
+      id: linux-configure
       shell: bash
       run: |
         export PKG_CONFIG_PATH="$PWD/build-linux/vcpkg_installed/x64-linux-release/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -193,6 +194,16 @@ jobs:
           -DBUILD_TESTING=ON \
           -DMOTIONCAM_REQUIRE_VULKAN=ON \
           -DPKG_CONFIG_ARGN=--static
+
+    - name: Upload Linux dependency failure logs
+      if: failure() && steps.linux-configure.outcome == 'failure'
+      uses: actions/upload-artifact@v4
+      with:
+        name: motioncam-Linux-dependency-logs
+        if-no-files-found: ignore
+        path: |
+          build-linux/vcpkg-manifest-install.log
+          vcpkg/buildtrees/ffmpeg/*.log
 
     - name: Build runtime
       run: cmake --build build-linux --config Release --target MotionCamFuse --parallel
