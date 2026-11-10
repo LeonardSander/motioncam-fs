@@ -148,9 +148,24 @@ jobs:
 
   linux-appimage:
     outputs:
-      portable-tests: ${{ format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) }}
-    name: Linux AppImage (Clang)
-    runs-on: ubuntu-24.04
+      x86_64: ${{ matrix.arch == 'x86_64' && format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) || '' }}
+      aarch64: ${{ matrix.arch == 'aarch64' && format('{0}:{1}', steps.test-build.outcome, steps.portable-tests.outcome) || '' }}
+    name: Linux AppImage (${{ matrix.arch }}, Clang)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: x86_64
+            qt_host: linux
+            qt_arch: linux_gcc_64
+            triplet: x64-linux-release
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            qt_host: linux_arm64
+            qt_arch: linux_gcc_arm64
+            triplet: arm64-linux-release
     steps:
     - name: Checkout source
       uses: actions/checkout@v4
@@ -180,23 +195,24 @@ jobs:
       uses: jurplel/install-qt-action@v4
       with:
         version: ${{ env.QT_VERSION }}
-        host: linux
+        host: ${{ matrix.qt_host }}
         target: desktop
+        arch: ${{ matrix.qt_arch }}
         modules: qtmultimedia
 
     - name: Configure with LLVM
       id: linux-configure
       shell: bash
       run: |
-        export PKG_CONFIG_PATH="$PWD/build-linux/vcpkg_installed/x64-linux-release/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export PKG_CONFIG_PATH="$PWD/build-linux/vcpkg_installed/${{ matrix.triplet }}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         cmake -S . -B build-linux -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DQt6_DIR="${{ steps.qt.outputs.qt-root-dir }}/lib/cmake/Qt6" \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-          -DVCPKG_TARGET_TRIPLET=x64-linux-release \
-          -DVCPKG_HOST_TRIPLET=x64-linux-release \
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+          -DVCPKG_HOST_TRIPLET=${{ matrix.triplet }} \
           -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" \
           -DVCPKG_MANIFEST_MODE=ON \
           -DBUILD_TESTING=ON \
@@ -207,7 +223,7 @@ jobs:
       if: failure() && steps.linux-configure.outcome == 'failure'
       uses: actions/upload-artifact@v4
       with:
-        name: motioncam-Linux-dependency-logs
+        name: motioncam-Linux-${{ matrix.arch }}-dependency-logs
         if-no-files-found: ignore
         path: |
           build-linux/vcpkg-manifest-install.log
@@ -251,15 +267,16 @@ jobs:
         # real binary. Bundle the binary itself so it also works in the AppImage.
         install -Dm755 /usr/lib/7zip/7z AppDir/usr/bin/7z
         curl -L --retry 3 -o linuxdeploy.AppImage \
-          https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${{ matrix.arch }}.AppImage
         curl -L --retry 3 -o linuxdeploy-plugin-qt.AppImage \
-          https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${{ matrix.arch }}.AppImage
         chmod +x linuxdeploy.AppImage linuxdeploy-plugin-qt.AppImage
+        export APPIMAGE_EXTRACT_AND_RUN=1
         export QMAKE="${{ steps.qt.outputs.qt-root-dir }}/bin/qmake"
         export LINUXDEPLOY_PLUGIN_QT_PATH="$PWD/linuxdeploy-plugin-qt.AppImage"
         export VERSION="${GITHUB_REF_NAME#v}"
         # vcpkg's shared VA-API libraries live outside the system loader paths.
-        export LD_LIBRARY_PATH="$PWD/build-linux/vcpkg_installed/x64-linux-release/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH="$PWD/build-linux/vcpkg_installed/${{ matrix.triplet }}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         # linuxdeploy includes xcb by default. Include native Wayland and its
         # dynamically loaded integration plugins as well; linuxdeploy resolves
         # dependencies of the copied plugins during deployment.
@@ -283,7 +300,7 @@ jobs:
           --appdir AppDir --output appimage
         mkdir -p artifacts
         ref_safe="${GITHUB_REF_NAME//\//-}"
-        mv MotionCam_Fuse-*.AppImage artifacts/motioncam-${ref_safe}-linux-x86_64.AppImage
+        mv MotionCam_Fuse-*.AppImage artifacts/motioncam-${ref_safe}-linux-${{ matrix.arch }}.AppImage
 
     - name: Check packaged Linux display backends
       shell: bash
@@ -576,13 +593,14 @@ jobs:
         shell: python
         env:
           ANDROID_TESTS: ${{ needs.android-apk.outputs.portable-tests }}
-          LINUX_TESTS: ${{ needs.linux-appimage.outputs.portable-tests }}
+          LINUX_X86_TESTS: ${{ needs.linux-appimage.outputs.x86_64 }}
+          LINUX_ARM_TESTS: ${{ needs.linux-appimage.outputs.aarch64 }}
           WINDOWS_TESTS: ${{ needs.build.outputs.windows-x86_64 }}
           MACOS_INTEL_TESTS: ${{ needs.build.outputs.macos-x86_64 }}
           MACOS_ARM_TESTS: ${{ needs.build.outputs.macos-arm64 }}
         run: |
           import os
-          platforms = ("ANDROID_TESTS", "LINUX_TESTS", "WINDOWS_TESTS",
+          platforms = ("ANDROID_TESTS", "LINUX_X86_TESTS", "LINUX_ARM_TESTS", "WINDOWS_TESTS",
                        "MACOS_INTEL_TESTS", "MACOS_ARM_TESTS")
           failures = [f"{platform}: {os.environ.get(platform) or 'missing result'}"
                       for platform in platforms

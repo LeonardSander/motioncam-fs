@@ -201,6 +201,27 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang
 cmake --build build --parallel
 ```
 
+Linux AppImages are built for `x86_64` and `aarch64` on native Ubuntu 24.04
+CI runners, with the same Qt version, pinned vcpkg dependencies and portable
+test gate. The ARM64 artifact is one build for desktops, notebooks and phones, requiring glibc 2.39 or newer on Wayland/X11.
+
+Both Linux architectures offer desktop and touch layouts in the same binary:
+
+```bash
+./motioncam-<version>-linux-aarch64.AppImage --ui-mode touch
+./motioncam-<version>-linux-aarch64.AppImage --ui-mode desktop
+```
+
+Preferences > Interface saves `Automatic`, `Desktop` or `Touch` for the next
+start. `--ui-mode` overrides that preference for one launch. Automatic chooses
+touch mode when a touchscreen is present and the screen's shorter dimension
+is at most 600 logical pixels; larger touch desktops retain the desktop layout.
+Touch mode shares the Android scrolling settings layout and gallery gestures,
+while retaining Linux file dialogs, source paths, output folders and FUSE mounting.
+The touch Import clips button opens the same file-and-folder browser as
+File > Open Clip on the desktop. Layout changes require an application restart.
+Mounting needs `/dev/fuse`, `fusermount3` and the usual user permissions.
+
 Android arm64 APK (Qt 6.12.0, JDK 21, Android SDK 36, NDK r27c, and the
 repository's pinned vcpkg revision):
 

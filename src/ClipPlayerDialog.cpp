@@ -1,6 +1,7 @@
+#include "UiMode.h"
 #include "DebugInstrumentation.h"
+#include "TouchScrolling.h"
 #ifdef __ANDROID__
-#include "android/TouchScrolling.h"
 #include "android/PageCrossfade.h"
 #endif
 #include "ClipPlayerDialog.h"
@@ -328,10 +329,10 @@ protected:
         event->accept();
     }
     void mouseDoubleClickEvent(QMouseEvent* event) override {
-#ifdef Q_OS_ANDROID
-        event->accept();
-        return;
-#endif
+        if (motioncam::touchUi()) {
+            event->accept();
+            return;
+        }
         if(event->button()==Qt::LeftButton && doubleClicked) {
             doubleClicked();
             event->accept();
@@ -789,22 +790,21 @@ QSize ClipPlayerDialog::thumbnailMaximumSize(){return {176,112};}
 
 QSize ClipPlayerDialog::thumbnailDisplayMaximumSize() const{
     auto bounds=thumbnailMaximumSize();
-#ifdef Q_OS_ANDROID
-    const bool landscape=width()>height();
-    if(mHistogramEnabled&&landscape)bounds=QSize(112,56);
-    const int minimumVisible=landscape?5:3;
-    bounds.setWidth(std::min(bounds.width(),std::max(1,width()/minimumVisible-16)));
-#endif
+    if (motioncam::touchUi()) {
+        const bool landscape=width()>height();
+        if(mHistogramEnabled&&landscape)bounds=QSize(112,56);
+        const int minimumVisible=landscape?5:3;
+        bounds.setWidth(std::min(bounds.width(),std::max(1,width()/minimumVisible-16)));
+    }
     return bounds;
 }
 
 int ClipPlayerDialog::thumbnailStripHeight() const{
-#ifdef Q_OS_ANDROID
-    const bool stills=mIndex>=0&&mIndex<mClips.size()&&!mClips[mIndex].isSequence;
-    return (stills?thumbnailDisplayMaximumSize().height():thumbnailSizeForSource(0).height())+42;
-#else
+    if (motioncam::touchUi()) {
+        const bool stills=mIndex>=0&&mIndex<mClips.size()&&!mClips[mIndex].isSequence;
+        return (stills?thumbnailDisplayMaximumSize().height():thumbnailSizeForSource(0).height())+42;
+    }
     return thumbnailMaximumSize().height()+58;
-#endif
 }
 
 #if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
@@ -1031,7 +1031,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     // resized. QLabel will center and clip/pad this pixmap until the decoder
     // supplies a surface rendered for the new viewport.
     mVideo->setScaledContents(false);
-    mVideo->setMinimumSize(640,360);mVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
+    mVideo->setMinimumSize(motioncam::touchUi()?QSize(1,1):QSize(640,360));mVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
     mVideo->setFrameShape(QFrame::NoFrame);mVideo->setLineWidth(0);mVideo->setContentsMargins(0,0,0,0);
     mVideo->setStyleSheet("background:#606060;color:#e0e0e0;border:none;margin:0;padding:0;");stack->addWidget(mVideo);
     mOverlay=new QWidget(stage);mOverlay->setStyleSheet("background:transparent;");
@@ -1040,33 +1040,37 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mPreparingLabel->setStyleSheet("background:transparent;color:#e0e0e0;border:0;padding:0;");
     mPreparingLabel->hide();
     auto* overlayLayout=new QVBoxLayout(mOverlay);overlayLayout->setContentsMargins(10,10,10,0);
-#ifdef Q_OS_ANDROID
-    overlayLayout->setContentsMargins(0,10,0,0);
-    overlayLayout->setSpacing(10);
+    if (motioncam::touchUi()) {
+        overlayLayout->setContentsMargins(0,10,0,0);
+        overlayLayout->setSpacing(10);
 #if QT_VERSION >= QT_VERSION_CHECK(6,9,0)
-    stage->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea,false);
-    mOverlay->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea,false);
+        stage->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea,false);
+        mOverlay->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea,false);
 #endif
-#endif
+    }
     const auto addInsetWidget=[&](QWidget* widget){
-#ifdef Q_OS_ANDROID
-        auto* row=new QHBoxLayout;
-        row->setContentsMargins(10,0,10,0);
-        row->addWidget(widget,0,Qt::AlignLeft);overlayLayout->addLayout(row);
-#else
-        overlayLayout->addWidget(widget,0,Qt::AlignLeft);
-#endif
+        if (motioncam::touchUi()) {
+            auto* row=new QHBoxLayout;
+            row->setContentsMargins(10,0,10,0);
+            row->addWidget(widget,0,Qt::AlignLeft);overlayLayout->addLayout(row);
+        } else {
+            overlayLayout->addWidget(widget,0,Qt::AlignLeft);
+        }
     };
     mTitle=new QLabel(mOverlay);mTitle->setTextFormat(Qt::RichText);mTitle->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
+    if(motioncam::touchUi()) {
+        mTitle->setWordWrap(true);
+        mTitle->setMinimumWidth(1);
+    }
     mFpsLabel=new QLabel(stage);
     mFpsLabel->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
     mFpsLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     addInsetWidget(mTitle);
     mHistogram=new RawHistogram(mOverlay);
     static_cast<RawHistogram*>(mHistogram)->doubleClicked=[this]{
-#ifndef Q_OS_ANDROID
-        setHistogramExpanded(!mHistogramExpanded);
-#endif
+        if (!motioncam::touchUi()) {
+            setHistogramExpanded(!mHistogramExpanded);
+        }
     };
     static_cast<RawHistogram*>(mHistogram)->distributionChanged=[this]{ updateHistogram(); };
     static_cast<RawHistogram*>(mHistogram)->binsGeometryChanged=[this]{
@@ -1080,10 +1084,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mHistogram->hide();
     addInsetWidget(mHistogram);
     overlayLayout->addStretch(1);
-    auto* controls=new QHBoxLayout;controls->setSpacing(8);
-#ifdef Q_OS_ANDROID
-    controls->setContentsMargins(10,0,10,0);
-#endif
+    auto* controls=new QHBoxLayout;controls->setSpacing(motioncam::touchUi()?4:8);
+    if (motioncam::touchUi()) {
+        controls->setContentsMargins(10,0,10,0);
+    }
     auto* previous=new QPushButton(mOverlay);
     mPlayPause=new QPushButton(mOverlay); auto* next=new QPushButton(mOverlay);
     mAudioButton=new QPushButton(mOverlay);
@@ -1175,9 +1179,15 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(mThumbnailScroll->horizontalScrollBar(),&QScrollBar::valueChanged,this,[this]{
         if(mPaused)mThumbnailBackfillTimer.start();
     });
-#ifdef Q_OS_ANDROID
-    new motioncam::TouchScrolling(mThumbnailScroll, {}, false);
-#endif
+    if (motioncam::touchUi()) {
+        // Native windows forward input manually; QWidget fallback presentation
+        // delivers touch events directly to the thumbnail viewport.
+        new motioncam::TouchScrolling(mThumbnailScroll);
+        connect(QScroller::scroller(mThumbnailScroll->viewport()), &QScroller::stateChanged,
+                this, [this](QScroller::State state) {
+            if(state==QScroller::Dragging)mThumbnailFollowPlayback=false;
+        });
+    }
     auto* thumbnails=new FrameThumbnailModel(mThumbnailScroll);
     thumbnails->size=[this](int source){return thumbnailSizeForSource(source);};
     thumbnails->thumbnail=[this](int source){
@@ -1216,10 +1226,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mThumbnailScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     mThumbnailScroll->setFixedHeight(thumbnailStripHeight());
     mThumbnailScroll->setFrameShape(QFrame::NoFrame);
-#ifdef Q_OS_ANDROID
-    mThumbnailScroll->setContentsMargins(0,0,0,0);
-    mThumbnailScroll->viewport()->setContentsMargins(0,0,0,0);
-#endif
+    if (motioncam::touchUi()) {
+        mThumbnailScroll->setContentsMargins(0,0,0,0);
+        mThumbnailScroll->viewport()->setContentsMargins(0,0,0,0);
+    }
     mThumbnailScroll->setStyleSheet(
         "QListView{background:rgba(0,0,0,80);border:0;"
 #ifdef Q_OS_ANDROID
@@ -1236,13 +1246,13 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mPosition=new DuplicateSlider(mOverlay); mPosition->setRange(0,0);
     mPosition->setStyleSheet("QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
     mPosition->setMouseTracking(true);
-#ifdef Q_OS_ANDROID
-    mPosition->setMinimumHeight(28);
-#endif
+    if (motioncam::touchUi()) {
+        mPosition->setMinimumHeight(28);
+    }
     auto* seekLayout=new QVBoxLayout;seekLayout->setContentsMargins(10,10,10,10);seekLayout->addWidget(mPosition);
-#ifdef Q_OS_ANDROID
-    seekLayout->setContentsMargins(20,10,20,10);
-#endif
+    if (motioncam::touchUi()) {
+        seekLayout->setContentsMargins(20,10,20,10);
+    }
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
     mOverlayOpacity=new QGraphicsOpacityEffect(mOverlay);mOverlayOpacity->setOpacity(1.0);
     mOverlayAnimation=new QPropertyAnimation(mOverlayOpacity,"opacity",this);
@@ -1261,10 +1271,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     });
     mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{
         if(mPerformanceOverlayPinned||mHistogramExpanded||pointerOverThumbnailRow())return;
-#ifndef Q_OS_ANDROID
-        if((mAudioButton&&mAudioButton->underMouse())||
-           (mVolumePanel&&mVolumePanel->underMouse()))return;
-#endif
+        if (!motioncam::touchUi()) {
+            if((mAudioButton&&mAudioButton->underMouse())||
+               (mVolumePanel&&mVolumePanel->underMouse()))return;
+        }
         setOverlayVisible(false);
     });
     mNativeOverlayCaptureTimer.setInterval(nativeOverlayIntervalMs);
@@ -1301,24 +1311,24 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mZoomAnimationTimer.setInterval(16);
     mZoomAnimationTimer.setTimerType(Qt::PreciseTimer);
     connect(&mZoomAnimationTimer,&QTimer::timeout,this,&ClipPlayerDialog::advanceZoomAnimation);
-#ifdef Q_OS_ANDROID
-    mTouchPanUpdateTimer.setSingleShot(true);
-    mTouchPanUpdateTimer.setInterval(16);
-    mTouchPanUpdateTimer.setTimerType(Qt::PreciseTimer);
-    connect(&mTouchPanUpdateTimer,&QTimer::timeout,this,
-            &ClipPlayerDialog::updateDisplayedImage);
-#endif
+    if (motioncam::touchUi()) {
+        mTouchPanUpdateTimer.setSingleShot(true);
+        mTouchPanUpdateTimer.setInterval(16);
+        mTouchPanUpdateTimer.setTimerType(Qt::PreciseTimer);
+        connect(&mTouchPanUpdateTimer,&QTimer::timeout,this,
+                &ClipPlayerDialog::updateDisplayedImage);
+    }
     // Collapse wheel bursts and window-manager resize storms into one preview
     // generation instead of repeatedly tearing down an active producer.
     const std::array<QWidget*,4> trackedWidgets{this,stage,mVideo,mOverlay};
     for(auto* widget:trackedWidgets){
         widget->setMouseTracking(true);
     }
-#ifdef Q_OS_ANDROID
-    // Let Qt synthesize mouse events for overlay controls. Accept raw touch
-    // only on the picture, where multi-touch gestures need all touch points.
-    mVideo->setAttribute(Qt::WA_AcceptTouchEvents);
-#endif
+    if (motioncam::touchUi()) {
+        // Let Qt synthesize mouse events for overlay controls. Accept raw touch
+        // only on the picture, where multi-touch gestures need all touch points.
+        mVideo->setAttribute(Qt::WA_AcceptTouchEvents);
+    }
 #if defined(Q_OS_ANDROID) && QT_VERSION >= QT_VERSION_CHECK(6,9,0)
     for(auto* widget:mOverlay->findChildren<QWidget*>())
         widget->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea,false);
@@ -1388,10 +1398,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
     connect(mThumbnailToggle,&QPushButton::clicked,this,[this]{
         const bool show=!mThumbnailScroll->isVisible();mThumbnailScroll->setVisible(show);
-#ifdef Q_OS_ANDROID
-        QScroller::scroller(mThumbnailScroll->viewport())->stop();
-        if(show)mThumbnailFollowPlayback=true;
-#endif
+        if (motioncam::touchUi()) {
+            QScroller::scroller(mThumbnailScroll->viewport())->stop();
+            if(show)mThumbnailFollowPlayback=true;
+        }
         if(!show){
             mThumbnailCacheWriter.clear();
             revealOverlay();
@@ -1411,15 +1421,15 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             revealOverlay();
         }
     });
-#ifdef __ANDROID__
-    mFullscreenButton->setToolTip(tr("Close gallery"));
-    connect(mFullscreenButton,&QPushButton::clicked,this,&QWidget::close);
-#else
-    connect(mFullscreenButton,&QPushButton::clicked,this,[this]{
-        if(isFullScreen())showNormal();else showFullScreen();
-        updateButtonIcons();revealOverlay();
-    });
-#endif
+    if (motioncam::touchUi()) {
+        mFullscreenButton->setToolTip(tr("Close gallery"));
+        connect(mFullscreenButton,&QPushButton::clicked,this,&QWidget::close);
+    } else {
+        connect(mFullscreenButton,&QPushButton::clicked,this,[this]{
+            if(isFullScreen())showNormal();else showFullScreen();
+            updateButtonIcons();revealOverlay();
+        });
+    }
     mIndex=0; for(int i=0;i<mClips.size();++i)if(mClips[i].mountId==initialMountId){mIndex=i;break;}
     if(!mClips.isEmpty())openClip(mIndex);
 }
@@ -1642,12 +1652,10 @@ QString ClipPlayerDialog::ffmpegPath()const{
 void ClipPlayerDialog::openClip(int index,double startSeconds){
     if(index<0||index>=mClips.size())return;
     const bool changingClip=index!=mIndex;
-#ifdef Q_OS_ANDROID
-    if(changingClip){
+    if (motioncam::touchUi()&&changingClip) {
         mThumbnailFollowPlayback=true;
         QScroller::scroller(mThumbnailScroll->viewport())->stop();
     }
-#endif
     const bool preservePausedNavigation=mPaused&&(!changingClip||
         (mThumbnailScroll&&mThumbnailScroll->isVisible()));
     if(changingClip){
@@ -1719,9 +1727,9 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
         mGpuVideo->setAutoFillBackground(true);
         mGpuVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
         mGpuVideo->setMouseTracking(true);
-#ifdef Q_OS_ANDROID
-        mGpuVideo->setAttribute(Qt::WA_AcceptTouchEvents);
-#endif
+        if (motioncam::touchUi()) {
+            mGpuVideo->setAttribute(Qt::WA_AcceptTouchEvents);
+        }
         static_cast<QStackedLayout*>(stage->layout())->insertWidget(1,mGpuVideo);
         if(mGpuVideo->native()){
             mOverlayOpacity->setEnabled(false);
@@ -1872,10 +1880,10 @@ void ClipPlayerDialog::centerCurrentThumbnail(){
     if(!mThumbnailScroll||!mThumbnailScroll->isVisible()||
        mCurrentThumbnailSource<0||mNativeThumbnailTouch||
        (mNativeMouseTarget&&mThumbnailScroll->isAncestorOf(mNativeMouseTarget)))return;
-#ifdef Q_OS_ANDROID
-    if(!mThumbnailFollowPlayback||
-       QScroller::scroller(mThumbnailScroll->viewport())->state()!=QScroller::Inactive)return;
-#endif
+    if (motioncam::touchUi()) {
+        if(!mThumbnailFollowPlayback||
+           QScroller::scroller(mThumbnailScroll->viewport())->state()!=QScroller::Inactive)return;
+    }
     auto* bar=mThumbnailScroll->horizontalScrollBar();
     if(mIndex<0||mIndex>=mClips.size())return;
     const auto index=mThumbnailScroll->model()->index(mCurrentThumbnailSource,0);
@@ -2266,15 +2274,14 @@ void ClipPlayerDialog::adoptRenderedDimensions(int width,int height){
 
 void ClipPlayerDialog::updateTitle(){
     if(!mTitle||mIndex<0||mIndex>=mClips.size())return;
-#ifdef Q_OS_ANDROID
-    // Android embeds the gallery in the activity window. Qt tooltip popup
-    // windows can crash there; keep scrub feedback in the captured overlay.
-    if(mSeeking){
-        mTitle->setText(framePositionText(mPosition->value()).toHtmlEscaped()
-            .replace(QLatin1Char('\n'),QStringLiteral("<br>")));
-        return;
+    if (motioncam::touchUi()) {
+        // Keep scrub feedback inside the captured overlay for touch input.
+        if(mSeeking){
+            mTitle->setText(framePositionText(mPosition->value()).toHtmlEscaped()
+                .replace(QLatin1Char('\n'),QStringLiteral("<br>")));
+            return;
+        }
     }
-#endif
     const double shownZoom=mZoomPercent>0.0?mZoomPercent:fitScale()*100.0;
     QString view=mZoomPercent>0.0
         ?tr("Zoom %1%").arg(shownZoom,0,'f',1):tr("Scale to fit");
@@ -2423,9 +2430,7 @@ void ClipPlayerDialog::setPerformancePixelOverlayEnabled(bool enabled){
 }
 
 void ClipPlayerDialog::setHistogramExpanded(bool expanded){
-#ifdef Q_OS_ANDROID
-    if(expanded)return;
-#endif
+    if (motioncam::touchUi()&&expanded)return;
     if(mHistogramExpanded==expanded)return;
     mHistogramExpanded=expanded;
     auto* layout=static_cast<QVBoxLayout*>(mOverlay->layout());
@@ -2441,11 +2446,11 @@ void ClipPlayerDialog::setHistogramExpanded(bool expanded){
         mOverlayOpacity->setOpacity(1.0);
         mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,false);
     }else{
-#ifdef Q_OS_ANDROID
-        updateAndroidOverlayMask();
-#else
-        mHistogram->setFixedSize(560,260);
-#endif
+        if (motioncam::touchUi()) {
+            updateTouchOverlayMask();
+        } else {
+            mHistogram->setFixedSize(560,260);
+        }
         mHistogram->setSizePolicy(QSizePolicy::Fixed,QSizePolicy::Fixed);
         layout->setAlignment(mHistogram,Qt::AlignLeft);
         layout->setStretch(1,0);
@@ -2612,13 +2617,12 @@ void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
 }
 
 bool ClipPlayerDialog::pointerOverThumbnailRow()const{
-#ifdef Q_OS_ANDROID
-    // Android's synthesized cursor can remain over the last tapped control.
-    return false;
-#else
+    if (motioncam::touchUi()) {
+        // A synthesized cursor can remain over the last tapped control.
+        return false;
+    }
     return mThumbnailScroll&&mThumbnailScroll->isVisible()&&
         mThumbnailScroll->rect().contains(mThumbnailScroll->mapFromGlobal(QCursor::pos()));
-#endif
 }
 
 void ClipPlayerDialog::updateMouseSourcePosition(const QPointF& globalPosition){
@@ -2808,11 +2812,11 @@ void ClipPlayerDialog::updateButtonIcons(){
         ?tr("Real-time audio — click for uncapped, muted playback"):
         tr("Capped, muted — click for real-time audio"));
     if(mFullscreenButton){
-#ifdef Q_OS_ANDROID
-        mFullscreenButton->setIcon(closeGalleryIcon());
-#else
-        mFullscreenButton->setIcon(fullscreenIcon(isFullScreen()));
-#endif
+        if (motioncam::touchUi()) {
+            mFullscreenButton->setIcon(closeGalleryIcon());
+        } else {
+            mFullscreenButton->setIcon(fullscreenIcon(isFullScreen()));
+        }
     }
     updateFpsIndicator();
 }
@@ -2825,9 +2829,9 @@ void ClipPlayerDialog::setOverlayVisible(bool visible){
     }
     if(!visible&&mHistogramExpanded)return;
     mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,!visible);
-#ifdef Q_OS_ANDROID
-    updateAndroidOverlayMask();
-#endif
+    if (motioncam::touchUi()) {
+        updateTouchOverlayMask();
+    }
     mOverlayAnimation->stop();mOverlayAnimation->setStartValue(mOverlayOpacity->opacity());
     mOverlayAnimation->setEndValue(visible?1.0:0.0);mOverlayAnimation->start();
     if(nativeVulkanPresenter()){
@@ -2836,8 +2840,7 @@ void ClipPlayerDialog::setOverlayVisible(bool visible){
     }
     if(!visible)QToolTip::hideText();
 }
-#ifdef Q_OS_ANDROID
-void ClipPlayerDialog::updateAndroidOverlayMask(){
+void ClipPlayerDialog::updateTouchOverlayMask(){
     if(!mOverlay)return;
     if(!mHistogramExpanded)mHistogram->setFixedSize(
         std::min(560,std::max(1,mOverlay->width()-20)),height()>width()?190:84);
@@ -2849,7 +2852,6 @@ void ClipPlayerDialog::updateAndroidOverlayMask(){
     }
     mOverlay->setMask(controls);
 }
-#endif
 void ClipPlayerDialog::revealOverlay(){
     if(mPerformanceOverlayPinned)return;
     const bool alreadyFadingIn=mOverlayAnimation->state()==QAbstractAnimation::Running&&
@@ -2872,11 +2874,7 @@ void ClipPlayerDialog::updateDisplayedImage(){
         captureNativeOverlay(false);
         mGpuVideo->setOverlay(mCapturedNativeOverlay,mCapturedNativeOverlayParts,false);
     }
-#ifdef Q_OS_ANDROID
-    const bool fastTouchPreview=mTouchActive;
-#else
-    constexpr bool fastTouchPreview=false;
-#endif
+    const bool fastTouchPreview=motioncam::touchUi()&&mTouchActive;
 #ifndef Q_OS_ANDROID
     if (mGpuVideo && mGpuVideo->native() && !mGpuVideo->usable()) {
         spdlog::warn("Gallery native Vulkan presenter failed; retrying through fallback presentation");
@@ -3532,17 +3530,17 @@ int ClipPlayerDialog::frameAtSliderPosition(int x)const{
 }
 void ClipPlayerDialog::updateSeekPosition(int x){
     const int frame=frameAtSliderPosition(x);mPosition->setValue(frame);
-#ifdef Q_OS_ANDROID
-    updateTitle();
-#else
-    QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),framePositionText(frame),mPosition);
-#endif
+    if (motioncam::touchUi()) {
+        updateTitle();
+    } else {
+        QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),framePositionText(frame),mPosition);
+    }
 }
 void ClipPlayerDialog::seekToFrame(int frame){
-#ifdef Q_OS_ANDROID
-    mThumbnailFollowPlayback=true;
-    QScroller::scroller(mThumbnailScroll->viewport())->stop();
-#endif
+    if (motioncam::touchUi()) {
+        mThumbnailFollowPlayback=true;
+        QScroller::scroller(mThumbnailScroll->viewport())->stop();
+    }
     if(mIndex<0||mIndex>=mClips.size())return;
     setDroppedCursorVisible(false);
     setDuplicateCursorVisible(false);
@@ -3754,153 +3752,154 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     const bool belongsToPlayer=nativeVideoSurface||
         (watchedWidget&&(watchedWidget->window()==this||
                          watchedWidget==this||isAncestorOf(watchedWidget)));
-#ifdef Q_OS_ANDROID
-    if(event->type()==QEvent::KeyPress && isVisible() &&
-       (belongsToPlayer||watchedWidget==parentWidget())){
-        auto* key=static_cast<QKeyEvent*>(event);
-        if(key->key()==Qt::Key_Back||key->key()==Qt::Key_Escape){
-            spdlog::info("Gallery navigation close: key={} thumbnail_touch={} thumbnail_drag={}",
-                key->key(),mNativeThumbnailTouch,mNativeThumbnailDrag);
-            close();event->accept();return true;
+    if (motioncam::touchUi()) {
+        if(event->type()==QEvent::KeyPress && isVisible() &&
+           (belongsToPlayer||watchedWidget==parentWidget())){
+            auto* key=static_cast<QKeyEvent*>(event);
+            if(key->key()==Qt::Key_Back||key->key()==Qt::Key_Escape){
+                spdlog::info("Gallery navigation close: key={} thumbnail_touch={} thumbnail_drag={}",
+                    key->key(),mNativeThumbnailTouch,mNativeThumbnailDrag);
+                close();event->accept();return true;
+            }
         }
-    }
-    const bool touchSurface=watched==mVideo||watched==mGpuVideo||nativeVideoSurface;
-    if(belongsToPlayer&&touchSurface&&
-       (event->type()==QEvent::TouchBegin||event->type()==QEvent::TouchUpdate||
-        event->type()==QEvent::TouchEnd||event->type()==QEvent::TouchCancel)){
-        auto* touch=static_cast<QTouchEvent*>(event);
-        const auto& points=touch->points();
-        if(touchSurface){
-            if(event->type()==QEvent::TouchBegin&&points.size()==1){
-                revealOverlay();
-                const QPointF global=points[0].globalPosition();
-                auto* hit=mOverlay->childAt(mOverlay->mapFromGlobal(global.toPoint()));
-                const bool thumbnailHit=mThumbnailScroll&&
-                    mThumbnailScroll->isVisible()&&
-                    mThumbnailScroll->rect().contains(
-                        mThumbnailScroll->mapFromGlobal(global.toPoint()));
-                if(thumbnailHit){
-                    mNativeTouchTarget=hit?hit:mThumbnailScroll;
-                    mNativeTouchPosition=global;
-                    mNativeTouchStart=global;
-                    auto* scroller=QScroller::scroller(mThumbnailScroll->viewport());
-                    const bool stoppingScroll=scroller->state()==QScroller::Scrolling;
-                    scroller->handleInput(
-                        QScroller::InputPress, mThumbnailScroll->viewport()->mapFromGlobal(global),
-                        touch->timestamp());
-                    mNativeThumbnailTouch=true;
-                    mNativeThumbnailDrag=stoppingScroll;
-                    event->accept();return true;
+        const bool touchSurface=watched==mVideo||watched==mGpuVideo||nativeVideoSurface||
+            (watchedWidget&&mGpuVideo&&mGpuVideo->isAncestorOf(watchedWidget));
+        if(belongsToPlayer&&touchSurface&&
+           (event->type()==QEvent::TouchBegin||event->type()==QEvent::TouchUpdate||
+            event->type()==QEvent::TouchEnd||event->type()==QEvent::TouchCancel)){
+            auto* touch=static_cast<QTouchEvent*>(event);
+            const auto& points=touch->points();
+            if(touchSurface){
+                if(event->type()==QEvent::TouchBegin&&points.size()==1){
+                    revealOverlay();
+                    const QPointF global=points[0].globalPosition();
+                    auto* hit=mOverlay->childAt(mOverlay->mapFromGlobal(global.toPoint()));
+                    const bool thumbnailHit=mThumbnailScroll&&
+                        mThumbnailScroll->isVisible()&&
+                        mThumbnailScroll->rect().contains(
+                            mThumbnailScroll->mapFromGlobal(global.toPoint()));
+                    if(thumbnailHit){
+                        mNativeTouchTarget=hit?hit:mThumbnailScroll;
+                        mNativeTouchPosition=global;
+                        mNativeTouchStart=global;
+                        auto* scroller=QScroller::scroller(mThumbnailScroll->viewport());
+                        const bool stoppingScroll=scroller->state()==QScroller::Scrolling;
+                        scroller->handleInput(
+                            QScroller::InputPress, mThumbnailScroll->viewport()->mapFromGlobal(global),
+                            touch->timestamp());
+                        mNativeThumbnailTouch=true;
+                        mNativeThumbnailDrag=stoppingScroll;
+                        event->accept();return true;
+                    }
+                    if(hit&&(qobject_cast<QAbstractButton*>(hit)||hit==mPosition)){
+                        mNativeTouchTarget=hit;
+                        mNativeTouchPosition=global;
+                        QMouseEvent press(QEvent::MouseButtonPress,hit->mapFromGlobal(global),
+                            global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+                        QCoreApplication::sendEvent(hit,&press);
+                        event->accept();return true;
+                    }
                 }
-                if(hit&&(qobject_cast<QAbstractButton*>(hit)||hit==mPosition)){
-                    mNativeTouchTarget=hit;
-                    mNativeTouchPosition=global;
-                    QMouseEvent press(QEvent::MouseButtonPress,hit->mapFromGlobal(global),
-                        global,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
-                    QCoreApplication::sendEvent(hit,&press);
+                if(mNativeTouchTarget){
+                    if(!points.isEmpty())mNativeTouchPosition=points[0].globalPosition();
+                    if(mNativeThumbnailTouch&&event->type()==QEvent::TouchUpdate){
+                        const QPointF delta=mNativeTouchPosition-mNativeTouchStart;
+                        if(!mNativeThumbnailDrag&&std::abs(delta.x())>12.0&&
+                           std::abs(delta.x())>std::abs(delta.y())*1.2)
+                            mNativeThumbnailDrag=true;
+                        auto* scroller=QScroller::scroller(mThumbnailScroll->viewport());
+                        scroller->handleInput(QScroller::InputMove,
+                            mThumbnailScroll->viewport()->mapFromGlobal(mNativeTouchPosition),
+                            touch->timestamp());
+                        mNativeThumbnailDrag=mNativeThumbnailDrag||scroller->state()==QScroller::Dragging;
+                        if(mNativeThumbnailDrag)mThumbnailFollowPlayback=false;
+                        event->accept();return true;
+                    }
+                    if(event->type()==QEvent::TouchEnd||event->type()==QEvent::TouchCancel){
+                        if(mNativeThumbnailTouch){
+                            auto* scroller=QScroller::scroller(mThumbnailScroll->viewport());
+                            scroller->handleInput(QScroller::InputRelease,
+                                mThumbnailScroll->viewport()->mapFromGlobal(mNativeTouchPosition),
+                                touch->timestamp());
+                            if(event->type()==QEvent::TouchCancel)scroller->stop();
+                        }
+                        auto* target=mNativeTouchTarget.data();
+                        mNativeTouchTarget=nullptr;
+                        const bool cancelled=event->type()==QEvent::TouchCancel;
+                        if(cancelled){
+                            if(auto* button=qobject_cast<QAbstractButton*>(target))button->setDown(false);
+                            if(auto* slider=qobject_cast<QAbstractSlider*>(target))slider->setSliderDown(false);
+                        }
+                        if(target&&mNativeThumbnailTouch&&!mNativeThumbnailDrag&&!cancelled){
+                            QMouseEvent press(QEvent::MouseButtonPress,
+                                target->mapFromGlobal(mNativeTouchPosition),
+                                mNativeTouchPosition,Qt::LeftButton,Qt::LeftButton,
+                                Qt::NoModifier);
+                            QCoreApplication::sendEvent(target,&press);
+                        }
+                        if(target&&!mNativeThumbnailDrag&&!cancelled){
+                            QMouseEvent release(QEvent::MouseButtonRelease,
+                                target->mapFromGlobal(mNativeTouchPosition),mNativeTouchPosition,
+                                Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+                            QCoreApplication::sendEvent(target,&release);
+                        }
+                        mNativeThumbnailTouch=false;
+                        mNativeThumbnailDrag=false;
+                    }
                     event->accept();return true;
                 }
             }
-            if(mNativeTouchTarget){
-                if(!points.isEmpty())mNativeTouchPosition=points[0].globalPosition();
-                if(mNativeThumbnailTouch&&event->type()==QEvent::TouchUpdate){
-                    const QPointF delta=mNativeTouchPosition-mNativeTouchStart;
-                    if(!mNativeThumbnailDrag&&std::abs(delta.x())>12.0&&
-                       std::abs(delta.x())>std::abs(delta.y())*1.2)
-                        mNativeThumbnailDrag=true;
-                    auto* scroller=QScroller::scroller(mThumbnailScroll->viewport());
-                    scroller->handleInput(QScroller::InputMove,
-                        mThumbnailScroll->viewport()->mapFromGlobal(mNativeTouchPosition),
-                        touch->timestamp());
-                    mNativeThumbnailDrag=mNativeThumbnailDrag||scroller->state()==QScroller::Dragging;
-                    if(mNativeThumbnailDrag)mThumbnailFollowPlayback=false;
-                    event->accept();return true;
-                }
-                if(event->type()==QEvent::TouchEnd||event->type()==QEvent::TouchCancel){
-                    if(mNativeThumbnailTouch){
-                        auto* scroller=QScroller::scroller(mThumbnailScroll->viewport());
-                        scroller->handleInput(QScroller::InputRelease,
-                            mThumbnailScroll->viewport()->mapFromGlobal(mNativeTouchPosition),
-                            touch->timestamp());
-                        if(event->type()==QEvent::TouchCancel)scroller->stop();
-                    }
-                    auto* target=mNativeTouchTarget.data();
-                    mNativeTouchTarget=nullptr;
-                    const bool cancelled=event->type()==QEvent::TouchCancel;
-                    if(cancelled){
-                        if(auto* button=qobject_cast<QAbstractButton*>(target))button->setDown(false);
-                        if(auto* slider=qobject_cast<QAbstractSlider*>(target))slider->setSliderDown(false);
-                    }
-                    if(target&&mNativeThumbnailTouch&&!mNativeThumbnailDrag&&!cancelled){
-                        QMouseEvent press(QEvent::MouseButtonPress,
-                            target->mapFromGlobal(mNativeTouchPosition),
-                            mNativeTouchPosition,Qt::LeftButton,Qt::LeftButton,
-                            Qt::NoModifier);
-                        QCoreApplication::sendEvent(target,&press);
-                    }
-                    if(target&&!mNativeThumbnailDrag&&!cancelled){
-                        QMouseEvent release(QEvent::MouseButtonRelease,
-                            target->mapFromGlobal(mNativeTouchPosition),mNativeTouchPosition,
-                            Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
-                        QCoreApplication::sendEvent(target,&release);
-                    }
-                    mNativeThumbnailTouch=false;
-                    mNativeThumbnailDrag=false;
+            if(event->type()==QEvent::TouchEnd||event->type()==QEvent::TouchCancel||
+               points.isEmpty()){
+                const bool wasTouching=mTouchActive;
+                mTouchActive=false;
+                mTouchPanUpdateTimer.stop();
+                if(wasTouching)updateDisplayedImage();
+                if(!hasReusableSourceFrame()&&mZoomPercent>0.0){
+                    mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
                 }
                 event->accept();return true;
             }
-        }
-        if(event->type()==QEvent::TouchEnd||event->type()==QEvent::TouchCancel||
-           points.isEmpty()){
-            const bool wasTouching=mTouchActive;
-            mTouchActive=false;
-            mTouchPanUpdateTimer.stop();
-            if(wasTouching)updateDisplayedImage();
-            if(!hasReusableSourceFrame()&&mZoomPercent>0.0){
-                mSurfaceUpdateTimer.setInterval(16);mSurfaceUpdateTimer.start();
+            const QPointF center=points.size()>1
+                ?(points[0].globalPosition()+points[1].globalPosition())/2.0
+                :points[0].globalPosition();
+            const double distance=points.size()>1
+                ?QLineF(points[0].globalPosition(),points[1].globalPosition()).length():0.0;
+            if(!mTouchActive||event->type()==QEvent::TouchBegin||
+               mTouchPointCount!=std::min<int>(2,points.size())){
+                mTouchActive=true;
+                mTouchPointCount=std::min<int>(2,points.size());
+                mLastTouchCenter=center;
+                mLastTouchDistance=distance;
+                revealOverlay();
+                event->accept();return true;
             }
-            event->accept();return true;
-        }
-        const QPointF center=points.size()>1
-            ?(points[0].globalPosition()+points[1].globalPosition())/2.0
-            :points[0].globalPosition();
-        const double distance=points.size()>1
-            ?QLineF(points[0].globalPosition(),points[1].globalPosition()).length():0.0;
-        if(!mTouchActive||event->type()==QEvent::TouchBegin||
-           mTouchPointCount!=std::min<int>(2,points.size())){
-            mTouchActive=true;
-            mTouchPointCount=std::min<int>(2,points.size());
+            if(points.size()>1&&distance>0.0&&mLastTouchDistance>0.0){
+                changeZoom(std::log(distance/mLastTouchDistance)/std::log(1.08));
+            }
+            if(mZoomPercent>0.0&&mIndex>=0&&mIndex<mClips.size()&&
+               QLineF(center,mLastTouchCenter).length()>0.5){
+                const QPointF displayDelta=-(center-mLastTouchCenter)/(mZoomPercent/100.0);
+                QPointF sourceDelta=displayDelta;
+                const int orientation=mClips[mIndex].orientation;
+                if(orientation==90)sourceDelta=QPointF(displayDelta.y(),-displayDelta.x());
+                else if(orientation==180)sourceDelta=-displayDelta;
+                else if(orientation==270)sourceDelta=QPointF(-displayDelta.y(),displayDelta.x());
+                mPanSourcePixels+=sourceDelta;
+                clampPanToZoom();
+                if(!mZoomAnimationTimer.isActive()&&!mTouchPanUpdateTimer.isActive())
+                    mTouchPanUpdateTimer.start();
+            }
             mLastTouchCenter=center;
             mLastTouchDistance=distance;
             revealOverlay();
             event->accept();return true;
         }
-        if(points.size()>1&&distance>0.0&&mLastTouchDistance>0.0){
-            changeZoom(std::log(distance/mLastTouchDistance)/std::log(1.08));
-        }
-        if(mZoomPercent>0.0&&mIndex>=0&&mIndex<mClips.size()&&
-           QLineF(center,mLastTouchCenter).length()>0.5){
-            const QPointF displayDelta=-(center-mLastTouchCenter)/(mZoomPercent/100.0);
-            QPointF sourceDelta=displayDelta;
-            const int orientation=mClips[mIndex].orientation;
-            if(orientation==90)sourceDelta=QPointF(displayDelta.y(),-displayDelta.x());
-            else if(orientation==180)sourceDelta=-displayDelta;
-            else if(orientation==270)sourceDelta=QPointF(-displayDelta.y(),displayDelta.x());
-            mPanSourcePixels+=sourceDelta;
-            clampPanToZoom();
-            if(!mZoomAnimationTimer.isActive()&&!mTouchPanUpdateTimer.isActive())
-                mTouchPanUpdateTimer.start();
-        }
-        mLastTouchCenter=center;
-        mLastTouchDistance=distance;
-        revealOverlay();
-        event->accept();return true;
+        if(watchedWidget&&watchedWidget->parentWidget()==mOverlay&&
+           (event->type()==QEvent::Show||event->type()==QEvent::Hide||
+            event->type()==QEvent::Move||event->type()==QEvent::Resize))
+            QTimer::singleShot(0,this,[this]{updateTouchOverlayMask();});
     }
-    if(watchedWidget&&watchedWidget->parentWidget()==mOverlay&&
-       (event->type()==QEvent::Show||event->type()==QEvent::Hide||
-        event->type()==QEvent::Move||event->type()==QEvent::Resize))
-        QTimer::singleShot(0,this,[this]{updateAndroidOverlayMask();});
-#endif
     if(mFpsLabel&&watched==mFpsLabel->parentWidget()&&event->type()==QEvent::Resize)
         updateFpsIndicator();
     if(belongsToPlayer&&event->type()==QEvent::Leave&&
@@ -3955,9 +3954,9 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         auto* mouse=static_cast<QMouseEvent*>(event);
         if(mouse->button()==Qt::LeftButton){
             mPanning=false;unsetCursor();
-#ifndef Q_OS_ANDROID
-            mFullscreenButton->click();
-#endif
+            if (!motioncam::touchUi()) {
+                mFullscreenButton->click();
+            }
             return true;
         }
     }
@@ -4017,10 +4016,8 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         const int x=mouse->pos().x();
 #endif
         if(mSeeking)updateSeekPosition(x);
-#ifndef Q_OS_ANDROID
-        else QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),
+        else if(!motioncam::touchUi()) QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),
             framePositionText(frameAtSliderPosition(x)),mPosition);
-#endif
         return mSeeking;
     }else if(event->type()==QEvent::MouseButtonRelease){
         auto* mouse=static_cast<QMouseEvent*>(event);
@@ -4369,16 +4366,13 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
 }
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
-#ifdef Q_OS_ANDROID
-    QTimer::singleShot(0,this,[this]{updateAndroidOverlayMask();});
-#endif
+    if (motioncam::touchUi()) {
+        QTimer::singleShot(0,this,[this]{updateTouchOverlayMask();});
+    }
     positionVolumePanel();
     if(mThumbnailScroll){
-#ifdef Q_OS_ANDROID
-        if(mThumbnailScroll->isVisible())
-#else
-        if(mThumbnailScroll->isVisible()&&mThumbnailScroll->height()!=thumbnailStripHeight())
-#endif
+        if(mThumbnailScroll->isVisible()&&
+           (motioncam::touchUi()||mThumbnailScroll->height()!=thumbnailStripHeight()))
             rebuildThumbnailStrip();
         else mThumbnailScroll->viewport()->update();
     }
@@ -4409,12 +4403,12 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     }
 }
 void ClipPlayerDialog::keyPressEvent(QKeyEvent* e){
-#ifdef __ANDROID__
-    if(e->key()==Qt::Key_Escape||e->key()==Qt::Key_Back){close();e->accept();return;}
-#else
-    if(e->key()==Qt::Key_Escape&&isFullScreen()){showNormal();updateButtonIcons();e->accept();return;}
-    if(e->key()==Qt::Key_F){mFullscreenButton->click();e->accept();return;}
-#endif
+    if (motioncam::touchUi()) {
+        if(e->key()==Qt::Key_Escape||e->key()==Qt::Key_Back){close();e->accept();return;}
+    } else {
+        if(e->key()==Qt::Key_Escape&&isFullScreen()){showNormal();updateButtonIcons();e->accept();return;}
+        if(e->key()==Qt::Key_F){mFullscreenButton->click();e->accept();return;}
+    }
     if(e->key()==Qt::Key_Space){mPlayPause->click();e->accept();return;}
     if((e->key()==Qt::Key_Right||e->key()==Qt::Key_Left)&&mIndex>=0){
         stepFrame(e->key()==Qt::Key_Right?1:-1);

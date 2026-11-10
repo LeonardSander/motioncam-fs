@@ -64,6 +64,7 @@ set(MACOS_BUNDLE_ICON_FILE app_icon.icns)
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
+        src/UiMode.cpp
         src/ArchiveImport.cpp
         src/FrameTimingDialog.cpp
         src/ClipPlayerDialog.cpp
@@ -945,11 +946,16 @@ if(BUILD_TESTING)
     target_include_directories(motioncam-gallery-overlay-test PRIVATE include)
     target_link_libraries(motioncam-gallery-overlay-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
     add_test(NAME motioncam-gallery-overlay-test COMMAND motioncam-gallery-overlay-test)
-    set_tests_properties(motioncam-gallery-overlay-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    add_executable(motioncam-ui-mode-test tests/ui_mode_test.cpp src/UiMode.cpp)
+    target_include_directories(motioncam-ui-mode-test PRIVATE include)
+    target_link_libraries(motioncam-ui-mode-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+    add_test(NAME motioncam-ui-mode-test COMMAND motioncam-ui-mode-test)
+    set_tests_properties(motioncam-gallery-overlay-test motioncam-ui-mode-test
+        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     if(WIN32)
-        # windeployqt deploys qwindows by default. This test needs qoffscreen
+        # windeployqt deploys qwindows by default. GUI tests need qoffscreen
         # from the selected kit, whose archive installation is relocatable.
-        set_property(TEST motioncam-gallery-overlay-test APPEND PROPERTY ENVIRONMENT
+        set_property(TEST motioncam-gallery-overlay-test motioncam-ui-mode-test APPEND PROPERTY ENVIRONMENT
             "QT_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>/../plugins")
     endif()
 
@@ -1129,6 +1135,7 @@ if(BUILD_TESTING)
     set_tests_properties(
         motioncam-thumbnail-cache-test
         motioncam-gallery-overlay-test
+        motioncam-ui-mode-test
         motioncam-archive-import-test
         motioncam-demosaic-test
         motioncam-core-tests
@@ -1163,7 +1170,7 @@ if(BUILD_TESTING)
     endforeach()
 
     if(ANDROID)
-        set_tests_properties(motioncam-gallery-overlay-test PROPERTIES SKIP_RETURN_CODE 77)
+        set_tests_properties(motioncam-gallery-overlay-test motioncam-ui-mode-test PROPERTIES SKIP_RETURN_CODE 77)
         # These console tests use local fixtures, without a Java activity or
         # document provider. Exercise the Android stream with POSIX file access.
         add_library(motioncam-test-source-access STATIC tests/android_source_access.cpp)

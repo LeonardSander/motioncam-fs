@@ -65,8 +65,7 @@ private:
 class TouchScrolling final : public QObject {
 public:
     explicit TouchScrolling(QAbstractScrollArea* area,
-                            const QList<QAbstractScrollArea*>& columns = {},
-                            bool grabGesture = true)
+                            const QList<QAbstractScrollArea*>& columns = {})
         : QObject(area), mArea(area), mColumns(columns) {
         area->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         area->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -91,7 +90,7 @@ public:
                                    QScrollerProperties::OvershootAlwaysOff);
         properties.setScrollMetric(QScrollerProperties::DecelerationFactor, 0.1);
         mScroller->setScrollerProperties(properties);
-        if (grabGesture) QScroller::grabGesture(viewport, QScroller::TouchGesture);
+        QScroller::grabGesture(viewport, QScroller::TouchGesture);
         mFrames.setTimerType(Qt::PreciseTimer);
         mFrames.setInterval(16);
         connect(&mFrames,&QTimer::timeout,this,[this]{
@@ -137,7 +136,7 @@ public:
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
         if(!mScroller)return false;
-        // Android also emits mouse moves for a touch drag. Let the touch
+        // Touchscreens also emit mouse moves for a drag. Let the touch
         // gesture move the content without hover-driven style repaints.
         if(event->type()==QEvent::MouseMove&&mScroller->state()==QScroller::Dragging&&
            watched==mArea->window()->windowHandle())return true;

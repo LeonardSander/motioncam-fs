@@ -1,3 +1,4 @@
+#include "UiMode.h"
 #include "DebugInstrumentation.h"
 #include "mainwindow.h"
 #include "SingleApplication.h"
@@ -63,8 +64,7 @@
 #endif
 
 namespace {
-#ifdef __ANDROID__
-class AndroidButtonSizing final : public QObject {
+class TouchButtonSizing final : public QObject {
 public:
     using QObject::QObject;
     bool eventFilter(QObject* watched,QEvent* event) override {
@@ -76,7 +76,6 @@ public:
         return false;
     }
 };
-#endif
 
 #if MOTIONCAM_DEBUG_INSTRUMENTATION
 std::vector<uint8_t> benchmarkCfaDng(const uint8_t* payload, size_t bytes,
@@ -712,9 +711,6 @@ int main(int argc, char *argv[])
         app.setStyleSheet(ts.readAll());
     }
 
-#ifdef __ANDROID__
-    app.installEventFilter(new AndroidButtonSizing(&app));
-#endif
     // Parse command line arguments
     QCommandLineParser parser;
 
@@ -749,6 +745,9 @@ int main(int argc, char *argv[])
         "video");
 #endif
 
+    QCommandLineOption uiModeOption(QStringList() << "ui-mode",
+        "Interface layout: auto, desktop, or touch (overrides Preferences)", "mode");
+    parser.addOption(uiModeOption);
     parser.addOption(fileOption);
     parser.addOption(galleryPerfOption);
     parser.addOption(galleryPerfPlaybackOption);
@@ -770,6 +769,15 @@ int main(int argc, char *argv[])
     }
 #endif
     parser.process(arguments);
+    const QString uiMode = parser.isSet(uiModeOption)
+        ? parser.value(uiModeOption) : motioncam::preferredUiMode();
+    if (!motioncam::validUiMode(uiMode)) {
+        std::fprintf(stderr, "Invalid --ui-mode; use auto, desktop, or touch\n");
+        return 2;
+    }
+    motioncam::initializeUiMode(uiMode);
+    if (motioncam::touchUi())
+        app.installEventFilter(new TouchButtonSizing(&app));
 #ifdef Q_OS_ANDROID
     // Dispatching these short high-DPI raster fills to Qt's worker pool
     // costs more than drawing them on the GUI thread on Android.
@@ -1283,11 +1291,8 @@ int main(int argc, char *argv[])
                  QString filePath = message.mid(11); // Remove "MOUNT_FILE:" prefix
 
                  window.mountFile(filePath);
-#ifdef __ANDROID__
-                 window.showFullScreen();
-#else
-                 window.show();
-#endif
+                 if (motioncam::touchUi()) window.showFullScreen();
+                 else window.show();
                  window.raise();
                  window.activateWindow();
              }
@@ -1300,11 +1305,8 @@ int main(int argc, char *argv[])
         });
     }
 
-#ifdef __ANDROID__
-    window.showFullScreen();
-#else
-    window.show();
-#endif
+    if (motioncam::touchUi()) window.showFullScreen();
+    else window.show();
 #ifdef __APPLE__
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window,
         [&window](Qt::ApplicationState state) {

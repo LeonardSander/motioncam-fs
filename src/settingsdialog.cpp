@@ -1,3 +1,5 @@
+#include "UiMode.h"
+#include "TouchScrolling.h"
 #include "settingsdialog.h"
 #include "DirectLogDecoder.h"
 #include "DNGDecoder.h"
@@ -17,20 +19,19 @@
 #include <QStorageInfo>
 #include <QCheckBox>
 #include <QLocale>
+#include <QScrollArea>
+#include <QSettings>
 #ifdef __ANDROID__
 #include "android/ExportDirectory.h"
-#include <QSettings>
 #include <QTimer>
-#include <QScrollArea>
 #include <QScrollBar>
-#include "android/TouchScrolling.h"
 #endif
 
 SettingsDialog::SettingsDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Preferences");
-    setMinimumWidth(600);
+    setMinimumWidth(motioncam::touchUi() ? 0 : 600);
     setMinimumHeight(200);
 
 #ifdef __APPLE__
@@ -46,7 +47,37 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     };
 
     // Main layout
-    auto* mainLayout = new QVBoxLayout(this);
+    auto* outerLayout = new QVBoxLayout(this);
+    auto* content = new QWidget(this);
+    auto* mainLayout = new QVBoxLayout(content);
+    if (motioncam::touchUi()) {
+        auto* scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidget(content);
+        outerLayout->addWidget(scroll, 1);
+        new motioncam::TouchScrolling(scroll);
+    } else {
+        outerLayout->addWidget(content);
+    }
+#ifndef __ANDROID__
+    auto* interfaceGroup = new QGroupBox(tr("Interface"), this);
+    auto* interfaceLayout = new QVBoxLayout(interfaceGroup);
+    auto* uiMode = new QComboBox(interfaceGroup);
+    uiMode->setObjectName(QStringLiteral("uiModeComboBox"));
+    uiMode->addItem(tr("Automatic"), QStringLiteral("auto"));
+    uiMode->addItem(tr("Desktop"), QStringLiteral("desktop"));
+    uiMode->addItem(tr("Touch"), QStringLiteral("touch"));
+    uiMode->setCurrentIndex(uiMode->findData(motioncam::preferredUiMode()));
+    interfaceLayout->addWidget(uiMode);
+    auto* modeHelp = new QLabel(tr("Interface changes take effect after restarting the application."), interfaceGroup);
+    modeHelp->setWordWrap(true);
+    interfaceLayout->addWidget(modeHelp);
+    mainLayout->addWidget(interfaceGroup);
+    connect(this, &QDialog::accepted, this, [uiMode] {
+        QSettings("com.motioncam", "MotionCam FS").setValue("interface/mode", uiMode->currentData());
+    });
+#endif
 
     // Cache folder group
 #ifdef __APPLE__
@@ -251,34 +282,37 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 
     // Clip settings group
     auto* clipSettingsGroup = new QGroupBox("Clip Settings", this);
-#ifdef __ANDROID__
-    auto* clipGroupLayout = new QVBoxLayout(clipSettingsGroup);
-    clipGroupLayout->setContentsMargins(0, 0, 0, 0);
-    auto* clipScrollArea = new QScrollArea(clipSettingsGroup);
-    clipScrollArea->setWidgetResizable(true);
-    clipScrollArea->setFrameShape(QFrame::NoFrame);
-    clipScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    clipScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    auto* clipContent = new QWidget(clipScrollArea);
-    auto* clipColumns = new QHBoxLayout(clipContent);
-    clipColumns->setContentsMargins(8, 8, 8, 8);
-    clipColumns->setSpacing(12);
-    auto* firstColumn = new QWidget(clipContent);
-    auto* secondColumn = new QWidget(clipContent);
-    auto* clipSettingsLayout = new QVBoxLayout(firstColumn);
-    auto* secondClipSettingsLayout = new QVBoxLayout(secondColumn);
-    for (auto* columnLayout : {clipSettingsLayout, secondClipSettingsLayout}) {
-        columnLayout->setContentsMargins(0, 0, 0, 0);
-        columnLayout->setSpacing(8);
+    QVBoxLayout* clipSettingsLayout = nullptr;
+    QVBoxLayout* secondClipSettingsLayout = nullptr;
+    if (motioncam::touchUi()) {
+        auto* clipGroupLayout = new QVBoxLayout(clipSettingsGroup);
+        clipGroupLayout->setContentsMargins(0, 0, 0, 0);
+        auto* clipScrollArea = new QScrollArea(clipSettingsGroup);
+        clipScrollArea->setWidgetResizable(true);
+        clipScrollArea->setFrameShape(QFrame::NoFrame);
+        clipScrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        clipScrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* clipContent = new QWidget(clipScrollArea);
+        auto* clipColumns = new QHBoxLayout(clipContent);
+        clipColumns->setContentsMargins(8, 8, 8, 8);
+        clipColumns->setSpacing(12);
+        auto* firstColumn = new QWidget(clipContent);
+        auto* secondColumn = new QWidget(clipContent);
+        clipSettingsLayout = new QVBoxLayout(firstColumn);
+        secondClipSettingsLayout = new QVBoxLayout(secondColumn);
+        for (auto* columnLayout : {clipSettingsLayout, secondClipSettingsLayout}) {
+            columnLayout->setContentsMargins(0, 0, 0, 0);
+            columnLayout->setSpacing(8);
+        }
+        clipColumns->addWidget(firstColumn, 1);
+        clipColumns->addWidget(secondColumn, 1);
+        clipScrollArea->setWidget(clipContent);
+        clipGroupLayout->addWidget(clipScrollArea);
+        new motioncam::TouchScrolling(clipScrollArea);
+        clipScrollArea->setMinimumHeight(360);
+    } else {
+        clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
     }
-    clipColumns->addWidget(firstColumn, 1);
-    clipColumns->addWidget(secondColumn, 1);
-    clipScrollArea->setWidget(clipContent);
-    clipGroupLayout->addWidget(clipScrollArea);
-    new motioncam::TouchScrolling(clipScrollArea);
-#else
-    auto* clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
-#endif
     mFuseMountingCheckBox = new QCheckBox("Mount clips as virtual DNG folders", this);
     mFuseMountingCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mFuseMountingCheckBox);
@@ -312,10 +346,10 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
     mGalleryFpsIndicatorCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
-#ifdef __ANDROID__
-    clipSettingsLayout->addStretch();
-    clipSettingsLayout = secondClipSettingsLayout;
-#endif
+    if (motioncam::touchUi()) {
+        clipSettingsLayout->addStretch();
+        clipSettingsLayout = secondClipSettingsLayout;
+    }
     mUnmountOnFinalizeCheckBox = new QCheckBox("Unmount on finalize", this);
     mUnmountOnFinalizeCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mUnmountOnFinalizeCheckBox);
@@ -347,12 +381,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         this);
     heroSidecarHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(heroSidecarHelpLabel);
-#ifdef __ANDROID__
-    clipSettingsLayout->addStretch();
-    mainLayout->addWidget(clipSettingsGroup, 1);
-#else
-    mainLayout->addWidget(clipSettingsGroup);
-#endif
+    if (motioncam::touchUi()) clipSettingsLayout->addStretch();
+    mainLayout->addWidget(clipSettingsGroup, motioncam::touchUi() ? 1 : 0);
 
     // Matrix override group (disabled for Fuse-AllV2)
     auto* matrixGroup = new QGroupBox("Color Matrix Override", this);
@@ -402,7 +432,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     // Button box
     mButtonBox = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    mainLayout->addWidget(mButtonBox);
+    outerLayout->addWidget(mButtonBox);
 
     // Connect signals
     connect(mCacheBrowseButton, &QPushButton::clicked, this, &SettingsDialog::onBrowseCacheFolder);

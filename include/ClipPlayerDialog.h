@@ -172,9 +172,7 @@ private:
     void updateButtonIcons();
     void revealOverlay();
     void setOverlayVisible(bool visible);
-#ifdef Q_OS_ANDROID
-    void updateAndroidOverlayMask();
-#endif
+    void updateTouchOverlayMask();
     void changeZoom(double wheelSteps);
     void advanceZoomAnimation();
     void setZoomAnimationTarget(double target);
@@ -243,8 +241,8 @@ private:
     QWidget* mOverlay=nullptr; QGraphicsOpacityEffect* mOverlayOpacity=nullptr;
     QPropertyAnimation* mOverlayAnimation=nullptr;
     QTimer mThumbnailBackfillTimer, mOverlayTimer, mNativeOverlayCaptureTimer, mSurfaceUpdateTimer, mZoomAnimationTimer;
-#ifdef Q_OS_ANDROID
     QTimer mTouchPanUpdateTimer;
+#ifdef Q_OS_ANDROID
     std::function<QPixmap()> mNavigationReturnSnapshot;
     bool mNavigationClosing=false, mNavigationCloseReady=false;
 #endif
@@ -259,9 +257,7 @@ private:
     QPointF mNativeTouchStart;
     bool mNativeThumbnailTouch=false;
     bool mNativeThumbnailDrag=false;
-#ifdef Q_OS_ANDROID
     bool mThumbnailFollowPlayback=true;
-#endif
     QElapsedTimer mZoomAnimationClock;
     QElapsedTimer mPresentationClock;
     QElapsedTimer mCadenceClock;
@@ -342,12 +338,10 @@ private:
     bool mWaitingForFirstFrame=false;
     QPoint mMouseSourcePosition{-1,-1};
     QPointF mPanSourcePixels, mLastPanGlobal;
-#ifdef Q_OS_ANDROID
     bool mTouchActive=false;
     int mTouchPointCount=0;
     QPointF mLastTouchCenter;
     double mLastTouchDistance=0.0;
-#endif
     std::shared_ptr<std::atomic_bool> mAudioLoadCancelled=
         std::make_shared<std::atomic_bool>(false);
     std::shared_ptr<std::atomic<int>> mPlaybackTarget=std::make_shared<std::atomic<int>>(0);

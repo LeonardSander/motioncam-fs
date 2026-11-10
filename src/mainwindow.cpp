@@ -1,3 +1,4 @@
+#include "UiMode.h"
 #include "DebugInstrumentation.h"
 #include "SourceInput.h"
 #include "mainwindow.h"
@@ -76,8 +77,8 @@ using namespace motioncam;
 #endif
 #include <QScrollBar>
 #include <QScroller>
+#include "TouchScrolling.h"
 #ifdef __ANDROID__
-#include "android/TouchScrolling.h"
 #include "android/PageCrossfade.h"
 #endif
 #include <QScrollArea>
@@ -147,23 +148,22 @@ namespace {
         if (!future.isFinished()) events.exec();
     }
 
-#ifdef __ANDROID__
-    class AndroidPopup final : public QWidget {
+    class TouchPopup final : public QWidget {
     public:
-        AndroidPopup(QWidget* parent,const QString& title):QWidget(parent) {
-            setObjectName(QStringLiteral("androidPopupOverlay"));
+        TouchPopup(QWidget* parent,const QString& title):QWidget(parent) {
+            setObjectName(QStringLiteral("touchPopupOverlay"));
             setGeometry(parent->rect());parent->installEventFilter(this);
             setFocusPolicy(Qt::StrongFocus);
             setStyleSheet(
-                "QWidget#androidPopupOverlay{background:rgba(0,0,0,180);}"
-                "QFrame#androidPopupPanel{background:#19232d;border:1px solid #455364;border-radius:8px;}"
-                "QFrame#androidPopupPanel QLabel{background:transparent;border:0;padding:0;color:#dfe1e2;}"
-                "QFrame#androidPopupPanel QPushButton{background:#263445;border:1px solid #455364;"
+                "QWidget#touchPopupOverlay{background:rgba(0,0,0,180);}"
+                "QFrame#touchPopupPanel{background:#19232d;border:1px solid #455364;border-radius:8px;}"
+                "QFrame#touchPopupPanel QLabel{background:transparent;border:0;padding:0;color:#dfe1e2;}"
+                "QFrame#touchPopupPanel QPushButton{background:#263445;border:1px solid #455364;"
                 "border-radius:4px;padding:8px 12px;min-height:28px;min-width:0;color:#dfe1e2;}"
-                "QFrame#androidPopupPanel QPushButton:pressed{background:#346792;}");
+                "QFrame#touchPopupPanel QPushButton:pressed{background:#346792;}");
             auto* layout=new QVBoxLayout(this);layout->setContentsMargins(16,16,16,16);
             layout->addStretch();
-            panel=new QFrame(this);panel->setObjectName(QStringLiteral("androidPopupPanel"));
+            panel=new QFrame(this);panel->setObjectName(QStringLiteral("touchPopupPanel"));
             content=new QVBoxLayout(panel);content->setContentsMargins(20,20,20,20);content->setSpacing(14);
             auto* heading=new QLabel(title,panel);heading->setWordWrap(true);
             QFont font=heading->font();font.setBold(true);heading->setFont(font);content->addWidget(heading);
@@ -193,8 +193,8 @@ namespace {
         }
     };
 
-    void showAndroidActionMenu(QWidget* parent,QMenu* menu,int first=0) {
-        auto* popup=new AndroidPopup(parent,menu->title().remove('&'));
+    void showTouchActionMenu(QWidget* parent,QMenu* menu,int first=0) {
+        auto* popup=new TouchPopup(parent,menu->title().remove('&'));
         popup->setProperty("dismissOnResize",true);
         popup->content->setSpacing(6);
         QVector<QPointer<QAction>> actions;
@@ -216,7 +216,7 @@ namespace {
             QObject::connect(choice,&QPushButton::clicked,popup,[popup,parent,action]{
                 popup->hide();popup->deleteLater();
                 if(!action)return;
-                if(action->menu())showAndroidActionMenu(parent,action->menu());
+                if(action->menu())showTouchActionMenu(parent,action->menu());
                 else QTimer::singleShot(0,action,[action]{if(action)action->trigger();});
             });
         }
@@ -229,7 +229,7 @@ namespace {
                 control->setEnabled(next?last<actions.size():first>0);pages->addWidget(control);
                 QObject::connect(control,&QPushButton::clicked,popup,[popup,parent,menu,first,last,pageSize,next]{
                     popup->hide();popup->deleteLater();
-                    showAndroidActionMenu(parent,menu,next?last:std::max(0,first-pageSize));
+                    showTouchActionMenu(parent,menu,next?last:std::max(0,first-pageSize));
                 });
             }
             popup->content->addLayout(pages);
@@ -237,7 +237,7 @@ namespace {
         popup->open();
     }
 
-    void positionAndroidProgress(QProgressDialog& progress, QWidget* parent) {
+    void positionTouchProgress(QProgressDialog& progress, QWidget* parent) {
         const int width=std::min(480,std::max(1,parent->width()-32));
         progress.setMaximumWidth(width);
         if(auto* label=progress.findChild<QLabel*>()){
@@ -247,18 +247,26 @@ namespace {
         }
         const QSize size=progress.sizeHint().expandedTo(QSize(width,112));
         const int height=std::min(size.height(),std::max(1,parent->height()-16));
-        progress.setGeometry(std::max(0,(parent->width()-width)/2),
-                             std::max(0,(parent->height()-height)/2),width,height);
+        QPoint position(std::max(0,(parent->width()-width)/2),
+                        std::max(0,(parent->height()-height)/2));
+        if(progress.isWindow())position=parent->mapToGlobal(position);
+        progress.setGeometry(QRect(position,QSize(width,height)));
     }
 
-    void showAndroidProgress(QProgressDialog& progress, QWidget* parent) {
+    void showTouchProgress(QProgressDialog& progress, QWidget* parent) {
+#ifdef __ANDROID__
         progress.setWindowFlags(Qt::Widget);
         progress.setWindowModality(Qt::NonModal);
-        positionAndroidProgress(progress,parent);
+#else
+        // Desktop platforms support modal windows, including in touch mode.
+        progress.setWindowModality(Qt::WindowModal);
+#endif
+        positionTouchProgress(progress,parent);
         progress.show();
         progress.raise();
     }
 
+#ifdef __ANDROID__
     class AndroidFinalizeWakeLock {
     public:
         AndroidFinalizeWakeLock() {
@@ -617,15 +625,11 @@ namespace {
     constexpr auto APP_NAME = "MotionCam FS";
 
     void styleClipMetadata(QLabel* label,const QString& extra={}) {
-#ifdef __ANDROID__
-        constexpr int pointSize=10;
-#else
-        constexpr int pointSize=9;
-#endif
+        const int pointSize=motioncam::touchUi()?10:9;
         label->setStyleSheet(QStringLiteral("font-size:%1pt;%2").arg(pointSize).arg(extra));
-#ifdef __ANDROID__
-        label->ensurePolished();
-#endif
+        if (motioncam::touchUi()) {
+            label->ensurePolished();
+        }
     }
 
 #ifdef __ANDROID__
@@ -1873,107 +1877,8 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
     QMenu* androidSessionMenu = nullptr;
 #endif
+    if (motioncam::touchUi()) setupTouchLayout();
 #ifdef __ANDROID__
-    ui->horizontalLayout->setContentsMargins(0,0,0,0);
-    ui->verticalLayout_3->setContentsMargins(0,0,0,0);
-    ui->verticalLayout_3->setAlignment(Qt::AlignTop);
-    ui->verticalLayout_3->setSpacing(2);
-    ui->dragAndDropScrollArea->setFrameShape(QFrame::NoFrame);
-    ui->dragAndDropScrollArea->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
-    ui->verticalSpacer_top->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
-    ui->verticalSpacer_bottom->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
-    ui->verticalLayout_3->invalidate();
-    ui->dragAndDropLabel->setText(tr("Import a clip to begin"));
-    ui->settingsTitle->setText(tr("Settings"));
-    ui->preprocessingTitle->setText(tr("Preprocessing"));
-    for (auto* title : {ui->settingsTitle, ui->preprocessingTitle}) {
-        QFont font = title->font();
-        font.setPixelSize(14);
-        font.setBold(true);
-        title->setFont(font);
-    }
-
-    auto* settingsStrip = new QScrollArea(ui->centralwidget);
-    settingsStrip->setWidgetResizable(true);
-    settingsStrip->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
-    auto* stripContent = new QWidget(settingsStrip);
-    auto* stripLayout = new QHBoxLayout(stripContent);
-    stripLayout->setContentsMargins(0, 0, 0, 0);
-    stripLayout->setSpacing(0);
-    QList<QAbstractScrollArea*> settingsColumns;
-    int stripWidth = 0;
-    for (auto* column : {ui->globalSettings, ui->globalPreprocessingSettings}) {
-        ui->horizontalLayout->removeWidget(column);
-        auto* vertical = new QScrollArea(stripContent);
-        const int columnWidth = std::max(300, column->sizeHint().width());
-        vertical->setFixedWidth(columnWidth);
-        stripWidth += columnWidth;
-        vertical->setWidgetResizable(true);
-        vertical->setWidget(column);
-        stripLayout->addWidget(vertical);
-        vertical->setFrameShape(QFrame::NoFrame);
-        vertical->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
-        vertical->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        vertical->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        settingsColumns.append(vertical);
-    }
-    stripContent->setFixedWidth(stripWidth + stripLayout->spacing());
-    settingsStrip->setWidget(stripContent);
-    settingsStrip->setFrameShape(QFrame::NoFrame);
-    settingsStrip->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
-    new motioncam::TouchScrolling(settingsStrip, settingsColumns);
-    new motioncam::TouchScrolling(ui->dragAndDropScrollArea);
-    // The clip cards include transparent children. Give their scrolling
-    // parent an opaque fill so newly exposed pixels are initialized while
-    // Android moves the content widget and while the splitter resizes it.
-    ui->scrollAreaWidgetContents->setAutoFillBackground(true);
-    ui->scrollAreaWidgetContents->setAttribute(Qt::WA_OpaquePaintEvent, false);
-    ui->horizontalLayout->removeWidget(ui->dragAndDropScrollArea);
-    auto* splitter = new QSplitter(Qt::Horizontal, ui->centralwidget);
-    splitter->setObjectName(QStringLiteral("androidMainSplitter"));
-    QSettings splitterSettings(PACKAGE_NAME, APP_NAME);
-    mAndroidSplitterHorizontal=std::clamp(splitterSettings.value("android/mainSplitterHorizontal",0.5).toDouble(),1.0/6.0,5.0/6.0);
-    mAndroidSplitterVertical=std::clamp(splitterSettings.value("android/mainSplitterVertical",0.5).toDouble(),1.0/6.0,5.0/6.0);
-    auto* saveSplitter=new QTimer(splitter);
-    saveSplitter->setSingleShot(true);
-    saveSplitter->setInterval(250);
-    connect(splitter,&QSplitter::splitterMoved,this,[this,splitter,saveSplitter]{
-        const auto sizes=splitter->sizes();
-        if(sizes.size()!=2||sizes[0]+sizes[1]<=0)return;
-        auto& fraction=splitter->orientation()==Qt::Horizontal
-            ?mAndroidSplitterHorizontal:mAndroidSplitterVertical;
-        fraction=double(sizes[0])/(sizes[0]+sizes[1]);
-        saveSplitter->start();
-    });
-    connect(saveSplitter,&QTimer::timeout,this,[this]{
-        QSettings settings(PACKAGE_NAME, APP_NAME);
-        settings.setValue("android/mainSplitterHorizontal",mAndroidSplitterHorizontal);
-        settings.setValue("android/mainSplitterVertical",mAndroidSplitterVertical);
-        settings.sync();
-    });
-    splitter->setHandleWidth(12);
-    splitter->setChildrenCollapsible(false);
-    splitter->setStyleSheet(
-        "QSplitter::handle:horizontal{background:#25282c;border:0;}"
-        "QSplitter::handle:vertical{background:#25282c;border:0;}");
-    ui->dragAndDropScrollArea->setMinimumWidth(0);
-    settingsStrip->setMinimumWidth(0);
-    splitter->addWidget(ui->dragAndDropScrollArea);
-    splitter->addWidget(settingsStrip);
-    ui->horizontalLayout->addWidget(splitter);
-    QTimer::singleShot(0, this, [this] {
-        updateAndroidOrientationPolicy();
-    });
-    for (auto* column : {ui->globalSettings, ui->globalPreprocessingSettings}) {
-        for (auto* box : column->findChildren<QCheckBox*>()) {
-            box->setProperty("androidIndicatorOnly", true);
-            box->installEventFilter(this);
-        }
-        for (auto* combo : column->findChildren<QComboBox*>()) {
-            combo->setProperty("androidInlineChoices", true);
-            combo->installEventFilter(this);
-        }
-    }
     for (int i = ui->dngCompressionModeComboBox->count() - 1; i >= 0; --i) {
         const auto text = ui->dngCompressionModeComboBox->itemText(i);
         if (text.startsWith("HEVC ") || text.startsWith("AV1 "))
@@ -2094,7 +1999,7 @@ MainWindow::MainWindow(QWidget *parent)
     androidSessionMenu = new QMenu(sessionButton);
     androidSessionMenu->setTitle(tr("Session actions"));
     connect(sessionButton,&QPushButton::clicked,this,[this,androidSessionMenu]{
-        showAndroidActionMenu(this,androidSessionMenu);
+        showTouchActionMenu(this,androidSessionMenu);
     });
     importRow->addWidget(sessionButton,1);
     ui->verticalLayout_3->insertLayout(0,importRow);
@@ -2131,7 +2036,7 @@ MainWindow::MainWindow(QWidget *parent)
         connect(poll, &QTimer::timeout, this, [this, poll, progress] {
             const QString status=motioncam::dngSequenceFolderImportStatus();
             if(status=="indexing"){
-                if(!progress->isVisible())showAndroidProgress(*progress,this);
+                if(!progress->isVisible())showTouchProgress(*progress,this);
                 return;
             }
             progress->hide();
@@ -2222,7 +2127,7 @@ MainWindow::MainWindow(QWidget *parent)
             QProgressDialog progress(tr("Reading clip information..."),QString(), 0, 0, this);
             progress.setCancelButton(nullptr);
             progress.setMinimumDuration(0);
-            showAndroidProgress(progress, this);
+            showTouchProgress(progress, this);
             auto preparation = QtConcurrent::run([sourcePath, mountedSources]() -> PreparedImport {
                 for (const auto& mounted : mountedSources)
                     if (motioncam::sameImportedSource(mounted, sourcePath)) return {};
@@ -2441,10 +2346,12 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
     fileMenu->addSeparator();
     auto* openClip = fileMenu->addAction(tr("Open Clip..."));
+    openClip->setObjectName(QStringLiteral("openClipsAction"));
     connect(openClip, &QAction::triggered, this, [this] {
         QDialog dialog(this);
         dialog.setWindowTitle(tr("Open Clips"));
         dialog.resize(760, 520);
+        if (motioncam::touchUi()) dialog.setWindowState(Qt::WindowFullScreen);
 
         auto* layout = new QVBoxLayout(&dialog);
         auto* navigation = new QHBoxLayout();
@@ -2459,12 +2366,21 @@ MainWindow::MainWindow(QWidget *parent)
         model->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
         auto* browser = new QTreeView(&dialog);
         browser->setModel(model);
-        browser->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        browser->setSelectionMode(motioncam::touchUi()
+            ? QAbstractItemView::MultiSelection : QAbstractItemView::ExtendedSelection);
         browser->setRootIsDecorated(false);
         browser->setSortingEnabled(true);
         browser->sortByColumn(0, Qt::AscendingOrder);
+        if (motioncam::touchUi()) {
+            browser->setStyleSheet("QTreeView::item{min-height:32px;}");
+            for (int column = 1; column < model->columnCount(); ++column)
+                browser->hideColumn(column);
+            new motioncam::TouchScrolling(browser);
+        }
         layout->addWidget(browser);
-        layout->addWidget(new QLabel(tr("Select clips or folders. MOV/MP4 files must contain NATIVE in the name."), &dialog));
+        auto* hint = new QLabel(tr("Select clips or folders. MOV/MP4 files must contain NATIVE in the name."), &dialog);
+        hint->setWordWrap(true);
+        layout->addWidget(hint);
 
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Open | QDialogButtonBox::Cancel, &dialog);
         auto* acceptButton = buttons->button(QDialogButtonBox::Open);
@@ -2535,6 +2451,30 @@ MainWindow::MainWindow(QWidget *parent)
     auto* preferencesAction = settingsMenu->addAction(tr("Preferences..."));
     preferencesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
     connect(preferencesAction, &QAction::triggered, this, &MainWindow::onOpenPreferences);
+#ifndef __ANDROID__
+    if (motioncam::touchUi()) {
+        auto* row = new QHBoxLayout;
+        row->setContentsMargins(4, 4, 4, 4);
+        const auto button = [this, row](const QString& text) {
+            auto* control = new QPushButton(text, ui->dragAndDropScrollArea->widget());
+            control->setMinimumWidth(0);
+            control->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+            row->addWidget(control, 1);
+            return control;
+        };
+        auto* clips = button(tr("Import clips"));
+        clips->setObjectName(QStringLiteral("importClipsButton"));
+        auto* sessions = button(tr("Session menu"));
+        auto* preferences = button(tr("Preferences"));
+        connect(clips, &QPushButton::clicked, openClip, &QAction::trigger);
+        connect(sessions, &QPushButton::clicked, this, [this, fileMenu] {
+            showTouchActionMenu(this, fileMenu);
+        });
+        connect(preferences, &QPushButton::clicked, preferencesAction, &QAction::trigger);
+        ui->verticalLayout_3->insertLayout(0, row);
+        menuBar()->hide();
+    }
+#endif
 #ifdef __ANDROID__
     menuBar()->hide();
 #endif
@@ -2556,6 +2496,115 @@ MainWindow::MainWindow(QWidget *parent)
             spdlog::info("Created example calibration.json at: {}", globalCalibPath.toStdString());
         }
     }
+}
+
+void MainWindow::setupTouchLayout() {
+    ui->horizontalLayout->setContentsMargins(0,0,0,0);
+    ui->verticalLayout_3->setContentsMargins(0,0,0,0);
+    ui->verticalLayout_3->setAlignment(Qt::AlignTop);
+    ui->verticalLayout_3->setSpacing(2);
+    ui->dragAndDropScrollArea->setFrameShape(QFrame::NoFrame);
+    ui->dragAndDropScrollArea->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
+    ui->verticalSpacer_top->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+    ui->verticalSpacer_bottom->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Fixed);
+    ui->verticalLayout_3->invalidate();
+    ui->dragAndDropLabel->setText(tr("Import a clip to begin"));
+    ui->settingsTitle->setText(tr("Settings"));
+    ui->preprocessingTitle->setText(tr("Preprocessing"));
+    for (auto* title : {ui->settingsTitle, ui->preprocessingTitle}) {
+        QFont font = title->font();
+        font.setPixelSize(14);
+        font.setBold(true);
+        title->setFont(font);
+    }
+
+    auto* settingsStrip = new QScrollArea(ui->centralwidget);
+    settingsStrip->setWidgetResizable(true);
+    settingsStrip->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+    auto* stripContent = new QWidget(settingsStrip);
+    auto* stripLayout = new QHBoxLayout(stripContent);
+    stripLayout->setContentsMargins(0, 0, 0, 0);
+    stripLayout->setSpacing(0);
+    QList<QAbstractScrollArea*> settingsColumns;
+    int stripWidth = 0;
+    for (auto* column : {ui->globalSettings, ui->globalPreprocessingSettings}) {
+        ui->horizontalLayout->removeWidget(column);
+        auto* vertical = new QScrollArea(stripContent);
+        const int columnWidth = std::max(300, column->sizeHint().width());
+        vertical->setFixedWidth(columnWidth);
+        stripWidth += columnWidth;
+        vertical->setWidgetResizable(true);
+        vertical->setWidget(column);
+        stripLayout->addWidget(vertical);
+        vertical->setFrameShape(QFrame::NoFrame);
+        vertical->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
+        vertical->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        vertical->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        settingsColumns.append(vertical);
+    }
+    stripContent->setFixedWidth(stripWidth + stripLayout->spacing());
+    settingsStrip->setWidget(stripContent);
+    settingsStrip->setFrameShape(QFrame::NoFrame);
+    settingsStrip->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
+    new motioncam::TouchScrolling(settingsStrip, settingsColumns);
+    new motioncam::TouchScrolling(ui->dragAndDropScrollArea);
+    // The clip cards include transparent children. Give their scrolling
+    // parent an opaque fill so newly exposed pixels are initialized while
+    // the content moves and while the splitter resizes it.
+    ui->scrollAreaWidgetContents->setAutoFillBackground(true);
+    ui->scrollAreaWidgetContents->setAttribute(Qt::WA_OpaquePaintEvent, false);
+    ui->horizontalLayout->removeWidget(ui->dragAndDropScrollArea);
+    auto* splitter = new QSplitter(Qt::Horizontal, ui->centralwidget);
+    splitter->setObjectName(QStringLiteral("touchMainSplitter"));
+    QSettings splitterSettings(PACKAGE_NAME, APP_NAME);
+    mTouchSplitterHorizontal=std::clamp(splitterSettings.value("interface/mainSplitterHorizontal",
+        splitterSettings.value("android/mainSplitterHorizontal",0.5)).toDouble(),1.0/6.0,5.0/6.0);
+    mTouchSplitterVertical=std::clamp(splitterSettings.value("interface/mainSplitterVertical",
+        splitterSettings.value("android/mainSplitterVertical",0.5)).toDouble(),1.0/6.0,5.0/6.0);
+    auto* saveSplitter=new QTimer(splitter);
+    saveSplitter->setSingleShot(true);
+    saveSplitter->setInterval(250);
+    connect(splitter,&QSplitter::splitterMoved,this,[this,splitter,saveSplitter]{
+        const auto sizes=splitter->sizes();
+        if(sizes.size()!=2||sizes[0]+sizes[1]<=0)return;
+        auto& fraction=splitter->orientation()==Qt::Horizontal
+            ?mTouchSplitterHorizontal:mTouchSplitterVertical;
+        fraction=double(sizes[0])/(sizes[0]+sizes[1]);
+        saveSplitter->start();
+    });
+    connect(saveSplitter,&QTimer::timeout,this,[this]{
+        QSettings settings(PACKAGE_NAME, APP_NAME);
+        saveTouchLayoutSettings(settings);
+        settings.sync();
+    });
+    splitter->setHandleWidth(12);
+    splitter->setChildrenCollapsible(false);
+    splitter->setStyleSheet(
+        "QSplitter::handle:horizontal{background:#25282c;border:0;}"
+        "QSplitter::handle:vertical{background:#25282c;border:0;}");
+    ui->dragAndDropScrollArea->setMinimumWidth(0);
+    settingsStrip->setMinimumWidth(0);
+    splitter->addWidget(ui->dragAndDropScrollArea);
+    splitter->addWidget(settingsStrip);
+    ui->horizontalLayout->addWidget(splitter);
+    QTimer::singleShot(0, this, [this] {
+        updateAndroidOrientationPolicy();
+    });
+    for (auto* column : {ui->globalSettings, ui->globalPreprocessingSettings}) {
+        for (auto* box : column->findChildren<QCheckBox*>()) {
+            box->setProperty("touchIndicatorOnly", true);
+            box->installEventFilter(this);
+        }
+        for (auto* combo : column->findChildren<QComboBox*>()) {
+            combo->setProperty("touchInlineChoices", true);
+            combo->installEventFilter(this);
+        }
+    }
+}
+
+void MainWindow::saveTouchLayoutSettings(QSettings& settings) const {
+    settings.setValue("interface/mainSplitterHorizontal",mTouchSplitterHorizontal);
+    settings.setValue("interface/mainSplitterVertical",mTouchSplitterVertical);
 }
 
 MainWindow::~MainWindow() {
@@ -2610,10 +2659,7 @@ MainWindow::~MainWindow() {
 
 void MainWindow::saveSettings() {
     QSettings settings(PACKAGE_NAME, APP_NAME);
-#ifdef __ANDROID__
-    settings.setValue("android/mainSplitterHorizontal",mAndroidSplitterHorizontal);
-    settings.setValue("android/mainSplitterVertical",mAndroidSplitterVertical);
-#endif
+    if (motioncam::touchUi()) saveTouchLayoutSettings(settings);
 
     settings.setValue("draftMode", ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteCorrection", QString::fromStdString(
@@ -2830,14 +2876,14 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     QMainWindow::closeEvent(event);
 }
 
-#ifdef __ANDROID__
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
-    if (mAndroidComboOverlay) mAndroidComboOverlay->deleteLater();
+    if (!motioncam::touchUi()) return;
+    if (mTouchComboOverlay) mTouchComboOverlay->deleteLater();
     if (mClipPlayer && mClipPlayer->parentWidget() == this)
         mClipPlayer->setGeometry(rect());
     QTimer::singleShot(0, this, [this] {
-        if (auto* splitter = findChild<QSplitter*>(QStringLiteral("androidMainSplitter"))) {
+        if (auto* splitter = findChild<QSplitter*>(QStringLiteral("touchMainSplitter"))) {
             auto* clips = ui->dragAndDropScrollArea;
             auto* settings = splitter->widget(1);
             const Qt::Orientation orientation = height() > width()
@@ -2860,12 +2906,12 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
                 settings->setMinimumWidth(minimum);
             }
             const double fraction=orientation==Qt::Horizontal
-                ?mAndroidSplitterHorizontal:mAndroidSplitterVertical;
+                ?mTouchSplitterHorizontal:mTouchSplitterVertical;
             const int first=std::clamp(qRound(available*fraction),minimum,available-minimum);
             splitter->setSizes({first,available-first});
         }
         for (auto* progress : findChildren<QProgressDialog*>(QString(),Qt::FindDirectChildrenOnly))
-            if (progress->isVisible()) positionAndroidProgress(*progress,this);
+            if (progress->isVisible()) positionTouchProgress(*progress,this);
         if (mSettingsDialog && mSettingsDialog->parentWidget() == ui->centralwidget)
             mSettingsDialog->setGeometry(ui->centralwidget->rect());
         for (const auto& dialog : mTimingDialogs)
@@ -2875,6 +2921,7 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void MainWindow::updateAndroidOrientationPolicy() {
+#ifdef __ANDROID__
     bool landscapeOnly = false;
     if (!(mClipPlayer && mClipPlayer->isVisible())) {
         landscapeOnly = mSettingsDialog && mSettingsDialog->isVisible();
@@ -2884,17 +2931,18 @@ void MainWindow::updateAndroidOrientationPolicy() {
     const auto activity = QNativeInterface::QAndroidApplication::context();
     if (activity.isValid())
         activity.callMethod<void>("setMotionCamLandscapeOnly", landscapeOnly);
+#endif
 }
 
-void MainWindow::showAndroidComboChoices(QComboBox* combo) {
-    if (mAndroidComboOverlay) {
-        mAndroidComboOverlay->hide();
-        mAndroidComboOverlay->deleteLater();
+void MainWindow::showTouchComboChoices(QComboBox* combo) {
+    if (mTouchComboOverlay) {
+        mTouchComboOverlay->hide();
+        mTouchComboOverlay->deleteLater();
     }
     auto* overlay = new QWidget(ui->centralwidget);
     overlay->setGeometry(ui->centralwidget->rect());
     overlay->setAttribute(Qt::WA_TranslucentBackground);
-    overlay->setProperty("androidComboBackdrop", true);
+    overlay->setProperty("touchComboBackdrop", true);
     overlay->installEventFilter(this);
     auto* choices = new QListWidget(overlay);
     choices->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -2922,48 +2970,47 @@ void MainWindow::showAndroidComboChoices(QComboBox* combo) {
         overlay->hide();
         overlay->deleteLater();
     });
-    mAndroidComboOverlay = overlay;
+    mTouchComboOverlay = overlay;
     overlay->show();
     overlay->raise();
 }
-#endif
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
-#ifdef __ANDROID__
-    if (watched->property("androidComboBackdrop").toBool() &&
-        event->type() == QEvent::MouseButtonRelease) {
-        if (auto* overlay = qobject_cast<QWidget*>(watched)) {
-            overlay->hide();
-            overlay->deleteLater();
-        }
-        return true;
-    }
-    if (auto* combo = qobject_cast<QComboBox*>(watched);
-        combo && combo->property("androidInlineChoices").toBool() &&
-        (event->type() == QEvent::MouseButtonPress ||
-         event->type() == QEvent::MouseButtonRelease)) {
-        if (event->type() == QEvent::MouseButtonRelease)
-            showAndroidComboChoices(combo);
-        return true;
-    }
-    if (auto* box = qobject_cast<QCheckBox*>(watched);
-        box && box->property("androidIndicatorOnly").toBool() &&
-        (event->type() == QEvent::MouseButtonPress ||
-         event->type() == QEvent::MouseButtonRelease ||
-         event->type() == QEvent::MouseButtonDblClick)) {
-        auto* mouse = static_cast<QMouseEvent*>(event);
-        QStyleOptionButton option;
-        option.initFrom(box);
-        option.text = box->text();
-        const QRect indicator = box->style()->subElementRect(
-            QStyle::SE_CheckBoxIndicator, &option, box).adjusted(-3, -3, 3, 3);
-        if (!indicator.contains(mouse->position().toPoint())) {
-            if (event->type() == QEvent::MouseButtonRelease) box->setDown(false);
-            event->accept();
+    if (motioncam::touchUi()) {
+        if (watched->property("touchComboBackdrop").toBool() &&
+            event->type() == QEvent::MouseButtonRelease) {
+            if (auto* overlay = qobject_cast<QWidget*>(watched)) {
+                overlay->hide();
+                overlay->deleteLater();
+            }
             return true;
         }
+        if (auto* combo = qobject_cast<QComboBox*>(watched);
+            combo && combo->property("touchInlineChoices").toBool() &&
+            (event->type() == QEvent::MouseButtonPress ||
+             event->type() == QEvent::MouseButtonRelease)) {
+            if (event->type() == QEvent::MouseButtonRelease)
+                showTouchComboChoices(combo);
+            return true;
+        }
+        if (auto* box = qobject_cast<QCheckBox*>(watched);
+            box && box->property("touchIndicatorOnly").toBool() &&
+            (event->type() == QEvent::MouseButtonPress ||
+             event->type() == QEvent::MouseButtonRelease ||
+             event->type() == QEvent::MouseButtonDblClick)) {
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            QStyleOptionButton option;
+            option.initFrom(box);
+            option.text = box->text();
+            const QRect indicator = box->style()->subElementRect(
+                QStyle::SE_CheckBoxIndicator, &option, box).adjusted(-3, -3, 3, 3);
+            if (!indicator.contains(mouse->position().toPoint())) {
+                if (event->type() == QEvent::MouseButtonRelease) box->setDown(false);
+                event->accept();
+                return true;
+            }
+        }
     }
-#endif
     if (watched->property("sourceJsonStatus").toBool() &&
         (event->type() == QEvent::MouseButtonDblClick ||
          (event->type() == QEvent::MouseButtonPress &&
@@ -3178,11 +3225,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         mountProgress->setWindowModality(Qt::WindowModal);
         mountProgress->setCancelButton(nullptr);
         mountProgress->setMinimumDuration(0);
-#ifdef __ANDROID__
-        showAndroidProgress(*mountProgress, this);
-#else
-        mountProgress->show();
-#endif
+        if (motioncam::touchUi()) {
+            showTouchProgress(*mountProgress, this);
+        } else {
+            mountProgress->show();
+        }
         QApplication::processEvents();
     }
 #ifdef __ANDROID__
@@ -3257,12 +3304,12 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-#ifdef __ANDROID__
-    fileWidget->setMinimumHeight(156);
-    fileWidget->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
-#else
-    fileWidget->setFixedHeight(156);
-#endif
+    if (motioncam::touchUi()) {
+        fileWidget->setMinimumHeight(156);
+        fileWidget->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
+    } else {
+        fileWidget->setFixedHeight(156);
+    }
     fileWidget->setProperty("filePath", filePath);
     fileWidget->setProperty("importPath", importPath);
     fileWidget->setProperty("sidecarPath", sidecarPath);
@@ -3307,11 +3354,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 #else
     fileLabel->setToolTip(filePath);
 #endif
-#ifdef __ANDROID__
-    fileLabel->setStyleSheet("font-weight: bold; font-size: 13pt;");
-#else
-    fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
-#endif
+    if (motioncam::touchUi()) {
+        fileLabel->setStyleSheet("font-weight: bold; font-size: 13pt;");
+    } else {
+        fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
+    }
     auto* titleLayout = new QHBoxLayout();
     titleLayout->setContentsMargins(0, 0, 0, 0);
     titleLayout->addWidget(fileLabel, 1);
@@ -3563,16 +3610,14 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                 fileInfo.baseName(), *info->presentationTimestamps,
                 info->timingTimeBaseNum, info->timingTimeBaseDen, info->fps,
                 info->timingUsesCfrMapping, info->frameRateInfo,
+                motioncam::touchUi() ? ui->centralwidget : this);
+            if (motioncam::touchUi()) {
+                dialog->setWindowFlags(Qt::Widget);
+                dialog->setAutoFillBackground(true);
 #ifdef __ANDROID__
-                ui->centralwidget);
-#else
-                this);
+                new motioncam::PageCrossfade(dialog);
 #endif
-#ifdef __ANDROID__
-            dialog->setWindowFlags(Qt::Widget);
-            dialog->setAutoFillBackground(true);
-            new motioncam::PageCrossfade(dialog);
-#endif
+            }
             mTimingDialogs.insert(mountId, dialog);
             connect(dialog, &QObject::destroyed, this, [this, mountId] {
                 mTimingDialogs.remove(mountId);
@@ -3586,8 +3631,8 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                  info->fps, info->timingUsesCfrMapping,
                                  info->frameRateInfo);
         }
+        if (motioncam::touchUi()) dialog->setGeometry(ui->centralwidget->rect());
 #ifdef __ANDROID__
-        dialog->setGeometry(ui->centralwidget->rect());
         motioncam::PageCrossfade::show(dialog);
         updateAndroidOrientationPolicy();
 #else
@@ -3756,11 +3801,11 @@ void MainWindow::mountFiles(
     if (auto* bar = progress.findChild<QProgressBar*>())
         bar->setFormat(tr("0 / %1").arg(filePaths.size()));
     mImportBatchProgress = &progress;
-#ifdef __ANDROID__
-    showAndroidProgress(progress, this);
-#else
-    progress.show();
-#endif
+    if (motioncam::touchUi()) {
+        showTouchProgress(progress, this);
+    } else {
+        progress.show();
+    }
     QApplication::processEvents();
 
     int imported = 0;
@@ -4442,7 +4487,8 @@ void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
     mClipPlayer->raise();
     updateAndroidOrientationPolicy();
 #else
-    mClipPlayer->show();
+    if (motioncam::touchUi()) mClipPlayer->showFullScreen();
+    else mClipPlayer->show();
 #endif
     if (startRender) startGalleryRender(mountId);
 }
@@ -4577,7 +4623,7 @@ void MainWindow::finalizeSelectedFrames(){
         progress.setWindowModality(Qt::WindowModal);progress.setMinimumDuration(0);
 #ifdef __ANDROID__
         AndroidFinalizeWakeLock finalizeWakeLock;
-        showAndroidProgress(progress,this);
+        showTouchProgress(progress,this);
 #endif
         try{
             mFuseFilesystem->finalize(mountId,temporary.toStdString(),compressionEnabled,options,
@@ -5571,11 +5617,11 @@ std::optional<QString> MainWindow::ensureRifeRuntime() {
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
-#ifdef __ANDROID__
-    showAndroidProgress(progress,this);
-#else
-    progress.show();
-#endif
+    if (motioncam::touchUi()) {
+        showTouchProgress(progress,this);
+    } else {
+        progress.show();
+    }
 
     QNetworkAccessManager network;
     QNetworkRequest request(QUrl(QString("https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS/archive/%1.zip")
@@ -6095,7 +6141,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     progress.setAutoReset(false);
 #ifdef __ANDROID__
     AndroidFinalizeWakeLock finalizeWakeLock;
-    showAndroidProgress(progress,this);
+    showTouchProgress(progress,this);
 #endif
 
 #ifdef __ANDROID__
@@ -7193,7 +7239,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     progress.setAutoReset(false);
 #ifdef __ANDROID__
     AndroidFinalizeWakeLock finalizeWakeLock;
-    showAndroidProgress(progress,this);
+    showTouchProgress(progress,this);
 #endif
     progress.setValue(0);
 
@@ -8250,22 +8296,20 @@ void MainWindow::onCfaPhaseChanged(std::string input) {
 }
 
 void MainWindow::onOpenPreferences() {
-#ifdef __ANDROID__
     if (mSettingsDialog) {
         mSettingsDialog->raise();
         mSettingsDialog->activateWindow();
         return;
     }
-    auto* dialog = new SettingsDialog(ui->centralwidget);
+    auto* dialog = new SettingsDialog(motioncam::touchUi() ? ui->centralwidget : this);
     mSettingsDialog = dialog;
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowFlags(Qt::Widget);
-    dialog->setAutoFillBackground(true);
-    new motioncam::PageCrossfade(dialog);
-#else
-    SettingsDialog stackDialog(this);
-    auto* dialog = &stackDialog;
+    if (motioncam::touchUi()) {
+        dialog->setWindowFlags(Qt::Widget);
+        dialog->setAutoFillBackground(true);
+#ifdef __ANDROID__
+        new motioncam::PageCrossfade(dialog);
 #endif
+    }
     dialog->setCacheFolder(mCacheRootFolder);
     dialog->setAutoApplyClipSettings(mAutoApplyClipSettings);
     dialog->setGalleryFpsIndicatorEnabled(mGalleryFpsIndicatorEnabled);
@@ -8288,18 +8332,25 @@ void MainWindow::onOpenPreferences() {
     dialog->setAndroidFinalizeDestination(
         androidPreferences.value("android/finalizeDestination", "documents").toString(),
         motioncam::legacyCustomFinalizeDirectory());
+#endif
     connect(dialog, &QDialog::finished, this, [this, dialog](int result) {
         if (result == QDialog::Accepted) applyPreferences(*dialog);
         mSettingsDialog = nullptr;
         updateAndroidOrientationPolicy();
         dialog->deleteLater();
     });
-    dialog->setGeometry(ui->centralwidget->rect());
-    motioncam::PageCrossfade::show(dialog);
-    updateAndroidOrientationPolicy();
+    if (motioncam::touchUi()) {
+        dialog->setGeometry(ui->centralwidget->rect());
+#ifdef __ANDROID__
+        motioncam::PageCrossfade::show(dialog);
 #else
-    if (dialog->exec() == QDialog::Accepted) applyPreferences(*dialog);
+        dialog->show();
+        dialog->raise();
 #endif
+        updateAndroidOrientationPolicy();
+    } else {
+        dialog->exec();
+    }
 }
 
 #ifdef __ANDROID__
@@ -8601,7 +8652,7 @@ void MainWindow::promptToResumeSession() {
     if (!QFileInfo::exists(path)) return;
 #ifdef __ANDROID__
     // Embedded in the active Qt surface to avoid Android popup-window crashes.
-    auto* overlay=new AndroidPopup(this,tr("Resume Session"));
+    auto* overlay=new TouchPopup(this,tr("Resume Session"));
     auto* question=new QLabel(tr("Resume the last session or start a new one?"),overlay->panel);
     question->setWordWrap(true);overlay->content->addWidget(question);
     auto* buttons=new QDialogButtonBox(overlay->panel);
@@ -8639,7 +8690,7 @@ void MainWindow::showAndroidNotice(const QString& title, const QString& message)
         mPendingAndroidNoticeMessage = message;
         return;
     }
-    auto* overlay=new AndroidPopup(this,title);
+    auto* overlay=new TouchPopup(this,title);
     auto* body=new QLabel(message,overlay->panel);body->setTextFormat(Qt::PlainText);body->setWordWrap(true);
     overlay->content->addWidget(body);
     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok,overlay->panel);
@@ -8986,12 +9037,12 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
         QProgressDialog progress(tr("Reloading clip sidecars..."), QString(), 0, 0, this);
         progress.setCancelButton(nullptr);
         progress.setMinimumDuration(0);
-#ifdef __ANDROID__
-        showAndroidProgress(progress, this);
-#else
-        progress.setWindowModality(Qt::WindowModal);
-        progress.show();
-#endif
+        if (motioncam::touchUi()) {
+            showTouchProgress(progress, this);
+        } else {
+            progress.setWindowModality(Qt::WindowModal);
+            progress.show();
+        }
         // Finish any earlier settings update before reloading the same mounts.
         waitForBackgroundTask(mProcessingWatcher->future());
         struct Reload {

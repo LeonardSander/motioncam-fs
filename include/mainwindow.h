@@ -83,6 +83,7 @@ QT_END_NAMESPACE
 class FrameTimingDialog;
 class ClipPlayerDialog;
 class SettingsDialog;
+class QSettings;
 
 class MainWindow : public QMainWindow
 {
@@ -107,11 +108,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
-#ifdef __ANDROID__
     void resizeEvent(QResizeEvent *event) override;
-    void showAndroidComboChoices(class QComboBox* combo);
-    void updateAndroidOrientationPolicy();
-#endif
 
 private slots:
     void onProcessingStarted();
@@ -197,6 +194,10 @@ private:
     void applyAutoSettings();
     void updateApplyButtonsVisibility();
     void applyPreferences(SettingsDialog& dialog);
+    void setupTouchLayout();
+    void saveTouchLayoutSettings(QSettings& settings) const;
+    void showTouchComboChoices(class QComboBox* combo);
+    void updateAndroidOrientationPolicy();
 #ifdef __ANDROID__
     void hideSecondaryWindowsForGallery();
     void restoreSecondaryWindowsAfterGallery();
@@ -253,14 +254,14 @@ private:
     QHash<motioncam::MountId, std::shared_ptr<std::atomic_bool>> mThumbnailCancellations;
     QHash<motioncam::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
     QPointer<ClipPlayerDialog> mClipPlayer;
-#ifdef __ANDROID__
     QPointer<SettingsDialog> mSettingsDialog;
+    double mTouchSplitterHorizontal=0.5,mTouchSplitterVertical=0.5;
+    QPointer<QWidget> mTouchComboOverlay;
+#ifdef __ANDROID__
     QList<QPointer<QWidget>> mHiddenForGallery;
     bool mAndroidGalleryOpening=false;
-    double mAndroidSplitterHorizontal=0.5,mAndroidSplitterVertical=0.5;
     QPointer<QWidget> mPendingAndroidJsonCard;
     QPointer<QWidget> mAndroidExternalJsonCard;
-    QPointer<QWidget> mAndroidComboOverlay;
     QPointer<QWidget> mPendingAndroidFinalizeCard;
     QString mPendingAndroidNoticeTitle;
     QString mPendingAndroidNoticeMessage;
