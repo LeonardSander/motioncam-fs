@@ -221,7 +221,11 @@ See `HELP.md` for usage, preferences, and feature details.
 
 Release builds disable developer environment overrides, detailed profiling,
 GPU timestamp-query resources, validation/hash comparisons, diagnostic dumps,
-and failure injection. These are enabled only in CMake's `Debug` configuration;
+and failure injection. All `MOTIONCAM_*` runtime overrides described below
+require a Debug app unless explicitly identified as Release benchmark controls
+or standalone test controls. GPU processing and native Vulkan presentation are
+selected automatically without environment opt-ins. Diagnostics are enabled only
+in CMake's `Debug` configuration;
 `RelWithDebInfo` also uses the Release instrumentation policy. Gallery benchmark
 scenario controls, including compression and quality workloads, remain available
 inside `--gallery-perf-session`. The standalone

@@ -4364,7 +4364,6 @@ void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
             ? (orientationOverride >= 0 ? orientationOverride : info->orientation)
             : -1;
         clip.isSequence = info->isSequence;
-        clip.directPresentation = info->isSequence;
         clip.autoAdvance = info->isSequence && clip.sourceFrames > 1;
         clip.audioWav = info->audioWav;
         clip.duplicateFrames = info->duplicateFrameMask;

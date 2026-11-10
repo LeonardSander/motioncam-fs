@@ -1694,8 +1694,6 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     // Present sequence frames at source size so a larger viewport does not
     // increase the FFmpeg output pipe and copy cost.
     mDirectSequencePresentation=mClips[index].isSequence &&
-        (mClips[index].directPresentation ||
-         motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_DIRECT_PRESENT")) &&
         !motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
 #ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
     const bool nativeStillPresentation = !mClips[index].isSequence;

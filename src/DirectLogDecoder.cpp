@@ -129,16 +129,10 @@ AVBufferRef* acquireHardwareDevice(AVHWDeviceType type) {
     std::lock_guard lock(directLogHardwareDeviceMutex);
     auto& shared = directLogHardwareDevices[static_cast<int>(type)];
     if (!shared.reference) {
-        AVDictionary* options = nullptr;
-        if (type == AV_HWDEVICE_TYPE_VULKAN &&
-            motioncam::debugEnvironment("MOTIONCAM_GALLERY_PRESENT_EXTENSIONS")) {
-            av_dict_set(&options, "instance_extensions",
-                "VK_KHR_surface+VK_KHR_wayland_surface+VK_KHR_xcb_surface", 0);
-            av_dict_set(&options, "device_extensions", "VK_KHR_swapchain", 0);
-        }
+        // Decoder devices do not present. Window-system extensions belong to
+        // the gallery presenter and its shared Vulkan device.
         const int created = av_hwdevice_ctx_create(
-            &shared.reference, type, nullptr, options, 0);
-        av_dict_free(&options);
+            &shared.reference, type, nullptr, nullptr, 0);
         if (created < 0) {
             directLogHardwareDevices.erase(static_cast<int>(type));
             return nullptr;
