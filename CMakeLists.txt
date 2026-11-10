@@ -946,6 +946,12 @@ if(BUILD_TESTING)
     target_link_libraries(motioncam-gallery-overlay-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
     add_test(NAME motioncam-gallery-overlay-test COMMAND motioncam-gallery-overlay-test)
     set_tests_properties(motioncam-gallery-overlay-test PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+    if(WIN32)
+        # windeployqt deploys qwindows by default. This test needs qoffscreen
+        # from the selected kit, whose archive installation is relocatable.
+        set_property(TEST motioncam-gallery-overlay-test APPEND PROPERTY ENVIRONMENT
+            "QT_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>/../plugins")
+    endif()
 
     if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
         add_executable(motioncam-vulkan-gain-layout-test
