@@ -298,6 +298,9 @@ jobs:
         # dynamically loaded integration plugins as well; linuxdeploy resolves
         # dependencies of the copied plugins during deployment.
         export EXTRA_PLATFORM_PLUGINS="libqwayland.so"
+        # The ARM Qt kit also ships an unused GStreamer backend whose system
+        # dependencies are absent on the runner. Keep the FFmpeg backend only.
+        export LINUXDEPLOY_EXCLUDED_LIBRARIES="libgstreamermediaplugin.so"
         qt_plugins="$("$QMAKE" -query QT_INSTALL_PLUGINS)"
         mkdir -p AppDir/usr/plugins
         for group in iconengines wayland-decoration-client wayland-graphics-integration-client wayland-shell-integration; do
@@ -326,6 +329,8 @@ jobs:
         test -f AppDir/usr/plugins/platforms/libqxcb.so
         test -f AppDir/usr/plugins/platforms/libqwayland.so
         test -f AppDir/usr/plugins/iconengines/libqsvgicon.so
+        test -f AppDir/usr/plugins/multimedia/libffmpegmediaplugin.so
+        test ! -e AppDir/usr/plugins/multimedia/libgstreamermediaplugin.so
         test "$(readlink -f AppDir/usr/lib/libvulkan.so)" = \
              "$(readlink -f AppDir/usr/lib/libvulkan.so.1)"
         # Test the deployed runtime and libraries without requiring a GPU.
