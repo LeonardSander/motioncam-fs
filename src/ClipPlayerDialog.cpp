@@ -194,7 +194,12 @@ QIcon mediaIcon(QStyle::StandardPixmap kind) {
     if(kind==QStyle::SP_MediaSkipBackward||kind==QStyle::SP_MediaSkipForward||
        kind==QStyle::SP_MediaSeekForward){
         if(kind==QStyle::SP_MediaSkipBackward){painter.translate(24,0);painter.scale(-1,1);}
-        triangle(3);triangle(13);
+        if(kind==QStyle::SP_MediaSeekForward){triangle(3);triangle(13);}
+        else {
+            painter.drawPolygon(QPolygonF{{3,5},{9,12},{3,19}});
+            painter.drawPolygon(QPolygonF{{11,5},{17,12},{11,19}});
+            painter.drawLine(21,5,21,19);
+        }
     }else if(kind==QStyle::SP_MediaPlay){painter.drawPolygon(QPolygonF{{8,4},{20,12},{8,20}});}
     else if(kind==QStyle::SP_MediaPause){painter.drawRect(6,5,3,14);painter.drawRect(15,5,3,14);}
     else {
