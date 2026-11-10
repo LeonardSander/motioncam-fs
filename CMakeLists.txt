@@ -874,6 +874,14 @@ install(TARGETS ${PROJECT_NAME}
 
 include(CTest)
 if(BUILD_TESTING)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
+        add_executable(motioncam-linux-fuse-test tests/linux_fuse_test.cpp)
+        target_include_directories(motioncam-linux-fuse-test PRIVATE include)
+        target_link_libraries(motioncam-linux-fuse-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+        add_dependencies(motioncam-linux-fuse-test MotionCamFuse)
+        add_test(NAME motioncam-linux-fuse-test
+            COMMAND motioncam-linux-fuse-test $<TARGET_FILE:MotionCamFuse>)
+    endif()
     add_executable(motioncam-sidecar-privacy-test tests/sidecar_privacy_test.cpp)
     target_include_directories(motioncam-sidecar-privacy-test PRIVATE include)
     target_link_libraries(motioncam-sidecar-privacy-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)

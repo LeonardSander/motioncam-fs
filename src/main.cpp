@@ -57,6 +57,11 @@
 #include <Windows.h>
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <cerrno>
+#include <sys/stat.h>
+#endif
+
 namespace {
 #ifdef __ANDROID__
 class AndroidButtonSizing final : public QObject {
@@ -616,6 +621,14 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
 
 int main(int argc, char *argv[])
 {
+#if defined(__linux__) && !defined(__ANDROID__)
+    // Internal subprocess probe: run before QApplication/single-instance setup.
+    // A parent can terminate this process if an unresponsive FUSE server hangs stat.
+    if (argc == 3 && std::strcmp(argv[1], "--probe-fuse-mount") == 0) {
+        struct stat attributes{};
+        return ::stat(argv[2], &attributes) == 0 ? 0 : errno;
+    }
+#endif
     const auto processStarted = std::chrono::steady_clock::now();
 #ifdef __ANDROID__
     spdlog::set_default_logger(

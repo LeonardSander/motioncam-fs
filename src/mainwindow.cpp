@@ -1614,58 +1614,6 @@ namespace {
     }
 #endif
 
-#if defined(__linux__) && !defined(__ANDROID__)
-    QByteArray decodeLinuxMountInfoPath(QByteArray path) {
-        path.replace("\\040", " ");
-        path.replace("\\011", "\t");
-        path.replace("\\012", "\n");
-        path.replace("\\134", "\\");
-        return path;
-    }
-
-    bool isLinuxMountPoint(const QString& path) {
-        QFile mountInfo(QStringLiteral("/proc/self/mountinfo"));
-        if (!mountInfo.open(QIODevice::ReadOnly)) return false;
-        const QByteArray expected = QFile::encodeName(QDir::cleanPath(path));
-        while (!mountInfo.atEnd()) {
-            const auto fields = mountInfo.readLine().trimmed().split(' ');
-            if (fields.size() > 4 && decodeLinuxMountInfoPath(fields.at(4)) == expected)
-                return true;
-        }
-        return false;
-    }
-
-    bool cleanupStaleLinuxFuseMount(const QString& mountPath, QString& errorMessage) {
-        const QString cleanPath = QDir::cleanPath(mountPath);
-        // Never stat a possibly stale FUSE path: if its userspace server is
-        // alive but unresponsive, the lookup itself can block indefinitely.
-        if (!isLinuxMountPoint(cleanPath)) return true;
-
-        QProcess fusermount;
-        fusermount.start("fusermount3", {"-u", "-z", cleanPath});
-        if (!fusermount.waitForStarted() || !fusermount.waitForFinished(10000) ||
-            fusermount.exitStatus() != QProcess::NormalExit || fusermount.exitCode() != 0) {
-            if (fusermount.state() != QProcess::NotRunning) {
-                fusermount.kill();
-                fusermount.waitForFinished(1000);
-            }
-            const QString details =
-                QString::fromLocal8Bit(fusermount.readAllStandardError()).trimmed();
-            errorMessage = QString("A stale FUSE mount exists at %1 and could not be detached%2.")
-                               .arg(cleanPath,
-                                    details.isEmpty() ? QString() : QString(": %1").arg(details));
-            return false;
-        }
-        if (isLinuxMountPoint(cleanPath)) {
-            errorMessage = QString("FUSE mount at %1 is still present after detachment. "
-                                   "Import stopped to avoid accessing an unresponsive mount.")
-                               .arg(cleanPath);
-            return false;
-        }
-        return true;
-    }
-#endif
-
     QString rifeRuntimeRoot() {
         return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
             .absoluteFilePath("rife-" + QString(RIFE_REVISION));
@@ -3264,19 +3212,6 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     settings.sourceGyroflowSidecarPath = gyroflowSidecarPath.toStdString();
 #ifdef __APPLE__
     if (mFuseMountingEnabled) cleanupStaleMacFuseMounts();
-#elif defined(__linux__) && !defined(__ANDROID__)
-    const qint64 cleanupStarted = mountElapsed();
-    if (mFuseMountingEnabled && !cleanupStaleLinuxFuseMount(dstPath, mountError)) {
-        if (singleProgress) mountProgress->close();
-        mMountInProgress = false;
-        mMountPathInProgress.clear();
-        if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
-        QMessageBox::critical(this, tr("Error"), mountError);
-        return;
-    }
-    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: stale-mount check {:.1f} ms",
-                 filePath.toStdString(),
-                 static_cast<double>(mountElapsed() - cleanupStarted));
 #endif
     const qint64 backendStarted = mountElapsed();
     if (mGalleryPerformanceTestActive)

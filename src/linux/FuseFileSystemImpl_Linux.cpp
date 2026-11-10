@@ -2,6 +2,7 @@
 #define FUSE_USE_VERSION 31
 
 #include "linux/FuseFileSystemImpl_Linux.h"
+#include "linux/FuseSupport.h"
 
 #include "CameraFrameMetadata.h"
 #include "CameraMetadata.h"
@@ -19,6 +20,7 @@
 #include <fuse3/fuse.h>
 #include <motioncam/Decoder.hpp>
 #include <QDir>
+#include <QCoreApplication>
 #include <QProcess>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -34,11 +36,13 @@
 #include <fstream>
 #include <fcntl.h>
 #include <iostream>
+#include <limits>
 #include <pwd.h>
-#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <thread>
 #include <vector>
@@ -51,26 +55,37 @@ constexpr auto CACHE_SIZE = 1024 * 1024 * 1024;
 constexpr auto IO_THREADS = 4;
 constexpr auto MAX_READ = 1024 * 1024;
 
+int probeLegacyMount(const linux_fuse::MountRecord& mount) {
+    if (mount.type != "fuse" || mount.source != "/dev/fuse") return -1;
+    // Legacy versions did not label mounts. Only reclaim an endpoint that the
+    // kernel explicitly reports as disconnected; a timeout is not proof of death.
+    QProcess probe;
+    probe.start(QCoreApplication::applicationFilePath(),
+                {QStringLiteral("--probe-fuse-mount"), QString::fromStdString(mount.path)});
+    if (!probe.waitForStarted(1000)) return -1;
+    if (!probe.waitForFinished(2000)) {
+        probe.kill();
+        probe.waitForFinished(1000);
+        return -1;
+    }
+    return probe.exitStatus() == QProcess::NormalExit ? probe.exitCode() : -1;
+}
+
 void recoverStaleMount(const std::string& path) {
     std::ifstream mountInfo("/proc/self/mountinfo");
-    const auto decodeMountPath = [](std::string value) {
-        const std::pair<const char*, const char*> escapes[] = {
-            {"\\040", " "}, {"\\011", "\t"}, {"\\012", "\n"}, {"\\134", "\\"}};
-        for (const auto& [encoded, decoded] : escapes) {
-            for (std::size_t offset = 0; (offset = value.find(encoded, offset)) != std::string::npos;)
-                value.replace(offset, 4, decoded);
-        }
-        return value;
-    };
-    const auto expected = std::filesystem::path(path).lexically_normal().string();
+    if (!mountInfo) throw std::runtime_error("Cannot inspect /proc/self/mountinfo");
+    const auto expected = std::filesystem::absolute(path).lexically_normal().string();
     bool mounted = false;
-    for (std::string line; std::getline(mountInfo, line);) {
-        std::istringstream fields(line);
-        std::string field;
-        for (int index = 0; index <= 4 && fields >> field; ++index) {
-            if (index == 4 && decodeMountPath(field) == expected) mounted = true;
-        }
-        if (mounted) break;
+    for (const auto& mount : linux_fuse::readMounts(mountInfo)) {
+        if (mount.path != expected) continue;
+        mounted = true;
+        const auto pid = linux_fuse::ownerPid(mount);
+        const bool deadProvider = pid && ::kill(*pid, 0) != 0 && errno == ESRCH;
+        if (!linux_fuse::canRecoverMount(mount, deadProvider,
+                                         deadProvider ? -1 : probeLegacyMount(mount)))
+            throw std::runtime_error(
+                "Mount destination is already in use: " + path +
+                ". Unmount it explicitly if it belongs to a stopped application.");
     }
     if (!mounted) return;
 
@@ -92,14 +107,23 @@ void recoverStaleMount(const std::string& path) {
     // A successful helper exit does not guarantee that the mount disappeared.
     // Never let mkpath or fuse_mount follow a still-mounted, possibly dead FUSE endpoint.
     std::ifstream remainingMounts("/proc/self/mountinfo");
-    for (std::string line; std::getline(remainingMounts, line);) {
-        std::istringstream fields(line);
-        std::string field;
-        for (int index = 0; index <= 4 && fields >> field; ++index) {
-            if (index == 4 && decodeMountPath(field) == expected)
-                throw std::runtime_error("FUSE mount remains after detachment at " + path);
-        }
+    if (!remainingMounts) throw std::runtime_error("Cannot verify FUSE mount detachment");
+    for (const auto& mount : linux_fuse::readMounts(remainingMounts)) {
+        if (mount.path == expected)
+            throw std::runtime_error("FUSE mount remains after detachment at " + path);
     }
+}
+
+std::string prepareMountPath(const std::string& source, const std::string& destination) {
+    const auto absoluteSource = std::filesystem::absolute(source).lexically_normal();
+    const auto absoluteDestination = std::filesystem::absolute(destination).lexically_normal();
+    linux_fuse::checkSourcePath(absoluteSource, absoluteDestination);
+    // Detach a known dead mount before canonicalization can stat its root.
+    recoverStaleMount(absoluteDestination.string());
+    const auto resolved = std::filesystem::weakly_canonical(absoluteDestination);
+    linux_fuse::checkSourcePath(std::filesystem::weakly_canonical(absoluteSource), resolved);
+    if (resolved != absoluteDestination) recoverStaleMount(resolved.string());
+    return resolved.string();
 }
 
 void setupLogging() {
@@ -130,6 +154,7 @@ struct FuseContext {
     IVirtualFileSystem* fs;
     std::atomic_uint64_t nextFileHandle{0};
     std::atomic<std::time_t> mountTime;
+    std::string backingDirectory;
 };
 
 FuseContext* context() {
@@ -160,11 +185,11 @@ struct LinuxFuseSession {
                 spdlog::warn("Could not remove empty mount directory {}", mDstPath);
             return;
         }
-        mSettings.projectedFileSizes = true;
-        mFs->updateOptions(mSettings);
-        recoverStaleMount(mDstPath);
+        mDstPath = prepareMountPath(mSrcPath, mDstPath);
         if (!QDir().mkpath(QString::fromStdString(mDstPath)))
             throw std::runtime_error("Failed to create " + mDstPath);
+        mSettings.projectedFileSizes = true;
+        mFs->updateOptions(mSettings);
         start();
     }
 
@@ -228,36 +253,42 @@ private:
         delete state;
     }
     static int getattr(const char* path, struct stat* statBuffer, fuse_file_info*) {
-        std::memset(statBuffer, 0, sizeof(*statBuffer));
         const auto* state = context();
         const auto mountTime = state->mountTime.load();
-        statBuffer->st_atime = mountTime;
-        statBuffer->st_mtime = mountTime;
-        statBuffer->st_ctime = mountTime;
         if (std::string(path) == "/") {
-            statBuffer->st_mode = S_IFDIR | 0755;
-            statBuffer->st_nlink = 2;
+            linux_fuse::setReadOnlyAttributes(*statBuffer, true, 0, mountTime);
             return 0;
         }
         const auto entry = state->fs->findEntry(path);
-        if (!entry)
-            return -ENOENT;
-        statBuffer->st_mode = entry->type == DIRECTORY_ENTRY ? S_IFDIR | 0755 : S_IFREG | 0444;
-        statBuffer->st_nlink = entry->type == DIRECTORY_ENTRY ? 2 : 1;
-        statBuffer->st_size = entry->type == DIRECTORY_ENTRY ? 4096 : entry->size;
-        statBuffer->st_uid = getuid();
-        statBuffer->st_gid = getgid();
+        if (!entry) return -ENOENT;
+        linux_fuse::setReadOnlyAttributes(
+            *statBuffer, entry->type == DIRECTORY_ENTRY, entry->size, mountTime);
         return 0;
     }
     static int readdir(const char* path, void* buffer, fuse_fill_dir_t filler,
                        off_t, fuse_file_info*, fuse_readdir_flags) {
         if (std::string(path) != "/")
             return -ENOENT;
-        filler(buffer, ".", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
-        filler(buffer, "..", nullptr, 0, static_cast<fuse_fill_dir_flags>(0));
-        for (const auto& entry : context()->fs->listFiles(""))
-            filler(buffer, entry.name.c_str(), nullptr, 0,
+        // Without st_mode libfuse emits DT_UNKNOWN. Directory scanners may
+        // use d_type directly instead of issuing a separate stat for each file.
+        struct stat attributes{};
+        attributes.st_mode = S_IFDIR | 0755;
+        filler(buffer, ".", &attributes, 0, static_cast<fuse_fill_dir_flags>(0));
+        filler(buffer, "..", &attributes, 0, static_cast<fuse_fill_dir_flags>(0));
+        for (const auto& entry : context()->fs->listFiles("")) {
+            attributes.st_mode = entry.type == DIRECTORY_ENTRY ? S_IFDIR | 0755 : S_IFREG | 0444;
+            filler(buffer, entry.name.c_str(), &attributes, 0,
                    static_cast<fuse_fill_dir_flags>(0));
+        }
+        return 0;
+    }
+    static int statfs(const char*, struct statvfs* statistics) {
+        // The generated files have no allocated volume of their own. Report
+        // the containing filesystem rather than libfuse's zero-capacity default.
+        // Query the parent, never the mount itself (which would recurse).
+        if (::statvfs(context()->backingDirectory.c_str(), statistics) != 0)
+            return -errno;
+        statistics->f_flag |= ST_RDONLY;
         return 0;
     }
     static int open(const char* path, fuse_file_info* info) {
@@ -283,8 +314,10 @@ private:
                 readError = error;
             },
             false);
-        if (readError != 0)
-            return readError < 0 ? readError : -EIO;
+        if (readError != 0) {
+            // The VFS uses -1 as a generic materialization failure, not EPERM.
+            return readError == -1 || readError > 0 ? -EIO : readError;
+        }
         if (bytesRead > static_cast<size_t>(std::numeric_limits<int>::max()))
             return -EOVERFLOW;
         return static_cast<int>(bytesRead);
@@ -297,12 +330,20 @@ private:
         operations.readdir = readdir;
         operations.open = open;
         operations.read = read;
+        operations.statfs = statfs;
 
         fuse_args args = FUSE_ARGS_INIT(0, nullptr);
         // fuse_parse_cmdline expects argv[0] even when the filesystem is
         // embedded in a GUI application.
         fuse_opt_add_arg(&args, "MotionCamFuse");
-        auto* state = new FuseContext{mFs.get(), 0, std::time(nullptr)};
+        fuse_opt_add_arg(&args, "-o");
+        const std::string mountOptions =
+            "ro,default_permissions,subtype=motioncam,fsname=MotionCamFuse@" +
+            std::to_string(getpid());
+        fuse_opt_add_arg(&args, mountOptions.c_str());
+        auto* state = new FuseContext{
+            mFs.get(), 0, std::time(nullptr),
+            std::filesystem::absolute(mDstPath).parent_path().string()};
         mState = state;
         mFuse = fuse_new(&args, &operations, sizeof(operations), state);
         fuse_opt_free_args(&args);
@@ -314,6 +355,7 @@ private:
         if (fuse_mount(mFuse, mDstPath.c_str()) != 0) {
             fuse_destroy(mFuse);
             mFuse = nullptr;
+            mState = nullptr;
             throw std::runtime_error("Failed to mount " + mDstPath);
         }
         mThread = std::thread([this] {
@@ -362,16 +404,12 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
     sourceSettings.projectedFileSizes = projectFiles;
     const std::string filename = sourcePath.filename().string();
 
-    const auto normalizedSource = std::filesystem::absolute(srcFile).lexically_normal();
-    const auto normalizedDestination = std::filesystem::absolute(dstPath).lexically_normal();
-    if (normalizedSource == normalizedDestination)
-        throw std::runtime_error("Source and mount destination must be different paths");
+    const std::string mountPath = projectFiles ? prepareMountPath(srcFile, dstPath) : dstPath;
 
     if (projectFiles) {
-        recoverStaleMount(dstPath);
         logStage("backend stale-mount recovery");
-        if (!QDir().mkpath(QString::fromStdString(dstPath)))
-            throw std::runtime_error("Failed to create " + dstPath);
+        if (!QDir().mkpath(QString::fromStdString(mountPath)))
+            throw std::runtime_error("Failed to create " + mountPath);
         logStage("mount directory creation");
     }
 
@@ -402,7 +440,7 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
 
     const MountId mountId = mNextMountId++;
     auto session = std::make_shared<LinuxFuseSession>(
-        srcFile, dstPath, std::move(filesystem), projectFiles, sourceSettings);
+        srcFile, mountPath, std::move(filesystem), projectFiles, sourceSettings);
     {
         std::lock_guard<std::mutex> lock(mMountedFilesMutex);
         mMountedFiles.emplace(mountId, std::move(session));
