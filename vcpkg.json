@@ -42,7 +42,7 @@
         },
         {
             "name": "ffmpeg",
-            "version>=": "9.0.1",
+            "version>=": "9.0.2#7",
             "default-features": false,
             "features": ["avcodec", "avfilter", "avformat", "dav1d", "swresample", "swscale"]
         }
@@ -58,7 +58,8 @@
         },
         {
             "name": "ffmpeg",
-            "version": "9.0.1"
+            "version": "9.0.2",
+            "port-version": 7
         }
     ]
 }

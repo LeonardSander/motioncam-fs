@@ -56,7 +56,7 @@ jobs:
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+        vcpkgGitCommitId: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
 
     - name: Configure CMake (Android arm64)
       shell: bash
@@ -169,7 +169,7 @@ jobs:
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+        vcpkgGitCommitId: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v3
@@ -178,18 +178,6 @@ jobs:
         host: linux
         target: desktop
         modules: qtmultimedia
-
-    # FFmpeg's port probes glslc but does not depend on it. Install it first
-    # in a separate prefix so manifest reconciliation cannot remove the tool.
-    - name: Build FFmpeg shader compiler
-      shell: bash
-      run: |
-        "$VCPKG_ROOT/vcpkg" install \
-          --x-manifest-root="$PWD/scripts/vcpkg-host-tools" \
-          --x-install-root="$PWD/build-tools/vcpkg_installed" \
-          --overlay-triplets="$PWD/scripts/vcpkg-triplets" \
-          --triplet=x64-linux-release --host-triplet=x64-linux-release
-        echo "$PWD/build-tools/vcpkg_installed/x64-linux-release/tools/shaderc" >> "$GITHUB_PATH"
 
     - name: Configure with LLVM
       id: linux-configure
@@ -263,6 +251,8 @@ jobs:
         chmod +x linuxdeploy.AppImage linuxdeploy-plugin-qt.AppImage
         export LINUXDEPLOY_PLUGIN_QT_PATH="$PWD/linuxdeploy-plugin-qt.AppImage"
         export VERSION="${GITHUB_REF_NAME#v}"
+        # vcpkg's shared VA-API libraries live outside the system loader paths.
+        export LD_LIBRARY_PATH="$PWD/build-linux/vcpkg_installed/x64-linux-release/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         # linuxdeploy includes xcb by default. Include native Wayland and its
         # dynamically loaded integration plugins as well; linuxdeploy resolves
         # dependencies of the copied plugins during deployment.
@@ -415,7 +405,7 @@ jobs:
         # Keep the ports and tool version reproducible. The action's old
         # implicit snapshot referenced MSYS2 archives that are no longer
         # available, which prevented libjxl's dependencies from installing.
-        vcpkgGitCommitId: 0bab79f3c6bc9cbe867686df00b108c0c0e9c274
+        vcpkgGitCommitId: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
 
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macOS build tools
@@ -440,18 +430,6 @@ jobs:
       if: matrix.platform == 'macos'
       shell: bash
       run: rm -rf "${{ matrix.build_dir }}"
-
-    - name: Build FFmpeg shader compiler (Windows)
-      if: matrix.platform == 'windows'
-      shell: pwsh
-      run: |
-        & "$env:VCPKG_ROOT/vcpkg.exe" install `
-          --x-manifest-root="$PWD/scripts/vcpkg-host-tools" `
-          --x-install-root="$PWD/build-tools/vcpkg_installed" `
-          --overlay-triplets="$PWD/scripts/vcpkg-triplets" `
-          --triplet=${{ matrix.vcpkg_triplet }} --host-triplet=${{ matrix.vcpkg_triplet }}
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        "$PWD/build-tools/vcpkg_installed/${{ matrix.vcpkg_triplet }}/tools/shaderc" >> $env:GITHUB_PATH
 
     - name: Configure CMake (Windows)
       if: matrix.platform == 'windows'

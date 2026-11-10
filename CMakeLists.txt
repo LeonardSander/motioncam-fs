@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Rebuild extracted dependencies when the pinned archive changes.
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
+
 # CMake 4 prefers Boost's package config; distributions still commonly ship
 # only the classic FindBoost metadata.
 if(POLICY CMP0167)
@@ -615,9 +620,10 @@ endif()
 # pick up the newer templated BS::thread_pool API from vcpkg on Windows/macOS.
 include(FetchContent)
 FetchContent_Declare(bs_thread_pool
-    GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
-    GIT_TAG v4.1.0
-    GIT_SHALLOW TRUE)
+    URL
+        https://github.com/bshoshany/thread-pool/archive/refs/tags/v4.1.0.tar.gz
+        https://codeload.github.com/bshoshany/thread-pool/tar.gz/refs/tags/v4.1.0
+    URL_HASH SHA256=be7abecbc420bb87919eeef729b13ff7c29d5ce547bdae284923296c695415bd)
 FetchContent_MakeAvailable(bs_thread_pool)
 target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
     ${bs_thread_pool_SOURCE_DIR}/include)

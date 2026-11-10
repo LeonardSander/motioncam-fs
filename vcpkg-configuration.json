@@ -9,7 +9,7 @@
     {
       "kind": "git",
       "repository": "https://github.com/microsoft/vcpkg",
-      "baseline": "0bab79f3c6bc9cbe867686df00b108c0c0e9c274",
+      "baseline": "b1c0e26466f37efd4112bf7c1f88f5a8e28c510e",
       "packages": [
         "dav1d",
         "ffmpeg",

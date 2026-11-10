@@ -279,8 +279,8 @@ NativeVideoEncoder::NativeVideoEncoder(const Options& options) : m(std::make_uni
         nativeOptions.bitrate = options.hardwareBitrate;
         nativeOptions.width = options.width; nativeOptions.height = options.height;
         nativeOptions.fps = options.fps;
-        s.codec->profile = s.codec->codec_id == AV_CODEC_ID_H264 ? FF_PROFILE_H264_HIGH_10
-            : s.codec->codec_id == AV_CODEC_ID_HEVC ? FF_PROFILE_HEVC_MAIN_10 : FF_PROFILE_AV1_MAIN;
+        s.codec->profile = s.codec->codec_id == AV_CODEC_ID_H264 ? AV_PROFILE_H264_HIGH_10
+            : s.codec->codec_id == AV_CODEC_ID_HEVC ? AV_PROFILE_HEVC_MAIN_10 : AV_PROFILE_AV1_MAIN;
         s.codec->bits_per_raw_sample = 10;
         s.p010Encoder = std::make_unique<P010VideoEncoder>(nativeOptions);
     } else
