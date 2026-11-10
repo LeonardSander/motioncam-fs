@@ -565,12 +565,14 @@ VirtualFileSystemImpl_DNG::staticMaterializer(const Entry& entry) {
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile(
-    const Entry& entry, bool jpegCompression, bool savedOutput) {
+    const Entry& entry, bool outputCompression, bool savedOutput,
+    bool deferCompression) {
+    const bool jpegCompression = outputCompression && !deferCompression;
     std::shared_lock renderLock(mRenderMutex);
     if (entry.name == mAudioFileName && mAudioData)
         return std::make_shared<std::vector<uint8_t>>(mAudioData->begin(), mAudioData->end());
 
-    return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
+    return vfs::materializeCached(mCache, entry, outputCompression || savedOutput, [&] {
         const auto materializeStarted = motioncam::diagnosticNow();
         MOTIONCAM_DIAGNOSTIC_INFO("DNG timing [{}]: materialize cache miss started (advertised {:.2f} MiB)",
                      entry.name, static_cast<double>(entry.size) / (1024.0 * 1024.0));
@@ -595,7 +597,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
         FrameStageTiming stageTiming;
         auto bytes = transformFrame(
             frameIt->second, renderPlan.outputTimestamp, jpegCompression,
-            renderPlan.nativeMetadataFrame, &stageTiming);
+            renderPlan.nativeMetadataFrame, &stageTiming, outputCompression);
         const auto transformedAt = motioncam::diagnosticNow();
         const size_t advertisedSize = entry.size;
         if (!jpegCompression && !mConfig.streamingPreview && mConfig.projectedFileSizes && !savedOutput) {
@@ -996,7 +998,7 @@ DNGFrameMetadata VirtualFileSystemImpl_DNG::resolvedFrameMetadata(
 
 std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
-        bool nativeResolution, FrameStageTiming* timing) {
+        bool nativeResolution, FrameStageTiming* timing, bool outputCompression) {
     const auto& frames = mDecoder->getFrames();
     if (frameIndex >= frames.size()) throw std::out_of_range("DNG source frame index");
     const auto& frame = frames[frameIndex];
@@ -1044,6 +1046,7 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
             inputQuantizationWhite = (uint32_t{1} << inputBits) - 1;
     }
     vfs::DngPixelPipelineOptions pixels;
+    pixels.compression = outputCompression;
     std::vector<uint8_t> gpuJpeg;
     vfs::GpuJpegTiles gpuJpegTiles;
     if (jpegCompression && isLosslessJpeg92(mConfig.jxlDistance) &&

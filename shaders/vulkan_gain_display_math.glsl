@@ -45,3 +45,25 @@ vec3 motioncamLog60(vec3 normalized, uint encodedWhite) {
     return log2(vec3(1.0) + 60.0 * normalized) / log2(61.0) *
            float(encodedWhite);
 }
+
+// LLOG60: same curve as RawLogTransform.h, with continuous value and first derivative.
+float motioncamLLog60(float x, uint encodedWhite) {
+    x = clamp(x, 0.0, 1.0);
+    const float a = 0.980913053208808;
+    const float m = 0.244314924085355;
+    const float join = 0.971335276138720;
+    float y;
+    if (x >= 0.99) y = x;
+    else if (x <= 0.96) y = a * log2(1.0 + 60.0*x) / log2(61.0);
+    else {
+        float t = x - 0.96;
+        y = join + m*t + 12.594751265244078*t*t;
+    }
+    return y * float(encodedWhite);
+}
+
+vec3 motioncamLLog60(vec3 x, uint encodedWhite) {
+    return vec3(motioncamLLog60(x.r, encodedWhite),
+                motioncamLLog60(x.g, encodedWhite),
+                motioncamLLog60(x.b, encodedWhite));
+}

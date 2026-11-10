@@ -275,7 +275,8 @@ void encodeLog60(
     double whiteLevel,
     uint16_t encodedWhite,
     bool highQuality = false,
-    uint32_t ditherSeed = 0);
+    uint32_t ditherSeed = 0,
+    LogCurve curve = LogCurve::LOG60);
 
 void encodeLog60(
     uint16_t* samples,
@@ -287,7 +288,8 @@ void encodeLog60(
     double whiteLevel,
     uint16_t encodedWhite,
     bool highQuality = false,
-    uint32_t ditherSeed = 0);
+    uint32_t ditherSeed = 0,
+    LogCurve curve = LogCurve::LOG60);
 
 // Deterministic triangular dither in output-code units. HQ preserves the
 // original per-pixel hash; the fast path uses a cheaper spatial hash.

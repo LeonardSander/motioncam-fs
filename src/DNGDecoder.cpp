@@ -5849,7 +5849,11 @@ bool DNGDecoder::encodeImage(std::vector<uint8_t>& data,
         return false;
     const uint32_t oldOffset = scalar(*offsets), oldBytes = scalar(*counts);
     if (oldOffset > data.size() || oldBytes > data.size() - oldOffset) return false;
-    std::vector<uint8_t> encoded(image.samples.size() * 2);
+    const size_t encodedBytes = image.samples.size() * sizeof(uint16_t);
+    if ((counts->type != TIFF_TYPE_SHORT && counts->type != TIFF_TYPE_LONG) ||
+        encodedBytes > UINT32_MAX)
+        return false;
+    std::vector<uint8_t> encoded(encodedBytes);
     writeSampleBytes(encoded.data(), image.samples.data(), image.samples.size(), little);
     for (uint32_t i = 0; i < bits->count; ++i) {
         const size_t at = bits->valueOffset + static_cast<size_t>(i) *
@@ -5857,6 +5861,21 @@ bool DNGDecoder::encodeImage(std::vector<uint8_t>& data,
         if (bits->type == TIFF_TYPE_SHORT) write16(data.data() + at, 16, little);
         else if (bits->type == TIFF_TYPE_LONG) write32(data.data() + at, 16, little);
         else return false;
+    }
+    if (counts->type == TIFF_TYPE_SHORT && encodedBytes <= UINT16_MAX) {
+        write16(data.data() + counts->valueOffset, static_cast<uint16_t>(encodedBytes), little);
+    } else {
+        write16(data.data() + counts->entryOffset + 2, TIFF_TYPE_LONG, little);
+        write32(data.data() + counts->entryOffset + 8, static_cast<uint32_t>(encodedBytes), little);
+    }
+    // DecodedDNGImage samples are in raster order.
+    for (const auto tag : {TIFF_TAG_ROW_INTERLEAVE_FACTOR, TIFF_TAG_COLUMN_INTERLEAVE_FACTOR}) {
+        if (const auto* factor = find(tag)) {
+            if (factor->type == TIFF_TYPE_SHORT)
+                write16(data.data() + factor->valueOffset, 1, little);
+            else
+                write32(data.data() + factor->valueOffset, 1, little);
+        }
     }
     if (!replaceTiffStrip(data, oldOffset, oldBytes, encoded, little)) return false;
     if (image.linearizationApplied) {
@@ -6261,7 +6280,7 @@ uint32_t logStoredBits(uint16_t storedWhite) {
 bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode mode,
                                    uint32_t quantizationWhite, bool highQuality,
                                    bool samplesAlreadyEncoded,
-                                   uint32_t ditherSeed) {
+                                   uint32_t ditherSeed, LogCurve curve) {
     if (mode == LogTransformMode::Disabled) return true;
     bool little = true;
     auto entries = findTiffEntries(data, little);
@@ -6301,6 +6320,22 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
     const uint32_t offset=scalar(*offsetsE), bytes=scalar(*countsE);
     const uint32_t sourceWhite=scalar(*whiteE);
     const size_t samples=static_cast<size_t>(width)*height*channels;
+    if (!samplesAlreadyEncoded && !quantizationWhite &&
+        mode == LogTransformMode::KeepInput && inputLinearization &&
+        inputLinearization->count > 1 && inputLinearization->count <= 65536)
+        quantizationWhite = inputLinearization->count - 1;
+    if (!samplesAlreadyEncoded && scalar(*bitsE) != 16) {
+        if (!quantizationWhite && mode == LogTransformMode::KeepInput) {
+            const auto inputBits = scalar(*bitsE);
+            if (!inputBits || inputBits > 16) return false;
+            quantizationWhite = (1u << inputBits) - 1;
+        }
+        DecodedDNGImage image;
+        if (!decodeImageBorrowed(data, image, false, false) || !encodeImage(data, image))
+            return false;
+        return applyLogTransform(data, mode, quantizationWhite, highQuality,
+                                 false, ditherSeed, curve);
+    }
     const uint32_t storedWhite = logStoredWhite(mode, quantizationWhite, sourceWhite);
     const uint32_t storedBits = logStoredBits(static_cast<uint16_t>(storedWhite));
     const bool packedEncoded = samplesAlreadyEncoded && storedBits < 16 &&
@@ -6331,7 +6366,7 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
             utils::encodeLog60(
                 reinterpret_cast<uint16_t*>(data.data() + offset), samples,
                 width, height, channels, black, sourceWhite,
-                static_cast<uint16_t>(storedWhite), highQuality, ditherSeed);
+                static_cast<uint16_t>(storedWhite), highQuality, ditherSeed, curve);
         } else {
             std::vector<uint16_t> logSamples(samples);
             if (!inputLinearization) {
@@ -6348,7 +6383,7 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
             }
             utils::encodeLog60(logSamples, width, height, channels, black,
                                sourceWhite, static_cast<uint16_t>(storedWhite),
-                               highQuality, ditherSeed);
+                               highQuality, ditherSeed, curve);
             writeSampleBytes(data.data() + offset, logSamples.data(), samples, little);
         }
     }
@@ -6358,7 +6393,7 @@ bool DNGDecoder::applyLogTransform(std::vector<uint8_t>& data, LogTransformMode 
     if (data.size() & 1u) data.push_back(0);
     const uint32_t tableOffset=static_cast<uint32_t>(data.size());
     data.resize(data.size()+static_cast<size_t>(storedWhite+1)*2);
-    const auto logLinearization = makeLog60LinearizationTable(storedWhite);
+    const auto logLinearization = makeLog60LinearizationTable(storedWhite, curve);
     for (uint32_t i=0;i<=storedWhite;++i)
         write16(data.data()+tableOffset+static_cast<size_t>(i)*2,
                 logLinearization[i],little);
@@ -6457,7 +6492,7 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
         const VulkanGainBakeTextureSource& texture, LogTransformMode mode,
         uint32_t quantizationWhite, bool highQuality, uint32_t ditherSeed,
         std::vector<uint8_t>* gpuJpeg,
-        std::vector<std::vector<uint8_t>>* gpuJpegTiles) {
+        std::vector<std::vector<uint8_t>>* gpuJpegTiles, LogCurve curve) {
     if (!texture.gpu || !texture.texture || !logReductionBits(mode))
         return false;
     bool little = true;
@@ -6537,9 +6572,10 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
     params.encodedWhite = encodedWhite;
     params.ditherSeed = ditherSeed;
     params.log60 = true;
+    params.llog60 = curve == LogCurve::LLOG60;
     params.logHighQuality = highQuality;
     params.logLookup = &cachedLog60EncodeLookup(
-        0.0, static_cast<double>(sourceWhite), encodedWhite);
+        0.0, static_cast<double>(sourceWhite), encodedWhite, curve);
     params.scale.fill(1.0f);
     params.textureSource = &texture;
     params.map = VulkanRgbGainMap{1, 1, 3, 0, 0, width, height,
@@ -6562,7 +6598,7 @@ bool DNGDecoder::bakeLogTexture(std::vector<uint8_t>& data,
         write32(data.data() + countsE->valueOffset, packedBytes, little);
     else return false;
     if (!applyLogTransform(data, mode, quantizationWhite, highQuality, true,
-                           ditherSeed))
+                           ditherSeed, curve))
         return false;
     return alreadyPacked || replaceTiffStrip(data, offset, oldBytes, {}, little,
                                              nullptr, packedBytes, true);
@@ -6572,7 +6608,7 @@ bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         LogTransformMode mode, uint32_t quantizationWhite,
         bool highQuality, uint32_t ditherSeed,
         std::vector<uint8_t>* gpuJpeg,
-        std::vector<std::vector<uint8_t>>* gpuJpegTiles) {
+        std::vector<std::vector<uint8_t>>* gpuJpegTiles, LogCurve curve) {
     if (!logReductionBits(mode)) return false;
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -6653,6 +6689,7 @@ bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
     params.encodedWhite = encodedWhite;
     params.ditherSeed = ditherSeed;
     params.log60 = true;
+    params.llog60 = curve == LogCurve::LLOG60;
     params.logHighQuality = highQuality;
     params.map = VulkanRgbGainMap{1, 1, channels, 0, 0, width, height,
                                   1, 1, 0.0f, 0.0f, 1.0f, 1.0f, &identity};
@@ -6661,7 +6698,7 @@ bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         params.cfaMaps[0] = params.map;
     } else {
         params.logLookup = &cachedLog60EncodeLookup(
-            0.0, static_cast<double>(sourceWhite), encodedWhite);
+            0.0, static_cast<double>(sourceWhite), encodedWhite, curve);
     }
     for (uint32_t channel = 0; channel < 4; ++channel) {
         const uint32_t black = blackE && blackE->count
@@ -6696,7 +6733,7 @@ bool DNGDecoder::bakeLogStripVulkan(std::vector<uint8_t>& data,
         write32(data.data() + countsE->valueOffset, packedBytes, little);
     else throw std::runtime_error("Invalid DNG strip count after GPU LOG bake");
     if (!applyLogTransform(data, mode, quantizationWhite, highQuality, true,
-                           ditherSeed) ||
+                           ditherSeed, curve) ||
         !replaceTiffStrip(data, offset, oldBytes, {}, little,
                           nullptr, packedBytes, true))
         throw std::runtime_error("Could not finalize GPU LOG DNG strip");
@@ -8180,6 +8217,36 @@ bool DNGDecoder::replaceNormalizedRGB16(std::vector<uint8_t>& data,
         image.layout.samplesPerPixel != 3 ||
         rgbData.size() != static_cast<size_t>(width) * height * 6)
         return false;
+    // Interpolation returns linear values. Convert them back to the stored
+    // code domain if the template carries a linearization table.
+    std::vector<uint16_t> storedCodes;
+    bool little = true;
+    const auto entries = findTiffEntries(data, little);
+    for (const auto& entry : entries) {
+        if (entry.tag != TIFF_TAG_LINEARIZATION_TABLE || entry.type != TIFF_TYPE_SHORT ||
+            !entry.count || isIdentityLinearization(data, entry, little))
+            continue;
+        if (entry.count > 65536) return false;
+        std::vector<std::pair<uint16_t, uint16_t>> samples;
+        samples.reserve(entry.count);
+        for (uint32_t code = 0; code < entry.count; ++code) {
+            samples.emplace_back(read16(data.data() + entry.valueOffset + code * 2, little),
+                                 static_cast<uint16_t>(code));
+        }
+        std::sort(samples.begin(), samples.end());
+        samples.erase(std::unique(samples.begin(), samples.end(), [](const auto& a, const auto& b) {
+            return a.first == b.first;
+        }), samples.end());
+        storedCodes.resize(65536);
+        size_t nearest = 0;
+        for (int value = 0; value < static_cast<int>(storedCodes.size()); ++value) {
+            while (nearest + 1 < samples.size() &&
+                   2 * value > samples[nearest].first + samples[nearest + 1].first)
+                ++nearest;
+            storedCodes[value] = samples[nearest].second;
+        }
+        break;
+    }
     image.samples.resize(rgbData.size() / 2);
     for (size_t i = 0; i < rgbData.size() / 2; ++i) {
         const uint16_t normalized = static_cast<uint16_t>(rgbData[i * 2] | rgbData[i * 2 + 1] << 8);
@@ -8193,7 +8260,7 @@ bool DNGDecoder::replaceNormalizedRGB16(std::vector<uint8_t>& data,
         if (!(whiteValue > blackValue)) return false;
         const uint16_t value = static_cast<uint16_t>(std::clamp(std::lround(
             blackValue + normalized / 65535.0 * (whiteValue - blackValue)), 0l, 65535l));
-        image.samples[i] = value;
+        image.samples[i] = storedCodes.empty() ? value : storedCodes[value];
     }
     return encodeImage(data, image);
 }
@@ -9390,7 +9457,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               bool preferVulkan,
                               const VulkanGainBakeTextureSource* textureSource,
                               std::vector<uint8_t>* gpuJpeg,
-                              std::vector<std::vector<uint8_t>>* gpuJpegTiles) {
+                              std::vector<std::vector<uint8_t>>* gpuJpegTiles, LogCurve curve) {
     if (logFused) *logFused = false;
     const char* cpuOptSetting = motioncam::debugEnvironment("MOTIONCAM_GAIN_BAKE_CPU_OPT");
     const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
@@ -9772,7 +9839,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         encodedWhite = logStoredWhite(fusedLogMode, logQuantizationWhite,
                                       static_cast<uint32_t>(destinationWhite));
         logLookup = &cachedLog60EncodeLookup(
-            destinationBlack[0], destinationWhite, encodedWhite);
+            destinationBlack[0], destinationWhite, encodedWhite, curve);
     }
     uint32_t packedBits = fuseLog && packFusedLog
         ? logStoredBits(encodedWhite) : 16;
@@ -10122,6 +10189,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         gpuParams.ditherSeed = ditherSeed;
         gpuParams.textureSource = textureSource;
         gpuParams.log60 = fuseLog;
+        gpuParams.llog60 = curve == LogCurve::LLOG60;
         gpuParams.logHighQuality = logHighQuality;
         gpuParams.debugGain = debugGainMap;
         // Fused LOG uses its packed precision. If LOG is requested but did

@@ -221,6 +221,8 @@ DngRenderPlan planDngRender(const Entry& entry, Timestamp sourceTimestamp,
                             bool finalizing, bool numberedSequence = true);
 
 struct DngPixelPipelineOptions {
+    // Final output compression, including when compression itself is deferred.
+    bool compression = false;
     int cfaRepeatSize = 2;
     std::array<uint8_t, 4> cfaPhase{0, 1, 1, 2};
     bool hasCfa = false;

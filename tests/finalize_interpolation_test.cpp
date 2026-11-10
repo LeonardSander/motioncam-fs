@@ -1,6 +1,7 @@
 #define TINY_DNG_WRITER_IMPLEMENTATION
 #include "tinydng/tiny_dng_writer.h"
 #include "DNGDecoder.h"
+#include "RawLogTransform.h"
 #include "DebugInstrumentation.h"
 #include "ArchiveImport.h"
 #include "GyroTelemetry.h"
@@ -152,7 +153,8 @@ std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
 std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp,
                                    bool withLinearization = true,
                                    uint32_t width = 32, bool patterned = false,
-                                   uint32_t repeatSize = 2, uint32_t identityBits = 0) {
+                                   uint32_t repeatSize = 2, uint32_t identityBits = 0,
+                                   bool interleaved = false) {
     constexpr uint32_t height = 32;
     std::vector<uint16_t> pixels(width * height, value);
     if (patterned)
@@ -179,6 +181,13 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
     assert(image.SetCompression(tinydngwriter::COMPRESSION_NONE));
     assert(image.SetPhotometric(tinydngwriter::PHOTOMETRIC_CFA));
     assert(image.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
+    if (interleaved) {
+        std::vector<uint16_t> grouped;
+        assert(motioncam::reorderDngSamples(pixels, grouped, width, height, 1, 2, 2, true));
+        pixels = std::move(grouped);
+        assert(image.SetCustomFieldULong(50975, 2));
+        assert(image.SetCustomFieldULong(52547, 2));
+    }
     assert(image.SetCFARepeatPatternDim(repeatSize, repeatSize) &&
            image.SetCFAPattern(pattern.size(), pattern.data()));
     assert(image.SetBlackLevelRepeatDim(2, 2) && image.SetBlackLevel(4, black));
@@ -231,7 +240,7 @@ public:
     std::optional<motioncam::Entry> findEntry(const std::string&) const override { return {}; }
     int readFile(const motioncam::Entry&, size_t, size_t, void*,
                  std::function<void(size_t, int)>, bool) override { return -1; }
-    std::shared_ptr<std::vector<uint8_t>> materializeFile(const motioncam::Entry& entry, bool, bool = false) override {
+    std::shared_ptr<std::vector<uint8_t>> materializeFile(const motioncam::Entry& entry, bool, bool = false, bool = false) override {
         if (entry.name == "audio.wav") {
             ++mAncillaryMaterializations;
             return std::make_shared<std::vector<uint8_t>>(
@@ -1182,6 +1191,125 @@ int main(int argc, char** argv) {
                     galleryExposure.baselineExposure) < 1e-5);
     assert(motioncam::DNGDecoder::imagePayloadsEqual(
         normalizedExposureDng, uncompressedA));
+    // Output-mode switches must select matching pixels and inverse tables,
+    // even when the same worker reuses its LOG/LLOG lookup caches.
+    for (bool cfa : {false, true}) for (bool gpu : {false, true}) {
+        for (const auto [compressed, distance] : {
+                std::pair{false, 1.0f}, std::pair{true, -1.0f},
+                std::pair{true, -1.5f}, std::pair{true, 0.0f},
+                std::pair{true, -2.0f}, std::pair{true, 1.0f},
+                std::pair{false, 1.0f}}) {
+            const auto curve = compressed && (distance == -2.0f || distance > 0)
+                ? motioncam::LogCurve::LLOG60 : motioncam::LogCurve::LOG60;
+            auto output = cfa ? makeLogCfaDng(64552, 0, false)
+                : makeDng(64552, .01f, 100, 0, {1, 1, 1}, 0, 32, 32);
+            if (cfa) assert(motioncam::DNGDecoder::overrideDataLevels(output, "65535/0"));
+            motioncam::RenderSettings curveSettings;
+            curveSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+            curveSettings.logTransform = motioncam::LogTransformMode::ReduceBy4Bit;
+            curveSettings.jxlDistance = distance;
+            motioncam::vfs::DngPixelPipelineOptions pipeline;
+            pipeline.hasCfa = cfa;
+            pipeline.compression = compressed;
+            pipeline.inputQuantizationWhite = 65535;
+            pipeline.preferVulkan = gpu;
+            // Also exercise the texture-free GPU log path and its CPU fallback.
+            motioncam::vfs::processDngPixels(output, curveSettings, pipeline);
+            auto expectedTable = motioncam::makeLog60LinearizationTable(4095, curve);
+            auto checkTable = [&](const std::vector<uint16_t>& expected) {
+                const auto [offset, count] = tagPayload(output, 50712);
+                assert(offset && count == expected.size());
+                for (size_t code = 0; code < expected.size(); ++code) {
+                    const size_t at = offset + code * 2;
+                    assert(static_cast<uint16_t>(output[at] | output[at+1] << 8) == expected[code]);
+                }
+            };
+            checkTable(expectedTable);
+            if (!cfa && curve == motioncam::LogCurve::LLOG60) {
+                auto interpolated = output;
+                std::vector<uint8_t> rgb(32 * 32 * 6, 0);
+                for (size_t i = 1; i < rgb.size(); i += 2) rgb[i] = 128;
+                assert(motioncam::DNGDecoder::replaceNormalizedRGB16(interpolated, rgb, 32, 32));
+                motioncam::DecodedDNGImage decoded;
+                assert(motioncam::DNGDecoder::decodeImage(interpolated, decoded));
+                assert(decoded.linearizationApplied);
+                for (uint16_t value : decoded.samples)
+                    assert(std::abs(int(value) - 32768) < 32);
+            }
+            motioncam::DecodedDNGImage codes;
+            assert(motioncam::DNGDecoder::decodeImage(output, codes, false, false));
+            const double expectedCode = motioncam::encodeLog60Normalized(64552. / 65535, 4095., curve);
+            for (uint16_t code : codes.samples)
+                assert(std::abs(code - expectedCode) <= 1.1);
+            motioncam::vfs::DngFinalizeOptions finish;
+            finish.compression = compressed;
+            finish.packToWhiteLevel = true;
+            finish.writeTiming = false;
+            motioncam::vfs::finalizeDng(output, curveSettings, finish);
+            checkTable(expectedTable);
+            motioncam::DecodedDNGImage linear;
+            assert(motioncam::DNGDecoder::decodeImage(output, linear));
+            for (uint16_t value : linear.samples)
+                assert(std::abs(int(value) - 64552) < 1000);
+        }
+    }
+    // A packed strip can fit a SHORT byte count before it expands to 16 bits.
+    auto rasterCfa = makeLogCfaDng(0, 0, false, 1024, true);
+    auto interleavedCfa = makeLogCfaDng(0, 0, false, 1024, true, 2, 0, true);
+    for (auto* dng : {&rasterCfa, &interleavedCfa}) {
+        assert(motioncam::DNGDecoder::overrideDataLevels(*dng, "4095/0"));
+        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(*dng));
+        assert(tagValue(*dng, 258).value == 12);
+        assert(tagValue(*dng, 279).value == 49152);
+        assert(setTagType(*dng, 279, 3));
+        assert(motioncam::DNGDecoder::applyLogTransform(
+            *dng, motioncam::LogTransformMode::KeepInput, 0, false, false,
+            0, motioncam::LogCurve::LLOG60));
+        assert(tagValue(*dng, 279).value == 65536);
+    }
+    assert(tagValue(interleavedCfa, 50975).value == 1);
+    assert(tagValue(interleavedCfa, 52547).value == 1);
+    motioncam::DecodedDNGImage rasterLog, interleavedLog;
+    assert(motioncam::DNGDecoder::decodeImage(rasterCfa, rasterLog));
+    assert(motioncam::DNGDecoder::decodeImage(interleavedCfa, interleavedLog));
+    assert(rasterLog.samples == interleavedLog.samples);
+
+    // Keep Input must replace a packed LOG60 source table for lossy export
+    // while keeping the 12-bit precision of its stored samples.
+    for (float distance : {motioncam::DNG_COMPRESSION_JPEG_DCT, 1.0f}) {
+        auto output = makeDng(64552, .01f, 100, 0, {1, 1, 1}, 0, 32, 32);
+        assert(motioncam::DNGDecoder::applyLogTransform(
+            output, motioncam::LogTransformMode::ReduceBy4Bit, 65535));
+        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(output));
+        assert(tagValue(output, 258).value == 12);
+
+        motioncam::RenderSettings settings;
+        settings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+        settings.logTransform = motioncam::LogTransformMode::KeepInput;
+        settings.jxlDistance = distance;
+        motioncam::vfs::DngPixelPipelineOptions pipeline;
+        pipeline.compression = true;
+        motioncam::vfs::processDngPixels(output, settings, pipeline);
+
+        const auto [offset, count] = tagPayload(output, 50712);
+        const auto expected = motioncam::makeLog60LinearizationTable(
+            4095, motioncam::LogCurve::LLOG60);
+        assert(offset && count == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            const size_t at = offset + i * 2;
+            assert(static_cast<uint16_t>(output[at] | output[at + 1] << 8) == expected[i]);
+        }
+
+        motioncam::vfs::DngFinalizeOptions finish;
+        finish.compression = true;
+        finish.packToWhiteLevel = true;
+        finish.writeTiming = false;
+        motioncam::vfs::finalizeDng(output, settings, finish);
+        motioncam::DecodedDNGImage linear;
+        assert(motioncam::DNGDecoder::decodeImage(output, linear));
+        for (uint16_t value : linear.samples)
+            assert(std::abs(int(value) - 64552) < 1000);
+    }
     motioncam::CalibrationData badPixelCalibration;
     badPixelCalibration.hasBadPixels = true;
     motioncam::CalibrationData::BadPixel defect;
@@ -1348,6 +1476,7 @@ int main(int argc, char** argv) {
     assert(motioncam::stringToLogTransformMode("14") ==
            motioncam::LogTransformMode::ReduceBy14Bit);
     assert(motioncam::logOutputBits(10, motioncam::LogTransformMode::ReduceBy14Bit) == 2);
+    for (auto curve : {motioncam::LogCurve::LOG60, motioncam::LogCurve::LLOG60})
     for (size_t modeIndex = 0; modeIndex < packedLogModes.size(); ++modeIndex) {
         const auto mode = packedLogModes[modeIndex];
         const uint32_t ditherSeed = static_cast<uint32_t>(modeIndex + 1);
@@ -1360,18 +1489,18 @@ int main(int argc, char** argv) {
         bool logFused = false;
         assert(motioncam::DNGDecoder::bakeGainMaps(
             fusedUnpacked, false, false, false, false, 2, std::nullopt,
-            mode, 65535, true, &logFused, false, ditherSeed));
+            mode, 65535, true, &logFused, false, ditherSeed, false, nullptr, nullptr, nullptr, curve));
         assert(logFused);
         assert(motioncam::DNGDecoder::bakeGainMaps(
             fusedPacked, false, false, false, false, 2, std::nullopt,
-            mode, 65535, true, &logFused, true, ditherSeed));
+            mode, 65535, true, &logFused, true, ditherSeed, false, nullptr, nullptr, nullptr, curve));
         assert(logFused);
         assert(tagValue(fusedUnpacked, 258).value == 16);
         assert(tagValue(fusedPacked, 258).value == expectedBits);
         assert(motioncam::DNGDecoder::applyLogTransform(
-            fusedUnpacked, mode, 65535, true, true, ditherSeed));
+            fusedUnpacked, mode, 65535, true, true, ditherSeed, curve));
         assert(motioncam::DNGDecoder::applyLogTransform(
-            fusedPacked, mode, 65535, true, true, ditherSeed));
+            fusedPacked, mode, 65535, true, true, ditherSeed, curve));
         assert(tagValue(fusedPacked, 50712).count == (1u << expectedBits));
         assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedUnpacked));
         assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedPacked));
@@ -1379,7 +1508,7 @@ int main(int argc, char** argv) {
         assert(motioncam::DNGDecoder::bakeGainMaps(
             separateBake, false, false, false, false, 2, std::nullopt));
         assert(motioncam::DNGDecoder::applyLogTransform(
-            separateBake, mode, 65535, true, false, ditherSeed));
+            separateBake, mode, 65535, true, false, ditherSeed, curve));
         assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(separateBake));
         assert(motioncam::DNGDecoder::imagePayloadsEqual(separateBake, fusedPacked));
     }

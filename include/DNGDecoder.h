@@ -10,6 +10,7 @@
 #include <atomic>
 #include <functional>
 #include "DNGImage.h"
+#include "Types.h"
 
 namespace motioncam {
 struct VulkanGainBakeTextureSource;
@@ -141,7 +142,8 @@ public:
                                   uint32_t quantizationWhite = 0,
                                   bool highQuality = false,
                                   bool samplesAlreadyEncoded = false,
-                                  uint32_t ditherSeed = 0);
+                                  uint32_t ditherSeed = 0,
+                                  LogCurve curve = LogCurve::LOG60);
     static bool bakeIsoOverlay(std::vector<uint8_t>& dngData, double iso);
     static bool markBadPixels(std::vector<uint8_t>& dngData,
                               uint32_t sourceWidth, uint32_t sourceHeight,
@@ -179,13 +181,15 @@ public:
                                LogTransformMode mode, uint32_t quantizationWhite,
                                bool highQuality, uint32_t ditherSeed,
                                std::vector<uint8_t>* gpuJpeg = nullptr,
-                               std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr);
+                               std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr,
+                               LogCurve curve = LogCurve::LOG60);
     static bool bakeLogStripVulkan(std::vector<uint8_t>& dngData,
                                    LogTransformMode mode,
                                    uint32_t quantizationWhite,
                                    bool highQuality, uint32_t ditherSeed,
                                    std::vector<uint8_t>* gpuJpeg = nullptr,
-                                   std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr);
+                                   std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr,
+                                   LogCurve curve = LogCurve::LOG60);
     static bool decodePreview(std::vector<uint8_t> dngData,
                               const RenderSettings& settings,
                               PreviewFrame& frame,
@@ -242,7 +246,8 @@ public:
                              bool preferVulkan = false,
                              const VulkanGainBakeTextureSource* textureSource = nullptr,
                              std::vector<uint8_t>* gpuJpeg = nullptr,
-                             std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr);
+                             std::vector<std::vector<uint8_t>>* gpuJpegTiles = nullptr,
+                             LogCurve curve = LogCurve::LOG60);
     static bool transformGainMaps(std::vector<uint8_t>& dngData,
                                   bool normalizeGainMaps,
                                   bool colorOnly,

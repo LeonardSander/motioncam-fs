@@ -535,7 +535,8 @@ bool bakeGainVulkan(const uint16_t* source,
     constants.flags = (params.log60 ? 1u : 0u) |
         (params.logHighQuality ? 2u : 0u) | (params.debugGain ? 4u : 0u) |
         (cfa && first.channels == 4 ? 8u : 0u) |
-        (hasLinearization ? 16u : 0u) | (hasLogLookup ? 32u : 0u);
+        (hasLinearization ? 16u : 0u) | (hasLogLookup ? 32u : 0u) |
+        (params.llog60 ? 64u : 0u);
     constants.rowBytes = static_cast<uint32_t>(rowBytes);
     constants.wordsPerRow = static_cast<uint32_t>(wordsPerRow);
     if (externalSource) {

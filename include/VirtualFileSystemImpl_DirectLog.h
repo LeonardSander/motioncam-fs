@@ -38,7 +38,8 @@ public:
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
     std::shared_ptr<std::vector<uint8_t>> materializeFile(
-        const Entry& entry, bool jpegCompression = false, bool savedOutput = false) override;
+        const Entry& entry, bool jpegCompression = false, bool savedOutput = false,
+        bool deferCompression = false) override;
     int readFile(const Entry& entry, size_t pos, size_t len, void* dst,
                  std::function<void(size_t, int)> result,
                  bool async = true) override;

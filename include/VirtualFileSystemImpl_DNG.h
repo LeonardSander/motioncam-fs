@@ -39,7 +39,8 @@ public:
     FileInfo getFileInfo() const override;
     bool sourceImagePayloadsEqual(const Entry& left, const Entry& right) override;
     std::shared_ptr<std::vector<uint8_t>> materializeFile(
-        const Entry& entry, bool jpegCompression = false, bool savedOutput = false) override;
+        const Entry& entry, bool jpegCompression = false, bool savedOutput = false,
+        bool deferCompression = false) override;
     bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame,
                                  bool retainSourceSamples = false) override;
 
@@ -70,7 +71,7 @@ private:
     };
     std::vector<uint8_t> transformFrame(
         size_t frameIndex, Timestamp outputTimestamp, bool jpegCompression,
-        bool nativeResolution = false, FrameStageTiming* timing = nullptr);
+        bool nativeResolution, FrameStageTiming* timing, bool outputCompression);
 
 private:
     const std::string mSrcPath;

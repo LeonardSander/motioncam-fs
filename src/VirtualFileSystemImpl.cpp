@@ -332,6 +332,9 @@ void processDngPixels(std::vector<uint8_t>& dng,
           }
         }
     }
+    const LogCurve logCurve = options.compression &&
+        (isLossyJpegDct(settings.jxlDistance) || settings.jxlDistance > 0.0f)
+        ? LogCurve::LLOG60 : LogCurve::LOG60;
     bool logFused = false;
     bool logMetadataDone = false;
     if (!motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_LOG_DISABLE") && textureSource &&
@@ -343,7 +346,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
             settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
             !remosaic && options.cfaRepeatSize == 2 ? options.gpuJpeg : nullptr,
             !remosaic && options.cfaRepeatSize == 2 && options.gpuJpegTiles
-                ? &options.gpuJpegTiles->bytes : nullptr)) {
+                ? &options.gpuJpegTiles->bytes : nullptr, logCurve)) {
         textureSource = nullptr;
         logFused = true;
         logMetadataDone = true;
@@ -419,7 +422,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
                 ? options.gpuJpeg : nullptr,
             badPixelTreatment != BadPixelTreatment::MarkPixels &&
             !postTopologyAfterBake && options.gpuJpegTiles
-                ? &options.gpuJpegTiles->bytes : nullptr))
+                ? &options.gpuJpegTiles->bytes : nullptr, logCurve))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
     const auto gainFinished = motioncam::diagnosticNow();
     if (!topologyBeforeBake &&
@@ -447,9 +450,11 @@ void processDngPixels(std::vector<uint8_t>& dng,
         outputBits = logOutputBits(outputBits, settings.logTransform);
         applyLog = bakeGain || outputBits < options.linearInputBitDepth;
     }
+    // Keep Input sets the precision. Lossy exports still need the output curve.
+    applyLog |= logCurve == LogCurve::LLOG60;
     if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
-        applyLog && !logFused && !logMetadataDone &&
+        applyLog && !logFused && !logMetadataDone && options.preferVulkan &&
         !motioncam::debugEnvironment("MOTIONCAM_GPU_LOG_STRIP_DISABLE") &&
         DNGDecoder::bakeLogStripVulkan(
             dng, settings.logTransform, options.inputQuantizationWhite,
@@ -457,7 +462,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
             badPixelTreatment != BadPixelTreatment::MarkPixels
                 ? options.gpuJpeg : nullptr,
             badPixelTreatment != BadPixelTreatment::MarkPixels && options.gpuJpegTiles
-                ? &options.gpuJpegTiles->bytes : nullptr)) {
+                ? &options.gpuJpegTiles->bytes : nullptr, logCurve)) {
         logMetadataDone = true;
         if (profile)
             spdlog::info("GALLERY_PERF event=dng_gpu_log_strip source={}", source);
@@ -468,7 +473,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !DNGDecoder::applyLogTransform(
             dng, settings.logTransform, options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, logFused,
-            options.ditherSeed))
+            options.ditherSeed, logCurve))
         throw std::runtime_error("Could not apply log transform to " + source);
     if (badPixelTreatment == BadPixelTreatment::MarkPixels &&
         badPixelsWillDemosaic && !markedPixels.empty()) {
@@ -2394,7 +2399,7 @@ for line in sys.stdin:
         }
         const bool delayCompression = interpolate && gapMember[index];
         auto data = filesystem.materializeFile(entries[index],
-            delayCompression ? false : jpegCompression, true);
+            jpegCompression, true, delayCompression);
         if (!data) throw std::runtime_error("Failed to render " + entries[index].name);
         std::vector<uint8_t> rendered(data->begin(), data->end());
         if (isDng(entries[index])) {

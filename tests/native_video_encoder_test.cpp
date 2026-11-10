@@ -1,3 +1,4 @@
+#include "RawLogTransform.h"
 #include "NativeVideoEncoder.h"
 #include "AudioWriter.h"
 #include "P010Packing.h"
@@ -62,6 +63,7 @@ void checkP010Packing() {
 }
 void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "prores_ks",
                     const std::string& pixelFormat = "yuv444p10le", const QString& audio = {}, int orientation = 90) {
+    const bool shoulder = path.contains("LLOG60_NATIVE");
     motioncam::NativeVideoEncoder::Options options;
     options.outputPath = path.toStdString();
     options.encoder = codec;
@@ -91,7 +93,7 @@ void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "p
         // Neutral bands expose both LOG60 midtones and the black/white
         // endpoints needed to distinguish full-range from limited-range YUV.
         for (int y = 0; y < 64; ++y) {
-            const uint16_t value = y < 16 ? 0 : y < 32 ? 6554 : y < 48 ? 65535 : 32768;
+            const uint16_t value = y < 16 ? 0 : y < 32 ? 6554 : y < 48 ? 65535 : shoulder ? 64552 : 32768;
             for (int x = 0; x < 64 * 3; ++x) {
                 const size_t at = (static_cast<size_t>(y) * 64 * 3 + x) * 2;
                 rgb[at] = value & 255; rgb[at + 1] = value >> 8;
@@ -144,7 +146,14 @@ void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "p
                 const int sample = format->comp[0].depth == 8 ? row[32] : row[64] | (row[65] << 8);
                 return double(sample) / ((1 << format->comp[0].depth) - 1);
             };
-            require(std::abs(luma(24) - std::log(7.0) / std::log(61.0)) < .015, "LOG60 full-range pixel value");
+            const double expected = motioncam::LLog60::encode(0.1);
+            require(std::abs(luma(24) - expected) < .015, "Native transfer full-range pixel value");
+            if (shoulder) {
+                require(std::abs(luma(56) - motioncam::LLog60::encode(64552. / 65535)) < .006,
+                    "AV1 retains modified highlight transition");
+                require(std::abs(motioncam::LLog60::decode(luma(56)) - 64552. / 65535) < .007,
+                    "AV1 highlights round-trip through modified inverse");
+            }
             require(luma(8) < .02 && luma(40) > .98, "Full-range black and white endpoints (no 16-235/64-940 scaling)");
             ++decoded;
             av_frame_unref(frame);
@@ -183,6 +192,22 @@ int main() {
     // No event loop or Java activity is needed for local-file codec fixtures.
     try {
         checkP010Packing();
+        using Curve = motioncam::LLog60;
+        double previousCode = -1;
+        for (int i = 0; i <= 65535; ++i) {
+            const double x = i / 65535., y = Curve::encode(x);
+            require(y > previousCode, "Shoulder curve is strictly monotonic");
+            require(std::abs(Curve::decode(y) - x) < 1e-12, "Shoulder inverse round-trip");
+            previousCode = y;
+        }
+        for (double x : {Curve::start, Curve::end}) {
+            constexpr double h = 1e-7;
+            const double left = (Curve::encode(x) - Curve::encode(x-h))/h;
+            const double right = (Curve::encode(x+h) - Curve::encode(x))/h;
+            require(std::abs(left-right) < 2e-6, "Continuous slope at shoulder joins");
+        }
+        require(Curve::encode(0) == 0 && Curve::encode(1) == 1 &&
+            Curve::encode(.995) == .995, "Fixed endpoints and linear white segment");
         QTemporaryDir directory;
         require(directory.isValid(), "Temporary directory");
         try {
@@ -222,6 +247,9 @@ int main() {
                 "cfhd", "yuv422p10le", {}, rotation);
         if (motioncam::NativeVideoEncoder::supports("libx264", "nv12"))
             encodeAndCheck(directory.filePath("nv12.mov"), false, "libx264", "nv12", audio);
+        if (motioncam::NativeVideoEncoder::supports("libaom-av1", "yuv420p10le"))
+            encodeAndCheck(directory.filePath("clip_LLOG60_NATIVE.mp4"), false,
+                "libaom-av1", "yuv420p10le", flacAudio);
         for (const char* codec : {"libx265", "libaom-av1"}) {
             for (const char* format : {"yuv420p10le", "yuv422p10le", "yuv444p10le"}) {
                 if (!motioncam::NativeVideoEncoder::supports(codec, format)) continue;

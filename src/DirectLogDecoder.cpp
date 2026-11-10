@@ -1,3 +1,4 @@
+#include "RawLogTransform.h"
 #include "DebugInstrumentation.h"
 #include "SourceMedia.h"
 #include "SourceInput.h"
@@ -44,6 +45,17 @@ extern "C" {
 #endif
 
 namespace {
+
+std::string_view videoBasename(std::string_view path) {
+    const auto separator = path.find_last_of("/\\");
+    return separator == std::string_view::npos ? path : path.substr(separator + 1);
+}
+
+bool isLLog60NativePath(const std::string& path) {
+    const auto name = videoBasename(path);
+    return boost::icontains(name, "LLOG60_NATIVE") ||
+           boost::icontains(name, "LOG60_NATIVE_S1");
+}
 
 std::string ffmpegErrorString(int error) {
     char buffer[AV_ERROR_MAX_STRING_SIZE] = {};
@@ -542,11 +554,16 @@ void DirectLogDecoder::initDecoder() {
 
 void DirectLogDecoder::analyzeVideo() {
     const std::string cacheKey = directLogTimelineCacheKey(mFilePath);
+    const auto classifyTransfer = [&] {
+        mVideoInfo.isHLG = isHLGVideo(mFilePath);
+        mVideoInfo.isLOG60 = isLOG60Video(mFilePath);
+    };
     {
         std::lock_guard<std::mutex> lock(directLogTimelineCacheMutex);
         if (const auto cached = directLogTimelineCache.find(cacheKey);
             cached != directLogTimelineCache.end()) {
             mVideoInfo = cached->second.videoInfo;
+            classifyTransfer();
             mFrames = cached->second.frames;
             spdlog::info("DirectLogDecoder: reused cached timeline for {} ({} frames)",
                          mFilePath, mFrames.size());
@@ -555,6 +572,7 @@ void DirectLogDecoder::analyzeVideo() {
         CachedDirectLogTimeline persistent;
         if (loadPersistentTimeline(cacheKey, persistent)) {
             mVideoInfo = persistent.videoInfo;
+            classifyTransfer();
             mFrames = persistent.frames;
             directLogTimelineCache.emplace(cacheKey, std::move(persistent));
             spdlog::info("DirectLogDecoder: reused persistent timeline for {} ({} frames)",
@@ -604,9 +622,7 @@ void DirectLogDecoder::analyzeVideo() {
         (pixelDescription->flags & AV_PIX_FMT_FLAG_RGB))
         mVideoInfo.pixelFormat = "CineRGB";
     
-    // Check if HLG based on filename
-    mVideoInfo.isHLG = boost::icontains(mFilePath, "HLG_NATIVE");
-    mVideoInfo.isLOG60 = boost::icontains(mFilePath, "LOG60_NATIVE");
+    classifyTransfer();
     mVideoInfo.orientation = -1;
     const AVStream* videoStream = mFormatContext->streams[mVideoStreamIndex];
     if (const AVPacketSideData* display = av_packet_side_data_get(
@@ -928,7 +944,9 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             if (range == AVCOL_RANGE_UNSPECIFIED) range = mCodecContext->color_range;
             const bool fullRange = mFullRangeOverride.value_or(range == AVCOL_RANGE_JPEG);
             const auto curve = mVideoInfo.isHLG ? DirectLogGpuRgb::TransferCurve::HLG
-                : mVideoInfo.isLOG60 && !preserveLogEncoded ? DirectLogGpuRgb::TransferCurve::LOG60
+                : mVideoInfo.isLOG60 && !preserveLogEncoded
+                    ? (isLLog60NativePath(mFilePath)
+                        ? DirectLogGpuRgb::TransferCurve::LLOG60 : DirectLogGpuRgb::TransferCurve::LOG60)
                 : DirectLogGpuRgb::TransferCurve::None;
             if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<DirectLogGpuRgb>();
             const bool rendered = mDirectGpuRgb->renderAndroidImage(decoded, image, acquireFd,
@@ -1510,7 +1528,8 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
     if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<DirectLogGpuRgb>();
     const auto curve = mVideoInfo.isHLG ? DirectLogGpuRgb::TransferCurve::HLG
         : mVideoInfo.isLOG60 && !preserveLogEncoded
-            ? DirectLogGpuRgb::TransferCurve::LOG60
+            ? (isLLog60NativePath(mFilePath)
+                ? DirectLogGpuRgb::TransferCurve::LLOG60 : DirectLogGpuRgb::TransferCurve::LOG60)
             : DirectLogGpuRgb::TransferCurve::None;
     if (!mDirectGpuRgb->render(frame, width, height, smoothChroma, curve,
                                fullRange, rgbData, cfaPhase, deferDownload)) {
@@ -1879,16 +1898,17 @@ void DirectLogDecoder::applyHLGToLinear(
 }
 
 bool DirectLogDecoder::isHLGVideo(const std::string& filePath) {
-    return boost::icontains(filePath, "HLG_NATIVE");
+    return boost::icontains(videoBasename(filePath), "HLG_NATIVE");
 }
 
 void DirectLogDecoder::applyLOG60ToLinear(
         uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite) {
-    const auto makeLut = [](uint32_t white) {
+    const auto makeLut = [](uint32_t white, bool llog60 = false) {
         std::array<uint16_t, 65536> values{};
         for (size_t i = 0; i < values.size(); ++i) {
             const float encoded = i >= white ? 1.0f : i / 65535.0f;
-            const float linear = (std::pow(61.0f, encoded) - 1.0f) / 60.0f;
+            const float linear = llog60 ? LLog60::decode(encoded)
+                : (std::pow(61.0f, encoded) - 1.0f) / 60.0f;
             values[i] = static_cast<uint16_t>(std::clamp(
                 std::lround(linear * 65535.0f), 0l, 65535l));
         }
@@ -1896,14 +1916,18 @@ void DirectLogDecoder::applyLOG60ToLinear(
     };
     static const auto fullLut = makeLut(65535u);
     static const auto limited8BitLut = makeLut(254u * 257u);
-    const auto& lut = encodedWhite == 65535u ? fullLut : limited8BitLut;
+    static const auto llog60Full = makeLut(65535u, true);
+    static const auto llog60Limited = makeLut(254u * 257u, true);
+    const bool llog60 = isLLog60NativePath(mFilePath);
+    const auto& lut = llog60 ? (encodedWhite == 65535u ? llog60Full : llog60Limited)
+        : (encodedWhite == 65535u ? fullLut : limited8BitLut);
     parallelPixelRanges(sampleCount, [&](size_t begin, size_t end) {
         for (size_t i = begin; i < end; ++i) rgbData[i] = lut[rgbData[i]];
     });
 }
 
 bool DirectLogDecoder::isLOG60Video(const std::string& filePath) {
-    return boost::icontains(filePath, "LOG60_NATIVE");
+    return boost::icontains(videoBasename(filePath), "LOG60_NATIVE");
 }
 
 std::pair<uintmax_t, size_t> DirectLogDecoder::timelineCacheUsage() {

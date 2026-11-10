@@ -119,7 +119,8 @@ uint codeAt(uint y, uint rowSample) {
                 max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
             value = ((p.flags & 32u) != 0u
                 ? uintBitsToFloat(linearization.values[uint(linear)])
-                : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
+                : ((p.flags & 64u) != 0u ? motioncamLLog60(normalized, p.encodedWhite)
+                    : motioncamLog60(normalized, p.encodedWhite))) + ditherAt(x, y);
         }
     }
     float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite)
@@ -154,7 +155,8 @@ uvec3 pixelCodes(uint x, uint y) {
                 ? vec3(uintBitsToFloat(linearization.values[uint(linear.r)]),
                        uintBitsToFloat(linearization.values[uint(linear.g)]),
                        uintBitsToFloat(linearization.values[uint(linear.b)]))
-                : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
+                : ((p.flags & 64u) != 0u ? motioncamLLog60(normalized, p.encodedWhite)
+                    : motioncamLog60(normalized, p.encodedWhite))) + ditherAt(x, y);
         }
     }
     float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite)

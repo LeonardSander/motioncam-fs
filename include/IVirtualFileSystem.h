@@ -32,10 +32,12 @@ public:
 
     // Produce the complete bytes for an entry. Mounted range reads and
     // permanent exports must share this path so they cannot render different
-    // frame sequences or metadata.
+    // frame sequences or metadata. With deferCompression, render samples for
+    // the requested output codec but leave the strip uncompressed.
     virtual std::shared_ptr<std::vector<uint8_t>> materializeFile(
         const Entry& entry,
-        bool jpegCompression = false, bool savedOutput = false) = 0;
+        bool jpegCompression = false, bool savedOutput = false,
+        bool deferCompression = false) = 0;
     virtual bool materializePreviewFrame(const Entry&, PreviewFrame&,
                                          bool retainSourceSamples = false) = 0;
 

@@ -37,6 +37,7 @@ struct VulkanGainBakeParams {
     uint32_t sourceNominalWhite = 65535;
     float destinationWhite = 65535.0f;
     uint32_t encodedWhite = 0, ditherSeed = 0;
+    bool llog60 = false;
     bool log60 = false, logHighQuality = false, debugGain = false;
     const std::vector<uint16_t>* linearization = nullptr;
     const std::vector<float>* logLookup = nullptr;

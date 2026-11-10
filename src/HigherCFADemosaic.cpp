@@ -514,16 +514,16 @@ void encodeLog60(std::vector<uint16_t>& samples,
                  uint32_t width, uint32_t height, uint32_t channels,
                  const std::array<double, 4>& blackLevel,
                  double whiteLevel, uint16_t encodedWhite, bool highQuality,
-                 uint32_t frameSeed) {
+                 uint32_t frameSeed, LogCurve curve) {
     encodeLog60(samples.data(), samples.size(), width, height, channels,
-                blackLevel, whiteLevel, encodedWhite, highQuality, frameSeed);
+                blackLevel, whiteLevel, encodedWhite, highQuality, frameSeed, curve);
 }
 
 void encodeLog60(uint16_t* samples, size_t sampleCount,
                  uint32_t width, uint32_t height, uint32_t channels,
                  const std::array<double, 4>& blackLevel,
                  double whiteLevel, uint16_t encodedWhite, bool highQuality,
-                 uint32_t frameSeed) {
+                 uint32_t frameSeed, LogCurve curve) {
     if (!channels || (channels != 1 && channels != 3) || !encodedWhite ||
         !samples || sampleCount != static_cast<size_t>(width) * height * channels)
         throw std::invalid_argument("Invalid LOG60 image");
@@ -532,7 +532,7 @@ void encodeLog60(uint16_t* samples, size_t sampleCount,
             (sample - blackLevel[level]) /
             std::max(1.0, whiteLevel - blackLevel[level]), 0.0, 1.0);
         return encodeLog60Normalized(
-            normalized, static_cast<double>(encodedWhite));
+            normalized, static_cast<double>(encodedWhite), curve);
     };
     if (sampleCount < 65536) {
         for (uint32_t y = 0; y < height; ++y)
@@ -542,10 +542,12 @@ void encodeLog60(uint16_t* samples, size_t sampleCount,
                                          channels + channel;
                     const uint32_t level = channels == 1
                         ? ((y & 1u) * 2u + (x & 1u)) : channel;
-                    samples[index] = quantizeDitheredLog60(
-                        encode(samples[index], level),
-                        logTriangularDither(x, y, highQuality, frameSeed),
-                        encodedWhite);
+                    const double encoded = encode(samples[index], level);
+                    const float dither = logTriangularDither(x, y, highQuality, frameSeed);
+                    // Match the float lookup precision used by fused LLOG60.
+                    samples[index] = curve == LogCurve::LLOG60
+                        ? quantizeDitheredLog60(static_cast<float>(encoded), dither, encodedWhite)
+                        : quantizeDitheredLog60(encoded, dither, encodedWhite);
                 }
         return;
     }
@@ -553,6 +555,7 @@ void encodeLog60(uint16_t* samples, size_t sampleCount,
         double black = 0.0;
         double white = 0.0;
         uint16_t encodedWhite = 0;
+        LogCurve curve = LogCurve::LOG60;
         std::vector<float> values;
     };
     static thread_local std::array<LookupCache, 4> lookupCache;
@@ -561,9 +564,10 @@ void encodeLog60(uint16_t* samples, size_t sampleCount,
     for (uint32_t level = 0; level < levels; ++level) {
         auto& cached = lookupCache[level];
         if (cached.values.empty() || cached.black != blackLevel[level] ||
-            cached.white != whiteLevel || cached.encodedWhite != encodedWhite) {
+            cached.white != whiteLevel || cached.encodedWhite != encodedWhite || cached.curve != curve) {
             cached.values = makeLog60EncodeLookup(
-                blackLevel[level], whiteLevel, encodedWhite);
+                blackLevel[level], whiteLevel, encodedWhite, curve);
+            cached.curve = curve;
             cached.black = blackLevel[level];
             cached.white = whiteLevel;
             cached.encodedWhite = encodedWhite;

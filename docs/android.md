@@ -88,7 +88,7 @@ document-tree grant; later exports reuse it. Destination preferences can select
 Documents, the source directory, or a custom granted directory. The output
 bytes are passed synchronously through a direct byte buffer, avoiding an
 app-private copy of the whole finalized sequence. Camera Native finalization uses
-linked FFmpeg libraries for LOG60 conversion, video encoding, and audio muxing;
+linked FFmpeg libraries for LLOG60 conversion, video encoding, and audio muxing;
 it does not launch an FFmpeg executable. ProRes and CineForm use the linked
 software encoders. Android-only device encoder formats include `H264 8b 100`,
 `HEVC 10b 100`, and `AV1 10b 100`. The second field selects 8 or 10 bits;
@@ -121,7 +121,7 @@ its sidecars are staged privately,
 then copied in bounded chunks directly into the selected Android destination.
 Only DNG sequences create a per-clip subfolder. Native video and metadata-only
 exports reserve a shared basename for their files; repeat exports add a numeric
-suffix instead of overwriting existing files. Video names retain `_LOG60_NATIVE`
+suffix instead of overwriting existing files. Video names retain `_LLOG60_NATIVE`
 without a codec suffix. Cancelling a direct export removes only its newly
 created documents, never the destination directory or pre-existing files.
 Temporary files are removed on completion or failure. Display matrices use the
@@ -189,7 +189,7 @@ DirectLog uses MediaCodec AImageReader output when FFmpeg Vulkan decode is
 unavailable. Hardware-buffer imports and submission resources are cached, with
 at most three output images. The intermediate is RGBA16 UNORM; displayed 10-bit
 frames use packed RGB10A2 UNORM. Full-resolution deferred RGB decoding fuses
-HLG/LOG60 linearization into hardware-buffer sampling, so the gallery consumes
+HLG/LOG60/LLOG60 linearization into hardware-buffer sampling, so the gallery consumes
 that texture without a second full-frame libplacebo transfer pass. Scaled and
 CFA output retain the existing conversion path. No OpenGL presenter is used.
 Resident RGB clipping is classified in the gallery color shader, including

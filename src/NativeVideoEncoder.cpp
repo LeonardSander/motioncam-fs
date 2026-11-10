@@ -1,3 +1,4 @@
+#include "RawLogTransform.h"
 #include "NativeVideoEncoder.h"
 
 #include <algorithm>
@@ -357,8 +358,8 @@ NativeVideoEncoder::NativeVideoEncoder(const Options& options) : m(std::make_uni
     check(avfilter_graph_create_filter(&s.sink, avfilter_get_by_name("buffersink"), "video", nullptr, nullptr, s.graph), "Create native video sink");
     // swscale is part of every supported Android build. Keep full-range
     // BT.2020 matrix conversion and ordered dithering explicit.
-    std::string filters = "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:g=log(1+60*val/maxval)/log(61)*maxval:b=log(1+60*val/maxval)/log(61)*maxval,"
-        "scale=in_range=full:out_range=full:out_color_matrix=bt2020:flags=accurate_rnd+full_chroma_int:sws_dither=bayer,format=" + options.pixelFormat;
+    const std::string transfer = LLog60::ffmpegLut();
+    std::string filters = transfer + ",scale=in_range=full:out_range=full:out_color_matrix=bt2020:flags=accurate_rnd+full_chroma_int:sws_dither=bayer,format=" + options.pixelFormat;
     if (options.constantFrameRate)
         filters += ",fps=fps=" + std::to_string(s.codec->framerate.num) + "/" + std::to_string(s.codec->framerate.den) + ":round=near";
     AVFilterInOut* inputs = avfilter_inout_alloc();
@@ -433,7 +434,7 @@ void NativeVideoEncoder::finish() {
     check(avio_closep(&s.output->pb), "Close native video output");
     // Hardware components can accept a format and then negotiate a different
     // layout or omit color signaling. Validate the actual bitstream before
-    // the caller publishes a LOG60/full-range sidecar with it.
+    // the caller publishes an LLOG60/full-range sidecar with it.
     if (s.options.encoder.find("_mediacodec") != std::string::npos) {
         AVFormatContext* input = nullptr;
         check(avformat_open_input(&input, s.options.outputPath.c_str(), nullptr, nullptr), "Verify hardware output");

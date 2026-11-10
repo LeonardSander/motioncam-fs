@@ -15,6 +15,10 @@
 
 namespace motioncam {
 
+// Select samples and their inverse table together. LOG60 remains the default
+// for uncompressed and lossless DNGs; lossy outputs select LLOG60 explicitly.
+enum class LogCurve { LOG60, LLOG60 };
+
 constexpr float DNG_COMPRESSION_JPEG_DCT = -2.0f;
 constexpr float DNG_COMPRESSION_JPEG92_STRIP = -1.5f;
 constexpr float DNG_COMPRESSION_JPEG_LOSSLESS = -1.0f;

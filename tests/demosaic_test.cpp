@@ -1,4 +1,5 @@
 #include "Utils.h"
+#include "RawLogTransform.h"
 #include "GainMapBake.h"
 #include "DNGImage.h"
 
@@ -27,6 +28,20 @@ int main() {
             37, 91, highQuality, 1));
         assert(first != motioncam::utils::logTriangularDither(
             37, 91, highQuality, 2));
+    }
+    // Switch curves at fixed levels/precision to catch stale shared and
+    // per-channel encoder caches, in both direct and LUT image sizes.
+    for (auto curve : {motioncam::LogCurve::LOG60, motioncam::LogCurve::LLOG60,
+                       motioncam::LogCurve::LOG60}) {
+        const auto& lookup = motioncam::cachedLog60EncodeLookup(0, 65535, 4095, curve);
+        const double expected = motioncam::encodeLog60Normalized(64552. / 65535, 4095., curve);
+        assert(std::abs(lookup[64552] - expected) < .001);
+        for (uint32_t width : {32u, 256u}) for (uint32_t channels : {1u, 3u}) {
+            std::vector<uint16_t> pixels(width * width * channels, 64552);
+            motioncam::utils::encodeLog60(pixels, width, width, channels,
+                {0, 0, 0, 0}, 65535, 4095, false, 1, curve);
+            for (auto code : pixels) assert(std::abs(code - expected) <= 1);
+        }
     }
     const std::array<double, 4> logBlack{64.0, 130.5, 260.0, 512.25};
     for (uint32_t channels : {1u, 3u}) {

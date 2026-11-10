@@ -1,3 +1,4 @@
+#include "RawLogTransform.h"
 #include "UiMode.h"
 #include "DebugInstrumentation.h"
 #include "SourceInput.h"
@@ -5956,7 +5957,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     const QString destinationMode = QSettings(PACKAGE_NAME, APP_NAME).value(
         "android/finalizeDestination", "documents").toString();
     const QString requestedOutputBase = QFileInfo(srcFile).completeBaseName() +
-        (metadataOnly ? "_METADATA" : "_LOG60_NATIVE");
+        (metadataOnly ? "_METADATA" : "_LLOG60_NATIVE");
     const QString destination = motioncam::prepareFinalizeOutput(
         requestedOutputBase, destinationMode,
         fileWidget->property("importPath").toString(), false);
@@ -5988,7 +5989,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         ? CalibrationData::loadFromFile(calibrationPath.toStdString())
         : std::nullopt;
 
-    // Camera Native is deliberately fed linear RGB. LOG60 is applied once by
+    // Camera Native is deliberately fed linear RGB. LLOG60 is applied once by
     // FFmpeg immediately before the ordered-dithered RGB-to-YUV conversion.
     auto stagingSettings = buildRenderSettings();
     // Per-source JSON is authoritative for display orientation and therefore
@@ -6082,7 +6083,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 #ifdef __ANDROID__
         androidOutputBase;
 #else
-        sourceInfo.completeBaseName() + (metadataOnly ? "_METADATA" : "_LOG60_NATIVE");
+        sourceInfo.completeBaseName() + (metadataOnly ? "_METADATA" : "_LLOG60_NATIVE");
 #endif
     const bool compressedSourceAudio=
 #ifdef __ANDROID__
@@ -6428,14 +6429,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         args << "-f" << "nut" << "-i" << "pipe:0";
         if (!audioPath.isEmpty())
             args << "-i" << audioPath;
-        const QString log60Lut =
-            "lutrgb=r=log(1+60*val/maxval)/log(61)*maxval:"
-            "g=log(1+60*val/maxval)/log(61)*maxval:"
-            "b=log(1+60*val/maxval)/log(61)*maxval";
+        const QString llog60Lut = QString::fromStdString(motioncam::LLog60::ffmpegLut());
         const QString videoFilter = cineFormRgb
-            ? log60Lut +
+            ? llog60Lut +
                 ",zscale=matrixin=gbr:matrix=gbr:rangein=full:range=full:dither=ordered,format=gbrp12le"
-            : log60Lut +
+            : llog60Lut +
                 ",zscale=matrixin=gbr:matrix=2020_ncl:rangein=full:range=full:dither=ordered,format=" +
                 pixelFormat;
         args << "-map" << "0:v:0";
@@ -6525,7 +6523,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         progress.setRange(0, frameCount);
         progress.setValue(0);
         progress.setLabelText(metadataOnly ? "Collecting per-clip metadata..."
-                                           : "Encoding LOG60 Camera Native frame 1...");
+                                           : "Encoding LLOG60 Camera Native frame 1...");
         progress.show();
         QApplication::processEvents();
 #ifndef __ANDROID__
@@ -6779,7 +6777,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             if (!haveFrame) progress.setValue(static_cast<int>(completed));
             progress.setLabelText(haveFrame
                 ? QString(metadataOnly ? "Collecting metadata for frame %1 of %2..."
-                                       : "Rendering and encoding LOG60 Camera Native frame %1 of %2...")
+                                       : "Rendering and encoding LLOG60 Camera Native frame %1 of %2...")
                     .arg(frameIndex + 1).arg(frameCount)
                 : QString::fromStdString(label));
             QApplication::processEvents();
@@ -6803,7 +6801,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 #endif
 #ifndef __ANDROID__
         if (!metadataOnly) encoder.closeWriteChannel();
-        if (!metadataOnly) progress.setLabelText(QString("Finishing LOG60 Camera Native %1...")
+        if (!metadataOnly) progress.setLabelText(QString("Finishing LLOG60 Camera Native %1...")
             .arg(containerExtension==".mp4" ? "MP4" : "MOV"));
         while (!metadataOnly && encoder.state() != QProcess::NotRunning) {
             encoder.waitForFinished(100);
@@ -6862,7 +6860,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 
         nlohmann::json sidecar;
         if (!metadataOnly) {
-            sidecar["transferFunction"] = "LOG60";
+            sidecar["transferFunction"] = "LLOG60";
             sidecar["dataLevels"] = "Full";
             sidecar["videoCodec"] = h264 ? "H264" : av1 ? "AV1" : proRes ? "ProRes" : cineForm ? "CineForm" : "HEVC";
             sidecar["encoder"] = selectedEncoder.toStdString();

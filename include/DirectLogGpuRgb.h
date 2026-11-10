@@ -14,7 +14,7 @@ namespace motioncam {
 
 class DirectLogGpuRgb {
 public:
-    enum class TransferCurve { None, HLG, LOG60 };
+    enum class TransferCurve { None, HLG, LOG60, LLOG60 };
     // Shared GLSL for the renderer hooks and native hardware-buffer sampling.
     static const char* transferShader();
     DirectLogGpuRgb();

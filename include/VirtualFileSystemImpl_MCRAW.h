@@ -39,7 +39,8 @@ public:
     void updateOptions(const RenderSettings& settings) override;
     FileInfo getFileInfo() const override;
     std::shared_ptr<std::vector<uint8_t>> materializeFile(
-        const Entry& entry, bool jpegCompression = false, bool savedOutput = false) override;
+        const Entry& entry, bool jpegCompression = false, bool savedOutput = false,
+        bool deferCompression = false) override;
     bool materializePreviewFrame(const Entry& entry, PreviewFrame& frame,
                                  bool retainSourceSamples = false) override;
 

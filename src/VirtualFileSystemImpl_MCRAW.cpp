@@ -814,12 +814,14 @@ void VirtualFileSystemImpl_MCRAW::clearAnalysisCache() {
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFile(
-    const Entry& entry, bool jpegCompression, bool savedOutput) {
+    const Entry& entry, bool outputCompression, bool savedOutput,
+    bool deferCompression) {
+    const bool jpegCompression = outputCompression && !deferCompression;
     std::shared_lock renderLock(mRenderMutex);
     if (boost::ends_with(entry.name, "wav"))
         return std::make_shared<std::vector<uint8_t>>(mAudioFile.begin(), mAudioFile.end());
 
-    return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
+    return vfs::materializeCached(mCache, entry, outputCompression || savedOutput, [&] {
         const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
         const auto materializeStarted = motioncam::diagnosticNow();
         thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
@@ -924,6 +926,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             throw std::runtime_error("Could not fill raw-container capture metadata");
         attachSidecarGainMapOpcodes(timed, frameIt->second);
         vfs::DngPixelPipelineOptions pixels;
+        pixels.compression = outputCompression;
         std::vector<uint8_t> gpuJpeg;
         vfs::GpuJpegTiles gpuJpegTiles;
         if (jpegCompression && isLosslessJpeg92(frameSettings.jxlDistance) &&

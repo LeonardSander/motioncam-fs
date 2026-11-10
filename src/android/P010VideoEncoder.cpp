@@ -63,7 +63,7 @@ struct P010VideoEncoder::Impl {
             MediaFormat format(AMediaCodec_getOutputFormat(codec), AMediaFormat_delete);
             if (!format) throw std::runtime_error("Could not read P010 encoder output format");
             // The emitted format must honor full-range BT.2020 before any
-            // container metadata is attached. Transfer stays unspecified for LOG60.
+            // container metadata is attached. Transfer stays unspecified for LLOG60.
             int32_t range = 0, standard = 0;
             if (!AMediaFormat_getInt32(format.get(), "color-range", &range) || range != 1 ||
                 !AMediaFormat_getInt32(format.get(), "color-standard", &standard) || standard != 6)
@@ -149,7 +149,7 @@ P010VideoEncoder::P010VideoEncoder(const Options& options) : m(std::make_unique<
     AMediaFormat_setInt32(format.get(), "max-bframes", 0);
     AMediaFormat_setInt32(format.get(), "color-range", 1); // COLOR_RANGE_FULL
     AMediaFormat_setInt32(format.get(), "color-standard", 6); // COLOR_STANDARD_BT2020
-    // LOG60 has no standardized transfer identifier. Never signal PQ or HLG.
+    // LLOG60 has no standardized transfer identifier. Never signal PQ or HLG.
     checkMedia(AMediaCodec_configure(s.codec, format.get(), nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE), "Configure P010 hardware encoder");
     checkMedia(AMediaCodec_start(s.codec), "Start P010 hardware encoder");
     s.started = true;

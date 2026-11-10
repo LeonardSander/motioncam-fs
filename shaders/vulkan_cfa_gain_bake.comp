@@ -92,7 +92,8 @@ uint codeAt(uint y, uint x) {
             float linear = floor(clamp(value, 0.0, 65535.0) + 0.5);
             float normalized = clamp((linear - p.destinationBlack.x) /
                 max(1.0, p.destinationWhite - p.destinationBlack.x), 0.0, 1.0);
-            value = motioncamLog60(normalized, p.encodedWhite) + ditherAt(x, y);
+            value = ((p.flags & 64u) != 0u ? motioncamLLog60(normalized, p.encodedWhite)
+                    : motioncamLog60(normalized, p.encodedWhite)) + ditherAt(x, y);
         }
     }
     float maximum = (p.flags & 1u) != 0u ? float(p.encodedWhite)

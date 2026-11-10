@@ -1,4 +1,5 @@
 #include "VulkanGainBake.h"
+#include "RawLogTransform.h"
 #include "VulkanGalleryPreview.h"
 #include "Utils.h"
 #include "GalleryColor.h"
@@ -736,6 +737,27 @@ int main() {
          std::array<uint16_t, 3>{1875, 1500, 1125})) {
         std::fprintf(stderr, "RGB second-map layout mismatch\n");
         return 1;
+    }
+    // Exercise the shader curve itself (no encode LUT), including both joins.
+    const std::vector<float> unityGrid(4, 1.0f);
+    constexpr std::array<uint16_t, 9> logSamples{0, 6554, 32768, 62913,
+        62914, 64552, 64880, 65200, 65535};
+    for (uint32_t channels : {1u, 3u}) {
+        auto modified = params(channels);
+        modified.maps = {gainMap(unityGrid, 1, 0, width, 1)};
+        modified.log60 = modified.llog60 = true;
+        modified.encodedWhite = 65535;
+        std::vector<uint16_t> source(width * height * channels);
+        for (size_t i = 0; i < source.size(); ++i)
+            source[i] = logSamples[i % logSamples.size()];
+        run(source, modified, channels == 1, output);
+        for (size_t i = 0; i < source.size(); ++i) {
+            const double expected = motioncam::LLog60::encode(source[i] / 65535.) * 65535;
+            if (std::abs(output[i] - expected) > 1.1) {
+                std::fprintf(stderr, "LLOG60 GPU/CPU mismatch (%u channels)\n", channels);
+                return 1;
+            }
+        }
     }
     const std::vector<float> interpolatedGrid{1.0f, 2.0f, 3.0f, 4.0f};
     auto interpolated = params(1);

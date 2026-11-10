@@ -1189,10 +1189,12 @@ VirtualFileSystemImpl_DirectLog::staticMaterializer(const Entry& entry) {
 }
 
 std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materializeFile(
-    const Entry& entry, bool jpegCompression, bool savedOutput) {
+    const Entry& entry, bool outputCompression, bool savedOutput,
+    bool deferCompression) {
+    const bool jpegCompression = outputCompression && !deferCompression;
     if (entry.name == "audio.wav") return mAudioWav;
     std::shared_lock renderLock(mRenderMutex);
-    return vfs::materializeCached(mCache, entry, jpegCompression || savedOutput, [&] {
+    return vfs::materializeCached(mCache, entry, outputCompression || savedOutput, [&] {
         std::unique_lock gpuFrameLock(mGpuFrameMutex);
         const auto materializeStart = motioncam::diagnosticNow();
         const auto& frames = mDecoder->getFrames();
@@ -1281,6 +1283,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             throw std::runtime_error("Could not fill DirectLog capture metadata");
         const auto generatedAt = motioncam::diagnosticNow();
         vfs::DngPixelPipelineOptions pixels;
+        pixels.compression = outputCompression;
         std::vector<uint8_t> gpuJpeg;
         vfs::GpuJpegTiles gpuJpegTiles;
         if (jpegCompression && isLosslessJpeg92(mConfig.jxlDistance) &&

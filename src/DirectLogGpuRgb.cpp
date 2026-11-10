@@ -65,6 +65,15 @@ vec3 motioncamDecodeDirectLog(vec3 encoded, uint curve) {
         return mix(e * e / 3.0,
             (exp((e - 0.55991073) / 0.17883277) + 0.28466892) / 12.0,
             greaterThan(e, vec3(0.5)));
+    if (curve == 3u) {
+        // LLog60 inverse; keep constants in sync with the CPU curve.
+        const float a = 0.980913053208808, m = 0.244314924085355, join = 0.971335276138720, k = 12.594751265244078;
+        vec3 d = max(e - join, vec3(0.0));
+        vec3 transition = vec3(0.96) + 2.0 * d / (m + sqrt(m*m + 4.0*k*d));
+        vec3 lower = (pow(vec3(61.0), e / a) - 1.0) / 60.0;
+        return mix(mix(lower, transition, greaterThan(e, vec3(join))), e,
+            greaterThanEqual(e, vec3(0.99)));
+    }
     return (pow(vec3(61.0), e) - 1.0) / 60.0;
 }
 )glsl";
@@ -111,6 +120,7 @@ struct DirectLogGpuRgb::State {
     bool pending = false;
     const pl_hook* hlgHook = nullptr;
     const pl_hook* log60Hook = nullptr;
+    const pl_hook* llog60Hook = nullptr;
     const pl_hook* limited10Hook = nullptr;
     const pl_hook* mosaicHook = nullptr;
     std::array<uint8_t, 4> mosaicPhase{};
@@ -167,6 +177,7 @@ struct DirectLogGpuRgb::State {
         }
         pl_mpv_user_shader_destroy(&hlgHook);
         pl_mpv_user_shader_destroy(&log60Hook);
+        pl_mpv_user_shader_destroy(&llog60Hook);
         pl_mpv_user_shader_destroy(&limited10Hook);
         pl_mpv_user_shader_destroy(&mosaicHook);
         pl_renderer_destroy(&renderer);
@@ -252,6 +263,9 @@ struct DirectLogGpuRgb::State {
         static const std::string log60Shader =
             std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + DirectLogGpuRgb::transferShader() +
             "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = motioncamDecodeDirectLog(c.rgb, 2u); return c; }\n";
+        static const std::string llog60Shader =
+            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + DirectLogGpuRgb::transferShader() +
+            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = motioncamDecodeDirectLog(c.rgb, 3u); return c; }\n";
         static constexpr char limited10Shader[] = R"(
 //!HOOK NATIVE
 //!BIND HOOKED
@@ -265,7 +279,8 @@ vec4 hook() {
         log60Hook = pl_mpv_user_shader_parse(vulkan->gpu, log60Shader.data(), log60Shader.size());
         limited10Hook = pl_mpv_user_shader_parse(vulkan->gpu, limited10Shader,
                                                 sizeof(limited10Shader) - 1);
-        if (!hlgHook || !log60Hook || !limited10Hook) return false;
+        llog60Hook = pl_mpv_user_shader_parse(vulkan->gpu, llog60Shader.data(), llog60Shader.size());
+        if (!hlgHook || !log60Hook || !llog60Hook || !limited10Hook) return false;
         // Android Vulkan drivers can mishandle three-component 16-bit render
         // targets when the texture is sampled by the gallery. Use a native
         // four-component target, then discard alpha on CPU download.
@@ -368,7 +383,8 @@ vec4 hook() {
             params.deband_params = nullptr;
             const pl_hook* transferHook = curve == DirectLogGpuRgb::TransferCurve::HLG
                 ? hlgHook : curve == DirectLogGpuRgb::TransferCurve::LOG60
-                    ? log60Hook : nullptr;
+                    ? log60Hook : curve == DirectLogGpuRgb::TransferCurve::LLOG60
+                        ? llog60Hook : nullptr;
             const auto* frames = source->hw_frames_ctx
                 ? reinterpret_cast<const AVHWFramesContext*>(
                     source->hw_frames_ctx->data) : nullptr;
