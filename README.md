@@ -150,12 +150,32 @@ There are some more options configurable under Settings > Preferences. Here virt
 
 ### Building
 
+CI pins Qt 6.12.0 for desktop and Android in the workflow's `QT_VERSION`.
+Desktop jobs use the official Qt kits, including the universal macOS kit for
+both architectures. Windows and Android use the shared archive installer because
+aqt does not resolve their repository layouts. That installer reads `QT_VERSION`
+and defaults to 6.12.0 for local builds.
+
 Windows (Visual Studio + Qt + vcpkg; install LLVM for `clang-cl`, used by libplacebo):
 ```
 git submodule update --init --recursive
 .\build.bat
 ```
-Executable lands in `build\Release\MotionCamFuse.exe`.
+Executable lands in `build-windows\Release\MotionCamFuse.exe`. CI and this
+entry point share `scripts/build_windows.ps1`; set `QT_ROOT_DIR` and
+`VCPKG_ROOT` for custom installation paths. The vcpkg checkout must match the
+workflow's `VCPKG_COMMIT`. Windows SDK discovery selects the installed x64
+ProjectedFS library rather than a hardcoded SDK version.
+Local builds deploy the selected Qt runtime beside the executable, retaining
+vcpkg's hardware-enabled FFmpeg DLLs as CI packaging does.
+`rebuild.bat` configures a fresh build tree when needed and otherwise performs
+a clean rebuild. Build-only operations recover the configured Qt kit from the
+CMake cache unless `-QtPath` is explicitly supplied.
+
+For clang-cl, run `./build-windows-clang.ps1` from an x64 Visual Studio developer
+shell. It uses the same Release configuration and dependencies in
+`build-windows-clang`; pass `Debug` explicitly for a debugging build. Debug uses
+the regular `x64-windows` triplet so its debug dependency libraries are available.
 
 macOS (Qt + vcpkg, CMake; install `molten-vk` for Vulkan presentation):
 ```
@@ -205,6 +225,15 @@ For repeated local builds, copy `scripts/android-build.env.example` to
 this ignored file automatically, so subsequent builds only need
 `bash scripts/build_android_apk.sh`. Build files and dependencies are kept in
 `build-android-arm64` by default.
+
+Explicit environment settings override the local defaults; CI ignores the local
+file. `VCPKG_ROOT` must match the workflow's `VCPKG_COMMIT`, and the script checks
+NDK r27c, matching Qt versions and the requested ABI. Use the `print-config` phase
+to inspect the effective configuration. Old build trees using `arm64-android` or
+Debug APK deployment must be reconfigured; their existing APKs do not represent
+the current Release build policy.
+Compile SDK 36 and build-tools 36.0.0 are pinned so a newer installed SDK does
+not change local or CI APK generation.
 
 The script prints the APK path. Both native code and the Android package use
 Release configuration. The signing helper uses the existing local debug key

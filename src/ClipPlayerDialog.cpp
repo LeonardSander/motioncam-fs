@@ -902,6 +902,7 @@ public:
         if (mNative) mNative->setOverlay(image, parts, redraw);
     }
     void drainGpuFrames() { if (mNative) mNative->drainGpuFrames(); }
+    void stopPresentation() { if (mNative) mNative->stopPresentation(); }
     bool usable() const { return mNative ? mNative->usable() : mAvailable; }
     bool native() const { return mNative != nullptr; }
     qreal nativePixelRatio() const {
@@ -4355,6 +4356,9 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
         currentMountId(),mCurrentThumbnailSource,mPaused,mPlaybackFailed);
     mClosing=true;
     releaseGpuFrames();
+    // Destroy the swapchain while the Wayland window surface is still alive.
+    // Waiting for the child QWindow's hide event is too late on older Qt.
+    if(mGpuVideo)mGpuVideo->stopPresentation();
     emit playbackClosed();
     stopDecoder();
     QDialog::closeEvent(e);

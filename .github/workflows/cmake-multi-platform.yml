@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  QT_VERSION: '6.12.0'
+  VCPKG_COMMIT: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
+
 jobs:
   android-apk:
     outputs:
@@ -46,22 +50,22 @@ jobs:
       id: host-qt
       uses: jurplel/install-qt-action@v4
       with:
-        version: '6.12.0'
+        version: ${{ env.QT_VERSION }}
         host: linux
         target: desktop
 
     - name: Install Android Qt
-      run: python3 scripts/install_qt_android.py "$PWD/Qt/6.12.0/android_arm64_v8a"
+      run: python3 scripts/install_qt_android.py "$PWD/Qt/${{ env.QT_VERSION }}/android_arm64_v8a"
 
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        vcpkgGitCommitId: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
+        vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
 
     - name: Configure CMake (Android arm64)
       shell: bash
       env:
-        QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_arm64_v8a
+        QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/${{ env.QT_VERSION }}/android_arm64_v8a
         QT_HOST_PATH: ${{ steps.host-qt.outputs.qt-root-dir }}
       run: |
         export ANDROID_SDK_ROOT="${ANDROID_HOME}"
@@ -92,13 +96,13 @@ jobs:
 
     - name: Install Android Qt (x86_64)
       continue-on-error: true
-      run: python3 scripts/install_qt_android.py "$PWD/Qt/6.12.0/android_x86_64" x86_64
+      run: python3 scripts/install_qt_android.py "$PWD/Qt/${{ env.QT_VERSION }}/android_x86_64" x86_64
 
     - name: Configure CMake (Android tests)
       continue-on-error: true
       shell: bash
       env:
-        QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/6.12.0/android_x86_64
+        QT_ANDROID_ROOT: ${{ github.workspace }}/Qt/${{ env.QT_VERSION }}/android_x86_64
         QT_HOST_PATH: ${{ steps.host-qt.outputs.qt-root-dir }}
         QT_ANDROID_ABI: x86_64
         ANDROID_VCPKG_TRIPLET: x64-android-release
@@ -137,7 +141,7 @@ jobs:
         disk-size: 8G
         disable-animations: true
         script: |
-          python3 tests/android_ctest.py deploy build-android-tests Qt/6.12.0/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
+          python3 tests/android_ctest.py deploy build-android-tests Qt/${{ env.QT_VERSION }}/android_x86_64 "$ANDROID_HOME/ndk/27.2.12479018"
           ctest --test-dir build-android-tests -C Release -LE '^portable$' --output-on-failure --timeout 300 || echo '::warning::Device Android tests failed (advisory)'
           ctest --test-dir build-android-tests -C Release -L '^portable$' --output-on-failure --no-tests=error --timeout 300
 
@@ -169,12 +173,13 @@ jobs:
     - name: Set up vcpkg
       uses: lukka/run-vcpkg@v11
       with:
-        vcpkgGitCommitId: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
+        vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
 
     - name: Install Qt
-      uses: jurplel/install-qt-action@v3
+      id: qt
+      uses: jurplel/install-qt-action@v4
       with:
-        version: "6.7.2"
+        version: ${{ env.QT_VERSION }}
         host: linux
         target: desktop
         modules: qtmultimedia
@@ -188,6 +193,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
+          -DQt6_DIR="${{ steps.qt.outputs.qt-root-dir }}/lib/cmake/Qt6" \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=x64-linux-release \
           -DVCPKG_HOST_TRIPLET=x64-linux-release \
@@ -249,6 +255,7 @@ jobs:
         curl -L --retry 3 -o linuxdeploy-plugin-qt.AppImage \
           https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
         chmod +x linuxdeploy.AppImage linuxdeploy-plugin-qt.AppImage
+        export QMAKE="${{ steps.qt.outputs.qt-root-dir }}/bin/qmake"
         export LINUXDEPLOY_PLUGIN_QT_PATH="$PWD/linuxdeploy-plugin-qt.AppImage"
         export VERSION="${GITHUB_REF_NAME#v}"
         # vcpkg's shared VA-API libraries live outside the system loader paths.
@@ -256,8 +263,8 @@ jobs:
         # linuxdeploy includes xcb by default. Include native Wayland and its
         # dynamically loaded integration plugins as well; linuxdeploy resolves
         # dependencies of the copied plugins during deployment.
-        export EXTRA_PLATFORM_PLUGINS="libqwayland-generic.so;libqwayland-egl.so"
-        qt_plugins="$(qmake -query QT_INSTALL_PLUGINS)"
+        export EXTRA_PLATFORM_PLUGINS="libqwayland.so"
+        qt_plugins="$("$QMAKE" -query QT_INSTALL_PLUGINS)"
         mkdir -p AppDir/usr/plugins
         for group in iconengines wayland-decoration-client wayland-graphics-integration-client wayland-shell-integration; do
           cp -a "$qt_plugins/$group" AppDir/usr/plugins/
@@ -283,8 +290,7 @@ jobs:
       run: |
         set -euxo pipefail
         test -f AppDir/usr/plugins/platforms/libqxcb.so
-        test -f AppDir/usr/plugins/platforms/libqwayland-generic.so
-        test -f AppDir/usr/plugins/platforms/libqwayland-egl.so
+        test -f AppDir/usr/plugins/platforms/libqwayland.so
         test -f AppDir/usr/plugins/iconengines/libqsvgicon.so
         test "$(readlink -f AppDir/usr/lib/libvulkan.so)" = \
              "$(readlink -f AppDir/usr/lib/libvulkan.so.1)"
@@ -318,7 +324,6 @@ jobs:
             platform: windows
             build_type: Release
             build_dir: build-windows
-            qt_arch: win64_msvc2019_64
             vcpkg_triplet: x64-windows-release
             artifact_suffix: windows-x86_64
           - os: macos-15-intel
@@ -326,22 +331,16 @@ jobs:
             build_type: Release
             build_dir: build-macos-x86
             mac_arch: x86_64
-            qt_arch: clang_64
             vcpkg_triplet: x64-osx-release
             artifact_suffix: macos-x86_64
-            qt_version: 6.7.2
-            qt_install: aqt
             macos_target: "15.0"
           - os: macos-15
             platform: macos
             build_type: Release
             build_dir: build-macos-arm64
             mac_arch: arm64
-            qt_arch: clang_arm64
             vcpkg_triplet: arm64-osx-release
             artifact_suffix: macos-arm64
-            qt_version: 6.7.2
-            qt_install: brew
             macos_target: "15.0"
 
     steps:
@@ -363,40 +362,30 @@ jobs:
           ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-
 
     # ---------- QT ----------
-    - name: Install Qt (Windows)
+    - name: Set up Python (Windows Qt installer)
       if: matrix.platform == 'windows'
-      uses: jurplel/install-qt-action@v3
+      uses: actions/setup-python@v5
       with:
-        version: "6.7.2"
-        host: windows
-        target: desktop
-        arch: ${{ matrix.qt_arch }}
-        modules: qtmultimedia
+        python-version: '3.12'
 
-    - name: Install Qt (macOS via aqt)
-      if: matrix.qt_install == 'aqt'
-      uses: jurplel/install-qt-action@v3
+    # aqt 3.3 does not resolve Qt 6.12's split MSVC repository layout.
+    - name: Install Qt (Windows archives)
+      id: qt-windows
+      if: matrix.platform == 'windows'
+      shell: pwsh
+      run: python scripts/install_qt.py windows "$env:GITHUB_WORKSPACE/Qt/$env:QT_VERSION/msvc2022_64"
+
+    - name: Install Qt
+      id: qt
+      if: matrix.platform == 'macos'
+      uses: jurplel/install-qt-action@v4
       with:
-        version: "${{ matrix.qt_version }}"
+        version: ${{ env.QT_VERSION }}
         host: mac
         target: desktop
-        arch: ${{ matrix.qt_arch }}
+        arch: clang_64
         modules: qtmultimedia
-        set-env: true
         extra: --timeout 60
-
-    - name: Install Qt (macOS arm64 via Homebrew)
-      if: matrix.qt_install == 'brew'
-      shell: bash
-      run: |
-        set -euxo pipefail
-        # The runner's OpenSSL 4 links conflict with Qt's OpenSSL 3 dependency.
-        # Unlink first so Homebrew does not try to back up/overwrite them.
-        if brew list --versions openssl@4 >/dev/null 2>&1; then
-          brew unlink openssl@4
-        fi
-        brew install qt@6
-        echo "$(brew --prefix qt@6)/bin" >> "$GITHUB_PATH"
 
     # ---------- VCPKG ----------
     - name: Set up vcpkg
@@ -405,7 +394,7 @@ jobs:
         # Keep the ports and tool version reproducible. The action's old
         # implicit snapshot referenced MSYS2 archives that are no longer
         # available, which prevented libjxl's dependencies from installing.
-        vcpkgGitCommitId: b1c0e26466f37efd4112bf7c1f88f5a8e28c510e
+        vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
 
     # ---------- MACOS DEPENDENCIES ----------
     - name: Install macOS build tools
@@ -437,18 +426,9 @@ jobs:
       run: |
         # Manifest installation reuses the restored build directory cache.
         $env:VCPKG_BINARY_SOURCES = "clear"
-        cmake -S . -B ${{ matrix.build_dir }} `
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
-          -DCMAKE_VERBOSE_MAKEFILE=ON `
-          -DBUILD_TESTING=ON `
-          -DMOTIONCAM_REQUIRE_VULKAN=ON `
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
-          -DVCPKG_HOST_TRIPLET=${{ matrix.vcpkg_triplet }} `
-          -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" `
-          -DCMAKE_CONFIGURATION_TYPES=Release `
-          -DCMAKE_PREFIX_PATH="$env:Qt6_DIR" `
-          -Dprojected-fs="C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0/um/x64/ProjectedFSLib.lib"
+        ./scripts/build_windows.ps1 -Compiler MSVC -Phase Configure `
+          -BuildType ${{ matrix.build_type }} -BuildDirectory ${{ matrix.build_dir }} `
+          -QtPath "${{ steps.qt-windows.outputs.qt-root-dir }}"
 
     - name: Configure CMake (macOS)
       if: matrix.platform == 'macos'
@@ -467,14 +447,8 @@ jobs:
           echo "macFUSE libfuse.2.dylib not found"
           exit 1
         fi
-        QT_PREFIX="${Qt6_ROOT_DIR:-${Qt6_DIR:-}}"
-        if [ -z "$QT_PREFIX" ] || [ ! -d "$QT_PREFIX" ]; then
-          if [ -d "${GITHUB_WORKSPACE}/Qt/${{ matrix.qt_version }}/macos" ]; then
-            QT_PREFIX="${GITHUB_WORKSPACE}/Qt/${{ matrix.qt_version }}/macos"
-          else
-            QT_PREFIX="$(brew --prefix qt@6)"
-          fi
-        fi
+        QT_PREFIX="${{ steps.qt.outputs.qt-root-dir }}"
+        test -f "$QT_PREFIX/lib/cmake/Qt6/Qt6Config.cmake"
         # Do not add the whole Homebrew prefix to CMake's dependency search.
         # Intel Homebrew can provide an ABI-80 jpeglib.h in /usr/local while
         # the vcpkg libjpeg-turbo archive uses ABI 62. Mixing the two only
@@ -543,7 +517,10 @@ jobs:
             exit 1
           fi
           echo "Running windeployqt on $exe"
-          windeployqt.exe --release "$exe"
+          # Keep the hardware-enabled FFmpeg DLLs copied by vcpkg. Qt 6.12
+          # bundles the same DLL names and must not replace that tested build.
+          windeployqt.exe --release --no-ffmpeg "$exe"
+          ./motioncam-hardware-video-decoder-test.exe
           sevenzip_dir="$(dirname "$(command -v 7z)")"
           cp "$sevenzip_dir/7z.exe" .
           if [ -f "$sevenzip_dir/7z.dll" ]; then cp "$sevenzip_dir/7z.dll" .; fi

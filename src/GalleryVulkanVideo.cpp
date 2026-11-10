@@ -1119,11 +1119,16 @@ void GalleryVulkanVideo::drainGpuFrames() {
     if (mSurface) mSurface->drainGpuFrames();
 }
 
+void GalleryVulkanVideo::stopPresentation() {
+    if (mSurface) mSurface->releaseSurfaceResources();
+}
+
 #else
 
 GalleryVulkanVideo::GalleryVulkanVideo(QWidget* parent) : QWidget(parent) {}
 GalleryVulkanVideo::~GalleryVulkanVideo() = default;
 bool GalleryVulkanVideo::usable() const { return false; }
+void GalleryVulkanVideo::stopPresentation() {}
 qreal GalleryVulkanVideo::pixelRatio() const { return devicePixelRatioF(); }
 void GalleryVulkanVideo::setFrame(const QImage&, const QRectF&, bool) {}
 void GalleryVulkanVideo::setGpuFrame(

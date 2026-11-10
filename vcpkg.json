@@ -41,6 +41,11 @@
             "platform": "android | linux | osx | windows"
         },
         {
+            "name": "vulkan-loader",
+            "platform": "linux & !android",
+            "features": ["wayland", "xcb", "xlib"]
+        },
+        {
             "name": "ffmpeg",
             "version>=": "9.0.2#7",
             "default-features": false,

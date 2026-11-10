@@ -69,6 +69,7 @@ public:
     void setOverlay(const QImage& image,
                     const std::vector<GalleryOverlayPart>& parts = {}, bool redraw = true);
     void drainGpuFrames();
+    void stopPresentation();
 
 private:
 #if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && QT_CONFIG(vulkan)
