@@ -79,7 +79,7 @@ static void checkOriginalPrecision(const std::filesystem::path& root, AVCodecID 
     assert(av_interleaved_write_frame(output, packet) >= 0);
     assert(av_write_trailer(output) >= 0);
     avio_closep(&output->pb); avformat_free_context(output);
-    const auto extracted = motioncam::AudioWriter::extractOriginalTrack(source,
+    const auto extracted = rawpreamp::AudioWriter::extractOriginalTrack(source,
         (root / ("original-" + std::to_string(bits))).string());
     AVFormatContext* input = nullptr;
     assert(avformat_open_input(&input, extracted.c_str(), nullptr, nullptr) >= 0);
@@ -98,7 +98,7 @@ static void checkOriginalPrecision(const std::filesystem::path& root, AVCodecID 
 
 int main() {
     const auto root = std::filesystem::temp_directory_path() /
-        ("mcfuse-audio-finalize-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        ("rawpreamp-audio-finalize-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);
     struct Cleanup { std::filesystem::path root; ~Cleanup() { std::filesystem::remove_all(root); } } cleanup{root};
     checkOriginalPrecision(root, AV_CODEC_ID_PCM_S24LE, 24);
@@ -109,12 +109,12 @@ int main() {
     const auto wav = (root / "audio.wav").string();
     std::vector<uint8_t> bytes;
     {
-        motioncam::AudioWriter writer(bytes, 2, 48000, 24, 1, 16);
+        rawpreamp::AudioWriter writer(bytes, 2, 48000, 24, 1, 16);
         writer.write(input, input.size() / 2);
     }
     { std::ofstream out(wav, std::ios::binary); out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size()); }
     const auto flac = (root / "audio.flac").string();
-    motioncam::AudioWriter::convertFile(wav, flac, "flac", false);
+    rawpreamp::AudioWriter::convertFile(wav, flac, "flac", false);
     assert(decode(flac, AV_CODEC_ID_FLAC) == input);
     // Both WAV and encoded audio companions are decoded directly from ZIPs.
     for (const char* compression : {"store", "deflate", "zstd"}) {
@@ -140,9 +140,9 @@ int main() {
         const auto index = root / compression;
         std::filesystem::create_directories(index);
         for (const char* name : {"audio.wav", "audio.flac"}) std::ofstream(index / name);
-        motioncam::registerZipSource(zip, index.string(), motioncam::indexZipSource(zip));
+        rawpreamp::registerZipSource(zip, index.string(), rawpreamp::indexZipSource(zip));
         for (const char* name : {"audio.wav", "audio.flac"}) {
-            const auto restored = motioncam::AudioWriter::decodeWav((index / name).string(), 24.0);
+            const auto restored = rawpreamp::AudioWriter::decodeWav((index / name).string(), 24.0);
             assert(restored && !restored->empty());
             const auto decoded = root / "zip-decoded.wav";
             { std::ofstream out(decoded, std::ios::binary);
@@ -151,15 +151,15 @@ int main() {
             assert(std::filesystem::file_size(index / name) == 0);
         }
     }
-    const auto extractedWav = motioncam::AudioWriter::extractOriginalTrack(wav, (root / "extracted-pcm").string());
-    const auto extractedFlac = motioncam::AudioWriter::extractOriginalTrack(flac, (root / "extracted-flac").string());
+    const auto extractedWav = rawpreamp::AudioWriter::extractOriginalTrack(wav, (root / "extracted-pcm").string());
+    const auto extractedFlac = rawpreamp::AudioWriter::extractOriginalTrack(flac, (root / "extracted-flac").string());
     assert(decode(extractedWav, AV_CODEC_ID_PCM_S16LE) == input);
     assert(decode(extractedFlac, AV_CODEC_ID_FLAC) == input);
     const auto copied = (root / "copy.flac").string();
-    motioncam::AudioWriter::convertFile(flac, copied, "flac", true);
+    rawpreamp::AudioWriter::convertFile(flac, copied, "flac", true);
     assert(decode(copied, AV_CODEC_ID_FLAC) == input);
     for (const auto& source : {wav, flac}) {
-        const auto restored = motioncam::AudioWriter::decodeWav(source, 24.0);
+        const auto restored = rawpreamp::AudioWriter::decodeWav(source, 24.0);
         assert(restored && !restored->empty());
         const auto restoredPath = (root / "restored.wav").string();
         { std::ofstream out(restoredPath, std::ios::binary);
@@ -169,7 +169,7 @@ int main() {
 
     for (const int64_t offsetUs : {2500, -2500}) {
         auto shifted = bytes;
-        motioncam::AudioWriter::offsetWav(shifted, offsetUs);
+        rawpreamp::AudioWriter::offsetWav(shifted, offsetUs);
         const auto path = (root / "shifted.wav").string();
         { std::ofstream out(path, std::ios::binary);
           out.write(reinterpret_cast<const char*>(shifted.data()), shifted.size()); }
@@ -194,7 +194,7 @@ int main() {
         label(36, "data"); put(40, 16);
         put(44, 0x3eaaaaab); put(48, 0xbeaaaaab); put(52, 0x3f000001); put(56, 0xbf000001);
         const auto original = floating;
-        motioncam::AudioWriter::offsetWav(floating, 2500);
+        rawpreamp::AudioWriter::offsetWav(floating, 2500);
         assert(floating[20] == 3 && floating[34] == 32);
         assert(floating.size() == original.size() + 120 * 8);
         assert(std::all_of(floating.begin() + 44, floating.begin() + 44 + 120 * 8,
@@ -223,19 +223,19 @@ int main() {
         label(60, "data"); put(64, 3 * alignment);
         for (size_t i = 68; i < extensible.size(); ++i) extensible[i] = uint8_t(i);
         const auto original = extensible;
-        motioncam::AudioWriter::offsetWav(extensible, 2500);
+        rawpreamp::AudioWriter::offsetWav(extensible, 2500);
         assert(std::equal(original.begin() + 8, original.begin() + 64, extensible.begin() + 8));
         assert(extensible.size() == original.size() + 120 * alignment);
         assert(std::all_of(extensible.begin() + 68, extensible.begin() + 68 + 120 * alignment,
                            [](uint8_t value) { return value == 0; }));
         assert(std::equal(original.begin() + 68, original.end(), extensible.begin() + 68 + 120 * alignment));
-        motioncam::AudioWriter::offsetWav(extensible, -2500);
+        rawpreamp::AudioWriter::offsetWav(extensible, -2500);
         assert(extensible == original);
         for (const size_t corruptAt : {size_t{36}, size_t{38}, size_t{44}, size_t{59}}) {
             auto invalid = original;
             invalid[corruptAt] = 0xff;
             bool rejected = false;
-            try { motioncam::AudioWriter::offsetWav(invalid, 2500); }
+            try { rawpreamp::AudioWriter::offsetWav(invalid, 2500); }
             catch (const std::runtime_error&) { rejected = true; }
             assert(rejected);
         }
@@ -256,37 +256,37 @@ int main() {
         label(36, "data"); put(40, 3); mono[44] = 5; mono[45] = 7; mono[46] = 9;
         label(48, "fact"); put(52, 4); put(56, 3);
         auto delayed = mono;
-        motioncam::AudioWriter::offsetWav(delayed, 1000);
+        rawpreamp::AudioWriter::offsetWav(delayed, 1000);
         assert(delayed.size() == 60 && delayed[40] == 4 && delayed[56] == 4);
         assert(delayed[44] == 128 && delayed[45] == 5 && delayed[46] == 7 && delayed[47] == 9);
         auto trimmed = mono;
-        motioncam::AudioWriter::offsetWav(trimmed, -1000);
+        rawpreamp::AudioWriter::offsetWav(trimmed, -1000);
         assert(trimmed.size() == 58 && trimmed[40] == 2 && trimmed[54] == 2);
         assert(trimmed[44] == 7 && trimmed[45] == 9);
-        motioncam::AudioWriter::offsetWav(mono, -1000000);
+        rawpreamp::AudioWriter::offsetWav(mono, -1000000);
         assert(mono.size() == 56 && mono[40] == 0 && mono[52] == 0);
         bool rejected = false;
-        try { motioncam::AudioWriter::offsetWav(mono, INT64_MAX); }
+        try { rawpreamp::AudioWriter::offsetWav(mono, INT64_MAX); }
         catch (const std::runtime_error&) { rejected = true; }
         assert(rejected);
     }
 
     const auto opus = (root / "audio.opus").string();
-    motioncam::AudioWriter::convertFile(wav, opus, "opus", false);
+    rawpreamp::AudioWriter::convertFile(wav, opus, "opus", false);
     const auto decodedOpus = decode(opus, AV_CODEC_ID_OPUS);
     assert(decodedOpus.size() >= input.size() && decodedOpus.size() - input.size() < 2000);
     bool cancelled = false;
-    try { motioncam::AudioWriter::convertFile(wav, opus, "opus", false, [] { return false; }); }
+    try { rawpreamp::AudioWriter::convertFile(wav, opus, "opus", false, [] { return false; }); }
     catch (const std::runtime_error& e) { cancelled = std::string(e.what()) == "Finalization cancelled"; }
     assert(cancelled);
     int progressCalls = 0;
     cancelled = false;
-    try { motioncam::AudioWriter::convertFile(wav, (root / "cancelled.flac").string(), "flac", false,
+    try { rawpreamp::AudioWriter::convertFile(wav, (root / "cancelled.flac").string(), "flac", false,
         [&] { return ++progressCalls < 4; }); }
     catch (const std::runtime_error& e) { cancelled = std::string(e.what()) == "Finalization cancelled"; }
     assert(cancelled && progressCalls == 4);
     bool failed = false;
-    try { motioncam::AudioWriter::convertFile(wav, (root / "missing" / "audio.flac").string(), "flac", false); }
+    try { rawpreamp::AudioWriter::convertFile(wav, (root / "missing" / "audio.flac").string(), "flac", false); }
     catch (const std::runtime_error&) { failed = true; }
     assert(failed);
 }

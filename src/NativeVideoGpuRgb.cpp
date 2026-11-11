@@ -5,13 +5,13 @@
 #include <media/NdkImage.h>
 #include <dlfcn.h>
 #endif
-#include "DirectLogGpuRgb.h"
+#include "NativeVideoGpuRgb.h"
 #include "SharedVulkanDevice.h"
 #include "VulkanGainBake.h"
 #include "VulkanJpegFullEncode.h"
 #include "VulkanGalleryPreview.h"
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
@@ -53,12 +53,12 @@ void unlockQueue(void* context, uint32_t family, uint32_t index) {
 } // namespace
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 
-const char* DirectLogGpuRgb::transferShader() {
+const char* NativeVideoGpuRgb::transferShader() {
     // Quantization matches the RGBA16 intermediate used by the ordinary path.
     return R"glsl(
-vec3 motioncamDecodeDirectLog(vec3 encoded, uint curve) {
+vec3 decodeNativeVideo(vec3 encoded, uint curve) {
     if (curve == 0u) return encoded;
     vec3 e = floor(clamp(encoded, 0.0, 1.0) * 65535.0 + 0.5) / 65535.0;
     if (curve == 1u)
@@ -79,8 +79,8 @@ vec3 motioncamDecodeDirectLog(vec3 encoded, uint curve) {
 )glsl";
 }
 
-struct DirectLogGpuRgb::State {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+struct NativeVideoGpuRgb::State {
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #ifdef __ANDROID__
     struct AndroidImport {
         AHardwareBuffer* buffer = nullptr;
@@ -204,7 +204,7 @@ struct DirectLogGpuRgb::State {
         pl_log_params logParams{};
         logParams.log_level = PL_LOG_WARN;
         logParams.log_cb = [](void*, pl_log_level, const char* message) {
-            spdlog::warn("DirectLog GPU conversion: {}", message);
+            spdlog::warn("Native Video GPU conversion: {}", message);
         };
         log = pl_log_create(PL_API_VER, &logParams);
         if (!log) return false;
@@ -258,14 +258,14 @@ struct DirectLogGpuRgb::State {
         renderer = pl_renderer_create(log, vulkan->gpu);
         if (!renderer) return false;
         static const std::string hlgShader =
-            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + DirectLogGpuRgb::transferShader() +
-            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = motioncamDecodeDirectLog(c.rgb, 1u); return c; }\n";
+            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + NativeVideoGpuRgb::transferShader() +
+            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = decodeNativeVideo(c.rgb, 1u); return c; }\n";
         static const std::string log60Shader =
-            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + DirectLogGpuRgb::transferShader() +
-            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = motioncamDecodeDirectLog(c.rgb, 2u); return c; }\n";
+            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + NativeVideoGpuRgb::transferShader() +
+            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = decodeNativeVideo(c.rgb, 2u); return c; }\n";
         static const std::string llog60Shader =
-            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + DirectLogGpuRgb::transferShader() +
-            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = motioncamDecodeDirectLog(c.rgb, 3u); return c; }\n";
+            std::string("//!HOOK SCALED\n//!BIND HOOKED\n") + NativeVideoGpuRgb::transferShader() +
+            "vec4 hook() { vec4 c = HOOKED_texOff(0); c.rgb = decodeNativeVideo(c.rgb, 3u); return c; }\n";
         static constexpr char limited10Shader[] = R"(
 //!HOOK NATIVE
 //!BIND HOOKED
@@ -291,7 +291,7 @@ vec4 hook() {
             rgbaOutput ? AV_PIX_FMT_RGBA64LE : AV_PIX_FMT_RGB48LE;
         if (!pl_test_pixfmt(vulkan->gpu, outputFormat)) {
 #ifdef __ANDROID__
-            qWarning() << "DirectLog Vulkan output format unsupported"
+            qWarning() << "Native Video Vulkan output format unsupported"
                        << int(outputFormat);
 #endif
             return false;
@@ -313,7 +313,7 @@ vec4 hook() {
     }
 
     bool render(const AVFrame* source, bool smoothChroma,
-                DirectLogGpuRgb::TransferCurve curve, bool fullRange,
+                NativeVideoGpuRgb::TransferCurve curve, bool fullRange,
                 uint16_t* packedRgb,
                 const std::array<uint8_t, 4>* cfaPhase,
                 bool deferDownload, const pl_frame* externalInput = nullptr) {
@@ -336,7 +336,7 @@ vec4 hook() {
         if (!tagged->hw_frames_ctx) inputParams.tex = sourceTextures;
         inputParams.map_dovi = false;
         pl_frame input = externalInput ? *externalInput : pl_frame{};
-        const auto mapStarted = motioncam::diagnosticNow();
+        const auto mapStarted = rawpreamp::diagnosticNow();
         const bool mapped = externalInput || pl_map_avframe_ex(vulkan->gpu, &input, &inputParams);
         av_frame_free(&tagged);
         if (!mapped) {
@@ -381,9 +381,9 @@ vec4 hook() {
             params.plane_upscaler = params.upscaler;
             params.peak_detect_params = nullptr;
             params.deband_params = nullptr;
-            const pl_hook* transferHook = curve == DirectLogGpuRgb::TransferCurve::HLG
-                ? hlgHook : curve == DirectLogGpuRgb::TransferCurve::LOG60
-                    ? log60Hook : curve == DirectLogGpuRgb::TransferCurve::LLOG60
+            const pl_hook* transferHook = curve == NativeVideoGpuRgb::TransferCurve::HLG
+                ? hlgHook : curve == NativeVideoGpuRgb::TransferCurve::LOG60
+                    ? log60Hook : curve == NativeVideoGpuRgb::TransferCurve::LLOG60
                         ? llog60Hook : nullptr;
             const auto* frames = source->hw_frames_ctx
                 ? reinterpret_cast<const AVHWFramesContext*>(
@@ -422,7 +422,7 @@ vec4 hook() {
                 hooks[params.num_hooks++] = mosaicHook;
             }
             params.hooks = hooks;
-            const auto renderStart = motioncam::diagnosticNow();
+            const auto renderStart = rawpreamp::diagnosticNow();
             const bool renderOk = pl_render_image(renderer, &input, &target, &params);
             // A failed intermediate allocation/hook can still return an image
             // with the transfer curve omitted. Do not publish it or reuse the
@@ -432,17 +432,17 @@ vec4 hook() {
             const auto errors = pl_renderer_get_errors(renderer).errors;
             const bool requiredPassFailed = errors & (PL_RENDER_ERR_FBO | PL_RENDER_ERR_HOOKS);
             if (requiredPassFailed)
-                spdlog::warn("DirectLog GPU conversion required render pass failed (flags={})",
+                spdlog::warn("Native Video GPU conversion required render pass failed (flags={})",
                              static_cast<unsigned int>(errors));
-            const auto downloadStart = motioncam::diagnosticNow();
+            const auto downloadStart = rawpreamp::diagnosticNow();
             rendered = renderOk && !requiredPassFailed &&
                 (deferDownload || downloadRgb(target, packedRgb));
             if (rendered && deferDownload) {
                 pendingTarget = target;
                 pending = true;
             }
-            const auto downloadEnd = motioncam::diagnosticNow();
-            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB_PROFILE")) {
+            const auto downloadEnd = rawpreamp::diagnosticNow();
+            if (rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_GPU_RGB_PROFILE")) {
                 const auto ms = [](auto a, auto b) {
                     return std::chrono::duration<double, std::milli>(b - a).count();
                 };
@@ -459,15 +459,15 @@ vec4 hook() {
 #endif
 };
 
-DirectLogGpuRgb::DirectLogGpuRgb() : mState(std::make_shared<State>()) {}
-DirectLogGpuRgb::~DirectLogGpuRgb() = default;
+NativeVideoGpuRgb::NativeVideoGpuRgb() : mState(std::make_shared<State>()) {}
+NativeVideoGpuRgb::~NativeVideoGpuRgb() = default;
 
-bool DirectLogGpuRgb::render(const AVFrame* source, int width, int height,
+bool NativeVideoGpuRgb::render(const AVFrame* source, int width, int height,
                              bool smoothChroma, TransferCurve curve,
                              bool fullRange, uint16_t* packedRgb,
                              const std::array<uint8_t, 4>* cfaPhase,
                              bool deferDownload) {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
     if (!source || !packedRgb) return false;
     auto* frames = source->hw_frames_ctx ?
         reinterpret_cast<AVHWFramesContext*>(source->hw_frames_ctx->data) : nullptr;
@@ -491,11 +491,11 @@ bool DirectLogGpuRgb::render(const AVFrame* source, int width, int height,
 }
 
 #ifdef __ANDROID__
-bool DirectLogGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
+bool NativeVideoGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
         int acquireFenceFd, int width, int height, bool smoothChroma,
         TransferCurve curve, bool fullRange, uint16_t* packedRgb,
         const std::array<uint8_t, 4>* cfaPhase, bool deferDownload) {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
     auto fail = [&] {
         if (acquireFenceFd >= 0) ::close(acquireFenceFd);
         if (image) AImage_delete(image);
@@ -589,7 +589,7 @@ bool DirectLogGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
     hold.qf = lease->vk->queue_compute.index;
     hold.semaphore = {lease->available, 0};
     if (!pl_vulkan_hold_ex(lease->vk->gpu, &hold)) return fail();
-    const char* fusionSetting = motioncam::debugEnvironment("MOTIONCAM_ANDROID_FUSED_DECODE");
+    const char* fusionSetting = rawpreamp::debugEnvironment("RAWPREAMP_ANDROID_FUSED_DECODE");
     const bool fused = deferDownload && !cfaPhase &&
         width == source->width && height == source->height &&
         (!fusionSetting || fusionSetting[0] != '0');
@@ -630,7 +630,7 @@ bool DirectLogGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
         rendered = mState->render(source, smoothChroma, curve, fullRange,
             packedRgb, cfaPhase, deferDownload, &input);
     }
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=android_decode_pipeline fused={} width={} height={}",
             fused, width, height);
     // Keep both the imported decoder allocation and output sampler alive until
@@ -647,10 +647,10 @@ bool DirectLogGpuRgb::renderAndroidImage(const AVFrame* source, AImage* image,
 }
 #endif
 
-std::shared_ptr<void> DirectLogGpuRgb::deviceLease() const { return mState; }
+std::shared_ptr<void> NativeVideoGpuRgb::deviceLease() const { return mState; }
 
-bool DirectLogGpuRgb::pendingTexture(const void*& gpu, const void*& texture) const {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+bool NativeVideoGpuRgb::pendingTexture(const void*& gpu, const void*& texture) const {
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
     if (!mState->pending || !mState->vulkan || !mState->pendingTarget.planes[0].texture)
         return false;
     gpu = mState->vulkan->gpu;
@@ -662,10 +662,10 @@ bool DirectLogGpuRgb::pendingTexture(const void*& gpu, const void*& texture) con
 #endif
 }
 
-bool DirectLogGpuRgb::downloadPending(uint16_t* pixels, size_t samples) {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
-        spdlog::error("Full-frame DirectLog readback rejected by zero-copy validation");
+bool NativeVideoGpuRgb::downloadPending(uint16_t* pixels, size_t samples) {
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_REQUIRE_ZERO_COPY")) {
+        spdlog::error("Full-frame Native Video readback rejected by zero-copy validation");
         return false;
     }
     if (!mState->pending || !pixels || samples != static_cast<size_t>(mState->width) *
@@ -684,12 +684,12 @@ bool DirectLogGpuRgb::downloadPending(uint16_t* pixels, size_t samples) {
 #endif
 }
 
-bool DirectLogGpuRgb::prepareForSeek() {
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+bool NativeVideoGpuRgb::prepareForSeek() {
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
     return mState->prepareForSeek();
 #else
     return true;
 #endif
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

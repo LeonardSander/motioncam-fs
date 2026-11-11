@@ -10,7 +10,7 @@ namespace BS {
     class thread_pool;
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct Session;
 class LRUCache;
@@ -56,4 +56,4 @@ private:
     std::map<MountId, std::shared_ptr<PreviewRenderer>> mPreviewRenderers;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

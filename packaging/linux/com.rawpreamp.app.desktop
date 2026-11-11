@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=MotionCam Fuse
+Name=RawPreamp
 Comment=Mount MotionCam MCRAW files as DNG sequences
-Exec=MotionCamFuse
-Icon=motioncam-fuse
+Exec=RawPreamp
+Icon=rawpreamp
 Categories=AudioVideo;Video;
 Terminal=false

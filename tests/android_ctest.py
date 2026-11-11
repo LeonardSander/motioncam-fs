@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 
-REMOTE = "/data/local/tmp/motioncam-tests"
+REMOTE = "/data/local/tmp/rawpreamp-tests"
 
 
 def adb(*args, **kwargs):
@@ -33,7 +33,7 @@ def deploy(build, qt, ndk):
         f"toolchains/llvm/prebuilt/*/sysroot/usr/lib/{architecture}/libc++_shared.so"), None)
     if runtime is None:
         raise RuntimeError(f"NDK C++ runtime not found for {architecture}")
-    with tempfile.TemporaryDirectory(prefix="motioncam-android-tests-") as directory:
+    with tempfile.TemporaryDirectory(prefix="rawpreamp-android-tests-") as directory:
         stage = Path(directory)
         (stage / "bin").mkdir()
         (stage / "lib").mkdir()

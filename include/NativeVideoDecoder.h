@@ -22,15 +22,15 @@ extern "C" {
 #include <libavutil/rational.h>
 #include <libavutil/display.h>
 #include <libswscale/swscale.h>
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
 #include <libavfilter/avfilter.h>
 #endif
 }
 
-namespace motioncam {
-class DirectLogGpuRgb;
+namespace rawpreamp {
+class NativeVideoGpuRgb;
 
-struct DirectLogFrameInfo {
+struct NativeVideoFrameInfo {
     int frameNumber;
     int64_t pts;           
     Timestamp timestamp;   
@@ -41,7 +41,7 @@ struct DirectLogFrameInfo {
     bool keyFrame;
 };
 
-struct DirectLogVideoInfo {
+struct NativeVideoVideoInfo {
     int width;
     int height;
     double fps;
@@ -53,13 +53,13 @@ struct DirectLogVideoInfo {
     int orientation = -1;
 };
 
-class DirectLogDecoder {
+class NativeVideoDecoder {
 public:
-    DirectLogDecoder(const std::string& filePath);
-    ~DirectLogDecoder();
+    NativeVideoDecoder(const std::string& filePath);
+    ~NativeVideoDecoder();
 
-    const DirectLogVideoInfo& getVideoInfo() const { return mVideoInfo; }
-    const std::vector<DirectLogFrameInfo>& getFrames() const { return mFrames; }
+    const NativeVideoVideoInfo& getVideoInfo() const { return mVideoInfo; }
+    const std::vector<NativeVideoFrameInfo>& getFrames() const { return mFrames; }
     void overrideTimestamps(const std::vector<Timestamp>& timestamps);
     
     bool extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
@@ -128,7 +128,7 @@ private:
     void applyHLGToLinear(uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite);
     void applyLOG60ToLinear(uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite);
     AVFrame* transferableFrame(AVFrame* frame);
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     AVFrame* scaledHardwareFrame(AVFrame* frame, int width, int height);
     bool convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
                                size_t sampleCount, int outputWidth,
@@ -142,8 +142,8 @@ private:
 
 private:
     std::string mFilePath;
-    DirectLogVideoInfo mVideoInfo;
-    std::vector<DirectLogFrameInfo> mFrames;
+    NativeVideoVideoInfo mVideoInfo;
+    std::vector<NativeVideoFrameInfo> mFrames;
     
     AVFormatContext* mFormatContext;
     AVCodecContext* mCodecContext;
@@ -152,7 +152,7 @@ private:
     AVFrame* mTransferFrame;
     AVPacket* mPacket;
     SwsContext* mSwsContext;
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     AVFilterGraph* mProxyGpuGraph = nullptr;
     AVFilterContext* mProxyGpuSource = nullptr;
     AVFilterContext* mProxyGpuSink = nullptr;
@@ -166,7 +166,7 @@ private:
     AVPixelFormat mProxyGpuRejectedFormat = AV_PIX_FMT_NONE;
     const void* mProxyGpuRejectedFrames = nullptr;
     bool mGpuRgbRejected = false;
-    std::unique_ptr<DirectLogGpuRgb> mDirectGpuRgb;
+    std::unique_ptr<NativeVideoGpuRgb> mDirectGpuRgb;
 #endif
     std::vector<SwsContext*> mBandSwsContexts;
     std::vector<std::vector<uint16_t>> mBandRgbScratch;
@@ -199,4 +199,4 @@ private:
     mutable std::mutex mMutex;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

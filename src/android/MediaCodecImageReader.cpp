@@ -9,7 +9,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_mediacodec.h>
 }
-namespace motioncam {
+namespace rawpreamp {
 MediaCodecImageReader::~MediaCodecImageReader() {
     if (mReader) {
         AImageReader_setImageListener(mReader, nullptr);

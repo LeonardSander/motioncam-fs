@@ -5,7 +5,7 @@
 #include <functional>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 struct VulkanRgbGainMap {
     uint32_t width = 0, height = 0, channels = 0;
     uint32_t left = 0, top = 0, right = 0, bottom = 0;
@@ -13,7 +13,7 @@ struct VulkanRgbGainMap {
     float originH = 0, originV = 0, spacingH = 0, spacingV = 0;
     const std::vector<float>* data = nullptr;
 };
-// An image produced by DirectLog's Vulkan renderer. The renderer keeps the
+// An image produced by Native Video's Vulkan renderer. The renderer keeps the
 // texture alive until the bake finishes; download is used only for CPU fallback.
 struct VulkanGainBakeTextureSource {
     const void* gpu = nullptr;

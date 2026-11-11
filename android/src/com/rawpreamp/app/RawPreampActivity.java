@@ -1,4 +1,4 @@
-package com.motioncam.fuse;
+package com.rawpreamp.app;
 
 import android.app.Activity;
 import android.content.ClipData;
@@ -45,11 +45,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
-public class MotionCamActivity extends QtActivity {
+public class RawPreampActivity extends QtActivity {
     private static final int CHOOSE_SIDECAR_DIRECTORY = 6302;
     private static final int CHOOSE_FINALIZE_DIRECTORY = 6303;
     private static final int CHOOSE_SEQUENCE_FOLDER = 6305;
-    private static final String PREFS = "motioncam_documents";
+    private static final String PREFS = "rawpreamp_documents";
     private static final String FINALIZE_TREE_KEY = "finalize_tree_uri";
     private static final String CUSTOM_FINALIZE_TREE_KEY = "custom_finalize_tree_uri";
     private String pendingSidecarImportRoot;
@@ -198,7 +198,7 @@ public class MotionCamActivity extends QtActivity {
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    public void setMotionCamLandscapeOnly(boolean landscapeOnly) {
+    public void setRawPreampLandscapeOnly(boolean landscapeOnly) {
         runOnUiThread(() -> setRequestedOrientation(landscapeOnly
                 ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 : ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR));
@@ -210,7 +210,7 @@ public class MotionCamActivity extends QtActivity {
             PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
             if (power != null)
                 finalizeWakeLock = power.newWakeLock(
-                        PowerManager.PARTIAL_WAKE_LOCK, "MotionCamFuse:Finalize");
+                        PowerManager.PARTIAL_WAKE_LOCK, "RawPreamp:Finalize");
         }
         if (finalizeWakeLock != null && !finalizeWakeLock.isHeld())
             finalizeWakeLock.acquire();
@@ -270,7 +270,7 @@ public class MotionCamActivity extends QtActivity {
                 if (custom) {
                     output = root;
                 } else {
-                    output = ensureDirectory(tree, root, "mcFuse");
+                    output = ensureDirectory(tree, root, "RawPreamp");
                 }
             }
             String name = requestedFolderName == null || requestedFolderName.isEmpty()
@@ -543,7 +543,7 @@ public class MotionCamActivity extends QtActivity {
             pendingSidecarIndex = 0;
             indexedSidecars = 0;
             sidecarScanStatus = "scanning";
-            new Thread(this::scanNextSidecarDirectory, "mcFuse-sidecar-scan").start();
+            new Thread(this::scanNextSidecarDirectory, "RawPreamp-sidecar-scan").start();
         });
     }
 
@@ -700,7 +700,7 @@ public class MotionCamActivity extends QtActivity {
                 } finally {
                     runOnUiThread(this::endFinalizeWork);
                 }
-            }, "mcFuse-dng-sequence-import").start();
+            }, "RawPreamp-dng-sequence-import").start();
             return;
         }
         if (requestCode == CHOOSE_SIDECAR_DIRECTORY) {
@@ -734,7 +734,7 @@ public class MotionCamActivity extends QtActivity {
                     sidecarScanStatus = "error:" + error.getMessage();
                     endSourceImportBatch();
                 }
-            }, "mcFuse-sidecar-scan").start();
+            }, "RawPreamp-sidecar-scan").start();
             return;
         }
     }

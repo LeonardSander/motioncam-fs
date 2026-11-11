@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace motioncam {
+namespace rawpreamp {
 struct JpegEntropyImageSource {
     const uint16_t* pixels;
     uint32_t width, height, channels, bits, predictor;

@@ -10,7 +10,7 @@ namespace BS {
     class thread_pool;
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
 class VirtualizationInstance;
 class LRUCache;
@@ -53,4 +53,4 @@ private:
 
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

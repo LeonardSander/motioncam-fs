@@ -4,7 +4,7 @@
 
 #include "IVirtualFileSystem.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
-#include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl_NativeVideo.h"
 #include "VirtualFileSystemImpl_DNG.h"
 #include "DNGDecoder.h"
 #include "LRUCache.h"
@@ -39,7 +39,7 @@
 namespace fs = boost::filesystem;
 namespace lcv = boost::locale::conv;
 
-namespace motioncam {
+namespace rawpreamp {
 
 constexpr auto CACHE_SIZE = 128 * 1024 * 1024; // Small cache size as we write the files to disk
 constexpr auto IO_THREADS = 4;
@@ -552,11 +552,11 @@ std::string getLogDirectory() {
         WideCharToMultiByte(CP_UTF8, 0, appDataPath, -1, &appData[0], size, nullptr, nullptr);
         CoTaskMemFree(appDataPath);
 
-        logDir = appData + "\\MotionCam Tools\\Fuse\\logs";
+        logDir = appData + "\\RawPreamp\\Fuse\\logs";
     }
     else {
         // Fallback to temp directory
-        logDir = std::filesystem::temp_directory_path().string() + "\\MotionCam Tools\\Fuse\\logs";
+        logDir = std::filesystem::temp_directory_path().string() + "\\RawPreamp\\Fuse\\logs";
     }
 
     return logDir;
@@ -614,7 +614,7 @@ void setupLogging() {
     }
 }
 
-} // namespace motioncam
+} // namespace rawpreamp
 
 FuseFileSystemImpl_Win::FuseFileSystemImpl_Win() :
     mNextMountId(0),
@@ -673,7 +673,7 @@ MountId FuseFileSystemImpl_Win::mount(const RenderSettings& settings, const std:
             // Extract base name from destination path
             fs::path dstPathObj(dstPath);
             std::string baseName = dstPathObj.filename().string();
-            auto fs = std::make_unique<VirtualFileSystemImpl_DirectLog>(*mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings, srcFile, baseName);
+            auto fs = std::make_unique<VirtualFileSystemImpl_NativeVideo>(*mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings, srcFile, baseName);
             auto session = std::make_shared<Session>(srcFile, dstPath, std::move(fs), projectFiles, sourceSettings);
             std::lock_guard<std::mutex> lock(mMountedFilesMutex);
             mMountedFiles[mountId] = std::move(session);

@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 
 // Display only: locate black in the stored-code domain without altering the
 // table or discarding codes below it. Ties choose the first matching code.
@@ -78,4 +78,4 @@ inline ResolvedDataLevels resolveDataLevels(
     return result;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

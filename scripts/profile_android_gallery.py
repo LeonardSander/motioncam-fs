@@ -42,7 +42,7 @@ def main():
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "configuration.json").write_text(json.dumps(vars(args), default=str, indent=2))
-    package = "com.motioncam.fuse"
+    package = "com.rawpreamp.app"
     log_path = "files/diagnostics/gallery-perf.log"
     stayon = adb("shell", "settings", "get", "global", "stay_on_while_plugged_in").strip()
     rotation, fixed = [], ""
@@ -73,7 +73,7 @@ def main():
             if thumbnails == "off":
                 flags += ",hidethumbnails"
             playback_ms = (args.late_after + args.duration + 20) * 1000
-            adb("shell", "am", "start", "-S", "-n", package + "/com.motioncam.fuse.MotionCamActivity",
+            adb("shell", "am", "start", "-S", "-n", package + "/com.rawpreamp.app.RawPreampActivity",
                 "--es", "gallery-perf-session", shlex.quote(args.session),
                 "--es", "gallery-perf-playback-ms", str(playback_ms),
                 "--es", "gallery-perf-thumbnails", thumbnails, "--es", "gallery-perf-flags", shlex.quote(flags))

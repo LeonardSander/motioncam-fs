@@ -3,7 +3,7 @@
 extern "C" {
 #include <libavformat/avformat.h>
 }
-namespace motioncam {
+namespace rawpreamp {
 #ifdef __ANDROID__
 int openSourceMedia(AVFormatContext** context, const std::string& path);
 void closeSourceMedia(AVFormatContext** context);

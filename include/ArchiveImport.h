@@ -3,7 +3,7 @@
 #include <QString>
 #include <stdexcept>
 
-namespace motioncam {
+namespace rawpreamp {
 
 class InsufficientArchiveSpace : public std::runtime_error {
 public:

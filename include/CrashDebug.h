@@ -3,7 +3,7 @@
 #ifdef __APPLE__
 #include <cstddef>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace debug {
 void setStage(const char* stage);
 void setDngContext(int frameNumber,
@@ -13,5 +13,5 @@ void setDngContext(int frameNumber,
                    std::size_t processedBytes);
 void dumpCrashContext(int fd);
 } // namespace debug
-} // namespace motioncam
+} // namespace rawpreamp
 #endif

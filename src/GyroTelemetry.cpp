@@ -18,7 +18,7 @@
 #include <set>
 #include <stdexcept>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -63,12 +63,21 @@ void shiftFrameTimes(nlohmann::json& frame, double delta) {
     if (!frame.contains("endTimestampUs")) frame["endTimestampUs"] = 0.0;
     shiftTimes(frame, delta);
 }
+const nlohmann::json* telemetryField(const nlohmann::json& data, const char* key,
+                                     const char* legacyKey) {
+    if (!data.is_object()) return nullptr;
+    auto field = data.find(key);
+    if (field == data.end()) field = data.find(legacyKey);
+    return field == data.end() ? nullptr : &*field;
+}
+
 std::optional<double> videoClockOrigin(const nlohmann::json& header) {
     if (!header.contains("camera") || !header["camera"].contains("additionalData")) return {};
     auto extra = header["camera"]["additionalData"];
     if (extra.is_string()) extra = nlohmann::json::parse(extra.get<std::string>(), nullptr, false);
-    if (extra.is_object() && extra.contains("motioncamVideoClockOriginUs"))
-        return extra.at("motioncamVideoClockOriginUs").get<double>();
+    if (const auto* origin = telemetryField(extra, "rawpreampVideoClockOriginUs",
+                                            "motioncamVideoClockOriginUs"))
+        return origin->get<double>();
     return {};
 }
 double sensorStart(const nlohmann::json& frame) {
@@ -207,19 +216,18 @@ void GyroTelemetry::readContainer(const std::string& path) {
                         if (extra.is_string())
                             extra = nlohmann::json::parse(extra.get<std::string>(), nullptr, false);
                     }
-                    if (extra.is_object() && extra.contains("motioncamTelemetryChunk")) {
-                        const auto& chunk = extra.at("motioncamTelemetryChunk");
-                        if (chunk.at("version") != 1 || !additionalChunks
-                                                             .emplace(chunk.at("index").get<size_t>(),
-                                                                      chunk.at("text").get<std::string>())
-                                                             .second)
+                    if (const auto* chunk = telemetryField(extra, "rawpreampTelemetryChunk",
+                                                           "motioncamTelemetryChunk")) {
+                        if (chunk->at("version") != 1 ||
+                            !additionalChunks.emplace(chunk->at("index").get<size_t>(),
+                                                      chunk->at("text").get<std::string>()).second)
                             throw std::runtime_error("Invalid duplicate/unsupported telemetry chunk");
                         // Extension packets must not replace the main camera header.
                     } else {
-                        if (extra.is_object() && extra.contains("motioncamTelemetryChunks")) {
-                            const auto& descriptor = extra.at("motioncamTelemetryChunks");
-                            if (descriptor.at("version") != 1 ||
-                                !(expectedChunks = descriptor.at("count").get<size_t>()))
+                        if (const auto* descriptor = telemetryField(extra, "rawpreampTelemetryChunks",
+                                                                    "motioncamTelemetryChunks")) {
+                            if (descriptor->at("version") != 1 ||
+                                !(expectedChunks = descriptor->at("count").get<size_t>()))
                                 throw std::runtime_error("Invalid telemetry chunk descriptor");
                         }
                         mHeader = header;
@@ -261,7 +269,7 @@ void GyroTelemetry::readContainer(const std::string& path) {
 }
 
 void GyroTelemetry::readRaw(const std::string& path) {
-    Decoder decoder(decoderSource(path));
+    motioncam::Decoder decoder(decoderSource(path));
     const auto& timestamps = decoder.getFrames();
     if (timestamps.empty()) return;
     const auto& container = decoder.getContainerMetadata();
@@ -285,21 +293,21 @@ void GyroTelemetry::readRaw(const std::string& path) {
             return;
         }
     }
-    std::vector<MotionSample> gyro;
+    std::vector<motioncam::MotionSample> gyro;
     decoder.loadGyroData(gyro);
-    const bool motionCam = lower(std::filesystem::path(path).extension().string()) != ".mcpro";
+    const bool hasNativeCaptureMetadata = lower(std::filesystem::path(path).extension().string()) != ".mcpro";
     if (mHeader.is_null()) mHeader = container.value("captureTelemetry", nlohmann::json::object());
     if (!mHeader.contains("camera")) mHeader["camera"] = nlohmann::json::object();
     auto& sourceClock = mHeader["camera"]["additionalData"];
     if (sourceClock.is_null()) sourceClock = nlohmann::json::object();
-    if (motionCam && !sourceClock.is_object()) sourceClock = {{"sourceAdditionalData", sourceClock}};
+    if (hasNativeCaptureMetadata && !sourceClock.is_object()) sourceClock = {{"sourceAdditionalData", sourceClock}};
     if (sourceClock.is_object()) {
         sourceClock["source_clock_origin_ns"] = timestamps.front();
-        if (motionCam) sourceClock["motioncamContainerMetadata"] = container;
+        if (hasNativeCaptureMetadata) sourceClock["motioncamContainerMetadata"] = container;
     }
     if (mHeader["camera"].value("imuOrientation", std::string{}).empty())
         mHeader["camera"]["imuOrientation"] = "XYZ";
-    if (motionCam) {
+    if (hasNativeCaptureMetadata) {
         const auto& device = container.value("extraData", nlohmann::json::object())
                                  .value("postProcessSettings", nlohmann::json::object())
                                  .value("metadata", nlohmann::json::object());
@@ -310,12 +318,12 @@ void GyroTelemetry::readRaw(const std::string& path) {
             mHeader["clip"]["fileFrameRate"] =
                 (timestamps.size() - 1) * 1e9 / (timestamps.back() - timestamps.front());
     }
-    std::vector<OisSample> ois;
+    std::vector<motioncam::OisSample> ois;
     decoder.loadOisData(ois);
     std::stable_sort(ois.begin(), ois.end(),
                      [](const auto& a, const auto& b) { return a.timestampNs < b.timestampNs; });
     auto& camera = mHeader["camera"];
-    if (motionCam) {
+    if (hasNativeCaptureMetadata) {
         // Physical sensor dimensions are millimeters; OIS shifts use full-array
         // pixels, even for a binned/cropped recording. Never infer pitch from the
         // output raster or relabel pixels as nanometers.
@@ -351,7 +359,7 @@ void GyroTelemetry::readRaw(const std::string& path) {
                  {"shiftXPixels", sample.xPixels},
                  {"shiftYPixels", sample.yPixels}});
     }
-    std::vector<MotionSample> acceleration;
+    std::vector<motioncam::MotionSample> acceleration;
     decoder.loadAccelerometerData(acceleration);
     std::sort(gyro.begin(), gyro.end(),
               [](const auto& a, const auto& b) { return a.timestampNs < b.timestampNs; });
@@ -362,7 +370,7 @@ void GyroTelemetry::readRaw(const std::string& path) {
     for (size_t i = 0; i < timestamps.size(); ++i) {
         nlohmann::json metadata;
         decoder.loadFrameMetadata(timestamps[i], metadata);
-        if (motionCam)
+        if (hasNativeCaptureMetadata)
             sourceClock["motioncamFrameMetadata"].push_back(
                 {{"timestampNs", timestamps[i]}, {"metadata", metadata}});
         auto frame = metadata.value("captureTelemetry", nlohmann::json::object());
@@ -376,7 +384,7 @@ void GyroTelemetry::readRaw(const std::string& path) {
         frame["endTimestampUs"] = relative / 1000.0 + exposure + readout;
         frame["exposureTimeUs"] = exposure;
         if (metadata.contains("iso")) frame["iso"] = metadata["iso"];
-        if (motionCam) {
+        if (hasNativeCaptureMetadata) {
             nlohmann::json lens = nlohmann::json::object();
             for (const auto& mapping : {std::pair<const char*, const char*>{"focalLengths", "focalLengthMm"},
                                         {"apertures", "fNumber"}}) {
@@ -388,7 +396,7 @@ void GyroTelemetry::readRaw(const std::string& path) {
             if (focus > 0) lens["focusDistanceMm"] = 1000.0 / focus;
             if (!lens.empty()) frame["lens"] = nlohmann::json::array({lens});
         }
-        if (motionCam) {
+        if (hasNativeCaptureMetadata) {
             const double bin = metadata.value("isBinned", false) ? 2.0 : 1.0;
             const auto w = metadata.value("width", 0.0) * bin, h = metadata.value("height", 0.0) * bin;
             const auto rawW = metadata.value("originalWidth", metadata.value("width", 0.0));
@@ -636,7 +644,7 @@ nlohmann::json GyroTelemetry::outputHeader(const std::vector<int64_t>& timestamp
         auto& extra = header["camera"]["additionalData"];
         if (!extra.is_object()) extra = {{"sourceAdditionalData", extra}};
         // Capture and sensor timestamps are already relative to the video clock.
-        extra["motioncamVideoClockOriginUs"] = 0;
+        extra["rawpreampVideoClockOriginUs"] = 0;
         auto& videoTimes = extra["videoFrameTimestampsNs"] = nlohmann::json::array();
         if (!timestamps.empty())
             videoTimes = timestamps;
@@ -705,4 +713,4 @@ std::string GyroTelemetry::serialize(const std::vector<int64_t>& timestamps, dou
     }
     return output;
 }
-} // namespace motioncam
+} // namespace rawpreamp

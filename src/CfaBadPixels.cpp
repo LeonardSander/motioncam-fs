@@ -8,7 +8,7 @@
 #include <cstdlib>
 #include <spdlog/spdlog.h>
 
-namespace motioncam::utils {
+namespace rawpreamp::utils {
 
 std::vector<ActiveBadPixel> applyCfaBadPixels(
         uint16_t* samples, uint32_t width, uint32_t height,
@@ -25,10 +25,10 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                 return pixel.action != CalibrationData::BadPixelAction::Interpolate;
             }))
         spdlog::warn("DNG bad-pixel opcodes only represent interpolation; brighten/dampen entries require a baked CFA stage");
-    const auto started = motioncam::diagnosticNow();
+    const auto started = rawpreamp::diagnosticNow();
     const std::vector<uint16_t> source(
         samples, samples + static_cast<size_t>(width) * height);
-    const auto copiedAt = motioncam::diagnosticNow();
+    const auto copiedAt = rawpreamp::diagnosticNow();
     const int group = std::max(1, cfaRepeatSize / 2);
     const int sensorLeft = std::max(0, (originalWidth - static_cast<int>(width)) / 2);
     const int sensorTop = std::max(0, (originalHeight - static_cast<int>(height)) / 2);
@@ -76,7 +76,7 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                     active.push_back({static_cast<uint32_t>(y), static_cast<uint32_t>(x)});
             }
     }
-    const auto enumeratedAt = motioncam::diagnosticNow();
+    const auto enumeratedAt = rawpreamp::diagnosticNow();
 
     auto median = [](std::vector<uint16_t>& values) -> uint16_t {
         if (values.empty()) return 0;
@@ -93,7 +93,7 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
     // millions of times. Cache each original, defect-masked 2x2 block median
     // once; sparse patterns keep the lower-memory on-demand path below.
     const bool cacheBlocks = group == 2 && eligible.size() >= 100000 &&
-        !motioncam::debugEnvironment("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE");
+        !rawpreamp::debugEnvironment("RAWPREAMP_BAD_PIXEL_CACHE_DISABLE");
     const uint32_t firstBlockX = static_cast<uint32_t>(sensorLeft / group);
     const uint32_t firstBlockY = static_cast<uint32_t>(sensorTop / group);
     const uint32_t blockWidth =
@@ -155,7 +155,7 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                 cachedValid[index / 64] |= uint64_t{1} << (index % 64);
             }
     }
-    const auto cachedAt = motioncam::diagnosticNow();
+    const auto cachedAt = rawpreamp::diagnosticNow();
     auto interpolate = [&](int x, int y) {
         const int absoluteX = x + sensorLeft;
         const int absoluteY = y + sensorTop;
@@ -248,8 +248,8 @@ std::vector<ActiveBadPixel> applyCfaBadPixels(
                 0l, 65535l));
         }
     }
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
-        const auto finished = motioncam::diagnosticNow();
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) {
+        const auto finished = rawpreamp::diagnosticNow();
         const auto ms = [](auto a, auto b) {
             return std::chrono::duration<double, std::milli>(b - a).count();
         };
@@ -308,4 +308,4 @@ void markBadPixelsCfa(uint16_t* samples, uint32_t outputWidth,
     }
 }
 
-} // namespace motioncam::utils
+} // namespace rawpreamp::utils

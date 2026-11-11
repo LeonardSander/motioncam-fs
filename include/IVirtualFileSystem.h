@@ -9,7 +9,7 @@
 #include <functional>
 #include <memory>
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct FileInfo;
 

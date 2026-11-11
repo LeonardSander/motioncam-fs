@@ -9,7 +9,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
-namespace motioncam {
+namespace rawpreamp {
 struct HardwareVideoEncoder {
     QString name;
     QString pixelFormat;
@@ -121,4 +121,4 @@ inline HardwareVideoEncoder selectHardwareVideoEncoder(
     }
     return {};
 }
-} // namespace motioncam
+} // namespace rawpreamp

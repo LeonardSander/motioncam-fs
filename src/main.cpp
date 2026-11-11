@@ -2,11 +2,11 @@
 #include "DebugInstrumentation.h"
 #include "mainwindow.h"
 #include "SingleApplication.h"
-#include "DirectLogDecoder.h"
+#include "NativeVideoDecoder.h"
 #include "DNGDecoder.h"
 #include "VulkanJpegFullEncode.h"
 #include "VulkanJpegDecode.h"
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libplacebo/gpu.h>
 #endif
 #include "liblj92/lj92.h"
@@ -77,7 +77,7 @@ public:
     }
 };
 
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
 std::vector<uint8_t> benchmarkCfaDng(const uint8_t* payload, size_t bytes,
                                      uint32_t width, uint32_t height,
                                      bool jpeg) {
@@ -178,12 +178,12 @@ void messageHandler(QtMsgType type, const QMessageLogContext&, const QString& me
 }
 
 #ifdef __APPLE__
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
 int crashLogFd = -1;
 void crashHandler(int signal) {
-    const char header[] = "\n==== MotionCamFuse crash ====\n";
+    const char header[] = "\n==== RawPreamp crash ====\n";
     if (crashLogFd >= 0) ::write(crashLogFd, header, sizeof(header) - 1);
-    motioncam::debug::dumpCrashContext(crashLogFd >= 0 ? crashLogFd : STDERR_FILENO);
+    rawpreamp::debug::dumpCrashContext(crashLogFd >= 0 ? crashLogFd : STDERR_FILENO);
     void* stack[64];
     const int count = ::backtrace(stack, 64);
     ::backtrace_symbols_fd(stack, count, crashLogFd >= 0 ? crashLogFd : STDERR_FILENO);
@@ -191,7 +191,7 @@ void crashHandler(int signal) {
     _Exit(128 + signal);
 }
 void installCrashHandler() {
-    const QString directory = QDir::home().filePath("Library/Logs/MotionCam Tools");
+    const QString directory = QDir::home().filePath("Library/Logs/RawPreamp");
     QDir().mkpath(directory);
     crashLogFd = ::open(QDir(directory).filePath("crash.txt").toUtf8().constData(),
                         O_CREAT | O_WRONLY | O_APPEND, 0644);
@@ -267,8 +267,8 @@ bool platformReady() {
     return false;
 }
 #endif
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
-bool benchmarkDirectLogSingleScan(
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
+bool benchmarkNativeVideoSingleScan(
         const uint8_t* fullJpeg, size_t fullBytes,
         const std::vector<uint16_t>& source, uint32_t width,
         uint32_t height, uint32_t channels) {
@@ -280,7 +280,7 @@ bool benchmarkDirectLogSingleScan(
             ++restartMarkers;
     }
     std::fprintf(stderr,
-        "DirectLog single-scan JPEG: channels=%u bytes=%zu "
+        "Native Video single-scan JPEG: channels=%u bytes=%zu "
         "dri_markers=%zu restart_markers=%zu\n",
         channels, fullBytes, restartIntervals, restartMarkers);
     auto decode = [&](const uint8_t* jpeg, size_t bytes,
@@ -304,25 +304,25 @@ bool benchmarkDirectLogSingleScan(
             std::chrono::steady_clock::now() - cpuStarted).count();
         lj92_close(cpuDecoder);
         if (!cpuOkay) return false;
-        const motioncam::VulkanJpegTile tile{
+        const rawpreamp::VulkanJpegTile tile{
             jpeg, bytes, imageWidth, imageHeight, 16, channels};
-        const motioncam::VulkanJpegContiguousSource contiguous{jpeg, bytes};
+        const rawpreamp::VulkanJpegContiguousSource contiguous{jpeg, bytes};
         std::fprintf(stderr,
-            "DirectLog single-scan decode start: channels=%u image=%ux%u "
+            "Native Video single-scan decode start: channels=%u image=%ux%u "
             "jpeg_bytes=%zu case=%s cpu_ms=%.3f\n",
             channels, imageWidth, imageHeight, bytes, label, cpuMs);
         const int attempts = std::strcmp(label, "crop") == 0 ? 2 : 1;
         for (int attempt = 0; attempt < attempts; ++attempt) {
             std::vector<std::vector<uint16_t>> decoded;
             const auto started = std::chrono::steady_clock::now();
-            const bool ok = motioncam::jpegDecodeTilesVulkan(
+            const bool ok = rawpreamp::jpegDecodeTilesVulkan(
                 {tile}, decoded, &contiguous);
             const double ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count();
             const bool equal = ok && decoded.size() == 1u &&
                                decoded.front() == expected;
             std::fprintf(stderr,
-                "DirectLog single-scan decode: channels=%u image=%ux%u "
+                "Native Video single-scan decode: channels=%u image=%ux%u "
                 "case=%s attempt=%d gpu_ms=%.3f supported=%d equal=%d\n",
                 channels, imageWidth, imageHeight, label, attempt, ms, ok, equal);
             if (!ok) return true;
@@ -330,8 +330,8 @@ bool benchmarkDirectLogSingleScan(
         }
         return true;
     };
-    const char* sideSetting = motioncam::debugEnvironment(
-        "MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SIDE");
+    const char* sideSetting = rawpreamp::debugEnvironment(
+        "RAWPREAMP_NATIVE_VIDEO_JPEG_SINGLE_SCAN_SIDE");
     const uint32_t side = sideSetting
         ? static_cast<uint32_t>(std::atoi(sideSetting)) : 128u;
     if (width < side || height < side ||
@@ -351,11 +351,11 @@ bool benchmarkDirectLogSingleScan(
                                  side, side, "crop");
     std::free(cropJpeg);
     return cropOkay &&
-        (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SKIP_FULL") ||
+        (rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_JPEG_SINGLE_SCAN_SKIP_FULL") ||
          decode(fullJpeg, fullBytes, source, width, height, "full"));
 }
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 bool benchmarkResidentJpegRoundtrip(
     const void* gpuHandle, const void* texture,
     const std::vector<uint16_t>& source, uint32_t width, uint32_t height,
@@ -363,25 +363,25 @@ bool benchmarkResidentJpegRoundtrip(
     auto gpu = static_cast<pl_gpu>(const_cast<void*>(gpuHandle));
     struct Release {
         const void* gpu;
-        ~Release() { motioncam::releaseVulkanJpegDecodeDevice(gpu); }
+        ~Release() { rawpreamp::releaseVulkanJpegDecodeDevice(gpu); }
     } release{gpuHandle};
     double coldMs = 0.0;
     std::array<double, 5> warmMs{};
     for (int attempt = 0; attempt < 7; ++attempt) {
         bool equal = true;
         const auto started = std::chrono::steady_clock::now();
-        const bool encoded = motioncam::jpegEncodeTiledVulkanTextureResident(
+        const bool encoded = rawpreamp::jpegEncodeTiledVulkanTextureResident(
             gpuHandle, texture, width, height, channels, tileWidth, tileHeight,
             [&](const void* device, const void* stream,
                 const void* lengths, const void* table, uint32_t imageWidth,
                 uint32_t imageHeight, uint32_t imageChannels,
                 uint32_t blockWidth, uint32_t blockHeight, uint32_t tileCount,
                 uint32_t slotWords) {
-                return motioncam::jpegDecodeResidentTiledImageVulkan(
+                return rawpreamp::jpegDecodeResidentTiledImageVulkan(
                     device, stream, lengths, table,
                     imageWidth, imageHeight, imageChannels,
                     blockWidth, blockHeight, tileCount, slotWords,
-                    [&](const motioncam::VulkanDecodedJpegImage& image) {
+                    [&](const rawpreamp::VulkanDecodedJpegImage& image) {
                         if (attempt != 6) return true;
                         pl_buf_params params{};
                         params.size = source.size() * sizeof(uint16_t);
@@ -424,20 +424,20 @@ bool benchmarkResidentJpegRoundtrip(
     }
     std::sort(warmMs.begin(), warmMs.end());
     std::fprintf(stderr,
-        "DirectLog GPU resident JPEG roundtrip: channels=%u tile=%ux%u cold_ms=%.3f warm_ms=%.3f warm_min_ms=%.3f warm_max_ms=%.3f equal=1\n",
+        "Native Video GPU resident JPEG roundtrip: channels=%u tile=%ux%u cold_ms=%.3f warm_ms=%.3f warm_min_ms=%.3f warm_max_ms=%.3f equal=1\n",
         channels, tileWidth, tileHeight, coldMs, warmMs[2],
         warmMs.front(), warmMs.back());
     return true;
 }
 #endif
 
-bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
+bool benchmarkNativeVideoJpegDecode(const std::vector<uint16_t>& source,
                                   uint32_t width, uint32_t height,
                                   uint32_t channels, uint32_t tileWidth,
                                   uint32_t tileHeight,
                                   const std::vector<std::vector<uint8_t>>* gpuEncoded = nullptr,
                                   double gpuEncodeMs = 0.0,
-                                  const motioncam::VulkanJpegTiledPayload* gpuPayload = nullptr) {
+                                  const rawpreamp::VulkanJpegTiledPayload* gpuPayload = nullptr) {
     if (!tileWidth || !tileHeight || width % tileWidth || height % tileHeight ||
         (channels != 1u && channels != 3u) ||
         source.size() != size_t(width) * height * channels) return false;
@@ -449,7 +449,7 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
     std::vector<std::vector<uint8_t>> encodedOwned;
     if (!gpuEncoded && !gpuPayload) encodedOwned.resize(tileCount);
     const auto& encoded = gpuEncoded ? *gpuEncoded : encodedOwned;
-    std::vector<motioncam::VulkanJpegTile> tiles(tileCount);
+    std::vector<rawpreamp::VulkanJpegTile> tiles(tileCount);
     const auto started = std::chrono::steady_clock::now();
     std::atomic_uint32_t nextEncodeTile{0};
     std::atomic_bool encodedOkay{true};
@@ -516,7 +516,7 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
         contiguousData = contiguousBytes.data();
         contiguousSize = contiguousBytes.size();
     }
-    const motioncam::VulkanJpegContiguousSource contiguous{
+    const rawpreamp::VulkanJpegContiguousSource contiguous{
         contiguousData, contiguousSize};
     const auto prepared = std::chrono::steady_clock::now();
     std::vector<uint8_t> gpuJpeg;
@@ -524,24 +524,24 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
     struct ReleaseJpegDevice {
         const void*& gpu;
         ~ReleaseJpegDevice() {
-            if (gpu) motioncam::releaseVulkanJpegFullEncodeDevice(gpu);
+            if (gpu) rawpreamp::releaseVulkanJpegFullEncodeDevice(gpu);
         }
     } releaseJpegDevice{residentGpu};
     double decodeMs[2]{};
     for (int attempt = 0; attempt < 2; ++attempt) {
         const auto start = std::chrono::steady_clock::now();
-        const bool ok = motioncam::jpegDecodeTiledImageVulkanValidated(
+        const bool ok = rawpreamp::jpegDecodeTiledImageVulkanValidated(
             tiles, width, height, tileWidth, tileHeight, &contiguous);
         if (!ok) return false;
         decodeMs[attempt] = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - start).count();
     }
     // Full pixel verification is outside the decode-only timing.
-    const bool verifiedOnGpu = motioncam::jpegDecodeTiledImageVulkan(
+    const bool verifiedOnGpu = rawpreamp::jpegDecodeTiledImageVulkan(
             tiles, width, height, tileWidth, tileHeight,
-            [&](const motioncam::VulkanDecodedJpegImage& image) {
+            [&](const rawpreamp::VulkanDecodedJpegImage& image) {
                 residentGpu = image.gpu;
-                return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                return rawpreamp::jpegEncodeFullyVulkanPackedBufferBorrowed(
                     image.gpu, image.buffer, image.width, image.height,
                     image.channels, 16, image.wordsPerRow,
                     [&](const uint8_t* bytes, size_t count) {
@@ -603,7 +603,7 @@ bool benchmarkDirectLogJpegDecode(const std::vector<uint16_t>& source,
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     std::fprintf(stderr,
-        "DirectLog JPEG transfer benchmark: encoder=%s channels=%u size=%ux%u tile=%ux%u tiles=%u tile_encode_ms=%.3f prepare_ms=%.3f gpu_decode_cold_ms=%.3f gpu_decode_warm_ms=%.3f readback_reupload_roundtrip_ms=%.3f cpu_decode_ms=%.3f input_jpeg_bytes=%zu equal=%d\n",
+        "Native Video JPEG transfer benchmark: encoder=%s channels=%u size=%ux%u tile=%ux%u tiles=%u tile_encode_ms=%.3f prepare_ms=%.3f gpu_decode_cold_ms=%.3f gpu_decode_warm_ms=%.3f readback_reupload_roundtrip_ms=%.3f cpu_decode_ms=%.3f input_jpeg_bytes=%zu equal=%d\n",
         (gpuEncoded || gpuPayload) ? "gpu" : "cpu",
         channels, width, height, tileWidth, tileHeight, tileCount,
         (gpuEncoded || gpuPayload) ? gpuEncodeMs : ms(started, encodedAt),
@@ -631,7 +631,7 @@ int main(int argc, char *argv[])
     const auto processStarted = std::chrono::steady_clock::now();
 #ifdef __ANDROID__
     spdlog::set_default_logger(
-        spdlog::android_logger_mt("MotionCamFuse", "MotionCamFuse"));
+        spdlog::android_logger_mt("RawPreamp", "RawPreamp"));
 #endif
 #ifndef _WIN32
     // Pipe consumers such as the gallery FFmpeg process can exit between a
@@ -662,17 +662,17 @@ int main(int argc, char *argv[])
 #endif
     const auto applicationConstructed = std::chrono::steady_clock::now();
 
-#if defined(__APPLE__) && MOTIONCAM_DEBUG_INSTRUMENTATION
+#if defined(__APPLE__) && RAWPREAMP_DEBUG_INSTRUMENTATION
     installCrashHandler();
 #endif
 
     // Set application properties
-    app.setApplicationName("MotionCam Fuse");
+    app.setApplicationName("RawPreamp");
     app.setApplicationVersion("1.0");
-    app.setOrganizationName("MotionCam");
+    app.setOrganizationName("RawPreamp");
 #if defined(__linux__) && !defined(__ANDROID__)
     // Wayland associates the window with its installed desktop entry/icon.
-    app.setDesktopFileName("com.motioncam.fuse");
+    app.setDesktopFileName("com.rawpreamp.app");
     // Bundled libva's compiled driver directory belongs to the build machine.
     // Locate host drivers while preserving any explicit user configuration.
     if ((qEnvironmentVariableIsSet("APPIMAGE") || qEnvironmentVariableIsSet("APPDIR")) &&
@@ -714,7 +714,7 @@ int main(int argc, char *argv[])
     // Parse command line arguments
     QCommandLineParser parser;
 
-    parser.setApplicationDescription("MotionCam Fuse");
+    parser.setApplicationDescription("RawPreamp");
     parser.addHelpOption();
     parser.addVersionOption();
 
@@ -738,10 +738,10 @@ int main(int argc, char *argv[])
         QStringList() << "gallery-perf-flags",
         "Comma separated gallery benchmark scenario flags",
         "flags");
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
-    QCommandLineOption directLogJpegBenchmarkOption(
-        QStringList() << "directlog-jpeg-benchmark",
-        "Compare remosaiced DirectLog GPU JPEG with raw pixel download",
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
+    QCommandLineOption nativeVideoJpegBenchmarkOption(
+        QStringList() << "native-video-jpeg-benchmark",
+        "Compare remosaiced Native Video GPU JPEG with raw pixel download",
         "video");
 #endif
 
@@ -753,8 +753,8 @@ int main(int argc, char *argv[])
     parser.addOption(galleryPerfPlaybackOption);
     parser.addOption(galleryPerfThumbnailsOption);
     parser.addOption(galleryPerfFlagsOption);
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
-    parser.addOption(directLogJpegBenchmarkOption);
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
+    parser.addOption(nativeVideoJpegBenchmarkOption);
 #endif
     QStringList arguments = app.arguments();
 #ifdef __ANDROID__
@@ -770,13 +770,13 @@ int main(int argc, char *argv[])
 #endif
     parser.process(arguments);
     const QString uiMode = parser.isSet(uiModeOption)
-        ? parser.value(uiModeOption) : motioncam::preferredUiMode();
-    if (!motioncam::validUiMode(uiMode)) {
+        ? parser.value(uiModeOption) : rawpreamp::preferredUiMode();
+    if (!rawpreamp::validUiMode(uiMode)) {
         std::fprintf(stderr, "Invalid --ui-mode; use auto, desktop, or touch\n");
         return 2;
     }
-    motioncam::initializeUiMode(uiMode);
-    if (motioncam::touchUi())
+    rawpreamp::initializeUiMode(uiMode);
+    if (rawpreamp::touchUi())
         app.installEventFilter(new TouchButtonSizing(&app));
 #ifdef Q_OS_ANDROID
     // Dispatching these short high-DPI raster fills to Qt's worker pool
@@ -789,48 +789,48 @@ int main(int argc, char *argv[])
         const char* value;
         bool releaseBenchmark = false;
     } perfFlags[] = {
-        {"profile", "MOTIONCAM_GALLERY_PERF_PROFILE", "1"},
-        {"importonly", "MOTIONCAM_GALLERY_PERF_IMPORT_ONLY", "1", true},
-        {"sidecarscan", "MOTIONCAM_GALLERY_PERF_SIDECAR_SCAN", "1", true},
-        {"noindexcache", "MOTIONCAM_DNG_METADATA_CACHE", "0"},
+        {"profile", "RAWPREAMP_GALLERY_PERF_PROFILE", "1"},
+        {"importonly", "RAWPREAMP_GALLERY_PERF_IMPORT_ONLY", "1", true},
+        {"sidecarscan", "RAWPREAMP_GALLERY_PERF_SIDECAR_SCAN", "1", true},
+        {"noindexcache", "RAWPREAMP_DNG_METADATA_CACHE", "0"},
         {"noguipool", "QT_NO_GUI_THREADPOOL", "1"},
         {"guipool", "QT_NO_GUI_THREADPOOL", nullptr},
-        {"zerocopy", "MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY", "1"},
-        {"unfuseddecode", "MOTIONCAM_ANDROID_FUSED_DECODE", "0"},
-        {"hashpreview", "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW", "1"},
-        {"jpegprofile", "MOTIONCAM_JPEG_DECODE_PROFILE", "1"},
-        {"nohist", "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM", "1", true},
-        {"hidethumbnails", "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS", "1", true},
-        {"openthumbnails", "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK", "500", true},
-        {"autofade", "MOTIONCAM_GALLERY_PERF_AUTO_FADE", "1", true},
-        {"presenttrace", "MOTIONCAM_GALLERY_PERF_PRESENT_TRACE", "1"},
-        {"gestures", "MOTIONCAM_GALLERY_PERF_GESTURES", "1", true},
-        {"skipbackfill", "MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL", "1", true},
-        {"preserveproxy", "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY", "1", true},
-        {"capped", "MOTIONCAM_GALLERY_PERF_CAPPED", "1", true},
-        {"audio", "MOTIONCAM_GALLERY_PERF_AUDIO", "1", true},
-        {"clipping", "MOTIONCAM_GALLERY_PERF_CLIPPING", "1", true},
-        {"expandhistogram", "MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM", "1", true},
-        {"histpaint", "MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT", "1"},
-        {"keepalive", "MOTIONCAM_GALLERY_PERF_KEEP_ALIVE", "1", true},
+        {"zerocopy", "RAWPREAMP_GALLERY_REQUIRE_ZERO_COPY", "1"},
+        {"unfuseddecode", "RAWPREAMP_ANDROID_FUSED_DECODE", "0"},
+        {"hashpreview", "RAWPREAMP_GALLERY_PERF_HASH_PREVIEW", "1"},
+        {"jpegprofile", "RAWPREAMP_JPEG_DECODE_PROFILE", "1"},
+        {"nohist", "RAWPREAMP_GALLERY_PERF_NO_HISTOGRAM", "1", true},
+        {"hidethumbnails", "RAWPREAMP_GALLERY_PERF_HIDE_THUMBNAILS", "1", true},
+        {"openthumbnails", "RAWPREAMP_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK", "500", true},
+        {"autofade", "RAWPREAMP_GALLERY_PERF_AUTO_FADE", "1", true},
+        {"presenttrace", "RAWPREAMP_GALLERY_PERF_PRESENT_TRACE", "1"},
+        {"gestures", "RAWPREAMP_GALLERY_PERF_GESTURES", "1", true},
+        {"skipbackfill", "RAWPREAMP_GALLERY_PERF_SKIP_BACKFILL", "1", true},
+        {"preserveproxy", "RAWPREAMP_GALLERY_PERF_PRESERVE_PROXY", "1", true},
+        {"capped", "RAWPREAMP_GALLERY_PERF_CAPPED", "1", true},
+        {"audio", "RAWPREAMP_GALLERY_PERF_AUDIO", "1", true},
+        {"clipping", "RAWPREAMP_GALLERY_PERF_CLIPPING", "1", true},
+        {"expandhistogram", "RAWPREAMP_GALLERY_PERF_EXPAND_HISTOGRAM", "1", true},
+        {"histpaint", "RAWPREAMP_GALLERY_PERF_HISTOGRAM_PAINT", "1"},
+        {"keepalive", "RAWPREAMP_GALLERY_PERF_KEEP_ALIVE", "1", true},
     };
     for (const QString& flag : parser.value(galleryPerfFlagsOption).split(',', Qt::SkipEmptyParts))
         for (const auto& option : perfFlags)
             if (flag.trimmed().compare(QLatin1String(option.flag), Qt::CaseInsensitive) == 0) {
-                if (!motioncam::debugInstrumentation && !option.releaseBenchmark) continue;
+                if (!rawpreamp::debugInstrumentation && !option.releaseBenchmark) continue;
                 if (option.value) qputenv(option.environment, option.value);
                 else qunsetenv(option.environment);
             }
 
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
-    if (parser.isSet(directLogJpegBenchmarkOption)) {
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
+    if (parser.isSet(nativeVideoJpegBenchmarkOption)) {
         try {
-            motioncam::DirectLogDecoder decoder(
-                parser.value(directLogJpegBenchmarkOption).toStdString());
+            rawpreamp::NativeVideoDecoder decoder(
+                parser.value(nativeVideoJpegBenchmarkOption).toStdString());
             const auto& info = decoder.getVideoInfo();
             if (!decoder.canExtractFrameTexture() || info.width <= 0 ||
                 info.height <= 0) {
-                std::fprintf(stderr, "DirectLog GPU texture unavailable\n");
+                std::fprintf(stderr, "Native Video GPU texture unavailable\n");
                 return 2;
             }
             const std::array<uint8_t, 4> phase{0, 1, 1, 2};
@@ -846,11 +846,11 @@ int main(int argc, char *argv[])
             uint8_t *jpeg = nullptr, *warmJpeg = nullptr;
             int jpegBytes = 0, warmJpegBytes = 0;
             const auto encodeStart = std::chrono::steady_clock::now();
-            if (!motioncam::jpegEncodeFullyVulkanTexture(
+            if (!rawpreamp::jpegEncodeFullyVulkanTexture(
                     gpu, texture, info.width, info.height,
                     &jpeg, &jpegBytes)) return 5;
             const auto firstEnd = std::chrono::steady_clock::now();
-            if (!motioncam::jpegEncodeFullyVulkanTexture(
+            if (!rawpreamp::jpegEncodeFullyVulkanTexture(
                     gpu, texture, info.width, info.height,
                     &warmJpeg, &warmJpegBytes)) {
                 std::free(jpeg);
@@ -870,12 +870,12 @@ int main(int argc, char *argv[])
             auto stagedJpegDng = rawDng;
             const auto stagedJpegStart = std::chrono::steady_clock::now();
             const bool stagedJpegOk =
-                motioncam::DNGDecoder::compressLosslessJPEG(stagedJpegDng);
+                rawpreamp::DNGDecoder::compressLosslessJPEG(stagedJpegDng);
             const auto stagedJpegEnd = std::chrono::steady_clock::now();
             auto stagedWarmJpegDng = rawDng;
             const auto stagedWarmStart = std::chrono::steady_clock::now();
             const bool stagedWarmOk =
-                motioncam::DNGDecoder::compressLosslessJPEG(stagedWarmJpegDng);
+                rawpreamp::DNGDecoder::compressLosslessJPEG(stagedWarmJpegDng);
             const auto stagedWarmEnd = std::chrono::steady_clock::now();
             lj92 handle = nullptr;
             int width = 0, height = 0, bits = 0, channels = 0;
@@ -889,15 +889,15 @@ int main(int argc, char *argv[])
                 lj92_decode(handle, decoded.data(), width, 0, nullptr, 0) ==
                     LJ92_ERROR_NONE;
             const auto cfaDecodeEnd = std::chrono::steady_clock::now();
-            motioncam::DecodedDNGImage rawDngImage, jpegDngImage,
+            rawpreamp::DecodedDNGImage rawDngImage, jpegDngImage,
                                        stagedJpegImage;
             const bool dngEqual = !rawDng.empty() && !jpegDng.empty() &&
-                motioncam::DNGDecoder::decodeImageBorrowed(rawDng, rawDngImage,
+                rawpreamp::DNGDecoder::decodeImageBorrowed(rawDng, rawDngImage,
                                                             false, false) &&
-                motioncam::DNGDecoder::decodeImageBorrowed(jpegDng, jpegDngImage,
+                rawpreamp::DNGDecoder::decodeImageBorrowed(jpegDng, jpegDngImage,
                                                             false, false) &&
                 stagedJpegOk && stagedWarmOk &&
-                motioncam::DNGDecoder::decodeImageBorrowed(
+                rawpreamp::DNGDecoder::decodeImageBorrowed(
                     stagedJpegDng, stagedJpegImage, false, false) &&
                 rawDngImage.samples == jpegDngImage.samples &&
                 rawDngImage.samples == stagedJpegImage.samples;
@@ -905,10 +905,10 @@ int main(int argc, char *argv[])
                 jpegBytes == warmJpegBytes &&
                 std::memcmp(jpeg, warmJpeg, jpegBytes) == 0 && dngEqual;
             if (handle) lj92_close(handle);
-            const char* singleScanSetting = motioncam::debugEnvironment(
-                "MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_BENCHMARK");
+            const char* singleScanSetting = rawpreamp::debugEnvironment(
+                "RAWPREAMP_NATIVE_VIDEO_JPEG_SINGLE_SCAN_BENCHMARK");
             if (singleScanSetting && std::strcmp(singleScanSetting, "rgb") != 0 &&
-                !benchmarkDirectLogSingleScan(
+                !benchmarkNativeVideoSingleScan(
                     warmJpeg, size_t(warmJpegBytes), raw,
                     info.width, info.height, 1u)) return 15;
             std::free(jpeg);
@@ -917,7 +917,7 @@ int main(int argc, char *argv[])
                 return std::chrono::duration<double, std::milli>(end-start).count();
             };
             std::fprintf(stderr,
-                "DirectLog GPU CFA JPEG benchmark: width=%d height=%d channels=1 decode_ms=%.3f jpeg_first_ms=%.3f jpeg_warm_ms=%.3f full_cpu_decode_ms=%.3f full_roundtrip_estimate_ms=%.3f raw_download_ms=%.3f raw_dng_ms=%.3f direct_jpeg_dng_ms=%.3f staged_jpeg_dng_first_ms=%.3f staged_jpeg_dng_warm_ms=%.3f raw_dng_bytes=%zu direct_jpeg_dng_bytes=%zu staged_jpeg_dng_bytes=%zu equal=%d\n",
+                "Native Video GPU CFA JPEG benchmark: width=%d height=%d channels=1 decode_ms=%.3f jpeg_first_ms=%.3f jpeg_warm_ms=%.3f full_cpu_decode_ms=%.3f full_roundtrip_estimate_ms=%.3f raw_download_ms=%.3f raw_dng_ms=%.3f direct_jpeg_dng_ms=%.3f staged_jpeg_dng_first_ms=%.3f staged_jpeg_dng_warm_ms=%.3f raw_dng_bytes=%zu direct_jpeg_dng_bytes=%zu staged_jpeg_dng_bytes=%zu equal=%d\n",
                 info.width, info.height,
                 ms(decodedStart, decodedEnd), ms(encodeStart, firstEnd),
                 ms(firstEnd, warmEnd), ms(cfaDecodeStart, cfaDecodeEnd),
@@ -928,37 +928,37 @@ int main(int argc, char *argv[])
                 ms(stagedWarmStart, stagedWarmEnd), rawDng.size(),
                 jpegDng.size(), stagedJpegDng.size(), equal);
             if (!equal) return 7;
-            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK")) {
-                const char* widthSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH");
-                const char* heightSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT");
+            if (rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_JPEG_GPU_TILED_BENCHMARK")) {
+                const char* widthSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_WIDTH");
+                const char* heightSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_HEIGHT");
                 const uint32_t tileWidth = widthSetting
                     ? uint32_t(std::atoi(widthSetting)) : 16u;
                 const uint32_t tileHeight = heightSetting
                     ? uint32_t(std::atoi(heightSetting)) : 64u;
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
                 if (!benchmarkResidentJpegRoundtrip(
                         gpu, texture, raw, info.width, info.height, 1u,
                         tileWidth, tileHeight)) return 26;
 #endif
-                motioncam::VulkanJpegTiledPayload gpuPayload;
+                rawpreamp::VulkanJpegTiledPayload gpuPayload;
                 const auto tileColdStart = std::chrono::steady_clock::now();
-                if (!motioncam::jpegEncodeTiledVulkanTexture(
+                if (!rawpreamp::jpegEncodeTiledVulkanTexture(
                         gpu, texture, info.width, info.height, 1u,
                         tileWidth, tileHeight,
                         gpuPayload)) return 17;
                 const auto tileWarmStart = std::chrono::steady_clock::now();
-                if (!motioncam::jpegEncodeTiledVulkanTexture(
+                if (!rawpreamp::jpegEncodeTiledVulkanTexture(
                         gpu, texture, info.width, info.height, 1u,
                         tileWidth, tileHeight,
                         gpuPayload)) return 18;
                 const auto tileWarmEnd = std::chrono::steady_clock::now();
                 std::fprintf(stderr,
-                    "DirectLog GPU CFA tiled encode: cold_ms=%.3f warm_ms=%.3f\n",
+                    "Native Video GPU CFA tiled encode: cold_ms=%.3f warm_ms=%.3f\n",
                     ms(tileColdStart, tileWarmStart),
                     ms(tileWarmStart, tileWarmEnd));
-                if (!benchmarkDirectLogJpegDecode(
+                if (!benchmarkNativeVideoJpegDecode(
                         raw, info.width, info.height, 1u,
                         tileWidth, tileHeight,
                         nullptr, ms(tileWarmStart, tileWarmEnd),
@@ -970,17 +970,17 @@ int main(int argc, char *argv[])
                         gpuPayload.bytes.begin() + gpuPayload.offsets[tile] +
                             gpuPayload.lengths[tile]);
                 auto tiledDng = rawDng;
-                motioncam::DecodedDNGImage tiledImage;
+                rawpreamp::DecodedDNGImage tiledImage;
                 const auto attachStart = std::chrono::steady_clock::now();
-                const bool attached = motioncam::DNGDecoder::attachLosslessJPEGTiles(
+                const bool attached = rawpreamp::DNGDecoder::attachLosslessJPEGTiles(
                     tiledDng, gpuTiles, tileWidth, tileHeight);
                 const auto attachEnd = std::chrono::steady_clock::now();
                 if (!attached ||
-                    !motioncam::DNGDecoder::decodeImageBorrowed(
+                    !rawpreamp::DNGDecoder::decodeImageBorrowed(
                         tiledDng, tiledImage, false, false) ||
                     tiledImage.samples != raw) return 24;
                 std::fprintf(stderr,
-                    "DirectLog GPU CFA tiled DNG: attach_ms=%.3f bytes=%zu equal=1\n",
+                    "Native Video GPU CFA tiled DNG: attach_ms=%.3f bytes=%zu equal=1\n",
                     ms(attachStart, attachEnd), tiledDng.size());
             }
 
@@ -992,11 +992,11 @@ int main(int argc, char *argv[])
             uint8_t *rgbFirst = nullptr, *rgbWarm = nullptr, *rgbCpu = nullptr;
             int rgbFirstBytes = 0, rgbWarmBytes = 0, rgbCpuBytes = 0;
             const auto rgbEncodeStart = std::chrono::steady_clock::now();
-            if (!motioncam::jpegEncodeFullyVulkanTexture(
+            if (!rawpreamp::jpegEncodeFullyVulkanTexture(
                     gpu, texture, info.width, info.height, 3, 16,
                     &rgbFirst, &rgbFirstBytes)) return 11;
             const auto rgbFirstEnd = std::chrono::steady_clock::now();
-            if (!motioncam::jpegEncodeFullyVulkanTexture(
+            if (!rawpreamp::jpegEncodeFullyVulkanTexture(
                     gpu, texture, info.width, info.height, 3, 16,
                     &rgbWarm, &rgbWarmBytes)) {
                 std::free(rgbFirst);
@@ -1033,11 +1033,11 @@ int main(int argc, char *argv[])
                 std::memcmp(rgbCpu, rgbFirst, rgbCpuBytes) == 0 &&
                 std::memcmp(rgbCpu, rgbWarm, rgbCpuBytes) == 0;
             if (singleScanSetting && std::strcmp(singleScanSetting, "cfa") != 0 &&
-                !benchmarkDirectLogSingleScan(
+                !benchmarkNativeVideoSingleScan(
                     rgbWarm, size_t(rgbWarmBytes), rgbRaw,
                     info.width, info.height, 3u)) return 16;
             std::fprintf(stderr,
-                "DirectLog GPU RGB JPEG benchmark: width=%d height=%d "
+                "Native Video GPU RGB JPEG benchmark: width=%d height=%d "
                 "channels=3 decode_ms=%.3f jpeg_first_ms=%.3f "
                 "jpeg_warm_ms=%.3f full_cpu_decode_ms=%.3f "
                 "full_roundtrip_estimate_ms=%.3f raw_download_ms=%.3f cpu_jpeg_ms=%.3f "
@@ -1050,37 +1050,37 @@ int main(int argc, char *argv[])
                 ms(rgbWarmEnd, rgbDownloadEnd),
                 ms(rgbDownloadEnd, rgbCpuEnd), rgbWarmBytes, rgbEqual);
             if (!rgbEqual) return 20;
-            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK")) {
-                const char* widthSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH");
-                const char* heightSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT");
+            if (rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_JPEG_GPU_TILED_BENCHMARK")) {
+                const char* widthSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_WIDTH");
+                const char* heightSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_HEIGHT");
                 const uint32_t tileWidth = widthSetting
                     ? uint32_t(std::atoi(widthSetting)) : 8u;
                 const uint32_t tileHeight = heightSetting
                     ? uint32_t(std::atoi(heightSetting)) : 128u;
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
                 if (!benchmarkResidentJpegRoundtrip(
                         gpu, texture, rgbRaw, info.width, info.height, 3u,
                         tileWidth, tileHeight)) return 27;
 #endif
-                motioncam::VulkanJpegTiledPayload gpuPayload;
+                rawpreamp::VulkanJpegTiledPayload gpuPayload;
                 const auto tileColdStart = std::chrono::steady_clock::now();
-                if (!motioncam::jpegEncodeTiledVulkanTexture(
+                if (!rawpreamp::jpegEncodeTiledVulkanTexture(
                         gpu, texture, info.width, info.height, 3u,
                         tileWidth, tileHeight,
                         gpuPayload)) return 21;
                 const auto tileWarmStart = std::chrono::steady_clock::now();
-                if (!motioncam::jpegEncodeTiledVulkanTexture(
+                if (!rawpreamp::jpegEncodeTiledVulkanTexture(
                         gpu, texture, info.width, info.height, 3u,
                         tileWidth, tileHeight,
                         gpuPayload)) return 22;
                 const auto tileWarmEnd = std::chrono::steady_clock::now();
                 std::fprintf(stderr,
-                    "DirectLog GPU RGB tiled encode: cold_ms=%.3f warm_ms=%.3f\n",
+                    "Native Video GPU RGB tiled encode: cold_ms=%.3f warm_ms=%.3f\n",
                     ms(tileColdStart, tileWarmStart),
                     ms(tileWarmStart, tileWarmEnd));
-                if (!benchmarkDirectLogJpegDecode(
+                if (!benchmarkNativeVideoJpegDecode(
                         rgbRaw, info.width, info.height, 3u,
                         tileWidth, tileHeight,
                         nullptr, ms(tileWarmStart, tileWarmEnd),
@@ -1095,17 +1095,17 @@ int main(int argc, char *argv[])
                     reinterpret_cast<const uint8_t*>(rgbRaw.data()),
                     rgbRaw.size() * sizeof(uint16_t),
                     info.width, info.height, false);
-                motioncam::DecodedDNGImage tiledImage;
+                rawpreamp::DecodedDNGImage tiledImage;
                 const auto attachStart = std::chrono::steady_clock::now();
-                const bool attached = motioncam::DNGDecoder::attachLosslessJPEGTiles(
+                const bool attached = rawpreamp::DNGDecoder::attachLosslessJPEGTiles(
                     tiledDng, gpuTiles, tileWidth, tileHeight);
                 const auto attachEnd = std::chrono::steady_clock::now();
                 if (!attached ||
-                    !motioncam::DNGDecoder::decodeImageBorrowed(
+                    !rawpreamp::DNGDecoder::decodeImageBorrowed(
                         tiledDng, tiledImage, false, false) ||
                     tiledImage.samples != rgbRaw) return 25;
                 std::fprintf(stderr,
-                    "DirectLog GPU RGB tiled DNG: attach_ms=%.3f bytes=%zu equal=1\n",
+                    "Native Video GPU RGB tiled DNG: attach_ms=%.3f bytes=%zu equal=1\n",
                     ms(attachStart, attachEnd), tiledDng.size());
             }
             const auto rawRgbDngStart = std::chrono::steady_clock::now();
@@ -1121,7 +1121,7 @@ int main(int argc, char *argv[])
             std::vector<uint8_t> borrowedRgbDng;
             const auto borrowedDngStart = std::chrono::steady_clock::now();
             const bool borrowedOk =
-                motioncam::jpegEncodeFullyVulkanTextureBorrowed(
+                rawpreamp::jpegEncodeFullyVulkanTextureBorrowed(
                     gpu, texture, info.width, info.height, 3, 16,
                     [&](const uint8_t* payload, size_t bytes) {
                         borrowedRgbDng = benchmarkRgbDng(
@@ -1129,18 +1129,18 @@ int main(int argc, char *argv[])
                         return !borrowedRgbDng.empty();
                     });
             const auto borrowedDngEnd = std::chrono::steady_clock::now();
-            motioncam::DecodedDNGImage decodedRawRgbDng, decodedRgbDng;
+            rawpreamp::DecodedDNGImage decodedRawRgbDng, decodedRgbDng;
             const bool rawRgbEqual = !rawRgbDng.empty() &&
-                motioncam::DNGDecoder::decodeImageBorrowed(
+                rawpreamp::DNGDecoder::decodeImageBorrowed(
                     rawRgbDng, decodedRawRgbDng, false, false) &&
                 decodedRawRgbDng.samples == rgbRaw;
             const bool rgbDngEqual = borrowedOk &&
                 borrowedRgbDng == ownedRgbDng &&
-                motioncam::DNGDecoder::decodeImageBorrowed(
+                rawpreamp::DNGDecoder::decodeImageBorrowed(
                     borrowedRgbDng, decodedRgbDng, false, false) &&
                 decodedRgbDng.samples == rgbRaw && rawRgbEqual;
             std::fprintf(stderr,
-                "DirectLog GPU RGB DNG comparison: raw_wrap_ms=%.3f "
+                "Native Video GPU RGB DNG comparison: raw_wrap_ms=%.3f "
                 "owned_wrap_ms=%.3f borrowed_encode_wrap_ms=%.3f "
                 "raw_bytes=%zu jpeg_bytes=%zu pixel_equal=%d byte_equal=%d\n",
                 ms(rawRgbDngStart, rawRgbDngEnd),
@@ -1148,17 +1148,17 @@ int main(int argc, char *argv[])
                 ms(borrowedDngStart, borrowedDngEnd),
                 rawRgbDng.size(), borrowedRgbDng.size(), rawRgbEqual,
                 borrowedRgbDng == ownedRgbDng);
-            if (motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_JPEG_DECODE_BENCHMARK")) {
-                const char* tileSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_SIZE");
+            if (rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_BENCHMARK")) {
+                const char* tileSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_SIZE");
                 const uint32_t cfaTileSize = tileSetting
                     ? static_cast<uint32_t>(std::atoi(tileSetting)) : 64u;
                 const uint32_t rgbTileSize = tileSetting
                     ? static_cast<uint32_t>(std::atoi(tileSetting)) : 32u;
-                const char* widthSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH");
-                const char* heightSetting = motioncam::debugEnvironment(
-                    "MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT");
+                const char* widthSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_WIDTH");
+                const char* heightSetting = rawpreamp::debugEnvironment(
+                    "RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_HEIGHT");
                 const uint32_t cfaTileWidth = widthSetting
                     ? static_cast<uint32_t>(std::atoi(widthSetting)) : cfaTileSize;
                 const uint32_t cfaTileHeight = heightSetting
@@ -1167,10 +1167,10 @@ int main(int argc, char *argv[])
                     ? static_cast<uint32_t>(std::atoi(widthSetting)) : rgbTileSize;
                 const uint32_t rgbTileHeight = heightSetting
                     ? static_cast<uint32_t>(std::atoi(heightSetting)) : rgbTileSize;
-                if (!benchmarkDirectLogJpegDecode(
+                if (!benchmarkNativeVideoJpegDecode(
                         raw, info.width, info.height, 1,
                         cfaTileWidth, cfaTileHeight) ||
-                    !benchmarkDirectLogJpegDecode(
+                    !benchmarkNativeVideoJpegDecode(
                         rgbRaw, info.width, info.height, 3,
                         rgbTileWidth, rgbTileHeight))
                     return 14;
@@ -1180,7 +1180,7 @@ int main(int argc, char *argv[])
             std::free(rgbCpu);
             return rgbEqual && rgbDngEqual ? 0 : 13;
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "DirectLog GPU JPEG benchmark failed: %s\n",
+            std::fprintf(stderr, "Native Video GPU JPEG benchmark failed: %s\n",
                          error.what());
             return 8;
         }
@@ -1193,18 +1193,18 @@ int main(int argc, char *argv[])
     // Get file parameter if provided
     QString fileToMount;
     const QString galleryPerfSession = parser.value(galleryPerfOption);
-    motioncam::galleryBenchmarkActive.store(!galleryPerfSession.isEmpty());
+    rawpreamp::galleryBenchmarkActive.store(!galleryPerfSession.isEmpty());
     bool galleryPerfDurationOk = false;
     const int galleryPerfPlaybackMs = parser.value(galleryPerfPlaybackOption)
         .toInt(&galleryPerfDurationOk);
     const bool galleryPerfThumbnails =
         parser.value(galleryPerfThumbnailsOption).compare("off", Qt::CaseInsensitive) != 0;
     if (!galleryPerfSession.isEmpty()) {
-#if defined(__ANDROID__) && MOTIONCAM_DEBUG_INSTRUMENTATION
+#if defined(__ANDROID__) && RAWPREAMP_DEBUG_INSTRUMENTATION
         // Android logcat can be unavailable or aggressively truncated during
         // long GPU profiling sessions. Keep the same structured events in a
         // bounded app-private file so gallery-perf results remain retrievable
-        // with `run-as com.motioncam.fuse` after a crash or device disconnect.
+        // with `run-as com.rawpreamp.app` after a crash or device disconnect.
         const QString diagnosticsDir = QDir(QStandardPaths::writableLocation(
             QStandardPaths::AppLocalDataLocation)).filePath("diagnostics");
         if (QDir().mkpath(diagnosticsDir)) {
@@ -1212,12 +1212,12 @@ int main(int argc, char *argv[])
             try {
                 auto distribution = std::make_shared<spdlog::sinks::dist_sink_mt>();
                 distribution->add_sink(
-                    std::make_shared<spdlog::sinks::android_sink_mt>("MotionCamFuse"));
+                    std::make_shared<spdlog::sinks::android_sink_mt>("RawPreamp"));
                 distribution->add_sink(
                     std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                         logPath.toStdString(), 4u * 1024u * 1024u, 2u, true));
                 auto logger = std::make_shared<spdlog::logger>(
-                    "MotionCamFuseGalleryPerf", distribution);
+                    "RawPreampGalleryPerf", distribution);
                 logger->set_level(spdlog::level::info);
                 logger->flush_on(spdlog::level::warn);
                 spdlog::set_default_logger(logger);
@@ -1232,9 +1232,9 @@ int main(int argc, char *argv[])
                           diagnosticsDir.toStdString());
         }
 #endif
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
-        qputenv("MOTIONCAM_DIRECTLOG_DIAGNOSTICS", "1");
-        qputenv("MOTIONCAM_GALLERY_DIAGNOSTICS", "1");
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
+        qputenv("RAWPREAMP_NATIVE_VIDEO_DIAGNOSTICS", "1");
+        qputenv("RAWPREAMP_GALLERY_DIAGNOSTICS", "1");
 #endif
         const auto milliseconds = [](auto duration) {
             return std::chrono::duration<double, std::milli>(duration).count();
@@ -1291,7 +1291,7 @@ int main(int argc, char *argv[])
                  QString filePath = message.mid(11); // Remove "MOUNT_FILE:" prefix
 
                  window.mountFile(filePath);
-                 if (motioncam::touchUi()) window.showFullScreen();
+                 if (rawpreamp::touchUi()) window.showFullScreen();
                  else window.show();
                  window.raise();
                  window.activateWindow();
@@ -1305,7 +1305,7 @@ int main(int argc, char *argv[])
         });
     }
 
-    if (motioncam::touchUi()) window.showFullScreen();
+    if (rawpreamp::touchUi()) window.showFullScreen();
     else window.show();
 #ifdef __APPLE__
     QObject::connect(&app, &QGuiApplication::applicationStateChanged, &window,

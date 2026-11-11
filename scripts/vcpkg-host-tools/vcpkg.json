@@ -1,5 +1,5 @@
 {
-  "name": "motioncam-host-tools",
+  "name": "rawpreamp-host-tools",
   "version-string": "1",
   "builtin-baseline": "b1c0e26466f37efd4112bf7c1f88f5a8e28c510e",
   "dependencies": ["shaderc"]

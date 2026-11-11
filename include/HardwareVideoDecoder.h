@@ -6,7 +6,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 }
 
-namespace motioncam {
+namespace rawpreamp {
 inline const AVCodec* findWrappedHardwareDecoder(AVCodecID id, const char* wrapper) {
     void* iterator = nullptr;
     while (const AVCodec* codec = av_codec_iterate(&iterator)) {

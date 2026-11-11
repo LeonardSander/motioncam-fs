@@ -13,7 +13,7 @@
 
 #include <boost/filesystem.hpp>
 
-namespace motioncam {
+namespace rawpreamp {
 
 // Select samples and their inverse table together. LOG60 remains the default
 // for uncompressed and lossless DNGs; lossy outputs select LLOG60 explicitly.

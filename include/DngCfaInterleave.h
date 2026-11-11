@@ -6,7 +6,7 @@
 #include <limits>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 
 // DNG RowInterleaveFactor/ColumnInterleaveFactor order: group each phase into
 // a contiguous field, retaining row order within that field. Adobe uses the
@@ -99,4 +99,9 @@ inline bool reorderDngSamples(const std::vector<uint16_t>& input,
                              channels, rowFactor, columnFactor, encode, clampMaximum);
 }
 
-} // namespace motioncam
+} // namespace rawpreamp
+
+// The bundled decoder’s DNG writer uses this name.
+namespace motioncam {
+using rawpreamp::reorderDngSamples;
+}

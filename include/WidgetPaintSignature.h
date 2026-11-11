@@ -9,7 +9,7 @@
 #include <QProgressBar>
 #include <QVariant>
 
-namespace motioncam {
+namespace rawpreamp {
 // Root position is deliberately excluded: moving a widget reuses its raster.
 inline quint64 widgetPaintSignature(QWidget& root){
     quint64 signature=0;
@@ -21,7 +21,7 @@ inline quint64 widgetPaintSignature(QWidget& root){
         mix(qHash(child->styleSheet()));mix(child->palette().cacheKey());
         mix(qHash(child->font().key()));mix(child->isVisible());mix(child->isEnabled());
         mix(child->underMouse());mix(child->hasFocus());
-        mix(child->property("motioncamGalleryOverlayRevision").toULongLong());
+        mix(child->property("rawpreampGalleryOverlayRevision").toULongLong());
         if(auto* button=qobject_cast<QAbstractButton*>(child)){
             mix(button->isDown());mix(button->isChecked());mix(qHash(button->text()));
             mix(button->icon().cacheKey());mix(qHash(button->iconSize()));
@@ -44,4 +44,4 @@ inline quint64 widgetPaintSignature(QWidget& root){
     }
     return signature;
 }
-} // namespace motioncam
+} // namespace rawpreamp

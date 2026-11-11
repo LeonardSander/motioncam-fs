@@ -16,7 +16,7 @@ bool nearlyEqual(float lhs, float rhs) {
 } // namespace
 
 int main() {
-    using namespace motioncam;
+    using namespace rawpreamp;
 
     const auto bake = planLinearGainBake(1023.0, {64.0, 64.0, 63.0, 63.0}, false);
     assert(bake.destinationWhite == 4095.0);

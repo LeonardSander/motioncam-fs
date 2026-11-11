@@ -12,7 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
-namespace motioncam {
+namespace rawpreamp {
 
 class LRUCache {
 public:

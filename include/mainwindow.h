@@ -26,7 +26,7 @@
 #include <shobjidl.h>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
     struct MountedFile {
         MountedFile(MountId mountId, QString srcFile, QString importFile = {}) :
             mountId(mountId), srcFile(srcFile),
@@ -99,9 +99,9 @@ public:
                                      bool generateThumbnails);
 
 signals:
-    void thumbnailPerformanceFinished(motioncam::MountId mountId, bool success,
+    void thumbnailPerformanceFinished(rawpreamp::MountId mountId, bool success,
                                       qint64 elapsedMilliseconds);
-    void galleryThumbnailBackfillFinished(motioncam::MountId mountId, int frames,
+    void galleryThumbnailBackfillFinished(rawpreamp::MountId mountId, int frames,
                                           qint64 elapsedMilliseconds);
 
 protected:
@@ -136,11 +136,11 @@ private slots:
     void onSaveSessionAs();
     void onClearRecentSessions();
 
-    void playMount(motioncam::MountId mountId, bool startRender = true);
-    void showGallery(motioncam::MountId mountId, bool startRender);
-    void startGalleryRender(motioncam::MountId mountId, double startSeconds = 0.0,
+    void playMount(rawpreamp::MountId mountId, bool startRender = true);
+    void showGallery(rawpreamp::MountId mountId, bool startRender);
+    void startGalleryRender(rawpreamp::MountId mountId, double startSeconds = 0.0,
                             bool backfillThumbnails = false);
-    motioncam::RenderSettings settingsForMount(motioncam::MountId mountId) const;
+    rawpreamp::RenderSettings settingsForMount(rawpreamp::MountId mountId) const;
     void openMountedDirectory(QWidget* fileWidget);
     void revealSourceJson(const QString& jsonPath,
                           const QString& clipPath = {});
@@ -152,7 +152,7 @@ private slots:
     void finalizeSelectedFrames();
     void clearSelectedFrames();
     void selectAllFrames();
-    void renderDroppedFrameThumbnail(motioncam::MountId mountId, int sourceFrame);
+    void renderDroppedFrameThumbnail(rawpreamp::MountId mountId, int sourceFrame);
     void finalizeAncillaryOnly(QWidget* fileWidget, const QString& mode);
     void finalizeCameraNative(QWidget* fileWidget, const QString& mode, bool metadataOnly,
                               bool allowHardwareEncoder = true);
@@ -168,17 +168,17 @@ private:
     void scheduleOptionsUpdate();
     void updateSelectionUi();
     void updateClipIndices();
-    void updateLocalBadge(motioncam::MountId mountId);
-    void updateThumbnail(motioncam::MountId mountId);
+    void updateLocalBadge(rawpreamp::MountId mountId);
+    void updateThumbnail(rawpreamp::MountId mountId);
     void mountFiles(
         const QStringList& filePaths,
-        const std::function<void(const motioncam::MountedFile&)>& mounted = {});
+        const std::function<void(const rawpreamp::MountedFile&)>& mounted = {});
     void mountFileImpl(const QString& filePath, const QString& importPath,
                        const QString& temporaryRoot = {},
                        const QString& sidecarPath = {},
                        const QString& gyroflowSidecarPath = {});
-    void cleanupArchiveMount(motioncam::MountId mountId);
-    QWidget* fileWidgetForMount(motioncam::MountId mountId) const;
+    void cleanupArchiveMount(rawpreamp::MountId mountId);
+    QWidget* fileWidgetForMount(rawpreamp::MountId mountId) const;
     bool saveSessionToFile(const QString& path);
     bool confirmSaveBeforeReplacingSession();
     void loadSessionFromFile(const QString& path);
@@ -210,16 +210,16 @@ private:
     std::optional<QString> ensureRifeRuntime();
 
 private:
-    motioncam::RenderSettings buildRenderSettings() const;
+    rawpreamp::RenderSettings buildRenderSettings() const;
 
 private:
     Ui::MainWindow *ui;
-    std::unique_ptr<motioncam::IFuseFileSystem> mFuseFilesystem;
-    QList<motioncam::MountedFile> mMountedFiles;
+    std::unique_ptr<rawpreamp::IFuseFileSystem> mFuseFilesystem;
+    QList<rawpreamp::MountedFile> mMountedFiles;
     QString mCacheRootFolder;
-    motioncam::RenderSettings mRenderSettings;
-    motioncam::RenderSettings mGlobalRenderSettings;
-    std::optional<motioncam::CalibrationData> mGlobalCalibration;
+    rawpreamp::RenderSettings mRenderSettings;
+    rawpreamp::RenderSettings mGlobalRenderSettings;
+    std::optional<rawpreamp::CalibrationData> mGlobalCalibration;
     
     QFutureWatcher<void>* mProcessingWatcher;
     bool mProcessingInProgress;
@@ -229,17 +229,17 @@ private:
     QString mMountPathInProgress;
     QPointer<QProgressDialog> mImportBatchProgress;
     bool mImportBatchActive = false;
-    QList<motioncam::MountId> mDeferredImportThumbnails;
+    QList<rawpreamp::MountId> mDeferredImportThumbnails;
     bool mCancelImportBatch = false;
     bool mDeleteOnUnmount = false;
-    motioncam::CachePolicy mCachePolicy = motioncam::CachePolicy::Quota;
+    rawpreamp::CachePolicy mCachePolicy = rawpreamp::CachePolicy::Quota;
     std::uint64_t mCacheQuotaBytes = 30ULL * 1024 * 1024 * 1024;
     int mCacheCleanupIntervalSeconds = 30;
     QTimer* mCacheCleanupTimer = nullptr;
-    QHash<motioncam::MountId, motioncam::RenderSettings> mLocalSettings;
-    QSet<motioncam::MountId> mSelectedMountIds;
-    QHash<motioncam::MountId, QSet<int>> mSelectedFrames;
-    QHash<motioncam::MountId, QString> mArchiveTemporaryRoots;
+    QHash<rawpreamp::MountId, rawpreamp::RenderSettings> mLocalSettings;
+    QSet<rawpreamp::MountId> mSelectedMountIds;
+    QHash<rawpreamp::MountId, QSet<int>> mSelectedFrames;
+    QHash<rawpreamp::MountId, QString> mArchiveTemporaryRoots;
     QPushButton* mFinalizeSelectedFramesButton = nullptr;
     QPushButton* mClearSelectedFramesButton = nullptr;
     QPushButton* mSelectAllFramesButton = nullptr;
@@ -251,8 +251,8 @@ private:
     QStringList mRecentSessions;
     QMenu* mRecentSessionsMenu = nullptr;
     QFutureSynchronizer<void> mThumbnailTasks;
-    QHash<motioncam::MountId, std::shared_ptr<std::atomic_bool>> mThumbnailCancellations;
-    QHash<motioncam::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
+    QHash<rawpreamp::MountId, std::shared_ptr<std::atomic_bool>> mThumbnailCancellations;
+    QHash<rawpreamp::MountId, QPointer<FrameTimingDialog>> mTimingDialogs;
     QPointer<ClipPlayerDialog> mClipPlayer;
     QPointer<SettingsDialog> mSettingsDialog;
     double mTouchSplitterHorizontal=0.5,mTouchSplitterVertical=0.5;
@@ -267,7 +267,7 @@ private:
     QString mPendingAndroidNoticeMessage;
     bool mAndroidExternalEditorLeftApp = false;
 #endif
-    motioncam::MountId mGalleryMountId = motioncam::InvalidMountId;
+    rawpreamp::MountId mGalleryMountId = rawpreamp::InvalidMountId;
     std::atomic_uint64_t mGalleryGeneration{0};
     // Preview filesystems are independent per mount. Serialize their large
     // frame working sets so cancellation cannot overlap multiple 108 MP jobs.

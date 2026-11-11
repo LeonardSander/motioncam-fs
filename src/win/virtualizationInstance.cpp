@@ -1,6 +1,6 @@
 #include "win/virtualizationInstance.h"
 
-using namespace motioncam;
+using namespace rawpreamp;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 // Virtualization instance control API wrappers.

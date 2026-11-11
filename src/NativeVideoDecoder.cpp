@@ -2,9 +2,9 @@
 #include "DebugInstrumentation.h"
 #include "SourceMedia.h"
 #include "SourceInput.h"
-#include "DirectLogDecoder.h"
+#include "NativeVideoDecoder.h"
 #include "HardwareVideoDecoder.h"
-#include "DirectLogGpuRgb.h"
+#include "NativeVideoGpuRgb.h"
 #include "CpuWorkerBudget.h"
 #include <spdlog/spdlog.h>
 #include <boost/algorithm/string.hpp>
@@ -33,11 +33,11 @@ extern "C" {
 extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/dict.h>
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libavutil/hwcontext_vulkan.h>
 #endif
 }
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
 extern "C" {
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
@@ -82,9 +82,9 @@ bool gpuYuvUploadSupported(int format) {
     }
 }
 
-bool directLogDiagnosticsEnabled() {
+bool nativeVideoDiagnosticsEnabled() {
     static const bool enabled = [] {
-        const char* value = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
+        const char* value = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_DIAGNOSTICS");
         return value && value[0] != '\0' && std::string(value) != "0";
     }();
     return enabled;
@@ -92,29 +92,29 @@ bool directLogDiagnosticsEnabled() {
 
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
-        motioncam::diagnosticNow() - start).count();
+        rawpreamp::diagnosticNow() - start).count();
 }
 
 
-struct CachedDirectLogTimeline {
-    motioncam::DirectLogVideoInfo videoInfo;
-    std::vector<motioncam::DirectLogFrameInfo> frames;
+struct CachedNativeVideoTimeline {
+    rawpreamp::NativeVideoVideoInfo videoInfo;
+    std::vector<rawpreamp::NativeVideoFrameInfo> frames;
 };
 
-std::mutex directLogTimelineCacheMutex;
-std::unordered_map<std::string, CachedDirectLogTimeline> directLogTimelineCache;
+std::mutex nativeVideoTimelineCacheMutex;
+std::unordered_map<std::string, CachedNativeVideoTimeline> nativeVideoTimelineCache;
 // Version 5 timelines omit packets marked for discard. Some cameras append a
 // final, timestamped HEVC access unit which the decoder intentionally emits no
 // frame for; retaining it creates a phantom still at the end of the clip.
 // Version 6 refreshes pixel-format labels, including CineForm RGB.
-constexpr uint64_t directLogTimelineCacheMagic = 0x4d4346544c000006ULL;
+constexpr uint64_t nativeVideoTimelineCacheMagic = 0x4d4346544c000006ULL;
 
-std::string directLogTimelineCacheKey(const std::string& path) {
+std::string nativeVideoTimelineCacheKey(const std::string& path) {
     std::error_code error;
     const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
-    const auto size = motioncam::sourceFileSize(absolute, error);
+    const auto size = rawpreamp::sourceFileSize(absolute, error);
     if (error) return absolute.string();
-    const auto revision = motioncam::sourceRevision(absolute.string());
+    const auto revision = rawpreamp::sourceRevision(absolute.string());
     if (!revision.empty()) return absolute.string() + ":" + std::to_string(size) + ":" + revision;
     const auto modified = std::filesystem::last_write_time(absolute, error);
     if (error) return absolute.string() + ":" + std::to_string(size);
@@ -126,37 +126,37 @@ std::string directLogTimelineCacheKey(const std::string& path) {
 // surfaces/thread pools.  The gallery may request a second decoder for a
 // thumbnail while the mounted decoder is still alive; serialize initialization
 // so those peak allocations cannot stack during a long import.
-std::mutex directLogInitializationMutex;
-std::atomic_uint directLogHardwareDecoderCount{0};
+std::mutex nativeVideoInitializationMutex;
+std::atomic_uint nativeVideoHardwareDecoderCount{0};
 
 struct SharedHardwareDevice {
     AVBufferRef* reference = nullptr;
     unsigned int users = 0;
 };
 
-std::mutex directLogHardwareDeviceMutex;
-std::unordered_map<int, SharedHardwareDevice> directLogHardwareDevices;
+std::mutex nativeVideoHardwareDeviceMutex;
+std::unordered_map<int, SharedHardwareDevice> nativeVideoHardwareDevices;
 
 AVBufferRef* acquireHardwareDevice(AVHWDeviceType type) {
-    std::lock_guard lock(directLogHardwareDeviceMutex);
-    auto& shared = directLogHardwareDevices[static_cast<int>(type)];
+    std::lock_guard lock(nativeVideoHardwareDeviceMutex);
+    auto& shared = nativeVideoHardwareDevices[static_cast<int>(type)];
     if (!shared.reference) {
         // Decoder devices do not present. Window-system extensions belong to
         // the gallery presenter and its shared Vulkan device.
         const int created = av_hwdevice_ctx_create(
             &shared.reference, type, nullptr, nullptr, 0);
         if (created < 0) {
-            directLogHardwareDevices.erase(static_cast<int>(type));
+            nativeVideoHardwareDevices.erase(static_cast<int>(type));
             return nullptr;
         }
-        spdlog::info("DirectLogDecoder: created shared {} hardware device",
+        spdlog::info("NativeVideoDecoder: created shared {} hardware device",
                      av_hwdevice_get_type_name(type));
     }
     AVBufferRef* reference = av_buffer_ref(shared.reference);
     if (!reference) {
         if (shared.users == 0) {
             av_buffer_unref(&shared.reference);
-            directLogHardwareDevices.erase(static_cast<int>(type));
+            nativeVideoHardwareDevices.erase(static_cast<int>(type));
         }
         return nullptr;
     }
@@ -168,25 +168,25 @@ void releaseHardwareDevice(AVBufferRef** reference) {
     if (!reference || !*reference) return;
     const auto* device = reinterpret_cast<const AVHWDeviceContext*>((*reference)->data);
     const int type = device ? static_cast<int>(device->type) : -1;
-    std::lock_guard lock(directLogHardwareDeviceMutex);
+    std::lock_guard lock(nativeVideoHardwareDeviceMutex);
     av_buffer_unref(reference);
-    const auto it = directLogHardwareDevices.find(type);
-    if (it == directLogHardwareDevices.end()) return;
+    const auto it = nativeVideoHardwareDevices.find(type);
+    if (it == nativeVideoHardwareDevices.end()) return;
     if (--it->second.users == 0) {
         av_buffer_unref(&it->second.reference);
-        directLogHardwareDevices.erase(it);
-        spdlog::info("DirectLogDecoder: released shared {} hardware device",
+        nativeVideoHardwareDevices.erase(it);
+        spdlog::info("NativeVideoDecoder: released shared {} hardware device",
                      av_hwdevice_get_type_name(static_cast<AVHWDeviceType>(type)));
     }
 }
 
-std::filesystem::path directLogTimelineCachePath(const std::string& key) {
+std::filesystem::path nativeVideoTimelineCachePath(const std::string& key) {
     const char* cacheRoot = std::getenv("XDG_CACHE_HOME");
     std::filesystem::path root;
     if (cacheRoot && cacheRoot[0] != '\0') root = cacheRoot;
     else if (const char* home = std::getenv("HOME")) root = std::filesystem::path(home) / ".cache";
     else root = std::filesystem::temp_directory_path();
-    return root / "motioncam-fuse" / "directlog-timelines" /
+    return root / "rawpreamp" / "native-video-timelines" /
            (std::to_string(std::hash<std::string>{}(key)) + ".bin");
 }
 
@@ -208,11 +208,11 @@ void writeString(std::ostream& output, const std::string& value) {
     output.write(value.data(), size);
 }
 
-bool loadPersistentTimeline(const std::string& key, CachedDirectLogTimeline& cached) {
-    motioncam::SourceInputStream input(directLogTimelineCachePath(key), std::ios::binary);
+bool loadPersistentTimeline(const std::string& key, CachedNativeVideoTimeline& cached) {
+    rawpreamp::SourceInputStream input(nativeVideoTimelineCachePath(key), std::ios::binary);
     uint64_t magic = 0;
     std::string storedKey;
-    if (!readValue(input, magic) || magic != directLogTimelineCacheMagic ||
+    if (!readValue(input, magic) || magic != nativeVideoTimelineCacheMagic ||
         !readString(input, storedKey) || storedKey != key) return false;
     auto& video = cached.videoInfo;
     uint8_t hlg = 0, log60 = 0;
@@ -240,15 +240,15 @@ bool loadPersistentTimeline(const std::string& key, CachedDirectLogTimeline& cac
            !cached.frames.empty() && input.peek() == std::char_traits<char>::eof();
 }
 
-void savePersistentTimeline(const std::string& key, const CachedDirectLogTimeline& cached) {
-    const auto path = directLogTimelineCachePath(key);
+void savePersistentTimeline(const std::string& key, const CachedNativeVideoTimeline& cached) {
+    const auto path = nativeVideoTimelineCachePath(key);
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     if (error) return;
     const auto temporary = path.string() + ".tmp";
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) return;
-    writeValue(output, directLogTimelineCacheMagic);
+    writeValue(output, nativeVideoTimelineCacheMagic);
     writeString(output, key);
     const auto& video = cached.videoInfo;
     writeValue(output, video.width); writeValue(output, video.height);
@@ -273,7 +273,7 @@ void savePersistentTimeline(const std::string& key, const CachedDirectLogTimelin
         error.clear();
         std::filesystem::rename(temporary, path, error);
     }
-    motioncam::trimSourceAnalysisCache(path.parent_path().parent_path());
+    rawpreamp::trimSourceAnalysisCache(path.parent_path().parent_path());
 }
 
 void configureSoftwareThreading(AVCodecContext* context) {
@@ -288,7 +288,7 @@ void configureSoftwareThreading(AVCodecContext* context) {
 template<typename Function>
 void parallelPixelRanges(size_t count, Function&& function) {
     constexpr size_t minimumPerWorker = 1u << 20;
-    const unsigned int available = motioncam::utils::availableCpuWorkers();
+    const unsigned int available = rawpreamp::utils::availableCpuWorkers();
     const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
         std::min<unsigned int>(available, 4),
         std::max<size_t>(1, (count + minimumPerWorker - 1) / minimumPerWorker)));
@@ -309,9 +309,9 @@ void parallelPixelRanges(size_t count, Function&& function) {
 
 } // namespace
 
-namespace motioncam {
+namespace rawpreamp {
 
-DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
+NativeVideoDecoder::NativeVideoDecoder(const std::string& filePath)
     : mFilePath(filePath),
       mFormatContext(nullptr),
       mCodecContext(nullptr),
@@ -327,36 +327,36 @@ DirectLogDecoder::DirectLogDecoder(const std::string& filePath)
       mVideoStreamIndex(-1),
       mLastDecodedFrame(-1) {
     
-    spdlog::info("DirectLogDecoder: Initializing for {}", filePath);
-    const auto initializationStarted = motioncam::diagnosticNow();
-    std::lock_guard initializationLock(directLogInitializationMutex);
+    spdlog::info("NativeVideoDecoder: Initializing for {}", filePath);
+    const auto initializationStarted = rawpreamp::diagnosticNow();
+    std::lock_guard initializationLock(nativeVideoInitializationMutex);
     auto stageStarted = initializationStarted;
     try {
         initFFmpeg();
-        if (directLogDiagnosticsEnabled())
+        if (nativeVideoDiagnosticsEnabled())
             spdlog::info(
-                "DirectLog diagnostic: decoder_init stage=demuxer_open latency_ms={:.3f}",
+                "Native Video diagnostic: decoder_init stage=demuxer_open latency_ms={:.3f}",
                 elapsedMilliseconds(stageStarted));
-        stageStarted = motioncam::diagnosticNow();
+        stageStarted = rawpreamp::diagnosticNow();
         analyzeVideo();
     } catch (...) {
         cleanup();
         throw;
     }
-    if (directLogDiagnosticsEnabled())
+    if (nativeVideoDiagnosticsEnabled())
         spdlog::info(
-            "DirectLog diagnostic: decoder_init stage=timeline latency_ms={:.3f} total_ms={:.3f}",
+            "Native Video diagnostic: decoder_init stage=timeline latency_ms={:.3f} total_ms={:.3f}",
             elapsedMilliseconds(stageStarted), elapsedMilliseconds(initializationStarted));
 }
 
-DirectLogDecoder::~DirectLogDecoder() {
+NativeVideoDecoder::~NativeVideoDecoder() {
     cleanup();
 }
 
 
-void DirectLogDecoder::initFFmpeg() {
+void NativeVideoDecoder::initFFmpeg() {
     // Open input file
-    const int openResult = motioncam::openSourceMedia(&mFormatContext, mFilePath);
+    const int openResult = rawpreamp::openSourceMedia(&mFormatContext, mFilePath);
     if (openResult < 0) {
         throw std::runtime_error("Could not open video file: " + mFilePath +
                                  " (" + ffmpegErrorString(openResult) + ")");
@@ -410,7 +410,7 @@ void DirectLogDecoder::initFFmpeg() {
     mTimeBase = mFormatContext->streams[mVideoStreamIndex]->time_base;
 }
 
-void DirectLogDecoder::initDecoder() {
+void NativeVideoDecoder::initDecoder() {
     if (mDecoderInitialized) return;
     AVCodecParameters* codecpar = mFormatContext->streams[mVideoStreamIndex]->codecpar;
 
@@ -425,7 +425,7 @@ void DirectLogDecoder::initDecoder() {
         throw std::runtime_error("Could not copy codec parameters");
     }
     
-    const char* forceSoftwareValue = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_FORCE_SOFTWARE");
+    const char* forceSoftwareValue = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_FORCE_SOFTWARE");
     const bool forceSoftware = mForceSoftwareDecoder ||
         (forceSoftwareValue && forceSoftwareValue[0] != '\0' &&
          std::string(forceSoftwareValue) != "0");
@@ -433,7 +433,7 @@ void DirectLogDecoder::initDecoder() {
     bool mediaCodecDecoder = false;
 #ifdef __ANDROID__
     const AVCodec* mediaCodec = !hardwareDecoder && !forceSoftware
-        ? motioncam::findWrappedHardwareDecoder(codecpar->codec_id, "mediacodec") : nullptr;
+        ? rawpreamp::findWrappedHardwareDecoder(codecpar->codec_id, "mediacodec") : nullptr;
     if (mediaCodec) {
         static std::once_flag mediaCodecJni;
         static int mediaCodecJniStatus = AVERROR(EINVAL);
@@ -443,7 +443,7 @@ void DirectLogDecoder::initDecoder() {
                 ? av_jni_set_java_vm(javaVm, nullptr) : AVERROR(EINVAL);
         });
         if (mediaCodecJniStatus < 0) {
-            qWarning() << "DirectLog could not register the Android Java VM with FFmpeg"
+            qWarning() << "Native Video could not register the Android Java VM with FFmpeg"
                        << mediaCodecJniStatus;
         } else {
             AVCodecContext* context = avcodec_alloc_context3(mediaCodec);
@@ -459,7 +459,7 @@ void DirectLogDecoder::initDecoder() {
     }
 #endif
     if (forceSoftware)
-        spdlog::info("DirectLogDecoder: software decoding forced");
+        spdlog::info("NativeVideoDecoder: software decoding forced");
     if (!hardwareDecoder && !mediaCodecDecoder && codecpar->codec_id == AV_CODEC_ID_AV1) {
         if (const AVCodec* dav1d = avcodec_find_decoder_by_name("libdav1d")) {
             avcodec_free_context(&mCodecContext);
@@ -473,7 +473,7 @@ void DirectLogDecoder::initDecoder() {
     // API default can otherwise leave external decoders effectively serial.
     if (!mediaCodecDecoder) configureSoftwareThreading(mCodecContext);
     if (!hardwareDecoder && !mediaCodecDecoder)
-        spdlog::info("DirectLogDecoder: using {} software decoding with automatic threading",
+        spdlog::info("NativeVideoDecoder: using {} software decoding with automatic threading",
                      mCodec->name);
 
     // Open codec. A device being available does not guarantee support for the
@@ -481,7 +481,7 @@ void DirectLogDecoder::initDecoder() {
     // with the software decoder before rejecting an otherwise valid source.
 #ifdef __ANDROID__
     if (mediaCodecDecoder && !mMediaCodecSurfaceRejected) {
-        const char* surface = motioncam::debugEnvironment("MOTIONCAM_ANDROID_MEDIACODEC_SURFACE");
+        const char* surface = rawpreamp::debugEnvironment("RAWPREAMP_ANDROID_MEDIACODEC_SURFACE");
         if (!surface || surface[0] != '0') {
             mCodecContext->hw_device_ctx = MediaCodecImageReader::createDevice(
                 codecpar->width, codecpar->height);
@@ -515,7 +515,7 @@ void DirectLogDecoder::initDecoder() {
             throw std::runtime_error("Could not open codec " +
                 std::string(mCodec ? mCodec->name : "(unknown)") + ": " +
                 ffmpegErrorString(decoderOpenResult));
-        spdlog::warn("DirectLogDecoder: {} decoder failed to open clip ({}); retrying in software",
+        spdlog::warn("NativeVideoDecoder: {} decoder failed to open clip ({}); retrying in software",
                      mediaCodecDecoder ? "MediaCodec" : "hardware",
                      ffmpegErrorString(decoderOpenResult));
         avcodec_free_context(&mCodecContext);
@@ -533,7 +533,7 @@ void DirectLogDecoder::initDecoder() {
         configureSoftwareThreading(mCodecContext);
         if (avcodec_open2(mCodecContext, mCodec, nullptr) < 0)
             throw std::runtime_error("Could not open software decoder fallback");
-        spdlog::info("DirectLogDecoder: using {} software decoding with automatic threading",
+        spdlog::info("NativeVideoDecoder: using {} software decoding with automatic threading",
                      mCodec->name);
     }
     
@@ -546,36 +546,36 @@ void DirectLogDecoder::initDecoder() {
     mDecoderInitialized = true;
     mHardwareDecoderActive = hardwareDecoder;
     if (hardwareDecoder) {
-        const unsigned int active = directLogHardwareDecoderCount.fetch_add(1) + 1;
-        spdlog::info("DirectLogDecoder: hardware context opened active={} source={}",
+        const unsigned int active = nativeVideoHardwareDecoderCount.fetch_add(1) + 1;
+        spdlog::info("NativeVideoDecoder: hardware context opened active={} source={}",
                      active, mFilePath);
     }
 }
 
-void DirectLogDecoder::analyzeVideo() {
-    const std::string cacheKey = directLogTimelineCacheKey(mFilePath);
+void NativeVideoDecoder::analyzeVideo() {
+    const std::string cacheKey = nativeVideoTimelineCacheKey(mFilePath);
     const auto classifyTransfer = [&] {
         mVideoInfo.isHLG = isHLGVideo(mFilePath);
         mVideoInfo.isLOG60 = isLOG60Video(mFilePath);
     };
     {
-        std::lock_guard<std::mutex> lock(directLogTimelineCacheMutex);
-        if (const auto cached = directLogTimelineCache.find(cacheKey);
-            cached != directLogTimelineCache.end()) {
+        std::lock_guard<std::mutex> lock(nativeVideoTimelineCacheMutex);
+        if (const auto cached = nativeVideoTimelineCache.find(cacheKey);
+            cached != nativeVideoTimelineCache.end()) {
             mVideoInfo = cached->second.videoInfo;
             classifyTransfer();
             mFrames = cached->second.frames;
-            spdlog::info("DirectLogDecoder: reused cached timeline for {} ({} frames)",
+            spdlog::info("NativeVideoDecoder: reused cached timeline for {} ({} frames)",
                          mFilePath, mFrames.size());
             return;
         }
-        CachedDirectLogTimeline persistent;
+        CachedNativeVideoTimeline persistent;
         if (loadPersistentTimeline(cacheKey, persistent)) {
             mVideoInfo = persistent.videoInfo;
             classifyTransfer();
             mFrames = persistent.frames;
-            directLogTimelineCache.emplace(cacheKey, std::move(persistent));
-            spdlog::info("DirectLogDecoder: reused persistent timeline for {} ({} frames)",
+            nativeVideoTimelineCache.emplace(cacheKey, std::move(persistent));
+            spdlog::info("NativeVideoDecoder: reused persistent timeline for {} ({} frames)",
                          mFilePath, mFrames.size());
             return;
         }
@@ -646,7 +646,7 @@ void DirectLogDecoder::analyzeVideo() {
     
     mVideoInfo.duration = static_cast<double>(mFormatContext->duration) / AV_TIME_BASE;
     
-    // DirectLog inputs are frame-based video streams: each video packet is one
+    // Native Video inputs are frame-based video streams: each video packet is one
     // encoded access unit. Building the timeline by decoding every frame made
     // a cold import take approximately as long as decoding the entire clip.
     // Demuxing preserves exact VFR presentation timestamps and key-frame flags
@@ -660,7 +660,7 @@ void DirectLogDecoder::analyzeVideo() {
             // useful fallback for simple streams that omit presentation time.
             if (pts == AV_NOPTS_VALUE) pts = mPacket->dts;
             if (pts != AV_NOPTS_VALUE) {
-                DirectLogFrameInfo frameInfo;
+                NativeVideoFrameInfo frameInfo;
                 frameInfo.frameNumber = 0;
                 frameInfo.pts = pts;
                 frameInfo.timestamp = static_cast<Timestamp>(
@@ -691,20 +691,20 @@ void DirectLogDecoder::analyzeVideo() {
     // Seek back to beginning
     av_seek_frame(mFormatContext, mVideoStreamIndex, 0, AVSEEK_FLAG_BACKWARD);
     {
-        std::lock_guard<std::mutex> lock(directLogTimelineCacheMutex);
-        CachedDirectLogTimeline cached{mVideoInfo, mFrames};
-        directLogTimelineCache[cacheKey] = cached;
+        std::lock_guard<std::mutex> lock(nativeVideoTimelineCacheMutex);
+        CachedNativeVideoTimeline cached{mVideoInfo, mFrames};
+        nativeVideoTimelineCache[cacheKey] = cached;
         savePersistentTimeline(cacheKey, cached);
     }
     
-    spdlog::info("DirectLogDecoder: Analyzed video - {}x{} @ {:.2f}fps, {} frames, format: {}, HLG: {}, LOG60: {}",
+    spdlog::info("NativeVideoDecoder: Analyzed video - {}x{} @ {:.2f}fps, {} frames, format: {}, HLG: {}, LOG60: {}",
                  mVideoInfo.width, mVideoInfo.height, mVideoInfo.fps, mVideoInfo.totalFrames,
                  mVideoInfo.pixelFormat, mVideoInfo.isHLG, mVideoInfo.isLOG60);
 }
 
 
 
-bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
+bool NativeVideoDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbData,
                                     int outputWidth, int outputHeight,
                                     bool preserveLogEncoded, bool smoothChroma) {
     const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
@@ -715,7 +715,7 @@ bool DirectLogDecoder::extractFrame(int frameNumber, std::vector<uint16_t>& rgbD
                             width, height, preserveLogEncoded, smoothChroma);
 }
 
-bool DirectLogDecoder::extractFrameDeferred(int frameNumber,
+bool NativeVideoDecoder::extractFrameDeferred(int frameNumber,
         std::vector<uint16_t>& rgbData, int outputWidth, int outputHeight,
         bool smoothChroma) {
     const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
@@ -726,7 +726,7 @@ bool DirectLogDecoder::extractFrameDeferred(int frameNumber,
                             width, height, false, smoothChroma, nullptr, true);
 }
 
-bool DirectLogDecoder::extractFrameTextureDeferred(int frameNumber,
+bool NativeVideoDecoder::extractFrameTextureDeferred(int frameNumber,
         int outputWidth, int outputHeight, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase) {
     if (outputWidth <= 0 || outputHeight <= 0) return false;
@@ -736,9 +736,9 @@ bool DirectLogDecoder::extractFrameTextureDeferred(int frameNumber,
         outputWidth, outputHeight, false, smoothChroma, cfaPhase, true, true);
 }
 
-bool DirectLogDecoder::canExtractFrameTexture() {
-#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && defined(MOTIONCAM_HAS_AVFILTER)
-    const char* enabled = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB");
+bool NativeVideoDecoder::canExtractFrameTexture() {
+#if defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO) && defined(RAWPREAMP_HAS_AVFILTER)
+    const char* enabled = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_GPU_RGB");
     if (enabled && enabled[0] == '0') return false;
     initDecoder();
     // Software YUV can also be uploaded to the common Vulkan renderer;
@@ -751,7 +751,7 @@ bool DirectLogDecoder::canExtractFrameTexture() {
 #endif
 }
 
-bool DirectLogDecoder::extractFrameBayer(int frameNumber,
+bool NativeVideoDecoder::extractFrameBayer(int frameNumber,
         std::vector<uint16_t>& bayerData,
         const std::array<uint8_t, 4>& cfaPhase,
         int outputWidth, int outputHeight) {
@@ -763,7 +763,7 @@ bool DirectLogDecoder::extractFrameBayer(int frameNumber,
                             width, height, false, false, &cfaPhase);
 }
 
-bool DirectLogDecoder::extractFrameBayerDeferred(int frameNumber,
+bool NativeVideoDecoder::extractFrameBayerDeferred(int frameNumber,
         std::vector<uint16_t>& bayerData,
         const std::array<uint8_t, 4>& cfaPhase,
         int outputWidth, int outputHeight) {
@@ -775,7 +775,7 @@ bool DirectLogDecoder::extractFrameBayerDeferred(int frameNumber,
                             width, height, false, false, &cfaPhase, true);
 }
 
-bool DirectLogDecoder::extractFrameBayerIntoBytes(int frameNumber,
+bool NativeVideoDecoder::extractFrameBayerIntoBytes(int frameNumber,
         std::vector<uint8_t>& bytes, size_t pixelOffset,
         const std::array<uint8_t, 4>& cfaPhase,
         int outputWidth, int outputHeight, bool deferDownload) {
@@ -794,7 +794,7 @@ bool DirectLogDecoder::extractFrameBayerIntoBytes(int frameNumber,
         width, height, false, false, &cfaPhase, deferDownload);
 }
 
-bool DirectLogDecoder::extractFrameIntoBytes(int frameNumber,
+bool NativeVideoDecoder::extractFrameIntoBytes(int frameNumber,
         std::vector<uint8_t>& bytes, size_t pixelOffset,
         int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma) {
@@ -815,7 +815,7 @@ bool DirectLogDecoder::extractFrameIntoBytes(int frameNumber,
         width, height, preserveLogEncoded, smoothChroma);
 }
 
-bool DirectLogDecoder::extractFrameIntoBytesDeferred(int frameNumber,
+bool NativeVideoDecoder::extractFrameIntoBytesDeferred(int frameNumber,
         std::vector<uint8_t>& bytes, size_t pixelOffset,
         int outputWidth, int outputHeight, bool smoothChroma) {
     const int width = outputWidth > 0 ? outputWidth : mVideoInfo.width;
@@ -833,16 +833,16 @@ bool DirectLogDecoder::extractFrameIntoBytesDeferred(int frameNumber,
         width, height, false, smoothChroma, nullptr, true);
 }
 
-std::shared_ptr<void> DirectLogDecoder::pendingGpuLease() const {
-#ifdef MOTIONCAM_HAS_AVFILTER
+std::shared_ptr<void> NativeVideoDecoder::pendingGpuLease() const {
+#ifdef RAWPREAMP_HAS_AVFILTER
     return mDirectGpuRgb?mDirectGpuRgb->deviceLease():nullptr;
 #else
     return {};
 #endif
 }
 
-bool DirectLogDecoder::pendingGpuTexture(const void*& gpu, const void*& texture) const {
-#ifdef MOTIONCAM_HAS_AVFILTER
+bool NativeVideoDecoder::pendingGpuTexture(const void*& gpu, const void*& texture) const {
+#ifdef RAWPREAMP_HAS_AVFILTER
     return mDirectGpuRgb && mDirectGpuRgb->pendingTexture(gpu, texture);
 #else
     (void)gpu; (void)texture;
@@ -850,8 +850,8 @@ bool DirectLogDecoder::pendingGpuTexture(const void*& gpu, const void*& texture)
 #endif
 }
 
-bool DirectLogDecoder::downloadPendingGpu(uint16_t* pixels, size_t samples) {
-#ifdef MOTIONCAM_HAS_AVFILTER
+bool NativeVideoDecoder::downloadPendingGpu(uint16_t* pixels, size_t samples) {
+#ifdef RAWPREAMP_HAS_AVFILTER
     return mDirectGpuRgb && mDirectGpuRgb->downloadPending(pixels, samples);
 #else
     (void)pixels; (void)samples;
@@ -859,7 +859,7 @@ bool DirectLogDecoder::downloadPendingGpu(uint16_t* pixels, size_t samples) {
 #endif
 }
 
-bool DirectLogDecoder::recoverFrameInSoftware(int frameNumber, uint16_t* pixels,
+bool NativeVideoDecoder::recoverFrameInSoftware(int frameNumber, uint16_t* pixels,
         size_t samples, int outputWidth, int outputHeight, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase) {
     std::lock_guard lock(mMutex);
@@ -870,20 +870,20 @@ bool DirectLogDecoder::recoverFrameInSoftware(int frameNumber, uint16_t* pixels,
         return extractFrameIntoLocked(frameNumber, pixels, samples,
             outputWidth, outputHeight, false, smoothChroma, cfaPhase, false);
     } catch (const std::exception& error) {
-        spdlog::error("DirectLog software recovery failed: {}", error.what());
+        spdlog::error("Native Video software recovery failed: {}", error.what());
         return false;
     }
 }
 
-bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
+bool NativeVideoDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase,
         bool deferDownload, bool textureOnly) {
-    const auto lockStarted = motioncam::diagnosticNow();
+    const auto lockStarted = rawpreamp::diagnosticNow();
     std::lock_guard<std::mutex> lock(mMutex);
-    if (directLogDiagnosticsEnabled())
-        spdlog::info("DirectLog diagnostic: frame={} decoder_lock_wait_ms={:.3f}",
+    if (nativeVideoDiagnosticsEnabled())
+        spdlog::info("Native Video diagnostic: frame={} decoder_lock_wait_ms={:.3f}",
                      frameNumber, elapsedMilliseconds(lockStarted));
     bool result = extractFrameIntoLocked(frameNumber, rgbData, sampleCount, outputWidth,
                                   outputHeight, preserveLogEncoded, smoothChroma,
@@ -901,27 +901,27 @@ bool DirectLogDecoder::extractFrameInto(int frameNumber, uint16_t* rgbData,
     return result;
 }
 
-bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData,
+bool NativeVideoDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase,
         bool deferDownload, bool textureOnly) {
-    const bool diagnostics = directLogDiagnosticsEnabled();
-    const auto extractStart = motioncam::diagnosticNow();
+    const bool diagnostics = nativeVideoDiagnosticsEnabled();
+    const auto extractStart = rawpreamp::diagnosticNow();
 
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) {
         return false;
     }
     initDecoder();
     
-    const DirectLogFrameInfo& frameInfo = mFrames[frameNumber];
-    const char* cacheSetting = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_FRAME_CACHE");
+    const NativeVideoFrameInfo& frameInfo = mFrames[frameNumber];
+    const char* cacheSetting = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_FRAME_CACHE");
     const bool cacheEnabled = (!cacheSetting || cacheSetting[0] != '0') && !mMediaCodecSurfaceActive;
     auto convertDecoded = [&](AVFrame* decoded, bool advanceDecoder) {
         if (decoded->format != mReportedFrameFormat) {
             mReportedFrameFormat = static_cast<AVPixelFormat>(decoded->format);
             const auto* description = av_pix_fmt_desc_get(mReportedFrameFormat);
-            spdlog::info("DirectLogDecoder: decoded frame format={} hardware={} decoder={} source={}",
+            spdlog::info("NativeVideoDecoder: decoded frame format={} hardware={} decoder={} source={}",
                          description ? description->name : "unknown",
                          description && (description->flags & AV_PIX_FMT_FLAG_HWACCEL) != 0,
                          mCodec->name, mFilePath);
@@ -929,8 +929,8 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         // Decoding advances independently of conversion. Keep the received
         // frame available if GPU conversion fails and the caller retries.
         if (advanceDecoder) mLastDecodedFrame = frameNumber;
-        const auto conversionStart = motioncam::diagnosticNow();
-#if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
+        const auto conversionStart = rawpreamp::diagnosticNow();
+#if defined(__ANDROID__) && defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO)
         if (mMediaCodecSurfaceActive && decoded->format == AV_PIX_FMT_MEDIACODEC) {
             const int width = outputWidth > 0 ? outputWidth : decoded->width;
             const int height = outputHeight > 0 ? outputHeight : decoded->height;
@@ -943,12 +943,12 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             AVColorRange range = decoded->color_range;
             if (range == AVCOL_RANGE_UNSPECIFIED) range = mCodecContext->color_range;
             const bool fullRange = mFullRangeOverride.value_or(range == AVCOL_RANGE_JPEG);
-            const auto curve = mVideoInfo.isHLG ? DirectLogGpuRgb::TransferCurve::HLG
+            const auto curve = mVideoInfo.isHLG ? NativeVideoGpuRgb::TransferCurve::HLG
                 : mVideoInfo.isLOG60 && !preserveLogEncoded
                     ? (isLLog60NativePath(mFilePath)
-                        ? DirectLogGpuRgb::TransferCurve::LLOG60 : DirectLogGpuRgb::TransferCurve::LOG60)
-                : DirectLogGpuRgb::TransferCurve::None;
-            if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<DirectLogGpuRgb>();
+                        ? NativeVideoGpuRgb::TransferCurve::LLOG60 : NativeVideoGpuRgb::TransferCurve::LOG60)
+                : NativeVideoGpuRgb::TransferCurve::None;
+            if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<NativeVideoGpuRgb>();
             const bool rendered = mDirectGpuRgb->renderAndroidImage(decoded, image, acquireFd,
                 width, height, smoothChroma, curve, fullRange, rgbData, cfaPhase, deferDownload);
             av_frame_unref(decoded);
@@ -958,13 +958,13 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
 #endif
 
 #ifdef __ANDROID__
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")) {
-            spdlog::error("Zero-copy DirectLog requires MediaCodec hardware-buffer output");
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_REQUIRE_ZERO_COPY")) {
+            spdlog::error("Zero-copy Native Video requires MediaCodec hardware-buffer output");
             return false;
         }
 #endif
         AVFrame* hardwareFrame = decoded;
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
         // Keep Vulkan import/render/download inside the decoder lock. A cloned
         // AVFrame still crashed in libplacebo when another request sought and
         // flushed this decoder while its image was being rendered.
@@ -975,7 +975,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
                 outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
                 cfaPhase, deferDownload)) {
             if (diagnostics)
-                spdlog::info("DirectLog diagnostic: frame={} direct_proxy_conversion_ms={:.3f} decoder_total_ms={:.3f}",
+                spdlog::info("Native Video diagnostic: frame={} direct_proxy_conversion_ms={:.3f} decoder_total_ms={:.3f}",
                              frameNumber, elapsedMilliseconds(conversionStart),
                              elapsedMilliseconds(extractStart));
             return true;
@@ -986,14 +986,14 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
                 outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
                 cfaPhase, deferDownload)) {
             if (diagnostics)
-                spdlog::info("DirectLog diagnostic: frame={} gpu_conversion_ms={:.3f} decoder_total_ms={:.3f}",
+                spdlog::info("Native Video diagnostic: frame={} gpu_conversion_ms={:.3f} decoder_total_ms={:.3f}",
                              frameNumber, elapsedMilliseconds(conversionStart),
                              elapsedMilliseconds(extractStart));
             return true;
         }
 #endif
         AVFrame* conversionFrame = transferableFrame(hardwareFrame);
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
         if (conversionFrame && conversionFrame != hardwareFrame &&
             convertVulkanYUVToRGB(conversionFrame, rgbData, sampleCount,
                 outputWidth, outputHeight, preserveLogEncoded, smoothChroma,
@@ -1023,7 +1023,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
                 }
         }
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} conversion_ms={:.3f} decoder_total_ms={:.3f}",
+            spdlog::info("Native Video diagnostic: frame={} conversion_ms={:.3f} decoder_total_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(conversionStart),
                          elapsedMilliseconds(extractStart));
         return true;
@@ -1037,7 +1037,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         if (decodedPts == AV_NOPTS_VALUE) decodedPts = mFrame->pts;
         if (decodedPts == frameInfo.pts) {
             if (diagnostics)
-                spdlog::info("DirectLog diagnostic: frame={} decoder begin mode=current pts={}",
+                spdlog::info("Native Video diagnostic: frame={} decoder begin mode=current pts={}",
                              frameNumber, frameInfo.pts);
             return convertDecoded(mFrame, false);
         }
@@ -1046,7 +1046,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
          cacheEnabled && it != mDecodedFrameCache.end(); ++it) {
         if (it->first != frameInfo.pts) continue;
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} decoder begin mode=cache pts={}",
+            spdlog::info("Native Video diagnostic: frame={} decoder begin mode=cache pts={}",
                          frameNumber, frameInfo.pts);
         const bool converted = convertDecoded(it->second, false);
         if (converted) {
@@ -1090,18 +1090,18 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         (mLastDecodedFrame >= precedingKeyFrame && forwardDistance > 0 &&
          forwardDistance <= seekDistance);
     if (diagnostics)
-        spdlog::info("DirectLog diagnostic: frame={} decoder begin mode={} pts={}",
+        spdlog::info("Native Video diagnostic: frame={} decoder begin mode={} pts={}",
                      frameNumber, sequential ? "sequential" : "seek", frameInfo.pts);
     if (!sequential) {
         // Release libplacebo's imported images before FFmpeg reuses decoder
         // surfaces. Keep the Vulkan device and gain buffers across seeks.
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
         if (mDirectGpuRgb) {
             const bool rendererReady = mDirectGpuRgb->prepareForSeek();
             if (!rendererReady) mDirectGpuRgb.reset();
             if (diagnostics)
                 spdlog::info(
-                    "DirectLog diagnostic: frame={} gpu_renderer_preserved_on_seek={} recreated={}",
+                    "Native Video diagnostic: frame={} gpu_renderer_preserved_on_seek={} recreated={}",
                     frameNumber, rendererReady, !rendererReady);
         }
 #endif
@@ -1109,7 +1109,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         for (auto& cached : mDecodedFrameCache)
             av_frame_free(&cached.second);
         mDecodedFrameCache.clear();
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
         if (mProxyGpuFrame) av_frame_unref(mProxyGpuFrame);
 #endif
         if (av_seek_frame(mFormatContext, mVideoStreamIndex, frameInfo.pts,
@@ -1120,7 +1120,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         }
         avcodec_flush_buffers(mCodecContext);
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} seek+flush complete elapsed_ms={:.3f}",
+            spdlog::info("Native Video diagnostic: frame={} seek+flush complete elapsed_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(extractStart));
     }
 
@@ -1134,7 +1134,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             if (decodedPts == AV_NOPTS_VALUE) decodedPts = mFrame->pts;
             if (decodedPts == frameInfo.pts) {
                 if (diagnostics)
-                    spdlog::info("DirectLog diagnostic: frame={} target decoded packets={} decoded_frames={} elapsed_ms={:.3f}; conversion begin",
+                    spdlog::info("Native Video diagnostic: frame={} target decoded packets={} decoded_frames={} elapsed_ms={:.3f}; conversion begin",
                                  frameNumber, packetsRead, framesDecoded,
                                  elapsedMilliseconds(extractStart));
                 return convertDecoded(mFrame, true) ? 1 : -1;
@@ -1148,7 +1148,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
             if (mMediaCodecSurfaceActive) av_frame_unref(mFrame);
         }
         if (receiveResult != AVERROR(EAGAIN) && receiveResult != AVERROR_EOF) {
-            spdlog::error("DirectLog frame {} receive failed: {}",
+            spdlog::error("Native Video frame {} receive failed: {}",
                           frameNumber, ffmpegErrorString(receiveResult));
             mLastDecodedFrame = -1;
             return -1;
@@ -1184,13 +1184,13 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
                 }
             }
             if (sendResult < 0 && sendResult != AVERROR(EAGAIN)) {
-                spdlog::error("DirectLog frame {} packet submit failed: {}",
+                spdlog::error("Native Video frame {} packet submit failed: {}",
                               frameNumber, ffmpegErrorString(sendResult));
                 av_packet_unref(mPacket);
                 mLastDecodedFrame = -1;
                 if (sendResult == AVERROR(ENOMEM) && mHardwareDecoderActive &&
                     !mForceSoftwareDecoder) {
-                    spdlog::warn("DirectLogDecoder: GPU decoder ran out of memory; retrying frame {} in software",
+                    spdlog::warn("NativeVideoDecoder: GPU decoder ran out of memory; retrying frame {} in software",
                                  frameNumber);
                     mForceSoftwareDecoder = true;
                     cleanup();
@@ -1206,7 +1206,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     }
 
     if (readResult != AVERROR_EOF) {
-        spdlog::error("DirectLog frame {} packet read failed: {}",
+        spdlog::error("Native Video frame {} packet read failed: {}",
                       frameNumber, ffmpegErrorString(readResult));
         mLastDecodedFrame = -1;
         return false;
@@ -1214,7 +1214,7 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
     // Drain delayed frames after the demuxer reaches EOF.
     const int drainResult = avcodec_send_packet(mCodecContext, nullptr);
     if (drainResult < 0 && drainResult != AVERROR_EOF) {
-        spdlog::error("DirectLog frame {} drain failed: {}",
+        spdlog::error("Native Video frame {} drain failed: {}",
                       frameNumber, ffmpegErrorString(drainResult));
         mLastDecodedFrame = -1;
         return false;
@@ -1231,14 +1231,14 @@ bool DirectLogDecoder::extractFrameIntoLocked(int frameNumber, uint16_t* rgbData
         cacheSkippedFrame(decodedPts);
     }
     if (receiveResult != AVERROR_EOF && receiveResult != AVERROR(EAGAIN))
-        spdlog::error("DirectLog frame {} drain receive failed: {}",
+        spdlog::error("Native Video frame {} drain receive failed: {}",
                       frameNumber, ffmpegErrorString(receiveResult));
 
     mLastDecodedFrame = -1;
     return false;
 }
 
-void DirectLogDecoder::overrideTimestamps(const std::vector<Timestamp>& timestamps) {
+void NativeVideoDecoder::overrideTimestamps(const std::vector<Timestamp>& timestamps) {
     if (timestamps.size() != mFrames.size()) return;
     for (size_t i = 1; i < timestamps.size(); ++i)
         if (timestamps[i] <= timestamps[i - 1]) return;
@@ -1246,10 +1246,10 @@ void DirectLogDecoder::overrideTimestamps(const std::vector<Timestamp>& timestam
         mFrames[i].timestamp = timestamps[i];
 }
 
-bool DirectLogDecoder::initHardwareDecoder() {
+bool NativeVideoDecoder::initHardwareDecoder() {
     std::vector<AVHWDeviceType> preferred;
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
-    const char* gpuRgb = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB");
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
+    const char* gpuRgb = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_GPU_RGB");
     const bool preferVulkan = !gpuRgb || gpuRgb[0] != '0';
     if (preferVulkan) preferred.push_back(AV_HWDEVICE_TYPE_VULKAN);
 #endif
@@ -1273,7 +1273,7 @@ bool DirectLogDecoder::initHardwareDecoder() {
         const AVCodec* candidate = mCodec;
         // QSV uses dedicated decoders rather than the native decoder's HW configs.
         if (deviceType == AV_HWDEVICE_TYPE_QSV) {
-            candidate = motioncam::findWrappedHardwareDecoder(mCodec->id, "qsv");
+            candidate = rawpreamp::findWrappedHardwareDecoder(mCodec->id, "qsv");
             if (!candidate) continue;
         }
         for (int index = 0;; ++index) {
@@ -1284,13 +1284,13 @@ bool DirectLogDecoder::initHardwareDecoder() {
                 continue;
             AVBufferRef* device = acquireHardwareDevice(deviceType);
             if (!device) {
-                if (directLogDiagnosticsEnabled())
+                if (nativeVideoDiagnosticsEnabled())
                     spdlog::info(
-                        "DirectLog diagnostic: hardware device={} unavailable",
+                        "Native Video diagnostic: hardware device={} unavailable",
                         av_hwdevice_get_type_name(deviceType));
                 continue;
             }
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
             // A Vulkan compute device can exist without video decode queues.
             // Reject that candidate before get_format falls back to software
             // and prevents CUDA/VAAPI/QSV from being tried.
@@ -1337,8 +1337,8 @@ bool DirectLogDecoder::initHardwareDecoder() {
             mHardwarePixelFormat = config->pix_fmt;
             mCodecContext->hw_device_ctx = contextDevice;
             mCodecContext->opaque = this;
-            mCodecContext->get_format = &DirectLogDecoder::selectPixelFormat;
-            spdlog::info("DirectLogDecoder: using {} hardware decoding",
+            mCodecContext->get_format = &NativeVideoDecoder::selectPixelFormat;
+            spdlog::info("NativeVideoDecoder: using {} hardware decoding",
                          av_hwdevice_get_type_name(deviceType));
             return true;
         }
@@ -1346,12 +1346,12 @@ bool DirectLogDecoder::initHardwareDecoder() {
     return false;
 }
 
-AVPixelFormat DirectLogDecoder::selectPixelFormat(
+AVPixelFormat NativeVideoDecoder::selectPixelFormat(
         AVCodecContext* context, const AVPixelFormat* formats) {
-    const auto* decoder = static_cast<const DirectLogDecoder*>(context->opaque);
+    const auto* decoder = static_cast<const NativeVideoDecoder*>(context->opaque);
     for (const AVPixelFormat* format = formats; *format != AV_PIX_FMT_NONE; ++format)
         if (*format == decoder->mHardwarePixelFormat) return *format;
-    spdlog::warn("DirectLogDecoder: requested hardware pixel format unavailable");
+    spdlog::warn("NativeVideoDecoder: requested hardware pixel format unavailable");
     // A device can exist while not supporting this codec profile. Select an
     // offered software format instead of accidentally choosing an unrelated
     // hardware format that has no matching device context.
@@ -1362,9 +1362,9 @@ AVPixelFormat DirectLogDecoder::selectPixelFormat(
     return formats[0];
 }
 
-#ifdef MOTIONCAM_HAS_AVFILTER
-AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int height) {
-    const char* enabled = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_PROXY");
+#ifdef RAWPREAMP_HAS_AVFILTER
+AVFrame* NativeVideoDecoder::scaledHardwareFrame(AVFrame* frame, int width, int height) {
+    const char* enabled = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_GPU_PROXY");
     if ((enabled && enabled[0] == '0') ||
         frame->format != mHardwarePixelFormat || !mHardwareDeviceContext ||
         !frame->hw_frames_ctx ||
@@ -1428,7 +1428,7 @@ AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int he
     }
     if (!mProxyGpuGraph) {
         auto fail = [&]() -> AVFrame* {
-            spdlog::warn("DirectLog GPU proxy unavailable; using CPU scaling");
+            spdlog::warn("Native Video GPU proxy unavailable; using CPU scaling");
             av_frame_free(&mProxyGpuFrame);
             avfilter_graph_free(&mProxyGpuGraph);
             mProxyGpuSource = mProxyGpuSink = nullptr;
@@ -1443,7 +1443,7 @@ AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int he
         mProxyGpuGraph = avfilter_graph_alloc();
         if (!mProxyGpuGraph) return fail();
         mProxyGpuSource = avfilter_graph_alloc_filter(
-            mProxyGpuGraph, sourceFilter, "directlog_in");
+            mProxyGpuGraph, sourceFilter, "native_video_in");
         if (!mProxyGpuSource) return fail();
         AVBufferSrcParameters* parameters = av_buffersrc_parameters_alloc();
         if (!parameters) return fail();
@@ -1464,9 +1464,9 @@ AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int he
             ? fmt::format("w={}:h={}:{}", width, height, quality)
             : fmt::format("w={}:h={}", width, height);
         if (avfilter_graph_create_filter(&scaleContext, scaleFilter,
-                "directlog_scale", scaleArgs.c_str(), nullptr, mProxyGpuGraph) < 0 ||
+                "native_video_scale", scaleArgs.c_str(), nullptr, mProxyGpuGraph) < 0 ||
             avfilter_graph_create_filter(&mProxyGpuSink, sinkFilter,
-                "directlog_out", nullptr, nullptr, mProxyGpuGraph) < 0 ||
+                "native_video_out", nullptr, nullptr, mProxyGpuGraph) < 0 ||
             avfilter_link(mProxyGpuSource, 0, scaleContext, 0) < 0 ||
             avfilter_link(scaleContext, 0, mProxyGpuSink, 0) < 0 ||
             avfilter_graph_config(mProxyGpuGraph, nullptr) < 0)
@@ -1477,7 +1477,7 @@ AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int he
         if (!mProxyGpuFrame) return fail();
         mProxyGpuWidth = width;
         mProxyGpuHeight = height;
-        spdlog::info("DirectLog GPU proxy initialized backend={} {}x{} -> {}x{}",
+        spdlog::info("Native Video GPU proxy initialized backend={} {}x{} -> {}x{}",
             av_hwdevice_get_type_name(device->type),
             frame->width, frame->height, width, height);
     }
@@ -1485,25 +1485,25 @@ AVFrame* DirectLogDecoder::scaledHardwareFrame(AVFrame* frame, int width, int he
     if (av_buffersrc_add_frame_flags(mProxyGpuSource, frame,
             AV_BUFFERSRC_FLAG_KEEP_REF) < 0 ||
         av_buffersink_get_frame(mProxyGpuSink, mProxyGpuFrame) < 0) {
-        spdlog::warn("DirectLog GPU proxy failed; using CPU scaling");
+        spdlog::warn("Native Video GPU proxy failed; using CPU scaling");
         reject();
         return nullptr;
     }
     return mProxyGpuFrame;
 }
 
-bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
+bool NativeVideoDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
         size_t sampleCount, int outputWidth, int outputHeight,
         bool preserveLogEncoded, bool smoothChroma,
         const std::array<uint8_t, 4>* cfaPhase,
         bool deferDownload) {
-#ifndef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifndef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
     (void)frame; (void)rgbData; (void)sampleCount; (void)outputWidth;
     (void)outputHeight; (void)preserveLogEncoded; (void)smoothChroma;
     (void)cfaPhase; (void)deferDownload;
     return false;
 #else
-    const char* enabled = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_RGB");
+    const char* enabled = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_GPU_RGB");
     if ((enabled && enabled[0] == '0') || mGpuRgbRejected || !rgbData)
         return false;
     const bool vulkanFrame = frame->format == AV_PIX_FMT_VULKAN &&
@@ -1525,15 +1525,15 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
         sampleCount != static_cast<size_t>(width) * height * (cfaPhase ? 1 : 3))
         return false;
 
-    if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<DirectLogGpuRgb>();
-    const auto curve = mVideoInfo.isHLG ? DirectLogGpuRgb::TransferCurve::HLG
+    if (!mDirectGpuRgb) mDirectGpuRgb = std::make_unique<NativeVideoGpuRgb>();
+    const auto curve = mVideoInfo.isHLG ? NativeVideoGpuRgb::TransferCurve::HLG
         : mVideoInfo.isLOG60 && !preserveLogEncoded
             ? (isLLog60NativePath(mFilePath)
-                ? DirectLogGpuRgb::TransferCurve::LLOG60 : DirectLogGpuRgb::TransferCurve::LOG60)
-            : DirectLogGpuRgb::TransferCurve::None;
+                ? NativeVideoGpuRgb::TransferCurve::LLOG60 : NativeVideoGpuRgb::TransferCurve::LOG60)
+            : NativeVideoGpuRgb::TransferCurve::None;
     if (!mDirectGpuRgb->render(frame, width, height, smoothChroma, curve,
                                fullRange, rgbData, cfaPhase, deferDownload)) {
-        spdlog::warn("DirectLog direct GPU RGB conversion failed; using CPU conversion");
+        spdlog::warn("Native Video direct GPU RGB conversion failed; using CPU conversion");
         mDirectGpuRgb.reset();
         mGpuRgbRejected = true;
         return false;
@@ -1545,7 +1545,7 @@ bool DirectLogDecoder::convertVulkanYUVToRGB(AVFrame* frame, uint16_t* rgbData,
 
 #endif
 
-AVFrame* DirectLogDecoder::transferableFrame(AVFrame* frame) {
+AVFrame* NativeVideoDecoder::transferableFrame(AVFrame* frame) {
     if (frame->format != mHardwarePixelFormat || !mHardwareDeviceContext) return frame;
     if (mTransferFrame->buf[0] &&
         (mTransferFrame->width != frame->width ||
@@ -1556,7 +1556,7 @@ AVFrame* DirectLogDecoder::transferableFrame(AVFrame* frame) {
         // download buffer. Retry with a fresh destination in that case.
         av_frame_unref(mTransferFrame);
         if (av_hwframe_transfer_data(mTransferFrame, frame, 0) < 0) {
-            spdlog::error("DirectLogDecoder: hardware frame transfer failed");
+            spdlog::error("NativeVideoDecoder: hardware frame transfer failed");
             return nullptr;
         }
     }
@@ -1566,18 +1566,18 @@ AVFrame* DirectLogDecoder::transferableFrame(AVFrame* frame) {
     return mTransferFrame;
 }
 
-void DirectLogDecoder::setFullRangeOverride(std::optional<bool> fullRange) {
+void NativeVideoDecoder::setFullRangeOverride(std::optional<bool> fullRange) {
     std::lock_guard<std::mutex> lock(mMutex);
     mFullRangeOverride = fullRange;
     mFullRange.reset();
 }
 
-bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
+bool NativeVideoDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
                                        size_t sampleCount,
                                        int outputWidth, int outputHeight,
                                        bool preserveLogEncoded, bool smoothChroma) {
-    const bool diagnostics = directLogDiagnosticsEnabled();
-    const auto conversionStart = motioncam::diagnosticNow();
+    const bool diagnostics = nativeVideoDiagnosticsEnabled();
+    const auto conversionStart = rawpreamp::diagnosticNow();
     const int width = yuvFrame->width;
     const int height = yuvFrame->height;
     if (outputWidth <= 0) outputWidth = width;
@@ -1591,12 +1591,12 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
             colorRange = mCodecContext->color_range;
         mFullRange = mFullRangeOverride.value_or(colorRange == AVCOL_RANGE_JPEG);
         spdlog::info(
-            "DirectLogDecoder: treating clip as {} range (metadata: {}, override: {})",
+            "NativeVideoDecoder: treating clip as {} range (metadata: {}, override: {})",
             *mFullRange ? "full" : "limited", av_color_range_name(colorRange),
             mFullRangeOverride.has_value() ? (*mFullRangeOverride ? "Full" : "Limited") : "Auto");
     }
     const bool fullRange = *mFullRange;
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     if (convertVulkanYUVToRGB(yuvFrame, rgbData, sampleCount,
             outputWidth, outputHeight, preserveLogEncoded, smoothChroma, nullptr, false))
         return true;
@@ -1604,7 +1604,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
 
     // Area filtering keeps the fast proxy path while averaging the source
     // region. The override supports direct comparisons with point/bicubic.
-    const char* proxyScaler = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_PROXY_SCALER");
+    const char* proxyScaler = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_PROXY_SCALER");
     const int proxyFlags = proxyScaler && std::string(proxyScaler) == "point"
         ? SWS_POINT : proxyScaler && std::string(proxyScaler) == "bicubic"
             ? SWS_BICUBIC : SWS_AREA;
@@ -1627,7 +1627,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
         yuvFrame->linesize[0], yuvFrame->linesize[1],
         yuvFrame->linesize[2], yuvFrame->linesize[3]};
 
-    // DirectLog scales nominal 8-bit limited-range codes over all 1023 values:
+    // Native Video scales nominal 8-bit limited-range codes over all 1023 values:
     // Y 16..235 becomes 64.19..942.53 rather than conventional 64..940, and
     // chroma 16..240 becomes 64.19..962.82 rather than 64..960. Multiplying
     // 10-bit samples by 1020/1023 maps that endpoint interpretation into
@@ -1636,7 +1636,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
     const bool tenBit = pixelFormat == AV_PIX_FMT_YUV420P10LE ||
                         pixelFormat == AV_PIX_FMT_YUV422P10LE;
     if (!fullRange && tenBit) {
-        const auto rangeStart = motioncam::diagnosticNow();
+        const auto rangeStart = rawpreamp::diagnosticNow();
         const AVPixFmtDescriptor* descriptor = av_pix_fmt_desc_get(pixelFormat);
         if (!descriptor) return false;
         const int chromaWidth = AV_CEIL_RSHIFT(width, descriptor->log2_chroma_w);
@@ -1667,11 +1667,11 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
         inputStride[0] = width * static_cast<int>(sizeof(uint16_t));
         inputStride[1] = inputStride[2] = chromaWidth * static_cast<int>(sizeof(uint16_t));
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: limited-range remap_ms={:.3f}",
+            spdlog::info("Native Video diagnostic: limited-range remap_ms={:.3f}",
                          elapsedMilliseconds(rangeStart));
     }
 
-    const auto scaleStart = motioncam::diagnosticNow();
+    const auto scaleStart = rawpreamp::diagnosticNow();
     uint8_t* output[] = {reinterpret_cast<uint8_t*>(rgbData)};
     int outputStride[] = {outputWidth * 3 * static_cast<int>(sizeof(uint16_t))};
     const AVPixFmtDescriptor* scaleDescriptor = av_pix_fmt_desc_get(pixelFormat);
@@ -1690,7 +1690,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
         scaleDescriptor->nb_components == 3 &&
         scaleDescriptor->log2_chroma_h <= 1 && height >= 1024;
     const unsigned bandCount = bandCandidate
-        ? std::min(8u, motioncam::utils::availableCpuWorkers()) : 1u;
+        ? std::min(8u, rawpreamp::utils::availableCpuWorkers()) : 1u;
     bool bandSuccess = false;
     const int proxyScale = outputWidth > 0 ? width / outputWidth : 0;
     // Split only integer-scale proxies: aligned source bands then have the
@@ -1704,7 +1704,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
         scaleDescriptor->nb_components == 3 && input[1] &&
         outputHeight >= 64 && proxyFlags != SWS_POINT;
     if (proxyBandCandidate) {
-        const unsigned workers = std::min(8u, motioncam::utils::availableCpuWorkers());
+        const unsigned workers = std::min(8u, rawpreamp::utils::availableCpuWorkers());
         const std::array<int, 8> key{width, height, outputWidth, outputHeight,
             static_cast<int>(pixelFormat), proxyFlags, fullRange ? 1 : 0,
             static_cast<int>(workers)};
@@ -1774,7 +1774,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
                     std::equal(reference.begin(), reference.end(), rgbData);
                 mProxyBandVerified = bandSuccess;
                 mProxyBandRejected = !bandSuccess;
-                spdlog::info("DirectLog proxy band conversion exact_match={}", bandSuccess);
+                spdlog::info("Native Video proxy band conversion exact_match={}", bandSuccess);
             }
         }
     }
@@ -1839,7 +1839,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
             if (matches) mVerifiedBandCounts |= static_cast<uint16_t>(1u << bandCount);
             else mBandConversionRejected = true;
             if (diagnostics)
-                spdlog::info("DirectLog diagnostic: banded_yuv_conversion exact_match={}",
+                spdlog::info("Native Video diagnostic: banded_yuv_conversion exact_match={}",
                     matches);
         }
     }
@@ -1859,7 +1859,7 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
     const uint32_t encodedWhite = !fullRange && eightBitInput
         ? limitedRgbWhite : 65535u;
     if (diagnostics)
-        spdlog::info("DirectLog diagnostic: swscale_ms={:.3f}; transfer stage begin",
+        spdlog::info("Native Video diagnostic: swscale_ms={:.3f}; transfer stage begin",
                      elapsedMilliseconds(scaleStart));
     
     // Apply HLG to linear conversion if needed
@@ -1869,13 +1869,13 @@ bool DirectLogDecoder::convertYUVToRGB(AVFrame* yuvFrame, uint16_t* rgbData,
         applyLOG60ToLinear(rgbData, sampleCount, encodedWhite);
     }
     if (diagnostics)
-        spdlog::info("DirectLog diagnostic: transfer_and_conversion_total_ms={:.3f}",
+        spdlog::info("Native Video diagnostic: transfer_and_conversion_total_ms={:.3f}",
                      elapsedMilliseconds(conversionStart));
     
     return true;
 }
 
-void DirectLogDecoder::applyHLGToLinear(
+void NativeVideoDecoder::applyHLGToLinear(
         uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite) {
     const auto makeLut = [](uint32_t white) {
         std::array<uint16_t, 65536> values{};
@@ -1897,11 +1897,11 @@ void DirectLogDecoder::applyHLGToLinear(
     });
 }
 
-bool DirectLogDecoder::isHLGVideo(const std::string& filePath) {
+bool NativeVideoDecoder::isHLGVideo(const std::string& filePath) {
     return boost::icontains(videoBasename(filePath), "HLG_NATIVE");
 }
 
-void DirectLogDecoder::applyLOG60ToLinear(
+void NativeVideoDecoder::applyLOG60ToLinear(
         uint16_t* rgbData, size_t sampleCount, uint32_t encodedWhite) {
     const auto makeLut = [](uint32_t white, bool llog60 = false) {
         std::array<uint16_t, 65536> values{};
@@ -1926,16 +1926,16 @@ void DirectLogDecoder::applyLOG60ToLinear(
     });
 }
 
-bool DirectLogDecoder::isLOG60Video(const std::string& filePath) {
+bool NativeVideoDecoder::isLOG60Video(const std::string& filePath) {
     return boost::icontains(videoBasename(filePath), "LOG60_NATIVE");
 }
 
-std::pair<uintmax_t, size_t> DirectLogDecoder::timelineCacheUsage() {
-    std::lock_guard initializationLock(directLogInitializationMutex);
+std::pair<uintmax_t, size_t> NativeVideoDecoder::timelineCacheUsage() {
+    std::lock_guard initializationLock(nativeVideoInitializationMutex);
     uintmax_t bytes = 0;
     size_t files = 0;
     std::error_code error;
-    const auto directory = directLogTimelineCachePath("").parent_path();
+    const auto directory = nativeVideoTimelineCachePath("").parent_path();
     std::filesystem::directory_iterator entries(directory, error);
     for (std::filesystem::directory_iterator end; !error && entries != end;
          entries.increment(error)) {
@@ -1948,24 +1948,24 @@ std::pair<uintmax_t, size_t> DirectLogDecoder::timelineCacheUsage() {
     return {bytes, files};
 }
 
-void DirectLogDecoder::clearTimelineCache() {
-    std::lock_guard initializationLock(directLogInitializationMutex);
+void NativeVideoDecoder::clearTimelineCache() {
+    std::lock_guard initializationLock(nativeVideoInitializationMutex);
     {
-        std::lock_guard<std::mutex> cacheLock(directLogTimelineCacheMutex);
-        directLogTimelineCache.clear();
+        std::lock_guard<std::mutex> cacheLock(nativeVideoTimelineCacheMutex);
+        nativeVideoTimelineCache.clear();
     }
     std::error_code error;
-    std::filesystem::remove_all(directLogTimelineCachePath("").parent_path(), error);
+    std::filesystem::remove_all(nativeVideoTimelineCachePath("").parent_path(), error);
     if (error)
-        spdlog::warn("Could not clear DirectLog timeline cache: {}", error.message());
+        spdlog::warn("Could not clear Native Video timeline cache: {}", error.message());
 }
 
-void DirectLogDecoder::cleanup() {
+void NativeVideoDecoder::cleanup() {
     const size_t cachedFrames = mDecodedFrameCache.size();
     for (auto& cached : mDecodedFrameCache)
         av_frame_free(&cached.second);
     mDecodedFrameCache.clear();
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     mDirectGpuRgb.reset();
     av_frame_free(&mProxyGpuFrame);
     avfilter_graph_free(&mProxyGpuGraph);
@@ -2011,14 +2011,14 @@ void DirectLogDecoder::cleanup() {
         releaseHardwareDevice(&mHardwareDeviceContext);
     }
     if (mHardwareDecoderActive) {
-        const unsigned int active = directLogHardwareDecoderCount.fetch_sub(1) - 1;
-        spdlog::info("DirectLogDecoder: hardware context closed active={} cached_frames_released={} source={}",
+        const unsigned int active = nativeVideoHardwareDecoderCount.fetch_sub(1) - 1;
+        spdlog::info("NativeVideoDecoder: hardware context closed active={} cached_frames_released={} source={}",
                      active, cachedFrames, mFilePath);
         mHardwareDecoderActive = false;
     }
     
     if (mFormatContext) {
-        motioncam::closeSourceMedia(&mFormatContext);
+        rawpreamp::closeSourceMedia(&mFormatContext);
     }
     mDecoderInitialized = false;
     mMediaCodecSurfaceActive = false;
@@ -2027,4 +2027,4 @@ void DirectLogDecoder::cleanup() {
     mReportedFrameFormat = AV_PIX_FMT_NONE;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

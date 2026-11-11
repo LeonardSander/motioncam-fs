@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 // In-process Camera Native encoding. Input is full-range linear RGB48LE;
 // timestamps and durations are in nanoseconds, relative to the clip start.
 class NativeVideoEncoder {

@@ -3,7 +3,7 @@
 #include <QSize>
 #include <QString>
 
-namespace motioncam {
+namespace rawpreamp {
 
 bool validUiMode(const QString& mode);
 bool useTouchUi(const QString& mode, bool touchscreen, const QSize& screen);
@@ -13,4 +13,4 @@ QString preferredUiMode();
 void initializeUiMode(const QString& mode);
 bool touchUi();
 
-} // namespace motioncam
+} // namespace rawpreamp

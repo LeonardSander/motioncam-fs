@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 
 template<typename... Args>

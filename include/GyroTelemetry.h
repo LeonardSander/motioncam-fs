@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 // GCSV and Gyroflow protobuf/JSONL are distinct source formats. They are never
 // converted into each other. Binary protobuf is decoded with its complete schema.
 class GyroTelemetry {
@@ -56,4 +56,4 @@ class GyroTelemetry {
     double mClockOriginUs = 0;
     bool mHaveClockOrigin = false;
 };
-} // namespace motioncam
+} // namespace rawpreamp

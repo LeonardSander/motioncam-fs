@@ -8,15 +8,15 @@
 #include <fstream>
 #include <memory>
 #include <string>
-#if defined(__ANDROID__) || defined(MOTIONCAM_SOURCE_INPUT_TEST)
+#if defined(__ANDROID__) || defined(RAWPREAMP_SOURCE_INPUT_TEST)
 #include <algorithm>
 #include <cerrno>
 #include <limits>
 #include <unistd.h>
 #endif
 
-namespace motioncam {
-#if defined(__ANDROID__) || defined(MOTIONCAM_SOURCE_INPUT_TEST)
+namespace rawpreamp {
+#if defined(__ANDROID__) || defined(RAWPREAMP_SOURCE_INPUT_TEST)
 inline constexpr bool sourceReadAheadEnabled = true;
 void prefetchSourceReadDescriptor(const std::string& path) noexcept;
 int openSourceReadDescriptor(const std::string& path);

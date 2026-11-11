@@ -8,7 +8,7 @@
 #include <memory>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 struct VulkanGalleryGain;
 struct VulkanGalleryBayerGain;
 struct VulkanGalleryGpuBuffer;
@@ -120,7 +120,7 @@ struct PreviewFrame {
     }
     std::array<uint8_t, 4> galleryCfaPhase{0, 1, 1, 2};
     std::array<double, 3> galleryBlack{}, galleryWhite{};
-    // DirectLog can keep its decoded RGB texture until the gallery's final
+    // Native Video can keep its decoded RGB texture until the gallery's final
     // display pass. The lease protects the decoder texture through callback.
     std::array<double, 3> galleryGpuBlack{}, galleryGpuWhite{};
     std::shared_ptr<VulkanGalleryGain> galleryGpuGain;
@@ -200,4 +200,4 @@ struct DecodedDNGImage {
     bool linearizationApplied = false;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

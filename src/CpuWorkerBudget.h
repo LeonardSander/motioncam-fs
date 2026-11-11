@@ -11,7 +11,7 @@
 #include <sys/resource.h>
 #endif
 
-namespace motioncam::utils {
+namespace rawpreamp::utils {
 
 // Count idle cores plus cores already used by this process. Other applications
 // reduce our budget, while our own parallel work does not throttle itself.
@@ -64,4 +64,4 @@ inline unsigned int availableCpuWorkers() {
 #endif
 }
 
-} // namespace motioncam::utils
+} // namespace rawpreamp::utils

@@ -3,7 +3,7 @@
 #include <cmath>
 #include <limits>
 
-namespace motioncam {
+namespace rawpreamp {
 bool GyroTelemetry::fillMissingDngMetadata(std::vector<uint8_t>& bytes, size_t index) const {
     if (mFormat != Format::Jsonl || index >= mFrames.size()) return true;
     const auto& capture = mFrames[index].message.at("frame");
@@ -65,4 +65,4 @@ bool GyroTelemetry::fillMissingDngMetadata(std::vector<uint8_t>& bytes, size_t i
     }
     return tags.empty() || DNGDecoder::fillMissingSidecarMetadata(bytes, tags);
 }
-} // namespace motioncam
+} // namespace rawpreamp

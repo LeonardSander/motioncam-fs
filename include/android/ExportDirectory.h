@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 // Folder exports return the created folder name; direct exports return a
 // collision-free basename shared by the video and sidecar files.
 QString prepareFinalizeOutput(const QString& folderName, const QString& mode,

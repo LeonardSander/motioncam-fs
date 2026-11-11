@@ -147,7 +147,7 @@ class TimingGraph final : public QWidget
 public:
     explicit TimingGraph(std::vector<Sample> samples, QWidget* parent = nullptr)
         : QWidget(parent), mSamples(std::move(samples)) {
-        setMinimumSize(motioncam::touchUi() ? QSize(280, 160) : QSize(720, 380));
+        setMinimumSize(rawpreamp::touchUi() ? QSize(280, 160) : QSize(720, 380));
     }
 
 protected:
@@ -156,7 +156,7 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         p.fillRect(rect(), QColor("#20242b"));
-        const QRectF plot = motioncam::touchUi() ? rect().adjusted(54, 12, -12, -35)
+        const QRectF plot = rawpreamp::touchUi() ? rect().adjusted(54, 12, -12, -35)
                                                    : rect().adjusted(72, 24, -24, -54);
         if (mSamples.empty()) {
             p.setPen(Qt::lightGray);
@@ -181,7 +181,7 @@ protected:
             p.drawLine(QPointF(plot.left(), py), QPointF(plot.right(), py));
             p.setPen(QColor("#aeb7c2"));
             p.drawText(QRectF(4, py - 10,
-                              motioncam::touchUi() ? 44 : 62,
+                              rawpreamp::touchUi() ? 44 : 62,
                               20), Qt::AlignRight | Qt::AlignVCenter,
                        QString::number(value, 'f', 1));
             p.setPen(QPen(QColor("#424a55"), 1));
@@ -223,7 +223,7 @@ FrameTimingDialog::FrameTimingDialog(const QString& clipName,
                                      const std::vector<std::int64_t>& pts,
                                      int timeBaseNum, int timeBaseDen,
                                      double targetFps, bool useCfrMapping,
-                                     const motioncam::FrameRateInfo& frameRateInfo,
+                                     const rawpreamp::FrameRateInfo& frameRateInfo,
                                      QWidget* parent)
     : QDialog(parent)
 {
@@ -235,18 +235,18 @@ FrameTimingDialog::FrameTimingDialog(const QString& clipName,
     const double ticksPerSecond = timeBaseNum > 0
         ? static_cast<double>(timeBaseDen) / timeBaseNum : 0.0;
     auto* layout = new QVBoxLayout(this);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         layout->setContentsMargins(8, 6, 8, 6);
         layout->setSpacing(4);
     }
     mSummary = new QLabel(this);
     mSummary->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         mSummary->setWordWrap(true);
     }
     layout->addWidget(mSummary);
     updateTiming(pts, timeBaseNum, timeBaseDen, targetFps, useCfrMapping, frameRateInfo);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         auto* closeButton = new QPushButton(tr("Close graph"), this);
         layout->addWidget(closeButton);
         connect(closeButton, &QPushButton::clicked, this, &QWidget::close);
@@ -256,7 +256,7 @@ FrameTimingDialog::FrameTimingDialog(const QString& clipName,
 void FrameTimingDialog::updateTiming(const std::vector<std::int64_t>& pts,
                                      int timeBaseNum, int timeBaseDen,
                                      double targetFps, bool useCfrMapping,
-                                     const motioncam::FrameRateInfo& frameRateInfo)
+                                     const rawpreamp::FrameRateInfo& frameRateInfo)
 {
     const double ticksPerSecond = timeBaseNum > 0
         ? static_cast<double>(timeBaseDen) / timeBaseNum : 0.0;
@@ -289,7 +289,7 @@ void FrameTimingDialog::updateTiming(const std::vector<std::int64_t>& pts,
             layout->replaceWidget(guardedThis->mGraph, graph);
             guardedThis->mGraph->deleteLater();
         } else {
-            if (motioncam::touchUi()) {
+            if (rawpreamp::touchUi()) {
                 layout->insertWidget(std::max(0, layout->count() - 1), graph, 1);
             } else {
                 layout->addWidget(graph, 1);

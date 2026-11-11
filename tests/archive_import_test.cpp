@@ -94,7 +94,7 @@ void createNamedZip(const QString& path, const QByteArray& rawName,
 }
 
 std::string readSource(const QString& path) {
-    motioncam::SourceInputStream input(path.toStdString(), std::ios::binary);
+    rawpreamp::SourceInputStream input(path.toStdString(), std::ios::binary);
     if (!input) throw std::runtime_error("Could not open source: " + path.toStdString());
     const std::string bytes(std::istreambuf_iterator<char>(input), {});
     if (input.bad()) throw std::runtime_error("Could not read source");
@@ -117,7 +117,7 @@ int main() {
                                 {"root-1.dng", "one"},
                                 {"root-2.DNG", "two"},
                                 {"notes.txt", "ignored"}});
-    const auto result = motioncam::extractReviewArchive(archivePath);
+    const auto result = rawpreamp::extractReviewArchive(archivePath);
     const QDir extracted(result.temporaryRoot);
     const bool ok = QFileInfo(result.sourcePath).isDir() &&
         QFileInfo::exists(extracted.absoluteFilePath("root-1.dng")) &&
@@ -125,7 +125,7 @@ int main() {
         !QFileInfo::exists(extracted.absoluteFilePath("nested/ignored.mcraw")) &&
         result.sidecarPath == QDir(directory.path()).absoluteFilePath("review.json") &&
         result.gyroflowSidecarPath == QDir(directory.path()).absoluteFilePath("review_gyroflow.json");
-    motioncam::removeReviewArchive(result.temporaryRoot);
+    rawpreamp::removeReviewArchive(result.temporaryRoot);
     if (!ok) {
         std::cerr << "archive selection or sidecar routing failed\n";
         return failedCheck(__LINE__);
@@ -146,7 +146,7 @@ int main() {
         const char size[2] = {char(comment.size()), char(comment.size() >> 8)};
         if (zip.write(size, 2) != 2 || zip.write(comment) != comment.size()) return failedCheck(__LINE__);
         zip.close();
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         const QDir media(imported.sourcePath);
         QFile retainedComment(media.filePath(".mcpro24fps.txt"));
         const bool valid = retainedComment.open(QIODevice::ReadOnly) && retainedComment.readAll() == comment &&
@@ -157,7 +157,7 @@ int main() {
             QFileInfo::exists(media.filePath("clip-audio.wav")) &&
             QFileInfo::exists(media.filePath("clip-00000000.jsonl")) &&
             !QFileInfo::exists(media.filePath("nested/other.wav"));
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
         if (!valid) { std::cerr << "ZIP companions or timing failed\n"; return failedCheck(__LINE__); }
     }
 
@@ -166,16 +166,16 @@ int main() {
         const auto rawName = QByteArray("caf") + char(0x82) + "/frame.dng";
         const auto decoded = QString::fromUtf8(unicodeExtra ? "映像/frame.dng" : "café/frame.dng");
         createNamedZip(zipPath, rawName, unicodeExtra ? decoded.toUtf8() : QByteArray{});
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         const auto frame = QDir(imported.temporaryRoot).filePath(decoded);
-        if (!motioncam::isZipSource(frame.toStdString()) || readSource(frame) != "frame") return failedCheck(__LINE__);
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        if (!rawpreamp::isZipSource(frame.toStdString()) || readSource(frame) != "frame") return failedCheck(__LINE__);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
         if (unicodeExtra) {
             createNamedZip(zipPath, rawName, decoded.toUtf8(), false);
-            const auto fallback = motioncam::extractReviewArchive(zipPath);
+            const auto fallback = rawpreamp::extractReviewArchive(zipPath);
             if (readSource(QDir(fallback.sourcePath).filePath("frame.dng")) != "frame" ||
                 !fallback.sourcePath.normalized(QString::NormalizationForm_C).endsWith(QString::fromUtf8("café"))) return failedCheck(__LINE__);
-            motioncam::removeReviewArchive(fallback.temporaryRoot);
+            rawpreamp::removeReviewArchive(fallback.temporaryRoot);
         }
     }
 
@@ -191,16 +191,16 @@ int main() {
         bytes.replace(asciiName, rawName);
         if (!archive.seek(0) || archive.write(bytes) != bytes.size()) return failedCheck(__LINE__);
         archive.close();
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         // Root files take precedence over nested files, so test the nested entry
         // through registration independently of clip selection.
-        const auto entries = motioncam::indexZipSource(zipPath.toStdString());
+        const auto entries = rawpreamp::indexZipSource(zipPath.toStdString());
         QTemporaryDir root;
-        motioncam::registerZipSource(zipPath.toStdString(), root.path().toStdString(), entries);
+        rawpreamp::registerZipSource(zipPath.toStdString(), root.path().toStdString(), entries);
         if (readSource(QDir(root.path()).filePath(QString::fromUtf8("café/frame.dng"))) != "frame" ||
             readSource(QDir(imported.sourcePath).filePath("empty.dng")) != "") return failedCheck(__LINE__);
-        motioncam::unregisterZipSource(root.path().toStdString());
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::unregisterZipSource(root.path().toStdString());
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
     }
 
     QByteArray payload(200000, Qt::Uninitialized);
@@ -209,10 +209,10 @@ int main() {
         const auto zipPath = QDir(directory.path()).filePath(QString(compression) + "-seek.zip");
         createArchive(zipPath, {{"nested/clip-00000000.dng", payload}, {"nested\\clip-00000001.dng", payload},
                                 {"nested/clip.frames.csv", "timing"}}, compression);
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         const auto frame = QDir(imported.sourcePath).filePath("clip-00000000.dng").toStdString();
         const auto check = [&] {
-            motioncam::SourceInputStream input(frame, std::ios::binary | std::ios::ate);
+            rawpreamp::SourceInputStream input(frame, std::ios::binary | std::ios::ate);
             if (!input || input.tellg() != payload.size()) return false;
             for (const auto position : {65530, 100, 180000, 0}) {
                 input.seekg(position);
@@ -238,9 +238,9 @@ int main() {
         if (!changed.open(QIODevice::Append) || changed.write("x", 1) != 1) return failedCheck(__LINE__);
         changed.close();
         bool rejected = false;
-        try { motioncam::SourceInputStream stale(frame); }
+        try { rawpreamp::SourceInputStream stale(frame); }
         catch (const std::runtime_error&) { rejected = true; }
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
         if (!rejected) { std::cerr << "Modified ZIP source was accepted\n"; return failedCheck(__LINE__); }
     }
 
@@ -250,7 +250,7 @@ int main() {
         const auto zipPath = QDir(directory.path()).filePath(QString(compression) + "-lazy.zip");
         const QByteArray large(16 * 1024 * 1024, 'x');
         createArchive(zipPath, {{"frame.dng", large}}, compression);
-        const auto entry = motioncam::indexZipSource(zipPath.toStdString()).front();
+        const auto entry = rawpreamp::indexZipSource(zipPath.toStdString()).front();
         QFile archive(zipPath);
         if (!archive.open(QIODevice::ReadWrite) || !archive.seek(entry.localOffset + 26)) return failedCheck(__LINE__);
         const auto lengths = archive.read(4);
@@ -263,8 +263,8 @@ int main() {
         const auto last = archive.read(1);
         if (last.size() != 1 || !archive.seek(tail) || archive.write(QByteArray(1, last[0] ^ 0x40)) != 1) return failedCheck(__LINE__);
         archive.close();
-        const auto imported = motioncam::extractReviewArchive(zipPath);
-        motioncam::SourceInputStream input(QDir(imported.sourcePath).filePath("frame.dng").toStdString(),
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
+        rawpreamp::SourceInputStream input(QDir(imported.sourcePath).filePath("frame.dng").toStdString(),
                                            std::ios::binary | std::ios::ate);
         if (!input || input.tellg() != large.size()) return failedCheck(__LINE__);
         input.seekg(0);
@@ -280,13 +280,13 @@ int main() {
         input.seekg(-32, std::ios::end);
         input.read(metadata.data(), metadata.size());
         if (!input.bad()) { std::cerr << "Lazy ZIP reader accepted a corrupt tail\n"; return failedCheck(__LINE__); }
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
     }
 
     {
         const auto zipPath = QDir(directory.path()).filePath("zip64.zip");
         createArchive(zipPath, {{"nested/café-00000000.dng", payload}}, "deflate", true);
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         const auto path = QDir(imported.sourcePath).filePath(QString::fromUtf8("café-00000000.dng"));
         if (readSource(path) != payload.toStdString() || QFileInfo(path).size() != 0) return failedCheck(__LINE__);
 #ifdef __APPLE__
@@ -295,17 +295,17 @@ int main() {
         // empty discovery placeholder instead of the registered payload.
         for (const auto form : {QString::NormalizationForm_C, QString::NormalizationForm_D}) {
             const auto alias = path.normalized(form);
-            if (!motioncam::isZipSource(alias.toStdString()) ||
+            if (!rawpreamp::isZipSource(alias.toStdString()) ||
                 readSource(alias) != payload.toStdString() || QFileInfo(alias).size() != 0)
                 return failedCheck(__LINE__);
         }
 #endif
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
     }
     for (const char* compression : {"store", "deflate", "zstd"}) {
         const auto zipPath = QDir(directory.path()).filePath(QString(compression) + "-bad-crc.zip");
         createArchive(zipPath, {{"frame.dng", payload}}, compression);
-        const auto entry = motioncam::indexZipSource(zipPath.toStdString()).front();
+        const auto entry = rawpreamp::indexZipSource(zipPath.toStdString()).front();
         QFile file(zipPath);
         if (!file.open(QIODevice::ReadWrite) || !file.seek(entry.localOffset + 26)) return failedCheck(__LINE__);
         const auto lengths = file.read(4);
@@ -318,51 +318,51 @@ int main() {
         const auto byte = file.read(1);
         if (byte.size() != 1 || !file.seek(position) || file.write(QByteArray(1, byte[0] ^ 0x40)) != 1) return failedCheck(__LINE__);
         file.close();
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         bool rejected = false;
         try { readSource(QDir(imported.sourcePath).filePath("frame.dng")); }
         catch (const std::runtime_error&) { rejected = true; }
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
         if (!rejected) { std::cerr << "Corrupt ZIP payload was accepted\n"; return failedCheck(__LINE__); }
     }
 
     {
         const auto zipPath = QDir(directory.path()).filePath("lifecycle.zip");
         createArchive(zipPath, {{"frame.dng", "frame"}}, "deflate");
-        const auto first = motioncam::extractReviewArchive(zipPath);
-        const auto second = motioncam::extractReviewArchive(zipPath);
+        const auto first = rawpreamp::extractReviewArchive(zipPath);
+        const auto second = rawpreamp::extractReviewArchive(zipPath);
         const auto firstFrame = QDir(first.sourcePath).filePath("frame.dng");
         const auto secondFrame = QDir(second.sourcePath).filePath("frame.dng");
-        motioncam::unregisterZipSource(first.temporaryRoot.toStdString());
-        if (motioncam::isZipSource(firstFrame.toStdString()) || readSource(secondFrame) != "frame") return failedCheck(__LINE__);
-        if (!motioncam::removeReviewArchive(first.temporaryRoot) ||
-            !motioncam::removeReviewArchive(first.temporaryRoot)) return failedCheck(__LINE__);
+        rawpreamp::unregisterZipSource(first.temporaryRoot.toStdString());
+        if (rawpreamp::isZipSource(firstFrame.toStdString()) || readSource(secondFrame) != "frame") return failedCheck(__LINE__);
+        if (!rawpreamp::removeReviewArchive(first.temporaryRoot) ||
+            !rawpreamp::removeReviewArchive(first.temporaryRoot)) return failedCheck(__LINE__);
         if (readSource(secondFrame) != "frame") return failedCheck(__LINE__);
-        motioncam::removeReviewArchive(second.temporaryRoot);
+        rawpreamp::removeReviewArchive(second.temporaryRoot);
 
         // Invalid registrations must not publish any of their entries.
         QTemporaryDir invalidRoot;
-        auto entries = motioncam::indexZipSource(zipPath.toStdString());
+        auto entries = rawpreamp::indexZipSource(zipPath.toStdString());
         auto unsafe = entries.front();
         unsafe.name = "../escape.dng";
         entries.push_back(unsafe);
         bool rejected = false;
-        try { motioncam::registerZipSource(zipPath.toStdString(), invalidRoot.path().toStdString(), entries); }
+        try { rawpreamp::registerZipSource(zipPath.toStdString(), invalidRoot.path().toStdString(), entries); }
         catch (const std::runtime_error&) { rejected = true; }
-        if (!rejected || motioncam::isZipSource(QDir(invalidRoot.path()).filePath("frame.dng").toStdString())) return failedCheck(__LINE__);
+        if (!rejected || rawpreamp::isZipSource(QDir(invalidRoot.path()).filePath("frame.dng").toStdString())) return failedCheck(__LINE__);
     }
     {
         const auto zipPath = QDir(directory.path()).filePath("mismatched-header.zip");
         createArchive(zipPath, {{"frame.dng", payload}}, "store");
-        const auto entry = motioncam::indexZipSource(zipPath.toStdString()).front();
+        const auto entry = rawpreamp::indexZipSource(zipPath.toStdString()).front();
         QFile file(zipPath);
         if (!file.open(QIODevice::ReadWrite) || !file.seek(entry.localOffset + 30) || file.write("x", 1) != 1) return failedCheck(__LINE__);
         file.close();
-        const auto imported = motioncam::extractReviewArchive(zipPath);
+        const auto imported = rawpreamp::extractReviewArchive(zipPath);
         bool rejected = false;
         try { readSource(QDir(imported.sourcePath).filePath("frame.dng")); }
         catch (const std::runtime_error&) { rejected = true; }
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
         if (!rejected) { std::cerr << "Mismatched ZIP local header was accepted\n"; return failedCheck(__LINE__); }
     }
 
@@ -372,8 +372,8 @@ int main() {
     if (!corrupt.open(QIODevice::ReadWrite) || !corrupt.resize(corrupt.size() / 2)) return failedCheck(__LINE__);
     corrupt.close();
     try {
-        const auto unexpected = motioncam::extractReviewArchive(corruptPath);
-        motioncam::removeReviewArchive(unexpected.temporaryRoot);
+        const auto unexpected = rawpreamp::extractReviewArchive(corruptPath);
+        rawpreamp::removeReviewArchive(unexpected.temporaryRoot);
         std::cerr << "truncated archive was accepted\n";
         return failedCheck(__LINE__);
     } catch (const std::exception&) {

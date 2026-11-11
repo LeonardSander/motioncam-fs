@@ -5,7 +5,7 @@
 #include <cmath>
 #include <string>
 
-namespace motioncam::utils {
+namespace rawpreamp::utils {
 
 void forEachIsoOverlayPixel(uint32_t width, uint32_t height, double iso,
                            const std::function<void(uint32_t, uint32_t, bool)>& paint) {
@@ -81,4 +81,4 @@ void bakeIsoOverlay(uint16_t* samples, uint32_t width, uint32_t height,
         });
 }
 
-} // namespace motioncam::utils
+} // namespace rawpreamp::utils

@@ -11,7 +11,7 @@ namespace {
 int sourceFd = -1;
 std::string sourcePath;
 }
-namespace motioncam {
+namespace rawpreamp {
 int openSourceReadDescriptor(const std::string& path) {
     return path == sourcePath ? ::dup(sourceFd) : ::open(path.c_str(), O_RDONLY);
 }
@@ -22,7 +22,7 @@ uintmax_t nativeSourceFileSize(const std::filesystem::path& path, std::error_cod
 }
 }
 int main() {
-    std::string pattern = (std::filesystem::temp_directory_path() / "motioncam-source-XXXXXX").string();
+    std::string pattern = (std::filesystem::temp_directory_path() / "rawpreamp-source-XXXXXX").string();
     sourceFd = ::mkstemp(pattern.data());
     assert(sourceFd >= 0);
     sourcePath = pattern;
@@ -34,7 +34,7 @@ int main() {
         assert(output.good());
     }
     {
-        motioncam::SourceInputStream first(sourcePath), second(sourcePath, std::ios::binary | std::ios::ate);
+        rawpreamp::SourceInputStream first(sourcePath), second(sourcePath, std::ios::binary | std::ios::ate);
         assert(first && second && second.tellg() == std::streampos(bytes.size()));
         std::array<char, 101> part;
         first.read(part.data(), part.size());
@@ -72,7 +72,7 @@ int main() {
         assert(first.tellg() == 0);
         first.close();
         assert(!first.is_open());
-        motioncam::SourceInputStream missing(sourcePath + "-missing");
+        rawpreamp::SourceInputStream missing(sourcePath + "-missing");
         assert(!missing && !missing.is_open());
     }
     // All readers duplicate one open file description. Concurrent random reads
@@ -80,7 +80,7 @@ int main() {
     std::vector<std::future<void>> readers;
     for (size_t worker = 0; worker < 8; ++worker) {
         readers.push_back(std::async(std::launch::async, [&, worker] {
-            motioncam::SourceInputStream input(sourcePath);
+            rawpreamp::SourceInputStream input(sourcePath);
             std::array<char, 101> part;
             for (size_t i = 0; i < 500; ++i) {
                 const size_t position = (i * 7919 + worker * 65521) % (bytes.size() - part.size());
@@ -94,7 +94,7 @@ int main() {
     for (auto& reader : readers) reader.get();
     assert(::lseek(sourceFd, 0, SEEK_CUR) == 0);
     {
-        motioncam::SourceInputStream retained(sourcePath);
+        rawpreamp::SourceInputStream retained(sourcePath);
         ::close(sourceFd);
         sourceFd = -1;
         std::array<char, 101> part;

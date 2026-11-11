@@ -1,5 +1,5 @@
 #include "DebugInstrumentation.h"
-#if defined(__APPLE__) && MOTIONCAM_DEBUG_INSTRUMENTATION
+#if defined(__APPLE__) && RAWPREAMP_DEBUG_INSTRUMENTATION
 #include "CrashDebug.h"
 
 #include <atomic>
@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <unistd.h>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace debug {
 namespace {
 std::atomic<int> gFrameNumber{-1};
@@ -55,5 +55,5 @@ void dumpCrashContext(int fd) {
     }
 }
 } // namespace debug
-} // namespace motioncam
+} // namespace rawpreamp
 #endif

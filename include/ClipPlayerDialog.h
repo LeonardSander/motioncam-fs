@@ -25,7 +25,7 @@ class QEvent;
 class QBuffer;
 class QTemporaryDir;
 class GalleryGpuVideo;
-namespace motioncam { struct VulkanGalleryGpuBuffer; }
+namespace rawpreamp { struct VulkanGalleryGpuBuffer; }
 class QGraphicsOpacityEffect; class QPropertyAnimation; class QWidget;
 #if QT_VERSION >= QT_VERSION_CHECK(6,0,0)
 class QAudioSink;
@@ -86,7 +86,7 @@ public:
         std::shared_ptr<const std::vector<uint8_t>> frameBacking = {},
         bool framePreOriented = false,
         std::shared_ptr<const uint8_t> framePixels = {},
-        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer = {},
+        std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> gpuBuffer = {},
         int sourceFrameIndex = -1);
     void presentRgb48Frame(const QByteArray& frame, int width, int height,
         std::shared_ptr<const std::vector<uint16_t>> rawSamples = {},
@@ -97,7 +97,7 @@ public:
         std::shared_ptr<const std::vector<uint8_t>> frameBacking = {},
         bool framePreOriented = false,
         std::shared_ptr<const uint8_t> framePixels = {},
-        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer = {});
+        std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> gpuBuffer = {});
     void finishRgb48Frames();
     void failRgb48Frames(const QString& error);
     void setOutputFrameThumbnail(int outputFrame, const QByteArray& frame, int width, int height);
@@ -143,7 +143,7 @@ private:
         QImage image;
         int sourceFrame=0;
         RawFrame raw;
-        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer;
+        std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> gpuBuffer;
     };
     bool hasPresentedFrame() const {
         return !mLastPresentedImage.isNull() || bool(mLastPresentedGpuBuffer);
@@ -292,7 +292,7 @@ private:
     std::deque<QueuedFrame> mFrames; std::deque<SubmittedFrame> mSubmittedFrames;
     RawFrame mPresentedRawFrame;
     QImage mLastPresentedImage;
-    std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> mLastPresentedGpuBuffer;
+    std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> mLastPresentedGpuBuffer;
     int mWidth=0, mHeight=0, mFrameBytes=0, mInputFrameBytes=0;
     int mInputBitsPerChannel=16;
     int mNextInputFrame=0;

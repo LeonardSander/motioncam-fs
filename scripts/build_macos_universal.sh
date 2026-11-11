@@ -17,7 +17,7 @@ host_arch="$(uname -m)"
 if [[ "$host_arch" == x86_64 ]]; then host_arch=x64; fi
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
-  -DMOTIONCAMFUSE_MACOS_UNIVERSAL=ON \
+  -DRAWPREAMP_MACOS_UNIVERSAL=ON \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
   -DVCPKG_OVERLAY_TRIPLETS="${ROOT_DIR}/scripts/vcpkg-triplets" \
@@ -26,10 +26,10 @@ cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
 
 cmake --build "${BUILD_DIR}" --config Release
 
-APP_PATH="${BUILD_DIR}/MotionCamFuse.app"
+APP_PATH="${BUILD_DIR}/RawPreamp.app"
 if [[ -d "$APP_PATH" ]]; then
   "${ROOT_DIR}/scripts/package_macos_app.sh" "$APP_PATH"
 fi
 
 echo "Universal build output:"
-echo "  ${BUILD_DIR}/MotionCamFuse.app"
+echo "  ${BUILD_DIR}/RawPreamp.app"

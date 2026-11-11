@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-using namespace motioncam;
+using namespace rawpreamp;
 
 // A comparison routine for std::sort that wraps PrjFileNameCompare() so that we can sort our DirInfo
 // the same way the file system would.

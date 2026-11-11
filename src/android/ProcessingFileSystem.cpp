@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <thread>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 constexpr std::size_t cacheBytes = 256u * 1024u * 1024u;
 }

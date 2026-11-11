@@ -5,7 +5,7 @@
 #include <mutex>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 // Only generated analysis entries are eligible; source URI indexes live elsewhere.
 inline void trimSourceAnalysisCache(const std::filesystem::path& root) {
     static std::mutex mutex;
@@ -38,4 +38,4 @@ inline void trimSourceAnalysisCache(const std::filesystem::path& root) {
         if (std::filesystem::remove(file.path, error)) total -= file.bytes;
     }
 }
-} // namespace motioncam
+} // namespace rawpreamp

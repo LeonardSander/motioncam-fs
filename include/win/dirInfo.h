@@ -6,7 +6,7 @@
 #include <Windows.h>
 #include <projectedfslib.h>
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct DirEntry {
     std::wstring FileName;

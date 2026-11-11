@@ -12,7 +12,7 @@ class SingleApplication : public QApplication
 public:
     SingleApplication(int &argc, char **argv) : QApplication(argc, argv)
     {
-        m_serverName = "motioncam-fs";
+        m_serverName = "RawPreamp";
         m_localServer = nullptr;
         m_isRunning = false;
     }

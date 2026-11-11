@@ -10,17 +10,17 @@ struct AVFrame;
 struct AImage;
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 
-class DirectLogGpuRgb {
+class NativeVideoGpuRgb {
 public:
     enum class TransferCurve { None, HLG, LOG60, LLOG60 };
     // Shared GLSL for the renderer hooks and native hardware-buffer sampling.
     static const char* transferShader();
-    DirectLogGpuRgb();
-    ~DirectLogGpuRgb();
-    DirectLogGpuRgb(const DirectLogGpuRgb&) = delete;
-    DirectLogGpuRgb& operator=(const DirectLogGpuRgb&) = delete;
+    NativeVideoGpuRgb();
+    ~NativeVideoGpuRgb();
+    NativeVideoGpuRgb(const NativeVideoGpuRgb&) = delete;
+    NativeVideoGpuRgb& operator=(const NativeVideoGpuRgb&) = delete;
 
     bool render(const AVFrame* source, int width, int height, bool smoothChroma,
                 TransferCurve curve, bool fullRange, uint16_t* packedRgb,
@@ -43,4 +43,4 @@ private:
     std::shared_ptr<State> mState;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

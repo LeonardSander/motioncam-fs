@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace motioncam { struct FrameRateInfo; }
+namespace rawpreamp { struct FrameRateInfo; }
 
 class FrameTimingDialog final : public QDialog
 {
@@ -15,7 +15,7 @@ public:
                       int timeBaseDen,
                       double targetFps,
                       bool useCfrMapping,
-                      const motioncam::FrameRateInfo& frameRateInfo,
+                      const rawpreamp::FrameRateInfo& frameRateInfo,
                       QWidget* parent = nullptr);
 
     void updateTiming(const std::vector<std::int64_t>& pts,
@@ -23,7 +23,7 @@ public:
                       int timeBaseDen,
                       double targetFps,
                       bool useCfrMapping,
-                      const motioncam::FrameRateInfo& frameRateInfo);
+                      const rawpreamp::FrameRateInfo& frameRateInfo);
 
 private:
     class QLabel* mSummary = nullptr;

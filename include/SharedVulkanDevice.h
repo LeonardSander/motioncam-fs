@@ -2,7 +2,7 @@
 
 #include "DebugInstrumentation.h"
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libplacebo/vulkan.h>
 #include "VulkanDevicePolicy.h"
 #include <cstdlib>
@@ -20,7 +20,7 @@
 #include <android/log.h>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 inline PFN_vkGetInstanceProcAddr galleryVulkanGetInstanceProcAddr() {
 #ifdef _WIN32
     // Keep the loader alive with the process's Vulkan devices. No static DLL
@@ -42,7 +42,7 @@ inline PFN_vkGetInstanceProcAddr galleryVulkanGetInstanceProcAddr() {
 // stages. The device outlives Qt and source-frame leases.
 inline pl_vulkan sharedVulkanDevice() {
     static const pl_vulkan device = [] {
-        const char* requested = motioncam::debugEnvironment("MOTIONCAM_GALLERY_SHARED_DEVICE");
+        const char* requested = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_SHARED_DEVICE");
         if (requested && requested[0] == '0')
             return pl_vulkan{};
         const bool forced = requested && requested[0] == '1';
@@ -107,7 +107,7 @@ inline pl_vulkan createSharedVulkanContext(pl_log log) {
     pl_log_params logParams{};
     logParams.log_level = PL_LOG_WARN;
     logParams.log_cb = [](void*, pl_log_level, const char* message) {
-        __android_log_write(ANDROID_LOG_WARN, "mcFuseVulkan", message);
+        __android_log_write(ANDROID_LOG_WARN, "RawPreampVulkan", message);
     };
     if (log) pl_log_update(log, &logParams);
 #endif

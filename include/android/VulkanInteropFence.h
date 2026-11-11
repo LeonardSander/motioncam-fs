@@ -1,9 +1,9 @@
 #pragma once
-#if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
+#if defined(__ANDROID__) && defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO)
 #include <libplacebo/vulkan.h>
 #include <unistd.h>
 
-namespace motioncam {
+namespace rawpreamp {
 inline bool androidSemaphoreFdEnabled(pl_vulkan vk) {
     // Imported libplacebo contexts do not preserve the public extension list.
     // Device-level lookup reflects extensions enabled on the actual VkDevice.

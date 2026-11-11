@@ -34,9 +34,9 @@
 #include <unistd.h>
 #endif
 
-using motioncam::Timestamp;
+using rawpreamp::Timestamp;
 
-namespace motioncam {
+namespace rawpreamp {
 
 namespace {
 
@@ -307,7 +307,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
         // ZIP previews retain the track in memory so the player never opens
         // a discovery placeholder as a native audio file.
         if (mHasFrameNumberSequence && (!mConfig.streamingPreview ||
-            motioncam::isZipSource(frames.front().filePath))) {
+            rawpreamp::isZipSource(frames.front().filePath))) {
             const boost::filesystem::path source(mSrcPath);
             const auto sourceDirectory = boost::filesystem::is_directory(source)
                 ? source : source.parent_path();
@@ -318,7 +318,7 @@ VirtualFileSystemImpl_DNG::VirtualFileSystemImpl_DNG(
             for (const auto& name : audioNames) {
                 const auto audioPath = sourceDirectory / name;
                 if (!boost::filesystem::is_regular_file(audioPath)) continue;
-                motioncam::SourceInputStream audio(audioPath.string(), std::ios::binary);
+                rawpreamp::SourceInputStream audio(audioPath.string(), std::ios::binary);
                 std::vector<uint8_t> bytes(
                     std::istreambuf_iterator<char>(audio), {});
                 if (!audio.eof() && audio.fail())
@@ -573,8 +573,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
         return std::make_shared<std::vector<uint8_t>>(mAudioData->begin(), mAudioData->end());
 
     return vfs::materializeCached(mCache, entry, outputCompression || savedOutput, [&] {
-        const auto materializeStarted = motioncam::diagnosticNow();
-        MOTIONCAM_DIAGNOSTIC_INFO("DNG timing [{}]: materialize cache miss started (advertised {:.2f} MiB)",
+        const auto materializeStarted = rawpreamp::diagnosticNow();
+        RAWPREAMP_DIAGNOSTIC_INFO("DNG timing [{}]: materialize cache miss started (advertised {:.2f} MiB)",
                      entry.name, static_cast<double>(entry.size) / (1024.0 * 1024.0));
         const auto timestamp = std::get<Timestamp>(entry.userData);
         const auto& frames = mDecoder->getFrames();
@@ -593,12 +593,12 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
         const int workUnits = static_cast<uint64_t>(mWidth) * mHeight > 32'000'000 ? 4 : 1;
         DngFrameWorkSlot workSlot(mMaterializeMutex, mMaterializeAvailable,
                                   mActiveMaterializeUnits, workUnits);
-        const auto acquiredAt = motioncam::diagnosticNow();
+        const auto acquiredAt = rawpreamp::diagnosticNow();
         FrameStageTiming stageTiming;
         auto bytes = transformFrame(
             frameIt->second, renderPlan.outputTimestamp, jpegCompression,
             renderPlan.nativeMetadataFrame, &stageTiming, outputCompression);
-        const auto transformedAt = motioncam::diagnosticNow();
+        const auto transformedAt = rawpreamp::diagnosticNow();
         const size_t advertisedSize = entry.size;
         if (!jpegCompression && !mConfig.streamingPreview && mConfig.projectedFileSizes && !savedOutput) {
             if (bytes.size() > advertisedSize)
@@ -608,8 +608,8 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
             bytes.resize(advertisedSize, 0);
         }
         auto output = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
-        const auto completedAt = motioncam::diagnosticNow();
-        MOTIONCAM_DIAGNOSTIC_INFO(
+        const auto completedAt = rawpreamp::diagnosticNow();
+        RAWPREAMP_DIAGNOSTIC_INFO(
             "DNG timing [{}]: materialize complete {:.1f} ms "
             "(queue {:.1f} ms, transform {:.1f} ms, pad/copy {:.1f} ms, output {:.2f} MiB)",
             entry.name,
@@ -618,7 +618,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DNG::materializeFile
             std::chrono::duration<double, std::milli>(transformedAt - acquiredAt).count(),
             std::chrono::duration<double, std::milli>(completedAt - transformedAt).count(),
             static_cast<double>(output->size()) / (1024.0 * 1024.0));
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=mounted_frame_stage source=DNG source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms=0 process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
                          mSrcPath, frameIt->second,
                          std::chrono::duration<double, std::milli>(acquiredAt-materializeStarted).count(),
@@ -653,9 +653,9 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
     // processor, including gain-map-only rendering.
     {
         try {
-            const auto previewStarted = motioncam::diagnosticNow();
+            const auto previewStarted = rawpreamp::diagnosticNow();
             auto prepared = prepareFrame(frameIt->second, false);
-            const auto preparedAt = motioncam::diagnosticNow();
+            const auto preparedAt = rawpreamp::diagnosticNow();
             DecodedDNGImage image;
             const auto treatment = effectiveBadPixelTreatment(
                 mConfig.badPixelTreatment, mConfig.vignetteCorrection);
@@ -669,7 +669,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             if (!DNGDecoder::decodeImage(std::move(prepared.dng), image, false, true, resident))
                 throw std::runtime_error("Could not decode source DNG preview");
             image.ditherSeed = static_cast<uint32_t>(frameIt->second + 1);
-            const auto decodedAt = motioncam::diagnosticNow();
+            const auto decodedAt = rawpreamp::diagnosticNow();
             // Sequence calibration can declare higher-CFA topology which the
             // individual DNG tags intentionally describe only as a Bayer
             // phase. Carry the resolved sequence topology into the shared
@@ -698,7 +698,7 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
             std::vector<utils::ActiveBadPixel> markedPixels;
             const uint32_t markedSourceWidth = image.layout.width;
             const uint32_t markedSourceHeight = image.layout.height;
-            const auto badPixelsStarted = motioncam::diagnosticNow();
+            const auto badPixelsStarted = rawpreamp::diagnosticNow();
             const auto badPixelTreatment = effectiveBadPixelTreatment(
                 mConfig.badPixelTreatment, mConfig.vignetteCorrection);
             if (mCalibration && mCalibration->hasBadPixels &&
@@ -721,12 +721,12 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     image.metadata.exposureTime, *mCalibration,
                     badPixelTreatment, true);
             }
-            const auto badPixelsFinished = motioncam::diagnosticNow();
+            const auto badPixelsFinished = rawpreamp::diagnosticNow();
             vfs::mergeManualDngMetadata(
                 image.metadata, mManualVignetteSidecars,
                 mCalibration ? &*mCalibration : nullptr);
             vfs::applyPreviewExposureOffset(image.metadata, mConfig);
-            const auto pipelineStarted = motioncam::diagnosticNow();
+            const auto pipelineStarted = rawpreamp::diagnosticNow();
             auto previewSettings = mConfig;
             // These overlays write RGB samples after the shared preview pass.
             if ((mConfig.options & RENDER_OPT_BAKE_ISO) || !markedPixels.empty())
@@ -736,8 +736,8 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
                     previewSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
             if (DNGDecoder::decodePreview(
                     std::move(image), previewSettings, preview, true, false)) {
-                if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
-                    const auto completedAt = motioncam::diagnosticNow();
+                if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) {
+                    const auto completedAt = rawpreamp::diagnosticNow();
                     spdlog::info(
                         "GALLERY_PERF event=dng_preview_stage source={} prepare_ms={:.3f} decode_ms={:.3f} bad_pixels_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f} total_ms={:.3f}",
                         mSrcPath,
@@ -792,8 +792,8 @@ bool VirtualFileSystemImpl_DNG::materializePreviewFrame(
 
 VirtualFileSystemImpl_DNG::PreparedFrame
 VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImage) {
-    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    const auto preparationStarted = motioncam::diagnosticNow();
+    const bool profile = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+    const auto preparationStarted = rawpreamp::diagnosticNow();
     const auto& frames = mDecoder->getFrames();
     if (frameIndex >= frames.size()) throw std::out_of_range("DNG source frame index");
     PreparedFrame result;
@@ -801,7 +801,7 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         throw std::runtime_error("Could not read source DNG");
     if (!mTelemetry->fillMissingDngMetadata(result.dng, frameIndex))
         throw std::runtime_error("Could not fill missing DNG capture metadata");
-    const auto extractedAt = motioncam::diagnosticNow();
+    const auto extractedAt = rawpreamp::diagnosticNow();
     // The frame is already in memory. getFrameMetadata can reopen and read the
     // entire source DNG on a cache miss, which is costly during sequence reads.
     if (!DNGDecoder::getColorMetadata(result.dng, result.sourceMetadata))
@@ -813,7 +813,7 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
         throw std::runtime_error("Could not remove source DNG thumbnails");
     if (canonicalizeImage && !DNGDecoder::ensureUncompressed(result.dng))
         throw std::runtime_error("Could not decode source DNG to an uncompressed DNG");
-    const auto canonicalizedAt = motioncam::diagnosticNow();
+    const auto canonicalizedAt = rawpreamp::diagnosticNow();
 
     result.cfaSize = mCfaSize;
     result.cfaPhase = mCfaPhase;
@@ -957,7 +957,7 @@ VirtualFileSystemImpl_DNG::prepareFrame(size_t frameIndex, bool canonicalizeImag
                      frames[frameIndex].filePath,
                      std::chrono::duration<double, std::milli>(extractedAt-preparationStarted).count(),
                      std::chrono::duration<double, std::milli>(canonicalizedAt-extractedAt).count(),
-                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-canonicalizedAt).count(),
+                     std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-canonicalizedAt).count(),
                      result.dng.size());
     return result;
 }
@@ -1013,11 +1013,11 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
         static_cast<bool>(mConfig.options & RENDER_OPT_HIGHER_CFA_HQ),
         static_cast<bool>(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER),
         optionsToString(mConfig.options));
-    const auto started = motioncam::diagnosticNow();
+    const auto started = rawpreamp::diagnosticNow();
     auto stageStarted = started;
     auto logStage = [&](const char* stage, size_t byteCount) {
-        const auto now = motioncam::diagnosticNow();
-        MOTIONCAM_DIAGNOSTIC_INFO("DNG timing [{}]: {} {:.1f} ms ({:.2f} MiB)",
+        const auto now = rawpreamp::diagnosticNow();
+        RAWPREAMP_DIAGNOSTIC_INFO("DNG timing [{}]: {} {:.1f} ms ({:.2f} MiB)",
                      frame.filePath, stage,
                      std::chrono::duration<double, std::milli>(now - stageStarted).count(),
                      static_cast<double>(byteCount) / (1024.0 * 1024.0));
@@ -1089,8 +1089,8 @@ std::vector<uint8_t> VirtualFileSystemImpl_DNG::transformFrame(
     if (timing) timing->finalizeMs =
         std::chrono::duration<double, std::milli>(stageStarted-started).count() -
         timing->loadMs - timing->processMs;
-    const auto completed = motioncam::diagnosticNow();
-    MOTIONCAM_DIAGNOSTIC_INFO("DNG timing [{}]: transform total {:.1f} ms",
+    const auto completed = rawpreamp::diagnosticNow();
+    RAWPREAMP_DIAGNOSTIC_INFO("DNG timing [{}]: transform total {:.1f} ms",
                  frame.filePath,
                  std::chrono::duration<double, std::milli>(completed - started).count());
     return bytes;
@@ -1370,4 +1370,4 @@ void VirtualFileSystemImpl_DNG::calculateFrameRateStats() {
                   mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

@@ -19,7 +19,7 @@ namespace tinydngwriter {
     struct GainMapParams;
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct CameraFrameMetadata;
 struct CameraConfiguration;
@@ -420,4 +420,4 @@ bool normalizeRgb16Bytes(
     const std::array<double, 3>& white);
 
 } // namespace utils
-} // namespace motioncam
+} // namespace rawpreamp

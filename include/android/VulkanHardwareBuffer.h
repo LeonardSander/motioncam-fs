@@ -1,16 +1,16 @@
 #pragma once
-#if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
+#if defined(__ANDROID__) && defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO)
 #include <android/hardware_buffer.h>
-#include "DirectLogGpuRgb.h"
+#include "NativeVideoGpuRgb.h"
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
 #include <libplacebo/vulkan.h>
-namespace motioncam {
+namespace rawpreamp {
 // Owns the Vulkan view of a decoder allocation. The AImage and its acquire /
 // release fences remain the caller's responsibility; do not destroy in flight.
 class VulkanHardwareBuffer {
 public:
-    using TransferCurve = DirectLogGpuRgb::TransferCurve;
+    using TransferCurve = NativeVideoGpuRgb::TransferCurve;
     ~VulkanHardwareBuffer();
     VulkanHardwareBuffer() = default;
     VulkanHardwareBuffer(const VulkanHardwareBuffer&) = delete;

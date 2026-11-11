@@ -198,26 +198,26 @@ int main(int argc, char** argv) {
         write(root / "sequence" / "clip-00000002.dng", "fixture");
         write(root / "sequence" / "clip-00000000.jsonl", jsonl(header(1000000), {frame(1, 500, 1.25)}));
         write(root / "sequence" / "clip-00000002.jsonl", jsonl(header(1066667), {frame(2, 500, 2.5)}));
-        auto rich = motioncam::GyroTelemetry::load((root / "sequence").string());
-        require(rich->format() == motioncam::GyroTelemetry::Format::Jsonl, "JSONL format");
+        auto rich = rawpreamp::GyroTelemetry::load((root / "sequence").string());
+        require(rich->format() == rawpreamp::GyroTelemetry::Format::Jsonl, "JSONL format");
         require(rich->frames().size() == 2 && rich->frames()[1].timestampNs == 66667000,
                 "clock base alignment");
         require(rich->frame(0)->at("imu")[0].at("gyroscopeX") == 1.25, "gyro retained");
         write(root / "sequence" / "unrelated.jsonl", jsonl(header(0), {frame(1, 0, 999)}));
-        require(motioncam::GyroTelemetry::load((root / "sequence").string())->frames().size() == 2,
+        require(rawpreamp::GyroTelemetry::load((root / "sequence").string())->frames().size() == 2,
                 "unrelated JSONL ignored");
         write(root / "sequence" / "sequence.jsonl", jsonl(header(0), {frame(1, 0, 777)}));
-        const auto finalized = motioncam::GyroTelemetry::load((root / "sequence").string());
+        const auto finalized = rawpreamp::GyroTelemetry::load((root / "sequence").string());
         require(finalized->frames().size() == 1 && finalized->frame(0)->at("imu")[0]["gyroscopeX"] == 777,
                 "finalized directory companion overrides old fragments on reimport");
         std::filesystem::remove(root / "sequence" / "sequence.jsonl");
         write(root / "frame-only.jsonl", frame(1, 0, 12).dump() + '\n');
-        require(motioncam::GyroTelemetry::load((root / "frame-only.jsonl").string())->frames().size() == 1,
+        require(rawpreamp::GyroTelemetry::load((root / "frame-only.jsonl").string())->frames().size() == 1,
                 "frame-only JSONL recognized as telemetry");
         auto gpsFrame = frame(1, 0, 12);
         gpsFrame["gps"] = Json::array({{{"latitude", 51.5}, {"longitude", 13.4}}});
         write(root / "gps.jsonl", jsonl(header(0), {gpsFrame}));
-        const auto gpsTelemetry = motioncam::GyroTelemetry::load((root / "gps.jsonl").string());
+        const auto gpsTelemetry = rawpreamp::GyroTelemetry::load((root / "gps.jsonl").string());
         require(gpsTelemetry->serialize().find("latitude") != std::string::npos,
                 "GPS retained by default");
         const auto privateTelemetry = gpsTelemetry->serialize({}, 0, 0, 0, -1, true);
@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
                 "GPS excluded while gyro retained");
         const auto merged = rich->serialize({0, 33333333, 66667000}, 30);
         write(root / "held.jsonl", merged);
-        const auto held = motioncam::GyroTelemetry::load((root / "held.jsonl").string());
+        const auto held = rawpreamp::GyroTelemetry::load((root / "held.jsonl").string());
         require(held->frames().size() == 3 && held->frames()[1].timestampNs == 33333333 &&
                     held->frames()[2].timestampNs == 66667000,
                 "JSONL preserves video timing independently of held exposures");
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
         changedExposure["frame"]["exposureTimeUs"] = 6000;
         write(root / "sensor-timing.jsonl",
               jsonl(header(1000000), {frame(1, 0, 1), changedExposure, frame(3, 66000, 3)}));
-        const auto sensorTiming = motioncam::GyroTelemetry::load((root / "sensor-timing.jsonl").string());
+        const auto sensorTiming = rawpreamp::GyroTelemetry::load((root / "sensor-timing.jsonl").string());
         require(sensorTiming->frameTimestamps(3) == std::vector<int64_t>({0, 30000000, 66000000}),
                 "protobuf timing uses sensor exposure start rather than variable exposure center");
         require(sensorTiming->frames()[1].timestampNs == 30000000 &&
@@ -257,7 +257,7 @@ int main(int argc, char** argv) {
         require(sensorTiming->frameTimestamps(4).empty(), "incomplete protobuf timing permits CSV fallback");
         auto duplicateExposure = frame(2, 0, 2);
         write(root / "invalid-timing.jsonl", jsonl(header(0), {frame(1, 0, 1), duplicateExposure}));
-        require(motioncam::GyroTelemetry::load((root / "invalid-timing.jsonl").string())
+        require(rawpreamp::GyroTelemetry::load((root / "invalid-timing.jsonl").string())
                     ->frameTimestamps(2)
                     .empty(),
                 "non-increasing protobuf capture timing permits CSV fallback");
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
         auto notesHeader = header(0);
         notesHeader["camera"]["additionalData"] = "Plain text notes are valid protobuf strings";
         write(root / "implicit-zero.jsonl", jsonl(notesHeader, {implicitZero}));
-        const auto zero = motioncam::GyroTelemetry::load((root / "implicit-zero.jsonl").string());
+        const auto zero = rawpreamp::GyroTelemetry::load((root / "implicit-zero.jsonl").string());
         require(zero->frame(0)->at("startTimestampUs") == 2000, "implicit proto3 zero is clock-rebased");
         require(zero->serialize().find("Plain text notes") != std::string::npos,
                 "plain additional data preserved");
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
         implicitSample["frame"]["imu"][0].erase("sampleTimestampUs");
         implicitSample["frame"]["quaternions"][0].erase("sampleTimestampUs");
         write(root / "implicit-sample.jsonl", jsonl(header(1000000), {implicitSample}));
-        const auto sampleZero = motioncam::GyroTelemetry::load((root / "implicit-sample.jsonl").string());
+        const auto sampleZero = rawpreamp::GyroTelemetry::load((root / "implicit-sample.jsonl").string());
         require(sampleZero->frame(0)->at("imu")[0]["sampleTimestampUs"] == 1000 &&
                     sampleZero->frame(0)->at("quaternions")[0]["sampleTimestampUs"] == 1000,
                 "implicit proto3 sample timestamps are rebased with explicit timestamps");
@@ -285,46 +285,46 @@ int main(int argc, char** argv) {
         const auto csvCompanion = "GYROFLOW IMU LOG\nversion,1.2\nt,gx,gy,gz\n0,1,2,3\n";
         write(renamed / "clip-mounted.gcsv", csvCompanion);
         write(renamed / "clip-mounted.jsonl", jsonl(header(0), {frame(1, 0, 42)}));
-        require(motioncam::GyroTelemetry::load(renamed.string())->frame(0)->at("imu")[0]["gyroscopeX"] == 42,
+        require(rawpreamp::GyroTelemetry::load(renamed.string())->frame(0)->at("imu")[0]["gyroscopeX"] == 42,
                 "projected DNG source companion survives a directory rename");
         std::filesystem::remove(renamed / "clip-mounted.jsonl");
-        require(motioncam::GyroTelemetry::load(renamed.string())->serialize() == csvCompanion,
+        require(rawpreamp::GyroTelemetry::load(renamed.string())->serialize() == csvCompanion,
                 "projected DNG GCSV companion survives a directory rename");
         const auto zipPath = root / "capture.zip";
         zip(zipPath, jsonl(header(1000000), {frame(1, 500, 3.75)}));
-        const auto imported = motioncam::extractReviewArchive(QString::fromStdString(zipPath.string()));
-        auto zipped = motioncam::GyroTelemetry::load(imported.sourcePath.toStdString());
-        require(zipped->format() == motioncam::GyroTelemetry::Format::Jsonl && zipped->frames().size() == 1,
+        const auto imported = rawpreamp::extractReviewArchive(QString::fromStdString(zipPath.string()));
+        auto zipped = rawpreamp::GyroTelemetry::load(imported.sourcePath.toStdString());
+        require(zipped->format() == rawpreamp::GyroTelemetry::Format::Jsonl && zipped->frames().size() == 1,
                 "ZIP-backed JSONL");
         write(root / "capture.gcsv", "GYROFLOW IMU LOG\nversion,1.2\nt,gx,gy,gz\n0,9,8,7\n");
         const auto archiveCsv =
-            motioncam::GyroTelemetry::load(imported.sourcePath.toStdString(), zipPath.string());
+            rawpreamp::GyroTelemetry::load(imported.sourcePath.toStdString(), zipPath.string());
         require(archiveCsv->extension() == ".gcsv", "GCSV beside ZIP overrides archived JSONL");
         write(root / "capture.jsonl", jsonl(header(0), {frame(1, 0, 888)}));
         const auto archiveJsonl =
-            motioncam::GyroTelemetry::load(imported.sourcePath.toStdString(), zipPath.string());
+            rawpreamp::GyroTelemetry::load(imported.sourcePath.toStdString(), zipPath.string());
         require(archiveJsonl->frame(0)->at("imu")[0]["gyroscopeX"] == 888,
                 "JSONL beside ZIP overrides archived JSONL and GCSV");
         std::filesystem::remove(root / "capture.gcsv");
         std::filesystem::remove(root / "capture.jsonl");
         const auto sevenZip = root / "capture.7z";
         zip(sevenZip, jsonl(header(0), {frame(1, 0, 12)}));
-        const auto extracted7z = motioncam::extractReviewArchive(QString::fromStdString(sevenZip.string()));
+        const auto extracted7z = rawpreamp::extractReviewArchive(QString::fromStdString(sevenZip.string()));
         write(root / "capture.gcsv", "GYROFLOW IMU LOG\nversion,1.2\nt,gx,gy,gz\n0,9,8,7\n");
-        require(motioncam::GyroTelemetry::load(extracted7z.sourcePath.toStdString(), sevenZip.string())
+        require(rawpreamp::GyroTelemetry::load(extracted7z.sourcePath.toStdString(), sevenZip.string())
                         ->extension() == ".gcsv",
                 "GCSV beside 7z overrides extracted telemetry");
         write(root / "capture.jsonl", jsonl(header(0), {frame(1, 0, 999)}));
-        require(motioncam::GyroTelemetry::load(extracted7z.sourcePath.toStdString(), sevenZip.string())
+        require(rawpreamp::GyroTelemetry::load(extracted7z.sourcePath.toStdString(), sevenZip.string())
                         ->frame(0)
                         ->at("imu")[0]["gyroscopeX"] == 999,
                 "JSONL beside 7z overrides extracted telemetry");
         std::filesystem::remove(root / "capture.gcsv");
         std::filesystem::remove(root / "capture.jsonl");
-        motioncam::removeReviewArchive(extracted7z.temporaryRoot);
-        motioncam::removeReviewArchive(imported.temporaryRoot);
+        rawpreamp::removeReviewArchive(extracted7z.temporaryRoot);
+        rawpreamp::removeReviewArchive(imported.temporaryRoot);
         makeRaw(root / "native.mcraw");
-        auto raw = motioncam::GyroTelemetry::load((root / "native.mcraw").string());
+        auto raw = rawpreamp::GyroTelemetry::load((root / "native.mcraw").string());
         require(raw->extension() == ".jsonl", "native MCRAW exports JSONL");
         const auto& imu = raw->frames().front().message["frame"]["imu"];
         require(imu.size() == 2 && imu[0].contains("gyroscopeX") && !imu[0].contains("accelerometerX") &&
@@ -358,7 +358,7 @@ int main(int argc, char** argv) {
         require(rawFrame["endTimestampUs"].get<double>() - rawFrame["startTimestampUs"].get<double>() == 2000,
                 "MCRAW rolling shutter mapped");
         makeRaw(root / "uncalibrated.mcraw", false);
-        auto uncalibrated = motioncam::GyroTelemetry::load((root / "uncalibrated.mcraw").string());
+        auto uncalibrated = rawpreamp::GyroTelemetry::load((root / "uncalibrated.mcraw").string());
         require(!uncalibrated->frames()[0].message["frame"].contains("ois") &&
                     uncalibrated->header()["camera"]["additionalData"]["motioncamOis"]["samples"].size() == 2,
                 "uncalibrated OIS remains decoded pixels, never invented nanometers");
@@ -376,7 +376,7 @@ int main(int argc, char** argv) {
         }
         makeVideo(root / "raw-native.mov");
         raw->embed((root / "raw-native.mov").string(), {0, 33333333, 66666667}, 30, 16, 16, 90);
-        auto rawRoundtrip = motioncam::GyroTelemetry::load((root / "raw-native.mov").string());
+        auto rawRoundtrip = rawpreamp::GyroTelemetry::load((root / "raw-native.mov").string());
         const auto checkCaptureClock = [&](const auto& restored) {
             const auto* capture = restored->frame(0);
             require(capture && capture->at("startTimestampUs") == rawFrame["startTimestampUs"] &&
@@ -408,26 +408,26 @@ int main(int argc, char** argv) {
             }
         require(oisCount == 2, "held output frames do not repeat or lose OIS samples");
         write(root / "raw-jsonl.jsonl", raw->serialize());
-        auto rawJsonl = motioncam::GyroTelemetry::load((root / "raw-jsonl.jsonl").string());
+        auto rawJsonl = rawpreamp::GyroTelemetry::load((root / "raw-jsonl.jsonl").string());
         require(rawJsonl->frames()[0].message["frame"]["ois"].size() == 2, "OIS JSONL readback");
         checkCaptureClock(rawJsonl);
         write(root / "raw-jsonl-twice.jsonl", rawJsonl->serialize());
-        checkCaptureClock(motioncam::GyroTelemetry::load((root / "raw-jsonl-twice.jsonl").string()));
+        checkCaptureClock(rawpreamp::GyroTelemetry::load((root / "raw-jsonl-twice.jsonl").string()));
         write(root / "legacy.mcraw", "unused fixture");
         const std::string gcsv =
             "GYROFLOW IMU "
             "LOG\nversion,1.2\nid,original\norientation,XYZ\ntscale,1\ngscale,1\nt,gx,gy,gz\n0,1,2,3\n";
         write(root / "legacy.gcsv", gcsv);
-        auto legacy = motioncam::GyroTelemetry::load((root / "legacy.mcraw").string());
+        auto legacy = rawpreamp::GyroTelemetry::load((root / "legacy.mcraw").string());
         require(legacy->extension() == ".gcsv" && legacy->serialize() == gcsv, "GCSV copied byte-for-byte");
         for (const char* suffix : {".mcraw", ".mcpro", ".unspektra", ".mov", ".mp4", ".mkv"}) {
             const auto path = root / (std::string("override") + suffix);
             write(path, "Sidecars must override without reading the clip");
             write(root / "override.gcsv", gcsv);
-            require(motioncam::GyroTelemetry::load(path.string())->serialize() == gcsv,
+            require(rawpreamp::GyroTelemetry::load(path.string())->serialize() == gcsv,
                     "GCSV override for every clip type");
             write(root / "override.jsonl", raw->serialize());
-            require(motioncam::GyroTelemetry::load(path.string())->extension() == ".jsonl",
+            require(rawpreamp::GyroTelemetry::load(path.string())->extension() == ".jsonl",
                     "JSONL override for every clip type");
             std::filesystem::remove(root / "override.gcsv");
             std::filesystem::remove(root / "override.jsonl");
@@ -436,8 +436,8 @@ int main(int argc, char** argv) {
             const auto video = root / "native.mov";
             makeVideo(video);
             rich->embed(video.string(), {0, 33333333, 66667000}, 30, 16, 16, 90);
-            auto embedded = motioncam::GyroTelemetry::load(video.string());
-            require(embedded->format() == motioncam::GyroTelemetry::Format::Jsonl &&
+            auto embedded = rawpreamp::GyroTelemetry::load(video.string());
+            require(embedded->format() == rawpreamp::GyroTelemetry::Format::Jsonl &&
                         embedded->frames().size() == 3,
                     "read embedded protobuf");
             size_t imu = 0, quaternions = 0;
@@ -456,10 +456,10 @@ int main(int argc, char** argv) {
                         !std::filesystem::exists(root / "native.gcsv"),
                     "no gyro sidecars");
             write(root / "native.gcsv", gcsv);
-            require(motioncam::GyroTelemetry::load(video.string())->serialize() == gcsv,
+            require(rawpreamp::GyroTelemetry::load(video.string())->serialize() == gcsv,
                     "GCSV sidecar overrides embedded protobuf");
             write(root / "native.jsonl", jsonl(header(0), {frame(1, 0, 999)}));
-            const auto override = motioncam::GyroTelemetry::load(video.string());
+            const auto override = rawpreamp::GyroTelemetry::load(video.string());
             require(override->frames().size() == 1 && override->frame(0)->at("imu")[0]["gyroscopeX"] == 999,
                     "JSONL sidecar overrides embedded protobuf and GCSV sidecar");
             std::filesystem::remove(root / "native.jsonl");
@@ -474,15 +474,15 @@ int main(int argc, char** argv) {
             }
             require(cancelled && std::filesystem::file_size(video) == originalSize &&
                         !std::filesystem::exists(root / "native.telemetry.mov") &&
-                        motioncam::GyroTelemetry::load(video.string())->frames().size() == 3,
+                        rawpreamp::GyroTelemetry::load(video.string())->frames().size() == 3,
                     "cancelled embedding preserves original and removes staging file");
             // Re-embedding replaces its own track, without accumulating duplicate telemetry.
             embedded->embed(video.string(), {0, 33333333, 66667000}, 30, 16, 16, 90);
-            require(motioncam::GyroTelemetry::load(video.string())->frames().size() == 3,
+            require(rawpreamp::GyroTelemetry::load(video.string())->frames().size() == 3,
                     "replace embedded track");
             legacy->embed(video.string(), {0, 33333333, 66667000}, 30, 16, 16, 0);
-            const auto storedCsv = motioncam::GyroTelemetry::load(video.string());
-            require(storedCsv->format() == motioncam::GyroTelemetry::Format::Gcsv &&
+            const auto storedCsv = rawpreamp::GyroTelemetry::load(video.string());
+            require(storedCsv->format() == rawpreamp::GyroTelemetry::Format::Gcsv &&
                         storedCsv->serialize() == gcsv,
                     "GCSV never converted to JSONL");
             {
@@ -495,16 +495,16 @@ int main(int argc, char** argv) {
                 output.seekp(tag);
                 output.write("gpmd", 4);
                 output.close();
-                require(motioncam::GyroTelemetry::load(video.string())->serialize() == gcsv,
+                require(rawpreamp::GyroTelemetry::load(video.string())->serialize() == gcsv,
                         "GCSV recognized in a generic metadata track");
             }
         }
         write(root / "header-only.jsonl", jsonl(header(0), {}));
-        const auto headerOnly = motioncam::GyroTelemetry::load((root / "header-only.jsonl").string());
+        const auto headerOnly = rawpreamp::GyroTelemetry::load((root / "header-only.jsonl").string());
         makeVideo(root / "header-only.mov");
         headerOnly->embed((root / "header-only.mov").string(), {0, 33333333, 66666667}, 30, 16, 16, 0);
         std::filesystem::remove(root / "header-only.jsonl");
-        const auto headerRoundtrip = motioncam::GyroTelemetry::load((root / "header-only.mov").string());
+        const auto headerRoundtrip = rawpreamp::GyroTelemetry::load((root / "header-only.mov").string());
         require(headerRoundtrip->extension() == ".jsonl" &&
                     headerRoundtrip->header()["camera"]["cameraBrand"] == "Test",
                 "header-only telemetry survives container export");
@@ -513,7 +513,7 @@ int main(int argc, char** argv) {
             // single-packet limit. Include Unicode across chunk boundaries.
             constexpr size_t metadataBytes = 65 * 1024 * 1024;
             auto bigHeader = header(0);
-            bigHeader["camera"]["additionalData"]["motioncamVideoClockOriginUs"] = 0;
+            bigHeader["camera"]["additionalData"]["rawpreampVideoClockOriginUs"] = 0;
             std::string payload(metadataBytes, 'x');
             for (size_t i = 1; i + 4 < payload.size(); i += 1048573)
                 payload.replace(i, 4, "\xf0\x9f\x93\xb7");
@@ -523,11 +523,11 @@ int main(int argc, char** argv) {
             write(root / "large.jsonl",
                   jsonl(bigHeader, {frame(1, 0, 1), frame(2, 33333, 2), frame(3, 66667, 3)}));
             bigHeader.clear();
-            auto large = motioncam::GyroTelemetry::load((root / "large.jsonl").string());
+            auto large = rawpreamp::GyroTelemetry::load((root / "large.jsonl").string());
             makeVideo(root / "large.mov");
             large->embed((root / "large.mov").string(), {0, 33333333, 66667000}, 30, 16, 16, 0);
             std::filesystem::remove(root / "large.jsonl");
-            const auto restored = motioncam::GyroTelemetry::load((root / "large.mov").string());
+            const auto restored = rawpreamp::GyroTelemetry::load((root / "large.mov").string());
             require(restored->frame(0)->at("startTimestampUs") == large->frame(0)->at("startTimestampUs") &&
                         restored->frame(0)->at("imu")[0]["sampleTimestampUs"] ==
                             large->frame(0)->at("imu")[0]["sampleTimestampUs"],
@@ -552,12 +552,12 @@ int main(int argc, char** argv) {
             std::string sourcePath = argv[i];
             std::string archiveRoot;
             if (std::filesystem::path(sourcePath).extension() == ".zip") {
-                const auto imported = motioncam::extractReviewArchive(QString::fromStdString(sourcePath));
+                const auto imported = rawpreamp::extractReviewArchive(QString::fromStdString(sourcePath));
                 sourcePath = imported.sourcePath.toStdString();
                 archiveRoot = imported.temporaryRoot.toStdString();
             }
-            const auto source = motioncam::GyroTelemetry::load(sourcePath);
-            require(source->format() == motioncam::GyroTelemetry::Format::Jsonl, "native capture telemetry");
+            const auto source = rawpreamp::GyroTelemetry::load(sourcePath);
+            require(source->format() == rawpreamp::GyroTelemetry::Format::Jsonl, "native capture telemetry");
             size_t samples = 0;
             for (const auto& frame : source->frames())
                 if (frame.message["frame"].contains("imu")) samples += frame.message["frame"]["imu"].size();
@@ -567,14 +567,14 @@ int main(int argc, char** argv) {
             const auto native = root / "fixture-roundtrip.mov";
             makeVideo(native);
             source->embed(native.string(), {0, 33333333, 66667000}, 30, 16, 16, 0);
-            const auto roundtrip = motioncam::GyroTelemetry::load(native.string());
+            const auto roundtrip = rawpreamp::GyroTelemetry::load(native.string());
             size_t restoredSamples = 0;
             for (const auto& packet : roundtrip->frames())
                 if (packet.message["frame"].contains("imu"))
                     restoredSamples += packet.message["frame"]["imu"].size();
             require(restoredSamples == samples,
                     "every real-capture IMU sample survives native-container export");
-            if (!archiveRoot.empty()) motioncam::removeReviewArchive(QString::fromStdString(archiveRoot));
+            if (!archiveRoot.empty()) rawpreamp::removeReviewArchive(QString::fromStdString(archiveRoot));
             std::cout << argv[i] << ": " << source->frames().size() << " capture frames, " << samples
                       << " IMU samples\n";
         }

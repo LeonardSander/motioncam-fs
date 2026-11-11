@@ -8,13 +8,13 @@
 int main() {
     namespace fs = std::filesystem;
     auto check = [](bool value) { if (!value) throw std::runtime_error("Cache eviction regression"); };
-    const auto root = fs::temp_directory_path() / ("mcfuse-analysis-budget-" +
+    const auto root = fs::temp_directory_path() / ("rawpreamp-analysis-budget-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     struct Cleanup {
         fs::path path;
         ~Cleanup() { std::error_code error; fs::remove_all(path, error); }
     } cleanup{root};
-    motioncam::trimSourceAnalysisCache(root);
+    rawpreamp::trimSourceAnalysisCache(root);
     check(!fs::exists(root));
     fs::create_directories(root / "dng-analysis");
     fs::create_directories(root / "other-analysis");
@@ -32,15 +32,15 @@ int main() {
     create(index, 40 * MiB);
     create(temporary, 40 * MiB);
     fs::last_write_time(old, fs::file_time_type::clock::now() - std::chrono::hours(1));
-    motioncam::trimSourceAnalysisCache(root);
+    rawpreamp::trimSourceAnalysisCache(root);
     check(!fs::exists(old));
     check(fs::exists(current) && fs::exists(index) && fs::exists(temporary));
     // Under the budget, repeated cleanup must retain valid cache entries.
-    motioncam::trimSourceAnalysisCache(root);
+    rawpreamp::trimSourceAnalysisCache(root);
     check(fs::exists(current));
     const auto newer = root / "dng-analysis" / "newer.bin";
     create(newer, 40 * MiB);
     fs::last_write_time(current, fs::file_time_type::clock::now() - std::chrono::minutes(1));
-    motioncam::trimSourceAnalysisCache(root);
+    rawpreamp::trimSourceAnalysisCache(root);
     check(!fs::exists(current) && fs::exists(newer));
 }

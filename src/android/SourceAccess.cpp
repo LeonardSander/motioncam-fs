@@ -16,7 +16,7 @@
 #include <unordered_set>
 #include <unistd.h>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 QString sourceUri(const std::string& path) {
     const QString name = QString::fromStdString(path);

@@ -17,7 +17,7 @@ namespace BS {
 class thread_pool;
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
 class LRUCache;
 class DNGDecoder;
@@ -131,4 +131,4 @@ private:
     std::string mAudioFileName="audio.wav";
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

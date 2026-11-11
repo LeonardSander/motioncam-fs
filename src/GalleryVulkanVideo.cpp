@@ -16,7 +16,7 @@
 #include <cmath>
 
 void invalidateGalleryOverlay(QWidget& widget) {
-    constexpr auto revision="motioncamGalleryOverlayRevision";
+    constexpr auto revision="rawpreampGalleryOverlayRevision";
     widget.setProperty(revision,widget.property(revision).toULongLong()+1);
 }
 
@@ -119,12 +119,12 @@ GalleryOverlayCapture captureGalleryOverlay(
                      qobject_cast<QLabel*>(widget));
                 if(!reusable){
                     QElapsedTimer timer;
-                    if constexpr (motioncam::debugInstrumentation) timer.start();
+                    if constexpr (rawpreamp::debugInstrumentation) timer.start();
                     ++result.paintedWidgets;
                     RestoreUpdates updates(widget);
                     widget->render(&target,localRegion.boundingRect().topLeft()+origin,
                                    localRegion,QWidget::DrawChildren);
-                    if constexpr (motioncam::debugInstrumentation) result.paintNanoseconds+=timer.nsecsElapsed();
+                    if constexpr (rawpreamp::debugInstrumentation) result.paintNanoseconds+=timer.nsecsElapsed();
                     return;
                 }
                 const QPointF deviceOrigin=target.worldTransform().map(QPointF(origin));
@@ -136,19 +136,19 @@ GalleryOverlayCapture captureGalleryOverlay(
                 quint64 signature=0;
                 const auto mix=[&](quint64 value){signature^=value+0x9e3779b97f4a7c15ULL+(signature<<6)+(signature>>2);};
                 mix(qHash(ratio));mix(qHash(phase.x()));mix(qHash(phase.y()));
-                mix(motioncam::widgetPaintSignature(*widget));
+                mix(rawpreamp::widgetPaintSignature(*widget));
                 auto& entry=(*cache)[widget];
                 if(entry.widget!=widget||entry.signature!=signature||entry.image.isNull()){
                     entry.widget=widget;entry.signature=signature;
                     entry.image=QImage(pixelSize,QImage::Format_ARGB32_Premultiplied);
                     entry.image.fill(Qt::transparent);
                     QElapsedTimer timer;
-                    if constexpr (motioncam::debugInstrumentation) timer.start();
+                    if constexpr (rawpreamp::debugInstrumentation) timer.start();
                     ++result.paintedWidgets;
                     {RestoreUpdates updates(widget);
                      QPainter capture(&entry.image);capture.translate(phase);capture.scale(ratio,ratio);
                      widget->render(&capture,QPoint(),QRegion(widget->rect()),QWidget::DrawChildren);}
-                    if constexpr (motioncam::debugInstrumentation) result.paintNanoseconds+=timer.nsecsElapsed();
+                    if constexpr (rawpreamp::debugInstrumentation) result.paintNanoseconds+=timer.nsecsElapsed();
                 }else ++result.reusedWidgets;
                 target.save();target.setClipRegion(localRegion.translated(origin),Qt::IntersectClip);
                 target.resetTransform();
@@ -189,7 +189,7 @@ GalleryOverlayCapture captureGalleryOverlay(
     return result;
 }
 
-#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && QT_CONFIG(vulkan)
+#if defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO) && QT_CONFIG(vulkan)
 
 #include <QEvent>
 #include <QDebug>
@@ -227,7 +227,7 @@ void galleryVulkanLog(void*, enum pl_log_level level, const char* message) {
 #endif
 }
 
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
 uint64_t samplePackedFrame(pl_gpu gpu, pl_buf source,
                            uint32_t width, uint32_t height) {
     pl_buf_params params{};
@@ -293,7 +293,7 @@ public:
         mPreparedVk = mSharedDevice;
         if (!mPreparedVk) {
             pl_vulkan_params params = pl_vulkan_default_params;
-            params.get_proc_addr = motioncam::galleryVulkanGetInstanceProcAddr();
+            params.get_proc_addr = rawpreamp::galleryVulkanGetInstanceProcAddr();
             params.instance = vulkanInstance()->vkInstance();
             params.surface = mPreparedSurface;
             mPreparedVk = pl_vulkan_create(mPreparedLog, &params);
@@ -310,10 +310,10 @@ public:
 #ifndef __ANDROID__
         mHealthy = bool(mPreparedVk && mPreparedSwapchain);
 #endif
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_device_prewarm device={} swapchain={}",
                 bool(mPreparedVk), bool(mPreparedSwapchain));
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             for (QScreen* screen : QGuiApplication::screens())
                 spdlog::info("GALLERY_PERF event=qt_screen name={} dpr={:.3f} logical={}x{}",
                     screen->name().toStdString(), double(screen->devicePixelRatio()),
@@ -351,7 +351,7 @@ public:
         if (mOutputWidth != previousWidth || mOutputHeight != previousHeight) {
             ++mSerial;
             mReady.notify_one();
-            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=native_pixel_ratio_change logical={}x{} dpr={:.3f} pixels={}x{}",
                     width(), height(), double(devicePixelRatio()),
                     mOutputWidth, mOutputHeight);
@@ -373,7 +373,7 @@ public:
         mReady.notify_one();
     }
 
-    void setGpuFrame(std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame,
+    void setGpuFrame(std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> frame,
                      const QRectF& target, bool smooth,
                      const QImage& overlay = {},
                      const std::vector<GalleryOverlayPart>& parts = {}) {
@@ -474,13 +474,13 @@ private:
         const qreal ratio = devicePixelRatio();
         int outputWidth = std::max(1, qRound(width() * ratio));
         int outputHeight = std::max(1, qRound(height() * ratio));
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_surface_pixels logical={}x{} dpr={:.3f} requested={}x{}",
                 width(), height(), double(ratio), outputWidth, outputHeight);
         pl_swapchain_frame swapFrame{};
         const bool resized = pl_swapchain_resize(mPreparedSwapchain,
             &outputWidth, &outputHeight);
-        if (resized && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (resized && rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_swapchain_pixels actual={}x{}",
                 outputWidth, outputHeight);
         const bool started = resized &&
@@ -503,7 +503,7 @@ private:
             return;
         }
         pl_swapchain_swap_buffers(mPreparedSwapchain);
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_initial_grey_present");
         const VkInstance instance = vulkanInstance()->vkInstance();
         {
@@ -547,7 +547,7 @@ private:
         // per slot so frame uploads can overlap instead of waiting below on
         // every imported buffer.
         std::array<pl_buf, 3> importedFrameBuffers{};
-        std::array<std::shared_ptr<motioncam::VulkanGalleryGpuBuffer>, 3>
+        std::array<std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer>, 3>
             importedFrameOwners{};
         unsigned frameTextureSlot = 0;
         bool haveFrameTexture = false;
@@ -556,7 +556,7 @@ private:
             vk = mSharedDevice;
             if (!vk) {
                 pl_vulkan_params params = pl_vulkan_default_params;
-                params.get_proc_addr = motioncam::galleryVulkanGetInstanceProcAddr();
+                params.get_proc_addr = rawpreamp::galleryVulkanGetInstanceProcAddr();
                 params.instance = instance;
                 params.surface = surface;
                 vk = pl_vulkan_create(log, &params);
@@ -588,10 +588,10 @@ private:
                 break;
             }
         }
-        if(rgb8&&motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if(rgb8&&rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_format name={} texel_size={} texel_align={} emulated={}",
                 rgb8->name,rgb8->texel_size,rgb8->texel_align,rgb8->emulated);
-        if(rgb10a2&&motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if(rgb10a2&&rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=native_packed_format name={} texel_size={} emulated={}",
                 rgb10a2->name,rgb10a2->texel_size,rgb10a2->emulated);
         if (!swapchain || !renderer || !rgba8) {
@@ -623,7 +623,7 @@ private:
         unsigned presentCount = 0;
         unsigned sharedImageFrames = 0, bufferUploadFrames = 0, hostUploadFrames = 0;
         bool placeholderLogged = false;
-        auto presentWindow = motioncam::diagnosticNow();
+        auto presentWindow = rawpreamp::diagnosticNow();
         double setupTotal = 0.0, uploadTotal = 0.0, startTotal = 0.0,
             drawTotal = 0.0, submitTotal = 0.0, swapTotal = 0.0,
             releaseTotal = 0.0;
@@ -634,7 +634,7 @@ private:
             uint64_t overlaySerial = 0;
             uint64_t frameSerial = 0;
             uint64_t drainRequest = 0;
-            std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer;
+            std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> gpuBuffer;
             QRectF target;
             bool smooth = true;
             bool placeholder = false;
@@ -673,7 +673,7 @@ private:
                 outputWidth <= 0 || outputHeight <= 0) continue;
             if (placeholder) target = QRectF(0, 0, outputWidth, outputHeight);
 
-            const auto setupStarted = motioncam::diagnosticNow();
+            const auto setupStarted = rawpreamp::diagnosticNow();
             if (overlaySerial != uploadedOverlaySerial) {
                 if (!overlayImage.isNull()) {
                     // Keep Qt's native raster format through upload. Painting
@@ -690,7 +690,7 @@ private:
                         if (upload.format() != QImage::Format_RGBA8888_Premultiplied)
                             upload = upload.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
                     }
-                    if(uploadedOverlaySerial==0&&motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                    if(uploadedOverlaySerial==0&&rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
                         spdlog::info("GALLERY_PERF event=native_overlay_format name={} converted={}",
                             format->name,upload.cacheKey()!=overlayImage.cacheKey());
                     pl_tex_params overlayParams{};
@@ -718,7 +718,7 @@ private:
             }
 
             pl_buf imported = nullptr;
-            const auto uploadStarted = motioncam::diagnosticNow();
+            const auto uploadStarted = rawpreamp::diagnosticNow();
             if (frameSerial != uploadedFrameSerial || !haveFrameTexture) {
                 // Stills arrive far apart and do not need three resident
                 // full-resolution textures. Reuse the first slot after its
@@ -823,11 +823,11 @@ private:
                     mHealthy = false;
                     break;
                 }
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
                 if (imported && gpuBuffer->debugSampleHash) {
                     const uint64_t importedHash = samplePackedFrame(vk->gpu,
                         imported, gpuBuffer->width, gpuBuffer->height);
-                    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
                         spdlog::info("GALLERY_PERF event=native_buffer_compare frame={} producer_hash={} presenter_hash={}",
                             gpuBuffer->sourceFrameIndex, gpuBuffer->debugSampleHash, importedHash);
                     if (importedHash != gpuBuffer->debugSampleHash)
@@ -846,7 +846,7 @@ private:
                 uploadedFrameSerial = frameSerial;
                 }
             }
-            const auto uploadedAt = motioncam::diagnosticNow();
+            const auto uploadedAt = rawpreamp::diagnosticNow();
 
             if (!pl_swapchain_resize(swapchain, &outputWidth, &outputHeight)) {
 #ifdef __ANDROID__
@@ -865,7 +865,7 @@ private:
                 pl_buf_destroy(vk->gpu, &imported);
                 continue;
             }
-            const auto startedAt = motioncam::diagnosticNow();
+            const auto startedAt = rawpreamp::diagnosticNow();
             pl_frame output{};
             pl_frame_from_swapchain(&output, &swapFrame);
             const float background[3] = {96.0f / 255.0f,
@@ -936,10 +936,10 @@ private:
             renderParams.background_color[2] = 96.0f / 255.0f;
             const bool rendered = pl_render_image(renderer, &input, &output,
                 &renderParams);
-            const auto drawnAt = motioncam::diagnosticNow();
+            const auto drawnAt = rawpreamp::diagnosticNow();
             const bool submitted = pl_swapchain_submit_frame(swapchain);
-            const auto renderedAt = motioncam::diagnosticNow();
-            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_DRAW_TRACE"))
+            const auto renderedAt = rawpreamp::diagnosticNow();
+            if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_DRAW_TRACE"))
                 spdlog::info("GALLERY_PERF event=native_draw_trace draw_ms={:.3f} submit_ms={:.3f} target={}x{} output={}x{} smooth={}",
                     std::chrono::duration<double, std::milli>(drawnAt-startedAt).count(),
                     std::chrono::duration<double, std::milli>(renderedAt-drawnAt).count(),
@@ -951,9 +951,9 @@ private:
                 break;
             }
             pl_swapchain_swap_buffers(swapchain);
-            const auto swappedAt = motioncam::diagnosticNow();
+            const auto swappedAt = rawpreamp::diagnosticNow();
             if (gpuBuffer && uploadedFrameSerial == frameSerial &&
-                motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PRESENT_TRACE")) {
+                rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PRESENT_TRACE")) {
                 const int frameIndex = gpuBuffer->sourceFrameIndex;
                 if (frameIndex <= lastSubmittedFrameIndex &&
                     frameIndex != lastSubmittedFrameIndex)
@@ -966,13 +966,13 @@ private:
                 lastSubmittedFrameIndex = frameIndex;
             }
             if (placeholder && !placeholderLogged &&
-                motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+                rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) {
                 spdlog::info("GALLERY_PERF event=native_placeholder_present");
                 placeholderLogged = true;
             }
             pl_buf_destroy(vk->gpu, &imported);
-            const auto releasedAt = motioncam::diagnosticNow();
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+            const auto releasedAt = rawpreamp::diagnosticNow();
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
             ++presentCount;
             setupTotal += std::chrono::duration<double, std::milli>(uploadStarted - setupStarted).count();
             uploadTotal += std::chrono::duration<double, std::milli>(uploadedAt - uploadStarted).count();
@@ -1030,7 +1030,7 @@ private:
     std::vector<GalleryOverlayPart> mOverlayParts;
     uint64_t mOverlaySerial = 0;
     uint64_t mFrameSerial = 0;
-    std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> mGpuBuffer;
+    std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> mGpuBuffer;
     QRectF mTarget;
     QRectF mLogicalTarget;
     bool mSmooth = true;
@@ -1049,7 +1049,7 @@ GalleryVulkanVideo::GalleryVulkanVideo(QWidget* parent) : QWidget(parent) {
     setPalette(background);
     setAutoFillBackground(true);
     mInstance = std::make_unique<QVulkanInstance>();
-    const auto shared = motioncam::sharedVulkanDevice();
+    const auto shared = rawpreamp::sharedVulkanDevice();
     if (shared) mInstance->setVkInstance(shared->instance);
     mInstance->setApiVersion(QVersionNumber(1, 2));
     if (!mInstance->create()) {
@@ -1102,7 +1102,7 @@ void GalleryVulkanVideo::setFrame(const QImage& image, const QRectF& target,
 }
 
 void GalleryVulkanVideo::setGpuFrame(
-        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame,
+        std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> frame,
         const QRectF& target, bool smooth, const QImage& overlay,
         const std::vector<GalleryOverlayPart>& parts) {
     if (mSurface) mSurface->setGpuFrame(std::move(frame), target, smooth, overlay, parts);
@@ -1132,7 +1132,7 @@ void GalleryVulkanVideo::stopPresentation() {}
 qreal GalleryVulkanVideo::pixelRatio() const { return devicePixelRatioF(); }
 void GalleryVulkanVideo::setFrame(const QImage&, const QRectF&, bool) {}
 void GalleryVulkanVideo::setGpuFrame(
-    std::shared_ptr<motioncam::VulkanGalleryGpuBuffer>, const QRectF&, bool,
+    std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer>, const QRectF&, bool,
     const QImage&, const std::vector<GalleryOverlayPart>&) {}
 void GalleryVulkanVideo::setOverlay(const QImage&,
                                   const std::vector<GalleryOverlayPart>&, bool) {}

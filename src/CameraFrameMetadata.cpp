@@ -2,7 +2,7 @@
 
 using json = nlohmann::json;
 
-namespace motioncam {
+namespace rawpreamp {
 
 CameraFrameMetadata CameraFrameMetadata::parse(const json& j) {
     CameraFrameMetadata frame;

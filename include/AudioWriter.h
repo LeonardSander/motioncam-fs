@@ -11,7 +11,7 @@ namespace bw64 {
     class Bw64Writer;
 }
 
-namespace motioncam {
+namespace rawpreamp {
     class AudioWriter {
     public:
         AudioWriter(std::vector<uint8_t>& output, int numChannels, int sampleRate, int fpsNum, int fpsDen, int bitDepth);

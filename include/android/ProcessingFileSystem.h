@@ -8,7 +8,7 @@
 
 namespace BS { class thread_pool; }
 
-namespace motioncam {
+namespace rawpreamp {
 class IVirtualFileSystem;
 class LRUCache;
 class PreviewRenderer;

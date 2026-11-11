@@ -6,7 +6,7 @@
 #include <string>
 #include <array>
 
-namespace motioncam {
+namespace rawpreamp {
 
 enum class ScreenOrientation : int {
     PORTRAIT = 0,

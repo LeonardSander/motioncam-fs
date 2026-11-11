@@ -5,7 +5,7 @@
 #include <QXmlStreamWriter>
 #include <stdexcept>
 
-namespace motioncam {
+namespace rawpreamp {
 
 // Keep processing edits while removing GPS properties, including nested GPS
 // directories. Reject unreadable XML rather than copying an unchecked packet.
@@ -63,4 +63,4 @@ inline QByteArray excludeSidecarGps(const QByteArray& source, bool xml) {
     return changed ? result : source;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

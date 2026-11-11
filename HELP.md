@@ -1,11 +1,11 @@
-# MotionCam FS Help
+# RawPreamp Help
 
 ## Quickstart
 - Windows: Put your source `.mcraw` files on an NTFS volume (required).
 - macOS: No NTFS requirement. Mounts are virtual folders.
-- Open MotionCam FS, click **Open** or drag in `.mcraw` files to mount.
+- Open RawPreamp, click **Open** or drag in `.mcraw` files to mount.
 - Adjust settings as needed (global on the right). Use **Apply to Selected** for overrides or **Apply to All** for everything.
-- Mounted DNG sequences appear in the mount folder (Windows default: source folder; macOS default: `~/Mounts/MotionCamFuse`).
+- Mounted DNG sequences appear in the mount folder (Windows default: source folder; macOS default: `~/Mounts/RawPreamp`).
 - Use **Play** to inspect clips in the integrated Gallery.
 
 ## Workspace Tour
@@ -17,7 +17,7 @@
 - **Status Bar**: Refresh progress, FPS updates, cache cleanup events.
 
 ## Preferences
-- **DNG Output Folder / Mount Folder**: Windows - leave empty to write next to source (must be NTFS) or set a dedicated NTFS folder. macOS - leave empty to use the default mount root (`~/Mounts/MotionCamFuse`) or set a custom mount folder.
+- **DNG Output Folder / Mount Folder**: Windows - leave empty to write next to source (must be NTFS) or set a dedicated NTFS folder. macOS - leave empty to use the default mount root (`~/Mounts/RawPreamp`) or set a custom mount folder.
 - **Delete on Unmount**: Windows - remove materialized DNGs when unmounting/clearing. macOS - remove the empty mount folder under the mount root.
 - **Unique Camera Model**: Configure the camera-model metadata override in the main settings panel.
 - **Reset**: Clears the saved mount/output folder.
@@ -57,7 +57,7 @@
   - Example:
     - `export VCPKG_ROOT=/path/to/vcpkg`
     - `./scripts/build_macos_universal.sh`
-  - Output: `build-universal-vcpkg/MotionCamFuse.app`
+  - Output: `build-universal-vcpkg/RawPreamp.app`
 
 ## Shortcuts & Actions
 - **Select All**: Ctrl/Cmd+A in the mount list.

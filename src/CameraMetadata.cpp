@@ -4,7 +4,7 @@
 
 using namespace nlohmann;
 
-namespace motioncam {
+namespace rawpreamp {
 
 // Helper function to convert JSON array to std::array with templated type
 template<typename T, size_t N>
@@ -209,4 +209,4 @@ CameraConfiguration CameraConfiguration::parse(const nlohmann::json& j) {
     return config;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

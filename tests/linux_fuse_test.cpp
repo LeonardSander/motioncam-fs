@@ -17,7 +17,7 @@ void testAttributes() {
     struct stat attributes{};
     for (const size_t size : {size_t(0), size_t(1), size_t(511), size_t(512), size_t(513),
                               size_t(38017601), size_t(std::numeric_limits<off_t>::max())}) {
-        motioncam::linux_fuse::setReadOnlyAttributes(attributes, false, size, 12345);
+        rawpreamp::linux_fuse::setReadOnlyAttributes(attributes, false, size, 12345);
         check(S_ISREG(attributes.st_mode) && (attributes.st_mode & 0777) == 0444);
         check(attributes.st_size == static_cast<off_t>(size));
         // Every nonempty generated file must advertise backing blocks to Resolve.
@@ -28,7 +28,7 @@ void testAttributes() {
         check(attributes.st_mtime == 12345 && attributes.st_nlink == 1);
     }
     // Reusing the stat buffer must clear the previous file's block count.
-    motioncam::linux_fuse::setReadOnlyAttributes(attributes, true, 0, 12346);
+    rawpreamp::linux_fuse::setReadOnlyAttributes(attributes, true, 0, 12346);
     check(S_ISDIR(attributes.st_mode) && (attributes.st_mode & 0777) == 0755);
     check(attributes.st_size == 4096 && attributes.st_blocks == 0);
     check(attributes.st_nlink == 2 && attributes.st_mtime == 12346);
@@ -37,12 +37,12 @@ void testAttributes() {
 
 void testMountSafety() {
     namespace fs = std::filesystem;
-    namespace safety = motioncam::linux_fuse;
+    namespace safety = rawpreamp::linux_fuse;
     const auto check = [](bool condition) {
         if (!condition) throw std::runtime_error("Linux FUSE mount safety regression");
     };
     std::istringstream input(
-        "45 1 0:44 / /tmp/clip\\040one rw shared:12 - fuse.motioncam MotionCamFuse@123 rw\n"
+        "45 1 0:44 / /tmp/clip\\040one rw shared:12 - fuse.rawpreamp RawPreamp@123 rw\n"
         "46 1 0:45 / /tmp/other rw - fuse.sshfs remote rw\n"
         "47 1 0:46 / /tmp/legacy rw - fuse /dev/fuse rw\n"
         "malformed\n");
@@ -56,9 +56,9 @@ void testMountSafety() {
     for (const int probeError : {0, -1, ENOENT, EACCES})
         check(!safety::canRecoverMount(mounts[2], false, probeError));
     check(!safety::canRecoverMount(mounts[1], true, ENOTCONN));
-    for (const auto* source : {"MotionCamFuse@", "MotionCamFuse@0", "MotionCamFuse@-1",
-                               "MotionCamFuse@123abc", "MotionCamFuse@999999999999999999"})
-        check(!safety::ownerPid({"/tmp/clip", "fuse.motioncam", source}));
+    for (const auto* source : {"RawPreamp@", "RawPreamp@0", "RawPreamp@-1",
+                               "RawPreamp@123abc", "RawPreamp@999999999999999999"})
+        check(!safety::ownerPid({"/tmp/clip", "fuse.rawpreamp", source}));
     check(safety::decodeMountField("/tmp/a\\134040b") == "/tmp/a\\040b");
     check(safety::decodeMountField("a\\011b\\012c") == "a\tb\nc");
     check(safety::containsPath("/tmp/clip/", "/tmp/clip/frame.dng"));
@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     testAttributes();
     testMountSafety();
-    if (argc != 2) throw std::runtime_error("Expected MotionCamFuse executable path");
+    if (argc != 2) throw std::runtime_error("Expected RawPreamp executable path");
     QTemporaryDir directory;
     if (!directory.isValid()) throw std::runtime_error("Cannot create probe fixture");
     const auto probe = [&](const QString& path, int expected) {

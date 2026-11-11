@@ -80,7 +80,7 @@ if ($Phase -ne 'Build') {
         "-DVCPKG_HOST_TRIPLET=$triplet",
         "-DVCPKG_OVERLAY_TRIPLETS=$sourceDirectory/scripts/vcpkg-triplets",
         '-DVCPKG_MANIFEST_MODE=ON', '-DBUILD_TESTING=ON',
-        '-DMOTIONCAM_REQUIRE_VULKAN=ON',
+        '-DRAWPREAMP_REQUIRE_VULKAN=ON',
         "-Dprojected-fs=$ProjectedFsLibrary"
     )
     if ($Compiler -eq 'Clang') {
@@ -102,16 +102,16 @@ if ($Phase -ne 'Build') {
 if ($Phase -eq 'Configure') { exit 0 }
 
 $build = @('--build', $BuildDirectory, '--config', $BuildType,
-    '--target', 'MotionCamFuse', 'motioncam-hardware-video-decoder-test', '--parallel')
+    '--target', 'RawPreamp', 'rawpreamp-hardware-video-decoder-test', '--parallel')
 if ($Parallel -gt 0) { $build += "$Parallel" }
 if ($cleanFirst) { $build += '--clean-first' }
 & cmake @build
 if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
-$executable = Join-Path $BuildDirectory "$BuildType/MotionCamFuse.exe"
+$executable = Join-Path $BuildDirectory "$BuildType/RawPreamp.exe"
 $deployMode = if ($BuildType -eq 'Debug') { '--debug' } else { '--release' }
 # Match CI deployment without replacing vcpkg's hardware-enabled FFmpeg DLLs.
 & "$QtPath/bin/windeployqt.exe" $deployMode --no-ffmpeg $executable
 if ($LASTEXITCODE -ne 0) { throw "Qt deployment failed ($LASTEXITCODE)." }
-& ctest --test-dir $BuildDirectory -C $BuildType -R '^motioncam-hardware-video-decoder-test$' --output-on-failure --no-tests=error
+& ctest --test-dir $BuildDirectory -C $BuildType -R '^rawpreamp-hardware-video-decoder-test$' --output-on-failure --no-tests=error
 if ($LASTEXITCODE -ne 0) { throw "Hardware decoder coverage failed ($LASTEXITCODE)." }
-Write-Host "Executable: $BuildDirectory/$BuildType/MotionCamFuse.exe"
+Write-Host "Executable: $BuildDirectory/$BuildType/RawPreamp.exe"

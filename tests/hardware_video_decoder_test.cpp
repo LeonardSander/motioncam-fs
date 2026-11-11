@@ -18,7 +18,7 @@ bool hasDeviceConfig(const AVCodec* codec, AVHWDeviceType type) {
 
 bool check(AVCodecID id, AVHWDeviceType type, const char* wrapper = nullptr) {
     const AVCodec* codec = wrapper
-        ? motioncam::findWrappedHardwareDecoder(id, wrapper)
+        ? rawpreamp::findWrappedHardwareDecoder(id, wrapper)
         : avcodec_find_decoder_by_name(avcodec_get_name(id));
     const bool found = hasDeviceConfig(codec, type);
     std::fprintf(found ? stdout : stderr, "%s: %s decoder support %s\n",
@@ -62,6 +62,6 @@ int main() {
         std::fprintf(stderr, "AV1 software fallback libdav1d is MISSING\n");
         passed = false;
     }
-    if (motioncam::findWrappedHardwareDecoder(AV_CODEC_ID_NONE, "qsv")) return 1;
+    if (rawpreamp::findWrappedHardwareDecoder(AV_CODEC_ID_NONE, "qsv")) return 1;
     return passed ? 0 : 1;
 }

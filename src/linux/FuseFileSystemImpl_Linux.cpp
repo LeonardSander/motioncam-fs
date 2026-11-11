@@ -11,7 +11,7 @@
 #include "DNGDecoder.h"
 #include "IVirtualFileSystem.h"
 #include "VirtualFileSystemImpl_DNG.h"
-#include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl_NativeVideo.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 
 #include <BS_thread_pool.hpp>
@@ -49,7 +49,7 @@
 
 namespace fs = boost::filesystem;
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 constexpr auto CACHE_SIZE = 1024 * 1024 * 1024;
 constexpr auto IO_THREADS = 4;
@@ -131,14 +131,14 @@ void setupLogging() {
         const char* home = getenv("HOME");
         if (!home)
             home = getpwuid(getuid())->pw_dir;
-        const std::string directory = std::string(home) + "/.local/state/motioncam-fuse";
+        const std::string directory = std::string(home) + "/.local/state/rawpreamp";
         std::filesystem::create_directories(directory);
         std::vector<spdlog::sink_ptr> sinks;
         sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
         sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             directory + "/fuse.log", 5 * 1024 * 1024, 3));
         spdlog::set_default_logger(std::make_shared<spdlog::logger>(
-            "motioncam-fuse", sinks.begin(), sinks.end()));
+            "rawpreamp", sinks.begin(), sinks.end()));
 #ifdef NDEBUG
         spdlog::set_level(spdlog::level::info);
 #else
@@ -335,10 +335,10 @@ private:
         fuse_args args = FUSE_ARGS_INIT(0, nullptr);
         // fuse_parse_cmdline expects argv[0] even when the filesystem is
         // embedded in a GUI application.
-        fuse_opt_add_arg(&args, "MotionCamFuse");
+        fuse_opt_add_arg(&args, "RawPreamp");
         fuse_opt_add_arg(&args, "-o");
         const std::string mountOptions =
-            "ro,default_permissions,subtype=motioncam,fsname=MotionCamFuse@" +
+            "ro,default_permissions,subtype=rawpreamp,fsname=RawPreamp@" +
             std::to_string(getpid());
         fuse_opt_add_arg(&args, mountOptions.c_str());
         auto* state = new FuseContext{
@@ -389,11 +389,11 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
                                         const std::string& srcFile,
                                         const std::string& dstPath,
                                         bool projectFiles) {
-    const auto mountStarted = motioncam::diagnosticNow();
+    const auto mountStarted = rawpreamp::diagnosticNow();
     auto stageStarted = mountStarted;
     auto logStage = [&](const char* stage) {
-        const auto now = motioncam::diagnosticNow();
-        MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: {} {:.1f} ms (total {:.1f} ms)", srcFile, stage,
+        const auto now = rawpreamp::diagnosticNow();
+        RAWPREAMP_DIAGNOSTIC_INFO("Mount timing [{}]: {} {:.1f} ms (total {:.1f} ms)", srcFile, stage,
                      std::chrono::duration<double, std::milli>(now - stageStarted).count(),
                      std::chrono::duration<double, std::milli>(now - mountStarted).count());
         stageStarted = now;
@@ -425,7 +425,7 @@ MountId FuseFileSystemImpl_Linux::mount(const RenderSettings& settings,
                 boost::iequals(extension, ".mp4") ||
                 boost::iequals(extension, ".mkv")) &&
                boost::icontains(filename, "NATIVE")) {
-        filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
+        filesystem = std::make_unique<VirtualFileSystemImpl_NativeVideo>(
             *mIoThreadPool, *mProcessingThreadPool, *mCache, sourceSettings,
             srcFile, baseName);
     } else if (boost::iequals(extension, ".dng") ||
@@ -531,4 +531,4 @@ void FuseFileSystemImpl_Linux::releasePreviewResources(MountId mountId) {
     std::lock_guard<std::mutex> lock(mMountedFilesMutex);
     mPreviewRenderers.erase(mountId);
 }
-} // namespace motioncam
+} // namespace rawpreamp

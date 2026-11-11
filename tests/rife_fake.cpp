@@ -7,7 +7,7 @@
 #include <vector>
 
 int main() {
-    std::cout << "MOTIONCAM_READY" << std::endl;
+    std::cout << "RAWPREAMP_READY" << std::endl;
     std::string line;
     while (std::getline(std::cin, line)) {
         std::vector<std::string> fields;
@@ -31,6 +31,6 @@ int main() {
                 output.put(static_cast<char>(value >> 8));
             }
         }
-        std::cout << "MOTIONCAM_DONE" << std::endl;
+        std::cout << "RAWPREAMP_DONE" << std::endl;
     }
 }

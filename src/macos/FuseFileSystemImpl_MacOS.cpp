@@ -1,6 +1,6 @@
 #include "macos/FuseFileSystemImpl_MacOS.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
-#include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl_NativeVideo.h"
 #include "VirtualFileSystemImpl_DNG.h"
 #include "DNGDecoder.h"
 #include "LRUCache.h"
@@ -40,7 +40,7 @@
 
 namespace fs = boost::filesystem;
 
-namespace motioncam {
+namespace rawpreamp {
 
 constexpr auto CACHE_SIZE = 1024 * 1024 * 1024; // 1 GB cache size
 constexpr auto IO_THREADS = 4;
@@ -57,7 +57,7 @@ std::string getLogDirectory() {
         home = pw->pw_dir;
     }
 
-    logPath = std::string(home) + "/Library/Logs/MotionCam Tools";
+    logPath = std::string(home) + "/Library/Logs/RawPreamp";
 
     // Create directory if it doesn't exist
     std::filesystem::create_directories(logPath);
@@ -183,7 +183,7 @@ void Session::init(IVirtualFileSystem* fs) {
 
     auto addFuseArgs = [](struct fuse_args& args, bool minimal) {
         // argv[0] is required by macFUSE's argument parser.
-        fuse_opt_add_arg(&args, "MotionCam Fuse");
+        fuse_opt_add_arg(&args, "RawPreamp");
         fuse_opt_add_arg(&args, "-r");
         if (minimal) return;
 
@@ -528,7 +528,7 @@ MountId FuseFileSystemImpl_MacOs::mount(
                     *mIoThreadPool, *mProcessingThreadPool, *mCache,
                     sourceSettings, srcFile, baseName);
             } else {
-                filesystem = std::make_unique<VirtualFileSystemImpl_DirectLog>(
+                filesystem = std::make_unique<VirtualFileSystemImpl_NativeVideo>(
                     *mIoThreadPool, *mProcessingThreadPool, *mCache,
                     sourceSettings, srcFile, baseName);
             }
@@ -651,4 +651,4 @@ void FuseFileSystemImpl_MacOs::releasePreviewResources(MountId mountId) {
     mPreviewRenderers.erase(mountId);
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

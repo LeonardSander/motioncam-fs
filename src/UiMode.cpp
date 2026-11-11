@@ -11,7 +11,7 @@
 #include <QTouchDevice>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 #ifdef Q_OS_ANDROID
 constexpr bool touchEnabled = true;
@@ -32,7 +32,7 @@ bool useTouchUi(const QString& mode, bool touchscreen, const QSize& screen) {
 }
 
 QString preferredUiMode() {
-    const auto mode = QSettings("com.motioncam", "MotionCam FS")
+    const auto mode = QSettings("com.rawpreamp", "RawPreamp")
         .value("interface/mode", "auto").toString();
     return validUiMode(mode) ? mode : QStringLiteral("auto");
 }
@@ -59,4 +59,4 @@ bool touchUi() {
     return touchEnabled;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

@@ -19,26 +19,26 @@ int main() {
         seed ^= seed >> 13; seed *= 0xc2b2ae35u; seed ^= seed >> 16;
         const float oldDither = ((seed & 0xffffu) / 65535.0f +
             ((seed >> 16) & 0xffffu) / 65535.0f - 1.0f) * 0.5f;
-        assert(motioncam::utils::logTriangularDither(x, y, true) == oldDither);
+        assert(rawpreamp::utils::logTriangularDither(x, y, true) == oldDither);
     }
     for (bool highQuality : {false, true}) {
-        const auto first = motioncam::utils::logTriangularDither(
+        const auto first = rawpreamp::utils::logTriangularDither(
             37, 91, highQuality, 1);
-        assert(first == motioncam::utils::logTriangularDither(
+        assert(first == rawpreamp::utils::logTriangularDither(
             37, 91, highQuality, 1));
-        assert(first != motioncam::utils::logTriangularDither(
+        assert(first != rawpreamp::utils::logTriangularDither(
             37, 91, highQuality, 2));
     }
     // Switch curves at fixed levels/precision to catch stale shared and
     // per-channel encoder caches, in both direct and LUT image sizes.
-    for (auto curve : {motioncam::LogCurve::LOG60, motioncam::LogCurve::LLOG60,
-                       motioncam::LogCurve::LOG60}) {
-        const auto& lookup = motioncam::cachedLog60EncodeLookup(0, 65535, 4095, curve);
-        const double expected = motioncam::encodeLog60Normalized(64552. / 65535, 4095., curve);
+    for (auto curve : {rawpreamp::LogCurve::LOG60, rawpreamp::LogCurve::LLOG60,
+                       rawpreamp::LogCurve::LOG60}) {
+        const auto& lookup = rawpreamp::cachedLog60EncodeLookup(0, 65535, 4095, curve);
+        const double expected = rawpreamp::encodeLog60Normalized(64552. / 65535, 4095., curve);
         assert(std::abs(lookup[64552] - expected) < .001);
         for (uint32_t width : {32u, 256u}) for (uint32_t channels : {1u, 3u}) {
             std::vector<uint16_t> pixels(width * width * channels, 64552);
-            motioncam::utils::encodeLog60(pixels, width, width, channels,
+            rawpreamp::utils::encodeLog60(pixels, width, width, channels,
                 {0, 0, 0, 0}, 65535, 4095, false, 1, curve);
             for (auto code : pixels) assert(std::abs(code - expected) <= 1);
         }
@@ -51,11 +51,11 @@ int main() {
             samples[index] = static_cast<uint16_t>((index * 173 + index / 7) & 65535);
         auto repeat = samples;
         auto hq = samples;
-        motioncam::utils::encodeLog60(
+        rawpreamp::utils::encodeLog60(
             samples, width, height, channels, logBlack, 16000.0, 4095);
-        motioncam::utils::encodeLog60(
+        rawpreamp::utils::encodeLog60(
             repeat, width, height, channels, logBlack, 16000.0, 4095);
-        motioncam::utils::encodeLog60(
+        rawpreamp::utils::encodeLog60(
             hq, width, height, channels, logBlack, 16000.0, 4095, true);
         assert(samples == repeat);
         assert(samples != hq);
@@ -69,7 +69,7 @@ int main() {
             for (size_t pixel = 0; pixel < neutral.size() / 3; ++pixel)
                 std::fill_n(neutral.begin() + pixel * 3, 3,
                             static_cast<uint16_t>((pixel * 173) & 65535));
-            motioncam::utils::encodeLog60(
+            rawpreamp::utils::encodeLog60(
                 neutral, width, width, 3, {0.0, 0.0, 0.0, 0.0},
                 16000.0, 4095, highQuality);
             for (size_t pixel = 0; pixel < neutral.size() / 3; ++pixel)
@@ -78,22 +78,22 @@ int main() {
         }
     std::vector<uint16_t> flat(256 * 256, 1000);
     auto nextFrame = flat;
-    motioncam::utils::encodeLog60(flat, 256, 256, 1,
+    rawpreamp::utils::encodeLog60(flat, 256, 256, 1,
                                   {0.0, 0.0, 0.0, 0.0}, 16000.0, 1023,
                                   false, 1);
-    motioncam::utils::encodeLog60(nextFrame, 256, 256, 1,
+    rawpreamp::utils::encodeLog60(nextFrame, 256, 256, 1,
                                   {0.0, 0.0, 0.0, 0.0}, 16000.0, 1023,
                                   false, 2);
     assert(flat != nextFrame);
     assert(*std::min_element(flat.begin(), flat.end()) <
            *std::max_element(flat.begin(), flat.end()));
-    const auto rggb = motioncam::cfaColorsFromPhase("rggb");
-    assert(motioncam::cfaColorAt(rggb, 0, 0) == 0);
-    assert(motioncam::cfaColorAt(rggb, 1, 0) == 1);
-    assert(motioncam::cfaColorAt(rggb, 0, 1) == 1);
-    assert(motioncam::cfaColorAt(rggb, 1, 1) == 2);
+    const auto rggb = rawpreamp::cfaColorsFromPhase("rggb");
+    assert(rawpreamp::cfaColorAt(rggb, 0, 0) == 0);
+    assert(rawpreamp::cfaColorAt(rggb, 1, 0) == 1);
+    assert(rawpreamp::cfaColorAt(rggb, 0, 1) == 1);
+    assert(rawpreamp::cfaColorAt(rggb, 1, 1) == 2);
 
-    std::vector<motioncam::GainMap> cfaMaps(4);
+    std::vector<rawpreamp::GainMap> cfaMaps(4);
     const std::array<float, 4> phaseGains{2.0f, 3.0f, 5.0f, 7.0f};
     for (size_t phaseIndex = 0; phaseIndex < cfaMaps.size(); ++phaseIndex) {
         auto& map = cfaMaps[phaseIndex];
@@ -115,7 +115,7 @@ int main() {
     // sidecar identifies the sensor as Quad Bayer. Their four phase maps must
     // select 2x2 photosite blocks, rather than alternating at every pixel.
     for (uint32_t y = 0; y < 8; ++y) for (uint32_t x = 0; x < 8; ++x) {
-        const size_t quadPhase = motioncam::gainMapPhaseChannel(x, y, 0, 0, 2);
+        const size_t quadPhase = rawpreamp::gainMapPhaseChannel(x, y, 0, 0, 2);
         assert(quadPhase == ((y / 2) & 1u) * 2u + ((x / 2) & 1u));
     }
     auto roundTrippedCfaMaps = cfaMaps;
@@ -124,61 +124,61 @@ int main() {
     roundTrippedCfaMaps[2].spacingV += 2e-17;
     roundTrippedCfaMaps[3].spacingV += 2e-17;
     const auto roundTrippedSeparation =
-        motioncam::separateGainMapLuminance(roundTrippedCfaMaps);
+        rawpreamp::separateGainMapLuminance(roundTrippedCfaMaps);
     assert(roundTrippedSeparation.valid);
 
-    motioncam::GainMap luminance = cfaMaps.front();
+    rawpreamp::GainMap luminance = cfaMaps.front();
     luminance.top = luminance.left = 0;
     luminance.rowPitch = luminance.colPitch = 1;
     luminance.data = {11.0f};
     cfaMaps.push_back(luminance);
-    const auto rgbMaps = motioncam::collapseCfaGainMapsForRgb(cfaMaps, rggb);
+    const auto rgbMaps = rawpreamp::collapseCfaGainMapsForRgb(cfaMaps, rggb);
     assert(rgbMaps.size() == 2);
     assert(rgbMaps[0].channels == 3);
     assert((rgbMaps[0].data == std::vector<float>{2.0f, 4.0f, 7.0f}));
     assert(rgbMaps[1].channels == 1 && rgbMaps[1].data[0] == 11.0f);
 
-    auto shiftedCfaMaps = std::vector<motioncam::GainMap>(cfaMaps.begin(), cfaMaps.begin() + 4);
+    auto shiftedCfaMaps = std::vector<rawpreamp::GainMap>(cfaMaps.begin(), cfaMaps.begin() + 4);
     shiftedCfaMaps[1].originH += shiftedCfaMaps[1].spacingH * 0.5;
     shiftedCfaMaps[2].originV += shiftedCfaMaps[2].spacingV * 0.5;
     shiftedCfaMaps[3].originH += shiftedCfaMaps[3].spacingH * 0.5;
     shiftedCfaMaps[3].originV += shiftedCfaMaps[3].spacingV * 0.5;
-    const auto shiftedRgbMaps = motioncam::collapseCfaGainMapsForRgb(
+    const auto shiftedRgbMaps = rawpreamp::collapseCfaGainMapsForRgb(
         shiftedCfaMaps, rggb);
     assert(shiftedRgbMaps.size() == 1 && shiftedRgbMaps[0].channels == 3);
     assert((shiftedRgbMaps[0].data == std::vector<float>{2.0f, 4.0f, 7.0f}));
     assert(shiftedRgbMaps[0].originH == 0.0);
     assert(shiftedRgbMaps[0].originV == 0.0);
 
-    motioncam::GainMap rgbMap = cfaMaps.front();
+    rawpreamp::GainMap rgbMap = cfaMaps.front();
     rgbMap.top = rgbMap.left = 0;
     rgbMap.rowPitch = rgbMap.colPitch = 1;
     rgbMap.channels = 3;
     rgbMap.data = {2.0f, 4.0f, 7.0f};
-    auto separatedRgbMaps = std::vector<motioncam::GainMap>{rgbMap};
+    auto separatedRgbMaps = std::vector<rawpreamp::GainMap>{rgbMap};
     const auto rgbSeparation =
-        motioncam::separateGainMapLuminance(separatedRgbMaps);
+        rawpreamp::separateGainMapLuminance(separatedRgbMaps);
     assert(rgbSeparation.valid && rgbSeparation.colorSeparated);
     assert(rgbSeparation.luminance.channels == 1);
     assert(rgbSeparation.luminance.data[0] == 2.0f);
     assert((separatedRgbMaps[0].data == std::vector<float>{1.0f, 2.0f, 3.5f}));
-    const auto cfaRgbPlanes = motioncam::expandGainMapsForCfa(
-        std::vector<motioncam::GainMap>{rgbMap}, rggb);
+    const auto cfaRgbPlanes = rawpreamp::expandGainMapsForCfa(
+        std::vector<rawpreamp::GainMap>{rgbMap}, rggb);
     assert(cfaRgbPlanes.size() == 4);
     assert(cfaRgbPlanes[0][0] == 2.0f);
     assert(cfaRgbPlanes[1][0] == 4.0f);
     assert(cfaRgbPlanes[2][0] == 4.0f);
     assert(cfaRgbPlanes[3][0] == 7.0f);
-    const auto cfaLumaPlanes = motioncam::expandGainMapsForCfa(
-        std::vector<motioncam::GainMap>{luminance}, rggb);
+    const auto cfaLumaPlanes = rawpreamp::expandGainMapsForCfa(
+        std::vector<rawpreamp::GainMap>{luminance}, rggb);
     for (const auto& plane : cfaLumaPlanes)
         assert(plane[0] == 11.0f);
-    motioncam::GainMap lonePhase = luminance;
+    rawpreamp::GainMap lonePhase = luminance;
     lonePhase.top = 1;
     lonePhase.left = 0;
     lonePhase.rowPitch = lonePhase.colPitch = 2;
-    const auto lonePhasePlanes = motioncam::expandGainMapsForCfa(
-        std::vector<motioncam::GainMap>{lonePhase}, rggb);
+    const auto lonePhasePlanes = rawpreamp::expandGainMapsForCfa(
+        std::vector<rawpreamp::GainMap>{lonePhase}, rggb);
     assert(lonePhasePlanes[0][0] == 1.0f);
     assert(lonePhasePlanes[1][0] == 1.0f);
     assert(lonePhasePlanes[2][0] == 11.0f);
@@ -193,8 +193,8 @@ int main() {
         mosaic[static_cast<size_t>(y) * width + x] = flatColor[phase[(y & 1) * 2 + (x & 1)]];
 
     std::vector<uint16_t> rgb;
-    motioncam::utils::demosaicHigherCFA(
-        mosaic, rgb, width, height, 2, phase, motioncam::QuadBayerMode::Demosaic);
+    rawpreamp::utils::demosaicHigherCFA(
+        mosaic, rgb, width, height, 2, phase, rawpreamp::QuadBayerMode::Demosaic);
     assert(rgb.size() == mosaic.size() * 3);
     for (int y = 1; y + 1 < height; ++y) for (int x = 1; x + 1 < width; ++x) {
         const size_t pixel = static_cast<size_t>(y) * width + x;
@@ -208,13 +208,13 @@ int main() {
     // delegates to the regular demosaic; fast non-HQ previews request
     // nearest-colour reconstruction explicitly.
     std::vector<uint16_t> sharedRgb;
-    motioncam::utils::demosaicCfaForOutput(
+    rawpreamp::utils::demosaicCfaForOutput(
         mosaic, sharedRgb, width, height, 2, phase,
-        motioncam::QuadBayerMode::Demosaic, {}, false);
+        rawpreamp::QuadBayerMode::Demosaic, {}, false);
     assert(sharedRgb == rgb);
-    motioncam::utils::demosaicCfaForOutput(
+    rawpreamp::utils::demosaicCfaForOutput(
         mosaic, sharedRgb, width, height, 2, phase,
-        motioncam::QuadBayerMode::Demosaic, {}, true);
+        rawpreamp::QuadBayerMode::Demosaic, {}, true);
     assert(sharedRgb.size() == mosaic.size() * 3);
     for (int y = 1; y + 1 < height; ++y) for (int x = 1; x + 1 < width; ++x) {
         const size_t pixel = static_cast<size_t>(y) * width + x;
@@ -225,8 +225,8 @@ int main() {
     // A high-frequency native sample must survive as brightness detail.
     const size_t detailPixel = static_cast<size_t>(4) * width + 4;
     mosaic[detailPixel] = 4095;
-    motioncam::utils::demosaicHigherCFA(
-        mosaic, rgb, width, height, 2, phase, motioncam::QuadBayerMode::Demosaic);
+    rawpreamp::utils::demosaicHigherCFA(
+        mosaic, rgb, width, height, 2, phase, rawpreamp::QuadBayerMode::Demosaic);
     assert(rgb[detailPixel * 3] == 4095);
     // Detail is reconstructed through the brightness estimate, not left only
     // in the native red plane as colour-difference demosaic would do.
@@ -243,12 +243,12 @@ int main() {
             static_cast<uint16_t>(2000.0 + 900.0 * wave);
     }
     std::vector<uint16_t> regularBand, colorBand;
-    motioncam::utils::demosaicHigherCFA(
+    rawpreamp::utils::demosaicHigherCFA(
         bandMosaic, regularBand, quadWidth, quadHeight, 4, phase,
-        motioncam::QuadBayerMode::Demosaic);
-    motioncam::utils::demosaicHigherCFA(
+        rawpreamp::QuadBayerMode::Demosaic);
+    rawpreamp::utils::demosaicHigherCFA(
         bandMosaic, colorBand, quadWidth, quadHeight, 4, phase,
-        motioncam::QuadBayerMode::DemosaicColor);
+        rawpreamp::QuadBayerMode::DemosaicColor);
     assert(colorBand.size() == regularBand.size());
     bool differsFromRegular = false;
     for (int y = 0; y < quadHeight; ++y) for (int x = 0; x < quadWidth; ++x) {
@@ -268,9 +268,9 @@ int main() {
         blackQuad[static_cast<size_t>(y) * quadWidth + x] =
             static_cast<uint16_t>(channelBlack[native]);
     }
-    motioncam::utils::demosaicHigherCFA(
+    rawpreamp::utils::demosaicHigherCFA(
         blackQuad, colorBand, quadWidth, quadHeight, 4, phase,
-        motioncam::QuadBayerMode::DemosaicColor, channelBlack);
+        rawpreamp::QuadBayerMode::DemosaicColor, channelBlack);
     for (int y = 4; y < quadHeight - 4; ++y) for (int x = 4; x < quadWidth - 4; ++x) {
         const size_t pixel = static_cast<size_t>(y) * quadWidth + x;
         for (int channel = 0; channel < 3; ++channel)
@@ -286,9 +286,9 @@ int main() {
         croppedBlack[static_cast<size_t>(y) * croppedWidth + x] =
             static_cast<uint16_t>(channelBlack[native]);
     }
-    motioncam::utils::demosaicHigherCFA(
+    rawpreamp::utils::demosaicHigherCFA(
         croppedBlack, colorBand, croppedWidth, croppedHeight, 4, phase,
-        motioncam::QuadBayerMode::DemosaicColor, channelBlack);
+        rawpreamp::QuadBayerMode::DemosaicColor, channelBlack);
     assert(colorBand.size() == croppedBlack.size() * 3);
     for (int y = 4; y < croppedHeight; ++y) for (int x = 4; x < croppedWidth; ++x) {
         const size_t pixel = static_cast<size_t>(y) * croppedWidth + x;
@@ -300,16 +300,16 @@ int main() {
     for (size_t i = 0; i < gradient.size(); ++i) gradient[i] = static_cast<uint16_t>(i);
     std::vector<uint16_t> reduced;
     uint32_t reducedWidth = 0, reducedHeight = 0;
-    motioncam::utils::reduceRGB(gradient, reduced, 8, 8, 2, true,
+    rawpreamp::utils::reduceRGB(gradient, reduced, 8, 8, 2, true,
                                 reducedWidth, reducedHeight);
     assert(reducedWidth == 4 && reducedHeight == 4 && reduced.size() == 4 * 4 * 3);
     assert(reduced[0] == (gradient[0] + gradient[3] + gradient[24] + gradient[27] + 2) / 4);
-    motioncam::utils::reduceRGB(gradient, reduced, 8, 8, 2, false,
+    rawpreamp::utils::reduceRGB(gradient, reduced, 8, 8, 2, false,
                                 reducedWidth, reducedHeight);
     assert(reduced[0] == gradient[0]);
 
     std::vector<uint16_t> rectangular(16 * 12 * 3, 100);
-    motioncam::utils::reduceRGB(rectangular, reduced, 16, 12, 2, true,
+    rawpreamp::utils::reduceRGB(rectangular, reduced, 16, 12, 2, true,
                                 reducedWidth, reducedHeight);
     assert(reducedWidth == 8 && reducedHeight == 6);
 
@@ -319,7 +319,7 @@ int main() {
     for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
         for (int c = 0; c < 3; ++c)
             encoded[(y * 8 + x) * 3 + c] = (x & 1) ? 4095 : 0;
-    motioncam::utils::reduceRGB(encoded, reduced, 8, 8, 2, true,
+    rawpreamp::utils::reduceRGB(encoded, reduced, 8, 8, 2, true,
                                 reducedWidth, reducedHeight, 4095);
     const auto expectedLogMidpoint = static_cast<uint16_t>(std::lround(
         std::log2(31.0) / std::log2(61.0) * 4095.0));
@@ -330,7 +330,7 @@ int main() {
         quad[y * 8 + x] = static_cast<uint16_t>((y / 2) * 100 + (x / 2) * 10 +
                                                 (y & 1) * 2 + (x & 1));
     std::vector<uint16_t> binned;
-    motioncam::utils::binQuadBayer(quad, binned, 8, 8,
+    rawpreamp::utils::binQuadBayer(quad, binned, 8, 8,
                                    reducedWidth, reducedHeight);
     assert(reducedWidth == 4 && reducedHeight == 4);
     assert(binned[0] == 2); // Rounded average of 0, 1, 2, and 3.
@@ -338,16 +338,16 @@ int main() {
     std::vector<uint16_t> sixBySix(12 * 12);
     for (size_t i = 0; i < sixBySix.size(); ++i)
         sixBySix[i] = static_cast<uint16_t>(i);
-    motioncam::utils::binHigherCFA(sixBySix, binned, 12, 12, 3,
+    rawpreamp::utils::binHigherCFA(sixBySix, binned, 12, 12, 3,
                                    reducedWidth, reducedHeight);
     assert(reducedWidth == 4 && reducedHeight == 4);
     assert(binned[0] == (0 + 1 + 2 + 12 + 13 + 14 + 24 + 25 + 26 + 4) / 9);
 
     std::vector<uint16_t> eightByEight(16 * 16, 400);
-    motioncam::utils::binHigherCFA(eightByEight, binned, 16, 16, 4,
+    rawpreamp::utils::binHigherCFA(eightByEight, binned, 16, 16, 4,
                                    reducedWidth, reducedHeight);
     assert(reducedWidth == 4 && reducedHeight == 4 && binned[0] == 400);
-    motioncam::utils::binHigherCFA(eightByEight, binned, 16, 16, 2,
+    rawpreamp::utils::binHigherCFA(eightByEight, binned, 16, 16, 2,
                                    reducedWidth, reducedHeight);
     assert(reducedWidth == 8 && reducedHeight == 8 && binned[0] == 400);
 
@@ -362,7 +362,7 @@ int main() {
     for (const auto& white : {std::array<double, 3>{1023.0, 4095.5, 65535.0},
                               std::array<double, 3>{2047.0, 8191.0, 50000.0}}) {
         const std::array<double, 3> black{64.0, 256.5, 1000.0};
-        if (!motioncam::utils::normalizeRgb16Bytes(
+        if (!rawpreamp::utils::normalizeRgb16Bytes(
                 levelsInput.data(), levelsInput.size(), levelsOutput, black, white)) return 1;
         const auto* actual = reinterpret_cast<const uint16_t*>(levelsOutput.data());
         for (size_t index = 0; index < levelsInput.size(); ++index) {
@@ -382,15 +382,15 @@ int main() {
         for (size_t index = 0; index < source.size(); ++index)
             source[index] = static_cast<uint16_t>((index * 71) & 65535);
         std::vector<uint16_t> actual;
-        motioncam::utils::demosaicCfaForOutput(
+        rawpreamp::utils::demosaicCfaForOutput(
             source, actual, width, height, repeat, rggb,
-            motioncam::QuadBayerMode::Demosaic, {}, true);
+            rawpreamp::QuadBayerMode::Demosaic, {}, true);
         std::vector<uint8_t> oldPreview, directPreview;
         const std::array<double, 3> previewBlack{64.0, 128.5, 256.0};
         const std::array<double, 3> previewWhite{1023.0, 4095.0, 65535.0};
-        if (!motioncam::utils::normalizeRgb16Bytes(
+        if (!rawpreamp::utils::normalizeRgb16Bytes(
                 actual, oldPreview, previewBlack, previewWhite) ||
-            !motioncam::utils::demosaicNearestCfaToRgb16Bytes(
+            !rawpreamp::utils::demosaicNearestCfaToRgb16Bytes(
                 source.data(), directPreview, width, height, repeat, rggb,
                 previewBlack, previewWhite) || oldPreview != directPreview) return 4;
         const int block = repeat / 2;
@@ -423,31 +423,31 @@ int main() {
         std::vector<uint8_t> oldPreview, directPreview;
         const std::array<double, 3> black{64.0, 128.0, 256.0};
         const std::array<double, 3> white{1023.0, 4095.0, 65535.0};
-        motioncam::utils::demosaicCfaForOutput(source, oldRgb, width, height,
-            2, rggb, motioncam::QuadBayerMode::Demosaic, {}, true);
-        if (!motioncam::utils::normalizeRgb16Bytes(
+        rawpreamp::utils::demosaicCfaForOutput(source, oldRgb, width, height,
+            2, rggb, rawpreamp::QuadBayerMode::Demosaic, {}, true);
+        if (!rawpreamp::utils::normalizeRgb16Bytes(
                 oldRgb, oldPreview, black, white) ||
-            !motioncam::utils::demosaicNearestCfaToRgb16Bytes(
+            !rawpreamp::utils::demosaicNearestCfaToRgb16Bytes(
                 source.data(), directPreview, width, height, 2, rggb,
                 black, white) || oldPreview != directPreview) return 5;
-        if (!motioncam::utils::demosaicBilinearBayer(
+        if (!rawpreamp::utils::demosaicBilinearBayer(
                 source.data(), oldRgb, width, height, rggb) ||
-            !motioncam::utils::normalizeRgb16Bytes(
+            !rawpreamp::utils::normalizeRgb16Bytes(
                 oldRgb, oldPreview, black, white) ||
-            !motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+            !rawpreamp::utils::demosaicBilinearBayerToRgb16Bytes(
                 source.data(), directPreview, width, height, rggb,
                 black, white) || oldPreview != directPreview) return 12;
     }
     for (const auto& bayer : {
-             motioncam::cfaColorsFromPhase("rggb"),
-             motioncam::cfaColorsFromPhase("bggr"),
-             motioncam::cfaColorsFromPhase("grbg"),
-             motioncam::cfaColorsFromPhase("gbrg")}) {
+             rawpreamp::cfaColorsFromPhase("rggb"),
+             rawpreamp::cfaColorsFromPhase("bggr"),
+             rawpreamp::cfaColorsFromPhase("grbg"),
+             rawpreamp::cfaColorsFromPhase("gbrg")}) {
         const std::array<uint16_t, 3> flat{600, 1800, 3200};
         const std::vector<uint16_t> tiny{
             flat[bayer[0]], flat[bayer[1]], flat[bayer[2]], flat[bayer[3]]};
         std::vector<uint16_t> tinyRgb;
-        if (!motioncam::utils::demosaicBilinearBayer(
+        if (!rawpreamp::utils::demosaicBilinearBayer(
                 tiny.data(), tinyRgb, 2, 2, bayer)) return 13;
         for (size_t pixel = 0; pixel < 4; ++pixel)
             for (size_t channel = 0; channel < 3; ++channel)
@@ -459,7 +459,7 @@ int main() {
                 source[static_cast<size_t>(y) * width + x] =
                     flat[bayer[((y & 1) << 1) | (x & 1)]];
         std::vector<uint16_t> bilinear;
-        if (!motioncam::utils::demosaicBilinearBayer(
+        if (!rawpreamp::utils::demosaicBilinearBayer(
                 source.data(), bilinear, width, height, bayer)) return 7;
         for (size_t pixel = 0; pixel < source.size(); ++pixel)
             for (size_t channel = 0; channel < 3; ++channel)
@@ -469,7 +469,7 @@ int main() {
         const int redX = 32 + (redPhase & 1);
         const int redY = 24 + (redPhase >> 1);
         source[static_cast<size_t>(redY) * width + redX] = 4095;
-        if (!motioncam::utils::demosaicBilinearBayer(
+        if (!rawpreamp::utils::demosaicBilinearBayer(
                 source.data(), bilinear, width, height, bayer)) return 9;
         if (bilinear[(static_cast<size_t>(redY) * width + redX) * 3] != 4095 ||
             bilinear[(static_cast<size_t>(redY) * width + redX + 1) * 3] !=
@@ -477,9 +477,9 @@ int main() {
         const std::array<double, 3> black{64.0, 96.0, 128.0};
         const std::array<double, 3> white{4095.0, 4095.0, 4095.0};
         std::vector<uint8_t> twoPass, direct;
-        if (!motioncam::utils::normalizeRgb16Bytes(
+        if (!rawpreamp::utils::normalizeRgb16Bytes(
                 bilinear, twoPass, black, white) ||
-            !motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+            !rawpreamp::utils::demosaicBilinearBayerToRgb16Bytes(
                 source.data(), direct, width, height, bayer,
                 black, white) || direct != twoPass) return 10;
     }
@@ -491,7 +491,7 @@ int main() {
         const std::array<float, 4> black{64, 66, 68, 70};
         const std::array<float, 4> white{4050, 4060, 4070, 4080};
         std::vector<uint8_t> actual, expected(width * height);
-        motioncam::utils::classifyCfaPreviewClipping(
+        rawpreamp::utils::classifyCfaPreviewClipping(
             source.data(), width, height, repeat, rggb, black, white, actual);
         const uint32_t cell = static_cast<uint32_t>(repeat);
         const uint32_t group = cell / 2;

@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cstddef>
 
-namespace motioncam::gallery {
+namespace rawpreamp::gallery {
 
 inline constexpr std::array<float, 9> identityMatrix{
     1.0f, 0.0f, 0.0f,
@@ -278,4 +278,4 @@ inline bool forwardCameraToXyz(const DNGFrameMetadata& metadata,
     return true;
 }
 
-} // namespace motioncam::gallery
+} // namespace rawpreamp::gallery

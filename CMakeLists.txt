@@ -12,19 +12,19 @@ if(POLICY CMP0167)
 endif()
 
 if(APPLE)
-  option(MOTIONCAMFUSE_MACOS_X86_64 "Build x86_64 on macOS (Intel / Rosetta)" OFF)
-  option(MOTIONCAMFUSE_MACOS_UNIVERSAL "Build universal macOS binary (x86_64 + arm64)" OFF)
+  option(RAWPREAMP_MACOS_X86_64 "Build x86_64 on macOS (Intel / Rosetta)" OFF)
+  option(RAWPREAMP_MACOS_UNIVERSAL "Build universal macOS binary (x86_64 + arm64)" OFF)
   if(NOT DEFINED CMAKE_OSX_ARCHITECTURES)
-    if(MOTIONCAMFUSE_MACOS_UNIVERSAL)
+    if(RAWPREAMP_MACOS_UNIVERSAL)
       set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Build architectures for macOS" FORCE)
-    elseif(MOTIONCAMFUSE_MACOS_X86_64)
+    elseif(RAWPREAMP_MACOS_X86_64)
       set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "Build architectures for macOS" FORCE)
     endif()
   endif()
   set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
 endif()
 
-project(MotionCamFuse VERSION 1.0 LANGUAGES C CXX)
+project(RawPreamp VERSION 1.0 LANGUAGES C CXX)
 
 # Windows SDK headers must not define macros that break std::min/max.
 if(WIN32)
@@ -34,7 +34,7 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_compile_definitions(
-    MOTIONCAM_DEBUG_INSTRUMENTATION=$<IF:$<CONFIG:Debug>,1,0>
+    RAWPREAMP_DEBUG_INSTRUMENTATION=$<IF:$<CONFIG:Debug>,1,0>
     SPDLOG_ACTIVE_LEVEL=$<IF:$<CONFIG:Debug>,SPDLOG_LEVEL_DEBUG,SPDLOG_LEVEL_INFO>
     $<$<NOT:$<CONFIG:Debug>>:QT_NO_DEBUG_OUTPUT>)
 
@@ -54,7 +54,7 @@ if(QT_VERSION_MAJOR EQUAL 6 AND NOT ANDROID)
     find_package(Qt6 COMPONENTS QuickWidgets QUIET)
 endif()
 
-set(APP_NAME "MotionCam Fuse")
+set(APP_NAME "RawPreamp")
 set(DEPENDENCIES_PATH deps)
 
 # set(Boost_DEBUG 1)
@@ -73,10 +73,10 @@ set(PROJECT_SOURCES
         src/VirtualFileSystemImpl.cpp
         src/PreviewVirtualFileSystem.cpp
         src/VirtualFileSystemImpl_MCRAW.cpp
-        src/VirtualFileSystemImpl_DirectLog.cpp
+        src/VirtualFileSystemImpl_NativeVideo.cpp
         src/VirtualFileSystemImpl_DNG.cpp
-        src/DirectLogDecoder.cpp
-        src/DirectLogGpuRgb.cpp
+        src/NativeVideoDecoder.cpp
+        src/NativeVideoGpuRgb.cpp
         src/VulkanGainBake.cpp
         src/VulkanJpegPredictor.cpp
         src/VulkanJpegEntropy.cpp
@@ -88,7 +88,7 @@ set(PROJECT_SOURCES
         shaders/vulkan_gain_common.glsl
         shaders/vulkan_gain_display_math.glsl
         shaders/vulkan_gain_multi.glsl
-        src/DirectLogPlaceboLibav.c
+        src/NativeVideoPlaceboLibav.c
         src/DNGDecoder.cpp
         src/CameraMetadata.cpp
         src/CameraFrameMetadata.cpp
@@ -111,9 +111,9 @@ set(PROJECT_SOURCES
         include/IFuseFileSystem.h
         include/VirtualFileSystemImpl.h
         include/VirtualFileSystemImpl_MCRAW.h
-        include/VirtualFileSystemImpl_DirectLog.h
+        include/VirtualFileSystemImpl_NativeVideo.h
         include/VirtualFileSystemImpl_DNG.h
-        include/DirectLogDecoder.h
+        include/NativeVideoDecoder.h
         include/DNGDecoder.h
         include/DNGImage.h
         include/LRUCache.h
@@ -277,7 +277,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
             "${android_package_dir}")
         set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_PACKAGE_NAME
-            "com.motioncam.fuse")
+            "com.rawpreamp.app")
         set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_MIN_SDK_VERSION 28)
         set_property(TARGET ${PROJECT_NAME} PROPERTY QT_ANDROID_TARGET_SDK_VERSION 34)
         # Do not silently select a newer SDK preinstalled on a CI runner.
@@ -301,29 +301,29 @@ endif()
 target_include_directories(${PROJECT_NAME} PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE _FILE_OFFSET_BITS=64)
-option(MOTIONCAM_RELEASE_IPO "Enable supported link-time optimization in Release" ON)
-if(MOTIONCAM_RELEASE_IPO)
+option(RAWPREAMP_RELEASE_IPO "Enable supported link-time optimization in Release" ON)
+if(RAWPREAMP_RELEASE_IPO)
     include(CheckIPOSupported)
-    check_ipo_supported(RESULT motioncam_ipo_supported OUTPUT motioncam_ipo_error LANGUAGES C CXX)
-    if(motioncam_ipo_supported)
+    check_ipo_supported(RESULT rawpreamp_ipo_supported OUTPUT rawpreamp_ipo_error LANGUAGES C CXX)
+    if(rawpreamp_ipo_supported)
         set_property(TARGET ${PROJECT_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     else()
-        message(STATUS "Release IPO unavailable: ${motioncam_ipo_error}")
+        message(STATUS "Release IPO unavailable: ${rawpreamp_ipo_error}")
     endif()
 endif()
 # Retain symbol files separately in CI for native Apple crash report decoding.
 if(APPLE)
     target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Release>:-g>)
-    if(MOTIONCAM_RELEASE_IPO AND motioncam_ipo_supported)
+    if(RAWPREAMP_RELEASE_IPO AND rawpreamp_ipo_supported)
         # Keep Darwin LTO objects until CI has generated the matching dSYM.
         if("-flto=thin" IN_LIST CMAKE_CXX_COMPILE_OPTIONS_IPO)
-            set(motioncam_lto_objects "${CMAKE_CURRENT_BINARY_DIR}/MotionCamFuse-lto")
-            file(MAKE_DIRECTORY "${motioncam_lto_objects}")
+            set(rawpreamp_lto_objects "${CMAKE_CURRENT_BINARY_DIR}/RawPreamp-lto")
+            file(MAKE_DIRECTORY "${rawpreamp_lto_objects}")
         else()
-            set(motioncam_lto_objects "${CMAKE_CURRENT_BINARY_DIR}/MotionCamFuse-lto.o")
+            set(rawpreamp_lto_objects "${CMAKE_CURRENT_BINARY_DIR}/RawPreamp-lto.o")
         endif()
         target_link_options(${PROJECT_NAME} PRIVATE
-            "$<$<CONFIG:Release>:-Wl,-object_path_lto,${motioncam_lto_objects}>")
+            "$<$<CONFIG:Release>:-Wl,-object_path_lto,${rawpreamp_lto_objects}>")
     endif()
 endif()
 
@@ -370,7 +370,7 @@ endif()
 #     )
 # endif()
 
-# Add motioncam decoder as static library
+# Build the MCRAW decoder as a static library
 add_library(motioncam-decoder STATIC
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Decoder.cpp
     ${DEPENDENCIES_PATH}/motioncam-decoder/lib/Mc24.cpp
@@ -408,47 +408,47 @@ find_package(LibArchive REQUIRED)
 
 if(APPLE)
   if(TARGET spdlog::spdlog_header_only)
-    set(MOTIONCAM_SPDLOG_TARGET spdlog::spdlog_header_only)
+    set(RAWPREAMP_SPDLOG_TARGET spdlog::spdlog_header_only)
   else()
-    set(MOTIONCAM_SPDLOG_TARGET spdlog::spdlog)
+    set(RAWPREAMP_SPDLOG_TARGET spdlog::spdlog)
   endif()
 
   if(TARGET fmt::fmt-header-only)
-    set(MOTIONCAM_FMT_TARGET fmt::fmt-header-only)
+    set(RAWPREAMP_FMT_TARGET fmt::fmt-header-only)
   else()
-    set(MOTIONCAM_FMT_TARGET fmt::fmt)
+    set(RAWPREAMP_FMT_TARGET fmt::fmt)
   endif()
 else()
-  set(MOTIONCAM_SPDLOG_TARGET spdlog::spdlog)
-  set(MOTIONCAM_FMT_TARGET fmt::fmt)
+  set(RAWPREAMP_SPDLOG_TARGET spdlog::spdlog)
+  set(RAWPREAMP_FMT_TARGET fmt::fmt)
 endif()
 
 # Link these directly to the decoder to keep compile definitions and fmt ABI
 # consistent in every translation unit.
 target_link_libraries(motioncam-decoder PRIVATE
-  ${MOTIONCAM_SPDLOG_TARGET}
-  ${MOTIONCAM_FMT_TARGET})
+  ${RAWPREAMP_SPDLOG_TARGET}
+  ${RAWPREAMP_FMT_TARGET})
 find_package(ZLIB REQUIRED)
-add_library(MotionCamZipSource STATIC src/ZipSource.cpp)
-set_target_properties(MotionCamZipSource PROPERTIES AUTOMOC OFF AUTOUIC OFF)
-target_include_directories(MotionCamZipSource PUBLIC include)
-target_link_libraries(MotionCamZipSource PUBLIC LibArchive::LibArchive ZLIB::ZLIB)
+add_library(RawPreampZipSource STATIC src/ZipSource.cpp)
+set_target_properties(RawPreampZipSource PROPERTIES AUTOMOC OFF AUTOUIC OFF)
+target_include_directories(RawPreampZipSource PUBLIC include)
+target_link_libraries(RawPreampZipSource PUBLIC LibArchive::LibArchive ZLIB::ZLIB)
 if(APPLE)
-    target_link_libraries(MotionCamZipSource PUBLIC "-framework CoreFoundation")
+    target_link_libraries(RawPreampZipSource PUBLIC "-framework CoreFoundation")
 endif()
 find_package(Protobuf CONFIG REQUIRED)
-add_library(MotionCamTelemetry STATIC
+add_library(RawPreampTelemetry STATIC
     src/GyroTelemetry.cpp
     src/GyroTelemetryDng.cpp
     src/GyroTelemetryMux.cpp
     deps/gyroflow/gyroflow.proto)
-set_target_properties(MotionCamTelemetry PROPERTIES AUTOMOC OFF AUTOUIC OFF)
-protobuf_generate(TARGET MotionCamTelemetry LANGUAGE cpp APPEND_PATH
+set_target_properties(RawPreampTelemetry PROPERTIES AUTOMOC OFF AUTOUIC OFF)
+protobuf_generate(TARGET RawPreampTelemetry LANGUAGE cpp APPEND_PATH
     IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/deps/gyroflow"
     PROTOC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}")
-target_include_directories(MotionCamTelemetry PUBLIC include
+target_include_directories(RawPreampTelemetry PUBLIC include
     PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/deps/gyroflow")
-target_link_libraries(MotionCamTelemetry PUBLIC MotionCamZipSource motioncam-decoder
+target_link_libraries(RawPreampTelemetry PUBLIC RawPreampZipSource motioncam-decoder
     PRIVATE protobuf::libprotobuf)
 target_link_libraries(motioncam-decoder PUBLIC ZLIB::ZLIB)
 
@@ -468,11 +468,11 @@ if(TARGET PkgConfig::JXL)
 else()
     find_path(JXL_INCLUDE_DIR jxl/encode.h REQUIRED)
     find_library(JXL_LIBRARY NAMES jxl REQUIRED)
-    add_library(MotionCamJXL UNKNOWN IMPORTED)
-    set_target_properties(MotionCamJXL PROPERTIES
+    add_library(RawPreampJXL UNKNOWN IMPORTED)
+    set_target_properties(RawPreampJXL PROPERTIES
         IMPORTED_LOCATION "${JXL_LIBRARY}"
         INTERFACE_INCLUDE_DIRECTORIES "${JXL_INCLUDE_DIR}")
-    set(JXL_TARGET MotionCamJXL)
+    set(JXL_TARGET RawPreampJXL)
 endif()
 if(PkgConfig_FOUND)
     pkg_check_modules(JXL_THREADS QUIET IMPORTED_TARGET libjxl_threads)
@@ -484,21 +484,21 @@ else()
         find_path(JXL_INCLUDE_DIR jxl/thread_parallel_runner.h REQUIRED)
     endif()
     find_library(JXL_THREADS_LIBRARY NAMES jxl_threads REQUIRED)
-    add_library(MotionCamJXLThreads UNKNOWN IMPORTED)
-    set_target_properties(MotionCamJXLThreads PROPERTIES
+    add_library(RawPreampJXLThreads UNKNOWN IMPORTED)
+    set_target_properties(RawPreampJXLThreads PROPERTIES
         IMPORTED_LOCATION "${JXL_THREADS_LIBRARY}"
         INTERFACE_INCLUDE_DIRECTORIES "${JXL_INCLUDE_DIR}")
-    set(JXL_THREADS_TARGET MotionCamJXLThreads)
+    set(JXL_THREADS_TARGET RawPreampJXLThreads)
 endif()
-add_library(MotionCamJXLBackend INTERFACE)
-target_link_libraries(MotionCamJXLBackend INTERFACE ${JXL_TARGET} ${JXL_THREADS_TARGET})
-set(JXL_TARGET MotionCamJXLBackend)
+add_library(RawPreampJXLBackend INTERFACE)
+target_link_libraries(RawPreampJXLBackend INTERFACE ${JXL_TARGET} ${JXL_THREADS_TARGET})
+set(JXL_TARGET RawPreampJXLBackend)
 
 # Find FFmpeg - try manual path first, then pkg-config, then vcpkg
 set(FFMPEG_ROOT "" CACHE PATH "Path to FFmpeg installation (e.g., C:/ffmpeg)")
 unset(FFMPEG_FOUND CACHE)
 set(FFMPEG_FOUND FALSE)
-set(MOTIONCAM_FFMPEG_PROVIDER "")
+set(RAWPREAMP_FFMPEG_PROVIDER "")
 
 if(FFMPEG_ROOT)
     # Manual FFmpeg path specified
@@ -513,9 +513,9 @@ if(FFMPEG_ROOT)
 
     if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWRESAMPLE_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
         set(FFMPEG_FOUND TRUE)
-        set(MOTIONCAM_FFMPEG_PROVIDER manual)
-        set(MOTIONCAM_FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
-        set(MOTIONCAM_FFMPEG_LIBRARY_DIR "${FFMPEG_ROOT}/lib")
+        set(RAWPREAMP_FFMPEG_PROVIDER manual)
+        set(RAWPREAMP_FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
+        set(RAWPREAMP_FFMPEG_LIBRARY_DIR "${FFMPEG_ROOT}/lib")
         set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWRESAMPLE_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
         include_directories(${FFMPEG_INCLUDE_DIRS})
         link_directories(${FFMPEG_LIBRARY_DIRS})
@@ -535,7 +535,7 @@ if(NOT FFMPEG_FOUND AND NOT WIN32)
             libavutil
         )
         if(FFMPEG_FOUND)
-            set(MOTIONCAM_FFMPEG_PROVIDER pkgconfig)
+            set(RAWPREAMP_FFMPEG_PROVIDER pkgconfig)
             set(FFMPEG_LIBRARIES PkgConfig::FFMPEG)
         endif()
     endif()
@@ -546,7 +546,7 @@ if(NOT FFMPEG_FOUND)
     find_package(ffmpeg CONFIG QUIET)
     if(ffmpeg_FOUND)
         set(FFMPEG_FOUND TRUE)
-        set(MOTIONCAM_FFMPEG_PROVIDER vcpkg_config)
+        set(RAWPREAMP_FFMPEG_PROVIDER vcpkg_config)
         set(FFMPEG_LIBRARIES ffmpeg::avformat ffmpeg::avcodec ffmpeg::swresample ffmpeg::swscale ffmpeg::avutil)
     endif()
 endif()
@@ -559,11 +559,11 @@ if(NOT FFMPEG_FOUND AND WIN32)
     if(NOT VCPKG_TARGET_TRIPLET)
         message(FATAL_ERROR "VCPKG_TARGET_TRIPLET is required for Windows dependency discovery")
     endif()
-    set(_motioncam_windows_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+    set(_rawpreamp_windows_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(VCPKG_LIB_DIR "${_motioncam_windows_prefix}/debug/lib")
+        set(VCPKG_LIB_DIR "${_rawpreamp_windows_prefix}/debug/lib")
     else()
-        set(VCPKG_LIB_DIR "${_motioncam_windows_prefix}/lib")
+        set(VCPKG_LIB_DIR "${_rawpreamp_windows_prefix}/lib")
     endif()
     
     # Clear cached values to force re-search
@@ -581,9 +581,9 @@ if(NOT FFMPEG_FOUND AND WIN32)
     
     if(AVFORMAT_LIBRARY AND AVCODEC_LIBRARY AND SWRESAMPLE_LIBRARY AND SWSCALE_LIBRARY AND AVUTIL_LIBRARY)
         set(FFMPEG_FOUND TRUE)
-        set(MOTIONCAM_FFMPEG_PROVIDER vcpkg_manual)
-        set(MOTIONCAM_FFMPEG_INCLUDE_DIR "${_motioncam_windows_prefix}/include")
-        set(MOTIONCAM_FFMPEG_LIBRARY_DIR "${VCPKG_LIB_DIR}")
+        set(RAWPREAMP_FFMPEG_PROVIDER vcpkg_manual)
+        set(RAWPREAMP_FFMPEG_INCLUDE_DIR "${_rawpreamp_windows_prefix}/include")
+        set(RAWPREAMP_FFMPEG_LIBRARY_DIR "${VCPKG_LIB_DIR}")
         set(FFMPEG_LIBRARIES ${AVFORMAT_LIBRARY} ${AVCODEC_LIBRARY} ${SWRESAMPLE_LIBRARY} ${SWSCALE_LIBRARY} ${AVUTIL_LIBRARY})
         message(STATUS "Found FFmpeg in vcpkg: ${VCPKG_LIB_DIR}")
     endif()
@@ -624,11 +624,11 @@ FetchContent_MakeAvailable(bs_thread_pool)
 target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
     ${bs_thread_pool_SOURCE_DIR}/include)
 
-target_link_libraries(MotionCamTelemetry PRIVATE ${FFMPEG_LIBRARIES})
-target_include_directories(MotionCamTelemetry PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_libraries(RawPreampTelemetry PRIVATE ${FFMPEG_LIBRARIES})
+target_include_directories(RawPreampTelemetry PRIVATE ${FFMPEG_INCLUDE_DIRS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-  MotionCamTelemetry
+  RawPreampTelemetry
   Qt${QT_VERSION_MAJOR}::Widgets
   Qt${QT_VERSION_MAJOR}::Network
   Qt${QT_VERSION_MAJOR}::Concurrent
@@ -636,16 +636,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
   Boost::filesystem
   Boost::locale
   Boost::regex
-  ${MOTIONCAM_SPDLOG_TARGET}
-  ${MOTIONCAM_FMT_TARGET}
-  MotionCamZipSource
+  ${RAWPREAMP_SPDLOG_TARGET}
+  ${RAWPREAMP_FMT_TARGET}
+  RawPreampZipSource
   motioncam-decoder
   JPEG::JPEG
   ${JXL_TARGET}
   ${FFMPEG_LIBRARIES}
   ${platform-specific})
-set(MOTIONCAM_AVFILTER_TARGET "")
-if(MOTIONCAM_FFMPEG_PROVIDER STREQUAL "pkgconfig")
+set(RAWPREAMP_AVFILTER_TARGET "")
+if(RAWPREAMP_FFMPEG_PROVIDER STREQUAL "pkgconfig")
   pkg_check_modules(AVFILTER QUIET IMPORTED_TARGET libavfilter)
   if(AVFILTER_FOUND)
     set(AVFILTER_SAME_INSTALL TRUE)
@@ -660,81 +660,81 @@ if(MOTIONCAM_FFMPEG_PROVIDER STREQUAL "pkgconfig")
       endif()
     endforeach()
     if(AVFILTER_SAME_INSTALL)
-      set(MOTIONCAM_AVFILTER_TARGET PkgConfig::AVFILTER)
+      set(RAWPREAMP_AVFILTER_TARGET PkgConfig::AVFILTER)
     endif()
   endif()
-elseif(MOTIONCAM_FFMPEG_PROVIDER STREQUAL "vcpkg_config")
+elseif(RAWPREAMP_FFMPEG_PROVIDER STREQUAL "vcpkg_config")
   if(TARGET ffmpeg::avfilter)
-    set(MOTIONCAM_AVFILTER_TARGET ffmpeg::avfilter)
+    set(RAWPREAMP_AVFILTER_TARGET ffmpeg::avfilter)
   endif()
 else()
-  if(MOTIONCAM_FFMPEG_INCLUDE_DIR AND MOTIONCAM_FFMPEG_LIBRARY_DIR)
+  if(RAWPREAMP_FFMPEG_INCLUDE_DIR AND RAWPREAMP_FFMPEG_LIBRARY_DIR)
     unset(AVFILTER_INCLUDE_DIR CACHE)
     unset(AVFILTER_LIBRARY CACHE)
     find_path(AVFILTER_INCLUDE_DIR libavfilter/avfilter.h
-      PATHS "${MOTIONCAM_FFMPEG_INCLUDE_DIR}" NO_DEFAULT_PATH)
+      PATHS "${RAWPREAMP_FFMPEG_INCLUDE_DIR}" NO_DEFAULT_PATH)
     find_library(AVFILTER_LIBRARY avfilter
-      PATHS "${MOTIONCAM_FFMPEG_LIBRARY_DIR}" NO_DEFAULT_PATH)
+      PATHS "${RAWPREAMP_FFMPEG_LIBRARY_DIR}" NO_DEFAULT_PATH)
     if(AVFILTER_INCLUDE_DIR AND AVFILTER_LIBRARY)
       target_include_directories(${PROJECT_NAME} PRIVATE ${AVFILTER_INCLUDE_DIR})
-      set(MOTIONCAM_AVFILTER_TARGET "${AVFILTER_LIBRARY}")
+      set(RAWPREAMP_AVFILTER_TARGET "${AVFILTER_LIBRARY}")
     endif()
   endif()
 endif()
-if(ANDROID AND NOT MOTIONCAM_AVFILTER_TARGET)
+if(ANDROID AND NOT RAWPREAMP_AVFILTER_TARGET)
   message(FATAL_ERROR "Android Camera Native finalization requires linked FFmpeg avfilter support")
 endif()
-if(MOTIONCAM_AVFILTER_TARGET)
-  target_link_libraries(${PROJECT_NAME} PRIVATE ${MOTIONCAM_AVFILTER_TARGET})
-  target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_AVFILTER=1)
+if(RAWPREAMP_AVFILTER_TARGET)
+  target_link_libraries(${PROJECT_NAME} PRIVATE ${RAWPREAMP_AVFILTER_TARGET})
+  target_compile_definitions(${PROJECT_NAME} PRIVATE RAWPREAMP_HAS_AVFILTER=1)
 endif()
-option(MOTIONCAM_REQUIRE_VULKAN "Require the Vulkan processing backend at build time" OFF)
+option(RAWPREAMP_REQUIRE_VULKAN "Require the Vulkan processing backend at build time" OFF)
 if(VCPKG_TARGET_TRIPLET)
   if(VCPKG_INSTALLED_DIR)
-    set(_motioncam_vcpkg_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+    set(_rawpreamp_vcpkg_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
   else()
-    set(_motioncam_vcpkg_prefix "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
+    set(_rawpreamp_vcpkg_prefix "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
   endif()
 endif()
-if(WIN32 AND _motioncam_vcpkg_prefix)
+if(WIN32 AND _rawpreamp_vcpkg_prefix)
   # pkg-config cannot reliably select the MSVC Debug/Release runtime. Import
   # the release archive; add Debug only when that dependency was built.
-  find_path(DIRECTLOG_VULKAN_INCLUDE_DIR vulkan/vulkan.h
-    PATHS "${_motioncam_vcpkg_prefix}/include" NO_DEFAULT_PATH)
-  find_path(DIRECTLOG_PLACEBO_INCLUDE_DIR libplacebo/config.h
-    PATHS "${_motioncam_vcpkg_prefix}/include" NO_DEFAULT_PATH)
-  find_library(DIRECTLOG_PLACEBO_RELEASE NAMES placebo libplacebo
-    PATHS "${_motioncam_vcpkg_prefix}/lib" NO_DEFAULT_PATH)
-  find_library(DIRECTLOG_PLACEBO_DEBUG NAMES placebo libplacebo
-    PATHS "${_motioncam_vcpkg_prefix}/debug/lib" NO_DEFAULT_PATH)
-  if(DIRECTLOG_PLACEBO_INCLUDE_DIR AND DIRECTLOG_VULKAN_INCLUDE_DIR AND
-     DIRECTLOG_PLACEBO_RELEASE)
-    file(STRINGS "${DIRECTLOG_PLACEBO_INCLUDE_DIR}/libplacebo/config.h"
-      _motioncam_placebo_api REGEX "^#define PL_API_VER +[0-9]+")
-    if(_motioncam_placebo_api MATCHES "PL_API_VER +([0-9]+)" AND CMAKE_MATCH_1 GREATER_EQUAL 360)
+  find_path(NATIVE_VIDEO_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+    PATHS "${_rawpreamp_vcpkg_prefix}/include" NO_DEFAULT_PATH)
+  find_path(NATIVE_VIDEO_PLACEBO_INCLUDE_DIR libplacebo/config.h
+    PATHS "${_rawpreamp_vcpkg_prefix}/include" NO_DEFAULT_PATH)
+  find_library(NATIVE_VIDEO_PLACEBO_RELEASE NAMES placebo libplacebo
+    PATHS "${_rawpreamp_vcpkg_prefix}/lib" NO_DEFAULT_PATH)
+  find_library(NATIVE_VIDEO_PLACEBO_DEBUG NAMES placebo libplacebo
+    PATHS "${_rawpreamp_vcpkg_prefix}/debug/lib" NO_DEFAULT_PATH)
+  if(NATIVE_VIDEO_PLACEBO_INCLUDE_DIR AND NATIVE_VIDEO_VULKAN_INCLUDE_DIR AND
+     NATIVE_VIDEO_PLACEBO_RELEASE)
+    file(STRINGS "${NATIVE_VIDEO_PLACEBO_INCLUDE_DIR}/libplacebo/config.h"
+      _rawpreamp_placebo_api REGEX "^#define PL_API_VER +[0-9]+")
+    if(_rawpreamp_placebo_api MATCHES "PL_API_VER +([0-9]+)" AND CMAKE_MATCH_1 GREATER_EQUAL 360)
       find_package(unofficial-shaderc CONFIG REQUIRED)
-      add_library(MotionCamPlaceboArchive STATIC IMPORTED)
-      set_target_properties(MotionCamPlaceboArchive PROPERTIES
+      add_library(RawPreampPlaceboArchive STATIC IMPORTED)
+      set_target_properties(RawPreampPlaceboArchive PROPERTIES
         IMPORTED_CONFIGURATIONS "RELEASE"
-        IMPORTED_LOCATION "${DIRECTLOG_PLACEBO_RELEASE}"
-        IMPORTED_LOCATION_RELEASE "${DIRECTLOG_PLACEBO_RELEASE}"
+        IMPORTED_LOCATION "${NATIVE_VIDEO_PLACEBO_RELEASE}"
+        IMPORTED_LOCATION_RELEASE "${NATIVE_VIDEO_PLACEBO_RELEASE}"
         MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
         MAP_IMPORTED_CONFIG_MINSIZEREL Release
-        INTERFACE_INCLUDE_DIRECTORIES "${DIRECTLOG_PLACEBO_INCLUDE_DIR}"
+        INTERFACE_INCLUDE_DIRECTORIES "${NATIVE_VIDEO_PLACEBO_INCLUDE_DIR}"
         INTERFACE_COMPILE_DEFINITIONS PL_STATIC)
-      if(DIRECTLOG_PLACEBO_DEBUG)
-        set_property(TARGET MotionCamPlaceboArchive APPEND PROPERTY IMPORTED_CONFIGURATIONS DEBUG)
-        set_property(TARGET MotionCamPlaceboArchive PROPERTY IMPORTED_LOCATION_DEBUG "${DIRECTLOG_PLACEBO_DEBUG}")
+      if(NATIVE_VIDEO_PLACEBO_DEBUG)
+        set_property(TARGET RawPreampPlaceboArchive APPEND PROPERTY IMPORTED_CONFIGURATIONS DEBUG)
+        set_property(TARGET RawPreampPlaceboArchive PROPERTY IMPORTED_LOCATION_DEBUG "${NATIVE_VIDEO_PLACEBO_DEBUG}")
       elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
         message(FATAL_ERROR "Debug configuration requires debug libplacebo dependencies")
       endif()
-      add_library(MotionCamPlacebo INTERFACE)
-      target_link_libraries(MotionCamPlacebo INTERFACE MotionCamPlaceboArchive
+      add_library(RawPreampPlacebo INTERFACE)
+      target_link_libraries(RawPreampPlacebo INTERFACE RawPreampPlaceboArchive
         unofficial::shaderc::shaderc shlwapi)
-      set(DIRECTLOG_PLACEBO_FOUND TRUE)
-      set(DIRECTLOG_PLACEBO_SAME_INSTALL TRUE)
-      target_link_libraries(${PROJECT_NAME} PRIVATE MotionCamPlacebo)
-      target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+      set(NATIVE_VIDEO_PLACEBO_FOUND TRUE)
+      set(NATIVE_VIDEO_PLACEBO_SAME_INSTALL TRUE)
+      target_link_libraries(${PROJECT_NAME} PRIVATE RawPreampPlacebo)
+      target_compile_definitions(${PROJECT_NAME} PRIVATE RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO=1)
     endif()
   endif()
 elseif(PkgConfig_FOUND)
@@ -745,46 +745,46 @@ elseif(PkgConfig_FOUND)
     set(_saved_pkg_config_argn "${PKG_CONFIG_ARGN}")
     set(_saved_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
     set(ENV{PKG_CONFIG_PATH} "")
-    set(ENV{PKG_CONFIG_LIBDIR} "${_motioncam_vcpkg_prefix}/lib/pkgconfig")
+    set(ENV{PKG_CONFIG_LIBDIR} "${_rawpreamp_vcpkg_prefix}/lib/pkgconfig")
     set(PKG_CONFIG_ARGN --static)
-    unset(__pkg_config_checked_DIRECTLOG_PLACEBO CACHE)
-    unset(pkgcfg_lib_DIRECTLOG_PLACEBO_placebo CACHE)
+    unset(__pkg_config_checked_NATIVE_VIDEO_PLACEBO CACHE)
+    unset(pkgcfg_lib_NATIVE_VIDEO_PLACEBO_placebo CACHE)
   endif()
-  pkg_check_modules(DIRECTLOG_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.1)
+  pkg_check_modules(NATIVE_VIDEO_PLACEBO QUIET IMPORTED_TARGET libplacebo>=7.360.1)
   if(VCPKG_TARGET_TRIPLET)
     set(ENV{PKG_CONFIG_LIBDIR} "${_saved_pkg_config_libdir}")
     set(ENV{PKG_CONFIG_PATH} "${_saved_pkg_config_path}")
     set(PKG_CONFIG_ARGN "${_saved_pkg_config_argn}")
   endif()
-  if(DIRECTLOG_PLACEBO_FOUND)
-    set(DIRECTLOG_PLACEBO_SAME_INSTALL TRUE)
-    foreach(PLACEBO_DIR IN LISTS DIRECTLOG_PLACEBO_LIBRARY_DIRS)
+  if(NATIVE_VIDEO_PLACEBO_FOUND)
+    set(NATIVE_VIDEO_PLACEBO_SAME_INSTALL TRUE)
+    foreach(PLACEBO_DIR IN LISTS NATIVE_VIDEO_PLACEBO_LIBRARY_DIRS)
       if(NOT PLACEBO_DIR IN_LIST FFMPEG_LIBRARY_DIRS AND
-         NOT PLACEBO_DIR STREQUAL MOTIONCAM_FFMPEG_LIBRARY_DIR)
-        set(DIRECTLOG_PLACEBO_SAME_INSTALL FALSE)
+         NOT PLACEBO_DIR STREQUAL RAWPREAMP_FFMPEG_LIBRARY_DIR)
+        set(NATIVE_VIDEO_PLACEBO_SAME_INSTALL FALSE)
       endif()
     endforeach()
-    find_path(DIRECTLOG_VULKAN_INCLUDE_DIR vulkan/vulkan.h
+    find_path(NATIVE_VIDEO_VULKAN_INCLUDE_DIR vulkan/vulkan.h
       HINTS "${CMAKE_BINARY_DIR}/deps/vulkan-headers/include")
-    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
-      target_include_directories(${PROJECT_NAME} PRIVATE ${DIRECTLOG_VULKAN_INCLUDE_DIR})
-      add_library(MotionCamPlacebo INTERFACE)
-      target_link_libraries(MotionCamPlacebo INTERFACE PkgConfig::DIRECTLOG_PLACEBO)
-      target_link_libraries(${PROJECT_NAME} PRIVATE MotionCamPlacebo)
+    if(NATIVE_VIDEO_PLACEBO_SAME_INSTALL AND NATIVE_VIDEO_VULKAN_INCLUDE_DIR)
+      target_include_directories(${PROJECT_NAME} PRIVATE ${NATIVE_VIDEO_VULKAN_INCLUDE_DIR})
+      add_library(RawPreampPlacebo INTERFACE)
+      target_link_libraries(RawPreampPlacebo INTERFACE PkgConfig::NATIVE_VIDEO_PLACEBO)
+      target_link_libraries(${PROJECT_NAME} PRIVATE RawPreampPlacebo)
       if(VCPKG_TARGET_TRIPLET)
         # The vcpkg shaderc .pc file omits static glslang/SPIRV-Tools links.
         # Its CMake target records the complete transitive dependency graph.
         find_package(unofficial-shaderc CONFIG REQUIRED)
-        target_link_libraries(MotionCamPlacebo INTERFACE unofficial::shaderc::shaderc)
+        target_link_libraries(RawPreampPlacebo INTERFACE unofficial::shaderc::shaderc)
       endif()
-      target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+      target_compile_definitions(${PROJECT_NAME} PRIVATE RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO=1)
     endif()
   endif()
 endif()
 if(ANDROID)
   # FindPkgConfig can resolve transitive -lc++ flags to the NDK's Linux-host
   # libc++.so. Let the Android C++ toolchain supply the target STL instead.
-  foreach(_pkg_target JXL JXL_THREADS FFMPEG AVFILTER DIRECTLOG_PLACEBO)
+  foreach(_pkg_target JXL JXL_THREADS FFMPEG AVFILTER NATIVE_VIDEO_PLACEBO)
     if(TARGET PkgConfig::${_pkg_target})
       get_target_property(_pkg_links PkgConfig::${_pkg_target} INTERFACE_LINK_LIBRARIES)
       if(_pkg_links)
@@ -794,31 +794,31 @@ if(ANDROID)
     endif()
   endforeach()
 endif()
-if(MOTIONCAM_REQUIRE_VULKAN AND (NOT TARGET MotionCamPlacebo OR NOT MOTIONCAM_AVFILTER_TARGET))
+if(RAWPREAMP_REQUIRE_VULKAN AND (NOT TARGET RawPreampPlacebo OR NOT RAWPREAMP_AVFILTER_TARGET))
   message(FATAL_ERROR "GPU processing requires libplacebo >= 7.360.1, Vulkan headers, shaderc, and FFmpeg avfilter from compatible target dependencies")
 endif()
-if(TARGET MotionCamPlacebo)
+if(TARGET RawPreampPlacebo)
   message(STATUS "Vulkan GPU processing enabled (CPU fallback remains available at runtime)")
 else()
   message(STATUS "Vulkan GPU processing unavailable in this build; using CPU processing")
 endif()
-if(APPLE AND DIRECTLOG_PLACEBO_FOUND AND DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
-  find_library(MOTIONCAM_VULKAN_LOADER NAMES vulkan
-    HINTS "${MOTIONCAM_FFMPEG_LIBRARY_DIR}" "${_motioncam_vcpkg_prefix}/lib")
-  if(MOTIONCAM_VULKAN_LOADER)
+if(APPLE AND NATIVE_VIDEO_PLACEBO_FOUND AND NATIVE_VIDEO_PLACEBO_SAME_INSTALL AND NATIVE_VIDEO_VULKAN_INCLUDE_DIR)
+  find_library(RAWPREAMP_VULKAN_LOADER NAMES vulkan
+    HINTS "${RAWPREAMP_FFMPEG_LIBRARY_DIR}" "${_rawpreamp_vcpkg_prefix}/lib")
+  if(RAWPREAMP_VULKAN_LOADER)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks"
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MOTIONCAM_VULKAN_LOADER}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RAWPREAMP_VULKAN_LOADER}"
         "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/libvulkan.1.dylib"
       COMMAND ${CMAKE_COMMAND} -E create_symlink libvulkan.1.dylib
         "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/libvulkan.dylib")
   endif()
-  if(MOTIONCAM_REQUIRE_VULKAN AND NOT MOTIONCAM_VULKAN_LOADER)
+  if(RAWPREAMP_REQUIRE_VULKAN AND NOT RAWPREAMP_VULKAN_LOADER)
     message(FATAL_ERROR "The macOS Vulkan build requires a Vulkan loader to bundle")
   endif()
-  find_library(MOTIONCAM_MOLTENVK_LIBRARY NAMES MoltenVK
+  find_library(RAWPREAMP_MOLTENVK_LIBRARY NAMES MoltenVK
     HINTS "$ENV{VULKAN_SDK}/lib" /opt/homebrew/opt/molten-vk/lib /usr/local/opt/molten-vk/lib)
-  if(MOTIONCAM_MOLTENVK_LIBRARY)
+  if(RAWPREAMP_MOLTENVK_LIBRARY)
     # Ship the driver alongside the loader pulled in by libplacebo. The loader
     # searches the application bundle's Resources/vulkan/icd.d directory.
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/MoltenVK_icd.json"
@@ -827,19 +827,19 @@ if(APPLE AND DIRECTLOG_PLACEBO_FOUND AND DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRE
       COMMAND ${CMAKE_COMMAND} -E make_directory
         "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks"
         "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Resources/vulkan/icd.d"
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${MOTIONCAM_MOLTENVK_LIBRARY}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${RAWPREAMP_MOLTENVK_LIBRARY}"
         "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Frameworks/libMoltenVK.dylib"
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/MoltenVK_icd.json"
         "$<TARGET_BUNDLE_DIR:${PROJECT_NAME}>/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json")
-  elseif(MOTIONCAM_REQUIRE_VULKAN)
-    message(FATAL_ERROR "The macOS Vulkan build requires MoltenVK; set MOTIONCAM_MOLTENVK_LIBRARY")
+  elseif(RAWPREAMP_REQUIRE_VULKAN)
+    message(FATAL_ERROR "The macOS Vulkan build requires MoltenVK; set RAWPREAMP_MOLTENVK_LIBRARY")
   else()
     message(STATUS "MoltenVK not bundled; gallery retains native/CPU fallbacks when Vulkan is unavailable")
   endif()
 endif()
 if(TARGET Qt6::QuickWidgets AND NOT ANDROID)
   target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::QuickWidgets)
-  target_compile_definitions(${PROJECT_NAME} PRIVATE MOTIONCAM_HAS_QUICKWIDGETS=1)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE RAWPREAMP_HAS_QUICKWIDGETS=1)
 endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE TINY_DNG_ENABLE_JPEG_XL)
 add_compile_definitions(BS_THREAD_POOL_ENABLE_PRIORITY)
@@ -857,13 +857,13 @@ if(WIN32)
   )
 endif()
 
-set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.motioncam.fuse")
+set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.rawpreamp.app")
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
 # explicit, fixed bundle identifier manually though.
 if(${QT_VERSION} VERSION_LESS 6.1.0)
-  set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.motioncam.fuse)
+  set(BUNDLE_ID_OPTION MACOSX_BUNDLE_GUI_IDENTIFIER com.rawpreamp.app)
 endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
@@ -890,117 +890,117 @@ install(TARGETS ${PROJECT_NAME}
 include(CTest)
 if(BUILD_TESTING)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
-        add_executable(motioncam-linux-fuse-test tests/linux_fuse_test.cpp)
-        target_include_directories(motioncam-linux-fuse-test PRIVATE include)
-        target_link_libraries(motioncam-linux-fuse-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)
-        add_dependencies(motioncam-linux-fuse-test MotionCamFuse)
-        add_test(NAME motioncam-linux-fuse-test
-            COMMAND motioncam-linux-fuse-test $<TARGET_FILE:MotionCamFuse>)
+        add_executable(rawpreamp-linux-fuse-test tests/linux_fuse_test.cpp)
+        target_include_directories(rawpreamp-linux-fuse-test PRIVATE include)
+        target_link_libraries(rawpreamp-linux-fuse-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+        add_dependencies(rawpreamp-linux-fuse-test RawPreamp)
+        add_test(NAME rawpreamp-linux-fuse-test
+            COMMAND rawpreamp-linux-fuse-test $<TARGET_FILE:RawPreamp>)
     endif()
-    add_executable(motioncam-sidecar-privacy-test tests/sidecar_privacy_test.cpp)
-    target_include_directories(motioncam-sidecar-privacy-test PRIVATE include)
-    target_link_libraries(motioncam-sidecar-privacy-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)
-    add_test(NAME motioncam-sidecar-privacy-test COMMAND motioncam-sidecar-privacy-test)
-    set_tests_properties(motioncam-sidecar-privacy-test PROPERTIES LABELS portable)
-    add_executable(motioncam-telemetry-test tests/gyro_telemetry_test.cpp src/ArchiveImport.cpp)
-    target_include_directories(motioncam-telemetry-test PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
-    target_link_libraries(motioncam-telemetry-test PRIVATE MotionCamTelemetry protobuf::libprotobuf Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
-    add_test(NAME motioncam-telemetry-test COMMAND motioncam-telemetry-test)
-    set_tests_properties(motioncam-telemetry-test PROPERTIES LABELS portable)
-    add_executable(motioncam-debug-instrumentation-test tests/debug_instrumentation_test.cpp)
-    target_include_directories(motioncam-debug-instrumentation-test PRIVATE include)
-    add_test(NAME motioncam-debug-instrumentation-test COMMAND motioncam-debug-instrumentation-test)
-    set_tests_properties(motioncam-debug-instrumentation-test PROPERTIES LABELS portable)
+    add_executable(rawpreamp-sidecar-privacy-test tests/sidecar_privacy_test.cpp)
+    target_include_directories(rawpreamp-sidecar-privacy-test PRIVATE include)
+    target_link_libraries(rawpreamp-sidecar-privacy-test PRIVATE Qt${QT_VERSION_MAJOR}::Core)
+    add_test(NAME rawpreamp-sidecar-privacy-test COMMAND rawpreamp-sidecar-privacy-test)
+    set_tests_properties(rawpreamp-sidecar-privacy-test PROPERTIES LABELS portable)
+    add_executable(rawpreamp-telemetry-test tests/gyro_telemetry_test.cpp src/ArchiveImport.cpp)
+    target_include_directories(rawpreamp-telemetry-test PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(rawpreamp-telemetry-test PRIVATE RawPreampTelemetry protobuf::libprotobuf Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
+    add_test(NAME rawpreamp-telemetry-test COMMAND rawpreamp-telemetry-test)
+    set_tests_properties(rawpreamp-telemetry-test PROPERTIES LABELS portable)
+    add_executable(rawpreamp-debug-instrumentation-test tests/debug_instrumentation_test.cpp)
+    target_include_directories(rawpreamp-debug-instrumentation-test PRIVATE include)
+    add_test(NAME rawpreamp-debug-instrumentation-test COMMAND rawpreamp-debug-instrumentation-test)
+    set_tests_properties(rawpreamp-debug-instrumentation-test PROPERTIES LABELS portable)
 
-    add_executable(motioncam-mc24-test deps/motioncam-decoder/tests/DecoderMc24Test.cpp)
-    target_link_libraries(motioncam-mc24-test PRIVATE motioncam-decoder)
-    add_test(NAME motioncam-mc24-test COMMAND motioncam-mc24-test)
-    set_tests_properties(motioncam-mc24-test PROPERTIES LABELS portable)
+    add_executable(rawpreamp-mc24-test deps/motioncam-decoder/tests/DecoderMc24Test.cpp)
+    target_link_libraries(rawpreamp-mc24-test PRIVATE motioncam-decoder)
+    add_test(NAME rawpreamp-mc24-test COMMAND rawpreamp-mc24-test)
+    set_tests_properties(rawpreamp-mc24-test PROPERTIES LABELS portable)
     find_package(Threads REQUIRED)
-    add_executable(motioncam-source-analysis-cache-test tests/source_analysis_cache_test.cpp)
-    target_include_directories(motioncam-source-analysis-cache-test PRIVATE include)
-    target_link_libraries(motioncam-source-analysis-cache-test PRIVATE Threads::Threads)
-    add_test(NAME motioncam-source-analysis-cache-test COMMAND motioncam-source-analysis-cache-test)
-    set_tests_properties(motioncam-source-analysis-cache-test PROPERTIES LABELS portable)
+    add_executable(rawpreamp-source-analysis-cache-test tests/source_analysis_cache_test.cpp)
+    target_include_directories(rawpreamp-source-analysis-cache-test PRIVATE include)
+    target_link_libraries(rawpreamp-source-analysis-cache-test PRIVATE Threads::Threads)
+    add_test(NAME rawpreamp-source-analysis-cache-test COMMAND rawpreamp-source-analysis-cache-test)
+    set_tests_properties(rawpreamp-source-analysis-cache-test PROPERTIES LABELS portable)
 
     if(UNIX)
         find_package(Threads REQUIRED)
-        add_executable(motioncam-source-input-test tests/source_input_test.cpp)
-        target_include_directories(motioncam-source-input-test PRIVATE include)
-        target_compile_definitions(motioncam-source-input-test PRIVATE MOTIONCAM_SOURCE_INPUT_TEST)
-        target_compile_options(motioncam-source-input-test PRIVATE -UNDEBUG)
-        target_link_libraries(motioncam-source-input-test PRIVATE Threads::Threads MotionCamZipSource)
-        add_test(NAME motioncam-source-input-test COMMAND motioncam-source-input-test)
+        add_executable(rawpreamp-source-input-test tests/source_input_test.cpp)
+        target_include_directories(rawpreamp-source-input-test PRIVATE include)
+        target_compile_definitions(rawpreamp-source-input-test PRIVATE RAWPREAMP_SOURCE_INPUT_TEST)
+        target_compile_options(rawpreamp-source-input-test PRIVATE -UNDEBUG)
+        target_link_libraries(rawpreamp-source-input-test PRIVATE Threads::Threads RawPreampZipSource)
+        add_test(NAME rawpreamp-source-input-test COMMAND rawpreamp-source-input-test)
     endif()
 
-    add_executable(motioncam-thumbnail-cache-test tests/thumbnail_cache_test.cpp)
+    add_executable(rawpreamp-thumbnail-cache-test tests/thumbnail_cache_test.cpp)
     if(ANDROID)
-        target_link_libraries(motioncam-thumbnail-cache-test PRIVATE ${CMAKE_DL_LIBS})
+        target_link_libraries(rawpreamp-thumbnail-cache-test PRIVATE ${CMAKE_DL_LIBS})
     endif()
-    target_include_directories(motioncam-thumbnail-cache-test PRIVATE include)
-    target_link_libraries(motioncam-thumbnail-cache-test PRIVATE Qt${QT_VERSION_MAJOR}::Gui)
-    add_test(NAME motioncam-thumbnail-cache-test COMMAND motioncam-thumbnail-cache-test)
+    target_include_directories(rawpreamp-thumbnail-cache-test PRIVATE include)
+    target_link_libraries(rawpreamp-thumbnail-cache-test PRIVATE Qt${QT_VERSION_MAJOR}::Gui)
+    add_test(NAME rawpreamp-thumbnail-cache-test COMMAND rawpreamp-thumbnail-cache-test)
 
-    add_executable(motioncam-gallery-overlay-test
+    add_executable(rawpreamp-gallery-overlay-test
         tests/gallery_overlay_test.cpp src/GalleryVulkanVideo.cpp)
-    target_include_directories(motioncam-gallery-overlay-test PRIVATE include)
-    target_link_libraries(motioncam-gallery-overlay-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
-    add_test(NAME motioncam-gallery-overlay-test COMMAND motioncam-gallery-overlay-test)
-    add_executable(motioncam-ui-mode-test tests/ui_mode_test.cpp src/UiMode.cpp)
-    target_include_directories(motioncam-ui-mode-test PRIVATE include)
-    target_link_libraries(motioncam-ui-mode-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
-    add_test(NAME motioncam-ui-mode-test COMMAND motioncam-ui-mode-test)
-    set_tests_properties(motioncam-gallery-overlay-test motioncam-ui-mode-test
+    target_include_directories(rawpreamp-gallery-overlay-test PRIVATE include)
+    target_link_libraries(rawpreamp-gallery-overlay-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+    add_test(NAME rawpreamp-gallery-overlay-test COMMAND rawpreamp-gallery-overlay-test)
+    add_executable(rawpreamp-ui-mode-test tests/ui_mode_test.cpp src/UiMode.cpp)
+    target_include_directories(rawpreamp-ui-mode-test PRIVATE include)
+    target_link_libraries(rawpreamp-ui-mode-test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+    add_test(NAME rawpreamp-ui-mode-test COMMAND rawpreamp-ui-mode-test)
+    set_tests_properties(rawpreamp-gallery-overlay-test rawpreamp-ui-mode-test
         PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     if(WIN32)
         # windeployqt deploys qwindows by default. GUI tests need qoffscreen
         # from the selected kit, whose archive installation is relocatable.
-        set_property(TEST motioncam-gallery-overlay-test motioncam-ui-mode-test APPEND PROPERTY ENVIRONMENT
+        set_property(TEST rawpreamp-gallery-overlay-test rawpreamp-ui-mode-test APPEND PROPERTY ENVIRONMENT
             "QT_PLUGIN_PATH=$<TARGET_FILE_DIR:Qt${QT_VERSION_MAJOR}::Core>/../plugins")
     endif()
 
-    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
-        add_executable(motioncam-vulkan-gain-layout-test
+    if(NATIVE_VIDEO_PLACEBO_SAME_INSTALL AND NATIVE_VIDEO_VULKAN_INCLUDE_DIR)
+        add_executable(rawpreamp-vulkan-gain-layout-test
             tests/vulkan_gain_layout_test.cpp src/VulkanGainBake.cpp
             src/VulkanGalleryPreview.cpp src/HigherCFADemosaic.cpp)
-        target_include_directories(motioncam-vulkan-gain-layout-test PRIVATE
+        target_include_directories(rawpreamp-vulkan-gain-layout-test PRIVATE
             include deps/motioncam-decoder/thirdparty
-            "${CMAKE_CURRENT_BINARY_DIR}" ${DIRECTLOG_VULKAN_INCLUDE_DIR})
-        target_link_libraries(motioncam-vulkan-gain-layout-test PRIVATE
-            MotionCamPlacebo spdlog::spdlog)
-        target_compile_definitions(motioncam-vulkan-gain-layout-test PRIVATE
-            MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
-        add_test(NAME motioncam-vulkan-gain-layout-test
-            COMMAND motioncam-vulkan-gain-layout-test)
-        set_tests_properties(motioncam-vulkan-gain-layout-test PROPERTIES
+            "${CMAKE_CURRENT_BINARY_DIR}" ${NATIVE_VIDEO_VULKAN_INCLUDE_DIR})
+        target_link_libraries(rawpreamp-vulkan-gain-layout-test PRIVATE
+            RawPreampPlacebo spdlog::spdlog)
+        target_compile_definitions(rawpreamp-vulkan-gain-layout-test PRIVATE
+            RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO=1)
+        add_test(NAME rawpreamp-vulkan-gain-layout-test
+            COMMAND rawpreamp-vulkan-gain-layout-test)
+        set_tests_properties(rawpreamp-vulkan-gain-layout-test PROPERTIES
             SKIP_RETURN_CODE 77 LABELS device)
     endif()
-    add_executable(motioncam-archive-import-test
+    add_executable(rawpreamp-archive-import-test
         tests/archive_import_test.cpp
         src/ArchiveImport.cpp)
-    target_include_directories(motioncam-archive-import-test PRIVATE include)
-    target_link_libraries(motioncam-archive-import-test PRIVATE
-        Qt${QT_VERSION_MAJOR}::Core MotionCamZipSource)
-    add_test(NAME motioncam-archive-import-test COMMAND motioncam-archive-import-test)
+    target_include_directories(rawpreamp-archive-import-test PRIVATE include)
+    target_link_libraries(rawpreamp-archive-import-test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core RawPreampZipSource)
+    add_test(NAME rawpreamp-archive-import-test COMMAND rawpreamp-archive-import-test)
 
-    add_executable(motioncam-demosaic-test
+    add_executable(rawpreamp-demosaic-test
         tests/demosaic_test.cpp
         src/HigherCFADemosaic.cpp)
-    target_include_directories(motioncam-demosaic-test PRIVATE
+    target_include_directories(rawpreamp-demosaic-test PRIVATE
         include
         deps/motioncam-decoder/thirdparty)
-    add_test(NAME motioncam-demosaic-test COMMAND motioncam-demosaic-test)
+    add_test(NAME rawpreamp-demosaic-test COMMAND rawpreamp-demosaic-test)
 
-    add_executable(motioncam-core-tests
+    add_executable(rawpreamp-core-tests
         tests/core_tests.cpp
         src/CalibrationData.cpp)
-    target_include_directories(motioncam-core-tests PRIVATE
+    target_include_directories(rawpreamp-core-tests PRIVATE
         include
         deps/motioncam-decoder/thirdparty)
-    target_link_libraries(motioncam-core-tests PRIVATE spdlog::spdlog MotionCamZipSource)
-    add_test(NAME motioncam-core-tests COMMAND motioncam-core-tests)
+    target_link_libraries(rawpreamp-core-tests PRIVATE spdlog::spdlog RawPreampZipSource)
+    add_test(NAME rawpreamp-core-tests COMMAND rawpreamp-core-tests)
 
-    add_executable(motioncam-lossless-jpeg-test
+    add_executable(rawpreamp-lossless-jpeg-test
         tests/lossless_jpeg_test.cpp
         src/IsoOverlay.cpp
         src/VulkanGainBake.cpp
@@ -1012,25 +1012,25 @@ if(BUILD_TESTING)
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
-    target_include_directories(motioncam-lossless-jpeg-test PRIVATE
+    target_include_directories(rawpreamp-lossless-jpeg-test PRIVATE
         deps/motioncam-decoder/thirdparty
         deps/motioncam-decoder/thirdparty/liblj92)
-    target_include_directories(motioncam-lossless-jpeg-test PRIVATE
+    target_include_directories(rawpreamp-lossless-jpeg-test PRIVATE
         include "${CMAKE_CURRENT_BINARY_DIR}")
-    target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
-        Boost::filesystem Boost::regex spdlog::spdlog JPEG::JPEG ${JXL_TARGET} MotionCamZipSource)
-    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
-        target_include_directories(motioncam-lossless-jpeg-test PRIVATE
-            ${DIRECTLOG_VULKAN_INCLUDE_DIR})
-        target_link_libraries(motioncam-lossless-jpeg-test PRIVATE
-            MotionCamPlacebo)
-        target_compile_definitions(motioncam-lossless-jpeg-test PRIVATE
-            MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+    target_link_libraries(rawpreamp-lossless-jpeg-test PRIVATE
+        Boost::filesystem Boost::regex spdlog::spdlog JPEG::JPEG ${JXL_TARGET} RawPreampZipSource)
+    if(NATIVE_VIDEO_PLACEBO_SAME_INSTALL AND NATIVE_VIDEO_VULKAN_INCLUDE_DIR)
+        target_include_directories(rawpreamp-lossless-jpeg-test PRIVATE
+            ${NATIVE_VIDEO_VULKAN_INCLUDE_DIR})
+        target_link_libraries(rawpreamp-lossless-jpeg-test PRIVATE
+            RawPreampPlacebo)
+        target_compile_definitions(rawpreamp-lossless-jpeg-test PRIVATE
+            RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO=1)
     endif()
-    add_test(NAME motioncam-lossless-jpeg-test
-        COMMAND motioncam-lossless-jpeg-test)
+    add_test(NAME rawpreamp-lossless-jpeg-test
+        COMMAND rawpreamp-lossless-jpeg-test)
 
-    add_executable(motioncam-jpeg-xl-test
+    add_executable(rawpreamp-jpeg-xl-test
         tests/jpeg_xl_test.cpp
         src/IsoOverlay.cpp
         src/VulkanGainBake.cpp
@@ -1041,16 +1041,16 @@ if(BUILD_TESTING)
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
-    target_include_directories(motioncam-jpeg-xl-test PRIVATE
+    target_include_directories(rawpreamp-jpeg-xl-test PRIVATE
         deps/motioncam-decoder/thirdparty)
-    target_include_directories(motioncam-jpeg-xl-test PRIVATE include)
-    target_link_libraries(motioncam-jpeg-xl-test PRIVATE
-        ${JXL_TARGET} JPEG::JPEG Boost::filesystem Boost::regex spdlog::spdlog MotionCamZipSource)
-    target_compile_definitions(motioncam-jpeg-xl-test PRIVATE TINY_DNG_ENABLE_JPEG_XL)
-    add_test(NAME motioncam-jpeg-xl-test COMMAND motioncam-jpeg-xl-test)
+    target_include_directories(rawpreamp-jpeg-xl-test PRIVATE include)
+    target_link_libraries(rawpreamp-jpeg-xl-test PRIVATE
+        ${JXL_TARGET} JPEG::JPEG Boost::filesystem Boost::regex spdlog::spdlog RawPreampZipSource)
+    target_compile_definitions(rawpreamp-jpeg-xl-test PRIVATE TINY_DNG_ENABLE_JPEG_XL)
+    add_test(NAME rawpreamp-jpeg-xl-test COMMAND rawpreamp-jpeg-xl-test)
 
-    add_executable(motioncam-rife-fake tests/rife_fake.cpp)
-    add_executable(motioncam-finalize-interpolation-test
+    add_executable(rawpreamp-rife-fake tests/rife_fake.cpp)
+    add_executable(rawpreamp-finalize-interpolation-test
         tests/finalize_interpolation_test.cpp
         src/ArchiveImport.cpp
         src/IsoOverlay.cpp
@@ -1066,125 +1066,125 @@ if(BUILD_TESTING)
         src/DNGDecoder.cpp
         src/HigherCFADemosaic.cpp
         deps/motioncam-decoder/thirdparty/liblj92/lj92.c)
-    target_include_directories(motioncam-finalize-interpolation-test PRIVATE
+    target_include_directories(rawpreamp-finalize-interpolation-test PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}"
         ${bs_thread_pool_SOURCE_DIR}/include
         include deps/motioncam-decoder/thirdparty deps/motioncam-decoder/thirdparty/liblj92)
-    target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
+    target_link_libraries(rawpreamp-finalize-interpolation-test PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets ${JXL_TARGET} Boost::filesystem Boost::regex
-        spdlog::spdlog motioncam-decoder MotionCamTelemetry JPEG::JPEG)
-    target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
+        spdlog::spdlog motioncam-decoder RawPreampTelemetry JPEG::JPEG)
+    target_compile_definitions(rawpreamp-finalize-interpolation-test PRIVATE
         TINY_DNG_ENABLE_JPEG_XL)
     if(ANDROID)
-        target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
-            RIFE_FAKE_EXECUTABLE="/data/local/tmp/motioncam-tests/bin/motioncam-rife-fake")
+        target_compile_definitions(rawpreamp-finalize-interpolation-test PRIVATE
+            RIFE_FAKE_EXECUTABLE="/data/local/tmp/rawpreamp-tests/bin/rawpreamp-rife-fake")
     else()
-        target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
-            RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:motioncam-rife-fake>")
+        target_compile_definitions(rawpreamp-finalize-interpolation-test PRIVATE
+            RIFE_FAKE_EXECUTABLE="$<TARGET_FILE:rawpreamp-rife-fake>")
     endif()
     if(MSVC)
-        target_compile_options(motioncam-finalize-interpolation-test PRIVATE /UNDEBUG)
+        target_compile_options(rawpreamp-finalize-interpolation-test PRIVATE /UNDEBUG)
     else()
-        target_compile_options(motioncam-finalize-interpolation-test PRIVATE -UNDEBUG)
+        target_compile_options(rawpreamp-finalize-interpolation-test PRIVATE -UNDEBUG)
     endif()
-    if(DIRECTLOG_PLACEBO_SAME_INSTALL AND DIRECTLOG_VULKAN_INCLUDE_DIR)
-        target_include_directories(motioncam-finalize-interpolation-test PRIVATE
-            ${DIRECTLOG_VULKAN_INCLUDE_DIR})
-        target_link_libraries(motioncam-finalize-interpolation-test PRIVATE
-            MotionCamPlacebo)
-        target_compile_definitions(motioncam-finalize-interpolation-test PRIVATE
-            MOTIONCAM_HAS_DIRECTLOG_PLACEBO=1)
+    if(NATIVE_VIDEO_PLACEBO_SAME_INSTALL AND NATIVE_VIDEO_VULKAN_INCLUDE_DIR)
+        target_include_directories(rawpreamp-finalize-interpolation-test PRIVATE
+            ${NATIVE_VIDEO_VULKAN_INCLUDE_DIR})
+        target_link_libraries(rawpreamp-finalize-interpolation-test PRIVATE
+            RawPreampPlacebo)
+        target_compile_definitions(rawpreamp-finalize-interpolation-test PRIVATE
+            RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO=1)
     endif()
-    add_dependencies(motioncam-finalize-interpolation-test motioncam-rife-fake)
-    add_test(NAME motioncam-finalize-interpolation-test
-        COMMAND motioncam-finalize-interpolation-test)
-    add_test(NAME motioncam-zip-dng-test
-        COMMAND motioncam-finalize-interpolation-test --zip-source-self-test)
-    set_tests_properties(motioncam-zip-dng-test PROPERTIES LABELS portable)
+    add_dependencies(rawpreamp-finalize-interpolation-test rawpreamp-rife-fake)
+    add_test(NAME rawpreamp-finalize-interpolation-test
+        COMMAND rawpreamp-finalize-interpolation-test)
+    add_test(NAME rawpreamp-zip-dng-test
+        COMMAND rawpreamp-finalize-interpolation-test --zip-source-self-test)
+    set_tests_properties(rawpreamp-zip-dng-test PROPERTIES LABELS portable)
 
-    add_executable(motioncam-audio-finalize-test tests/audio_finalize_test.cpp src/AudioWriter.cpp)
-    target_include_directories(motioncam-audio-finalize-test PRIVATE include)
-    target_link_libraries(motioncam-audio-finalize-test PRIVATE motioncam-decoder MotionCamZipSource ${FFMPEG_LIBRARIES})
-    add_test(NAME motioncam-audio-finalize-test COMMAND motioncam-audio-finalize-test)
+    add_executable(rawpreamp-audio-finalize-test tests/audio_finalize_test.cpp src/AudioWriter.cpp)
+    target_include_directories(rawpreamp-audio-finalize-test PRIVATE include)
+    target_link_libraries(rawpreamp-audio-finalize-test PRIVATE motioncam-decoder RawPreampZipSource ${FFMPEG_LIBRARIES})
+    add_test(NAME rawpreamp-audio-finalize-test COMMAND rawpreamp-audio-finalize-test)
 
-    if(MOTIONCAM_AVFILTER_TARGET)
-        add_executable(motioncam-native-video-encoder-test tests/native_video_encoder_test.cpp src/NativeVideoEncoder.cpp src/AudioWriter.cpp)
-        target_include_directories(motioncam-native-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
-        target_compile_definitions(motioncam-native-video-encoder-test PRIVATE MOTIONCAM_HAS_AVFILTER=1)
-        target_link_libraries(motioncam-native-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core motioncam-decoder MotionCamZipSource ${FFMPEG_LIBRARIES} ${MOTIONCAM_AVFILTER_TARGET})
+    if(RAWPREAMP_AVFILTER_TARGET)
+        add_executable(rawpreamp-native-video-encoder-test tests/native_video_encoder_test.cpp src/NativeVideoEncoder.cpp src/AudioWriter.cpp)
+        target_include_directories(rawpreamp-native-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+        target_compile_definitions(rawpreamp-native-video-encoder-test PRIVATE RAWPREAMP_HAS_AVFILTER=1)
+        target_link_libraries(rawpreamp-native-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core motioncam-decoder RawPreampZipSource ${FFMPEG_LIBRARIES} ${RAWPREAMP_AVFILTER_TARGET})
         if(ANDROID)
-            target_sources(motioncam-native-video-encoder-test PRIVATE src/android/P010VideoEncoder.cpp)
-            target_link_libraries(motioncam-native-video-encoder-test PRIVATE ${ANDROID_MEDIANDK_LIB})
+            target_sources(rawpreamp-native-video-encoder-test PRIVATE src/android/P010VideoEncoder.cpp)
+            target_link_libraries(rawpreamp-native-video-encoder-test PRIVATE ${ANDROID_MEDIANDK_LIB})
         endif()
-        add_test(NAME motioncam-native-video-encoder-test COMMAND motioncam-native-video-encoder-test)
-        set_tests_properties(motioncam-native-video-encoder-test PROPERTIES LABELS "portable")
+        add_test(NAME rawpreamp-native-video-encoder-test COMMAND rawpreamp-native-video-encoder-test)
+        set_tests_properties(rawpreamp-native-video-encoder-test PROPERTIES LABELS "portable")
     endif()
 
-    add_executable(motioncam-hardware-video-encoder-test tests/hardware_video_encoder_test.cpp)
-    target_include_directories(motioncam-hardware-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
-    target_link_libraries(motioncam-hardware-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
-    add_test(NAME motioncam-hardware-video-encoder-test COMMAND motioncam-hardware-video-encoder-test)
+    add_executable(rawpreamp-hardware-video-encoder-test tests/hardware_video_encoder_test.cpp)
+    target_include_directories(rawpreamp-hardware-video-encoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(rawpreamp-hardware-video-encoder-test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
+    add_test(NAME rawpreamp-hardware-video-encoder-test COMMAND rawpreamp-hardware-video-encoder-test)
 
-    add_executable(motioncam-hardware-video-decoder-test tests/hardware_video_decoder_test.cpp)
-    target_include_directories(motioncam-hardware-video-decoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
-    target_link_libraries(motioncam-hardware-video-decoder-test PRIVATE ${FFMPEG_LIBRARIES})
-    add_test(NAME motioncam-hardware-video-decoder-test COMMAND motioncam-hardware-video-decoder-test)
+    add_executable(rawpreamp-hardware-video-decoder-test tests/hardware_video_decoder_test.cpp)
+    target_include_directories(rawpreamp-hardware-video-decoder-test PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(rawpreamp-hardware-video-decoder-test PRIVATE ${FFMPEG_LIBRARIES})
+    add_test(NAME rawpreamp-hardware-video-decoder-test COMMAND rawpreamp-hardware-video-decoder-test)
 
     # Labels describe hardware requirements; CI intentionally runs both groups.
     # These tests use CPU fallbacks or fixtures even when they exercise GPU APIs.
     set_tests_properties(
-        motioncam-thumbnail-cache-test
-        motioncam-gallery-overlay-test
-        motioncam-ui-mode-test
-        motioncam-archive-import-test
-        motioncam-demosaic-test
-        motioncam-core-tests
-        motioncam-lossless-jpeg-test
-        motioncam-jpeg-xl-test
-        motioncam-finalize-interpolation-test
-        motioncam-audio-finalize-test
-        motioncam-hardware-video-encoder-test
-        motioncam-hardware-video-decoder-test
+        rawpreamp-thumbnail-cache-test
+        rawpreamp-gallery-overlay-test
+        rawpreamp-ui-mode-test
+        rawpreamp-archive-import-test
+        rawpreamp-demosaic-test
+        rawpreamp-core-tests
+        rawpreamp-lossless-jpeg-test
+        rawpreamp-jpeg-xl-test
+        rawpreamp-finalize-interpolation-test
+        rawpreamp-audio-finalize-test
+        rawpreamp-hardware-video-encoder-test
+        rawpreamp-hardware-video-decoder-test
         PROPERTIES LABELS portable)
-    if(TEST motioncam-source-input-test)
-        set_tests_properties(motioncam-source-input-test PROPERTIES LABELS portable)
+    if(TEST rawpreamp-source-input-test)
+        set_tests_properties(rawpreamp-source-input-test PROPERTIES LABELS portable)
     endif()
 
     # Build portable and device tests separately so only portable compilation
     # gates prereleases. Test names match their executable targets except
     # for the ZIP fixture mode of the finalize test.
-    add_custom_target(motioncam-portable-tests)
-    add_custom_target(motioncam-device-tests)
-    get_property(motioncam_tests DIRECTORY PROPERTY TESTS)
-    foreach(test_name IN LISTS motioncam_tests)
+    add_custom_target(rawpreamp-portable-tests)
+    add_custom_target(rawpreamp-device-tests)
+    get_property(rawpreamp_tests DIRECTORY PROPERTY TESTS)
+    foreach(test_name IN LISTS rawpreamp_tests)
         get_property(test_labels TEST ${test_name} PROPERTY LABELS)
         if("portable" IN_LIST test_labels)
-            if(test_name STREQUAL "motioncam-zip-dng-test")
-                add_dependencies(motioncam-portable-tests motioncam-finalize-interpolation-test)
+            if(test_name STREQUAL "rawpreamp-zip-dng-test")
+                add_dependencies(rawpreamp-portable-tests rawpreamp-finalize-interpolation-test)
             else()
-                add_dependencies(motioncam-portable-tests ${test_name})
+                add_dependencies(rawpreamp-portable-tests ${test_name})
             endif()
         else()
-            add_dependencies(motioncam-device-tests ${test_name})
+            add_dependencies(rawpreamp-device-tests ${test_name})
         endif()
     endforeach()
 
     if(ANDROID)
-        set_tests_properties(motioncam-gallery-overlay-test motioncam-ui-mode-test PROPERTIES SKIP_RETURN_CODE 77)
+        set_tests_properties(rawpreamp-gallery-overlay-test rawpreamp-ui-mode-test PROPERTIES SKIP_RETURN_CODE 77)
         # These console tests use local fixtures, without a Java activity or
         # document provider. Exercise the Android stream with POSIX file access.
-        add_library(motioncam-test-source-access STATIC tests/android_source_access.cpp)
-        target_include_directories(motioncam-test-source-access PRIVATE include ${FFMPEG_INCLUDE_DIRS})
-        target_link_libraries(motioncam-test-source-access PUBLIC
+        add_library(rawpreamp-test-source-access STATIC tests/android_source_access.cpp)
+        target_include_directories(rawpreamp-test-source-access PRIVATE include ${FFMPEG_INCLUDE_DIRS})
+        target_link_libraries(rawpreamp-test-source-access PUBLIC
             Qt${QT_VERSION_MAJOR}::Core ${FFMPEG_LIBRARIES})
         get_property(android_tests DIRECTORY PROPERTY TESTS)
-        set(android_test_files "$<TARGET_FILE:motioncam-rife-fake>\n")
+        set(android_test_files "$<TARGET_FILE:rawpreamp-rife-fake>\n")
         foreach(test_target IN LISTS android_tests)
-            if(test_target STREQUAL "motioncam-zip-dng-test")
+            if(test_target STREQUAL "rawpreamp-zip-dng-test")
                 continue()
             endif()
-            if(NOT test_target STREQUAL "motioncam-source-input-test")
-                target_link_libraries(${test_target} PRIVATE motioncam-test-source-access)
+            if(NOT test_target STREQUAL "rawpreamp-source-input-test")
+                target_link_libraries(${test_target} PRIVATE rawpreamp-test-source-access)
             endif()
             set_property(TARGET ${test_target} PROPERTY CROSSCOMPILING_EMULATOR
                 "python3;${CMAKE_CURRENT_SOURCE_DIR}/tests/android_ctest.py;run")
@@ -1197,7 +1197,7 @@ if(BUILD_TESTING)
     # These standalone tests intentionally use assert() for both execution and
     # validation. Keep it enabled in Release builds so the tested operations
     # are not compiled out.
-    foreach(test_target motioncam-thumbnail-cache-test motioncam-audio-finalize-test motioncam-demosaic-test motioncam-core-tests motioncam-lossless-jpeg-test motioncam-jpeg-xl-test motioncam-finalize-interpolation-test)
+    foreach(test_target rawpreamp-thumbnail-cache-test rawpreamp-audio-finalize-test rawpreamp-demosaic-test rawpreamp-core-tests rawpreamp-lossless-jpeg-test rawpreamp-jpeg-xl-test rawpreamp-finalize-interpolation-test)
         if(MSVC)
             target_compile_options(${test_target} PRIVATE /UNDEBUG)
         else()

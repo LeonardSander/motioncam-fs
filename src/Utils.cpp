@@ -29,7 +29,7 @@
 
 #include <tinydng/tiny_dng_writer.h>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace utils {
 
 
@@ -195,7 +195,7 @@ std::string mcrawCaptureXmp(const CameraConfiguration& camera,
     return "<?xpacket begin=''?><x:xmpmeta xmlns:x='adobe:ns:meta/'>"
            "<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>"
            "<rdf:Description xmlns:exif='http://ns.adobe.com/exif/1.0/' "
-           "xmlns:mc='https://github.com/motioncam-app/motioncam-fs/metadata'" +
+           "xmlns:mc='https://github.com/LeonardSander/RawPreamp/metadata'" +
            attributes.str() + "/></rdf:RDF></x:xmpmeta><?xpacket end='w'?>";
 }
 
@@ -1665,7 +1665,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         return nullptr;
     }
 
-    const auto previewProfileStarted = motioncam::diagnosticNow();
+    const auto previewProfileStarted = rawpreamp::diagnosticNow();
     if (previewFrame) {
         previewFrame->galleryCfa.clear();
         previewFrame->galleryCfaBytes.clear();
@@ -1820,7 +1820,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
 
     const bool linearizePreviewCfa = previewFrame && !stagedImage &&
         effectiveLogTransform != LogTransformMode::Disabled && !debugShadingMap;
-    const auto preprocessStarted = motioncam::diagnosticNow();
+    const auto preprocessStarted = rawpreamp::diagnosticNow();
     auto [processedData, dstBlackLevel, dstWhiteLevel, opcodeList2, opcodeList3] = utils::preprocessData(
         data,
         width, height,
@@ -1855,7 +1855,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
       dstBlackLevel.fill(0);
       dstWhiteLevel = 65535;
     }
-    const auto preprocessFinished = motioncam::diagnosticNow();
+    const auto preprocessFinished = rawpreamp::diagnosticNow();
 
     int processedRepeatSize = cfaRepeatSize;
     // preprocessData's sparse draft path emits ordinary Bayer, regardless of
@@ -2023,7 +2023,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         stagedImage->samples.resize(expectedSamples);
         std::memcpy(stagedImage->samples.data(), processedData.data(), processedData.size());
       }
-      const auto previewStarted = motioncam::diagnosticNow();
+      const auto previewStarted = rawpreamp::diagnosticNow();
       if (!stagedImage) {
       std::vector<uint16_t> rgbSamples;
       const uint16_t* previewRgb = nullptr;
@@ -2072,7 +2072,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         // reconstruct every Bayer preview with bilinear interpolation.
         const bool fastGalleryPreview =
             !(settings.options & RENDER_OPT_HIGHER_CFA_HQ);
-        const auto demosaicStarted = motioncam::diagnosticNow();
+        const auto demosaicStarted = rawpreamp::diagnosticNow();
         if (fastGalleryPreview) {
           const std::array<double, 3> previewBlack{
               rgbBlack[0], rgbBlack[1], rgbBlack[2]};
@@ -2104,22 +2104,22 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
           previewRgbSamples = rgbSamples.size();
         }
         demosaicMs = std::chrono::duration<double, std::milli>(
-            motioncam::diagnosticNow() - demosaicStarted).count();
+            rawpreamp::diagnosticNow() - demosaicStarted).count();
         if (!previewReady && rgbSamples.empty())
           throw std::runtime_error("Could not demosaic preview image");
       }
       const double previewWhite = dstWhiteLevel;
-      const auto normalizeStarted = motioncam::diagnosticNow();
+      const auto normalizeStarted = rawpreamp::diagnosticNow();
       if (!previewReady && !normalizeRgb16Bytes(
               previewRgb, previewRgbSamples, previewFrame->rgb,
               {rgbBlack[0], rgbBlack[1], rgbBlack[2]},
               {previewWhite, previewWhite, previewWhite}))
         throw std::runtime_error("Could not normalize preview image");
-      if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+      if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=mcraw_preview_detail width={} height={} demosaic_ms={:.3f} normalize_ms={:.3f}",
             previewWidth, previewHeight, demosaicMs,
             std::chrono::duration<double, std::milli>(
-                motioncam::diagnosticNow() - normalizeStarted).count());
+                rawpreamp::diagnosticNow() - normalizeStarted).count());
       previewFrame->width = previewWidth;
       previewFrame->height = previewHeight;
       if (previewFrame->clippingRequested &&
@@ -2297,13 +2297,13 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
         copyGainMaps(opcodeList3, stagedImage->opcodeList3);
         return nullptr;
       }
-      if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+      if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=mcraw_generate_stage width={} height={} setup_ms={:.3f} preprocess_ms={:.3f} intermediate_ms={:.3f} preview_ms={:.3f}",
             width, height,
             std::chrono::duration<double, std::milli>(preprocessStarted-previewProfileStarted).count(),
             std::chrono::duration<double, std::milli>(preprocessFinished-preprocessStarted).count(),
             std::chrono::duration<double, std::milli>(previewStarted-preprocessFinished).count(),
-            std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-previewStarted).count());
+            std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-previewStarted).count());
       return nullptr;
     }
 
@@ -2663,7 +2663,7 @@ std::shared_ptr<std::vector<uint8_t>> generateDng(
     }
 
     // Additional information
-    const auto software = "MotionCam Tools";
+    const auto software = "RawPreamp";
 
     dng.SetSoftware(software);
 
@@ -3137,4 +3137,4 @@ void burnInText(
 }
 
 } // namespace utils
-} // namespace motioncam
+} // namespace rawpreamp

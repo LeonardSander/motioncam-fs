@@ -20,14 +20,14 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersrc.h>
 #include <libavfilter/buffersink.h>
 #endif
 }
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 void check(int result, const char* operation) {
     if (result >= 0) return;
@@ -95,7 +95,7 @@ struct NativeVideoEncoder::Impl {
     bool audioPending = false, audioDone = false, finished = false;
     int64_t lastEnd = 0;
     std::map<int64_t, int64_t> frameDurations;
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     AVFilterGraph* graph = nullptr;
     AVFilterContext* source = nullptr;
     AVFilterContext* sink = nullptr;
@@ -104,7 +104,7 @@ struct NativeVideoEncoder::Impl {
 #ifdef __ANDROID__
         p010Encoder.reset();
 #endif
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
         avfilter_graph_free(&graph);
 #endif
         av_frame_free(&frame);
@@ -199,7 +199,7 @@ struct NativeVideoEncoder::Impl {
         }
         if (status != AVERROR(EAGAIN) && status != AVERROR_EOF) check(status, "Receive native video");
     }
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     void drainFrames() {
         int status;
         while ((status = av_buffersink_get_frame(sink, frame)) >= 0) {
@@ -227,7 +227,7 @@ struct NativeVideoEncoder::Impl {
 };
 
 NativeVideoEncoder::NativeVideoEncoder(const Options& options) : m(std::make_unique<Impl>()) {
-#ifndef MOTIONCAM_HAS_AVFILTER
+#ifndef RAWPREAMP_HAS_AVFILTER
     throw std::runtime_error("Camera Native encoding requires linked FFmpeg avfilter support");
 #else
     auto& s = *m;
@@ -320,7 +320,7 @@ NativeVideoEncoder::NativeVideoEncoder(const Options& options) : m(std::make_uni
 #endif
         if (!matrix) throw std::bad_alloc();
         // The setter takes clockwise degrees; the getter reports the inverse.
-        // Match the clockwise orientation used by Fuse and DirectLog imports.
+        // Match the clockwise orientation used by Fuse and Native Video imports.
         av_display_rotation_set(matrix, orientation);
     }
     if (!options.audioPath.empty()) {
@@ -387,7 +387,7 @@ NativeVideoEncoder::NativeVideoEncoder(const Options& options) : m(std::make_uni
 NativeVideoEncoder::~NativeVideoEncoder() = default;
 
 void NativeVideoEncoder::writeFrame(const std::vector<uint8_t>& rgb, int64_t pts, int64_t duration) {
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     auto& s = *m;
     if (s.finished || rgb.size() != static_cast<size_t>(s.options.width) * s.options.height * 6 || duration <= 0)
         throw std::runtime_error("Invalid native RGB frame");
@@ -409,7 +409,7 @@ void NativeVideoEncoder::writeFrame(const std::vector<uint8_t>& rgb, int64_t pts
 #endif
 }
 void NativeVideoEncoder::finish() {
-#ifdef MOTIONCAM_HAS_AVFILTER
+#ifdef RAWPREAMP_HAS_AVFILTER
     auto& s = *m;
     if (s.finished) return;
     check(av_buffersrc_close(s.source, s.lastEnd, 0), "Finish native RGB input");

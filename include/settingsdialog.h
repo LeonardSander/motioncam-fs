@@ -70,7 +70,7 @@ private slots:
     void onCachePolicyChanged(int index);
     void onCacheQuotaChanged(int index);
     void onCleanupIntervalChanged(int index);
-    void onClearDirectLogCache();
+    void onClearNativeVideoCache();
     void onResetPaths();
 
 private:
@@ -98,15 +98,15 @@ private:
     QLineEdit* mCacheQuotaCustomEdit;
     QComboBox* mCacheCleanupIntervalComboBox;
     QLineEdit* mCacheCleanupCustomEdit;
-    QLabel* mDirectLogCacheUsageLabel;
-    QPushButton* mClearDirectLogCacheButton;
+    QLabel* mNativeVideoCacheUsageLabel;
+    QPushButton* mClearNativeVideoCacheButton;
 #ifdef __ANDROID__
     QComboBox* mAndroidFinalizeDestinationCombo;
     QString mAndroidFinalizeDestination=QStringLiteral("documents");
     int rememberAndroidFinalizeDirectory(const QString& uri);
 #endif
 
-    void updateDirectLogCacheUsage();
+    void updateNativeVideoCacheUsage();
 };
 
 #endif // SETTINGSDIALOG_H

@@ -7,7 +7,7 @@
 #include <vector>
 #include <string>
 
-namespace motioncam {
+namespace rawpreamp {
 struct DNGProfileTable;
 struct VulkanGalleryBayerGainMap {
     uint32_t width = 0, height = 0, channels = 0;
@@ -107,7 +107,7 @@ struct VulkanGalleryGain {
 
 // Reconstruct and normalize the ordinary 2x2 Bayer gallery preview. Returns
 // false when Vulkan is unavailable so callers can use the CPU implementation.
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 void warmVulkanGalleryPreview(const std::string& cacheDirectory = {});
 bool vulkanGalleryPreviewReady();
 bool waitVulkanGalleryPreviewReady();
@@ -148,4 +148,4 @@ inline bool colorGalleryRgbVulkan(
     const VulkanGalleryTextureSource* = nullptr) { return false; }
 #endif
 
-} // namespace motioncam
+} // namespace rawpreamp

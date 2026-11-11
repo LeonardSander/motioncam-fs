@@ -15,7 +15,7 @@ if [ ! -d "$QT_PATH" ]; then
     exit 1
 fi
 
-echo "=== Building MotionCam Fuse in WSL ==="
+echo "=== Building RawPreamp in WSL ==="
 echo "Build directory: $BUILD_DIR"
 echo "Build type: $BUILD_TYPE"
 echo "Qt path: $QT_PATH"
@@ -50,12 +50,12 @@ ninja -j$(nproc)
 
 echo ""
 echo "=== Build Complete ==="
-echo "Executable: $BUILD_DIR/$BUILD_TYPE/MotionCamFuse"
+echo "Executable: $BUILD_DIR/$BUILD_TYPE/RawPreamp"
 echo ""
 echo "To debug with GDB:"
-echo "  gdb ./$BUILD_DIR/$BUILD_TYPE/MotionCamFuse"
+echo "  gdb ./$BUILD_DIR/$BUILD_TYPE/RawPreamp"
 echo ""
-echo "Or use VSCode 'MotionCam FS Debug (WSL + GDB)' launch config"
+echo "Or use VSCode 'RawPreamp Debug (WSL + GDB)' launch config"
 echo ""
 echo "To build Release version:"
 echo "  ./build-wsl.sh Release"

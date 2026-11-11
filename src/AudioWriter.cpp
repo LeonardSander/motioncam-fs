@@ -15,7 +15,7 @@ extern "C" {
 #include <libswresample/swresample.h>
 }
 
-namespace motioncam {
+namespace rawpreamp {
     namespace {
         constexpr auto PROJECT = "RAW Video";
         constexpr auto NOTES = "-";
@@ -132,7 +132,7 @@ void freeAudioPacket(AVPacket* p) { av_packet_free(&p); }
 // FFmpeg reads ZIP companions through the same seekable source interface as
 // DNG frames, including compressed audio tracks. No temporary audio file.
 struct ZipAudioInput {
-    motioncam::SourceInputStream input;
+    rawpreamp::SourceInputStream input;
     AVIOContext* io = nullptr;
     explicit ZipAudioInput(const std::string& path) : input(path, std::ios::binary) {
         if (!input) throw std::runtime_error("Could not open ZIP audio source");
@@ -177,18 +177,18 @@ public:
         : mFormat(nullptr, [](AVFormatContext* p) {
               if (p && (p->flags & AVFMT_FLAG_CUSTOM_IO) && p->pb && p->pb->read_packet == ZipAudioInput::read)
                   avformat_close_input(&p);
-              else motioncam::closeSourceMedia(&p);
+              else rawpreamp::closeSourceMedia(&p);
           }),
           mDecoder(nullptr, [](AVCodecContext* p) { avcodec_free_context(&p); }) {
         AVFormatContext* raw = nullptr;
-        if (motioncam::isZipSource(path)) {
+        if (rawpreamp::isZipSource(path)) {
             mZipInput = std::make_unique<ZipAudioInput>(path);
             raw = avformat_alloc_context();
             if (!raw) throw std::bad_alloc();
             raw->pb = mZipInput->io;
             raw->flags |= AVFMT_FLAG_CUSTOM_IO;
             checkAudio(avformat_open_input(&raw, path.c_str(), nullptr, nullptr), "Open ZIP audio source");
-        } else checkAudio(motioncam::openSourceMedia(&raw, path), "Open audio source");
+        } else checkAudio(rawpreamp::openSourceMedia(&raw, path), "Open audio source");
         mFormat.reset(raw);
         checkAudio(avformat_find_stream_info(mFormat.get(), nullptr), "Read audio source");
         mIndex = av_find_best_stream(mFormat.get(), AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
@@ -279,7 +279,7 @@ private:
 };
 } // namespace
 
-std::string motioncam::AudioWriter::extractOriginalTrack(const std::string& source,
+std::string rawpreamp::AudioWriter::extractOriginalTrack(const std::string& source,
                                                         const std::string& outputBase) {
     AudioInput input(source);
     if (!input.stream()) return {};
@@ -292,7 +292,7 @@ std::string motioncam::AudioWriter::extractOriginalTrack(const std::string& sour
     return target;
 }
 
-std::shared_ptr<std::vector<uint8_t>> motioncam::AudioWriter::decodeWav(
+std::shared_ptr<std::vector<uint8_t>> rawpreamp::AudioWriter::decodeWav(
         const std::string& source, double fps) {
     AudioInput input(source);
     if (!input.stream()) return {};
@@ -310,7 +310,7 @@ std::shared_ptr<std::vector<uint8_t>> motioncam::AudioWriter::decodeWav(
     return bytes;
 }
 
-void motioncam::AudioWriter::offsetWav(std::vector<uint8_t>& bytes, int64_t offsetUs) {
+void rawpreamp::AudioWriter::offsetWav(std::vector<uint8_t>& bytes, int64_t offsetUs) {
     if (!offsetUs) return;
     const auto read16 = [&](size_t p) { return unsigned(bytes[p]) | unsigned(bytes[p + 1]) << 8; };
     const auto read32 = [&](size_t p) { return read16(p) | uint32_t(read16(p + 2)) << 16; };
@@ -388,7 +388,7 @@ void motioncam::AudioWriter::offsetWav(std::vector<uint8_t>& bytes, int64_t offs
 
 // Use the already linked FFmpeg libraries, including on Android where an
 // external ffmpeg executable cannot be assumed to exist.
-void motioncam::AudioWriter::convertFile(const std::string& source,
+void rawpreamp::AudioWriter::convertFile(const std::string& source,
         const std::string& destination, const std::string& codec, bool copy,
         const std::function<bool()>& keepGoing) {
     const auto check = checkAudio;

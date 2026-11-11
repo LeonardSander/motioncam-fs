@@ -15,7 +15,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace motioncam::linux_fuse {
+namespace rawpreamp::linux_fuse {
 
 inline void setReadOnlyAttributes(struct stat& attributes, bool directory,
                                   size_t size, std::time_t modified) {
@@ -76,8 +76,8 @@ inline std::vector<MountRecord> readMounts(std::istream& input) {
 
 // The PID is only a conservative liveness check, not an ownership token.
 inline std::optional<int> ownerPid(const MountRecord& mount) {
-    constexpr const char* prefix = "MotionCamFuse@";
-    if (mount.type != "fuse.motioncam" || mount.source.rfind(prefix, 0) != 0)
+    constexpr const char* prefix = "RawPreamp@";
+    if (mount.type != "fuse.rawpreamp" || mount.source.rfind(prefix, 0) != 0)
         return std::nullopt;
     const auto digits = mount.source.substr(std::char_traits<char>::length(prefix));
     if (digits.empty()) return std::nullopt;
@@ -119,4 +119,4 @@ inline void checkSourcePath(const std::filesystem::path& source,
                                  destination.string());
 }
 
-} // namespace motioncam::linux_fuse
+} // namespace rawpreamp::linux_fuse

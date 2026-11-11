@@ -18,10 +18,11 @@ namespace BS { class thread_pool; }
 #include "DNGImage.h"
 #include "IVirtualFileSystem.h"
 
-namespace motioncam {
+namespace motioncam { struct AudioChunk; }
+
+namespace rawpreamp {
 struct VulkanGainBakeTextureSource;
 
-struct AudioChunk;
 struct GainMap;
 struct CalibrationData;
 class LRUCache;
@@ -231,7 +232,7 @@ struct DngPixelPipelineOptions {
     bool preScaledProxy = false;
     uint32_t inputQuantizationWhite = 0;
     // Non-zero for sources which enter this pipeline as linear samples but
-    // use KeepInput as a source-specific log ceiling (DirectLog: 12 bits).
+    // use KeepInput as a source-specific log ceiling (Native Video: 12 bits).
     uint32_t linearInputBitDepth = 0;
     uint32_t ditherSeed = 0;
     const CalibrationData* calibration = nullptr;
@@ -465,7 +466,7 @@ IconSize=16
 // Audio synchronization
 void syncAudio(
     Timestamp videoTimestamp,
-    std::vector<AudioChunk>& audioChunks,
+    std::vector<motioncam::AudioChunk>& audioChunks,
     int sampleRate,
     int numChannels);
 
@@ -480,4 +481,4 @@ std::string getDisplayDataLevels(
     const std::vector<uint16_t>* linearizationTable = nullptr);
 
 } // namespace vfs
-} // namespace motioncam
+} // namespace rawpreamp

@@ -7,7 +7,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 }
-namespace motioncam {
+namespace rawpreamp {
 // Preserve P010's ten most significant bits while adapting FFmpeg's separate
 // planes to Android's contiguous, possibly padded input allocation.
 inline size_t packP010Input(const AVFrame& frame, uint8_t* destination, size_t capacity,

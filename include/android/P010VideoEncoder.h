@@ -5,7 +5,7 @@
 #include <string>
 struct AVFrame;
 struct AVPacket;
-namespace motioncam {
+namespace rawpreamp {
 // Direct MediaCodec input for P010, absent from FFmpeg 6.1's wrapper.
 // Encoded packets are delivered synchronously in a microsecond time base.
 class P010VideoEncoder {

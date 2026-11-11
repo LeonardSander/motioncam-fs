@@ -11,7 +11,7 @@
 #include <process.h>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
     if (release) release();
     release = {};
@@ -24,7 +24,7 @@ VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
 }
 }
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libplacebo/vulkan.h>
 #include <libplacebo/gpu.h>
 #include <libplacebo/cache.h>
@@ -48,7 +48,7 @@ VulkanGalleryGpuBuffer::~VulkanGalleryGpuBuffer() {
 #include <QDebug>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 
 #ifdef __ANDROID__
@@ -214,10 +214,10 @@ uint packedCode(uint sampleIndex) {
             uint ib = a.y * stride + b.x * 3u + channel;
             uint ic = b.y * stride + a.x * 3u + channel;
             uint id = b.y * stride + b.x * 3u + channel;
-            gain = MOTIONCAM_GAIN_BILERP(
+            gain = RAWPREAMP_GAIN_BILERP(
                 galleryGain.values[ia], galleryGain.values[ib],
                 galleryGain.values[ic], galleryGain.values[id], t);
-            gain = motioncamGainOrIdentity(gain);
+            gain = rawpreampGainOrIdentity(gain);
         }
         if (galleryGain.flags.z != 0u &&
             x >= galleryGain.secondaryBounds.x && y >= galleryGain.secondaryBounds.y &&
@@ -234,7 +234,7 @@ uint packedCode(uint sampleIndex) {
             uint ib = start + a.y * stride + b.x;
             uint ic = start + b.y * stride + a.x;
             uint id = start + b.y * stride + b.x;
-            float luminance = MOTIONCAM_GAIN_BILERP(
+            float luminance = RAWPREAMP_GAIN_BILERP(
                 galleryGain.values[ia], galleryGain.values[ib],
                 galleryGain.values[ic], galleryGain.values[id], t);
             if (!isnan(luminance) && !isinf(luminance) && luminance > 0.0)
@@ -244,9 +244,9 @@ uint packedCode(uint sampleIndex) {
             ? floor(clamp(1.0 / gain, 0.0, 1.0) * 65535.0 + 0.5)
             : floor(clamp(normalized * gain, 0.0, 1.0) * 65535.0 + 0.5);
         if (galleryGain.shape.z == 0u) return uint(linear);
-        float dither = motioncamDither(x, y, galleryGain.shape.w,
+        float dither = rawpreampDither(x, y, galleryGain.shape.w,
                                       galleryGain.flags.x != 0u);
-        float encoded = motioncamLog60(linear / 65535.0, galleryGain.shape.z);
+        float encoded = rawpreampLog60(linear / 65535.0, galleryGain.shape.z);
         uint logCode = uint(floor(clamp(encoded + dither, 0.0,
             float(galleryGain.shape.z)) + 0.5));
         return uint(galleryGain.values[galleryGain.flags.y + logCode]);
@@ -303,7 +303,7 @@ uint bayerCode(int x, int y) {
         uint ib = shape.w + (a.y * shape.x + b.x) * shape.z + channel;
         uint ic = shape.w + (b.y * shape.x + a.x) * shape.z + channel;
         uint id = shape.w + (b.y * shape.x + b.x) * shape.z + channel;
-        gain *= motioncamGainOrIdentity(MOTIONCAM_GAIN_BILERP(
+        gain *= rawpreampGainOrIdentity(RAWPREAMP_GAIN_BILERP(
             bayerGain.values[ia], bayerGain.values[ib],
             bayerGain.values[ic], bayerGain.values[id], fraction));
     }
@@ -314,7 +314,7 @@ uint bayerCode(int x, int y) {
     uint code = uint(floor(clamp(linear, 0.0, 65535.0) + 0.5));
     if (bayerGain.header.y == 0u) return code;
     float encoded = bayerGain.values[bayerGain.lookup.w + code];
-    encoded += motioncamDither(uint(x), uint(y), bayerGain.header.z,
+    encoded += rawpreampDither(uint(x), uint(y), bayerGain.header.z,
                               (bayerGain.header.w & 1u) != 0u);
     uint logCode = uint(floor(clamp(encoded, 0.0,
                          float(bayerGain.header.y)) + 0.5));
@@ -1187,8 +1187,8 @@ bool demosaicGalleryBayerVulkan(
     const std::array<uint8_t, 4>& phase,
     const std::array<double, 3>& black,
     const std::array<double, 3>& white) {
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
-    const auto started = motioncam::diagnosticNow();
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU")) return false;
+    const auto started = rawpreamp::diagnosticNow();
     if (!cfa || width < 2 || height < 2 ||
         width > std::numeric_limits<uint32_t>::max() / height / 3u ||
         (phase != std::array<uint8_t, 4>{0, 1, 1, 2} &&
@@ -1258,11 +1258,11 @@ bool demosaicGalleryBayerVulkan(
     }
     result.resize(static_cast<size_t>(width) * height * 6);
     rgb = std::move(result);
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         std::fprintf(stderr,
             "GALLERY_PERF event=vulkan_gallery_demosaic width=%u height=%u elapsed_ms=%.3f\n",
             width, height, std::chrono::duration<double, std::milli>(
-                motioncam::diagnosticNow() - started).count());
+                rawpreamp::diagnosticNow() - started).count());
     return true;
 }
 
@@ -1277,7 +1277,7 @@ bool colorGalleryRgbVulkan(
     const VulkanGalleryBayerSource* bayer,
     const VulkanGalleryOutput* output,
     const VulkanGalleryTextureSource* texture) {
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU")) return false;
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU")) return false;
     // Device warmup runs on another thread. Keep host previews responsive
     // through the CPU fallback instead of blocking on device creation.
     // Resident sources need their final shader variant before playback starts.
@@ -1354,7 +1354,7 @@ bool colorGalleryRgbVulkan(
         : externalBuffer
         ? bufferDevices[static_cast<pl_gpu>(externalGpu)]
         : texture ? textureDevices[static_cast<pl_gpu>(externalGpu)] : device;
-    if (texture && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
+    if (texture && rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) {
         static std::atomic_bool loggedExternalCaps{false};
         if (!loggedExternalCaps.exchange(true))
             std::fprintf(stderr, "GALLERY_PERF event=gallery_external_caps export_buf=%d import_buf=%d export_tex=%d import_tex=%d\n",
@@ -1902,7 +1902,7 @@ bool colorGalleryRgbVulkan(
                 destroySemaphore(producer->device, ready, nullptr);
                 delete texture;
             });
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=gallery_shared_image width={} height={} direct=true resident_input={}",
                 outputWidth, outputHeight, externalGpu != nullptr);
         *output->gpuBuffer = std::move(gpuFrame);
@@ -1912,7 +1912,7 @@ bool colorGalleryRgbVulkan(
 #ifndef _WIN32
     if (exported) {
         const uint64_t debugSampleHash =
-            motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_GPU_HASH")
+            rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_GPU_HASH")
             ? samplePackedFrame(selected->gpu, exported,
                 orientation == 90 || orientation == 270 ? sourceHeight : sourceWidth,
                 orientation == 90 || orientation == 270 ? sourceWidth : sourceHeight)
@@ -1951,11 +1951,11 @@ bool colorGalleryRgbVulkan(
     }
 #endif
     if (output && output->requireZeroCopy) return false;
-    const bool hostImport = texture && !motioncam::debugEnvironment("MOTIONCAM_GALLERY_STAGED_READBACK") &&
+    const bool hostImport = texture && !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_STAGED_READBACK") &&
         (selected->gpu->import_caps.buf & PL_HANDLE_HOST_PTR);
     const bool directView = hostImport && output && output->hostPixels && rgb24 &&
         !alignedRgb24 && !rgb10a2 &&
-        !motioncam::debugEnvironment("MOTIONCAM_GALLERY_VECTOR_READBACK");
+        !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_VECTOR_READBACK");
     std::shared_ptr<uint8_t> owned;
     pl_buf imported = nullptr;
     const bool pooled = directView &&
@@ -2021,5 +2021,5 @@ bool colorGalleryRgbVulkan(
     rgb = std::move(result);
     return true;
 }
-} // namespace motioncam
+} // namespace rawpreamp
 #endif

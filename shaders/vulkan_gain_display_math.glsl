@@ -1,17 +1,17 @@
-// Shared by the DNG gain bake and the gallery's fused DirectLog display pass.
+// Shared by the DNG gain bake and the gallery's fused Native Video display pass.
 // These functions have no storage-layout dependencies, so each output keeps
 // its existing buffer packing and dispatch geometry.
-float motioncamGainOrIdentity(float gain) {
+float rawpreampGainOrIdentity(float gain) {
     return !isnan(gain) && !isinf(gain) && gain > 0.0 ? gain : 1.0;
 }
 
 // Keep interpolation in the caller's shader expression. This works for both
 // scalar and RGB gain grids without changing either pipeline's dispatch.
-#define MOTIONCAM_GAIN_BILERP(upperLeft, upperRight, lowerLeft, lowerRight, fraction) \
+#define RAWPREAMP_GAIN_BILERP(upperLeft, upperRight, lowerLeft, lowerRight, fraction) \
     mix(mix((upperLeft), (upperRight), (fraction).x), \
         mix((lowerLeft), (lowerRight), (fraction).x), (fraction).y)
 
-float motioncamDither(uint x, uint y, uint frameSeed, bool hq) {
+float rawpreampDither(uint x, uint y, uint frameSeed, bool hq) {
     uint rowTerm = y * (hq ? 1013904223u : 0x85ebca77u);
     uint frameTerm = (hq ? 0xdeadbeefu : 0u) ^
                      (frameSeed * 0x9e3779b9u);
@@ -36,18 +36,18 @@ float motioncamDither(uint x, uint y, uint frameSeed, bool hq) {
     return centered * 0.5;
 }
 
-float motioncamLog60(float normalized, uint encodedWhite) {
+float rawpreampLog60(float normalized, uint encodedWhite) {
     return log2(1.0 + 60.0 * normalized) / log2(61.0) *
            float(encodedWhite);
 }
 
-vec3 motioncamLog60(vec3 normalized, uint encodedWhite) {
+vec3 rawpreampLog60(vec3 normalized, uint encodedWhite) {
     return log2(vec3(1.0) + 60.0 * normalized) / log2(61.0) *
            float(encodedWhite);
 }
 
 // LLOG60: same curve as RawLogTransform.h, with continuous value and first derivative.
-float motioncamLLog60(float x, uint encodedWhite) {
+float rawpreampLLog60(float x, uint encodedWhite) {
     x = clamp(x, 0.0, 1.0);
     const float a = 0.980913053208808;
     const float m = 0.244314924085355;
@@ -62,8 +62,8 @@ float motioncamLLog60(float x, uint encodedWhite) {
     return y * float(encodedWhite);
 }
 
-vec3 motioncamLLog60(vec3 x, uint encodedWhite) {
-    return vec3(motioncamLLog60(x.r, encodedWhite),
-                motioncamLLog60(x.g, encodedWhite),
-                motioncamLLog60(x.b, encodedWhite));
+vec3 rawpreampLLog60(vec3 x, uint encodedWhite) {
+    return vec3(rawpreampLLog60(x.r, encodedWhite),
+                rawpreampLLog60(x.g, encodedWhite),
+                rawpreampLLog60(x.b, encodedWhite));
 }

@@ -17,15 +17,15 @@ namespace BS {
 class thread_pool;
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
 class LRUCache;
-class DirectLogDecoder;
+class NativeVideoDecoder;
 
-class VirtualFileSystemImpl_DirectLog : public MountedDngSource
+class VirtualFileSystemImpl_NativeVideo : public MountedDngSource
 {
 public:
-    VirtualFileSystemImpl_DirectLog(
+    VirtualFileSystemImpl_NativeVideo(
         BS::thread_pool& ioThreadPool,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
@@ -33,7 +33,7 @@ public:
         const std::string& file,
         const std::string& baseName);
 
-    ~VirtualFileSystemImpl_DirectLog();
+    ~VirtualFileSystemImpl_NativeVideo();
 
     void updateOptions(const RenderSettings& config) override;
     FileInfo getFileInfo() const override;
@@ -65,7 +65,7 @@ private:
     
     bool isHLGVideo() const;
     void calculateFrameRateStats();
-    bool convertRGBToDNG(std::vector<uint16_t> rgbData, std::vector<uint8_t>& dngData, int frameNumber, motioncam::Timestamp timestamp,
+    bool convertRGBToDNG(std::vector<uint16_t> rgbData, std::vector<uint8_t>& dngData, int frameNumber, rawpreamp::Timestamp timestamp,
                          double iso = 0.0, double shutterSpeed = 0.0,
                          double baselineExposure = 0.0,
                          const std::optional<std::array<float, 3>>& asShotNeutral = std::nullopt,
@@ -119,7 +119,7 @@ private:
     int mHeight;
     std::string mPixelFormat;
     bool mIsHLG;
-    std::unique_ptr<DirectLogDecoder> mDecoder;
+    std::unique_ptr<NativeVideoDecoder> mDecoder;
     std::mutex mGpuFrameMutex;
     std::shared_ptr<std::vector<uint8_t>> mAudioWav;
     std::optional<CalibrationData> mCalibration;
@@ -136,4 +136,4 @@ private:
     int mLastPrefetchFrame = -1;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

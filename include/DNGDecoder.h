@@ -12,7 +12,7 @@
 #include "DNGImage.h"
 #include "Types.h"
 
-namespace motioncam {
+namespace rawpreamp {
 struct VulkanGainBakeTextureSource;
 
 namespace utils { struct ActiveBadPixel; }
@@ -301,4 +301,4 @@ private:
     std::unordered_map<int, GainMap> mGainMapCache;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

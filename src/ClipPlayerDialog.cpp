@@ -28,7 +28,7 @@
 #include <QLabel>
 #include <QLineF>
 #include <QMouseEvent>
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
 #include <QQuickWidget>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -265,7 +265,7 @@ public:
         const double next=std::clamp(mDistribution+steps*0.5,-1.0,1.0);
         if(next==mDistribution)return;
         mDistribution=next;
-        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=histogram_distribution value={:.3f}",
                 mDistribution);
         if(distributionChanged)distributionChanged();
@@ -334,7 +334,7 @@ protected:
         event->accept();
     }
     void mouseDoubleClickEvent(QMouseEvent* event) override {
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             event->accept();
             return;
         }
@@ -347,7 +347,7 @@ protected:
     }
     void paintEvent(QPaintEvent*) override {
         if(property("nativeCaptureOnly").toBool()&&!mNativeCapture)return;
-        const auto paintStarted=motioncam::diagnosticNow();
+        const auto paintStarted=rawpreamp::diagnosticNow();
         QPainter painter(this);
         painter.fillRect(rect(),QColor(0,0,0,165));
         const QRect graph(8,8,width()-16,height()-16);
@@ -437,7 +437,7 @@ protected:
             }
         }
         painter.drawImage(graph.topLeft(),fill);
-        const auto fillFinished=motioncam::diagnosticNow();
+        const auto fillFinished=rawpreamp::diagnosticNow();
         const std::array<QRgb,8> lineColors={
             qRgb(0,0,0),qRgb(255,75,75),qRgb(80,255,80),qRgb(230,195,65),
             qRgb(85,130,255),qRgb(175,75,205),qRgb(70,225,235),qRgb(255,255,255)};
@@ -472,7 +472,7 @@ protected:
             if(inRun)lines.emplace_back(previous,QPointF(graph.right(),baseline));
             if(!lines.empty())maskPainter.drawLines(lines.data(),static_cast<int>(lines.size()));
         }
-        const auto masksFinished=motioncam::diagnosticNow();
+        const auto masksFinished=rawpreamp::diagnosticNow();
         QImage strokes(graph.size(),QImage::Format_ARGB32);
         strokes.fill(Qt::transparent);
         for(int y=0;y<strokes.height();++y) {
@@ -491,7 +491,7 @@ protected:
             }
         }
         painter.drawImage(graph.topLeft(),strokes);
-        const auto strokesFinished=motioncam::diagnosticNow();
+        const auto strokesFinished=rawpreamp::diagnosticNow();
         painter.restore();
         painter.setPen(QPen(QColor(150,105,45,95),1.5));
         std::array<int,4> blackMarkerXs{};
@@ -547,8 +547,8 @@ protected:
             painter.drawText(QRect(labelX,graph.top(),labelWidth,
                 painter.fontMetrics().height()),Qt::AlignCenter,label);
         }
-        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_HISTOGRAM_PAINT")) {
-            const auto now=motioncam::diagnosticNow();
+        if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_HISTOGRAM_PAINT")) {
+            const auto now=rawpreamp::diagnosticNow();
             auto ms=[](auto end,auto start) {
                 return std::chrono::duration<double,std::milli>(end-start).count();
             };
@@ -795,7 +795,7 @@ QSize ClipPlayerDialog::thumbnailMaximumSize(){return {176,112};}
 
 QSize ClipPlayerDialog::thumbnailDisplayMaximumSize() const{
     auto bounds=thumbnailMaximumSize();
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         const bool landscape=width()>height();
         if(mHistogramEnabled&&landscape)bounds=QSize(112,56);
         const int minimumVisible=landscape?5:3;
@@ -805,14 +805,14 @@ QSize ClipPlayerDialog::thumbnailDisplayMaximumSize() const{
 }
 
 int ClipPlayerDialog::thumbnailStripHeight() const{
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         const bool stills=mIndex>=0&&mIndex<mClips.size()&&!mClips[mIndex].isSequence;
         return (stills?thumbnailDisplayMaximumSize().height():thumbnailSizeForSource(0).height())+42;
     }
     return thumbnailMaximumSize().height()+58;
 }
 
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
 class GalleryTextureItem final : public QQuickItem {
 public:
     GalleryTextureItem() { setFlag(ItemHasContents); }
@@ -827,7 +827,7 @@ public:
 protected:
     QSGNode* updatePaintNode(QSGNode* oldNode,
                             UpdatePaintNodeData*) override {
-        const auto started = motioncam::diagnosticNow();
+        const auto started = rawpreamp::diagnosticNow();
         if (!mLoggedRenderApi && window()) {
             mLoggedRenderApi = true;
             spdlog::info("Gallery active scene graph API: {}",
@@ -853,12 +853,12 @@ protected:
         node->setRect(mTarget);
         node->setFiltering(mSmooth?QSGTexture::Linear:QSGTexture::Nearest);
         mUploadedFrameKey=mFrame.cacheKey();
-        if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+        if (rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE") &&
             !mFrame.isNull())
             spdlog::info("GALLERY_PERF event=gpu_present source={}x{} viewport={}x{} cpu_ms={:.3f}",
                 mFrame.width(), mFrame.height(), width(), height(),
                 std::chrono::duration<double, std::milli>(
-                    motioncam::diagnosticNow() - started).count());
+                    rawpreamp::diagnosticNow() - started).count());
         return node;
     }
 
@@ -877,7 +877,7 @@ public:
     explicit GalleryGpuVideo(QWidget* parent) : QWidget(parent) {
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
         mNative = new GalleryVulkanVideo(this);
         if (mNative->usable()) {
             spdlog::info("Gallery native Vulkan presenter selected");
@@ -893,11 +893,11 @@ public:
 
     void setFrame(const QImage& image, const QRectF& target, bool smooth) {
         if (mNative) { mNative->setFrame(image, target, smooth); return; }
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
         if (mTextureItem) mTextureItem->setFrame(image, target, smooth);
 #endif
     }
-    void setGpuFrame(std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame,
+    void setGpuFrame(std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> frame,
                      const QRectF& target, bool smooth, const QImage& overlay = {},
                      const std::vector<GalleryOverlayPart>& parts = {}) {
         if (mNative) mNative->setGpuFrame(std::move(frame), target, smooth, overlay, parts);
@@ -923,7 +923,7 @@ public:
 
 private:
     void createFallback() {
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
         mQuick = new QQuickWidget(this);
         connect(mQuick, &QQuickWidget::sceneGraphError, this,
             [this](QQuickWindow::SceneGraphError, const QString& message) {
@@ -940,7 +940,7 @@ private:
 #endif
     }
     GalleryVulkanVideo* mNative = nullptr;
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
     QQuickWidget* mQuick = nullptr;
     GalleryTextureItem* mTextureItem = nullptr;
 #endif
@@ -1007,7 +1007,7 @@ void ClipPlayerDialog::runPerformanceGestureTest(std::function<void()> finished)
 
 ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWidget* parent)
     : QDialog(parent), mClips(std::move(clips)) {
-    QSettings gallerySettings("com.motioncam","MotionCam FS");
+    QSettings gallerySettings("com.rawpreamp","RawPreamp");
     mAudioMode=static_cast<AudioMode>(qBound(0,gallerySettings.value("gallery/audioMode",0).toInt(),2));
     mPerformanceUncapped=mAudioMode==AudioMode::UncappedMuted;
     mVolumePercent=qBound(0,gallerySettings.value("gallery/volume",50).toInt(),100);
@@ -1036,7 +1036,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     // resized. QLabel will center and clip/pad this pixmap until the decoder
     // supplies a surface rendered for the new viewport.
     mVideo->setScaledContents(false);
-    mVideo->setMinimumSize(motioncam::touchUi()?QSize(1,1):QSize(640,360));mVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
+    mVideo->setMinimumSize(rawpreamp::touchUi()?QSize(1,1):QSize(640,360));mVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
     mVideo->setFrameShape(QFrame::NoFrame);mVideo->setLineWidth(0);mVideo->setContentsMargins(0,0,0,0);
     mVideo->setStyleSheet("background:#606060;color:#e0e0e0;border:none;margin:0;padding:0;");stack->addWidget(mVideo);
     mOverlay=new QWidget(stage);mOverlay->setStyleSheet("background:transparent;");
@@ -1045,7 +1045,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mPreparingLabel->setStyleSheet("background:transparent;color:#e0e0e0;border:0;padding:0;");
     mPreparingLabel->hide();
     auto* overlayLayout=new QVBoxLayout(mOverlay);overlayLayout->setContentsMargins(10,10,10,0);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         overlayLayout->setContentsMargins(0,10,0,0);
         overlayLayout->setSpacing(10);
 #if QT_VERSION >= QT_VERSION_CHECK(6,9,0)
@@ -1054,7 +1054,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
 #endif
     }
     const auto addInsetWidget=[&](QWidget* widget){
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             auto* row=new QHBoxLayout;
             row->setContentsMargins(10,0,10,0);
             row->addWidget(widget,0,Qt::AlignLeft);overlayLayout->addLayout(row);
@@ -1063,7 +1063,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
         }
     };
     mTitle=new QLabel(mOverlay);mTitle->setTextFormat(Qt::RichText);mTitle->setStyleSheet("color:white;background:rgba(0,0,0,120);padding:5px 9px;border-radius:4px;");
-    if(motioncam::touchUi()) {
+    if(rawpreamp::touchUi()) {
         mTitle->setWordWrap(true);
         mTitle->setMinimumWidth(1);
     }
@@ -1073,7 +1073,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     addInsetWidget(mTitle);
     mHistogram=new RawHistogram(mOverlay);
     static_cast<RawHistogram*>(mHistogram)->doubleClicked=[this]{
-        if (!motioncam::touchUi()) {
+        if (!rawpreamp::touchUi()) {
             setHistogramExpanded(!mHistogramExpanded);
         }
     };
@@ -1089,8 +1089,8 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mHistogram->hide();
     addInsetWidget(mHistogram);
     overlayLayout->addStretch(1);
-    auto* controls=new QHBoxLayout;controls->setSpacing(motioncam::touchUi()?4:8);
-    if (motioncam::touchUi()) {
+    auto* controls=new QHBoxLayout;controls->setSpacing(rawpreamp::touchUi()?4:8);
+    if (rawpreamp::touchUi()) {
         controls->setContentsMargins(10,0,10,0);
     }
     auto* previous=new QPushButton(mOverlay);
@@ -1134,7 +1134,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(mVolumeSlider,&QSlider::valueChanged,this,[this](int value){
         mVolumePercent=value;mVolumeSlider->setToolTip(tr("Gallery volume: %1%").arg(value));
         if(mAudioSink&&!mAudioFadeTimer.isActive())mAudioSink->setVolume(value/100.0);
-        QSettings("com.motioncam","MotionCam FS").setValue("gallery/volume",value);
+        QSettings("com.rawpreamp","RawPreamp").setValue("gallery/volume",value);
     });
     mVuTimer.setInterval(50);
     connect(&mVuTimer,&QTimer::timeout,this,[this]{
@@ -1184,10 +1184,10 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(mThumbnailScroll->horizontalScrollBar(),&QScrollBar::valueChanged,this,[this]{
         if(mPaused)mThumbnailBackfillTimer.start();
     });
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         // Native windows forward input manually; QWidget fallback presentation
         // delivers touch events directly to the thumbnail viewport.
-        new motioncam::TouchScrolling(mThumbnailScroll);
+        new rawpreamp::TouchScrolling(mThumbnailScroll);
         connect(QScroller::scroller(mThumbnailScroll->viewport()), &QScroller::stateChanged,
                 this, [this](QScroller::State state) {
             if(state==QScroller::Dragging)mThumbnailFollowPlayback=false;
@@ -1231,7 +1231,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mThumbnailScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     mThumbnailScroll->setFixedHeight(thumbnailStripHeight());
     mThumbnailScroll->setFrameShape(QFrame::NoFrame);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         mThumbnailScroll->setContentsMargins(0,0,0,0);
         mThumbnailScroll->viewport()->setContentsMargins(0,0,0,0);
     }
@@ -1251,11 +1251,11 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mPosition=new DuplicateSlider(mOverlay); mPosition->setRange(0,0);
     mPosition->setStyleSheet("QToolTip{background-color:#1976d2;color:white;border:1px solid #64a9e8;padding:4px 6px;}");
     mPosition->setMouseTracking(true);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         mPosition->setMinimumHeight(28);
     }
     auto* seekLayout=new QVBoxLayout;seekLayout->setContentsMargins(10,10,10,10);seekLayout->addWidget(mPosition);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         seekLayout->setContentsMargins(20,10,20,10);
     }
     overlayLayout->addLayout(seekLayout);stack->addWidget(mOverlay);layout->addWidget(stage,1);
@@ -1276,7 +1276,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     });
     mOverlayTimer.setSingleShot(true);mOverlayTimer.setInterval(4000);connect(&mOverlayTimer,&QTimer::timeout,this,[this]{
         if(mPerformanceOverlayPinned||mHistogramExpanded||pointerOverThumbnailRow())return;
-        if (!motioncam::touchUi()) {
+        if (!rawpreamp::touchUi()) {
             if((mAudioButton&&mAudioButton->underMouse())||
                (mVolumePanel&&mVolumePanel->underMouse()))return;
         }
@@ -1316,7 +1316,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     mZoomAnimationTimer.setInterval(16);
     mZoomAnimationTimer.setTimerType(Qt::PreciseTimer);
     connect(&mZoomAnimationTimer,&QTimer::timeout,this,&ClipPlayerDialog::advanceZoomAnimation);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         mTouchPanUpdateTimer.setSingleShot(true);
         mTouchPanUpdateTimer.setInterval(16);
         mTouchPanUpdateTimer.setTimerType(Qt::PreciseTimer);
@@ -1329,7 +1329,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     for(auto* widget:trackedWidgets){
         widget->setMouseTracking(true);
     }
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         // Let Qt synthesize mouse events for overlay controls. Accept raw touch
         // only on the picture, where multi-touch gestures need all touch points.
         mVideo->setAttribute(Qt::WA_AcceptTouchEvents);
@@ -1403,7 +1403,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
     connect(next,&QPushButton::clicked,this,&ClipPlayerDialog::advance);
     connect(mThumbnailToggle,&QPushButton::clicked,this,[this]{
         const bool show=!mThumbnailScroll->isVisible();mThumbnailScroll->setVisible(show);
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             QScroller::scroller(mThumbnailScroll->viewport())->stop();
             if(show)mThumbnailFollowPlayback=true;
         }
@@ -1426,7 +1426,7 @@ ClipPlayerDialog::ClipPlayerDialog(QVector<Clip> clips, int initialMountId, QWid
             revealOverlay();
         }
     });
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         mFullscreenButton->setToolTip(tr("Close gallery"));
         connect(mFullscreenButton,&QPushButton::clicked,this,&QWidget::close);
     } else {
@@ -1518,7 +1518,7 @@ void ClipPlayerDialog::invalidateThumbnails(int mountId){
         const auto files=cacheDir.entryList(
             {QStringLiteral("%1-*.jpg").arg(mountId)},QDir::Files);
         for(const auto& file:files)
-            motioncam::removeThumbnailCacheFile(cacheDir.filePath(file)
+            rawpreamp::removeThumbnailCacheFile(cacheDir.filePath(file)
 #ifdef __ANDROID__
                 ,mThumbnailDiskBytes.get()
 #endif
@@ -1594,7 +1594,7 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
     mNativeOverlayCapturePending=false;
     const QSize logicalSize=mGpuVideo->size();
     if(logicalSize.isEmpty())return;
-    const auto started=motioncam::diagnosticNow();
+    const auto started=rawpreamp::diagnosticNow();
     mOverlayOpacity->setEnabled(false);
     // Native presentation owns the pixels. These widgets remain input targets
     // and are painted only by the synchronous offscreen atlas capture.
@@ -1617,11 +1617,11 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
         {mHistogram,opacity},
         {mThumbnailScroll,opacity},{mFpsLabel,1.0},{mPreparingLabel,1.0}};
     static_cast<RawHistogram*>(mHistogram)->setNativeCapture(true);
-    const auto prepared=motioncam::diagnosticNow();
+    const auto prepared=rawpreamp::diagnosticNow();
     if(!mNativeOverlayCache)mNativeOverlayCache=std::make_unique<GalleryOverlayCache>();
     auto capture=captureGalleryOverlay(*mGpuVideo,roots,mGpuVideo->nativePixelRatio(),mNativeOverlayCache.get());
     static_cast<RawHistogram*>(mHistogram)->setNativeCapture(false);
-    const auto captured=motioncam::diagnosticNow();
+    const auto captured=rawpreamp::diagnosticNow();
     const auto* thumbnailDelegate=static_cast<FrameThumbnailDelegate*>(mThumbnailScroll->itemDelegate());
     const auto rasters=thumbnailDelegate->takeRasterCounts();
     if(capture.parts.empty())mCapturedNativeOverlay={};
@@ -1633,7 +1633,7 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
         !mPresentationClock.isValid()||mLastPresentationNs<0||
         mPresentationClock.nsecsElapsed()-mLastPresentationNs>=100000000;
     if(submit)mGpuVideo->setOverlay(mCapturedNativeOverlay,mCapturedNativeOverlayParts,redraw);
-    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=native_overlay_capture viewport={}x{} atlas={}x{} parts={} opacity={:.3f} painted={} reused={} thumbnail_rasters={} thumbnail_reused={} thumbnail_bytes={} thumbnail_pixmap_kib={} paint_ms={:.3f} prepare_ms={:.3f} capture_ms={:.3f} elapsed_ms={:.3f}",
             logicalSize.width(),logicalSize.height(),mCapturedNativeOverlay.width(),
             mCapturedNativeOverlay.height(),mCapturedNativeOverlayParts.size(),double(opacity),capture.paintedWidgets,capture.reusedWidgets,rasters.first,rasters.second,mThumbnailCachedBytes,
@@ -1641,7 +1641,7 @@ void ClipPlayerDialog::captureNativeOverlay(bool submit){
             double(capture.paintNanoseconds)/1000000.0,
             std::chrono::duration<double,std::milli>(prepared-started).count(),
             std::chrono::duration<double,std::milli>(captured-prepared).count(),
-            std::chrono::duration<double,std::milli>(motioncam::diagnosticNow()-started).count());
+            std::chrono::duration<double,std::milli>(rawpreamp::diagnosticNow()-started).count());
 }
 
 
@@ -1657,7 +1657,7 @@ QString ClipPlayerDialog::ffmpegPath()const{
 void ClipPlayerDialog::openClip(int index,double startSeconds){
     if(index<0||index>=mClips.size())return;
     const bool changingClip=index!=mIndex;
-    if (motioncam::touchUi()&&changingClip) {
+    if (rawpreamp::touchUi()&&changingClip) {
         mThumbnailFollowPlayback=true;
         QScroller::scroller(mThumbnailScroll->viewport())->stop();
     }
@@ -1708,14 +1708,14 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     // Present sequence frames at source size so a larger viewport does not
     // increase the FFmpeg output pipe and copy cost.
     mDirectSequencePresentation=mClips[index].isSequence &&
-        !motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_FFMPEG_PRESENT");
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+        !rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_FFMPEG_PRESENT");
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
     const bool nativeStillPresentation = !mClips[index].isSequence;
 #else
     constexpr bool nativeStillPresentation = false;
 #endif
     if((mDirectSequencePresentation||nativeStillPresentation)&&!mGpuVideo){
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
         static const bool vulkanSelected=[] {
 #if !defined(Q_OS_MACOS) && !defined(Q_OS_ANDROID)
             QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
@@ -1732,7 +1732,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
         mGpuVideo->setAutoFillBackground(true);
         mGpuVideo->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
         mGpuVideo->setMouseTracking(true);
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             mGpuVideo->setAttribute(Qt::WA_AcceptTouchEvents);
         }
         static_cast<QStackedLayout*>(stage->layout())->insertWidget(1,mGpuVideo);
@@ -1740,7 +1740,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
             mOverlayOpacity->setEnabled(false);
             mNativeOverlayCaptureTimer.start();
         }
-#if defined(MOTIONCAM_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
+#if defined(RAWPREAMP_HAS_QUICKWIDGETS) && !defined(Q_OS_ANDROID)
         if(mGpuVideo->native()){
             // Keep the grey preparation label visible until a processed GPU
             // frame exists. Mapping an empty native surface exposes the
@@ -1753,7 +1753,7 @@ void ClipPlayerDialog::openClip(int index,double startSeconds){
     }
     if(mGpuVideo&&!mGpuVideo->native())
         mGpuVideo->hide();
-    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=gallery_presenter mount={} mode={}",
             mClips[index].mountId,
             mDirectSequencePresentation?"direct":
@@ -1885,7 +1885,7 @@ void ClipPlayerDialog::centerCurrentThumbnail(){
     if(!mThumbnailScroll||!mThumbnailScroll->isVisible()||
        mCurrentThumbnailSource<0||mNativeThumbnailTouch||
        (mNativeMouseTarget&&mThumbnailScroll->isAncestorOf(mNativeMouseTarget)))return;
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         if(!mThumbnailFollowPlayback||
            QScroller::scroller(mThumbnailScroll->viewport())->state()!=QScroller::Inactive)return;
     }
@@ -1932,12 +1932,12 @@ void ClipPlayerDialog::cacheThumbnail(int mountId,int sourceFrame,const QImage& 
                     ,diskBytes
 #endif
                 ]{
-                    const auto result=motioncam::saveThumbnailCacheFile(path,image
+                    const auto result=rawpreamp::saveThumbnailCacheFile(path,image
 #ifdef __ANDROID__
                         ,diskBytes.get()
 #endif
                     );
-                    if(result==motioncam::ThumbnailCacheWrite::Failed)
+                    if(result==rawpreamp::ThumbnailCacheWrite::Failed)
                         spdlog::warn("Could not persist gallery thumbnail cache entry");
                 });
             }else{
@@ -1973,7 +1973,7 @@ void ClipPlayerDialog::setSourceFrameThumbnailImage(int sourceFrame,const QImage
     const bool visible=mThumbnailCollectionEnabled->load();
     if((!visible&&!cacheWhenHidden)||image.isNull())return;
     cacheThumbnail(currentMountId(),sourceFrame,image,visible);
-    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+    if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE") &&
        (sourceFrame<10 || sourceFrame%30==0))
         spdlog::info("GALLERY_PERF event=thumbnail_applied source={} current={} visible={}",
             sourceFrame,mCurrentThumbnailSource,
@@ -2279,7 +2279,7 @@ void ClipPlayerDialog::adoptRenderedDimensions(int width,int height){
 
 void ClipPlayerDialog::updateTitle(){
     if(!mTitle||mIndex<0||mIndex>=mClips.size())return;
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         // Keep scrub feedback inside the captured overlay for touch input.
         if(mSeeking){
             mTitle->setText(framePositionText(mPosition->value()).toHtmlEscaped()
@@ -2435,7 +2435,7 @@ void ClipPlayerDialog::setPerformancePixelOverlayEnabled(bool enabled){
 }
 
 void ClipPlayerDialog::setHistogramExpanded(bool expanded){
-    if (motioncam::touchUi()&&expanded)return;
+    if (rawpreamp::touchUi()&&expanded)return;
     if(mHistogramExpanded==expanded)return;
     mHistogramExpanded=expanded;
     auto* layout=static_cast<QVBoxLayout*>(mOverlay->layout());
@@ -2451,7 +2451,7 @@ void ClipPlayerDialog::setHistogramExpanded(bool expanded){
         mOverlayOpacity->setOpacity(1.0);
         mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,false);
     }else{
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             updateTouchOverlayMask();
         } else {
             mHistogram->setFixedSize(560,260);
@@ -2467,7 +2467,7 @@ void ClipPlayerDialog::setHistogramExpanded(bool expanded){
 }
 
 void ClipPlayerDialog::updateHistogram(){
-    const auto histogramStarted=motioncam::diagnosticNow();
+    const auto histogramStarted=rawpreamp::diagnosticNow();
     const auto& raw=mPresentedRawFrame;
     mIntensitySamples=nullptr;
     mDetectedClipValue.reset();
@@ -2609,11 +2609,11 @@ void ClipPlayerDialog::updateHistogram(){
                 raw.cfaPhase,raw.samples && raw.white>raw.black && raw.white>0.0f
                 ? (raw.channels==3?3:4) : 0);
     updateTitle();
-    if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=histogram_frame width={} height={} channels={} bins={} latency_ms={:.3f}",
             raw.width,raw.height,raw.channels,binCount,
             std::chrono::duration<double,std::milli>(
-                motioncam::diagnosticNow()-histogramStarted).count());
+                rawpreamp::diagnosticNow()-histogramStarted).count());
 }
 
 void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
@@ -2622,7 +2622,7 @@ void ClipPlayerDialog::setFpsIndicatorEnabled(bool enabled){
 }
 
 bool ClipPlayerDialog::pointerOverThumbnailRow()const{
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         // A synthesized cursor can remain over the last tapped control.
         return false;
     }
@@ -2817,7 +2817,7 @@ void ClipPlayerDialog::updateButtonIcons(){
         ?tr("Real-time audio — click for uncapped, muted playback"):
         tr("Capped, muted — click for real-time audio"));
     if(mFullscreenButton){
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             mFullscreenButton->setIcon(closeGalleryIcon());
         } else {
             mFullscreenButton->setIcon(fullscreenIcon(isFullScreen()));
@@ -2834,7 +2834,7 @@ void ClipPlayerDialog::setOverlayVisible(bool visible){
     }
     if(!visible&&mHistogramExpanded)return;
     mOverlay->setAttribute(Qt::WA_TransparentForMouseEvents,!visible);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         updateTouchOverlayMask();
     }
     mOverlayAnimation->stop();mOverlayAnimation->setStartValue(mOverlayOpacity->opacity());
@@ -2879,7 +2879,7 @@ void ClipPlayerDialog::updateDisplayedImage(){
         captureNativeOverlay(false);
         mGpuVideo->setOverlay(mCapturedNativeOverlay,mCapturedNativeOverlayParts,false);
     }
-    const bool fastTouchPreview=motioncam::touchUi()&&mTouchActive;
+    const bool fastTouchPreview=rawpreamp::touchUi()&&mTouchActive;
 #ifndef Q_OS_ANDROID
     if (mGpuVideo && mGpuVideo->native() && !mGpuVideo->usable()) {
         spdlog::warn("Gallery native Vulkan presenter failed; retrying through fallback presentation");
@@ -3297,7 +3297,7 @@ void ClipPlayerDialog::cycleAudioMode(){
         mAudioMode==AudioMode::RealTimeAudio?AudioMode::UncappedMuted:
         AudioMode::CappedMuted;
     mPerformanceUncapped=mAudioMode==AudioMode::UncappedMuted;
-    QSettings("com.motioncam","MotionCam FS").setValue("gallery/audioMode",static_cast<int>(mAudioMode));
+    QSettings("com.rawpreamp","RawPreamp").setValue("gallery/audioMode",static_cast<int>(mAudioMode));
     setVolumePanelVisible(mAudioMode==AudioMode::RealTimeAudio&&mAudioButton->underMouse());
     setAudioEnabled(mAudioMode==AudioMode::RealTimeAudio);
 }
@@ -3361,7 +3361,7 @@ void ClipPlayerDialog::consumeOutput(){
         QTimer::singleShot(0,this,&ClipPlayerDialog::showNextFrame);
 }
 void ClipPlayerDialog::showNextFrame(){
-    const auto showStarted=motioncam::diagnosticNow();
+    const auto showStarted=rawpreamp::diagnosticNow();
     consumeOutput();
     if(!mPaused&&mAudioEnabled&&!mAudioStartPending&&mAudioClock.isValid()&&
        mIndex>=0&&mClips[mIndex].autoAdvance&&mThumbnailScroll&&
@@ -3476,13 +3476,13 @@ void ClipPlayerDialog::showNextFrame(){
             captureNativeOverlay(false);
             if(!mNativeOverlayCaptureTimer.isActive())mNativeOverlayCaptureTimer.start();
         }
-        const auto displayUiStarted=motioncam::diagnosticNow();
+        const auto displayUiStarted=rawpreamp::diagnosticNow();
         updateDisplayedImage();
-        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+        if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE")&&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=gallery_display_ui elapsed_ms={:.3f}",
                 std::chrono::duration<double,std::milli>(
-                    motioncam::diagnosticNow()-displayUiStarted).count());
+                    rawpreamp::diagnosticNow()-displayUiStarted).count());
         if(!mFirstFrameReady){
             mFirstFrameReady=true;
             emit firstFramePresented(currentMountId());
@@ -3506,11 +3506,11 @@ void ClipPlayerDialog::showNextFrame(){
             updateFpsIndicator();
         }
         emit framePresented(currentMountId(),presentedFrame);
-        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")&&
+        if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE")&&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=gallery_show_ui elapsed_ms={:.3f}",
                 std::chrono::duration<double,std::milli>(
-                    motioncam::diagnosticNow()-showStarted).count());
+                    rawpreamp::diagnosticNow()-showStarted).count());
         mPositionSeconds=(presentedFrame+1)/fps;
         completeFrameStep();
         // A paused surface refresh still needs to consume and present its
@@ -3535,14 +3535,14 @@ int ClipPlayerDialog::frameAtSliderPosition(int x)const{
 }
 void ClipPlayerDialog::updateSeekPosition(int x){
     const int frame=frameAtSliderPosition(x);mPosition->setValue(frame);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         updateTitle();
     } else {
         QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),framePositionText(frame),mPosition);
     }
 }
 void ClipPlayerDialog::seekToFrame(int frame){
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         mThumbnailFollowPlayback=true;
         QScroller::scroller(mThumbnailScroll->viewport())->stop();
     }
@@ -3757,7 +3757,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
     const bool belongsToPlayer=nativeVideoSurface||
         (watchedWidget&&(watchedWidget->window()==this||
                          watchedWidget==this||isAncestorOf(watchedWidget)));
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         if(event->type()==QEvent::KeyPress && isVisible() &&
            (belongsToPlayer||watchedWidget==parentWidget())){
             auto* key=static_cast<QKeyEvent*>(event);
@@ -3959,7 +3959,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         auto* mouse=static_cast<QMouseEvent*>(event);
         if(mouse->button()==Qt::LeftButton){
             mPanning=false;unsetCursor();
-            if (!motioncam::touchUi()) {
+            if (!rawpreamp::touchUi()) {
                 mFullscreenButton->click();
             }
             return true;
@@ -4021,7 +4021,7 @@ bool ClipPlayerDialog::eventFilter(QObject* watched,QEvent* event){
         const int x=mouse->pos().x();
 #endif
         if(mSeeking)updateSeekPosition(x);
-        else if(!motioncam::touchUi()) QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),
+        else if(!rawpreamp::touchUi()) QToolTip::showText(mPosition->mapToGlobal(QPoint(x,0)),
             framePositionText(frameAtSliderPosition(x)),mPosition);
         return mSeeking;
     }else if(event->type()==QEvent::MouseButtonRelease){
@@ -4193,7 +4193,7 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
         std::array<float,4> rawBlackLevels,int rawOrientation,
         std::shared_ptr<const std::vector<uint8_t>> frameBacking,
         bool framePreOriented,std::shared_ptr<const uint8_t> framePixels,
-        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer,
+        std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> gpuBuffer,
         int sourceFrameIndex){
     // Stills are presented directly from the processed RGB48 callback. Feeding
     // them through a timed FFmpeg graph would display the same image twice and
@@ -4223,14 +4223,14 @@ ClipPlayerDialog::FramePushResult ClipPlayerDialog::pushRgb48Frame(
     if(mSubmittedFrames.size()+mFrames.size()>=maximumPending)
         return FramePushResult::Retry;
     if(!mClips[mIndex].isSequence||mDirectSequencePresentation){
-        const auto convertStarted=motioncam::diagnosticNow();
+        const auto convertStarted=rawpreamp::diagnosticNow();
         const QImage image=gpuBuffer ? QImage{} : rgb48Image(frame,width,height,
             std::move(frameBacking),framePreOriented,std::move(framePixels));
-        if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+        if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE") &&
            mDirectSequencePresentation)
             spdlog::info("GALLERY_PERF event=direct_present_convert source={}x{} ms={:.3f}",
                 width,height,std::chrono::duration<double,std::milli>(
-                    motioncam::diagnosticNow()-convertStarted).count());
+                    rawpreamp::diagnosticNow()-convertStarted).count());
         if(image.isNull()&&!gpuBuffer)return FramePushResult::Stopped;
         const int sourceFrame=mClips[mIndex].isSequence
             ?incomingSourceFrame:std::max(mNextInputFrame,incomingSourceFrame);
@@ -4261,7 +4261,7 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
         std::array<float,4> rawBlackLevels,int rawOrientation,
         std::shared_ptr<const std::vector<uint8_t>> frameBacking,
         bool framePreOriented,std::shared_ptr<const uint8_t> framePixels,
-        std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> gpuBuffer){
+        std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> gpuBuffer){
     const int inputBits=gpuBuffer||frame.size()==qint64(width)*height*3?8:16;
     const bool formatChanged=mInputBitsPerChannel!=inputBits;
     if(formatChanged)mInputBitsPerChannel=inputBits;
@@ -4308,7 +4308,7 @@ void ClipPlayerDialog::presentRgb48Frame(const QByteArray& frame,int width,int h
     if(mAudioEnabled&&mAudioStartPending&&!mPaused){
         startAudioAt(mPositionSeconds);mAudioStartPending=false;
     }
-    if constexpr (motioncam::debugInstrumentation)
+    if constexpr (rawpreamp::debugInstrumentation)
         spdlog::info("Gallery presented processed RGB48 frame {}x{}",width,height);
 }
 void ClipPlayerDialog::finishRgb48Frames(){
@@ -4337,14 +4337,14 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
         e->ignore();
         if(!mNavigationClosing){
             mNavigationClosing=true;
-            const bool fading=motioncam::crossfadePage(mNavigationReturnSnapshot(),0.0f,1.0f,true);
+            const bool fading=rawpreamp::crossfadePage(mNavigationReturnSnapshot(),0.0f,1.0f,true);
             if(!fading){mNavigationCloseReady=true;QTimer::singleShot(0,this,&QWidget::close);}
             else{
                 auto* completion=new QTimer(this);
                 completion->setInterval(16);
                 QElapsedTimer started;started.start();
                 connect(completion,&QTimer::timeout,this,[this,completion,started]{
-                    if(!mClosing&&!motioncam::pageCrossfadeFinished()&&started.elapsed()<2000)return;
+                    if(!mClosing&&!rawpreamp::pageCrossfadeFinished()&&started.elapsed()<2000)return;
                     completion->stop();completion->deleteLater();
                     if(!mClosing){mNavigationCloseReady=true;close();}
                 });
@@ -4366,18 +4366,18 @@ void ClipPlayerDialog::closeEvent(QCloseEvent* e){
     QDialog::closeEvent(e);
     suspendNativeBackingStore(false);
 #ifdef Q_OS_ANDROID
-    QTimer::singleShot(0,qApp,[]{motioncam::finishPageCrossfade();});
+    QTimer::singleShot(0,qApp,[]{rawpreamp::finishPageCrossfade();});
 #endif
 }
 void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     QDialog::resizeEvent(e);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         QTimer::singleShot(0,this,[this]{updateTouchOverlayMask();});
     }
     positionVolumePanel();
     if(mThumbnailScroll){
         if(mThumbnailScroll->isVisible()&&
-           (motioncam::touchUi()||mThumbnailScroll->height()!=thumbnailStripHeight()))
+           (rawpreamp::touchUi()||mThumbnailScroll->height()!=thumbnailStripHeight()))
             rebuildThumbnailStrip();
         else mThumbnailScroll->viewport()->update();
     }
@@ -4408,7 +4408,7 @@ void ClipPlayerDialog::resizeEvent(QResizeEvent* e){
     }
 }
 void ClipPlayerDialog::keyPressEvent(QKeyEvent* e){
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         if(e->key()==Qt::Key_Escape||e->key()==Qt::Key_Back){close();e->accept();return;}
     } else {
         if(e->key()==Qt::Key_Escape&&isFullScreen()){showNormal();updateButtonIcons();e->accept();return;}

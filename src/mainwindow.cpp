@@ -41,7 +41,7 @@
 #include <QMouseEvent>
 #include <QCloseEvent>
 
-using namespace motioncam;
+using namespace rawpreamp;
 #include <QMimeData>
 #include <QPushButton>
 #include <QAction>
@@ -343,7 +343,7 @@ namespace {
                 throw std::runtime_error("Could not inspect finalized DNG pixel layout");
             const QByteArray data = frame.readAll();
             const std::vector<uint8_t> dng(data.begin(), data.end());
-            const auto bytes = motioncam::vfs::finalizedCfaBadPixelOptions(sourceSidecar.toStdString(), dng);
+            const auto bytes = rawpreamp::vfs::finalizedCfaBadPixelOptions(sourceSidecar.toStdString(), dng);
             if (!bytes.empty()) {
                 const QString destination = perFrame
                     ? QFileInfo(framePath).absolutePath() + "/" +
@@ -584,7 +584,7 @@ namespace {
                         const auto bytes = input.readAll();
                         if (input.error() != QFileDevice::NoError)
                             throw std::runtime_error("Could not read inherited sidecar");
-                        const auto cleaned = motioncam::excludeSidecarGps(
+                        const auto cleaned = rawpreamp::excludeSidecarGps(
                             bytes, sidecar.second == QStringLiteral("xml"));
                         QSaveFile output(stagedSidecar);
                         if (!output.open(QIODevice::WriteOnly) ||
@@ -618,17 +618,17 @@ namespace {
 
     bool invertColorMatrix(const std::array<float, 9>& input,
                            std::array<float, 9>& inverse);
-    bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
+    bool colorMatrixToD50(const rawpreamp::DNGFrameMetadata& metadata,
                           std::array<float, 9>& cameraToXyzD50,
                           float* firstIlluminantWeight = nullptr);
 
-    constexpr auto PACKAGE_NAME = "com.motioncam";
-    constexpr auto APP_NAME = "MotionCam FS";
+    constexpr auto PACKAGE_NAME = "com.rawpreamp";
+    constexpr auto APP_NAME = "RawPreamp";
 
     void styleClipMetadata(QLabel* label,const QString& extra={}) {
-        const int pointSize=motioncam::touchUi()?10:9;
+        const int pointSize=rawpreamp::touchUi()?10:9;
         label->setStyleSheet(QStringLiteral("font-size:%1pt;%2").arg(pointSize).arg(extra));
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             label->ensurePolished();
         }
     }
@@ -643,14 +643,14 @@ namespace {
         "35bcf9b169e69f8aee5dfb26005424579109b7d9421bb16e3b675a5142b485bd";
 
     void applyGalleryColorTransform(std::vector<uint8_t>& bytes,
-                                    const motioncam::DNGFrameMetadata& metadata,
+                                    const rawpreamp::DNGFrameMetadata& metadata,
                                     bool ignoreForwardMat,
                                     bool gainMapOnlyDebug,
-                                    const motioncam::VulkanGalleryBayerSource* bayer = nullptr,
-                                    const motioncam::VulkanGalleryOutput* output = nullptr,
+                                    const rawpreamp::VulkanGalleryBayerSource* bayer = nullptr,
+                                    const rawpreamp::VulkanGalleryOutput* output = nullptr,
                                     bool* gpuApplied = nullptr,
                                     bool enableGpu = true,
-                                    const motioncam::VulkanGalleryTextureSource* texture = nullptr,
+                                    const rawpreamp::VulkanGalleryTextureSource* texture = nullptr,
                                     const std::function<bool(uint16_t*, size_t)>* textureDownload = nullptr) {
         if (gpuApplied) *gpuApplied = false;
         if (bytes.size() % 6 != 0) return;
@@ -658,7 +658,7 @@ namespace {
             ? static_cast<size_t>(bayer->width) * bayer->height
             : texture ? static_cast<size_t>(texture->width) * texture->height
             : bytes.size() / 6;
-        const auto transformStarted = motioncam::diagnosticNow();
+        const auto transformStarted = rawpreamp::diagnosticNow();
         static const std::array<uint16_t, 65536> srgbTransfer = [] {
             std::array<uint16_t, 65536> result{};
             for (size_t index = 0; index < result.size(); ++index) {
@@ -735,13 +735,13 @@ namespace {
                         ? metadata.forwardMatrix1 : metadata.forwardMatrix2;
                     const auto second = metadata.hasForwardMatrix2
                         ? metadata.forwardMatrix2 : first;
-                    const auto calibration = motioncam::gallery::interpolateMatrix(
-                        motioncam::gallery::cameraCalibrationMatrix(metadata, true),
-                        motioncam::gallery::cameraCalibrationMatrix(metadata, false),
+                    const auto calibration = rawpreamp::gallery::interpolateMatrix(
+                        rawpreamp::gallery::cameraCalibrationMatrix(metadata, true),
+                        rawpreamp::gallery::cameraCalibrationMatrix(metadata, false),
                         firstIlluminantWeight);
                     std::array<float, 9> inverseCalibration{};
-                    if (motioncam::gallery::invertMatrix(calibration, inverseCalibration)) {
-                        const auto forward = motioncam::gallery::interpolateMatrix(
+                    if (rawpreamp::gallery::invertMatrix(calibration, inverseCalibration)) {
+                        const auto forward = rawpreamp::gallery::interpolateMatrix(
                             first, second, firstIlluminantWeight);
                         for (int row = 0; row < 3; ++row)
                             for (int column = 0; column < 3; ++column)
@@ -763,8 +763,8 @@ namespace {
                     metadata.hasForwardMatrix2 &&
                     metadata.forwardMatrix1 != metadata.forwardMatrix2;
                 const bool calibrationDiffers =
-                    motioncam::gallery::cameraCalibrationMatrix(metadata, true) !=
-                    motioncam::gallery::cameraCalibrationMatrix(metadata, false);
+                    rawpreamp::gallery::cameraCalibrationMatrix(metadata, true) !=
+                    rawpreamp::gallery::cameraCalibrationMatrix(metadata, false);
                 const bool tableDiffers = metadata.profileTables &&
                     !metadata.profileTables->hueSat1.values.empty() &&
                     !metadata.profileTables->hueSat2.values.empty();
@@ -773,7 +773,7 @@ namespace {
                     colorMatrixToD50(metadata, unusedColorTransform,
                                      &firstIlluminantWeight);
                 }
-                if (motioncam::gallery::forwardCameraToXyz(
+                if (rawpreamp::gallery::forwardCameraToXyz(
                         metadata, firstIlluminantWeight, exposure, forwardTransform))
                     matrix = &forwardTransform;
                 else
@@ -801,7 +801,7 @@ namespace {
             (!metadata.profileTables->hueSat1.values.empty() ||
              !metadata.profileTables->hueSat2.values.empty() ||
              !metadata.profileTables->look.values.empty());
-        if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=color_transform pixels={} matrix={} tables={} hue_values={} hue_value_divisions={} hue_encoding={} look_values={} look_value_divisions={} look_encoding={}",
                 pixelCount, useMatrix, useProfileTables,
                 metadata.profileTables ? metadata.profileTables->hueSat1.values.size() : 0,
@@ -810,8 +810,8 @@ namespace {
                 metadata.profileTables ? metadata.profileTables->look.values.size() : 0,
                 metadata.profileTables ? metadata.profileTables->look.valueDivisions : 0,
                 metadata.profileTables ? metadata.profileTables->look.encoding : 0);
-        motioncam::DNGProfileTable blendedHueSat;
-        const motioncam::DNGProfileTable* hueSatTable = nullptr;
+        rawpreamp::DNGProfileTable blendedHueSat;
+        const rawpreamp::DNGProfileTable* hueSatTable = nullptr;
         if (useProfileTables) {
             const auto& first = metadata.profileTables->hueSat1;
             const auto& second = metadata.profileTables->hueSat2;
@@ -833,10 +833,10 @@ namespace {
             }
         }
         const bool validateGpu = enableGpu && !output &&
-            motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_VALIDATE_GPU");
+            rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_VALIDATE_GPU");
         std::vector<uint8_t> original;
         if (validateGpu) original = bytes;
-        if (enableGpu && motioncam::colorGalleryRgbVulkan(
+        if (enableGpu && rawpreamp::colorGalleryRgbVulkan(
                 bytes, gains, cameraToDisplay, cameraToXyz, exposure,
                 useProfileTables ? hueSatTable : nullptr,
                 useProfileTables && !metadata.profileTables->look.values.empty()
@@ -865,11 +865,11 @@ namespace {
                     bytes.empty() ? 0.0 : double(sum) / (bytes.size() / 2),
                     aboveTwo, aboveEight);
             }
-            if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=gallery_color_stage pixels={} tables={} gpu=true final={} elapsed_ms={:.3f}",
                     pixelCount, useProfileTables, output != nullptr,
                     std::chrono::duration<double, std::milli>(
-                        motioncam::diagnosticNow() - transformStarted).count());
+                        rawpreamp::diagnosticNow() - transformStarted).count());
             return;
         }
         if (output && output->requireZeroCopy)
@@ -889,24 +889,24 @@ namespace {
                     throw std::runtime_error("Could not recover gallery Bayer gain");
                 samples = recovered.data();
             }
-            if (!motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+            if (!rawpreamp::utils::demosaicBilinearBayerToRgb16Bytes(
                     samples, bytes, bayer->width, bayer->height,
                     bayer->phase, bayer->black, bayer->white))
                 throw std::runtime_error("Could not reconstruct gallery Bayer preview");
         }
         if (texture) {
             if (!textureDownload || !*textureDownload)
-                throw std::runtime_error("No DirectLog gallery CPU recovery path");
+                throw std::runtime_error("No Native Video gallery CPU recovery path");
             std::vector<uint16_t> samples(pixelCount * 3u);
             if (!(*textureDownload)(samples.data(), samples.size()))
-                throw std::runtime_error("Could not recover DirectLog gallery preview");
+                throw std::runtime_error("Could not recover Native Video gallery preview");
             if (texture->gain) {
                 const auto& map = *texture->gain;
                 const auto linearization = map.encodedWhite
-                    ? motioncam::makeLog60LinearizationTable(map.encodedWhite)
+                    ? rawpreamp::makeLog60LinearizationTable(map.encodedWhite)
                     : std::vector<uint16_t>{};
                 const auto* logLookup = map.encodedWhite
-                    ? &motioncam::cachedLog60EncodeLookup(
+                    ? &rawpreamp::cachedLog60EncodeLookup(
                         0.0, 65535.0, static_cast<uint16_t>(map.encodedWhite))
                     : nullptr;
                 bytes.resize(samples.size() * sizeof(uint16_t));
@@ -914,9 +914,9 @@ namespace {
                     return map.values[(static_cast<size_t>(y) * map.width + x) * 3u + channel];
                 };
                 for (uint32_t y = 0; y < texture->height; ++y) {
-                    const motioncam::utils::LogTriangularDitherRow<false> fastDither(
+                    const rawpreamp::utils::LogTriangularDitherRow<false> fastDither(
                         y, map.ditherSeed);
-                    const motioncam::utils::LogTriangularDitherRow<true> hqDither(
+                    const rawpreamp::utils::LogTriangularDitherRow<true> hqDither(
                         y, map.ditherSeed);
                     for (uint32_t x = 0; x < texture->width; ++x) {
                         std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
@@ -984,7 +984,7 @@ namespace {
                             const auto code = static_cast<uint16_t>(std::lround(
                                 linear * 65535.0f));
                             const auto normalized = logLookup
-                                ? linearization[motioncam::encodeDitheredLog60(
+                                ? linearization[rawpreamp::encodeDitheredLog60(
                                     *logLookup, code, dither,
                                     static_cast<uint16_t>(map.encodedWhite))]
                                 : code;
@@ -993,10 +993,10 @@ namespace {
                         }
                     }
                 }
-            } else if (!motioncam::utils::normalizeRgb16Bytes(
+            } else if (!rawpreamp::utils::normalizeRgb16Bytes(
                            samples.data(), samples.size(), bytes,
                            texture->black, texture->white)) {
-                throw std::runtime_error("Could not normalize DirectLog gallery preview");
+                throw std::runtime_error("Could not normalize Native Video gallery preview");
             }
         }
         auto* pixels = reinterpret_cast<uint16_t*>(bytes.data());
@@ -1065,14 +1065,14 @@ namespace {
                         hueSatTable->valueDivisions == 1 &&
                         hueSatTable->encoding == 0 && tables.look.encoding == 0 &&
                         exposure > 0.0f && std::isfinite(exposure)) {
-                        motioncam::gallery::applyHueSatAndLook(
+                        rawpreamp::gallery::applyHueSatAndLook(
                             proPhoto, *hueSatTable, tables.look, exposure);
                     } else {
                         if (hueSatTable)
-                            motioncam::gallery::applyProfileTable(proPhoto, *hueSatTable);
+                            rawpreamp::gallery::applyProfileTable(proPhoto, *hueSatTable);
                         for (float& channel : proPhoto) channel *= exposure;
                         if (!tables.look.values.empty())
-                            motioncam::gallery::applyProfileTable(proPhoto, tables.look);
+                            rawpreamp::gallery::applyProfileTable(proPhoto, tables.look);
                     }
                     xyz = {
                         0.7976749f * proPhoto[0] + 0.1351917f * proPhoto[1] +
@@ -1104,7 +1104,7 @@ namespace {
         // keeps its lower thread overhead at proxy sizes.
         const size_t minimumPixelsPerWorker = useProfileTables
             ? 64 * 1024 : 256 * 1024;
-        const unsigned int availableWorkers = motioncam::utils::availableCpuWorkers();
+        const unsigned int availableWorkers = rawpreamp::utils::availableCpuWorkers();
         const unsigned int workerLimit = useProfileTables ? 24u : 12u;
         const unsigned int workers = static_cast<unsigned int>(std::min<size_t>(
             std::min(workerLimit, availableWorkers), std::max<size_t>(1,
@@ -1118,21 +1118,21 @@ namespace {
         }
         convertRange(0, pixelCount / workers);
         for (auto& thread : threads) thread.join();
-        if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=gallery_color_stage pixels={} tables={} workers={} elapsed_ms={:.3f}",
                 pixelCount, useProfileTables, workers,
                 std::chrono::duration<double, std::milli>(
-                    motioncam::diagnosticNow() - transformStarted).count());
+                    rawpreamp::diagnosticNow() - transformStarted).count());
     }
 
-    void applyGalleryPreviewColorTransform(motioncam::PreviewFrame& preview,
+    void applyGalleryPreviewColorTransform(rawpreamp::PreviewFrame& preview,
                                            bool ignoreForwardMat,
                                            bool gainMapOnlyDebug,
-                                           const motioncam::VulkanGalleryOutput* output = nullptr,
+                                           const rawpreamp::VulkanGalleryOutput* output = nullptr,
                                            bool* gpuApplied = nullptr,
                                            std::vector<uint8_t>* destination = nullptr) {
-        motioncam::VulkanGalleryBayerSource bayer;
-        motioncam::VulkanGalleryTextureSource texture;
+        rawpreamp::VulkanGalleryBayerSource bayer;
+        rawpreamp::VulkanGalleryTextureSource texture;
         if (preview.hasGalleryCfa()) {
             bayer.samples = (preview.gallerySource.buffer || preview.gallerySource.texture)
                 ? nullptr : preview.galleryCfaSamples();
@@ -1158,7 +1158,7 @@ namespace {
             texture.white = preview.galleryGpuWhite;
             texture.gain = preview.galleryGpuGain.get();
         }
-        motioncam::VulkanGalleryOutput textureOutput;
+        rawpreamp::VulkanGalleryOutput textureOutput;
         if (!output && preview.clippingRequested && preview.clipping.empty() && texture.texture) {
             textureOutput.width = preview.width;
             textureOutput.height = preview.height;
@@ -1194,14 +1194,14 @@ namespace {
                                    (texture.texture || texture.buffer) ? &download : nullptr);
     }
 
-    motioncam::RenderSettings previewRenderSettings(motioncam::RenderSettings settings) {
-        settings.options = static_cast<motioncam::FileRenderOptions>(
+    rawpreamp::RenderSettings previewRenderSettings(rawpreamp::RenderSettings settings) {
+        settings.options = static_cast<rawpreamp::FileRenderOptions>(
             settings.options & ~(
-                motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
+                rawpreamp::RENDER_OPT_CAMMODEL_OVERRIDE));
         settings.cameraModel.clear();
-        if (settings.quadBayerOption == motioncam::QuadBayerMode::CorrectQBCFAMetadata ||
-            settings.quadBayerOption == motioncam::QuadBayerMode::WrongCFAMetadata)
-            settings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+        if (settings.quadBayerOption == rawpreamp::QuadBayerMode::CorrectQBCFAMetadata ||
+            settings.quadBayerOption == rawpreamp::QuadBayerMode::WrongCFAMetadata)
+            settings.quadBayerOption = rawpreamp::QuadBayerMode::Demosaic;
         settings.cameraNativeStaging = true;
         settings.streamingPreview = true;
         return settings;
@@ -1228,9 +1228,9 @@ namespace {
         }
     }
 
-    bool gainMapOnlyDebug(const motioncam::RenderSettings& settings) {
-        return settings.vignetteCorrection == motioncam::VignetteCorrectionMode::Bake &&
-            (settings.options & motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
+    bool gainMapOnlyDebug(const rawpreamp::RenderSettings& settings) {
+        return settings.vignetteCorrection == rawpreamp::VignetteCorrectionMode::Bake &&
+            (settings.options & rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP);
     }
 
     int normalizedGalleryOrientation(int orientation) {
@@ -1297,15 +1297,15 @@ namespace {
                           6823.3 * n + 5520.33, 2000.0, 25000.0);
     }
 
-    bool colorMatrixToD50(const motioncam::DNGFrameMetadata& metadata,
+    bool colorMatrixToD50(const rawpreamp::DNGFrameMetadata& metadata,
                           std::array<float, 9>& cameraToXyzD50,
                           float* firstIlluminantWeight) {
         if (!metadata.hasColorMatrix1 && !metadata.hasColorMatrix2) return false;
         const auto calibrated1 = metadata.hasColorMatrix1
-            ? motioncam::gallery::calibratedColorMatrix(metadata, true)
+            ? rawpreamp::gallery::calibratedColorMatrix(metadata, true)
             : std::array<float, 9>{};
         const auto calibrated2 = metadata.hasColorMatrix2
-            ? motioncam::gallery::calibratedColorMatrix(metadata, false)
+            ? rawpreamp::gallery::calibratedColorMatrix(metadata, false)
             : calibrated1;
         const double temperature1 = illuminantTemperature(metadata.calibrationIlluminant1);
         const double temperature2 = illuminantTemperature(metadata.calibrationIlluminant2);
@@ -1362,22 +1362,22 @@ namespace {
         return true;
     }
 
-    motioncam::RenderSettings thumbnailRenderSettings(motioncam::RenderSettings settings) {
+    rawpreamp::RenderSettings thumbnailRenderSettings(rawpreamp::RenderSettings settings) {
         settings = previewRenderSettings(std::move(settings));
         settings.thumbnailPreview = true;
         // Card images are only 176x112. Run the same preprocessing pipeline on
         // a small proxy so full-resolution CFA demosaic and display conversion
         // do not dominate mount/settings updates. HQ proxy demosaic is useful
         // for exported frames but its extra detail is not visible at card size.
-        settings.options = static_cast<motioncam::FileRenderOptions>(
-            settings.options | motioncam::RENDER_OPT_DRAFT);
-        settings.options = static_cast<motioncam::FileRenderOptions>(
-            settings.options & ~motioncam::RENDER_OPT_HIGHER_CFA_HQ);
+        settings.options = static_cast<rawpreamp::FileRenderOptions>(
+            settings.options | rawpreamp::RENDER_OPT_DRAFT);
+        settings.options = static_cast<rawpreamp::FileRenderOptions>(
+            settings.options & ~rawpreamp::RENDER_OPT_HIGHER_CFA_HQ);
         settings.draftScale = std::max(16, settings.draftScale);
         // Marking thousands of PDAF coordinates on a tiny proxy can cover the
         // entire card. Thumbnails are navigation aids, not diagnostics.
-        if (settings.badPixelTreatment == motioncam::BadPixelTreatment::MarkPixels)
-            settings.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
+        if (settings.badPixelTreatment == rawpreamp::BadPixelTreatment::MarkPixels)
+            settings.badPixelTreatment = rawpreamp::BadPixelTreatment::Disabled;
         return settings;
     }
 
@@ -1484,7 +1484,7 @@ namespace {
                value.compare("GCSV / JSONL Only", Qt::CaseInsensitive) == 0;
     }
 
-    std::vector<int64_t> telemetryOutputTimeline(const motioncam::FileInfo& info) {
+    std::vector<int64_t> telemetryOutputTimeline(const rawpreamp::FileInfo& info) {
         std::vector<int64_t> timestamps;
         if (!info.timingUsesCfrMapping || !(info.fps > 0)) return timestamps;
         const int count = info.totalFrames - info.droppedFrames + info.duplicatedFrames;
@@ -1523,7 +1523,7 @@ namespace {
     void copyFileAtomically(const QString& source, const QString& destination) {
         if (!QFileInfo::exists(source) ||
             QFileInfo(source).absoluteFilePath() == QFileInfo(destination).absoluteFilePath()) return;
-        motioncam::SourceInputStream input(source.toStdString(), std::ios::binary);
+        rawpreamp::SourceInputStream input(source.toStdString(), std::ios::binary);
         QSaveFile output(destination);
         if (!input || !output.open(QIODevice::WriteOnly))
             throw std::runtime_error("Could not create output sidecar " + destination.toStdString());
@@ -1562,17 +1562,17 @@ namespace {
         QString trimmed = mode.trimmed();
         finalizeAudioCodec(trimmed);
         if (trimmed.compare("JPEG 92 Lossless", Qt::CaseInsensitive) == 0) {
-            distance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
+            distance = rawpreamp::DNG_COMPRESSION_JPEG_LOSSLESS;
             return true;
         }
         if (trimmed.compare("JPEG92 Lossless Strip", Qt::CaseInsensitive) == 0) {
-            distance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
+            distance = rawpreamp::DNG_COMPRESSION_JPEG92_STRIP;
             return true;
         }
         if (trimmed.compare("JPEG DCT 12b", Qt::CaseInsensitive) == 0 ||
             trimmed.compare("CinemaDNG 12-bit Lossy", Qt::CaseInsensitive) == 0 ||
             trimmed.compare("JPEG DCT Lossy", Qt::CaseInsensitive) == 0) {
-            distance = motioncam::DNG_COMPRESSION_JPEG_DCT;
+            distance = rawpreamp::DNG_COMPRESSION_JPEG_DCT;
             return true;
         }
         if (trimmed.compare("JPEG XL Lossless", Qt::CaseInsensitive) == 0) {
@@ -1583,13 +1583,13 @@ namespace {
     }
 
 #ifdef __APPLE__
-    QStringList listMotionCamFuseMounts() {
+    QStringList listRawPreampMounts() {
         struct statfs* mounts = nullptr;
         const int count = getmntinfo(&mounts, MNT_NOWAIT);
         QStringList result;
         for (int index = 0; index < count; ++index) {
             const QString source = QString::fromLocal8Bit(mounts[index].f_mntfromname);
-            if (!source.startsWith("MotionCamFuse@") && !source.startsWith("MotionCam Fuse@"))
+            if (!source.startsWith("RawPreamp@"))
                 continue;
             result.push_back(QString::fromLocal8Bit(mounts[index].f_mntonname));
         }
@@ -1606,7 +1606,7 @@ namespace {
         QElapsedTimer timer;
         timer.start();
         while (timer.elapsed() < timeoutMs) {
-            const auto mounts = listMotionCamFuseMounts();
+            const auto mounts = listRawPreampMounts();
             const bool stillMounted = std::any_of(mounts.cbegin(), mounts.cend(),
                 [&expected](const QString& path) {
                     return QFileInfo(path).absoluteFilePath() == expected;
@@ -1758,68 +1758,68 @@ namespace {
     };
 }
 
-motioncam::RenderSettings MainWindow::buildRenderSettings() const {
-    motioncam::RenderSettings settings;
+rawpreamp::RenderSettings MainWindow::buildRenderSettings() const {
+    rawpreamp::RenderSettings settings;
     settings.detectDuplicateDngs = mDetectDuplicateDngs;
     settings.excludeGps = mExcludeGps;
 
     // Build options bitfield
-    settings.options = motioncam::RENDER_OPT_NONE;
+    settings.options = rawpreamp::RENDER_OPT_NONE;
 
     if(ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_DRAFT;
+        settings.options |= rawpreamp::RENDER_OPT_DRAFT;
 
     settings.vignetteCorrection = stringToVignetteCorrectionMode(
         ui->vignetteCorrectionComboBox->currentText().toStdString());
-    if(settings.vignetteCorrection == motioncam::VignetteCorrectionMode::Bake)
-        settings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    if(settings.vignetteCorrection == rawpreamp::VignetteCorrectionMode::Bake)
+        settings.options |= rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
 
     if(ui->vignetteOnlyColorCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+        settings.options |= rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR;
 
     if(ui->optimizeGainMapsCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
+        settings.options |= rawpreamp::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
 
     if(ui->normalizeGainMapsCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
+        settings.options |= rawpreamp::RENDER_OPT_NORMALIZE_SHADING_MAP;
 
     if(ui->debugVignetteCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_DEBUG_SHADING_MAP;
+        settings.options |= rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP;
 
     if(ui->normalizeExposureCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_NORMALIZE_EXPOSURE;
+        settings.options |= rawpreamp::RENDER_OPT_NORMALIZE_EXPOSURE;
 
     if(ui->smoothExposureCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_SMOOTH_EXPOSURE;
+        settings.options |= rawpreamp::RENDER_OPT_SMOOTH_EXPOSURE;
 
     if(ui->smoothWhiteBalanceCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE;
+        settings.options |= rawpreamp::RENDER_OPT_SMOOTH_WHITE_BALANCE;
 
     if(ui->bakeIsoCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_BAKE_ISO;
+        settings.options |= rawpreamp::RENDER_OPT_BAKE_ISO;
 
     if(ui->cfrConversionCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+        settings.options |= rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION;
 
     if(ui->cropEnableCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_CROPPING;
+        settings.options |= rawpreamp::RENDER_OPT_CROPPING;
 
     if(ui->camModelOverrideCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_CAMMODEL_OVERRIDE;
+        settings.options |= rawpreamp::RENDER_OPT_CAMMODEL_OVERRIDE;
 
     if(ui->logTransformCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
+        settings.options |= rawpreamp::RENDER_OPT_LOG_TRANSFORM;
     if(ui->logHqCheckBox->isChecked())
-        settings.options |= motioncam::RENDER_OPT_LOG_HQ;
+        settings.options |= rawpreamp::RENDER_OPT_LOG_HQ;
 
     if(ui->remosaicCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
+        settings.options |= rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER;
 
     if(ui->higherCfaHqCheckBox->isChecked())
-        settings.options |= motioncam::RENDER_OPT_HIGHER_CFA_HQ;
+        settings.options |= rawpreamp::RENDER_OPT_HIGHER_CFA_HQ;
 
     if(ui->dngCompressionCheckBox->checkState() == Qt::CheckState::Checked)
-        settings.options |= motioncam::RENDER_OPT_JPEG_COMPRESSION;
+        settings.options |= rawpreamp::RENDER_OPT_JPEG_COMPRESSION;
 
     // Copy all other settings from member variable
     settings.draftScale =
@@ -1878,7 +1878,7 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
     QMenu* androidSessionMenu = nullptr;
 #endif
-    if (motioncam::touchUi()) setupTouchLayout();
+    if (rawpreamp::touchUi()) setupTouchLayout();
 #ifdef __ANDROID__
     for (int i = ui->dngCompressionModeComboBox->count() - 1; i >= 0; --i) {
         const auto text = ui->dngCompressionModeComboBox->itemText(i);
@@ -1905,7 +1905,7 @@ MainWindow::MainWindow(QWidget *parent)
 #endif
            "Audio Only exports audio; JSON Only exports per-clip metadata; "
            "GCSV / JSONL Only exports gyro telemetry in its original format."));
-    motioncam::warmVulkanGalleryPreview(
+    rawpreamp::warmVulkanGalleryPreview(
         QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation))
             .filePath(QStringLiteral("gallery-vulkan-shaders")).toStdString());
 
@@ -1923,13 +1923,13 @@ MainWindow::MainWindow(QWidget *parent)
     connect(mProcessingWatcher, &QFutureWatcher<void>::finished, this, &MainWindow::onProcessingFinished);
 
 #ifdef _WIN32
-    mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Win>();
+    mFuseFilesystem = std::make_unique<rawpreamp::FuseFileSystemImpl_Win>();
 #elif __APPLE__
-    mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_MacOs>();
+    mFuseFilesystem = std::make_unique<rawpreamp::FuseFileSystemImpl_MacOs>();
 #elif defined(__ANDROID__)
-    mFuseFilesystem = std::make_unique<motioncam::ProcessingFileSystem>();
+    mFuseFilesystem = std::make_unique<rawpreamp::ProcessingFileSystem>();
 #elif __linux__
-    mFuseFilesystem = std::make_unique<motioncam::FuseFileSystemImpl_Linux>();
+    mFuseFilesystem = std::make_unique<rawpreamp::FuseFileSystemImpl_Linux>();
 #endif
 
     // Thumbnail and gallery previews can retain a decoder for every imported
@@ -1940,7 +1940,7 @@ MainWindow::MainWindow(QWidget *parent)
             [this](Qt::ApplicationState state) {
 #ifdef __ANDROID__
                 if (state == Qt::ApplicationActive && mPendingAndroidFinalizeCard) {
-                    const QString selection=motioncam::finalizeTreeSelectionStatus();
+                    const QString selection=rawpreamp::finalizeTreeSelectionStatus();
                     if(selection!="choosing"){
                         auto card=mPendingAndroidFinalizeCard;
                         mPendingAndroidFinalizeCard=nullptr;
@@ -2027,7 +2027,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(preferencesButton, &QPushButton::clicked,
             this, &MainWindow::onOpenPreferences);
     connect(importSequenceButton, &QPushButton::clicked, this, [this] {
-        motioncam::requestDngSequenceFolderImport();
+        rawpreamp::requestDngSequenceFolderImport();
         auto* progress = new QProgressDialog(tr("Indexing DNG source folder..."), QString(), 0, 0, this);
         progress->setCancelButton(nullptr);
         progress->setMinimumDuration(0);
@@ -2035,7 +2035,7 @@ MainWindow::MainWindow(QWidget *parent)
         progress->hide();
         auto* poll = new QTimer(this);
         connect(poll, &QTimer::timeout, this, [this, poll, progress] {
-            const QString status=motioncam::dngSequenceFolderImportStatus();
+            const QString status=rawpreamp::dngSequenceFolderImportStatus();
             if(status=="indexing"){
                 if(!progress->isVisible())showTouchProgress(*progress,this);
                 return;
@@ -2070,10 +2070,10 @@ MainWindow::MainWindow(QWidget *parent)
             else
                 for (const auto& clip : mMountedFiles) sourcePaths << clip.importFile;
         }
-        motioncam::scanDirectoryForSidecars(importRoot, sourcePaths.join(QChar('\n')));
+        rawpreamp::scanDirectoryForSidecars(importRoot, sourcePaths.join(QChar('\n')));
         auto* poll = new QTimer(this);
         connect(poll, &QTimer::timeout, this, [this, poll, sidecarButton, automaticScan] {
-            const QString status = motioncam::sidecarScanStatus();
+            const QString status = rawpreamp::sidecarScanStatus();
             if (status == "choosing" || status == "scanning" || status == "idle") return;
             poll->stop();poll->deleteLater();sidecarButton->setEnabled(true);
             if (status.startsWith("done:") || status == "cancelled") {
@@ -2081,7 +2081,7 @@ MainWindow::MainWindow(QWidget *parent)
                     auto* card = fileWidgetForMount(mounted.mountId);
                     if (!card) continue;
                     const QString path = card->property("filePath").toString();
-                    const QString location = motioncam::sourceDirectoryForImport(path);
+                    const QString location = rawpreamp::sourceDirectoryForImport(path);
                     if (location.isEmpty()) continue;
                     card->setProperty("sourceDirectory", location);
                     if (auto* label = card->findChild<QLabel*>("sourceDirectoryLabel"))
@@ -2093,7 +2093,7 @@ MainWindow::MainWindow(QWidget *parent)
                 mPendingAndroidJsonCard = nullptr;
                 if (pending) {
                     const QString path = pending->property("filePath").toString();
-                    if (!motioncam::sourceDirectoryForImport(path).isEmpty()) {
+                    if (!rawpreamp::sourceDirectoryForImport(path).isEmpty()) {
                         QTimer::singleShot(0, this, [this, pending] {
                             if (pending) createCalibrationJson(pending);
                         });
@@ -2131,8 +2131,8 @@ MainWindow::MainWindow(QWidget *parent)
             showTouchProgress(progress, this);
             auto preparation = QtConcurrent::run([sourcePath, mountedSources]() -> PreparedImport {
                 for (const auto& mounted : mountedSources)
-                    if (motioncam::sameImportedSource(mounted, sourcePath)) return {};
-                QString name = motioncam::documentDisplayName(sourcePath);
+                    if (rawpreamp::sameImportedSource(mounted, sourcePath)) return {};
+                QString name = rawpreamp::documentDisplayName(sourcePath);
                 if (name.isEmpty()) name = QFileInfo(QUrl(sourcePath).path()).fileName();
                 name = QFileInfo(name).fileName();
                 const QStringList supportedSuffixes{
@@ -2147,9 +2147,9 @@ MainWindow::MainWindow(QWidget *parent)
                     QUuid::createUuid().toString(QUuid::WithoutBraces);
                 if (!QDir().mkpath(directory)) return {{}, tr("Could not create import directory")};
                 const QString destination = QDir(directory).filePath(name);
-                const QString error = motioncam::registerImportedClip(destination, sourcePath);
+                const QString error = rawpreamp::registerImportedClip(destination, sourcePath);
                 if (!error.isEmpty()) return {{}, error};
-                FILE* source = motioncam::openSourceFile(destination.toStdString());
+                FILE* source = rawpreamp::openSourceFile(destination.toStdString());
                 if (!source) return {{}, tr("The document provider could not open this clip for seekable reading.")};
                 std::fclose(source);
                 return {destination, {}};
@@ -2163,7 +2163,7 @@ MainWindow::MainWindow(QWidget *parent)
         mountFiles(preparedPaths);
         QStringList missingAccess;
         for (const auto& path : preparedPaths)
-            if (motioncam::sourceDirectoryForImport(path).isEmpty()) missingAccess << path;
+            if (rawpreamp::sourceDirectoryForImport(path).isEmpty()) missingAccess << path;
         if (!missingAccess.isEmpty()) {
             sidecarButton->setProperty("importedSidecarPaths", missingAccess);
             sidecarButton->click();
@@ -2184,7 +2184,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(mCacheCleanupTimer, &QTimer::timeout, this, [this] {
         mFuseFilesystem->cleanupCacheExpired();
     });
-    if (mCachePolicy == motioncam::CachePolicy::Quota && mCacheCleanupIntervalSeconds > 0)
+    if (mCachePolicy == rawpreamp::CachePolicy::Quota && mCacheCleanupIntervalSeconds > 0)
         mCacheCleanupTimer->start(mCacheCleanupIntervalSeconds * 1000);
 #endif
 
@@ -2352,7 +2352,7 @@ MainWindow::MainWindow(QWidget *parent)
         QDialog dialog(this);
         dialog.setWindowTitle(tr("Open Clips"));
         dialog.resize(760, 520);
-        if (motioncam::touchUi()) dialog.setWindowState(Qt::WindowFullScreen);
+        if (rawpreamp::touchUi()) dialog.setWindowState(Qt::WindowFullScreen);
 
         auto* layout = new QVBoxLayout(&dialog);
         auto* navigation = new QHBoxLayout();
@@ -2367,16 +2367,16 @@ MainWindow::MainWindow(QWidget *parent)
         model->setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
         auto* browser = new QTreeView(&dialog);
         browser->setModel(model);
-        browser->setSelectionMode(motioncam::touchUi()
+        browser->setSelectionMode(rawpreamp::touchUi()
             ? QAbstractItemView::MultiSelection : QAbstractItemView::ExtendedSelection);
         browser->setRootIsDecorated(false);
         browser->setSortingEnabled(true);
         browser->sortByColumn(0, Qt::AscendingOrder);
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             browser->setStyleSheet("QTreeView::item{min-height:32px;}");
             for (int column = 1; column < model->columnCount(); ++column)
                 browser->hideColumn(column);
-            new motioncam::TouchScrolling(browser);
+            new rawpreamp::TouchScrolling(browser);
         }
         layout->addWidget(browser);
         auto* hint = new QLabel(tr("Select clips or folders. MOV/MP4 files must contain NATIVE in the name."), &dialog);
@@ -2453,7 +2453,7 @@ MainWindow::MainWindow(QWidget *parent)
     preferencesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
     connect(preferencesAction, &QAction::triggered, this, &MainWindow::onOpenPreferences);
 #ifndef __ANDROID__
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         auto* row = new QHBoxLayout;
         row->setContentsMargins(4, 4, 4, 4);
         const auto button = [this, row](const QString& text) {
@@ -2484,7 +2484,7 @@ MainWindow::MainWindow(QWidget *parent)
     QString appDir = QCoreApplication::applicationDirPath();
     QString globalCalibPath = QDir(appDir).absoluteFilePath("calibration.json");
     if (QFile::exists(globalCalibPath)) {
-        mGlobalCalibration = motioncam::CalibrationData::loadFromFile(globalCalibPath.toStdString());
+        mGlobalCalibration = rawpreamp::CalibrationData::loadFromFile(globalCalibPath.toStdString());
         if (mGlobalCalibration.has_value()) {
             spdlog::info("Loaded global calibration from: {}", globalCalibPath.toStdString());
         }
@@ -2492,7 +2492,7 @@ MainWindow::MainWindow(QWidget *parent)
         // Create example calibration.json
         std::ofstream outFile(globalCalibPath.toStdString());
         if (outFile.is_open()) {
-            outFile << motioncam::CalibrationData::createExampleJson();
+            outFile << rawpreamp::CalibrationData::createExampleJson();
             outFile.close();
             spdlog::info("Created example calibration.json at: {}", globalCalibPath.toStdString());
         }
@@ -2547,8 +2547,8 @@ void MainWindow::setupTouchLayout() {
     settingsStrip->setWidget(stripContent);
     settingsStrip->setFrameShape(QFrame::NoFrame);
     settingsStrip->setStyleSheet("QScrollArea{border:0;padding:0;margin:0;}");
-    new motioncam::TouchScrolling(settingsStrip, settingsColumns);
-    new motioncam::TouchScrolling(ui->dragAndDropScrollArea);
+    new rawpreamp::TouchScrolling(settingsStrip, settingsColumns);
+    new rawpreamp::TouchScrolling(ui->dragAndDropScrollArea);
     // The clip cards include transparent children. Give their scrolling
     // parent an opaque fill so newly exposed pixels are initialized while
     // the content moves and while the splitter resizes it.
@@ -2610,7 +2610,7 @@ void MainWindow::saveTouchLayoutSettings(QSettings& settings) const {
 
 MainWindow::~MainWindow() {
     QElapsedTimer shutdownTimer;
-    if (motioncam::debugInstrumentation || mGalleryPerformanceTestActive) shutdownTimer.start();
+    if (rawpreamp::debugInstrumentation || mGalleryPerformanceTestActive) shutdownTimer.start();
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=window_shutdown_start");
     if (!mGalleryPerformanceTestActive) autoSaveSession();
@@ -2660,7 +2660,7 @@ MainWindow::~MainWindow() {
 
 void MainWindow::saveSettings() {
     QSettings settings(PACKAGE_NAME, APP_NAME);
-    if (motioncam::touchUi()) saveTouchLayoutSettings(settings);
+    if (rawpreamp::touchUi()) saveTouchLayoutSettings(settings);
 
     settings.setValue("draftMode", ui->draftModeCheckBox->checkState() == Qt::CheckState::Checked);
     settings.setValue("vignetteCorrection", QString::fromStdString(
@@ -2689,7 +2689,7 @@ void MainWindow::saveSettings() {
     settings.setValue("higherCfaHq", ui->higherCfaHqCheckBox->isChecked());
     settings.setValue("cachePath", mCacheRootFolder);
     settings.setValue("deleteOnUnmount", mDeleteOnUnmount);
-    settings.setValue("cachePolicy", mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
+    settings.setValue("cachePolicy", mCachePolicy == rawpreamp::CachePolicy::Quota ? "quota" : "off");
     settings.setValue("cacheQuotaBytes", static_cast<qulonglong>(mCacheQuotaBytes));
     settings.setValue("cacheCleanupIntervalSeconds", mCacheCleanupIntervalSeconds);
     settings.setValue("autoApplyClipSettings", mAutoApplyClipSettings);
@@ -2772,7 +2772,7 @@ void MainWindow::restoreSettings() {
     ui->dngCompressionCheckBox->setCheckState(
         settings.value("jpegCompression").toBool() ? Qt::CheckState::Checked : Qt::CheckState::Unchecked);
     mRenderSettings.jxlDistance = settings.value("jxlDistance", -1.0).toFloat();
-    int compressionIndex = motioncam::isLossyJpegDct(mRenderSettings.jxlDistance) ? 1
+    int compressionIndex = rawpreamp::isLossyJpegDct(mRenderSettings.jxlDistance) ? 1
         : mRenderSettings.jxlDistance < 0.0f ? 0
         : mRenderSettings.jxlDistance == 0.0f ? 2 : 3;
     bool restoredNativeMode = false;
@@ -2816,7 +2816,7 @@ void MainWindow::restoreSettings() {
             QString("JPEG XL DCT %1").arg(mRenderSettings.jxlDistance));
     }
     if (!restoredNativeMode &&
-        mRenderSettings.jxlDistance == motioncam::DNG_COMPRESSION_JPEG92_STRIP)
+        mRenderSettings.jxlDistance == rawpreamp::DNG_COMPRESSION_JPEG92_STRIP)
         ui->dngCompressionModeComboBox->setCurrentText("JPEG92 Lossless Strip");
     ui->higherCfaHqCheckBox->setChecked(
         settings.value("higherCfaHq", false).toBool());
@@ -2824,7 +2824,7 @@ void MainWindow::restoreSettings() {
     mCacheRootFolder = settings.value("cachePath").toString();
     mDeleteOnUnmount = settings.value("deleteOnUnmount", false).toBool();
     mCachePolicy = settings.value("cachePolicy", "quota").toString() == "off"
-        ? motioncam::CachePolicy::Off : motioncam::CachePolicy::Quota;
+        ? rawpreamp::CachePolicy::Off : rawpreamp::CachePolicy::Quota;
     mCacheQuotaBytes = settings.value("cacheQuotaBytes",
         QVariant::fromValue<qulonglong>(30ULL * 1024 * 1024 * 1024)).toULongLong();
     mCacheCleanupIntervalSeconds = settings.value("cacheCleanupIntervalSeconds", 30).toInt();
@@ -2879,7 +2879,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
-    if (!motioncam::touchUi()) return;
+    if (!rawpreamp::touchUi()) return;
     if (mTouchComboOverlay) mTouchComboOverlay->deleteLater();
     if (mClipPlayer && mClipPlayer->parentWidget() == this)
         mClipPlayer->setGeometry(rect());
@@ -2931,7 +2931,7 @@ void MainWindow::updateAndroidOrientationPolicy() {
     }
     const auto activity = QNativeInterface::QAndroidApplication::context();
     if (activity.isValid())
-        activity.callMethod<void>("setMotionCamLandscapeOnly", landscapeOnly);
+        activity.callMethod<void>("setRawPreampLandscapeOnly", landscapeOnly);
 #endif
 }
 
@@ -2964,7 +2964,7 @@ void MainWindow::showTouchComboChoices(QComboBox* combo) {
         ? std::max(0, anchor.y())
         : std::max(0, anchor.y() - combo->height() - height);
     choices->setGeometry(x, y, width, height);
-    new motioncam::TouchScrolling(choices);
+    new rawpreamp::TouchScrolling(choices);
     connect(choices, &QListWidget::itemClicked, overlay,
             [this, combo, overlay](QListWidgetItem* item) {
         combo->setCurrentIndex(item->data(Qt::UserRole).toInt());
@@ -2977,7 +2977,7 @@ void MainWindow::showTouchComboChoices(QComboBox* combo) {
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         if (watched->property("touchComboBackdrop").toBool() &&
             event->type() == QEvent::MouseButtonRelease) {
             if (auto* overlay = qobject_cast<QWidget*>(watched)) {
@@ -3126,13 +3126,13 @@ void MainWindow::mountFile(const QString& filePath) {
             auto future = QtConcurrent::run([filePath, &importError] {
                 try {
 #ifdef __ANDROID__
-                    const auto sidecarError = motioncam::syncSidecarsForImport(filePath);
+                    const auto sidecarError = rawpreamp::syncSidecarsForImport(filePath);
                     if (!sidecarError.isEmpty()) spdlog::warn("{}", sidecarError.toStdString());
 #endif
-                    return motioncam::extractReviewArchive(filePath);
+                    return rawpreamp::extractReviewArchive(filePath);
                 } catch (...) {
                     importError = std::current_exception();
-                    return motioncam::ArchiveImportResult{};
+                    return rawpreamp::ArchiveImportResult{};
                 }
             });
             waitForBackgroundTask(future);
@@ -3141,7 +3141,7 @@ void MainWindow::mountFile(const QString& filePath) {
             if (progress) progress->close();
             mountFileImpl(extracted.sourcePath, filePath, extracted.temporaryRoot,
                           extracted.sidecarPath, extracted.gyroflowSidecarPath);
-        } catch (const motioncam::InsufficientArchiveSpace& error) {
+        } catch (const rawpreamp::InsufficientArchiveSpace& error) {
             if (progress) progress->close();
             mCancelImportBatch = mImportBatchActive;
             QMessageBox::critical(this, tr("Not enough temporary space"),
@@ -3161,7 +3161,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                const QString& sidecarPath,
                                const QString& gyroflowSidecarPath) {
     QElapsedTimer mountTimer;
-    if (motioncam::debugInstrumentation || mGalleryPerformanceTestActive) mountTimer.start();
+    if (rawpreamp::debugInstrumentation || mGalleryPerformanceTestActive) mountTimer.start();
     const auto mountElapsed = [&mountTimer] {
         return mountTimer.isValid() ? mountTimer.elapsed() : qint64{0};
     };
@@ -3169,25 +3169,25 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     if (mGalleryPerformanceTestActive)
         spdlog::info("GALLERY_PERF event=clip_import_start clip={} path={}",
                      importIndex, filePath.toStdString());
-    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: request started", filePath.toStdString());
+    RAWPREAMP_DIAGNOSTIC_INFO("Mount timing [{}]: request started", filePath.toStdString());
     const QString normalizedPath = QFileInfo(importPath).absoluteFilePath();
     for (const auto& mounted : mMountedFiles) {
         bool sameSource = QFileInfo(mounted.importFile).absoluteFilePath() == normalizedPath;
 #ifdef __ANDROID__
-        sameSource = sameSource || motioncam::sameImportedSource(mounted.importFile, importPath);
+        sameSource = sameSource || rawpreamp::sameImportedSource(mounted.importFile, importPath);
 #endif
         if (sameSource) {
-            if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
+            if (!temporaryRoot.isEmpty()) rawpreamp::removeReviewArchive(temporaryRoot);
             return;
         }
     }
     if (mMountInProgress) {
         if (mMountPathInProgress == normalizedPath) {
-            if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
+            if (!temporaryRoot.isEmpty()) rawpreamp::removeReviewArchive(temporaryRoot);
             return;
         }
         QTimer::singleShot(200, this, [this, importPath] { mountFile(importPath); });
-        if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
+        if (!temporaryRoot.isEmpty()) rawpreamp::removeReviewArchive(temporaryRoot);
         return;
     }
     mMountInProgress = true;
@@ -3197,12 +3197,12 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     const QFileInfo stagedFileInfo(filePath);
     auto fileName = fileInfo.fileName();
 #ifdef __ANDROID__
-    fileName = motioncam::importDisplayName(filePath);
+    fileName = rawpreamp::importDisplayName(filePath);
 #endif
     QString destinationRoot = mCacheRootFolder;
 #ifdef __APPLE__
     if (destinationRoot.isEmpty()) {
-        destinationRoot = QDir(QDir::homePath()).filePath("Mounts/MotionCamFuse");
+        destinationRoot = QDir(QDir::homePath()).filePath("Mounts/RawPreamp");
     }
 #else
     if (destinationRoot.isEmpty()) {
@@ -3215,7 +3215,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         ? fileName + "-mounted"
         : QFileInfo(fileName).baseName();
     auto dstPath = destinationRoot + "/" + mountName;
-    motioncam::MountId mountId;
+    rawpreamp::MountId mountId;
 
     std::unique_ptr<QProgressDialog> singleProgress;
     QProgressDialog* mountProgress = mImportBatchProgress.data();
@@ -3226,7 +3226,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         mountProgress->setWindowModality(Qt::WindowModal);
         mountProgress->setCancelButton(nullptr);
         mountProgress->setMinimumDuration(0);
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             showTouchProgress(*mountProgress, this);
         } else {
             mountProgress->show();
@@ -3235,11 +3235,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     }
 #ifdef __ANDROID__
     auto sourcePreparation = QtConcurrent::run([filePath] {
-        QString error = motioncam::refreshImportedSource(filePath);
+        QString error = rawpreamp::refreshImportedSource(filePath);
         if (!error.isEmpty()) return error;
         // Folder refresh already indexes every document, including sidecars.
         if (QFileInfo(filePath).isDir()) return QString();
-        const QString sidecarError = motioncam::syncSidecarsForImport(filePath);
+        const QString sidecarError = rawpreamp::syncSidecarsForImport(filePath);
         if (!sidecarError.isEmpty()) spdlog::warn("{}", sidecarError.toStdString());
         return QString();
     });
@@ -3273,7 +3273,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
         } catch (const std::exception& error) {
             mountError = QString::fromUtf8(error.what());
             spdlog::error("Mount failed [{}]: {}", filePath.toStdString(), error.what());
-            return motioncam::InvalidMountId;
+            return rawpreamp::InvalidMountId;
         }
     });
     waitForBackgroundTask(future);
@@ -3283,16 +3283,16 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     if (mGalleryPerformanceTestActive)
         spdlog::info(
             "GALLERY_PERF event=fuse_startup_complete clip={} mount={} success={} latency_ms={}",
-            importIndex, mountId, mountId != motioncam::InvalidMountId,
+            importIndex, mountId, mountId != rawpreamp::InvalidMountId,
             fuseElapsed);
-    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: backend mount {:.1f} ms (total {:.1f} ms)",
+    RAWPREAMP_DIAGNOSTIC_INFO("Mount timing [{}]: backend mount {:.1f} ms (total {:.1f} ms)",
                  filePath.toStdString(),
                  static_cast<double>(mountElapsed() - backendStarted),
                  static_cast<double>(mountElapsed()));
     mMountInProgress = false;
     mMountPathInProgress.clear();
-    if (mountId == motioncam::InvalidMountId) {
-        if (!temporaryRoot.isEmpty()) motioncam::removeReviewArchive(temporaryRoot);
+    if (mountId == rawpreamp::InvalidMountId) {
+        if (!temporaryRoot.isEmpty()) rawpreamp::removeReviewArchive(temporaryRoot);
         QMessageBox::critical(this, "Error",
             QString("There was an error importing the file. (error: %1)").arg(mountError));
         return;
@@ -3305,7 +3305,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // Create a widget to hold a filename label and buttons
     auto* fileWidget = new QWidget(scrollContent);
 
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         fileWidget->setMinimumHeight(156);
         fileWidget->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Fixed);
     } else {
@@ -3351,11 +3351,11 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // Create and add the filename label
     auto* fileLabel = new QLabel(stagedFileInfo.isDir() ? fileName : QFileInfo(fileName).baseName(), fileWidget);
 #ifdef __ANDROID__
-    fileLabel->setToolTip(motioncam::importSourceLocation(filePath));
+    fileLabel->setToolTip(rawpreamp::importSourceLocation(filePath));
 #else
     fileLabel->setToolTip(filePath);
 #endif
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         fileLabel->setStyleSheet("font-weight: bold; font-size: 13pt;");
     } else {
         fileLabel->setStyleSheet("font-weight: bold; font-size: 12pt;");
@@ -3437,7 +3437,7 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     // Create and add the source folder label
     QString sourceDirectory = fileInfo.path();
 #ifdef __ANDROID__
-    sourceDirectory = motioncam::importSourceLocation(filePath);
+    sourceDirectory = rawpreamp::importSourceLocation(filePath);
 #endif
     auto* sourceLabel = new QLabel(QString("Source: %1").arg(sourceDirectory), fileWidget);
     sourceLabel->setObjectName(QStringLiteral("sourceDirectoryLabel"));
@@ -3611,12 +3611,12 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                 fileInfo.baseName(), *info->presentationTimestamps,
                 info->timingTimeBaseNum, info->timingTimeBaseDen, info->fps,
                 info->timingUsesCfrMapping, info->frameRateInfo,
-                motioncam::touchUi() ? ui->centralwidget : this);
-            if (motioncam::touchUi()) {
+                rawpreamp::touchUi() ? ui->centralwidget : this);
+            if (rawpreamp::touchUi()) {
                 dialog->setWindowFlags(Qt::Widget);
                 dialog->setAutoFillBackground(true);
 #ifdef __ANDROID__
-                new motioncam::PageCrossfade(dialog);
+                new rawpreamp::PageCrossfade(dialog);
 #endif
             }
             mTimingDialogs.insert(mountId, dialog);
@@ -3632,9 +3632,9 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
                                  info->fps, info->timingUsesCfrMapping,
                                  info->frameRateInfo);
         }
-        if (motioncam::touchUi()) dialog->setGeometry(ui->centralwidget->rect());
+        if (rawpreamp::touchUi()) dialog->setGeometry(ui->centralwidget->rect());
 #ifdef __ANDROID__
-        motioncam::PageCrossfade::show(dialog);
+        rawpreamp::PageCrossfade::show(dialog);
         updateAndroidOrientationPolicy();
 #else
         dialog->show();
@@ -3749,14 +3749,14 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
     });
 
     mMountedFiles.append(
-        motioncam::MountedFile(mountId, filePath, importPath));
+        rawpreamp::MountedFile(mountId, filePath, importPath));
     if (!temporaryRoot.isEmpty()) mArchiveTemporaryRoots.insert(mountId, temporaryRoot);
     // Session loading writes the complete session after the batch. Rewriting
     // it for every imported clip adds quadratic JSON/file-system work and is
     // especially visible in automated multi-clip diagnostics.
     if (!mGalleryPerformanceTestActive && !mImportBatchActive) autoSaveSession();
 
-    MOTIONCAM_DIAGNOSTIC_INFO("Mount timing [{}]: UI/card/session complete {:.1f} ms",
+    RAWPREAMP_DIAGNOSTIC_INFO("Mount timing [{}]: UI/card/session complete {:.1f} ms",
                  filePath.toStdString(), static_cast<double>(mountElapsed()));
     if (mGalleryPerformanceTestActive) {
         const qint64 importElapsed = mountElapsed();
@@ -3773,12 +3773,12 @@ void MainWindow::mountFileImpl(const QString& filePath, const QString& importPat
 
 void MainWindow::mountFiles(
         const QStringList& filePaths,
-        const std::function<void(const motioncam::MountedFile&)>& mounted) {
+        const std::function<void(const rawpreamp::MountedFile&)>& mounted) {
     if (filePaths.isEmpty()) return;
 #ifdef __ANDROID__
     struct SourceImportBatch {
-        SourceImportBatch() { motioncam::beginSourceImportBatch(); }
-        ~SourceImportBatch() { motioncam::endSourceImportBatch(); }
+        SourceImportBatch() { rawpreamp::beginSourceImportBatch(); }
+        ~SourceImportBatch() { rawpreamp::endSourceImportBatch(); }
     } sourceImportBatch;
 #endif
     if (filePaths.size() == 1) {
@@ -3802,7 +3802,7 @@ void MainWindow::mountFiles(
     if (auto* bar = progress.findChild<QProgressBar*>())
         bar->setFormat(tr("0 / %1").arg(filePaths.size()));
     mImportBatchProgress = &progress;
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         showTouchProgress(progress, this);
     } else {
         progress.show();
@@ -3839,7 +3839,7 @@ void MainWindow::mountFiles(
     }
 }
 
-motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountId) const {
+rawpreamp::RenderSettings MainWindow::settingsForMount(rawpreamp::MountId mountId) const {
     auto settings = mLocalSettings.value(mountId, mGlobalRenderSettings);
     settings.excludeGps = mExcludeGps;
     // Source sidecars can be routed somewhere other than the conventional
@@ -3865,9 +3865,9 @@ motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountI
                 settings.ignoreForwardMat = mountedInfo->ignoreForwardMatOverride;
             break;
         }
-        const auto sidecarPath = motioncam::vfs::sidecarPath(mounted.srcFile.toStdString());
+        const auto sidecarPath = rawpreamp::vfs::sidecarPath(mounted.srcFile.toStdString());
         if (boost::filesystem::exists(sidecarPath)) {
-            const auto sidecar = motioncam::CalibrationData::loadFromFile(sidecarPath.string());
+            const auto sidecar = rawpreamp::CalibrationData::loadFromFile(sidecarPath.string());
             if (sidecar) {
                 if (sidecar->hasOrientation) settings.orientation = sidecar->orientation;
                 if (sidecar->hasIgnoreForwardMat) settings.ignoreForwardMat = sidecar->ignoreForwardMat;
@@ -3878,7 +3878,7 @@ motioncam::RenderSettings MainWindow::settingsForMount(motioncam::MountId mountI
     return settings;
 }
 
-void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeconds,
+void MainWindow::startGalleryRender(rawpreamp::MountId mountId, double startSeconds,
                                     bool backfillThumbnails) {
     auto settings = previewRenderSettings(settingsForMount(mountId));
     const auto info = mFuseFilesystem->getFileInfo(mountId);
@@ -3918,7 +3918,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                    thumbnailCollectionEnabled, thumbnailPrecacheEnabled,
                    diagnostics, clippingEnabled,
                    histogramEnabled, nativePresenter, directPresenter, thumbnailPixelRatio, thumbnailRenderBounds] {
-        const auto taskStarted = motioncam::galleryBenchmarkNow();
+        const auto taskStarted = rawpreamp::galleryBenchmarkNow();
         size_t deliveredFrames = 0;
         size_t thumbnailFrames = 0;
         double displayDecodeMs = 0.0;
@@ -3926,17 +3926,17 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
         if (diagnostics)
             spdlog::info("GALLERY_PERF event=gallery_render_task_start mount={} generation={} first_frame={}",
                          mountId, generation, firstFrame);
-        const auto handoffStarted = motioncam::galleryBenchmarkNow();
+        const auto handoffStarted = rawpreamp::galleryBenchmarkNow();
         std::unique_lock gallerySlot(mGalleryRenderMutex);
         const double handoffMs = std::chrono::duration<double, std::milli>(
-            motioncam::galleryBenchmarkNow() - handoffStarted).count();
+            rawpreamp::galleryBenchmarkNow() - handoffStarted).count();
         if (mGalleryGeneration.load() != generation) {
             if (diagnostics)
                 spdlog::info(
                     "GALLERY_PERF event=gallery_render_task_cancelled mount={} generation={} stage=handoff wait_ms={:.3f} total_ms={:.3f}",
                     mountId, generation, handoffMs,
                     std::chrono::duration<double, std::milli>(
-                        motioncam::galleryBenchmarkNow() - taskStarted).count());
+                        rawpreamp::galleryBenchmarkNow() - taskStarted).count());
             return;
         }
         if (diagnostics && handoffMs >= 1.0)
@@ -3944,7 +3944,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                 "GALLERY_PERF event=gallery_render_handoff mount={} generation={} wait_ms={:.3f}",
                 mountId, generation, handoffMs);
         try {
-            motioncam::PreviewOptions options;
+            rawpreamp::PreviewOptions options;
             options.firstFrame = firstFrame;
             options.clippingEnabled = clippingEnabled;
             options.retainSourceSamples = histogramEnabled;
@@ -3966,12 +3966,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                  backfillThumbnails, &presentedFirstFrame,
                  &deliveredFrames, &thumbnailFrames, &displayDecodeMs, &deliveryWaitMs,
                  &taskStarted, diagnostics, nativePresenter](
-                    motioncam::PreviewFrame&& preview) {
+                    rawpreamp::PreviewFrame&& preview) {
                     // A materialization already in progress may complete after
                     // the gallery closes. Do not touch the dialog or process
                     // that frame once its preview generation is cancelled.
                     if (mGalleryGeneration.load() != generation) return;
-                    const auto decodeStarted = motioncam::galleryBenchmarkNow();
+                    const auto decodeStarted = rawpreamp::galleryBenchmarkNow();
                     const bool collectThumbnail = thumbnailCollectionEnabled->load();
                     const int rawOrientation = !isSequence
                         ? normalizedGalleryOrientation(preview.metadata.orientation) : 0;
@@ -3980,12 +3980,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     // full playback depth for FFmpeg sequences.
                     const bool rgb24 = (preview.displayBitDepth <= 8 ||
                         (collectThumbnail && directPresenter)) &&
-                        !motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_FORCE_RGB48");
+                        !rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_FORCE_RGB48");
                     const bool hashPreview =
-                        motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
-                    motioncam::VulkanGalleryOutput gpuOutput;
+                        rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_HASH_PREVIEW");
+                    rawpreamp::VulkanGalleryOutput gpuOutput;
                     gpuOutput.requireZeroCopy =
-                        motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY");
+                        rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_REQUIRE_ZERO_COPY");
                     gpuOutput.width = preview.width;
                     gpuOutput.height = preview.height;
                     // Direct presentation can use the GPU's rotated RGB24
@@ -4061,7 +4061,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         frame->sourceLease = std::make_shared<std::pair<std::shared_ptr<void>,std::shared_ptr<void>>>(
                             std::move(preview.galleryStateLease),std::move(preview.gallerySource.deviceLease));
                     }
-                    const auto colorFinished = motioncam::galleryBenchmarkNow();
+                    const auto colorFinished = rawpreamp::galleryBenchmarkNow();
                     if (hashPreview) gpuFinal = false;
                     const bool gpuPreOriented = gpuFinal && isSequence &&
                         gpuOutput.orientation != 0;
@@ -4144,9 +4144,9 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     }
                     const uint32_t width = preview.width, height = preview.height;
                     displayDecodeMs += std::chrono::duration<double, std::milli>(
-                        motioncam::galleryBenchmarkNow() - decodeStarted).count();
+                        rawpreamp::galleryBenchmarkNow() - decodeStarted).count();
                     if (mGalleryGeneration.load() != generation) return;
-                    const auto deliveryStarted = motioncam::galleryBenchmarkNow();
+                    const auto deliveryStarted = rawpreamp::galleryBenchmarkNow();
                     // Keep the processed frame alive across queued thumbnail
                     // delivery without copying its full RGB48 payload. The
                     // playback handoff below is synchronous, so the view also
@@ -4233,13 +4233,13 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     if(backfillThumbnails)return;
                     if (!presentedFirstFrame) {
                         const double readyMs = std::chrono::duration<double, std::milli>(
-                            motioncam::galleryBenchmarkNow() - taskStarted).count();
+                            rawpreamp::galleryBenchmarkNow() - taskStarted).count();
                         if (diagnostics)
                             spdlog::info(
                                 "GALLERY_PERF event=gallery_first_frame_ready mount={} generation={} width={} height={} display_bpc={} latency_ms={:.3f}",
                                 mountId, generation, width, height,
                                 rgb24 ? 8 : 16, readyMs);
-                        const auto presentationStarted = motioncam::galleryBenchmarkNow();
+                        const auto presentationStarted = rawpreamp::galleryBenchmarkNow();
                         QMetaObject::invokeMethod(this, [&, width, height] {
                             if (mGalleryGeneration.load() != generation) return;
                             if (player) player->presentRgb48Frame(
@@ -4258,17 +4258,17 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                                 "GALLERY_PERF event=gallery_first_frame_handoff mount={} generation={} presentation_ms={:.3f} total_ms={:.3f}",
                                 mountId, generation,
                                 std::chrono::duration<double, std::milli>(
-                                    motioncam::galleryBenchmarkNow() - presentationStarted).count(),
+                                    rawpreamp::galleryBenchmarkNow() - presentationStarted).count(),
                                 std::chrono::duration<double, std::milli>(
-                                    motioncam::galleryBenchmarkNow() - taskStarted).count());
+                                    rawpreamp::galleryBenchmarkNow() - taskStarted).count());
                     }
-                    const auto pushStarted = motioncam::galleryBenchmarkNow();
+                    const auto pushStarted = rawpreamp::galleryBenchmarkNow();
                     auto pushResult = ClipPlayerDialog::FramePushResult::Retry;
                     size_t pushRetries = 0;
                     while (pushResult == ClipPlayerDialog::FramePushResult::Retry &&
                            mGalleryGeneration.load() == generation) {
                         QMetaObject::invokeMethod(this, [&] {
-                            const auto uiStarted = motioncam::galleryBenchmarkNow();
+                            const auto uiStarted = rawpreamp::galleryBenchmarkNow();
                             if (mGalleryGeneration.load() != generation)
                                 pushResult = ClipPlayerDialog::FramePushResult::Stopped;
                             else if (player) pushResult = player->pushRgb48Frame(
@@ -4285,7 +4285,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                             if (diagnostics)
                                 spdlog::info("GALLERY_PERF event=gallery_push_ui elapsed_ms={:.3f}",
                                     std::chrono::duration<double, std::milli>(
-                                        motioncam::galleryBenchmarkNow()-uiStarted).count());
+                                        rawpreamp::galleryBenchmarkNow()-uiStarted).count());
                         }, Qt::BlockingQueuedConnection);
                         if (pushResult == ClipPlayerDialog::FramePushResult::Retry) {
                             ++pushRetries;
@@ -4296,12 +4296,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         spdlog::info("GALLERY_PERF event=gallery_callback_detail color_ms={:.3f} prepare_ms={:.3f} push_ms={:.3f} push_retries={}",
                             std::chrono::duration<double, std::milli>(colorFinished-decodeStarted).count(),
                             std::chrono::duration<double, std::milli>(pushStarted-colorFinished).count(),
-                            std::chrono::duration<double, std::milli>(motioncam::galleryBenchmarkNow()-pushStarted).count(),
+                            std::chrono::duration<double, std::milli>(rawpreamp::galleryBenchmarkNow()-pushStarted).count(),
                             pushRetries);
                     if (pushResult == ClipPlayerDialog::FramePushResult::Stopped)
                         throw std::runtime_error("Gallery decoder stopped accepting frames");
                     deliveryWaitMs += std::chrono::duration<double, std::milli>(
-                        motioncam::galleryBenchmarkNow() - deliveryStarted).count();
+                        rawpreamp::galleryBenchmarkNow() - deliveryStarted).count();
                     ++deliveredFrames;
                 };
             const auto renderRange=[&](size_t begin,size_t last){
@@ -4326,7 +4326,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                 emit galleryThumbnailBackfillFinished(
                     mountId, static_cast<int>(thumbnailFrames),
                     static_cast<qint64>(std::chrono::duration<double, std::milli>(
-                        motioncam::galleryBenchmarkNow() - taskStarted).count()));
+                        rawpreamp::galleryBenchmarkNow() - taskStarted).count()));
             if (diagnostics) {
                 const bool cancelled = mGalleryGeneration.load() != generation;
                 spdlog::info(
@@ -4336,10 +4336,10 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                     deliveredFrames, thumbnailFrames,
                     thumbnailFrames * 1000.0 / std::max(1.0,
                         std::chrono::duration<double, std::milli>(
-                            motioncam::galleryBenchmarkNow() - taskStarted).count()),
+                            rawpreamp::galleryBenchmarkNow() - taskStarted).count()),
                     displayDecodeMs, deliveryWaitMs,
                     std::chrono::duration<double, std::milli>(
-                        motioncam::galleryBenchmarkNow() - taskStarted).count());
+                        rawpreamp::galleryBenchmarkNow() - taskStarted).count());
             }
         } catch (const std::exception& error) {
             if (mGalleryGeneration.load() != generation) {
@@ -4349,7 +4349,7 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
                         mountId, generation, deliveredFrames, displayDecodeMs,
                         deliveryWaitMs,
                         std::chrono::duration<double, std::milli>(
-                            motioncam::galleryBenchmarkNow() - taskStarted).count());
+                            rawpreamp::galleryBenchmarkNow() - taskStarted).count());
                 return;
             }
             const QString detail = QString::fromUtf8(error.what());
@@ -4363,12 +4363,12 @@ void MainWindow::startGalleryRender(motioncam::MountId mountId, double startSeco
     mGalleryTasks.addFuture(QtConcurrent::run(std::move(render)));
 }
 
-void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
+void MainWindow::playMount(rawpreamp::MountId mountId, bool startRender) {
 #ifdef __ANDROID__
     if(!mClipPlayer&&startRender){
         if(mAndroidGalleryOpening)return;
         mAndroidGalleryOpening=true;
-        motioncam::stagePageCrossfade(this,motioncam::grabPageSnapshot(this),[this,mountId,startRender]{
+        rawpreamp::stagePageCrossfade(this,rawpreamp::grabPageSnapshot(this),[this,mountId,startRender]{
             mAndroidGalleryOpening=false;
             showGallery(mountId,startRender);
         });
@@ -4378,7 +4378,7 @@ void MainWindow::playMount(motioncam::MountId mountId, bool startRender) {
     showGallery(mountId,startRender);
 }
 
-void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
+void MainWindow::showGallery(rawpreamp::MountId mountId, bool startRender) {
     if (mClipPlayer) {
         mClipPlayer->selectMount(mountId);
         mClipPlayer->raise();
@@ -4445,7 +4445,7 @@ void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
             [this](int id, double startSeconds) {
                 const auto previousMountId = mGalleryMountId;
                 mGalleryMountId = id;
-                if (previousMountId != motioncam::InvalidMountId &&
+                if (previousMountId != rawpreamp::InvalidMountId &&
                     previousMountId != id)
                     mFuseFilesystem->releasePreviewResources(previousMountId);
                 startGalleryRender(id, startSeconds);
@@ -4453,7 +4453,7 @@ void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
     connect(mClipPlayer, &ClipPlayerDialog::playbackClosed, this, [this] {
         if (!mClipPlayer) return;
         ++mGalleryGeneration;
-        mGalleryMountId = motioncam::InvalidMountId;
+        mGalleryMountId = rawpreamp::InvalidMountId;
         for (const auto& mounted : mMountedFiles)
             mFuseFilesystem->releasePreviewResources(mounted.mountId);
 #ifdef __ANDROID__
@@ -4482,36 +4482,36 @@ void MainWindow::showGallery(motioncam::MountId mountId, bool startRender) {
     mClipPlayer->setNavigationReturnSnapshot([this]{
         QWidget* destination=ui->centralwidget;
         for(const auto& page:mHiddenForGallery)if(page)destination=page;
-        return motioncam::grabPageSnapshot(destination);
+        return rawpreamp::grabPageSnapshot(destination);
     });
     mClipPlayer->show();
     mClipPlayer->raise();
     updateAndroidOrientationPolicy();
 #else
-    if (motioncam::touchUi()) mClipPlayer->showFullScreen();
+    if (rawpreamp::touchUi()) mClipPlayer->showFullScreen();
     else mClipPlayer->show();
 #endif
     if (startRender) startGalleryRender(mountId);
 }
 
-void MainWindow::renderDroppedFrameThumbnail(motioncam::MountId mountId,int sourceFrame){
+void MainWindow::renderDroppedFrameThumbnail(rawpreamp::MountId mountId,int sourceFrame){
     if(!mClipPlayer||sourceFrame<0)return;
     const auto generation=++mGalleryGeneration;
     auto settings=previewRenderSettings(settingsForMount(mountId));
-    settings.options=static_cast<motioncam::FileRenderOptions>(
+    settings.options=static_cast<rawpreamp::FileRenderOptions>(
         static_cast<unsigned int>(settings.options)&
-        ~static_cast<unsigned int>(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+        ~static_cast<unsigned int>(rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION));
     QPointer<ClipPlayerDialog> player(mClipPlayer);
     auto render=[this,mountId,sourceFrame,settings,generation,player]{
         std::unique_lock gallerySlot(mGalleryRenderMutex);
         if(mGalleryGeneration.load()!=generation)return;
         try{
-            motioncam::PreviewOptions options;options.firstFrame=static_cast<size_t>(sourceFrame);
+            rawpreamp::PreviewOptions options;options.firstFrame=static_cast<size_t>(sourceFrame);
             options.skipFrame=[sourceFrame](size_t frame){return frame!=static_cast<size_t>(sourceFrame);};
             bool delivered=false;
             mFuseFilesystem->renderPreview(mountId,settings,options,
                 [this,generation](size_t,size_t,const std::string&){return mGalleryGeneration.load()==generation;},
-                [this,generation,player,mountId,sourceFrame,&delivered,settings](motioncam::PreviewFrame&& preview){
+                [this,generation,player,mountId,sourceFrame,&delivered,settings](rawpreamp::PreviewFrame&& preview){
                     if(delivered||mGalleryGeneration.load()!=generation)return;
                     applyGalleryPreviewColorTransform(preview,
                         settings.ignoreForwardMat, gainMapOnlyDebug(settings));
@@ -4565,7 +4565,7 @@ void MainWindow::selectAllFrames(){
 }
 
 void MainWindow::finalizeSelectedFrames(){
-    QList<motioncam::MountId> renderIds;
+    QList<rawpreamp::MountId> renderIds;
     if(mSelectedMountIds.isEmpty()){
         for(const auto& mounted:mMountedFiles)if(!mSelectedFrames.value(mounted.mountId).isEmpty())renderIds.append(mounted.mountId);
     }else{
@@ -4608,12 +4608,12 @@ void MainWindow::finalizeSelectedFrames(){
         QDir().mkpath(temporary);
         const auto selected=mSelectedFrames.value(mountId);
         auto original=settingsForMount(mountId);auto sourceSettings=original;
-        sourceSettings.options=static_cast<motioncam::FileRenderOptions>(
+        sourceSettings.options=static_cast<rawpreamp::FileRenderOptions>(
             static_cast<unsigned int>(sourceSettings.options)&
-            ~static_cast<unsigned int>(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
+            ~static_cast<unsigned int>(rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION));
         sourceSettings.jxlDistance=compressionDistance;
         mFuseFilesystem->updateOptions(mountId,sourceSettings);
-        motioncam::FinalizeOptions options;
+        rawpreamp::FinalizeOptions options;
         options.skipDngFrame=[selected](size_t frame){return !selected.contains(static_cast<int>(frame));};
         options.detectDuplicateDngs=false;
         // Selected frames may omit the neighbors RIFE needs for a duplicated
@@ -4647,12 +4647,12 @@ void MainWindow::finalizeSelectedFrames(){
                                              mExcludeGps,sidecarError))
                     throw std::runtime_error(sidecarError.toStdString());
             }
-            if(motioncam::effectiveBadPixelTreatment(original.badPixelTreatment,
-                    original.vignetteCorrection) == motioncam::BadPixelTreatment::OptionsJsonOnly &&
-                !(original.options & motioncam::RENDER_OPT_REMOSAIC_TO_BAYER)){
+            if(rawpreamp::effectiveBadPixelTreatment(original.badPixelTreatment,
+                    original.vignetteCorrection) == rawpreamp::BadPixelTreatment::OptionsJsonOnly &&
+                !(original.options & rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER)){
                 QString sidecar=card->property("sidecarPath").toString();
                 if(sidecar.isEmpty())
-                    sidecar=QString::fromStdString(motioncam::vfs::sidecarPath(
+                    sidecar=QString::fromStdString(rawpreamp::vfs::sidecarPath(
                         card->property("filePath").toString().toStdString()).string());
                 writeFinalizedCfaBadPixelOptions(temporary,output,sidecar,true);
             }
@@ -4685,7 +4685,7 @@ void MainWindow::finalizeSelectedFrames(){
 void MainWindow::startGalleryPerformanceTest(
         const QString& sessionPath, int playbackMilliseconds,
         bool generateThumbnails) {
-    const bool mountedMode = qEnvironmentVariable("MOTIONCAM_GALLERY_PERF_MODE") ==
+    const bool mountedMode = qEnvironmentVariable("RAWPREAMP_GALLERY_PERF_MODE") ==
         QStringLiteral("mounted");
     if (mountedMode) generateThumbnails = false;
     const QFileInfo session(sessionPath);
@@ -4696,28 +4696,28 @@ void MainWindow::startGalleryPerformanceTest(
         return;
     }
 
-    const auto suiteStarted = motioncam::galleryBenchmarkNow();
+    const auto suiteStarted = rawpreamp::galleryBenchmarkNow();
     mGalleryPerformanceTestActive = true;
     spdlog::info("GALLERY_PERF event=suite_start session={} mode={} playback_ms={} thumbnails={}",
                  session.absoluteFilePath().toStdString(),
                  mountedMode ? "mounted" : "gallery", playbackMilliseconds,
                  generateThumbnails);
-    auto thumbnailsFinished = std::make_shared<QSet<motioncam::MountId>>();
+    auto thumbnailsFinished = std::make_shared<QSet<rawpreamp::MountId>>();
     if (generateThumbnails)
         connect(this, &MainWindow::thumbnailPerformanceFinished, this,
-        [thumbnailsFinished](motioncam::MountId mountId, bool success, qint64 elapsedMs) {
+        [thumbnailsFinished](rawpreamp::MountId mountId, bool success, qint64 elapsedMs) {
             spdlog::info(
                 "GALLERY_PERF event=thumbnail_complete mount={} success={} latency_ms={}",
                 mountId, success, elapsedMs);
             thumbnailsFinished->insert(mountId);
         });
-    const auto importStarted = motioncam::galleryBenchmarkNow();
+    const auto importStarted = rawpreamp::galleryBenchmarkNow();
     spdlog::info("GALLERY_PERF event=import_thumbnail_pipeline_start");
     mPerformanceThumbnailRun = generateThumbnails;
     loadSessionFromFile(session.absoluteFilePath());
     mPerformanceThumbnailRun = false;
     const double importMs = std::chrono::duration<double, std::milli>(
-        motioncam::galleryBenchmarkNow() - importStarted).count();
+        rawpreamp::galleryBenchmarkNow() - importStarted).count();
     spdlog::info("GALLERY_PERF event=session_import_complete clips={} latency_ms={:.3f}",
                  mMountedFiles.size(), importMs);
     if (mMountedFiles.isEmpty()) {
@@ -4727,17 +4727,17 @@ void MainWindow::startGalleryPerformanceTest(
     }
 
 #ifdef __ANDROID__
-    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_SIDECAR_SCAN")) {
+    if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_SIDECAR_SCAN")) {
         QStringList paths;
         for (const auto& clip : mMountedFiles) paths << clip.importFile;
         QElapsedTimer scanTimer;
         scanTimer.start();
-        motioncam::scanDirectoryForSidecars(QStringLiteral("benchmark"), paths.join(QChar('\n')));
+        rawpreamp::scanDirectoryForSidecars(QStringLiteral("benchmark"), paths.join(QChar('\n')));
         QEventLoop scanEvents;
         QTimer poll;
         QString result;
         connect(&poll, &QTimer::timeout, &scanEvents, [&] {
-            result = motioncam::sidecarScanStatus();
+            result = rawpreamp::sidecarScanStatus();
             if (result.startsWith("done:") || result.startsWith("error:") || result == "cancelled")
                 scanEvents.quit();
         });
@@ -4747,7 +4747,7 @@ void MainWindow::startGalleryPerformanceTest(
                      paths.size(), scanTimer.elapsed(), result.toStdString());
     }
 #endif
-    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_IMPORT_ONLY")) {
+    if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_IMPORT_ONLY")) {
         spdlog::info("GALLERY_PERF event=suite_complete mode=import clips={} latency_ms={:.3f}",
                      mMountedFiles.size(), importMs);
         QCoreApplication::exit(0);
@@ -4759,14 +4759,14 @@ void MainWindow::startGalleryPerformanceTest(
             "GALLERY_PERF event=cold_gallery_start clips={} thumbnails_enabled={} thumbnails_complete={} import_ms={:.3f}",
             mMountedFiles.size(), generateThumbnails, thumbnailsFinished->size(),
             std::chrono::duration<double, std::milli>(
-                motioncam::galleryBenchmarkNow() - importStarted).count());
+                rawpreamp::galleryBenchmarkNow() - importStarted).count());
 
     // Keep mounted reads off the UI thread. FUSE callbacks and mount setup can
     // need that thread while a client is blocked waiting for a frame.
     if (mountedMode) {
         struct MountedSampleClip {
             int index;
-            motioncam::MountId mount;
+            rawpreamp::MountId mount;
             QString path;
             float jxlDistance;
         };
@@ -4805,7 +4805,7 @@ void MainWindow::startGalleryPerformanceTest(
                     positions.push_back({"after_seek", midpoint + 1});
                 bool sequentialCountValid = false;
                 const int sequentialCount = qEnvironmentVariableIntValue(
-                    "MOTIONCAM_GALLERY_PERF_MOUNTED_SEQUENTIAL_COUNT",
+                    "RAWPREAMP_GALLERY_PERF_MOUNTED_SEQUENTIAL_COUNT",
                     &sequentialCountValid);
                 if (sequentialCountValid && sequentialCount > 0) {
                     positions.clear();
@@ -4837,20 +4837,20 @@ void MainWindow::startGalleryPerformanceTest(
                     }
                     const qint64 readMs = timer.elapsed();
                     if (complete && qEnvironmentVariableIsSet(
-                            "MOTIONCAM_GALLERY_PERF_COMPRESS_JXL")) {
+                            "RAWPREAMP_GALLERY_PERF_COMPRESS_JXL")) {
                         const size_t inputBytes = dng.size();
                         timer.restart();
                         bool compressed = true;
                         try {
-                            motioncam::RenderSettings settings;
+                            rawpreamp::RenderSettings settings;
                             settings.jxlDistance = clip.jxlDistance;
-                            motioncam::vfs::DngFinalizeOptions options;
+                            rawpreamp::vfs::DngFinalizeOptions options;
                             options.writeTiming = false;
                             options.compression = true;
                             options.packToWhiteLevel = qEnvironmentVariableIsSet(
-                                "MOTIONCAM_GALLERY_PERF_PACK_TO_WHITE_LEVEL");
+                                "RAWPREAMP_GALLERY_PERF_PACK_TO_WHITE_LEVEL");
                             options.sourceName = "gallery_perf_jxl";
-                            motioncam::vfs::finalizeDng(dng, settings, options);
+                            rawpreamp::vfs::finalizeDng(dng, settings, options);
                         } catch (const std::exception& error) {
                             spdlog::error("GALLERY_PERF event=jxl_encode_failed clip={} frame={} reason={}",
                                           clip.index, frame, error.what());
@@ -4863,15 +4863,15 @@ void MainWindow::startGalleryPerformanceTest(
                     }
                     timer.restart();
                     const size_t bytes = dng.size();
-                    motioncam::DNGImageLayout layout;
+                    rawpreamp::DNGImageLayout layout;
                     const bool layoutValid = complete &&
-                        motioncam::DNGDecoder::getImageLayout(dng, layout);
+                        rawpreamp::DNGDecoder::getImageLayout(dng, layout);
                     const uint32_t linearizationEntries = complete
-                        ? motioncam::DNGDecoder::getLinearizationTableCount(dng) : 0;
+                        ? rawpreamp::DNGDecoder::getLinearizationTableCount(dng) : 0;
                     const qint64 layoutMs = timer.elapsed();
                     if (clip.index == 0 && frame == 0) {
-                        const QString dumpPath = QString::fromLocal8Bit(motioncam::debugEnvironment(
-                            "MOTIONCAM_GALLERY_PERF_DUMP_DNG"));
+                        const QString dumpPath = QString::fromLocal8Bit(rawpreamp::debugEnvironment(
+                            "RAWPREAMP_GALLERY_PERF_DUMP_DNG"));
                         if (!dumpPath.isEmpty()) {
                             QFile dump(dumpPath);
                             if (dump.open(QIODevice::WriteOnly))
@@ -4880,16 +4880,16 @@ void MainWindow::startGalleryPerformanceTest(
                         }
                     }
                     const qint64 previewStartedMs = timer.elapsed();
-                    motioncam::PreviewFrame preview;
+                    rawpreamp::PreviewFrame preview;
                     const bool skipPreview = qEnvironmentVariableIsSet(
-                        "MOTIONCAM_GALLERY_PERF_SKIP_PREVIEW_DECODE");
+                        "RAWPREAMP_GALLERY_PERF_SKIP_PREVIEW_DECODE");
                     const bool decoded = complete && (skipPreview ||
-                        motioncam::DNGDecoder::decodePreview(
-                            std::move(dng), motioncam::RenderSettings{},
+                        rawpreamp::DNGDecoder::decodePreview(
+                            std::move(dng), rawpreamp::RenderSettings{},
                             preview, false));
                     const qint64 previewMs = timer.elapsed() - previewStartedMs;
-                    const bool hashPreview = motioncam::debugEnvironmentIsSet(
-                        "MOTIONCAM_GALLERY_PERF_HASH_PREVIEW");
+                    const bool hashPreview = rawpreamp::debugEnvironmentIsSet(
+                        "RAWPREAMP_GALLERY_PERF_HASH_PREVIEW");
                     uint64_t pixelHash = hashPreview ? 1469598103934665603ull : 0;
                     if (decoded && hashPreview)
                         for (const uint8_t value : preview.rgb) {
@@ -4897,7 +4897,7 @@ void MainWindow::startGalleryPerformanceTest(
                             pixelHash *= 1099511628211ull;
                         }
                     const qint64 decodeMs = timer.elapsed();
-                    if (motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE"))
+                    if (rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE"))
                         spdlog::info("GALLERY_PERF event=mounted_decode_breakdown clip={} frame={} layout_ms={} dump_ms={} preview_ms={} hash_ms={} total_ms={}",
                                      clip.index, frame, layoutMs,
                                      previewStartedMs - layoutMs, previewMs,
@@ -4909,16 +4909,16 @@ void MainWindow::startGalleryPerformanceTest(
                                  clip.index, clip.mount, access, frame, complete, decoded,
                                  bytes, readMs, decodeMs, preview.width,
                                  preview.height,
-                                 layoutValid && layout.pixels == motioncam::DNGPixelLayout::CFA,
+                                 layoutValid && layout.pixels == rawpreamp::DNGPixelLayout::CFA,
                                  layoutValid ? layout.samplesPerPixel : 0,
                                  linearizationEntries,
                                  pixelHash);
                 }
-                if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_PARALLEL_READS") &&
+                if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_PARALLEL_READS") &&
                     files.size() >= 8) {
                     bool countValid = false;
                     const int requestedCount = qEnvironmentVariableIntValue(
-                        "MOTIONCAM_GALLERY_PERF_PARALLEL_READ_COUNT", &countValid);
+                        "RAWPREAMP_GALLERY_PERF_PARALLEL_READ_COUNT", &countValid);
                     const int parallelCount = std::min(
                         static_cast<int>(files.size()) - 3,
                         countValid ? std::clamp(requestedCount, 1, 16) : 4);
@@ -4962,7 +4962,7 @@ void MainWindow::startGalleryPerformanceTest(
 
     struct RunState {
         enum class Phase { Init, Playback, Seek, SeekPlayback, ThumbnailBackfill };
-        QVector<motioncam::MountId> mounts;
+        QVector<rawpreamp::MountId> mounts;
         int clipIndex = 0;
         int playbackMs = 3000;
         int presentedFrames = 0;
@@ -4984,27 +4984,27 @@ void MainWindow::startGalleryPerformanceTest(
     // the HQ demosaic cannot hide gallery scheduling and presentation costs.
     // Proxy-preserving runs retain the session's saved scale and quality.
     const bool preserveGalleryProxy = qEnvironmentVariableIsSet(
-        "MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY");
+        "RAWPREAMP_GALLERY_PERF_PRESERVE_PROXY");
     const bool forceHighQuality = qEnvironmentVariableIsSet(
-        "MOTIONCAM_GALLERY_PERF_FORCE_HQ");
+        "RAWPREAMP_GALLERY_PERF_FORCE_HQ");
     for (const auto mountId : state->mounts) {
         auto settings = settingsForMount(mountId);
-        settings.options = static_cast<motioncam::FileRenderOptions>(
+        settings.options = static_cast<rawpreamp::FileRenderOptions>(
             static_cast<unsigned int>(settings.options) &
             ~(preserveGalleryProxy ? 0u : static_cast<unsigned int>(
-                motioncam::RENDER_OPT_DRAFT | motioncam::RENDER_OPT_HIGHER_CFA_HQ)));
+                rawpreamp::RENDER_OPT_DRAFT | rawpreamp::RENDER_OPT_HIGHER_CFA_HQ)));
         if (forceHighQuality)
-            settings.options = static_cast<motioncam::FileRenderOptions>(
-                settings.options | motioncam::RENDER_OPT_HIGHER_CFA_HQ);
+            settings.options = static_cast<rawpreamp::FileRenderOptions>(
+                settings.options | rawpreamp::RENDER_OPT_HIGHER_CFA_HQ);
         if (!preserveGalleryProxy) settings.draftScale = 1;
         spdlog::info("GALLERY_PERF event=gallery_clip_settings mount={} draft={} scale={} hq={}",
-            mountId, bool(settings.options & motioncam::RENDER_OPT_DRAFT),
+            mountId, bool(settings.options & rawpreamp::RENDER_OPT_DRAFT),
             settings.draftScale,
-            bool(settings.options & motioncam::RENDER_OPT_HIGHER_CFA_HQ));
+            bool(settings.options & rawpreamp::RENDER_OPT_HIGHER_CFA_HQ));
         mLocalSettings.insert(mountId, settings);
         mFuseFilesystem->updateOptions(mountId, settings);
     }
-    const QString requestedViewport = qEnvironmentVariable("MOTIONCAM_GALLERY_PERF_VIEWPORT");
+    const QString requestedViewport = qEnvironmentVariable("RAWPREAMP_GALLERY_PERF_VIEWPORT");
     spdlog::info(
         "GALLERY_PERF event=gallery_mode resolution={} hq={} window={}",
         preserveGalleryProxy ? "proxy" : "full", forceHighQuality,
@@ -5024,21 +5024,21 @@ void MainWindow::startGalleryPerformanceTest(
         QCoreApplication::exit(4);
         return;
     }
-    const bool cappedPlayback=qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CAPPED");
+    const bool cappedPlayback=qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_CAPPED");
     mClipPlayer->setPerformanceUncapped(!cappedPlayback);
-    if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUDIO"))
+    if(qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_AUDIO"))
         mClipPlayer->setPerformanceAudioEnabled(true);
     spdlog::info("GALLERY_PERF event=playback_cadence mode={}",
                  cappedPlayback?"capped":"uncapped");
-    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_CLIPPING")) {
+    if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_CLIPPING")) {
         mGalleryClippingEnabled = true;
         mClipPlayer->setClippingEnabled(true);
     }
     mClipPlayer->setPerformanceOverlayPinned(
-        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUTO_FADE"));
+        !qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_AUTO_FADE"));
     mClipPlayer->setHistogramEnabled(!qEnvironmentVariableIsSet(
-        "MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM"));
-    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_EXPAND_HISTOGRAM"))
+        "RAWPREAMP_GALLERY_PERF_NO_HISTOGRAM"));
+    if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_EXPAND_HISTOGRAM"))
         mClipPlayer->setHistogramExpanded(true);
     spdlog::info("GALLERY_PERF event=gallery_histogram enabled={} overlay_pinned=true",
                  mClipPlayer->histogramEnabled());
@@ -5046,8 +5046,8 @@ void MainWindow::startGalleryPerformanceTest(
     // The optional decode-focused run excludes thumbnail collection and row
     // layout work. The ordinary performance run includes both.
     const bool showThumbnailStrip = !qEnvironmentVariableIsSet(
-        "MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS") &&
-        !qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK");
+        "RAWPREAMP_GALLERY_PERF_HIDE_THUMBNAILS") &&
+        !qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK");
     mClipPlayer->setThumbnailStripVisible(showThumbnailStrip);
     spdlog::info("GALLERY_PERF event=thumbnail_strip enabled={}", showThumbnailStrip);
     // Playback samples target the most demanding normal UI geometry. Keep the
@@ -5063,7 +5063,7 @@ void MainWindow::startGalleryPerformanceTest(
         mClipPlayer->resize(viewportWidth, viewportHeight);
         spdlog::info("GALLERY_PERF event=gallery_viewport requested={}x{}",
             viewportWidth, viewportHeight);
-    } else if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_FULLSCREEN")) {
+    } else if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_FULLSCREEN")) {
         mClipPlayer->showFullScreen();
     } else {
         mClipPlayer->showMaximized();
@@ -5073,7 +5073,7 @@ void MainWindow::startGalleryPerformanceTest(
 
     auto finishSuite = [this, state, suiteStarted, previousClippingEnabled] {
         const double totalMs = std::chrono::duration<double, std::milli>(
-            motioncam::galleryBenchmarkNow() - suiteStarted).count();
+            rawpreamp::galleryBenchmarkNow() - suiteStarted).count();
         spdlog::info("GALLERY_PERF event=suite_complete clips={} total_ms={:.3f}",
                      state->mounts.size(), totalMs);
         if (mClipPlayer) mClipPlayer->setClippingEnabled(previousClippingEnabled);
@@ -5083,7 +5083,7 @@ void MainWindow::startGalleryPerformanceTest(
         mGalleryClippingEnabled = previousClippingEnabled;
 #ifdef __ANDROID__
         spdlog::default_logger()->flush();
-        if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_KEEP_ALIVE")) {
+        if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_KEEP_ALIVE")) {
             spdlog::info("GALLERY_PERF event=suite_waiting_for_external_stop");
             spdlog::default_logger()->flush();
             return;
@@ -5138,13 +5138,13 @@ void MainWindow::startGalleryPerformanceTest(
         state->firstPresentedIndex = -1;
         state->presentationIntervalsNs.clear();
         state->sampleTimer.restart();
-        if(qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_AUTO_FADE"))
+        if(qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_AUTO_FADE"))
             mClipPlayer->setPerformanceOverlayPinned(false);
         const int serial = ++state->actionSerial;
         if (!afterSeek && qEnvironmentVariableIsSet(
-                "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK"))
+                "RAWPREAMP_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK"))
             QTimer::singleShot(std::max(0, qEnvironmentVariableIntValue(
-                "MOTIONCAM_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK")),
+                "RAWPREAMP_GALLERY_PERF_OPEN_THUMBNAILS_DURING_PLAYBACK")),
                 this, [this, state, serial] {
                 if (state->actionSerial != serial || !mClipPlayer) return;
                 spdlog::info("GALLERY_PERF event=thumbnail_open_during_playback");
@@ -5192,7 +5192,7 @@ void MainWindow::startGalleryPerformanceTest(
                     const int seekSerial = ++state->actionSerial;
                     bool seekSecondsValid = false;
                     const double requestedSeekSeconds = qEnvironmentVariable(
-                        "MOTIONCAM_GALLERY_PERF_SEEK_SECONDS").toDouble(&seekSecondsValid);
+                        "RAWPREAMP_GALLERY_PERF_SEEK_SECONDS").toDouble(&seekSecondsValid);
                     const double target = seekSecondsValid ?
                         std::clamp(requestedSeekSeconds, 0.0,
                             mClipPlayer->currentDurationSeconds()) :
@@ -5208,8 +5208,8 @@ void MainWindow::startGalleryPerformanceTest(
                             QCoreApplication::exit(6);
                         });
                 } else {
-                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL") ||
-                        qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS")) {
+                    if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_SKIP_BACKFILL") ||
+                        qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_HIDE_THUMBNAILS")) {
                         ++state->clipIndex;
                         (*startClip)();
                         return;
@@ -5274,7 +5274,7 @@ void MainWindow::startGalleryPerformanceTest(
                 if (info && !info->isSequence) {
                     spdlog::info("GALLERY_PERF event=still_complete clip={} mount={}",
                                  state->clipIndex, mountId);
-                    if (qEnvironmentVariableIsSet("MOTIONCAM_GALLERY_PERF_GESTURES")) {
+                    if (qEnvironmentVariableIsSet("RAWPREAMP_GALLERY_PERF_GESTURES")) {
                         mClipPlayer->runPerformanceGestureTest([state, startClip] {
                             ++state->clipIndex;
                             (*startClip)();
@@ -5294,7 +5294,7 @@ void MainWindow::startGalleryPerformanceTest(
             }
         });
     connect(this, &MainWindow::galleryThumbnailBackfillFinished, this,
-        [this,state,startClip](motioncam::MountId mountId,int frames,qint64 elapsedMs){
+        [this,state,startClip](rawpreamp::MountId mountId,int frames,qint64 elapsedMs){
             if(state->phase!=RunState::Phase::ThumbnailBackfill||
                state->clipIndex>=state->mounts.size()||mountId!=state->mounts[state->clipIndex])return;
             ++state->actionSerial;
@@ -5339,12 +5339,12 @@ void MainWindow::revealSourceJson(const QString& jsonPath,
                                   const QString& clipPath) {
 #ifdef __ANDROID__
     if (clipPath.isEmpty() ||
-        motioncam::sourceDirectoryForImport(clipPath).isEmpty()) {
+        rawpreamp::sourceDirectoryForImport(clipPath).isEmpty()) {
         QMessageBox::information(this, tr("Source directory required"),
             tr("Link this clip's source directory before editing its JSON."));
         return;
     }
-    const QString error = motioncam::editSidecarInExternalApp(
+    const QString error = rawpreamp::editSidecarInExternalApp(
         clipPath, QFileInfo(jsonPath).fileName());
     if (!error.isEmpty()) {
         QMessageBox::critical(this, tr("Could not open JSON"), error);
@@ -5451,7 +5451,7 @@ void MainWindow::removeFile(QWidget* fileWidget, bool releaseMount) {
 
         auto it = std::find_if(
             mMountedFiles.begin(), mMountedFiles.end(),
-            [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
+            [mountId](const rawpreamp::MountedFile& f) { return f.mountId == mountId; });
         if(it != mMountedFiles.end()) {
             mMountedFiles.erase(it);
         }
@@ -5469,9 +5469,9 @@ void MainWindow::removeFile(QWidget* fileWidget, bool releaseMount) {
         autoSaveSession();
 }
 
-void MainWindow::cleanupArchiveMount(motioncam::MountId mountId) {
+void MainWindow::cleanupArchiveMount(rawpreamp::MountId mountId) {
     const QString root = mArchiveTemporaryRoots.take(mountId);
-    if (!root.isEmpty() && !motioncam::removeReviewArchive(root))
+    if (!root.isEmpty() && !rawpreamp::removeReviewArchive(root))
         spdlog::warn("Could not remove archive staging directory: {}", root.toStdString());
 }
 
@@ -5570,7 +5570,7 @@ void MainWindow::discardFile(QWidget* fileWidget) {
     if(ok) {
         auto it = std::find_if(
             mMountedFiles.begin(), mMountedFiles.end(),
-            [mountId](const motioncam::MountedFile& f) { return f.mountId == mountId; });
+            [mountId](const rawpreamp::MountedFile& f) { return f.mountId == mountId; });
         if(it != mMountedFiles.end()) {
             mMountedFiles.erase(it);
         }
@@ -5591,13 +5591,13 @@ std::optional<QString> MainWindow::ensureRifeRuntime() {
 #else
     const QString runtimePython = QDir(runtimeRoot).absoluteFilePath(".venv/bin/python");
 #endif
-    const QString readyMarker = QDir(runtimeRoot).absoluteFilePath(".motioncam-ready");
+    const QString readyMarker = QDir(runtimeRoot).absoluteFilePath(".rawpreamp-ready");
     if (QFileInfo::exists(readyMarker) && QFileInfo::exists(runtimePython) &&
         QFileInfo::exists(QDir(runtimeRoot).absoluteFilePath("inference_img.py")))
         return runtimeRoot;
 
     const auto answer = QMessageBox::question(this, "Install frame interpolation",
-        "MotionCam Fuse needs to download and install its private RIFE runtime. "
+        "RawPreamp needs to download and install its private RIFE runtime. "
         "PyTorch and the model dependencies can require several gigabytes.\n\n"
         "Install it now?", QMessageBox::Yes | QMessageBox::No);
     if (answer != QMessageBox::Yes) return std::nullopt;
@@ -5618,7 +5618,7 @@ std::optional<QString> MainWindow::ensureRifeRuntime() {
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     progress.setAutoClose(false);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         showTouchProgress(progress,this);
     } else {
         progress.show();
@@ -5780,7 +5780,7 @@ void MainWindow::finalizeAncillaryOnly(QWidget* fileWidget, const QString& reque
             }
             if (staged.isEmpty()) {
 #ifdef __ANDROID__
-                auto* processing = dynamic_cast<motioncam::ProcessingFileSystem*>(mFuseFilesystem.get());
+                auto* processing = dynamic_cast<rawpreamp::ProcessingFileSystem*>(mFuseFilesystem.get());
                 if (!processing) throw std::runtime_error("Audio processing is unavailable");
                 const auto entry = processing->audioEntry(mountId);
                 if (entry.second && !entry.second->empty()) {
@@ -5822,15 +5822,15 @@ void MainWindow::finalizeAncillaryOnly(QWidget* fileWidget, const QString& reque
                 extension = "." + audioCodec;
             }
         } else {
-            std::shared_ptr<const motioncam::GyroTelemetry> telemetry;
+            std::shared_ptr<const rawpreamp::GyroTelemetry> telemetry;
             std::exception_ptr error;
             auto task = QtConcurrent::run([&] {
-                try { telemetry = motioncam::GyroTelemetry::load(source.toStdString(), importPath.toStdString()); }
+                try { telemetry = rawpreamp::GyroTelemetry::load(source.toStdString(), importPath.toStdString()); }
                 catch (...) { error = std::current_exception(); }
             });
             waitForBackgroundTask(task); task.waitForFinished();
             if (error) std::rethrow_exception(error);
-            if (telemetry->format() == motioncam::GyroTelemetry::Format::None)
+            if (telemetry->format() == rawpreamp::GyroTelemetry::Format::None)
                 throw std::runtime_error("This clip has no gyro telemetry");
             extension = QString::fromStdString(telemetry->extension());
             staged = QDir(staging.path()).filePath(base + extension);
@@ -5844,14 +5844,14 @@ void MainWindow::finalizeAncillaryOnly(QWidget* fileWidget, const QString& reque
         }
 #ifdef __ANDROID__
         const auto destinationMode = QSettings(PACKAGE_NAME, APP_NAME).value("android/finalizeDestination", "documents").toString();
-        const auto destination = motioncam::prepareFinalizeOutput(base, destinationMode, importPath, false);
+        const auto destination = rawpreamp::prepareFinalizeOutput(base, destinationMode, importPath, false);
         if (destination == "choose") { mPendingAndroidFinalizeCard = fileWidget; return; }
         if (!destination.startsWith("ready:")) throw std::runtime_error(destination.toStdString());
         try {
-            if (!motioncam::writeFinalizeOutputFile(destination.mid(6) + extension, staged))
+            if (!rawpreamp::writeFinalizeOutputFile(destination.mid(6) + extension, staged))
                 throw std::runtime_error("Could not export to the selected folder");
-            motioncam::finishFinalizeOutput();
-        } catch (...) { motioncam::cancelFinalizeOutput(); throw; }
+            rawpreamp::finishFinalizeOutput();
+        } catch (...) { rawpreamp::cancelFinalizeOutput(); throw; }
 #else
         const auto output = QDir(QFileInfo(fileWidget->property("mountPath").toString()).absolutePath()).filePath(base + extension);
         if (QFile::exists(output) && QMessageBox::question(this, tr("Replace existing output?"), output,
@@ -5958,7 +5958,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         "android/finalizeDestination", "documents").toString();
     const QString requestedOutputBase = QFileInfo(srcFile).completeBaseName() +
         (metadataOnly ? "_METADATA" : "_LLOG60_NATIVE");
-    const QString destination = motioncam::prepareFinalizeOutput(
+    const QString destination = rawpreamp::prepareFinalizeOutput(
         requestedOutputBase, destinationMode,
         fileWidget->property("importPath").toString(), false);
     if (destination == "choose") {
@@ -5972,7 +5972,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     const QString androidOutputBase = destination.mid(6);
     bool androidOutputFinished = false;
     const auto androidOutputGuard = qScopeGuard([&] {
-        if (!androidOutputFinished) motioncam::cancelFinalizeOutput();
+        if (!androidOutputFinished) rawpreamp::cancelFinalizeOutput();
     });
 #endif
 
@@ -5995,11 +5995,11 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     // Per-source JSON is authoritative for display orientation and therefore
     // also overrides orientation inherited from the source container/DNG.
     stagingSettings.orientation = settingsForMount(mountId).orientation;
-    stagingSettings.options &= ~motioncam::RENDER_OPT_REMOSAIC_TO_BAYER;
-    stagingSettings.options &= ~motioncam::RENDER_OPT_JPEG_COMPRESSION;
-    stagingSettings.options &= ~motioncam::RENDER_OPT_LOG_TRANSFORM;
+    stagingSettings.options &= ~rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER;
+    stagingSettings.options &= ~rawpreamp::RENDER_OPT_JPEG_COMPRESSION;
+    stagingSettings.options &= ~rawpreamp::RENDER_OPT_LOG_TRANSFORM;
     stagingSettings.draftScale = 1;
-    stagingSettings.logTransform = motioncam::LogTransformMode::Disabled;
+    stagingSettings.logTransform = rawpreamp::LogTransformMode::Disabled;
     // ignoreForwardMat is a gallery display preference. Camera Native output
     // must retain the source/calibration ForwardMatrix tags in its sidecar.
     stagingSettings.ignoreForwardMat = false;
@@ -6023,9 +6023,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
     // before Camera Native staging requests a linear RGB sequence.
     bool unsupportedBayer = false;
     const bool demosaicCfa =
-        stagingSettings.quadBayerOption == motioncam::QuadBayerMode::Demosaic ||
-        stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicColor ||
-        stagingSettings.quadBayerOption == motioncam::QuadBayerMode::DemosaicOCL;
+        stagingSettings.quadBayerOption == rawpreamp::QuadBayerMode::Demosaic ||
+        stagingSettings.quadBayerOption == rawpreamp::QuadBayerMode::DemosaicColor ||
+        stagingSettings.quadBayerOption == rawpreamp::QuadBayerMode::DemosaicOCL;
     try {
         const auto& calibration = sourceCalibration;
         const int cfaSizeOverride = calibration && calibration->hasCfaSize && calibration->cfaSize > 0
@@ -6033,7 +6033,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         if (srcFile.endsWith(".mcraw", Qt::CaseInsensitive) ||
             srcFile.endsWith(".unspektra", Qt::CaseInsensitive) ||
             srcFile.endsWith(".mcpro", Qt::CaseInsensitive)) {
-            Decoder decoder(motioncam::decoderSource(srcFile.toStdString()));
+            motioncam::Decoder decoder(rawpreamp::decoderSource(srcFile.toStdString()));
             const auto frames = decoder.getFrames();
             if (!frames.empty()) {
                 std::vector<uint8_t> frameData;
@@ -6065,7 +6065,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 #ifdef __ANDROID__
     std::pair<std::string, std::shared_ptr<std::vector<uint8_t>>> androidAudio;
     try {
-        auto* processing = dynamic_cast<motioncam::ProcessingFileSystem*>(mFuseFilesystem.get());
+        auto* processing = dynamic_cast<rawpreamp::ProcessingFileSystem*>(mFuseFilesystem.get());
         if (!processing) throw std::runtime_error("Android processing filesystem is unavailable");
         const auto audioTask = QtConcurrent::run([processing, mountId] { return processing->audioEntry(mountId); });
         waitForBackgroundTask(audioTask);
@@ -6160,13 +6160,13 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         for (const auto& path : paths) {
             if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
             const auto copy = QtConcurrent::run([path] {
-                return motioncam::writeFinalizeOutputFile(QFileInfo(path).fileName(), path);
+                return rawpreamp::writeFinalizeOutputFile(QFileInfo(path).fileName(), path);
             });
             waitForBackgroundTask(copy);
             if (!copy.result()) throw std::runtime_error("Could not save finalized output to the selected folder");
         }
         if (progress.wasCanceled()) throw std::runtime_error("Finalization cancelled");
-        motioncam::finishFinalizeOutput();
+        rawpreamp::finishFinalizeOutput();
         androidOutputFinished = true;
         progress.close();
         showAndroidNotice(tr("Finalize complete"),
@@ -6176,7 +6176,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
 
     bool retrySoftwareEncoder = false;
     try {
-        motioncam::FinalizeOptions finalizeOptions;
+        rawpreamp::FinalizeOptions finalizeOptions;
         finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
         finalizeOptions.detectDuplicateDngs = false;
         finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
@@ -6202,7 +6202,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         else ffmpeg = QStandardPaths::findExecutable("ffmpeg");
         if (!metadataOnly && ffmpeg.isEmpty())
             throw std::runtime_error(
-                "Could not find the FFmpeg executable. Install it on PATH or place it beside MotionCam Fuse.");
+                "Could not find the FFmpeg executable. Install it on PATH or place it beside RawPreamp.");
         auto probeEncoder = [&ffmpeg](const QString& name, QByteArray* help = nullptr) {
             QProcess probe;
             probe.setProcessChannelMode(QProcess::MergedChannels);
@@ -6218,10 +6218,10 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         };
         const auto hardwareEncoder = !metadataOnly && allowHardwareEncoder &&
                 (hevc || av1) && !hdrNoise
-            ? motioncam::selectHardwareVideoEncoder(ffmpeg, av1, chroma,
+            ? rawpreamp::selectHardwareVideoEncoder(ffmpeg, av1, chroma,
                 info->width, info->height, info->fps,
                 av1 ? qRound(av1Crf * 51.0 / 63.0) : qRound(encoderCrf.toDouble()))
-            : motioncam::HardwareVideoEncoder{};
+            : rawpreamp::HardwareVideoEncoder{};
         QString av1Encoder;
         QString requiredEncoder = proRes ? "prores_ks" : cineForm ? "cfhd" : QString{};
         if (!metadataOnly && av1 && hardwareEncoder.name.isEmpty()) {
@@ -6247,18 +6247,18 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         } else if (!metadataOnly && !requiredEncoder.isEmpty() && !probeEncoder(requiredEncoder)) {
             throw std::runtime_error(
                 ("This FFmpeg executable does not provide the " + requiredEncoder +
-                 " encoder. Install a compatible FFmpeg build or place it beside MotionCam Fuse.")
+                 " encoder. Install a compatible FFmpeg build or place it beside RawPreamp.")
                     .toStdString());
         }
 
 #else
-        motioncam::HardwareVideoEncoder hardwareEncoder;
-        motioncam::NativeVideoEncoder::AndroidHardwareEncoder androidEncoder;
+        rawpreamp::HardwareVideoEncoder hardwareEncoder;
+        rawpreamp::NativeVideoEncoder::AndroidHardwareEncoder androidEncoder;
         const QString av1Encoder;
         if (!metadataOnly && androidHardwareFormat) {
             if (info->width % 16 || info->height % 16)
                 throw std::runtime_error("Android hardware encoding currently requires width and height divisible by 16. Use ProRes or CineForm for this clip.");
-            androidEncoder = motioncam::NativeVideoEncoder::selectAndroidHardwareEncoder(
+            androidEncoder = rawpreamp::NativeVideoEncoder::selectAndroidHardwareEncoder(
                 h264 ? "video/avc" : av1 ? "video/av01" : "video/hevc",
                 info->width, info->height, info->fps, hardwareBitrate, hardwareBitDepth);
             hardwareEncoder.name = h264 ? "h264_mediacodec" : av1 ? "av1_mediacodec" : "hevc_mediacodec";
@@ -6319,9 +6319,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
                         DNGDecoder::getGainMaps(dng, 3, frame.deferredGainMaps);
                         frame.duplicateFrame = DNGDecoder::isDuplicateFrame(dng);
                         frame.syntheticFrame = DNGDecoder::isSyntheticFrame(dng);
-                        if (stagingSettings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
+                        if (stagingSettings.options & rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION) {
                             frame.gainMaps.clear();
-                            if (!(stagingSettings.options & motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR))
+                            if (!(stagingSettings.options & rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR))
                                 frame.deferredGainMaps.clear();
                         }
                         std::unique_lock lock(queueMutex);
@@ -6403,7 +6403,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         }
 #endif
         const bool convertToCfr =
-            stagingSettings.options & motioncam::RENDER_OPT_FRAMERATE_CONVERSION;
+            stagingSettings.options & rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION;
         QString audioPath;
         for(const QString& name:{QStringLiteral("audio.wav"),QStringLiteral("audio.flac"),QStringLiteral("audio.opus"),QStringLiteral("audio.aac")}){
             const QString candidate=stageDir.absoluteFilePath(name);
@@ -6429,7 +6429,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         args << "-f" << "nut" << "-i" << "pipe:0";
         if (!audioPath.isEmpty())
             args << "-i" << audioPath;
-        const QString llog60Lut = QString::fromStdString(motioncam::LLog60::ffmpegLut());
+        const QString llog60Lut = QString::fromStdString(rawpreamp::LLog60::ffmpegLut());
         const QString videoFilter = cineFormRgb
             ? llog60Lut +
                 ",zscale=matrixin=gbr:matrix=gbr:rangein=full:range=full:dither=ordered,format=gbrp12le"
@@ -6544,9 +6544,9 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             videoPipe = std::make_unique<NutVideoPipe>(
                 encoder, diagnostic, info->width, info->height, encoderNominalFps);
 #else
-        std::unique_ptr<motioncam::NativeVideoEncoder> videoPipe;
+        std::unique_ptr<rawpreamp::NativeVideoEncoder> videoPipe;
         if (!metadataOnly) {
-            motioncam::NativeVideoEncoder::Options options;
+            rawpreamp::NativeVideoEncoder::Options options;
             options.outputPath = partialPath.toStdString();
             options.width = info->width;
             options.height = info->height;
@@ -6568,7 +6568,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             if (!audioPath.isEmpty() && !nativeAudioCodec.isEmpty()) {
                 progress.setLabelText(tr("Encoding Camera Native audio..."));
                 const QString encodedAudio = stageDir.absoluteFilePath("native-audio." + nativeAudioCodec);
-                motioncam::AudioWriter::convertFile(audioPath.toStdString(), encodedAudio.toStdString(),
+                rawpreamp::AudioWriter::convertFile(audioPath.toStdString(), encodedAudio.toStdString(),
                     nativeAudioCodec.toStdString(), false, [&] {
                         QApplication::processEvents();
                         return !progress.wasCanceled();
@@ -6577,7 +6577,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
             }
             options.audioPath = audioPath.toStdString();
             runNativeWork([&] {
-                videoPipe = std::make_unique<motioncam::NativeVideoEncoder>(options);
+                videoPipe = std::make_unique<rawpreamp::NativeVideoEncoder>(options);
             });
         }
 #endif
@@ -6902,7 +6902,7 @@ void MainWindow::finalizeCameraNative(QWidget* fileWidget, const QString& reques
         };
         if (!metadataOnly) {
             progress.setLabelText(tr("Embedding gyro telemetry..."));
-            auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
+            auto telemetry = rawpreamp::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
             std::vector<int64_t> videoTimeline;
             for (const auto& item : sidecar["dynamic"]["frames"])
                 videoTimeline.push_back(item.at("timestampNs").get<int64_t>());
@@ -7058,7 +7058,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         return;
     }
 
-    // DirectLog audio is decoded for the mounted view. Keep its original
+    // Native Video audio is decoded for the mounted view. Keep its original
     // compressed packets when the persistent format permits the same codec.
     QString sourceAudioCodec;
     if (srcFile.contains("NATIVE", Qt::CaseInsensitive) &&
@@ -7107,7 +7107,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         QFileInfo(srcFile).suffix().compare("mcraw", Qt::CaseInsensitive) != 0) {
         QMessageBox::warning(this, tr("Finalize failed"),
             tr("7z finalization is only available for MCRAW source clips. "
-               "DNG sequences and DirectLog clips cannot be archived with this format."));
+               "DNG sequences and Native Video clips cannot be archived with this format."));
         return;
     }
 
@@ -7136,10 +7136,10 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         sourceGyroflowPath = fileWidget->property("gyroflowSidecarPath").toString();
         if (sourceSidecarPath.isEmpty())
             sourceSidecarPath = QString::fromStdString(
-                motioncam::vfs::sidecarPath(srcFile.toStdString()).string());
+                rawpreamp::vfs::sidecarPath(srcFile.toStdString()).string());
         if (sourceGyroflowPath.isEmpty())
             sourceGyroflowPath = QString::fromStdString(
-                motioncam::vfs::gyroflowSidecarPath(srcFile.toStdString()).string());
+                rawpreamp::vfs::gyroflowSidecarPath(srcFile.toStdString()).string());
         archiver = sevenZipExecutable();
         if (archiver.isEmpty()) {
             QMessageBox::critical(this, tr("Finalize failed"),
@@ -7180,7 +7180,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         const QString folderName = QFileInfo(mountPath).fileName() + "-finalized";
         const QString destinationMode=QSettings(PACKAGE_NAME,APP_NAME).value(
             "android/finalizeDestination","documents").toString();
-        const QString destination = motioncam::prepareFinalizeOutput(folderName,
+        const QString destination = rawpreamp::prepareFinalizeOutput(folderName,
             destinationMode,fileWidget->property("importPath").toString());
         if (destination == "choose") {
             mPendingAndroidFinalizeCard=fileWidget;
@@ -7194,7 +7194,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
         if (!audioCodec.isEmpty() || !sourceAudioCodec.isEmpty()) {
             audioStaging = std::make_unique<QTemporaryDir>();
             if (!audioStaging->isValid()) {
-                motioncam::cancelFinalizeOutput();
+                rawpreamp::cancelFinalizeOutput();
                 showAndroidNotice(tr("Finalize failed"), tr("Could not prepare audio staging."));
                 return;
             }
@@ -7244,16 +7244,16 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     // Get current render config
     auto settings = buildRenderSettings();
     const bool exportBadPixelOptions = !archiveDngs &&
-        motioncam::effectiveBadPixelTreatment(settings.badPixelTreatment,
-            settings.vignetteCorrection) == motioncam::BadPixelTreatment::OptionsJsonOnly &&
-        !(settings.options & motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
+        rawpreamp::effectiveBadPixelTreatment(settings.badPixelTreatment,
+            settings.vignetteCorrection) == rawpreamp::BadPixelTreatment::OptionsJsonOnly &&
+        !(settings.options & rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER);
     QString badPixelSidecar = fileWidget->property("sidecarPath").toString();
     if (badPixelSidecar.isEmpty()) badPixelSidecar = QString::fromStdString(
-        motioncam::vfs::sidecarPath(srcFile.toStdString()).string());
+        rawpreamp::vfs::sidecarPath(srcFile.toStdString()).string());
 
     bool enableCompression = !archiveDngs &&
-        (settings.options & motioncam::RENDER_OPT_JPEG_COMPRESSION);
-    motioncam::FinalizeOptions finalizeOptions;
+        (settings.options & rawpreamp::RENDER_OPT_JPEG_COMPRESSION);
+    rawpreamp::FinalizeOptions finalizeOptions;
     finalizeOptions.interpolateDuplicatedFrames = interpolateFrames;
     finalizeOptions.detectDuplicateDngs = false;
     finalizeOptions.rifeDirectory = rifeRuntime->toStdString();
@@ -7290,13 +7290,13 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                 };
 #ifdef __ANDROID__
             if (androidDirectOutput) {
-                auto* processing = dynamic_cast<motioncam::ProcessingFileSystem*>(
+                auto* processing = dynamic_cast<rawpreamp::ProcessingFileSystem*>(
                     mFuseFilesystem.get());
                 if (!processing)
                     throw std::runtime_error("Android processing filesystem is unavailable");
                 const auto writeEntry = [](const std::string& name,
                                             const std::vector<uint8_t>& bytes) {
-                    if (!motioncam::writeFinalizeOutputEntry(QString::fromStdString(name), bytes))
+                    if (!rawpreamp::writeFinalizeOutputEntry(QString::fromStdString(name), bytes))
                         throw std::runtime_error("Could not write finalized entry " + name +
                             " to the selected output folder");
                 };
@@ -7319,7 +7319,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                         if (!inspectedCfa && entryName.endsWith(".dng", Qt::CaseInsensitive)) {
                             inspectedCfa = true;
                             if (exportBadPixelOptions) {
-                                const auto json = motioncam::vfs::finalizedCfaBadPixelOptions(
+                                const auto json = rawpreamp::vfs::finalizedCfaBadPixelOptions(
                                     badPixelSidecar.toStdString(), bytes);
                                 if (!json.empty()) writeEntry(
                                     (finalizedFolderName + ".json").toStdString(),
@@ -7361,14 +7361,14 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             if (!archiveDngs) {
                 // DNG sequences cannot carry a video metadata track. Preserve
                 // their telemetry as the same source-format companion file.
-                const auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
-                if (telemetry->format() != motioncam::GyroTelemetry::Format::None) {
+                const auto telemetry = rawpreamp::GyroTelemetry::load(srcFile.toStdString(), fileWidget->property("importPath").toString().toStdString());
+                if (telemetry->format() != rawpreamp::GyroTelemetry::Format::None) {
                     const auto data = telemetry->serialize(telemetryOutputTimeline(*fileInfo),
                         fileInfo->timingUsesCfrMapping ? fileInfo->fps : 0, 0, 0, -1, mExcludeGps);
                     const auto name = QFileInfo(mountPath).fileName() + QString::fromStdString(telemetry->extension());
 #ifdef __ANDROID__
                     if (androidDirectOutput) {
-                        if (!motioncam::writeFinalizeOutputEntry(name, std::vector<uint8_t>(data.begin(), data.end())))
+                        if (!rawpreamp::writeFinalizeOutputEntry(name, std::vector<uint8_t>(data.begin(), data.end())))
                             throw std::runtime_error("Could not preserve finalized gyro telemetry");
                     } else
 #endif
@@ -7394,12 +7394,12 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                             throw std::runtime_error("Could not read finalized audio");
                         const auto data = audio.readAll();
                         if (audio.error() != QFileDevice::NoError ||
-                            !motioncam::writeFinalizeOutputEntry(name,
+                            !rawpreamp::writeFinalizeOutputEntry(name,
                                 std::vector<uint8_t>(data.begin(), data.end())))
                             throw std::runtime_error("Could not write finalized audio to the selected output folder");
                     }
                 }
-                motioncam::finishFinalizeOutput();
+                rawpreamp::finishFinalizeOutput();
                 progress.close();
                 showAndroidNotice(tr("Finalize complete"),
                     tr("The rendered files were written to the selected output folder."));
@@ -7424,11 +7424,11 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
                                                partialJsonl, partialGcsv}};
                 // The archive retains the original raw timeline. Preserve the selected
                 // override on that timeline, rather than the rendered DNG mapping.
-                const auto telemetry = motioncam::GyroTelemetry::load(srcFile.toStdString(),
+                const auto telemetry = rawpreamp::GyroTelemetry::load(srcFile.toStdString(),
                     fileWidget->property("importPath").toString().toStdString());
-                if (telemetry->format() != motioncam::GyroTelemetry::Format::None) {
+                if (telemetry->format() != rawpreamp::GyroTelemetry::Format::None) {
                     const auto bytes = telemetry->serialize({}, 0, 0, 0, -1, mExcludeGps);
-                    QSaveFile output(telemetry->format() == motioncam::GyroTelemetry::Format::Jsonl
+                    QSaveFile output(telemetry->format() == rawpreamp::GyroTelemetry::Format::Jsonl
                         ? partialJsonl : partialGcsv);
                     if (!output.open(QIODevice::WriteOnly) ||
                         output.write(bytes.data(), bytes.size()) != static_cast<qint64>(bytes.size()) ||
@@ -7586,7 +7586,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
             spdlog::info("Finalize cancelled by user");
             if (!androidDirectOutput) tempDir.removeRecursively();
 #ifdef __ANDROID__
-            if (androidDirectOutput) motioncam::cancelFinalizeOutput();
+            if (androidDirectOutput) rawpreamp::cancelFinalizeOutput();
 #endif
             return;
         }
@@ -7594,7 +7594,7 @@ void MainWindow::finalizeFile(QWidget* fileWidget) {
     } catch (const std::exception& e) {
         spdlog::error("Finalize failed: {}", e.what());
 #ifdef __ANDROID__
-        if (androidDirectOutput) motioncam::cancelFinalizeOutput();
+        if (androidDirectOutput) rawpreamp::cancelFinalizeOutput();
 #endif
         if (!mountReleased) {
             if (!androidDirectOutput) tempDir.removeRecursively();
@@ -7775,7 +7775,7 @@ void MainWindow::applyAutoSettings() {
 
     if (mSelectedMountIds.isEmpty()) {
         mRenderSettings = mGlobalRenderSettings;
-        QList<motioncam::MountId> mounts;
+        QList<rawpreamp::MountId> mounts;
         for (const auto& file : mMountedFiles) {
             if (mLocalSettings.contains(file.mountId)) continue;
             mounts.push_back(file.mountId);
@@ -7829,7 +7829,7 @@ void MainWindow::clearApplyFeedback() {
     mApplyAllButton->setStyleSheet(mApplyAllButtonBaseStyle);
 }
 
-QWidget* MainWindow::fileWidgetForMount(motioncam::MountId mountId) const {
+QWidget* MainWindow::fileWidgetForMount(rawpreamp::MountId mountId) const {
     auto* content = ui->dragAndDropScrollArea->widget();
     if (!content) return nullptr;
     for (auto* widget : content->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
@@ -7839,7 +7839,7 @@ QWidget* MainWindow::fileWidgetForMount(motioncam::MountId mountId) const {
     return nullptr;
 }
 
-void MainWindow::updateLocalBadge(motioncam::MountId mountId) {
+void MainWindow::updateLocalBadge(rawpreamp::MountId mountId) {
     auto* card = fileWidgetForMount(mountId);
     if (!card) return;
     const bool local = mLocalSettings.contains(mountId);
@@ -7914,28 +7914,28 @@ void MainWindow::updateSelectionUi() {
         widget->style()->unpolish(widget);
         widget->style()->polish(widget);
     }
-    auto checked = [&settings](motioncam::FileRenderOptions option) {
+    auto checked = [&settings](rawpreamp::FileRenderOptions option) {
         return static_cast<bool>(settings.options & option);
     };
-    ui->draftModeCheckBox->setChecked(checked(motioncam::RENDER_OPT_DRAFT));
+    ui->draftModeCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_DRAFT));
     ui->vignetteCorrectionComboBox->setCurrentText(QString::fromStdString(
         vignetteCorrectionModeToString(settings.vignetteCorrection)));
-    ui->vignetteOnlyColorCheckBox->setChecked(checked(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
-    ui->optimizeGainMapsCheckBox->setChecked(checked(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
-    ui->normalizeGainMapsCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
-    ui->debugVignetteCheckBox->setChecked(checked(motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
-    ui->normalizeExposureCheckBox->setChecked(checked(motioncam::RENDER_OPT_NORMALIZE_EXPOSURE));
-    ui->smoothExposureCheckBox->setChecked(checked(motioncam::RENDER_OPT_SMOOTH_EXPOSURE));
-    ui->smoothWhiteBalanceCheckBox->setChecked(checked(motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE));
-    ui->bakeIsoCheckBox->setChecked(checked(motioncam::RENDER_OPT_BAKE_ISO));
-    ui->cfrConversionCheckBox->setChecked(checked(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
-    ui->cropEnableCheckBox->setChecked(checked(motioncam::RENDER_OPT_CROPPING));
-    ui->camModelOverrideCheckBox->setChecked(checked(motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
-    ui->logTransformCheckBox->setChecked(checked(motioncam::RENDER_OPT_LOG_TRANSFORM));
-    ui->logHqCheckBox->setChecked(checked(motioncam::RENDER_OPT_LOG_HQ));
-    ui->remosaicCheckBox->setChecked(checked(motioncam::RENDER_OPT_REMOSAIC_TO_BAYER));
-    ui->higherCfaHqCheckBox->setChecked(checked(motioncam::RENDER_OPT_HIGHER_CFA_HQ));
-    ui->dngCompressionCheckBox->setChecked(checked(motioncam::RENDER_OPT_JPEG_COMPRESSION));
+    ui->vignetteOnlyColorCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR));
+    ui->optimizeGainMapsCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
+    ui->normalizeGainMapsCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_NORMALIZE_SHADING_MAP));
+    ui->debugVignetteCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP));
+    ui->normalizeExposureCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_NORMALIZE_EXPOSURE));
+    ui->smoothExposureCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_SMOOTH_EXPOSURE));
+    ui->smoothWhiteBalanceCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_SMOOTH_WHITE_BALANCE));
+    ui->bakeIsoCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_BAKE_ISO));
+    ui->cfrConversionCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION));
+    ui->cropEnableCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_CROPPING));
+    ui->camModelOverrideCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_CAMMODEL_OVERRIDE));
+    ui->logTransformCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_LOG_TRANSFORM));
+    ui->logHqCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_LOG_HQ));
+    ui->remosaicCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER));
+    ui->higherCfaHqCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_HIGHER_CFA_HQ));
+    ui->dngCompressionCheckBox->setChecked(checked(rawpreamp::RENDER_OPT_JPEG_COMPRESSION));
     ui->cfrTarget->setCurrentText(QString::fromStdString(cfrTargetToString(settings.cfrTarget)));
     ui->cropTargetComboBox->setCurrentText(QString::fromStdString(settings.cropTarget));
     ui->camModelOverrideComboBox->setCurrentText(QString::fromStdString(settings.cameraModel));
@@ -7955,9 +7955,9 @@ void MainWindow::updateSelectionUi() {
     if (!isCameraNativeFormat(ui->dngCompressionModeComboBox->currentText()) &&
         !isMetadataOnlyFinalizeFormat(ui->dngCompressionModeComboBox->currentText()) &&
         !isSevenZipFinalizeFormat(ui->dngCompressionModeComboBox->currentText())) {
-        if (motioncam::isLossyJpegDct(settings.jxlDistance))
+        if (rawpreamp::isLossyJpegDct(settings.jxlDistance))
             ui->dngCompressionModeComboBox->setCurrentIndex(1);
-        else if (settings.jxlDistance == motioncam::DNG_COMPRESSION_JPEG92_STRIP)
+        else if (settings.jxlDistance == rawpreamp::DNG_COMPRESSION_JPEG92_STRIP)
             ui->dngCompressionModeComboBox->setCurrentText("JPEG92 Lossless Strip");
         else if (settings.jxlDistance < 0.0f)
             ui->dngCompressionModeComboBox->setCurrentIndex(0);
@@ -7971,7 +7971,7 @@ void MainWindow::updateSelectionUi() {
     }
 
     if (count > 1) {
-        auto mixedFlag = [this, &settings](motioncam::FileRenderOptions option) {
+        auto mixedFlag = [this, &settings](rawpreamp::FileRenderOptions option) {
             const bool first = static_cast<bool>(settings.options & option);
             for (auto selectedId : mSelectedMountIds) {
                 const auto current = mLocalSettings.value(selectedId, mGlobalRenderSettings);
@@ -7983,23 +7983,23 @@ void MainWindow::updateSelectionUi() {
             box->setTristate(mixed);
             if (mixed) box->setCheckState(Qt::PartiallyChecked);
         };
-        markCheck(ui->draftModeCheckBox, mixedFlag(motioncam::RENDER_OPT_DRAFT));
-        markCheck(ui->vignetteOnlyColorCheckBox, mixedFlag(motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR));
-        markCheck(ui->optimizeGainMapsCheckBox, mixedFlag(motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
-        markCheck(ui->normalizeGainMapsCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP));
-        markCheck(ui->debugVignetteCheckBox, mixedFlag(motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
-        markCheck(ui->normalizeExposureCheckBox, mixedFlag(motioncam::RENDER_OPT_NORMALIZE_EXPOSURE));
-        markCheck(ui->smoothExposureCheckBox, mixedFlag(motioncam::RENDER_OPT_SMOOTH_EXPOSURE));
-        markCheck(ui->smoothWhiteBalanceCheckBox, mixedFlag(motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE));
-        markCheck(ui->bakeIsoCheckBox, mixedFlag(motioncam::RENDER_OPT_BAKE_ISO));
-        markCheck(ui->cfrConversionCheckBox, mixedFlag(motioncam::RENDER_OPT_FRAMERATE_CONVERSION));
-        markCheck(ui->cropEnableCheckBox, mixedFlag(motioncam::RENDER_OPT_CROPPING));
-        markCheck(ui->camModelOverrideCheckBox, mixedFlag(motioncam::RENDER_OPT_CAMMODEL_OVERRIDE));
-        markCheck(ui->logTransformCheckBox, mixedFlag(motioncam::RENDER_OPT_LOG_TRANSFORM));
-        markCheck(ui->logHqCheckBox, mixedFlag(motioncam::RENDER_OPT_LOG_HQ));
-        markCheck(ui->remosaicCheckBox, mixedFlag(motioncam::RENDER_OPT_REMOSAIC_TO_BAYER));
-        markCheck(ui->higherCfaHqCheckBox, mixedFlag(motioncam::RENDER_OPT_HIGHER_CFA_HQ));
-        markCheck(ui->dngCompressionCheckBox, mixedFlag(motioncam::RENDER_OPT_JPEG_COMPRESSION));
+        markCheck(ui->draftModeCheckBox, mixedFlag(rawpreamp::RENDER_OPT_DRAFT));
+        markCheck(ui->vignetteOnlyColorCheckBox, mixedFlag(rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR));
+        markCheck(ui->optimizeGainMapsCheckBox, mixedFlag(rawpreamp::RENDER_OPT_OPTIMIZE_GAIN_MAPS));
+        markCheck(ui->normalizeGainMapsCheckBox, mixedFlag(rawpreamp::RENDER_OPT_NORMALIZE_SHADING_MAP));
+        markCheck(ui->debugVignetteCheckBox, mixedFlag(rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP));
+        markCheck(ui->normalizeExposureCheckBox, mixedFlag(rawpreamp::RENDER_OPT_NORMALIZE_EXPOSURE));
+        markCheck(ui->smoothExposureCheckBox, mixedFlag(rawpreamp::RENDER_OPT_SMOOTH_EXPOSURE));
+        markCheck(ui->smoothWhiteBalanceCheckBox, mixedFlag(rawpreamp::RENDER_OPT_SMOOTH_WHITE_BALANCE));
+        markCheck(ui->bakeIsoCheckBox, mixedFlag(rawpreamp::RENDER_OPT_BAKE_ISO));
+        markCheck(ui->cfrConversionCheckBox, mixedFlag(rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION));
+        markCheck(ui->cropEnableCheckBox, mixedFlag(rawpreamp::RENDER_OPT_CROPPING));
+        markCheck(ui->camModelOverrideCheckBox, mixedFlag(rawpreamp::RENDER_OPT_CAMMODEL_OVERRIDE));
+        markCheck(ui->logTransformCheckBox, mixedFlag(rawpreamp::RENDER_OPT_LOG_TRANSFORM));
+        markCheck(ui->logHqCheckBox, mixedFlag(rawpreamp::RENDER_OPT_LOG_HQ));
+        markCheck(ui->remosaicCheckBox, mixedFlag(rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER));
+        markCheck(ui->higherCfaHqCheckBox, mixedFlag(rawpreamp::RENDER_OPT_HIGHER_CFA_HQ));
+        markCheck(ui->dngCompressionCheckBox, mixedFlag(rawpreamp::RENDER_OPT_JPEG_COMPRESSION));
         auto markValue = [this, &settings](QWidget* widget, auto getter) {
             const auto first = getter(settings);
             bool mixed = false;
@@ -8031,32 +8031,32 @@ void MainWindow::onApplySelected() {
         return;
     }
     const auto edited = buildRenderSettings();
-    QList<QPair<motioncam::MountId, motioncam::RenderSettings>> updates;
+    QList<QPair<rawpreamp::MountId, rawpreamp::RenderSettings>> updates;
     for (auto id : mSelectedMountIds) {
         auto settings = edited;
         const auto previous = mLocalSettings.value(id, mGlobalRenderSettings);
-        auto preserveMixedFlag = [&](QCheckBox* box, motioncam::FileRenderOptions option) {
+        auto preserveMixedFlag = [&](QCheckBox* box, rawpreamp::FileRenderOptions option) {
             if (box->checkState() != Qt::PartiallyChecked) return;
             if (previous.options & option) settings.options |= option;
-            else settings.options = static_cast<motioncam::FileRenderOptions>(settings.options & ~option);
+            else settings.options = static_cast<rawpreamp::FileRenderOptions>(settings.options & ~option);
         };
-        preserveMixedFlag(ui->draftModeCheckBox, motioncam::RENDER_OPT_DRAFT);
-        preserveMixedFlag(ui->vignetteOnlyColorCheckBox, motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR);
-        preserveMixedFlag(ui->optimizeGainMapsCheckBox, motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS);
-        preserveMixedFlag(ui->normalizeGainMapsCheckBox, motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP);
-        preserveMixedFlag(ui->debugVignetteCheckBox, motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
-        preserveMixedFlag(ui->normalizeExposureCheckBox, motioncam::RENDER_OPT_NORMALIZE_EXPOSURE);
-        preserveMixedFlag(ui->smoothExposureCheckBox, motioncam::RENDER_OPT_SMOOTH_EXPOSURE);
-        preserveMixedFlag(ui->smoothWhiteBalanceCheckBox, motioncam::RENDER_OPT_SMOOTH_WHITE_BALANCE);
-        preserveMixedFlag(ui->bakeIsoCheckBox, motioncam::RENDER_OPT_BAKE_ISO);
-        preserveMixedFlag(ui->cfrConversionCheckBox, motioncam::RENDER_OPT_FRAMERATE_CONVERSION);
-        preserveMixedFlag(ui->cropEnableCheckBox, motioncam::RENDER_OPT_CROPPING);
-        preserveMixedFlag(ui->camModelOverrideCheckBox, motioncam::RENDER_OPT_CAMMODEL_OVERRIDE);
-        preserveMixedFlag(ui->logTransformCheckBox, motioncam::RENDER_OPT_LOG_TRANSFORM);
-        preserveMixedFlag(ui->logHqCheckBox, motioncam::RENDER_OPT_LOG_HQ);
-        preserveMixedFlag(ui->remosaicCheckBox, motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
-        preserveMixedFlag(ui->higherCfaHqCheckBox, motioncam::RENDER_OPT_HIGHER_CFA_HQ);
-        preserveMixedFlag(ui->dngCompressionCheckBox, motioncam::RENDER_OPT_JPEG_COMPRESSION);
+        preserveMixedFlag(ui->draftModeCheckBox, rawpreamp::RENDER_OPT_DRAFT);
+        preserveMixedFlag(ui->vignetteOnlyColorCheckBox, rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR);
+        preserveMixedFlag(ui->optimizeGainMapsCheckBox, rawpreamp::RENDER_OPT_OPTIMIZE_GAIN_MAPS);
+        preserveMixedFlag(ui->normalizeGainMapsCheckBox, rawpreamp::RENDER_OPT_NORMALIZE_SHADING_MAP);
+        preserveMixedFlag(ui->debugVignetteCheckBox, rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP);
+        preserveMixedFlag(ui->normalizeExposureCheckBox, rawpreamp::RENDER_OPT_NORMALIZE_EXPOSURE);
+        preserveMixedFlag(ui->smoothExposureCheckBox, rawpreamp::RENDER_OPT_SMOOTH_EXPOSURE);
+        preserveMixedFlag(ui->smoothWhiteBalanceCheckBox, rawpreamp::RENDER_OPT_SMOOTH_WHITE_BALANCE);
+        preserveMixedFlag(ui->bakeIsoCheckBox, rawpreamp::RENDER_OPT_BAKE_ISO);
+        preserveMixedFlag(ui->cfrConversionCheckBox, rawpreamp::RENDER_OPT_FRAMERATE_CONVERSION);
+        preserveMixedFlag(ui->cropEnableCheckBox, rawpreamp::RENDER_OPT_CROPPING);
+        preserveMixedFlag(ui->camModelOverrideCheckBox, rawpreamp::RENDER_OPT_CAMMODEL_OVERRIDE);
+        preserveMixedFlag(ui->logTransformCheckBox, rawpreamp::RENDER_OPT_LOG_TRANSFORM);
+        preserveMixedFlag(ui->logHqCheckBox, rawpreamp::RENDER_OPT_LOG_HQ);
+        preserveMixedFlag(ui->remosaicCheckBox, rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER);
+        preserveMixedFlag(ui->higherCfaHqCheckBox, rawpreamp::RENDER_OPT_HIGHER_CFA_HQ);
+        preserveMixedFlag(ui->dngCompressionCheckBox, rawpreamp::RENDER_OPT_JPEG_COMPRESSION);
         if (ui->cfrTarget->property("localOverride").toBool()) settings.cfrTarget = previous.cfrTarget;
         if (ui->draftQuality->property("localOverride").toBool()) settings.draftScale = previous.draftScale;
         if (ui->cropTargetComboBox->property("localOverride").toBool()) settings.cropTarget = previous.cropTarget;
@@ -8104,7 +8104,7 @@ void MainWindow::onApplyAll() {
     autoSaveSession();
 }
 
-void MainWindow::updateThumbnail(motioncam::MountId mountId) {
+void MainWindow::updateThumbnail(rawpreamp::MountId mountId) {
     if (mCalibrationReloadInProgress) return;
     if (mImportBatchActive) {
         if (!mDeferredImportThumbnails.contains(mountId))
@@ -8133,20 +8133,20 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
     if (settings.orientation < 0) {
         if (info) settings.orientation = info->orientation;
     }
-    const auto started = motioncam::galleryBenchmarkNow();
+    const auto started = rawpreamp::galleryBenchmarkNow();
     const bool performanceRun = mPerformanceThumbnailRun;
     auto render = [this, mountId, settings, guardedLabel, cancelled, started,
                    performanceRun] {
         QImage image;
         try {
-            motioncam::PreviewOptions options;
+            rawpreamp::PreviewOptions options;
             options.skipFrame = [](size_t frame) { return frame > 0; };
             mFuseFilesystem->renderPreview(
                 mountId, settings, options,
                 [cancelled](size_t, size_t, const std::string&) {
                     return !cancelled->load();
                 },
-                [&](motioncam::PreviewFrame&& preview) {
+                [&](rawpreamp::PreviewFrame&& preview) {
                     if (cancelled->load() || !image.isNull()) return;
                     applyGalleryPreviewColorTransform(
                         preview, settings.ignoreForwardMat,
@@ -8167,7 +8167,7 @@ void MainWindow::updateThumbnail(motioncam::MountId mountId) {
             if (cancelled->load()) return;
             const qint64 elapsedMs = static_cast<qint64>(
                 std::chrono::duration<double, std::milli>(
-                    motioncam::galleryBenchmarkNow() - started).count());
+                    rawpreamp::galleryBenchmarkNow() - started).count());
             if (performanceRun)
                 emit thumbnailPerformanceFinished(mountId, !image.isNull(), elapsedMs);
             if (!guardedLabel) return;
@@ -8225,7 +8225,7 @@ void MainWindow::onProcessingFinished() {
     updateFpsLabels();
     for (const auto& file : mMountedFiles)
         updateThumbnail(file.mountId);
-    if (mClipPlayer && mGalleryMountId != motioncam::InvalidMountId) {
+    if (mClipPlayer && mGalleryMountId != rawpreamp::InvalidMountId) {
         for (const auto& mounted : mMountedFiles) {
             const auto info = mFuseFilesystem->getFileInfo(mounted.mountId);
             if (!info) continue;
@@ -8299,13 +8299,13 @@ void MainWindow::onOpenPreferences() {
         mSettingsDialog->activateWindow();
         return;
     }
-    auto* dialog = new SettingsDialog(motioncam::touchUi() ? ui->centralwidget : this);
+    auto* dialog = new SettingsDialog(rawpreamp::touchUi() ? ui->centralwidget : this);
     mSettingsDialog = dialog;
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         dialog->setWindowFlags(Qt::Widget);
         dialog->setAutoFillBackground(true);
 #ifdef __ANDROID__
-        new motioncam::PageCrossfade(dialog);
+        new rawpreamp::PageCrossfade(dialog);
 #endif
     }
     dialog->setCacheFolder(mCacheRootFolder);
@@ -8320,7 +8320,7 @@ void MainWindow::onOpenPreferences() {
     dialog->setFuseMountingAvailable(mFuseMountingAvailable);
 #ifdef _WIN32
     dialog->setDeleteOnUnmount(mDeleteOnUnmount);
-    dialog->setCachePolicyMode(mCachePolicy == motioncam::CachePolicy::Quota ? "quota" : "off");
+    dialog->setCachePolicyMode(mCachePolicy == rawpreamp::CachePolicy::Quota ? "quota" : "off");
     dialog->setCacheQuotaGb(static_cast<double>(mCacheQuotaBytes) / (1024.0 * 1024.0 * 1024.0));
     dialog->setCacheCleanupIntervalSeconds(mCacheCleanupIntervalSeconds);
 #endif
@@ -8329,7 +8329,7 @@ void MainWindow::onOpenPreferences() {
     QSettings androidPreferences(PACKAGE_NAME, APP_NAME);
     dialog->setAndroidFinalizeDestination(
         androidPreferences.value("android/finalizeDestination", "documents").toString(),
-        motioncam::legacyCustomFinalizeDirectory());
+        rawpreamp::legacyCustomFinalizeDirectory());
 #endif
     connect(dialog, &QDialog::finished, this, [this, dialog](int result) {
         if (result == QDialog::Accepted) applyPreferences(*dialog);
@@ -8337,10 +8337,10 @@ void MainWindow::onOpenPreferences() {
         updateAndroidOrientationPolicy();
         dialog->deleteLater();
     });
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         dialog->setGeometry(ui->centralwidget->rect());
 #ifdef __ANDROID__
-        motioncam::PageCrossfade::show(dialog);
+        rawpreamp::PageCrossfade::show(dialog);
 #else
         dialog->show();
         dialog->raise();
@@ -8405,7 +8405,7 @@ void MainWindow::applyPreferences(SettingsDialog& dialog) {
 #endif
     const bool requestedProjection = dialog.getFuseMountingEnabled() && mFuseMountingAvailable;
     if (requestedProjection != mFuseMountingEnabled) {
-        std::vector<motioncam::MountId> changedMounts;
+        std::vector<rawpreamp::MountId> changedMounts;
         try {
             for (const auto& mounted : mMountedFiles) {
                 mFuseFilesystem->setProjectionEnabled(mounted.mountId, requestedProjection);
@@ -8439,7 +8439,7 @@ void MainWindow::applyPreferences(SettingsDialog& dialog) {
 #ifdef _WIN32
     mDeleteOnUnmount = dialog.getDeleteOnUnmount();
     mCachePolicy = dialog.getCachePolicyMode() == "off"
-        ? motioncam::CachePolicy::Off : motioncam::CachePolicy::Quota;
+        ? rawpreamp::CachePolicy::Off : rawpreamp::CachePolicy::Quota;
     mCacheQuotaBytes = static_cast<std::uint64_t>(
         dialog.getCacheQuotaGb() * 1024.0 * 1024.0 * 1024.0);
     mCacheCleanupIntervalSeconds = dialog.getCacheCleanupIntervalSeconds();
@@ -8447,7 +8447,7 @@ void MainWindow::applyPreferences(SettingsDialog& dialog) {
     mFuseFilesystem->setCacheQuotaBytes(mCacheQuotaBytes);
     mFuseFilesystem->cleanupCacheExpired();
     if (mCacheCleanupTimer) {
-        if (mCachePolicy == motioncam::CachePolicy::Quota && mCacheCleanupIntervalSeconds > 0)
+        if (mCachePolicy == rawpreamp::CachePolicy::Quota && mCacheCleanupIntervalSeconds > 0)
             mCacheCleanupTimer->start(mCacheCleanupIntervalSeconds * 1000);
         else
             mCacheCleanupTimer->stop();
@@ -8461,7 +8461,7 @@ void MainWindow::applyPreferences(SettingsDialog& dialog) {
 }
 
 bool MainWindow::saveSessionToFile(const QString& path) {
-    auto encode = [](const motioncam::RenderSettings& settings) {
+    auto encode = [](const rawpreamp::RenderSettings& settings) {
         QJsonObject object;
         object["options"] = static_cast<int>(settings.options);
         object["draftScale"] = settings.draftScale;
@@ -8503,7 +8503,7 @@ bool MainWindow::saveSessionToFile(const QString& path) {
     bool saved=false;
 #ifdef __ANDROID__
     if(path.startsWith("content:")){
-        const QString error=motioncam::writeDocument(path,json);
+        const QString error=rawpreamp::writeDocument(path,json);
         saved=error.isEmpty();
         if(!saved)spdlog::error("Could not save session document: {}",error.toStdString());
     }else
@@ -8555,8 +8555,8 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         return;
     }
     auto decode = [this](const QJsonObject& object) {
-        motioncam::RenderSettings settings;
-        settings.options = static_cast<motioncam::FileRenderOptions>(object["options"].toInt());
+        rawpreamp::RenderSettings settings;
+        settings.options = static_cast<rawpreamp::FileRenderOptions>(object["options"].toInt());
         settings.draftScale = object["draftScale"].toInt(1);
         settings.cfrTarget = stringToCFRTarget(object["cfrTarget"].toString("Prefer Integer").toStdString());
         settings.cropTarget = object["cropTarget"].toString().toStdString();
@@ -8567,7 +8567,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         settings.quadBayerOption = stringToQuadBayerMode(object["quadBayerOption"].toString("Demosaic").toStdString());
         settings.badPixelTreatment = stringToBadPixelTreatment(object["badPixelTreatment"].toString("Bake").toStdString());
         settings.vignetteCorrection = stringToVignetteCorrectionMode(object["vignetteCorrection"].toString(
-            settings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION ? "Bake" : "Resample").toStdString());
+            settings.options & rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION ? "Bake" : "Resample").toStdString());
         settings.cfaPhase = object["cfaPhase"].toString("Don't override CFA").toStdString();
         settings.jxlDistance = static_cast<float>(object["jxlDistance"].toDouble(-1.0));
         settings.orientation = normalizedGalleryOrientation(object["orientation"].toInt(-1));
@@ -8590,7 +8590,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
 #ifdef __ANDROID__
         if (!QFileInfo::exists(clipPath)) {
             auto refresh = QtConcurrent::run([clipPath] {
-                return motioncam::refreshImportedSource(clipPath);
+                return rawpreamp::refreshImportedSource(clipPath);
             });
             waitForBackgroundTask(refresh);
             refresh.result();
@@ -8601,7 +8601,7 @@ void MainWindow::loadSessionFromFile(const QString& path) {
         clipsByPath.insert(QFileInfo(clipPath).absoluteFilePath(), clip);
     }
     mountFiles(clipPaths, [this, &clipsByPath, &decode](
-            const motioncam::MountedFile& mounted) {
+            const rawpreamp::MountedFile& mounted) {
         const auto clip = clipsByPath.value(
             QFileInfo(mounted.importFile).absoluteFilePath());
         if (clip.contains("localSettings") && !mMountedFiles.isEmpty()) {
@@ -8705,7 +8705,7 @@ void MainWindow::cleanupStaleMacFuseMounts() {
         if (auto* card = fileWidgetForMount(mounted.mountId))
             activePaths.insert(QFileInfo(card->property("mountPath").toString()).absoluteFilePath());
     }
-    for (const auto& mountPoint : listMotionCamFuseMounts()) {
+    for (const auto& mountPoint : listRawPreampMounts()) {
         if (activePaths.contains(QFileInfo(mountPoint).absoluteFilePath())) continue;
         unmountMacFusePath(mountPoint);
         QDir().rmdir(mountPoint);
@@ -8714,10 +8714,10 @@ void MainWindow::cleanupStaleMacFuseMounts() {
 
 void MainWindow::forceUnmountAllMacFuseMounts() {
     if (QMessageBox::question(this, tr("Force Unmount All"),
-            tr("Force unmount all MotionCamFuse volumes and clear the session?"),
+            tr("Force unmount all RawPreamp volumes and clear the session?"),
             QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
         return;
-    auto mounts = listMotionCamFuseMounts();
+    auto mounts = listRawPreampMounts();
     std::sort(mounts.begin(), mounts.end(), [](const QString& a, const QString& b) {
         return a.size() > b.size();
     });
@@ -8750,7 +8750,7 @@ void MainWindow::updateRecentSessionsMenu() {
         QString name=QFileInfo(path).completeBaseName();
 #ifdef __ANDROID__
         if(path.startsWith("content:")){
-            const QString displayName=motioncam::documentDisplayName(path);
+            const QString displayName=rawpreamp::documentDisplayName(path);
             if(!displayName.isEmpty())name=QFileInfo(displayName).completeBaseName();
         }
 #endif
@@ -8892,7 +8892,7 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         ? fileInfo.absoluteFilePath() + "/" + fileInfo.fileName() + ".json"
         : fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".json";
 #ifdef __ANDROID__
-    const QString sourceDirectory = motioncam::sourceDirectoryForImport(filePath);
+    const QString sourceDirectory = rawpreamp::sourceDirectoryForImport(filePath);
     if (sourceDirectory.isEmpty()) {
         mPendingAndroidJsonCard = fileWidget;
         if (auto* scanButton = findChild<QPushButton*>("scanSidecarDirectoryButton"))
@@ -8912,13 +8912,13 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
         const QString sourcePath = candidate->property("copyJsonSourcePath").toString();
         if (!sourcePath.isEmpty()) {
 #ifdef __ANDROID__
-            motioncam::SourceInputStream sourceJson(sourcePath.toStdString(), std::ios::binary);
+            rawpreamp::SourceInputStream sourceJson(sourcePath.toStdString(), std::ios::binary);
             if (!sourceJson) {
                 QMessageBox::critical(this, tr("Error"), tr("Could not read source calibration JSON"));
                 return;
             }
             const std::string contents((std::istreambuf_iterator<char>(sourceJson)), {});
-            const QString writeError = motioncam::writeSidecarToSource(
+            const QString writeError = rawpreamp::writeSidecarToSource(
                 filePath, QFileInfo(jsonPath).fileName(),
                 QString::fromStdString(contents));
             if (!writeError.isEmpty()) {
@@ -8956,7 +8956,7 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
 
     if (QFile::exists(globalCalibPath)) {
         // Read the global calibration.json file
-        motioncam::SourceInputStream inFile(globalCalibPath.toStdString());
+        rawpreamp::SourceInputStream inFile(globalCalibPath.toStdString());
         if (inFile.is_open()) {
             std::stringstream buffer;
             buffer << inFile.rdbuf();
@@ -8964,11 +8964,11 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
             inFile.close();
         } else {
             // Fallback to example if can't read
-            jsonContent = motioncam::CalibrationData::createExampleJson();
+            jsonContent = rawpreamp::CalibrationData::createExampleJson();
         }
     } else {
         // Use example template if global calibration doesn't exist
-        jsonContent = motioncam::CalibrationData::createExampleJson();
+        jsonContent = rawpreamp::CalibrationData::createExampleJson();
     }
 
     // The global calibration may predate fields added to the generated
@@ -8977,7 +8977,7 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     try {
         auto calibration = nlohmann::ordered_json::parse(jsonContent);
         const auto example = nlohmann::ordered_json::parse(
-            motioncam::CalibrationData::createExampleJson());
+            rawpreamp::CalibrationData::createExampleJson());
         for (const auto& [key, value] : example.items())
             if (!calibration.contains(key)) calibration[key] = value;
         jsonContent = calibration.dump(2);
@@ -8986,7 +8986,7 @@ void MainWindow::createCalibrationJson(QWidget* fileWidget) {
     }
 
 #ifdef __ANDROID__
-    const QString writeError = motioncam::writeSidecarToSource(
+    const QString writeError = rawpreamp::writeSidecarToSource(
         filePath, QFileInfo(jsonPath).fileName(),
         QString::fromStdString(jsonContent));
     if (!writeError.isEmpty()) {
@@ -9016,7 +9016,7 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
     if (!ok) return;
 
     if (mCalibrationReloadInProgress) return;
-    QList<motioncam::MountedFile> affected;
+    QList<rawpreamp::MountedFile> affected;
     for (const auto& mounted : mMountedFiles)
         if (allClips || mounted.mountId == mountId) affected.append(mounted);
     if (affected.isEmpty()) return;
@@ -9035,7 +9035,7 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
         QProgressDialog progress(tr("Reloading clip sidecars..."), QString(), 0, 0, this);
         progress.setCancelButton(nullptr);
         progress.setMinimumDuration(0);
-        if (motioncam::touchUi()) {
+        if (rawpreamp::touchUi()) {
             showTouchProgress(progress, this);
         } else {
             progress.setWindowModality(Qt::WindowModal);
@@ -9044,9 +9044,9 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
         // Finish any earlier settings update before reloading the same mounts.
         waitForBackgroundTask(mProcessingWatcher->future());
         struct Reload {
-            motioncam::MountId id;
+            rawpreamp::MountId id;
             QString source;
-            motioncam::RenderSettings settings;
+            rawpreamp::RenderSettings settings;
         };
         QList<Reload> reloads;
         for (const auto& mounted : affected)
@@ -9054,14 +9054,14 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
                                settingsForMount(mounted.mountId)});
         auto reload = QtConcurrent::run([this, reloads = std::move(reloads)] {
 #ifdef __ANDROID__
-            motioncam::beginSourceImportBatch();
-            const auto endBatch = qScopeGuard([] { motioncam::endSourceImportBatch(); });
+            rawpreamp::beginSourceImportBatch();
+            const auto endBatch = qScopeGuard([] { rawpreamp::endSourceImportBatch(); });
 #endif
             // A card refresh only reloads that clip. The directory rescan
             // explicitly selects all clips. Keep provider I/O off the UI.
             for (const auto& mounted : reloads) {
 #ifdef __ANDROID__
-                const QString error = motioncam::syncSidecarsForImport(mounted.source);
+                const QString error = rawpreamp::syncSidecarsForImport(mounted.source);
                 if (!error.isEmpty()) spdlog::warn("{}", error.toStdString());
 #endif
                 mFuseFilesystem->updateOptions(mounted.id, mounted.settings);
@@ -9093,7 +9093,7 @@ void MainWindow::reloadCalibration(QWidget* fileWidget, bool allClips) {
     // A settings change reaches onProcessingFinished(), which refreshes an
     // open per-clip player.  Sidecar-only changes must do the same even though
     // the RenderSettings themselves did not change.
-    if (mClipPlayer && mGalleryMountId != motioncam::InvalidMountId) {
+    if (mClipPlayer && mGalleryMountId != rawpreamp::InvalidMountId) {
         for (const auto& mounted : affected)
             mClipPlayer->invalidateThumbnails(mounted.mountId);
         for (const auto& mounted : refreshed) {
@@ -9141,7 +9141,7 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
                 if (info && info->sidecarState >= 0)
                     valid = info->sidecarState == 1;
                 else
-                    valid = motioncam::CalibrationData::loadFromFile(
+                    valid = rawpreamp::CalibrationData::loadFromFile(
                         candidate.toStdString()).has_value();
                 if (valid) selectedJsonPath = candidate;
             }
@@ -9238,7 +9238,7 @@ void MainWindow::updateCalibrationButtonStates(QWidget* onlyFileWidget) {
             }
             const bool calibrationValid = mountedSidecarValid
                 ? *mountedSidecarValid
-                : motioncam::CalibrationData::loadFromFile(jsonPath.toStdString()).has_value();
+                : rawpreamp::CalibrationData::loadFromFile(jsonPath.toStdString()).has_value();
 
             if (calibrationValid) {
                 // Valid calibration found

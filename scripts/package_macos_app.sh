@@ -4,7 +4,7 @@ set -euo pipefail
 APP_PATH="${1:-}"
 
 if [[ -z "$APP_PATH" ]]; then
-  echo "Usage: $0 /path/to/MotionCamFuse.app" >&2
+  echo "Usage: $0 /path/to/RawPreamp.app" >&2
   exit 1
 fi
 
@@ -152,7 +152,7 @@ for _ in {1..5}; do
   [[ "$after" == "$before" ]] && break
 done
 
-BIN="$APP_PATH/Contents/MacOS/MotionCamFuse"
+BIN="$APP_PATH/Contents/MacOS/RawPreamp"
 if [[ -f "$BIN" ]]; then
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$BIN" 2>/dev/null || true
 fi

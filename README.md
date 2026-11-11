@@ -1,8 +1,8 @@
-# MotionCam Fuse – Virtual File System
+# RawPreamp – Virtual File System
 
 > **Ai-assisted work in progress**
 
-**MotionCam Fuse** allows opening raw image and video files, such as MCRAW, mcpro24fps `.mcpro` (mc24), and [Unspektra](https://github.com/EkinStrop/Unspektrawesome-Releases). These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options.
+**RawPreamp** allows opening raw image and video files, such as MCRAW, mcpro24fps `.mcpro` (mc24), and [Unspektra](https://github.com/EkinStrop/Unspektrawesome-Releases). These are mounted as projected folders containing DNG sequences. Several processing and calibration options aim to provide an optimal raw editing workflow—preferably in **Davinci Resolve** for video. Clips can also be inspected in an integrated Gallery, allowing for playback and specific frame selections. To save processed files to disk as intermediates or for archival, mounted clips may be finalized with many video and DNG compression options.
 
 ---  
  
@@ -12,7 +12,7 @@
 
 When clips are mounted, folders containing respective frames will appear in their source directory if not defined otherwise under Settings > Preferences. As soon as the individual frames are accessed, their image contents are processed and cached.
 
-For Windows builds the output directory needs to be on a NTFS drive. Also on Windows cached files are written into the projected folder structure and may remain along empty projected files when Fuse is closed irregularly or if Discard on Unmount is disabled under Preferences. These files will be properly accessible again when Fuse is opened again and the session is resumed. The cache can be manually cleared by closing Fuse, deleting folder contents first and folders afterwards.
+For Windows builds the output directory needs to be on a NTFS drive. Also on Windows cached files are written into the projected folder structure and may remain along empty projected files when RawPreamp is closed irregularly or if Discard on Unmount is disabled under Preferences. These files will be properly accessible again when RawPreamp is opened again and the session is resumed. The cache can be manually cleared by closing RawPreamp, deleting folder contents first and folders afterwards.
 
 For now nightly builds are available under GitHub Actions Artifacts. 
 
@@ -114,31 +114,31 @@ Input resolution is being reduced by discarding pixel values to increase playbac
 
 Supported GPU decode, processing, and lossless JPEG encode paths take precedence regardless of preview size or memory topology, with CPU fallback for unsupported layouts or GPU failures. HEVC and AV1 Camera Native export tries compatible NVENC, QSV, AMF, VAAPI, and VideoToolbox encoders supplied by FFmpeg before software. An actual encode probe must preserve resolution, 10-bit chroma, and full-range BT.2020 metadata; a later hardware failure retries in software. Quality values map to each encoder's quality control and are not numerically equivalent to software CRF; hardware uses its quality-oriented preset. SVT noise synthesis and codecs without a compatible hardware implementation retain software encoding. Explicit CPU/debug overrides remain available in Debug builds.
 
-To store processed clips persistently many compression options are available. For DNG output there are lossless JPEG 92, lossy 12b JPEG DCT (Davinci only), lossless and lossy JPEG-XL options. Video compression options are available as well namely HEVC, AV1, CineForm and ProRes, relying on a RGB to YUV pixel format conversion assuming Rec.2020. JSON sidecars containing otherwise lost metadata are written automatically and resulting files can be imported again in Fuse. When specific frames from mounted clips are selected in Gallery, these can be finalized by themselves instead of the entire sequence.
+To store processed clips persistently many compression options are available. For DNG output there are lossless JPEG 92, lossy 12b JPEG DCT (Davinci only), lossless and lossy JPEG-XL options. Video compression options are available as well namely HEVC, AV1, CineForm and ProRes, relying on a RGB to YUV pixel format conversion assuming Rec.2020. JSON sidecars containing otherwise lost metadata are written automatically and resulting files can be imported again in RawPreamp. When specific frames from mounted clips are selected in Gallery, these can be finalized by themselves instead of the entire sequence.
 
-Lossless JPEG DNG encoding uses Vulkan for camera-sized frames when available and falls back to the CPU otherwise. The single-scan encoder runs predictor selection, Huffman table construction, entropy packing, byte stuffing, and JPEG marker writing on the GPU; only the completed JPEG stream is read back for DNG storage. The tiled encoder accepts a resident texture or an 8–16-bit row-aligned packed GPU buffer and uses adaptive Huffman coding. CFA and RGB tiles are assembled into complete JPEGs on the GPU, with CPU encoding fallback when the GPU path is unavailable. The first Vulkan encode includes device and shader setup, so the speed benefit is greatest when exporting a sequence. The "JPEG 92 Lossless" finalize format always writes tiled DNGs: it uses tiled GPU encode for supported texture or buffer output and tiled CPU encode for other processed frames. Type "JPEG92 Lossless Strip" in the format field to select the single-strip path. Set `MOTIONCAM_GPU_JPEG_DISABLE=1` to force CPU encoding. `MOTIONCAM_JPEG_TILED=1` requests the older tiled path for other eligible CFA DNGs.
+Lossless JPEG DNG encoding uses Vulkan for camera-sized frames when available and falls back to the CPU otherwise. The single-scan encoder runs predictor selection, Huffman table construction, entropy packing, byte stuffing, and JPEG marker writing on the GPU; only the completed JPEG stream is read back for DNG storage. The tiled encoder accepts a resident texture or an 8–16-bit row-aligned packed GPU buffer and uses adaptive Huffman coding. CFA and RGB tiles are assembled into complete JPEGs on the GPU, with CPU encoding fallback when the GPU path is unavailable. The first Vulkan encode includes device and shader setup, so the speed benefit is greatest when exporting a sequence. The "JPEG 92 Lossless" finalize format always writes tiled DNGs: it uses tiled GPU encode for supported texture or buffer output and tiled CPU encode for other processed frames. Type "JPEG92 Lossless Strip" in the format field to select the single-strip path. Set `RAWPREAMP_GPU_JPEG_DISABLE=1` to force CPU encoding. `RAWPREAMP_JPEG_TILED=1` requests the older tiled path for other eligible CFA DNGs.
 
-When a terminal Vulkan gain or LOG bake produces 8–16-bit samples, finalization passes its packed GPU buffer directly to the tiled JPEG encoder, avoiding an uncompressed pixel readback and reupload. The encoder binds that buffer for histogram and entropy work without an extra GPU copy. The explicit strip format retains its packed-buffer GPU encoder. DirectLog can also encode a decoded GPU texture directly when no pixel bake, crop, topology conversion, or bit-depth packing is needed. With `MOTIONCAM_GALLERY_PERF_PROFILE=1`, `vulkan_gain_gpu_jpeg_handoff` and `dng_gpu_jpeg_attach` mark GPU JPEG handoffs.
+When a terminal Vulkan gain or LOG bake produces 8–16-bit samples, finalization passes its packed GPU buffer directly to the tiled JPEG encoder, avoiding an uncompressed pixel readback and reupload. The encoder binds that buffer for histogram and entropy work without an extra GPU copy. The explicit strip format retains its packed-buffer GPU encoder. Native Video can also encode a decoded GPU texture directly when no pixel bake, crop, topology conversion, or bit-depth packing is needed. With `RAWPREAMP_GALLERY_PERF_PROFILE=1`, `vulkan_gain_gpu_jpeg_handoff` and `dng_gpu_jpeg_attach` mark GPU JPEG handoffs.
 
-For a DirectLog clip, `MotionCamFuse --directlog-jpeg-benchmark <video>` benchmarks full-resolution remosaiced CFA and RGB JPEG encoding from the decoder's Vulkan textures. It checks the CFA DNG pixels, compares the RGB JPEG byte for byte with liblj92, and compares owned versus borrowed RGB JPEG DNG construction. It also reports raw download, DNG copy, and staged JPEG times. This diagnostic uses the source textures before any configured gain or log bake.
+For a Native Video clip, `RawPreamp --native-video-jpeg-benchmark <video>` benchmarks full-resolution remosaiced CFA and RGB JPEG encoding from the decoder's Vulkan textures. It checks the CFA DNG pixels, compares the RGB JPEG byte for byte with liblj92, and compares owned versus borrowed RGB JPEG DNG construction. It also reports raw download, DNG copy, and staged JPEG times. This diagnostic uses the source textures before any configured gain or log bake.
 
-`motioncam-finalize-interpolation-test --jpeg-gpu-benchmark` times large synthetic CFA and interleaved RGB JPEG encodes, including RGB from a GPU texture. It checks JPEG bytes against liblj92 and compares malloc-owned and borrowed-buffer RGB DNG writing byte for byte.
+`rawpreamp-finalize-interpolation-test --jpeg-gpu-benchmark` times large synthetic CFA and interleaved RGB JPEG encodes, including RGB from a GPU texture. It checks JPEG bytes against liblj92 and compares malloc-owned and borrowed-buffer RGB DNG writing byte for byte.
 
-An experimental Vulkan lossless JPEG **decoder** for independent CFA or RGB tiles is exercised by `MOTIONCAM_REQUIRE_GPU_JPEG_DECODE_TEST=1 MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST=1 ./build-linux-release/motioncam-lossless-jpeg-test`. Add `MOTIONCAM_JPEG_DECODE_RESIDENT_TEST=1` to validate decode → gain → JPEG encode with decoded pixels staying on the GPU; `MOTIONCAM_JPEG_DECODE_LOG_TEST=1` includes LOG processing. `MOTIONCAM_JPEG_DECODE_LARGE_BENCHMARK=1` runs a synthetic 12 MP image with 128×128 tiles, while `MOTIONCAM_JPEG_DECODE_SMALL_TILES=1` uses 32×32 tiles. For the HLG DirectLog clip, `MOTIONCAM_DIRECTLOG_JPEG_DECODE_BENCHMARK=1 ./build-linux-debug/MotionCamFuse --directlog-jpeg-benchmark <video>` encodes actual remosaiced CFA and RGB frame pixels into independent tiles, then checks GPU decode and resident JPEG re-encode against the source. The default tile size is 64×64 for CFA and 32×32 for RGB; set `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_SIZE` to test another size. It compares the GPU path with CPU tile decode followed by GPU JPEG encode. Contiguous input uploads JPEG bytes plus seven layout words per tile; GPU header parsing builds the full metadata. DNG import uses GPU decode for regular, full-size JPEG92 CFA or RGB tile grids, with CPU fallback for other layouts or GPU failures.
+An experimental Vulkan lossless JPEG **decoder** for independent CFA or RGB tiles is exercised by `RAWPREAMP_REQUIRE_GPU_JPEG_DECODE_TEST=1 RAWPREAMP_GPU_JPEG_RGB_DECODE_TEST=1 ./build-linux-release/rawpreamp-lossless-jpeg-test`. Add `RAWPREAMP_JPEG_DECODE_RESIDENT_TEST=1` to validate decode → gain → JPEG encode with decoded pixels staying on the GPU; `RAWPREAMP_JPEG_DECODE_LOG_TEST=1` includes LOG processing. `RAWPREAMP_JPEG_DECODE_LARGE_BENCHMARK=1` runs a synthetic 12 MP image with 128×128 tiles, while `RAWPREAMP_JPEG_DECODE_SMALL_TILES=1` uses 32×32 tiles. For the HLG Native Video clip, `RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_BENCHMARK=1 ./build-linux-debug/RawPreamp --native-video-jpeg-benchmark <video>` encodes actual remosaiced CFA and RGB frame pixels into independent tiles, then checks GPU decode and resident JPEG re-encode against the source. The default tile size is 64×64 for CFA and 32×32 for RGB; set `RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_SIZE` to test another size. It compares the GPU path with CPU tile decode followed by GPU JPEG encode. Contiguous input uploads JPEG bytes plus seven layout words per tile; GPU header parsing builds the full metadata. DNG import uses GPU decode for regular, full-size JPEG92 CFA or RGB tile grids, with CPU fallback for other layouts or GPU failures.
 
-`MOTIONCAM_GPU_JPEG_REAL_DNG_BENCHMARK=<path> ./build-linux-release/motioncam-lossless-jpeg-test` inspects and CPU-decodes a real single-strip JPEG DNG. The HLG DirectLog DNG in the saved session has one 4096×3072 JPEG scan; a per-tile GPU decoder would launch only one serial entropy task for it. The experimental decoder rejects streams above 65,536 samples per tile so this layout uses the CPU path rather than stalling the GPU. Accelerating these existing DNGs requires a parallel entropy decoder, or independently tiled JPEG at DNG creation time.
+`RAWPREAMP_GPU_JPEG_REAL_DNG_BENCHMARK=<path> ./build-linux-release/rawpreamp-lossless-jpeg-test` inspects and CPU-decodes a real single-strip JPEG DNG. The HLG Native Video DNG in the saved session has one 4096×3072 JPEG scan; a per-tile GPU decoder would launch only one serial entropy task for it. The experimental decoder rejects streams above 65,536 samples per tile so this layout uses the CPU path rather than stalling the GPU. Accelerating these existing DNGs requires a parallel entropy decoder, or independently tiled JPEG at DNG creation time.
 
-`MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_BENCHMARK=both ./build-linux-debug/MotionCamFuse --directlog-jpeg-benchmark <video>` feeds the GPU encoder's full CFA and RGB JPEG payloads to the decoder and compares a 128×128 crop in each mode with CPU decode. Set `MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SIDE=256` to test a larger crop, and `MOTIONCAM_DIRECTLOG_JPEG_SINGLE_SCAN_SKIP_FULL=1` to omit full payloads. `MOTIONCAM_GPU_JPEG_ALLOW_LARGE_SCAN=1` overrides the large-scan guard for bounded diagnostic runs only. The current full-frame encoder writes no JPEG restart markers, so one scan has no independent entropy starting points.
+`RAWPREAMP_NATIVE_VIDEO_JPEG_SINGLE_SCAN_BENCHMARK=both ./build-linux-debug/RawPreamp --native-video-jpeg-benchmark <video>` feeds the GPU encoder's full CFA and RGB JPEG payloads to the decoder and compares a 128×128 crop in each mode with CPU decode. Set `RAWPREAMP_NATIVE_VIDEO_JPEG_SINGLE_SCAN_SIDE=256` to test a larger crop, and `RAWPREAMP_NATIVE_VIDEO_JPEG_SINGLE_SCAN_SKIP_FULL=1` to omit full payloads. `RAWPREAMP_GPU_JPEG_ALLOW_LARGE_SCAN=1` overrides the large-scan guard for bounded diagnostic runs only. The current full-frame encoder writes no JPEG restart markers, so one scan has no independent entropy starting points.
 
-For tiled decode measurements, `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_WIDTH` and `MOTIONCAM_DIRECTLOG_JPEG_DECODE_TILE_HEIGHT` can override the default tile dimensions. Set `MOTIONCAM_DIRECTLOG_JPEG_GPU_TILED_BENCHMARK=1` to encode HLG CFA and RGB textures into independent GPU JPEG tiles. The `DirectLog GPU resident JPEG roundtrip` line reports the median of five warm GPU encode → decode runs; the JPEG payload stays on the GPU, and exact pixels are checked in a separate pass. The `DirectLog JPEG transfer benchmark` line includes a final JPEG readback and decoder reupload for comparison. The benchmark also checks tiled DNG roundtrips. On the measured HLG frame, 16×64 CFA and 8×128 RGB were the fastest tested tile dimensions and are the current texture-encode defaults.
+For tiled decode measurements, `RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_WIDTH` and `RAWPREAMP_NATIVE_VIDEO_JPEG_DECODE_TILE_HEIGHT` can override the default tile dimensions. Set `RAWPREAMP_NATIVE_VIDEO_JPEG_GPU_TILED_BENCHMARK=1` to encode HLG CFA and RGB textures into independent GPU JPEG tiles. The `Native Video GPU resident JPEG roundtrip` line reports the median of five warm GPU encode → decode runs; the JPEG payload stays on the GPU, and exact pixels are checked in a separate pass. The `Native Video JPEG transfer benchmark` line includes a final JPEG readback and decoder reupload for comparison. The benchmark also checks tiled DNG roundtrips. On the measured HLG frame, 16×64 CFA and 8×128 RGB were the fastest tested tile dimensions and are the current texture-encode defaults.
 
 - **Duplicated frame interpolation**
 
-Duplicated frames introduced by CFR conversion can be replaced by motion-interpolated frames using [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). This Python/PyTorch backend is available on desktop platforms; its controls are hidden on Android. On first use, Fuse downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment. Python 3 must be available for this one-time setup. Synthetic and duplicated frames are indicated as such in frame metadata. Beyond that duplicated frames are still detectable in DNG sequences to properly interpolate DNG sequences with poor CFR conversion.
+Duplicated frames introduced by CFR conversion can be replaced by motion-interpolated frames using [RIFE Fix Drop Frames and Convert FPS](https://github.com/may-son/RIFE-FixDropFrames-and-ConvertFPS). This Python/PyTorch backend is available on desktop platforms; its controls are hidden on Android. On first use, RawPreamp downloads a pinned RIFE release and installs its Python dependencies into a private application-data environment. Python 3 must be available for this one-time setup. Synthetic and duplicated frames are indicated as such in frame metadata. Beyond that duplicated frames are still detectable in DNG sequences to properly interpolate DNG sequences with poor CFR conversion.
 
 - **MCRAW archival**
 
-Original MCRAW source files can be compressed without processing using 7z LZMA2 Ultra and opened again in Fuse by decompressing to a temporary MCRAW on import. DNG sequences and DirectLog sources are not supported by this archival format.
+Original MCRAW source files can be compressed without processing using 7z LZMA2 Ultra and opened again in RawPreamp by decompressing to a temporary MCRAW on import. DNG sequences and Native Video sources are not supported by this archival format.
 
 ---
 
@@ -161,7 +161,7 @@ Windows (Visual Studio + Qt + vcpkg; install LLVM for `clang-cl`, used by libpla
 git submodule update --init --recursive
 .\build.bat
 ```
-Executable lands in `build-windows\Release\MotionCamFuse.exe`. CI and this
+Executable lands in `build-windows\Release\RawPreamp.exe`. CI and this
 entry point share `scripts/build_windows.ps1`; set `QT_ROOT_DIR` and
 `VCPKG_ROOT` for custom installation paths. The vcpkg checkout must match the
 workflow's `VCPKG_COMMIT`. Windows SDK discovery selects the installed x64
@@ -187,11 +187,11 @@ cmake --build build --config Release
 macOS x86_64 (Intel or Hackintosh):
 ```
 git submodule update --init --recursive
-cmake -S . -B build-x86 -DCMAKE_BUILD_TYPE=Release -DMOTIONCAMFUSE_MACOS_X86_64=ON -DVCPKG_TARGET_TRIPLET=x64-osx
+cmake -S . -B build-x86 -DCMAKE_BUILD_TYPE=Release -DRAWPREAMP_MACOS_X86_64=ON -DVCPKG_TARGET_TRIPLET=x64-osx
 cmake --build build-x86 --config Release
 ```
 
-Universal macOS (x86_64 + arm64) can be built by adding `-DMOTIONCAMFUSE_MACOS_UNIVERSAL=ON` when your dependencies are available as universal binaries.
+Universal macOS (x86_64 + arm64) can be built by adding `-DRAWPREAMP_MACOS_UNIVERSAL=ON` when your dependencies are available as universal binaries.
 
 Linux x86_64:
 
@@ -208,8 +208,8 @@ test gate. The ARM64 artifact is one build for desktops, notebooks and phones, r
 Both Linux architectures offer desktop and touch layouts in the same binary:
 
 ```bash
-./motioncam-<version>-linux-aarch64.AppImage --ui-mode touch
-./motioncam-<version>-linux-aarch64.AppImage --ui-mode desktop
+./rawpreamp-<version>-linux-aarch64.AppImage --ui-mode touch
+./rawpreamp-<version>-linux-aarch64.AppImage --ui-mode desktop
 ```
 
 Preferences > Interface saves `Automatic`, `Desktop` or `Touch` for the next
@@ -271,7 +271,7 @@ See `HELP.md` for usage, preferences, and feature details.
 
 Release builds disable developer environment overrides, detailed profiling,
 GPU timestamp-query resources, validation/hash comparisons, diagnostic dumps,
-and failure injection. All `MOTIONCAM_*` runtime overrides described below
+and failure injection. All `RAWPREAMP_*` runtime overrides described below
 require a Debug app unless explicitly identified as Release benchmark controls
 or standalone test controls. GPU processing and native Vulkan presentation are
 selected automatically without environment opt-ins. Diagnostics are enabled only
@@ -279,9 +279,9 @@ in CMake's `Debug` configuration;
 `RelWithDebInfo` also uses the Release instrumentation policy. Gallery benchmark
 scenario controls, including compression and quality workloads, remain available
 inside `--gallery-perf-session`. The standalone
-`--directlog-jpeg-benchmark` command requires a Debug app build; environment
+`--native-video-jpeg-benchmark` command requires a Debug app build; environment
 controls in separate test executables are independent of the shipped app.
-`MOTIONCAM_RELEASE_IPO=ON` enables link-time optimization when the toolchain
+`RAWPREAMP_RELEASE_IPO=ON` enables link-time optimization when the toolchain
 supports it. Distribution builds retain portable compiler targets and normal
 floating-point semantics.
 
@@ -290,7 +290,7 @@ macOS Release apps use Apple's native crash reports. CI retains a separate
 that build to decode a user's crash report. The custom in-process crash handler
 is enabled only in Debug builds.
 
-The Debug-only `MOTIONCAM_TEST_FAIL_VULKAN_GAIN_BAKE=1` hook makes gain baking
+The Debug-only `RAWPREAMP_TEST_FAIL_VULKAN_GAIN_BAKE=1` hook makes gain baking
 return failure for externally supplied GPU textures/buffers. It exercises CPU
 fallback or an explicit error when zero-copy output is required. It does not
 inject a crash and is ignored by Release builds.
@@ -298,73 +298,73 @@ inject a crash and is ignored by Release builds.
 Gallery playback benchmarking remains available in a Release build with:
 
 ```bash
-MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1 \
-  MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1 \
-  ./build/MotionCamFuse --gallery-perf-session /path/to/session.json \
+RAWPREAMP_GALLERY_PERF_SKIP_BACKFILL=1 \
+  RAWPREAMP_GALLERY_PERF_PRESERVE_PROXY=1 \
+  ./build/RawPreamp --gallery-perf-session /path/to/session.json \
   --gallery-perf-playback-ms 3000
 ```
 
 The runner enables the histogram, keeps its overlay visible throughout the
 run, and logs benchmark startup, playback, seek, and throughput summaries.
 Detailed per-frame profiling requires a Debug build and
-`MOTIONCAM_GALLERY_PERF_PROFILE=1`. `MOTIONCAM_GALLERY_PERF_PRESERVE_PROXY=1`
+`RAWPREAMP_GALLERY_PERF_PROFILE=1`. `RAWPREAMP_GALLERY_PERF_PRESERVE_PROXY=1`
 uses the session's draft scale with HQ off; omit it for full-resolution playback.
-`MOTIONCAM_GALLERY_PERF_SKIP_BACKFILL=1` keeps the run focused on playback and
+`RAWPREAMP_GALLERY_PERF_SKIP_BACKFILL=1` keeps the run focused on playback and
 seeks; omit it to include paused thumbnail backfill.
 The performance runner polls presentation every 1 ms instead of pacing it to
 the clip frame rate, so its playback samples measure gallery throughput.
-Set `MOTIONCAM_GALLERY_PERF_MODE=mounted` to run the mounted DNG sequence
+Set `RAWPREAMP_GALLERY_PERF_MODE=mounted` to run the mounted DNG sequence
 benchmark instead of gallery playback. It reads frames 0, 1, and 2, seeks to
 the midpoint, then reads the next frame for each clip. Its
 `mounted_sequence_sample` log records full-file FUSE read time and DNG preview
 decode time separately. Mounted reads run on a worker thread so the UI event
 loop remains available to service mounts. Each invocation runs only one mode;
 mounted mode also disables thumbnail generation.
-Set `MOTIONCAM_GALLERY_PERF_MOUNTED_SEQUENTIAL_COUNT=5` to sample a fixed
+Set `RAWPREAMP_GALLERY_PERF_MOUNTED_SEQUENTIAL_COUNT=5` to sample a fixed
 number of consecutive frames per clip. Set
-`MOTIONCAM_GALLERY_PERF_COMPRESS_JXL=1` to pass each mounted DNG through the
+`RAWPREAMP_GALLERY_PERF_COMPRESS_JXL=1` to pass each mounted DNG through the
 JPEG XL compression stage of `finalizeDng` using the clip's configured distance
 before preview decoding. `jxl_encode_sample` records compression time and DNG
 sizes; `mounted_sequence_sample` then records decode time for that output.
 This measures per-frame finalization compression without writing a finalized
 clip to disk.
-Set `MOTIONCAM_GALLERY_PERF_PACK_TO_WHITE_LEVEL=1` to include sensor bit-depth
+Set `RAWPREAMP_GALLERY_PERF_PACK_TO_WHITE_LEVEL=1` to include sensor bit-depth
 packing in that comparison. The JXL path normally fuses clipping with input
 preparation. With profiling enabled,
 `jxl_compress_stage` separates TIFF parsing and sample preparation, libjxl
 encoding, and DNG strip replacement. Packed 10-, 12-, and 14-bit CFA and
 LinearRaw strips use grouped sample decoding before libjxl encoding.
 `mounted_decode_breakdown` separates DNG layout, optional dump, preview decode, and the
-optional validation hash. Set `MOTIONCAM_GALLERY_PERF_HASH_PREVIEW=1` when
+optional validation hash. Set `RAWPREAMP_GALLERY_PERF_HASH_PREVIEW=1` when
 comparing decoded pixels; the hash is omitted by default because it is much
 slower than the decode on full-size frames.
-`MOTIONCAM_JXL_PACK_BENCH=1 ./build-linux-release/motioncam-jpeg-xl-test`
+`RAWPREAMP_JXL_PACK_BENCH=1 ./build-linux-release/rawpreamp-jpeg-xl-test`
 compares both paths on 12 MP synthetic 10-, 12-, and 14-bit DNGs.
-Set `MOTIONCAM_GALLERY_PERF_JXL_WORKERS=N` (0–16) to compare libjxl worker
+Set `RAWPREAMP_GALLERY_PERF_JXL_WORKERS=N` (0–16) to compare libjxl worker
 counts during profiling. The normal cap is eight workers for both decode and
 encode, limited by the available CPU threads.
-Set `MOTIONCAM_GALLERY_PERF_PARALLEL_READS=1` in mounted mode to add four
+Set `RAWPREAMP_GALLERY_PERF_PARALLEL_READS=1` in mounted mode to add four
 simultaneous cold reads per clip; the `mounted_parallel_sample` events expose
 queueing that sequential reads cannot measure.
-Set `MOTIONCAM_GALLERY_PERF_PARALLEL_READ_COUNT=12` to test a larger read-ahead
+Set `RAWPREAMP_GALLERY_PERF_PARALLEL_READ_COUNT=12` to test a larger read-ahead
 burst; the count is capped at 16 and applies only in mounted mode.
-With `MOTIONCAM_GALLERY_PERF_PROFILE=1`, `mounted_frame_stage` reports the same
+With `RAWPREAMP_GALLERY_PERF_PROFILE=1`, `mounted_frame_stage` reports the same
 queue, load, DNG generation, shared pixel processing, finalization, and total
-times for MCRAW, DirectLog, and DNG sources. `source_path` separates clips of
+times for MCRAW, Native Video, and DNG sources. `source_path` separates clips of
 the same source type.
-Set `MOTIONCAM_GALLERY_PERF_DUMP_DNG=/tmp/mounted-first.dng` to retain the first
+Set `RAWPREAMP_GALLERY_PERF_DUMP_DNG=/tmp/mounted-first.dng` to retain the first
 mounted frame for inspection of its TIFF tags.
-`MOTIONCAM_GALLERY_PERF_NO_HISTOGRAM=1` measures the same run without retaining
+`RAWPREAMP_GALLERY_PERF_NO_HISTOGRAM=1` measures the same run without retaining
 raw samples or drawing the histogram.
-`MOTIONCAM_GALLERY_PERF_HIDE_THUMBNAILS=1` hides the thumbnail row and disables
+`RAWPREAMP_GALLERY_PERF_HIDE_THUMBNAILS=1` hides the thumbnail row and disables
 its frame collection during playback.
-`MOTIONCAM_GALLERY_PERF_VIEWPORT=960x540` tests a fixed window size. Sequence
+`RAWPREAMP_GALLERY_PERF_VIEWPORT=960x540` tests a fixed window size. Sequence
 frames, including full-resolution frames, are presented at source size through
 the native Vulkan presenter when available, including MoltenVK on macOS.
 Shared-device presentation is selected automatically on unified-memory GPUs;
 Android and Apple Silicon assume unified memory. Other GPUs are classified by
 Vulkan memory properties. Linux retains DMA-BUF when using separate devices.
-`MOTIONCAM_GALLERY_SHARED_DEVICE=1` forces shared-device selection for testing,
+`RAWPREAMP_GALLERY_SHARED_DEVICE=1` forces shared-device selection for testing,
 including dedicated GPUs; `=0` retains separate devices and existing fallbacks.
 The memory policy remains based on topology in either mode. If Vulkan
 presentation fails on desktop, playback retries with the existing Qt presenter
@@ -375,11 +375,11 @@ Windows selects the matching Debug/Release archive and loads the system Vulkan
 loader at runtime, allowing CPU fallback even when the loader is absent. The
 selected vcpkg triplet determines architecture; there is no x64-only dependency
 lookup. macOS includes the Vulkan loader; CMake also bundles MoltenVK when found, or when supplied through
-`MOTIONCAM_MOLTENVK_LIBRARY`. CI requires the GPU backend with
-`MOTIONCAM_REQUIRE_VULKAN=ON` and runs the tests on Windows and both macOS
+`RAWPREAMP_MOLTENVK_LIBRARY`. CI requires the GPU backend with
+`RAWPREAMP_REQUIRE_VULKAN=ON` and runs the tests on Windows and both macOS
 architectures. This build requirement retains CPU fallback at runtime. Windows
 and macOS hardware validation remains outstanding.
-Set `MOTIONCAM_GALLERY_FFMPEG_PRESENT=1` to compare the previous FFmpeg presenter.
+Set `RAWPREAMP_GALLERY_FFMPEG_PRESENT=1` to compare the previous FFmpeg presenter.
 
 ---
 
@@ -389,7 +389,7 @@ Camera Native captures omit color transforms and white balance during image proc
 
 In MotionCam use Camera Native color space option, HLG transfer curve, 2,0 EV gain, all tonemapping disabled, variable frame rate, full data levels. Linear transfer curve is default for Camera Native but its inefficient nature for integer value distribution make it useless for capture. Vignette correction and highlight reconstruction is disabled for Native, but these restrictions are ignored on MCRAW video export.
 
-JSON sidecar also allow to set a DNG path. Further JSON parameters, beyond what a DNG sidecar can provide, are useful for DirectLog captures like centeredCrop for encoder overscan, dataLevels (currently 8bit full level encodes are mislabled as such, while levels are limited), and levels that apply to normalized value range of 65535/0 for DirectLog sources after dataLevels (useful if capture used an incorrect gain resulting in lowered clipping point).
+JSON sidecar also allow to set a DNG path. Further JSON parameters, beyond what a DNG sidecar can provide, are useful for Native Video captures like centeredCrop for encoder overscan, dataLevels (currently 8bit full level encodes are mislabled as such, while levels are limited), and levels that apply to normalized value range of 65535/0 for Native Video sources after dataLevels (useful if capture used an incorrect gain resulting in lowered clipping point).
 
 
 

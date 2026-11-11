@@ -1,9 +1,9 @@
 #pragma once
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libplacebo/vulkan.h>
 
-namespace motioncam {
+namespace rawpreamp {
 // A host-visible VRAM BAR does not turn a discrete GPU into unified memory.
 inline bool vulkanMemoryIsUnified(const VkPhysicalDeviceProperties& properties,
                                  const VkPhysicalDeviceMemoryProperties& memory) {

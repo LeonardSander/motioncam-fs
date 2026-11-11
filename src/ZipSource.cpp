@@ -25,7 +25,7 @@
 #include <type_traits>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 uint16_t u16(const unsigned char* p) { return p[0] | uint16_t(p[1]) << 8; }
 uint32_t u32(const unsigned char* p) { return u16(p) | uint32_t(u16(p + 2)) << 16; }
@@ -586,4 +586,4 @@ std::string zipSourceRevision(const std::string& path) {
     return binding ? revision(binding->archive->path) + ':' + binding->entry.name : std::string();
 }
 bool isZipSource(const std::string& path) { return lookup(path).has_value(); }
-} // namespace motioncam
+} // namespace rawpreamp

@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <thread>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace utils {
 
 namespace {
@@ -1114,4 +1114,4 @@ void binHigherCFA(const std::vector<uint16_t>& input, std::vector<uint16_t>& out
 
 
 } // namespace utils
-} // namespace motioncam
+} // namespace rawpreamp

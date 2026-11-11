@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 struct ZipSourceEntry {
     std::string name; // UTF-8 discovery path
     std::string rawName; // Exact local/central directory bytes
@@ -31,4 +31,4 @@ std::unique_ptr<std::streambuf> openZipSource(const std::filesystem::path& path)
 std::optional<uintmax_t> zipSourceSize(const std::filesystem::path& path);
 std::string zipSourceRevision(const std::string& path);
 bool isZipSource(const std::string& path);
-} // namespace motioncam
+} // namespace rawpreamp

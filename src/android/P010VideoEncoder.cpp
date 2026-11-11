@@ -15,7 +15,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 }
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 void checkMedia(media_status_t status, const char* operation) {
     if (status != AMEDIA_OK)

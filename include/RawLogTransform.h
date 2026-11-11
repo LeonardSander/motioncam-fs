@@ -13,7 +13,7 @@
 
 #include "Types.h"
 
-namespace motioncam {
+namespace rawpreamp {
 
 // LLOG60 transfer: scaled LOG60 through 0.96, quadratic
 // transition to slope 1 at 0.99, then identity through white. C1 continuous.
@@ -157,4 +157,4 @@ inline void applyLinearizationTable(uint16_t* samples, size_t count,
         samples[i] = table[std::min<size_t>(samples[i], table.size() - 1)];
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

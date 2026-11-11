@@ -372,9 +372,9 @@ int main() {
             4, 6, 5, 7,
             12, 14, 13, 15};
         std::vector<uint16_t> grouped, restored;
-        assert(motioncam::reorderDngSamples(mosaic, grouped, 4, 4, 1, 2, 2, true));
+        assert(rawpreamp::reorderDngSamples(mosaic, grouped, 4, 4, 1, 2, 2, true));
         assert(grouped == expected);
-        assert(motioncam::reorderDngSamples(grouped, restored, 4, 4, 1, 2, 2, false));
+        assert(rawpreamp::reorderDngSamples(grouped, restored, 4, 4, 1, 2, 2, false));
         assert(restored == mosaic);
     }
     // A CFA pattern may leave incomplete phase groups at the right or bottom
@@ -384,9 +384,9 @@ int main() {
         std::vector<uint16_t> source(width * height), grouped, restored;
         for (size_t i = 0; i < source.size(); ++i)
             source[i] = static_cast<uint16_t>(i * 97);
-        assert(motioncam::reorderDngSamples(
+        assert(rawpreamp::reorderDngSamples(
             source, grouped, width, height, 1, 3, 2, true));
-        assert(motioncam::reorderDngSamples(
+        assert(rawpreamp::reorderDngSamples(
             grouped, restored, width, height, 1, 3, 2, false));
         assert(restored == source);
     }
@@ -395,9 +395,9 @@ int main() {
         std::vector<uint16_t> source(width * height), grouped, clipped;
         for (size_t i = 0; i < source.size(); ++i)
             source[i] = static_cast<uint16_t>(i * 79);
-        assert(motioncam::reorderDngSamples(
+        assert(rawpreamp::reorderDngSamples(
             source, grouped, width, height, 1, 4, 4, true));
-        assert(motioncam::reorderDngSamples(
+        assert(rawpreamp::reorderDngSamples(
             source, clipped, width, height, 1, 4, 4, true, 1023));
         for (size_t i = 0; i < source.size(); ++i)
             assert(clipped[i] == std::min<uint16_t>(grouped[i], 1023));
@@ -408,8 +408,8 @@ int main() {
         for (size_t i = 0; i < samples.size(); ++i)
             samples[i] = static_cast<uint16_t>(i * 137);
         auto tiled = tiledJxlDng(samples, width, height, 4, 3);
-        motioncam::DecodedDNGImage decoded;
-        assert(motioncam::DNGDecoder::decodeImageBorrowed(tiled, decoded));
+        rawpreamp::DecodedDNGImage decoded;
+        assert(rawpreamp::DNGDecoder::decodeImageBorrowed(tiled, decoded));
         assert(decoded.samples == samples);
     }
     // Cross the parallel-runner threshold with a full-size raw plane.
@@ -497,41 +497,41 @@ int main() {
         rewriteTiffTag(tiledJxl, 278, 322, 4, width);
         rewriteTiffTag(tiledJxl, 279, 325);
         rewriteTiffTag(tiledJxl, 283, 323, 4, height);
-        motioncam::DNGImageLayout tiledLayout;
-        assert(motioncam::DNGDecoder::getImageLayout(tiledJxl, tiledLayout));
-        assert(tiledLayout.storage == motioncam::DNGStorageLayout::Tiles);
-        assert(tiledLayout.pixels == motioncam::DNGPixelLayout::CFA);
+        rawpreamp::DNGImageLayout tiledLayout;
+        assert(rawpreamp::DNGDecoder::getImageLayout(tiledJxl, tiledLayout));
+        assert(tiledLayout.storage == rawpreamp::DNGStorageLayout::Tiles);
+        assert(tiledLayout.pixels == rawpreamp::DNGPixelLayout::CFA);
         assert(tiledLayout.compression == 52546 && tiledLayout.cfaRepeatSize == repeat);
-        motioncam::DecodedDNGImage decodedTiled;
-        assert(motioncam::DNGDecoder::decodeImage(tiledJxl, decodedTiled));
-        assert(decodedTiled.layout.storage == motioncam::DNGStorageLayout::Tiles);
+        rawpreamp::DecodedDNGImage decodedTiled;
+        assert(rawpreamp::DNGDecoder::decodeImage(tiledJxl, decodedTiled));
+        assert(decodedTiled.layout.storage == rawpreamp::DNGStorageLayout::Tiles);
         assert(decodedTiled.samples == cfa);
         auto encodedFromTemplate = tiledJxl;
-        assert(motioncam::DNGDecoder::encodeImage(encodedFromTemplate, decodedTiled));
-        motioncam::DecodedDNGImage encodedRoundTrip;
-        assert(motioncam::DNGDecoder::decodeImage(encodedFromTemplate, encodedRoundTrip));
+        assert(rawpreamp::DNGDecoder::encodeImage(encodedFromTemplate, decodedTiled));
+        rawpreamp::DecodedDNGImage encodedRoundTrip;
+        assert(rawpreamp::DNGDecoder::decodeImage(encodedFromTemplate, encodedRoundTrip));
         assert(encodedRoundTrip.samples == cfa);
-        assert(motioncam::DNGDecoder::ensureUncompressed(tiledJxl));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(tiledJxl));
         assert(tiffTagValue(tiledJxl, 259) == 1);
         assert(tiffTagValue(tiledJxl, 279) == cfa.size() * sizeof(uint16_t));
-        assert(motioncam::DNGDecoder::ensureUncompressed(losslessDng));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(losslessDng));
         assert(tiffTagValue(losslessDng, 259) == 1);
         assert(tiffTagValue(losslessDng, 279) == cfa.size() * sizeof(uint16_t));
 
         auto jpeg92Dng = losslessDng;
-        assert(motioncam::DNGDecoder::compressLosslessJPEG(jpeg92Dng));
+        assert(rawpreamp::DNGDecoder::compressLosslessJPEG(jpeg92Dng));
         assert(tiffTagValue(jpeg92Dng, 259) == 7);
-        motioncam::DecodedDNGImage jpeg92Decoded;
-        assert(motioncam::DNGDecoder::decodeImage(jpeg92Dng, jpeg92Decoded));
+        rawpreamp::DecodedDNGImage jpeg92Decoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(jpeg92Dng, jpeg92Decoded));
         assert(jpeg92Decoded.layout.cfaRepeatSize == repeat);
         assert(jpeg92Decoded.samples == cfa);
-        assert(motioncam::DNGDecoder::ensureUncompressed(jpeg92Dng));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(jpeg92Dng));
         assert(tiffTagValue(jpeg92Dng, 277) == 1);
 
         // CinemaDNG keeps every CFA geometry as one raw plane in a 12-bit
         // lossy DCT JPEG stream under Compression=7.
         auto dctDng = losslessDng;
-        assert(motioncam::DNGDecoder::compressLossyJPEG(dctDng, 90));
+        assert(rawpreamp::DNGDecoder::compressLossyJPEG(dctDng, 90));
         assert(tiffTagValue(dctDng, 259) == 7);
         assert(tiffTagValue(dctDng, 262) == 32803);
         assert(tiffTagValue(dctDng, 258) == 12);
@@ -539,18 +539,18 @@ int main() {
         assert(tiffTagValue(dctDng, 322) == width);
         assert(tiffTagValue(dctDng, 323) == height);
         assert(tiffTagValue(dctDng, 324) > 0);
-        motioncam::DecodedDNGImage dctDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(dctDng, dctDecoded));
+        rawpreamp::DecodedDNGImage dctDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(dctDng, dctDecoded));
         assert(dctDecoded.layout.cfaRepeatSize == repeat);
         assert(dctDecoded.samples.size() == cfa.size());
         // Adding TileLength must not consume the existing resolution metadata.
         assert(tiffTagValue(dctDng, 283) > 0);
-        assert(motioncam::DNGDecoder::ensureUncompressed(dctDng));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(dctDng));
         assert(tiffTagValue(dctDng, 259) == 1);
         assert(tiffTagValue(dctDng, 277) == 1);
 
         // Exercise the complete lossy CFA DNG, not only the bare codestream.
-        // Low-range uint16 samples model DirectLog RGB16 after a reduced-bit
+        // Low-range uint16 samples model Native Video RGB16 after a reduced-bit
         // log transform and remosaic.
         tinydngwriter::DNGImage lossyImage;
         lossyImage.SetBigEndian(false);
@@ -573,24 +573,24 @@ int main() {
         assert(tiffTagValue(lossyDng, 259) == 52546);
         assert(tiffTagValue(lossyDng, 50975) == repeat);
         assert(tiffTagValue(lossyDng, 52547) == repeat);
-        motioncam::DecodedDNGImage lossyDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(lossyDng, lossyDecoded));
+        rawpreamp::DecodedDNGImage lossyDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(lossyDng, lossyDecoded));
         assert(lossyDecoded.samples.size() == cfa.size());
-        assert(motioncam::DNGDecoder::ensureUncompressed(lossyDng));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(lossyDng));
         assert(tiffTagValue(lossyDng, 259) == 1);
         assert(tiffTagValue(lossyDng, 50975) == 1);
         assert(tiffTagValue(lossyDng, 52547) == 1);
-        motioncam::DecodedDNGImage canonicalDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(lossyDng, canonicalDecoded));
+        rawpreamp::DecodedDNGImage canonicalDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(lossyDng, canonicalDecoded));
         assert(canonicalDecoded.samples == lossyDecoded.samples);
         assert(tiffTagValue(lossyDng, 277) == 1);
         // Canonicalization leaves factor-1 tags in place. A later lossy
         // finalization must group the CFA again and update those tags.
-        assert(motioncam::DNGDecoder::compressJPEGXL(lossyDng, 0.5f));
+        assert(rawpreamp::DNGDecoder::compressJPEGXL(lossyDng, 0.5f));
         assert(tiffTagValue(lossyDng, 50975) == repeat);
         assert(tiffTagValue(lossyDng, 52547) == repeat);
-        motioncam::DecodedDNGImage recompressed;
-        assert(motioncam::DNGDecoder::decodeImage(lossyDng, recompressed));
+        rawpreamp::DecodedDNGImage recompressed;
+        assert(rawpreamp::DNGDecoder::decodeImage(lossyDng, recompressed));
         assert(recompressed.layout.cfaRepeatSize == repeat);
         assert(recompressed.samples.size() == cfa.size());
     }
@@ -633,7 +633,7 @@ int main() {
                                      higher.size() * sizeof(uint16_t)));
     auto processBytes = writeDng(processImage);
     auto mountedHigher = processBytes;
-    assert(motioncam::DNGDecoder::ensureUncompressed(mountedHigher));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(mountedHigher));
     assert(tiffTagValue(mountedHigher, 259) == 1);
     assert(tiffTagValue(mountedHigher, 279) == higher.size() * sizeof(uint16_t));
     // Reproduce the legacy FloatToRational overflow found in already-finalized
@@ -656,7 +656,7 @@ int main() {
         patchedExposure = true;
     }
     assert(patchedExposure);
-    assert(motioncam::DNGDecoder::repairExposureTime(legacyBytes, 0.003009814));
+    assert(rawpreamp::DNGDecoder::repairExposureTime(legacyBytes, 0.003009814));
     for (uint16_t i = 0; i < entryCount; ++i) {
         const size_t entry = static_cast<size_t>(ifd) + 2 + i * 12;
         const uint16_t tag = static_cast<uint16_t>(legacyBytes[entry] | legacyBytes[entry + 1] << 8);
@@ -668,16 +668,16 @@ int main() {
         assert(denominator != 0);
     }
     const auto sequencePath = std::filesystem::temp_directory_path() /
-        ("motioncam-jxl-sequence-" + std::to_string(
+        ("rawpreamp-jxl-sequence-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(sequencePath);
     for (int frame = 0; frame < 3; ++frame) {
         auto timedBytes = legacyBytes;
-        const motioncam::Timestamp timestamp = frame * 40000000LL;
-        assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
+        const rawpreamp::Timestamp timestamp = frame * 40000000LL;
+        assert(rawpreamp::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
         assert(tiffTagType(timedBytes, 51044) == 10); // SRATIONAL
         const size_t timedSize = timedBytes.size();
-        assert(motioncam::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
+        assert(rawpreamp::DNGDecoder::setTimingMetadata(timedBytes, 25.0, timestamp));
         assert(timedBytes.size() == timedSize);
         if (frame == 2) timedBytes.insert(timedBytes.end(), 7, 0);
         const auto filename = sequencePath /
@@ -688,7 +688,7 @@ int main() {
         assert(output.good());
     }
     {
-        motioncam::DNGDecoder sequence(sequencePath.string());
+        rawpreamp::DNGDecoder sequence(sequencePath.string());
         const auto& info = sequence.getSequenceInfo();
         assert(info.width == higherWidth && info.height == higherHeight);
         assert(info.totalFrames == 3 && std::abs(info.fps - 25.0) < 0.001);
@@ -705,12 +705,12 @@ int main() {
         assert(frames[1].imagePayloadBytes == frames[2].imagePayloadBytes);
         std::vector<uint8_t> before, after;
         assert(sequence.extractFrame(1, before) && sequence.extractFrame(2, after));
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(before, after));
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(before, after));
         uint64_t beforeSample = 0, afterSample = 0;
         assert(sequence.imagePayloadSampleHash(1, beforeSample));
         assert(sequence.imagePayloadSampleHash(2, afterSample));
         assert(beforeSample == afterSample);
-        motioncam::DNGFrameMetadata metadata;
+        rawpreamp::DNGFrameMetadata metadata;
         assert(sequence.getFrameMetadata(0, metadata));
         assert(metadata.hasExposure && metadata.iso == 100);
         assert(metadata.exposureTime > 0.0 && std::isfinite(metadata.exposureTime));
@@ -727,7 +727,7 @@ int main() {
     }
     std::filesystem::remove_all(sequencePath);
     const auto shortSequencePath = std::filesystem::temp_directory_path() /
-        ("motioncam-jxl-short-sequence-" + std::to_string(
+        ("rawpreamp-jxl-short-sequence-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(shortSequencePath);
     for (int frame = 0; frame < 2; ++frame) {
@@ -739,14 +739,14 @@ int main() {
         assert(output.good());
     }
     {
-        motioncam::DNGDecoder sequence(shortSequencePath.string());
+        rawpreamp::DNGDecoder sequence(shortSequencePath.string());
         assert(sequence.getSequenceInfo().totalFrames == 2);
         assert(std::abs(sequence.getSequenceInfo().fps - 24.0) < 0.001);
         assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
     }
     std::filesystem::remove_all(shortSequencePath);
     const auto mixedSelectionPath = std::filesystem::temp_directory_path() /
-        ("motioncam-jxl-mixed-selection-" + std::to_string(
+        ("rawpreamp-jxl-mixed-selection-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(mixedSelectionPath);
     const std::array<const char*, 4> mixedSelectionNames = {
@@ -759,19 +759,19 @@ int main() {
         assert(output.good());
     }
     {
-        motioncam::DNGDecoder stills(mixedSelectionPath.string());
+        rawpreamp::DNGDecoder stills(mixedSelectionPath.string());
         assert(stills.getSequenceInfo().totalFrames == mixedSelectionNames.size());
         assert(!stills.getSequenceInfo().hasFrameNumberSequence);
         assert(std::abs(stills.getSequenceInfo().fps - 24.0) < 0.001);
     }
     std::filesystem::remove_all(mixedSelectionPath);
     const auto timedStillPath = std::filesystem::temp_directory_path() /
-        ("motioncam-jxl-timed-stills-" + std::to_string(
+        ("rawpreamp-jxl-timed-stills-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(timedStillPath);
     for (int frame = 0; frame < 2; ++frame) {
         auto timedBytes = legacyBytes;
-        assert(motioncam::DNGDecoder::setTimingMetadata(
+        assert(rawpreamp::DNGDecoder::setTimingMetadata(
             timedBytes, 25.0, 100000000LL + frame * 40000000LL));
         std::ofstream output(timedStillPath / (std::string("still-") +
             static_cast<char>('a' + frame) + ".dng"), std::ios::binary);
@@ -780,7 +780,7 @@ int main() {
         assert(output.good());
     }
     {
-        motioncam::DNGDecoder sequence(timedStillPath.string());
+        rawpreamp::DNGDecoder sequence(timedStillPath.string());
         assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
         const auto& frames = sequence.getFrames();
         assert(frames.size() == 2);
@@ -792,7 +792,7 @@ int main() {
     }
     std::filesystem::remove_all(timedStillPath);
     const auto datedSequencePath = std::filesystem::temp_directory_path() /
-        ("motioncam-jxl-dated-sequence-" + std::to_string(
+        ("rawpreamp-jxl-dated-sequence-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(datedSequencePath);
     const std::array<const char*, 4> datedNames = {
@@ -805,7 +805,7 @@ int main() {
         assert(output.good());
     }
     {
-        motioncam::DNGDecoder sequence(datedSequencePath.string());
+        rawpreamp::DNGDecoder sequence(datedSequencePath.string());
         assert(std::abs(sequence.getSequenceInfo().fps - 24.0) < 0.001);
         assert(!sequence.getSequenceInfo().hasFrameNumberSequence);
         const auto& frames = sequence.getFrames();
@@ -817,20 +817,20 @@ int main() {
     std::filesystem::remove_all(datedSequencePath);
     const std::array<uint8_t, 4> phase = {0, 1, 1, 2};
     auto metadataOverride = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        metadataOverride, 6, phase, motioncam::QuadBayerMode::CorrectQBCFAMetadata,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        metadataOverride, 6, phase, rawpreamp::QuadBayerMode::CorrectQBCFAMetadata,
         false, 1, true));
     assert(tiffTagValue(metadataOverride, 33421) == 6);
     const std::vector<uint8_t> expected6x6 = {
         0,0,0,1,1,1, 0,0,0,1,1,1, 0,0,0,1,1,1,
         1,1,1,2,2,2, 1,1,1,2,2,2, 1,1,1,2,2,2};
     assert(tiffByteTagValues(metadataOverride, 33422) == expected6x6);
-    assert(motioncam::DNGDecoder::setTimingMetadata(metadataOverride, 25.0, 0));
+    assert(rawpreamp::DNGDecoder::setTimingMetadata(metadataOverride, 25.0, 0));
     auto hqProxy = processBytes;
-    assert(motioncam::DNGDecoder::ensureUncompressed(hqProxy));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(hqProxy));
     const size_t fullResolutionSize = hqProxy.size();
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        hqProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        hqProxy, higherRepeat, phase, rawpreamp::QuadBayerMode::Demosaic,
         false, 2, true));
     assert(hqProxy.size() < fullResolutionSize);
     assert(tiffTagValue(hqProxy, 256) == higherWidth / 2);
@@ -840,24 +840,24 @@ int main() {
     assert((tiffLong4Tag(hqProxy, 50829) ==
             std::array<uint32_t, 4>{0, 0, higherHeight / 2, higherWidth / 2}));
     auto galleryProxy = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        galleryProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        galleryProxy, higherRepeat, phase, rawpreamp::QuadBayerMode::Demosaic,
         false, 2, false));
     assert(tiffTagValue(galleryProxy, 262) == 32803);
     assert(tiffTagValue(galleryProxy, 277) == 1);
     int galleryRepeat = 0;
     std::array<uint8_t, 4> galleryPhase{};
-    assert(motioncam::DNGDecoder::getCFAMetadata(
+    assert(rawpreamp::DNGDecoder::getCFAMetadata(
         galleryProxy, galleryRepeat, galleryPhase));
     assert(galleryRepeat == 2);
-    assert(motioncam::DNGDecoder::processHigherCFA(
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
         galleryProxy, galleryRepeat, galleryPhase,
-        motioncam::QuadBayerMode::Demosaic, false, 1, false, true));
+        rawpreamp::QuadBayerMode::Demosaic, false, 1, false, true));
     assert(tiffTagValue(galleryProxy, 262) == 34892);
     assert(tiffTagValue(galleryProxy, 277) == 3);
     auto binned = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        binned, higherRepeat, phase, motioncam::QuadBayerMode::Binning,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        binned, higherRepeat, phase, rawpreamp::QuadBayerMode::Binning,
         false, 1, false));
     assert(tiffTagValue(binned, 256) == higherWidth / 2);
     assert(tiffTagValue(binned, 257) == higherHeight / 2);
@@ -866,71 +866,71 @@ int main() {
     assert(tiffTagValue(binned, 33421) == 2);
     int binnedRepeat = 0;
     std::array<uint8_t, 4> binnedPhase{};
-    assert(motioncam::DNGDecoder::getCFAMetadata(
+    assert(rawpreamp::DNGDecoder::getCFAMetadata(
         binned, binnedRepeat, binnedPhase));
     assert(binnedRepeat == 2);
-    assert(motioncam::DNGDecoder::processHigherCFA(
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
         binned, binnedRepeat, binnedPhase,
-        motioncam::QuadBayerMode::Demosaic, false, 1, false, true));
+        rawpreamp::QuadBayerMode::Demosaic, false, 1, false, true));
     assert(tiffTagValue(binned, 262) == 34892);
     assert(tiffTagValue(binned, 277) == 3);
 
     // Gallery binning is an explicit image operation. A draft proxy must be
     // applied in addition to it, rather than treating the bin as satisfying
     // the requested proxy scale.
-    motioncam::RenderSettings binnedGallerySettings;
-    binnedGallerySettings.options = motioncam::RENDER_OPT_DRAFT;
+    rawpreamp::RenderSettings binnedGallerySettings;
+    binnedGallerySettings.options = rawpreamp::RENDER_OPT_DRAFT;
     binnedGallerySettings.draftScale = 2;
-    binnedGallerySettings.quadBayerOption = motioncam::QuadBayerMode::Binning;
-    motioncam::PreviewFrame binnedGalleryFrame;
-    assert(motioncam::DNGDecoder::decodePreview(
+    binnedGallerySettings.quadBayerOption = rawpreamp::QuadBayerMode::Binning;
+    rawpreamp::PreviewFrame binnedGalleryFrame;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         processBytes, binnedGallerySettings, binnedGalleryFrame, true));
     assert(binnedGalleryFrame.width == higherWidth / 4);
     assert(binnedGalleryFrame.height == higherHeight / 4);
 
     auto partialEightBin = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        partialEightBin, 8, phase, motioncam::QuadBayerMode::Bin8x8To4x4,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        partialEightBin, 8, phase, rawpreamp::QuadBayerMode::Bin8x8To4x4,
         false, 1, false));
     assert(tiffTagValue(partialEightBin, 256) == higherWidth / 2);
     assert(tiffTagValue(partialEightBin, 257) == higherHeight / 2);
     assert(tiffTagValue(partialEightBin, 262) == 32803);
     assert(tiffTagValue(partialEightBin, 33421) == 4);
     auto galleryEightSource = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
         galleryEightSource, 8, phase,
-        motioncam::QuadBayerMode::CorrectQBCFAMetadata, false, 1, false));
-    motioncam::RenderSettings partialBinGallerySettings;
+        rawpreamp::QuadBayerMode::CorrectQBCFAMetadata, false, 1, false));
+    rawpreamp::RenderSettings partialBinGallerySettings;
     partialBinGallerySettings.quadBayerOption =
-        motioncam::QuadBayerMode::Bin8x8To4x4;
-    motioncam::PreviewFrame partialBinGalleryFrame;
-    assert(motioncam::DNGDecoder::decodePreview(
+        rawpreamp::QuadBayerMode::Bin8x8To4x4;
+    rawpreamp::PreviewFrame partialBinGalleryFrame;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         galleryEightSource, partialBinGallerySettings, partialBinGalleryFrame, true));
     assert(partialBinGalleryFrame.width == higherWidth / 2);
     assert(partialBinGalleryFrame.height == higherHeight / 2);
     auto hqRemosaic = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        hqRemosaic, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        hqRemosaic, higherRepeat, phase, rawpreamp::QuadBayerMode::Demosaic,
         true, 2, true));
     assert(tiffTagValue(hqRemosaic, 256) == higherWidth / 2);
     assert(tiffTagValue(hqRemosaic, 257) == higherHeight / 2);
     assert(tiffTagValue(hqRemosaic, 262) == 32803);
     assert(tiffTagValue(hqRemosaic, 277) == 1);
     auto hqFourProxy = processBytes;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        hqFourProxy, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        hqFourProxy, higherRepeat, phase, rawpreamp::QuadBayerMode::Demosaic,
         false, 4, true));
     assert(tiffTagValue(hqFourProxy, 256) == higherWidth / 4);
     assert(tiffTagValue(hqFourProxy, 257) == higherHeight / 4);
     assert(tiffTagValue(hqFourProxy, 262) == 34892);
     assert(tiffTagValue(hqFourProxy, 277) == 3);
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        processBytes, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        processBytes, higherRepeat, phase, rawpreamp::QuadBayerMode::Demosaic,
         false, 1, true));
     assert(tiffTagValue(processBytes, 262) == 34892);
     assert(tiffTagValue(processBytes, 277) == 3);
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        processBytes, higherRepeat, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        processBytes, higherRepeat, phase, rawpreamp::QuadBayerMode::Demosaic,
         true, 1, true));
     assert(tiffTagValue(processBytes, 259) == 1);
     assert(tiffTagValue(processBytes, 262) == 32803);
@@ -951,7 +951,7 @@ int main() {
     assert(gainImage.SetImageData(reinterpret_cast<const unsigned char*>(higher.data()),
                                   higher.size() * sizeof(uint16_t)));
     auto gainBytes = writeDng(gainImage);
-    assert(motioncam::DNGDecoder::bakeGainMaps(gainBytes, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(gainBytes, false, false));
 
     constexpr unsigned int rgbWidth = 48, rgbHeight = 32, channels = 3;
     std::vector<uint16_t> rgb(rgbWidth * rgbHeight * channels);
@@ -997,19 +997,19 @@ int main() {
                                rgb.size() * sizeof(uint16_t)));
     assert(rgbDng.GetStripBytes() > 0);
     auto mountedRgb = writeDng(rgbDng);
-    motioncam::DNGImageLayout rgbLayout;
-    assert(motioncam::DNGDecoder::getImageLayout(mountedRgb, rgbLayout));
-    assert(rgbLayout.storage == motioncam::DNGStorageLayout::Strips);
-    assert(rgbLayout.pixels == motioncam::DNGPixelLayout::LinearRGB);
+    rawpreamp::DNGImageLayout rgbLayout;
+    assert(rawpreamp::DNGDecoder::getImageLayout(mountedRgb, rgbLayout));
+    assert(rgbLayout.storage == rawpreamp::DNGStorageLayout::Strips);
+    assert(rgbLayout.pixels == rawpreamp::DNGPixelLayout::LinearRGB);
     assert(rgbLayout.samplesPerPixel == 3 && rgbLayout.bitsPerSample == 16);
-    motioncam::DecodedDNGImage decodedRgb;
-    assert(motioncam::DNGDecoder::decodeImage(mountedRgb, decodedRgb));
-    assert(decodedRgb.layout.storage == motioncam::DNGStorageLayout::Strips);
+    rawpreamp::DecodedDNGImage decodedRgb;
+    assert(rawpreamp::DNGDecoder::decodeImage(mountedRgb, decodedRgb));
+    assert(decodedRgb.layout.storage == rawpreamp::DNGStorageLayout::Strips);
     assert(decodedRgb.samples.size() == rgb.size());
     auto croppedRgb = mountedRgb;
-    assert(motioncam::DNGDecoder::cropImage(croppedRgb, 32, 16));
-    motioncam::DecodedDNGImage decodedCrop;
-    assert(motioncam::DNGDecoder::decodeImage(croppedRgb, decodedCrop));
+    assert(rawpreamp::DNGDecoder::cropImage(croppedRgb, 32, 16));
+    rawpreamp::DecodedDNGImage decodedCrop;
+    assert(rawpreamp::DNGDecoder::decodeImage(croppedRgb, decodedCrop));
     assert(decodedCrop.layout.width == 32 && decodedCrop.layout.height == 16);
     assert(decodedCrop.samples.size() == 32 * 16 * 3);
     const size_t sourceCropOrigin =
@@ -1050,9 +1050,9 @@ int main() {
     }
     assert(cfaGainRgbDng.SetOpcodeList2(cfaPhaseOpcodes));
     auto cfaGainRgbBytes = writeDng(cfaGainRgbDng);
-    assert(motioncam::DNGDecoder::bakeGainMaps(cfaGainRgbBytes, false, false));
-    motioncam::DecodedDNGImage bakedCfaGainRgb;
-    assert(motioncam::DNGDecoder::decodeImage(cfaGainRgbBytes, bakedCfaGainRgb));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(cfaGainRgbBytes, false, false));
+    rawpreamp::DecodedDNGImage bakedCfaGainRgb;
+    assert(rawpreamp::DNGDecoder::decodeImage(cfaGainRgbBytes, bakedCfaGainRgb));
     // 10-bit source values are expanded to 12-bit while gains R=2, G=(3+5)/2,
     // B=7 are applied. In particular green must be 4x, not 3x*5x.
     assert(bakedCfaGainRgb.samples[0] == 80);
@@ -1072,16 +1072,16 @@ int main() {
     rgbLumaOpcodes.AddGainMap(rgbLumaGain);
     assert(rgbDng.SetOpcodeList3(rgbLumaOpcodes));
     auto rgbWithLuma = writeDng(rgbDng);
-    std::vector<motioncam::GainMap> parsedRgbLuma;
-    assert(motioncam::DNGDecoder::getGainMaps(rgbWithLuma, 3, parsedRgbLuma));
+    std::vector<rawpreamp::GainMap> parsedRgbLuma;
+    assert(rawpreamp::DNGDecoder::getGainMaps(rgbWithLuma, 3, parsedRgbLuma));
     assert(parsedRgbLuma.size() == 1);
     assert(parsedRgbLuma[0].coordinateWidth == rgbWidth);
     assert(parsedRgbLuma[0].coordinateHeight == rgbHeight);
     auto croppedRgbWithLuma = rgbWithLuma;
-    assert(motioncam::DNGDecoder::cropImage(
+    assert(rawpreamp::DNGDecoder::cropImage(
         croppedRgbWithLuma, rgbWidth / 2, rgbHeight / 2));
-    std::vector<motioncam::GainMap> croppedRgbLuma;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> croppedRgbLuma;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         croppedRgbWithLuma, 3, croppedRgbLuma));
     assert(croppedRgbLuma.size() == 1);
     // Normalized map geometry retains its source-sensor extent while opcode
@@ -1090,45 +1090,45 @@ int main() {
     assert(croppedRgbLuma[0].coordinateHeight == rgbHeight);
     assert(croppedRgbLuma[0].right == rgbWidth / 2);
     assert(croppedRgbLuma[0].bottom == rgbHeight / 2);
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         croppedRgbWithLuma, false, false));
     const std::vector<uint16_t> mixedRgbBits{16, 12, 10};
     assert(tiffShortTagValues(rgbWithLuma, 258, &mixedRgbBits) == mixedRgbBits);
-    assert(motioncam::DNGDecoder::bakeGainMaps(rgbWithLuma, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(rgbWithLuma, false, false));
     assert(tiffShortTagValues(rgbWithLuma, 258) ==
            std::vector<uint16_t>({16, 16, 16}));
     assert(tiffTagValue(rgbWithLuma, 277) == 3);
     assert(tiffTagValue(rgbWithLuma, 50717) == 4095);
-    std::vector<motioncam::GainMap> consumedRgbLuma;
-    assert(!motioncam::DNGDecoder::getGainMaps(rgbWithLuma, 3, consumedRgbLuma));
+    std::vector<rawpreamp::GainMap> consumedRgbLuma;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(rgbWithLuma, 3, consumedRgbLuma));
     // RGB is also a valid primary DNG photometric interpretation. Thumbnail
     // removal must not reject the file merely because it has no CFA/LinearRaw IFD.
     assert(rgbDng.SetPhotometric(tinydngwriter::PHOTOMETRIC_RGB));
     auto photometricRgb = writeDng(rgbDng);
-    assert(motioncam::DNGDecoder::removeThumbnails(photometricRgb));
-    assert(motioncam::DNGDecoder::ensureUncompressed(mountedRgb));
+    assert(rawpreamp::DNGDecoder::removeThumbnails(photometricRgb));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(mountedRgb));
     assert(tiffTagValue(mountedRgb, 259) == 1);
     assert(tiffTagValue(mountedRgb, 279) == rgb.size() * sizeof(uint16_t));
-    motioncam::DNGFrameMetadata linearMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, linearMetadata));
+    rawpreamp::DNGFrameMetadata linearMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(mountedRgb, linearMetadata));
     // A 10-bit WhiteLevel in a 16-bit container is still a 10-bit input.
     assert(linearMetadata.inputBitDepth == 10);
     auto jpeg92Rgb = mountedRgb;
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(jpeg92Rgb));
-    assert(motioncam::DNGDecoder::ensureUncompressed(jpeg92Rgb));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(jpeg92Rgb));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(jpeg92Rgb));
     assert(tiffTagValue(jpeg92Rgb, 277) == 3);
     auto dctRgb = mountedRgb;
-    assert(motioncam::DNGDecoder::compressLossyJPEG(dctRgb));
+    assert(rawpreamp::DNGDecoder::compressLossyJPEG(dctRgb));
     assert(tiffTagValue(dctRgb, 259) == 7);
     assert(tiffTagValue(dctRgb, 258) == 12);
-    assert(motioncam::DNGDecoder::ensureUncompressed(dctRgb));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(dctRgb));
     assert(tiffTagValue(dctRgb, 277) == 3);
     auto tenBitDctRgb = mountedRgb;
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(tenBitDctRgb));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(tenBitDctRgb));
     assert(tiffTagValue(tenBitDctRgb, 258) == 10);
-    assert(motioncam::DNGDecoder::compressLossyJPEG(tenBitDctRgb));
+    assert(rawpreamp::DNGDecoder::compressLossyJPEG(tenBitDctRgb));
     assert(tiffTagValue(tenBitDctRgb, 258) == 12);
-    assert(motioncam::DNGDecoder::ensureUncompressed(tenBitDctRgb));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(tenBitDctRgb));
 
     tinydngwriter::DNGImage logRgb;
     logRgb.SetBigEndian(false);
@@ -1152,24 +1152,24 @@ int main() {
     assert(logRgb.SetImageData(reinterpret_cast<const unsigned char*>(logSamples.data()),
                                logSamples.size() * sizeof(uint16_t)));
     auto logDctRgb = writeDng(logRgb);
-    motioncam::DNGFrameMetadata logInputMetadata;
-    if (!motioncam::DNGDecoder::getColorMetadata(logDctRgb, logInputMetadata) ||
+    rawpreamp::DNGFrameMetadata logInputMetadata;
+    if (!rawpreamp::DNGDecoder::getColorMetadata(logDctRgb, logInputMetadata) ||
         logInputMetadata.linearizationInputMax != 1023)
         throw std::runtime_error("DNG linearization input maximum was not preserved");
     auto reducedLogRgb = logDctRgb;
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        reducedLogRgb, motioncam::LogTransformMode::ReduceBy4Bit, 1023));
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(reducedLogRgb));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        reducedLogRgb, rawpreamp::LogTransformMode::ReduceBy4Bit, 1023));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(reducedLogRgb));
     assert(tiffTagValue(reducedLogRgb, 258) == 6);
-    assert(motioncam::DNGDecoder::compressLossyJPEG(logDctRgb));
+    assert(rawpreamp::DNGDecoder::compressLossyJPEG(logDctRgb));
     assert(tiffTagValue(logDctRgb, 50717) == 65534);
     assert(tiffTagValue(logDctRgb, 50714) == logBlack[0]);
-    assert(motioncam::DNGDecoder::ensureUncompressed(logDctRgb));
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(logDctRgb));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(logDctRgb));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(logDctRgb));
     assert(tiffTagValue(logDctRgb, 258) == 12);
     auto proxyRgb = mountedRgb;
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        proxyRgb, 2, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        proxyRgb, 2, phase, rawpreamp::QuadBayerMode::Demosaic,
         false, 2, true));
     assert(tiffTagValue(proxyRgb, 256) == rgbWidth / 2);
     assert(tiffTagValue(proxyRgb, 257) == rgbHeight / 2);
@@ -1178,18 +1178,18 @@ int main() {
     assert((tiffLong4Tag(proxyRgb, 50829) ==
             std::array<uint32_t, 4>{2, 3, 14, 21}));
     auto syntheticRgb = mountedRgb;
-    assert(motioncam::DNGDecoder::setTimingMetadata(syntheticRgb, 24.0, 0));
+    assert(rawpreamp::DNGDecoder::setTimingMetadata(syntheticRgb, 24.0, 0));
     std::vector<uint8_t> replacement(static_cast<size_t>(rgbWidth) * rgbHeight * channels * 2);
     for (size_t i = 0; i < replacement.size(); i += 2) {
         const uint16_t value = static_cast<uint16_t>((i / 2) * 997u);
         replacement[i] = static_cast<uint8_t>(value & 0xff);
         replacement[i + 1] = static_cast<uint8_t>(value >> 8);
     }
-    assert(motioncam::DNGDecoder::replaceNormalizedRGB16(
+    assert(rawpreamp::DNGDecoder::replaceNormalizedRGB16(
         syntheticRgb, replacement, rgbWidth, rgbHeight));
-    motioncam::PreviewFrame replacedFrame;
-    assert(motioncam::DNGDecoder::decodePreview(
-        syntheticRgb, motioncam::RenderSettings{}, replacedFrame, false));
+    rawpreamp::PreviewFrame replacedFrame;
+    assert(rawpreamp::DNGDecoder::decodePreview(
+        syntheticRgb, rawpreamp::RenderSettings{}, replacedFrame, false));
     const auto& replaced = replacedFrame.rgb;
     assert(replaced.size() == replacement.size());
     for (size_t i = 0; i < replaced.size(); i += 2) {
@@ -1197,55 +1197,55 @@ int main() {
         const int wanted = replacement[i] | replacement[i + 1] << 8;
         assert(std::abs(actual - wanted) <= 33);
     }
-    motioncam::RenderSettings missingGainMapDebug;
-    missingGainMapDebug.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-        motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
-    motioncam::PreviewFrame missingGainMapFrame;
-    assert(motioncam::DNGDecoder::decodePreview(
+    rawpreamp::RenderSettings missingGainMapDebug;
+    missingGainMapDebug.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP);
+    rawpreamp::PreviewFrame missingGainMapFrame;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         syntheticRgb, missingGainMapDebug, missingGainMapFrame, false));
     assert(missingGainMapFrame.rgb == replacedFrame.rgb);
-    assert(motioncam::DNGDecoder::markDuplicateFrame(syntheticRgb));
-    assert(motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
-    assert(!motioncam::DNGDecoder::isSyntheticFrame(syntheticRgb));
-    assert(motioncam::DNGDecoder::markSyntheticFrame(syntheticRgb));
-    assert(!motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
-    assert(motioncam::DNGDecoder::isSyntheticFrame(syntheticRgb));
-    assert(motioncam::DNGDecoder::markDuplicateFrame(syntheticRgb));
-    assert(motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
-    assert(motioncam::DNGDecoder::markSyntheticFrame(syntheticRgb));
-    assert(!motioncam::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::markDuplicateFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(!rawpreamp::DNGDecoder::isSyntheticFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::markSyntheticFrame(syntheticRgb));
+    assert(!rawpreamp::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::isSyntheticFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::markDuplicateFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::isDuplicateFrame(syntheticRgb));
+    assert(rawpreamp::DNGDecoder::markSyntheticFrame(syntheticRgb));
+    assert(!rawpreamp::DNGDecoder::isDuplicateFrame(syntheticRgb));
     const std::string syntheticMarker = "rpt:SyntheticFrame='true'";
     assert(std::search(syntheticRgb.begin(), syntheticRgb.end(),
         syntheticMarker.begin(), syntheticMarker.end()) != syntheticRgb.end());
     auto overriddenRgb = mountedRgb;
-    assert(motioncam::DNGDecoder::overrideDataLevels(overriddenRgb, "Static"));
+    assert(rawpreamp::DNGDecoder::overrideDataLevels(overriddenRgb, "Static"));
     assert(tiffTagValue(overriddenRgb, 50717) == 1023);
-    assert(motioncam::DNGDecoder::overrideDataLevels(overriddenRgb, "4095/Dynamic"));
+    assert(rawpreamp::DNGDecoder::overrideDataLevels(overriddenRgb, "4095/Dynamic"));
     assert(tiffTagValue(overriddenRgb, 50717) == 4095);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(overriddenRgb));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(overriddenRgb));
     assert(tiffTagValue(overriddenRgb, 258) == 12);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(mountedRgb));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(mountedRgb));
     assert(tiffTagValue(mountedRgb, 258) == 10);
     assert(tiffTagValue(mountedRgb, 279) ==
            ((rgbWidth * channels * 10 + 7) / 8) * rgbHeight);
     // Orientation overrides must work both when the source omitted tag 274 and
     // when a later override replaces the existing inline SHORT value.
-    assert(motioncam::DNGDecoder::setOrientation(mountedRgb, 90));
+    assert(rawpreamp::DNGDecoder::setOrientation(mountedRgb, 90));
     assert(tiffTagValue(mountedRgb, 274) == 6);
-    motioncam::DNGFrameMetadata orientedMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
+    rawpreamp::DNGFrameMetadata orientedMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
     assert(orientedMetadata.orientation == 90);
     assert(orientedMetadata.tiffOrientation == 6);
-    assert(motioncam::DNGDecoder::setOrientation(mountedRgb, 270));
+    assert(rawpreamp::DNGDecoder::setOrientation(mountedRgb, 270));
     assert(tiffTagValue(mountedRgb, 274) == 8);
-    assert(motioncam::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
+    assert(rawpreamp::DNGDecoder::getColorMetadata(mountedRgb, orientedMetadata));
     assert(orientedMetadata.orientation == 270);
     assert(orientedMetadata.tiffOrientation == 8);
 
     assert(rgbDng.SetOrientation(2));
     auto mirroredRgb = writeDng(rgbDng);
-    assert(motioncam::DNGDecoder::getColorMetadata(mirroredRgb, orientedMetadata));
+    assert(rawpreamp::DNGDecoder::getColorMetadata(mirroredRgb, orientedMetadata));
     assert(orientedMetadata.orientation == 0);
     assert(orientedMetadata.tiffOrientation == 2);
 
@@ -1253,23 +1253,23 @@ int main() {
     // the full raw in a following IFD. Resolve that tag deterministically and
     // migrate it onto the retained raw IFD before deleting the preview.
     auto previewOrientation = previewIfdOrientationDng(6);
-    assert(motioncam::DNGDecoder::getColorMetadata(previewOrientation, orientedMetadata));
+    assert(rawpreamp::DNGDecoder::getColorMetadata(previewOrientation, orientedMetadata));
     assert(orientedMetadata.orientation == 90);
-    assert(motioncam::DNGDecoder::removeThumbnails(previewOrientation));
+    assert(rawpreamp::DNGDecoder::removeThumbnails(previewOrientation));
     orientedMetadata.orientation = -1;
-    assert(motioncam::DNGDecoder::getColorMetadata(previewOrientation, orientedMetadata));
+    assert(rawpreamp::DNGDecoder::getColorMetadata(previewOrientation, orientedMetadata));
     assert(orientedMetadata.orientation == 90);
     assert(tiffTagValue(previewOrientation, 274) == 6);
 
     auto remosaicedRgb = writeDng(rgbDng);
-    assert(motioncam::DNGDecoder::ensureUncompressed(remosaicedRgb));
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        remosaicedRgb, 2, phase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(remosaicedRgb));
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        remosaicedRgb, 2, phase, rawpreamp::QuadBayerMode::Demosaic,
         true, 1, true));
     assert(tiffTagValue(remosaicedRgb, 262) == 32803);
     assert(tiffTagValue(remosaicedRgb, 277) == 1);
     auto unpackedForFusedJxl = remosaicedRgb;
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(remosaicedRgb));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(remosaicedRgb));
     assert(tiffTagValue(remosaicedRgb, 258) == 10);
     assert(tiffTagValue(remosaicedRgb, 279) ==
            ((rgbWidth * 10 + 7) / 8) * rgbHeight);
@@ -1282,12 +1282,12 @@ int main() {
     assert(tiffByteTag(remosaicedRgb, 50706) ==
            (std::array<uint8_t, 4>{1, 4, 0, 0}));
     auto lossyFinalized = remosaicedRgb;
-    assert(motioncam::DNGDecoder::compressJPEGXL(lossyFinalized, 0.5f));
+    assert(rawpreamp::DNGDecoder::compressJPEGXL(lossyFinalized, 0.5f));
     auto fusedLossy = unpackedForFusedJxl;
-    assert(motioncam::DNGDecoder::compressJPEGXL(fusedLossy, 0.5f, true));
-    motioncam::DecodedDNGImage legacyLossyDecoded, fusedLossyDecoded;
-    assert(motioncam::DNGDecoder::decodeImage(lossyFinalized, legacyLossyDecoded));
-    assert(motioncam::DNGDecoder::decodeImage(fusedLossy, fusedLossyDecoded));
+    assert(rawpreamp::DNGDecoder::compressJPEGXL(fusedLossy, 0.5f, true));
+    rawpreamp::DecodedDNGImage legacyLossyDecoded, fusedLossyDecoded;
+    assert(rawpreamp::DNGDecoder::decodeImage(lossyFinalized, legacyLossyDecoded));
+    assert(rawpreamp::DNGDecoder::decodeImage(fusedLossy, fusedLossyDecoded));
     assert(fusedLossyDecoded.samples == legacyLossyDecoded.samples);
     assert(fusedLossy == lossyFinalized);
     assert(tiffTagValue(lossyFinalized, 259) == 52546);
@@ -1296,18 +1296,18 @@ int main() {
     assert(tiffByteTag(lossyFinalized, 50707) ==
            (std::array<uint8_t, 4>{1, 7, 1, 0}));
     assert(tiffTagValue(lossyFinalized, 258) == 16);
-    assert(motioncam::DNGDecoder::ensureUncompressed(lossyFinalized));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(lossyFinalized));
     assert(tiffTagValue(lossyFinalized, 259) == 1);
     assert(tiffTagValue(lossyFinalized, 50975) == 1);
     assert(tiffTagValue(lossyFinalized, 52547) == 1);
     assert(tiffTagValue(lossyFinalized, 277) == 1);
 
-    assert(motioncam::DNGDecoder::compressJPEGXL(remosaicedRgb, 0.0f));
+    assert(rawpreamp::DNGDecoder::compressJPEGXL(remosaicedRgb, 0.0f));
     auto fusedLossless = unpackedForFusedJxl;
-    assert(motioncam::DNGDecoder::compressJPEGXL(fusedLossless, 0.0f, true));
-    motioncam::DecodedDNGImage legacyLosslessDecoded, fusedLosslessDecoded;
-    assert(motioncam::DNGDecoder::decodeImage(remosaicedRgb, legacyLosslessDecoded));
-    assert(motioncam::DNGDecoder::decodeImage(fusedLossless, fusedLosslessDecoded));
+    assert(rawpreamp::DNGDecoder::compressJPEGXL(fusedLossless, 0.0f, true));
+    rawpreamp::DecodedDNGImage legacyLosslessDecoded, fusedLosslessDecoded;
+    assert(rawpreamp::DNGDecoder::decodeImage(remosaicedRgb, legacyLosslessDecoded));
+    assert(rawpreamp::DNGDecoder::decodeImage(fusedLossless, fusedLosslessDecoded));
     assert(fusedLosslessDecoded.samples == legacyLosslessDecoded.samples);
     assert(fusedLossless == remosaicedRgb);
     assert(tiffTagValue(remosaicedRgb, 259) == 52546);
@@ -1318,7 +1318,7 @@ int main() {
     assert(tiffTagValue(remosaicedRgb, 258) == 16);
     assert(tiffTagValue(remosaicedRgb, 277) == 1);
     {
-        const bool benchmark = std::getenv("MOTIONCAM_JXL_PACK_BENCH") != nullptr;
+        const bool benchmark = std::getenv("RAWPREAMP_JXL_PACK_BENCH") != nullptr;
         const uint32_t benchWidth = benchmark ? 4032 : 64;
         const uint32_t benchHeight = benchmark ? 3024 : 48;
         for (const uint16_t white : {uint16_t{1023}, uint16_t{4095}, uint16_t{16383}}) {
@@ -1356,15 +1356,15 @@ int main() {
                 for (float distance : {0.0f, 0.5f}) {
                     auto legacy = original, fused = original;
                     const auto start = std::chrono::steady_clock::now();
-                    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(legacy));
+                    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(legacy));
                     const auto packed = std::chrono::steady_clock::now();
-                    assert(motioncam::DNGDecoder::compressJPEGXL(legacy, distance));
+                    assert(rawpreamp::DNGDecoder::compressJPEGXL(legacy, distance));
                     const auto legacyDone = std::chrono::steady_clock::now();
-                    assert(motioncam::DNGDecoder::compressJPEGXL(fused, distance, true));
+                    assert(rawpreamp::DNGDecoder::compressJPEGXL(fused, distance, true));
                     const auto fusedDone = std::chrono::steady_clock::now();
-                    motioncam::DecodedDNGImage a, b;
-                    assert(motioncam::DNGDecoder::decodeImage(legacy, a));
-                    assert(motioncam::DNGDecoder::decodeImage(fused, b));
+                    rawpreamp::DecodedDNGImage a, b;
+                    assert(rawpreamp::DNGDecoder::decodeImage(legacy, a));
+                    assert(rawpreamp::DNGDecoder::decodeImage(fused, b));
                     assert(a.samples == b.samples);
                     assert(legacy == fused);
                     auto ms = [](auto end, auto begin) {

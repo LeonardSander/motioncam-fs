@@ -7,7 +7,7 @@
 struct AVCodecContext;
 struct AVFrame;
 struct AVBufferRef;
-namespace motioncam {
+namespace rawpreamp {
 // Reader lifetime follows FFmpeg's hardware device, including retained frames.
 class MediaCodecImageReader {
 public:

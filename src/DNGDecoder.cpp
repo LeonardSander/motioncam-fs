@@ -47,7 +47,7 @@
 #define __builtin_bswap32(x) _byteswap_ulong(x)
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 
 namespace {
 struct DngByteView {
@@ -68,9 +68,9 @@ void prepareGpuJpegConsumer(VulkanGainBakeParams& params,
     if (!jpegOutput && !tileOutput) return;
     if (jpegOutput) jpegOutput->clear();
     if (tileOutput) tileOutput->clear();
-    if (motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") ||
-        motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") ||
-        motioncam::debugEnvironment("MOTIONCAM_JPEG_TILED")) return;
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DISABLE") ||
+        rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE") ||
+        rawpreamp::debugEnvironment("RAWPREAMP_JPEG_TILED")) return;
     params.consumePackedOutput = [jpegOutput, tileOutput](const VulkanPackedImage& image) {
         if (image.bits < 8 || image.bits > 16) return false;
         if (tileOutput) {
@@ -160,13 +160,13 @@ std::filesystem::path dngDuplicateCachePath(const std::string& key) {
         hash ^= byte;
         hash *= 1099511628211ULL;
     }
-    return root / "motioncam-fuse" / "dng-analysis" /
+    return root / "rawpreamp" / "dng-analysis" /
            (std::to_string(hash) + ".bin");
 }
 
 bool loadPersistentDngDuplicates(const std::string& key, size_t frames,
                                  std::vector<uint8_t>& mask) {
-    motioncam::SourceInputStream input(dngDuplicateCachePath(key), std::ios::binary);
+    rawpreamp::SourceInputStream input(dngDuplicateCachePath(key), std::ios::binary);
     uint64_t magic = 0, keySize = 0, count = 0;
     if (!input.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
         magic != dngDuplicateCacheMagic ||
@@ -213,7 +213,7 @@ void savePersistentDngDuplicates(const std::string& key,
         std::filesystem::rename(temporary, path, error);
         if (error) std::filesystem::remove(temporary, error);
     }
-    motioncam::trimSourceAnalysisCache(path.parent_path().parent_path());
+    rawpreamp::trimSourceAnalysisCache(path.parent_path().parent_path());
 }
 
 std::string dngSequenceSignature(const std::string& path) {
@@ -233,9 +233,9 @@ std::string dngSequenceSignature(const std::string& path) {
     std::sort(files.begin(), files.end());
     std::string signature;
     for (const auto& file : files) {
-        const auto size = motioncam::sourceFileSize(file, error);
+        const auto size = rawpreamp::sourceFileSize(file, error);
         if (error) return {};
-        const auto revision = motioncam::sourceRevision(file.string());
+        const auto revision = rawpreamp::sourceRevision(file.string());
         if (!revision.empty()) {
             // Unknown provider timestamps cannot invalidate same-size edits.
             // Disable both memory and disk analysis reuse for these documents.
@@ -503,7 +503,7 @@ namespace {
         boost::algorithm::to_lower(software);
 
         constexpr const char* toolsName = "motioncam tools";
-        constexpr const char* motionCamName = "motioncam";
+        constexpr const char* captureSoftwareName = "motioncam";
         SoftwareVersion version{};
         const auto productMatch = [&](const char* product) {
             const size_t length = std::strlen(product);
@@ -513,12 +513,12 @@ namespace {
                  software[length] == '-' || software[length] == 'v');
         };
         if (productMatch(toolsName)) {
-            // Early MotionCam Tools files did not always include a version.
+            // Early files from this producer did not always include a version.
             if (!parseSoftwareVersion(software, std::strlen(toolsName), version)) return true;
             return version <= SoftwareVersion{1, 0, 0, 0};
         }
-        if (productMatch(motionCamName)) {
-            if (!parseSoftwareVersion(software, std::strlen(motionCamName), version)) return false;
+        if (productMatch(captureSoftwareName)) {
+            if (!parseSoftwareVersion(software, std::strlen(captureSoftwareName), version)) return false;
             return version < SoftwareVersion{4, 0, 5, 0};
         }
         return false;
@@ -882,7 +882,7 @@ namespace {
             return false;
         *encoded = nullptr;
         *encodedLength = 0;
-        if (!motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") &&
+        if (!rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DISABLE") &&
             jpegEncodeFullyVulkan(pixels, width, height, channels, bits,
                                   encoded, encodedLength))
             return true;
@@ -1318,12 +1318,12 @@ namespace {
                          uint64_t* bytesRead = nullptr, size_t* fileSize = nullptr,
                          std::map<uint32_t, uint32_t>* originalIfds = nullptr) {
         std::error_code error;
-        const auto sourceSize = motioncam::sourceFileSize(path, error);
+        const auto sourceSize = rawpreamp::sourceFileSize(path, error);
         if (error || sourceSize < 8 || sourceSize >
                 std::numeric_limits<size_t>::max()) return false;
         const size_t size = static_cast<size_t>(sourceSize);
         if (fileSize) *fileSize = size;
-        const char* cacheMode = motioncam::debugEnvironment("MOTIONCAM_DNG_METADATA_CACHE");
+        const char* cacheMode = rawpreamp::debugEnvironment("RAWPREAMP_DNG_METADATA_CACHE");
         const std::string cacheKey = cacheMode && std::strcmp(cacheMode, "0") == 0
             ? std::string() : dngSequenceSignature(path);
         std::map<uint32_t, uint32_t> sourceIfds;
@@ -1331,7 +1331,7 @@ namespace {
             if (originalIfds) *originalIfds = std::move(sourceIfds);
             return true;
         }
-        motioncam::SourceInputStream file(path, std::ios::binary);
+        rawpreamp::SourceInputStream file(path, std::ios::binary);
         if (!file) return false;
         constexpr size_t blockSize = 65536;
         std::map<size_t, std::vector<uint8_t>> blocks;
@@ -1907,7 +1907,7 @@ namespace {
         const size_t pos = entry.valueOffset + static_cast<size_t>(index) * 8;
         const uint32_t numerator = read32(data.data() + pos, little);
         const uint32_t denominator = read32(data.data() + pos + 4, little);
-        // MotionCam Fuse builds before the decimal-rational writer fix could
+        // Builds before the decimal-rational writer fix could
         // overflow an exact 2^32 TIFF denominator to zero. Recover that one
         // known legacy encoding so already-finalized sequences can be reopened.
         if (!denominator)
@@ -2073,6 +2073,9 @@ namespace {
     constexpr auto RELATIVE_PRESENTATION_TIMESTAMP_NS =
         "rpt:RelativePresentationTimestampNs=";
     constexpr auto RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE =
+        "https://github.com/LeonardSander/RawPreamp";
+
+    constexpr auto LEGACY_RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE =
         "https://github.com/motioncam-app/motioncam-fs";
 
     std::string relativePresentationTimestampXmp(Timestamp timestampNs) {
@@ -2091,7 +2094,9 @@ namespace {
                                            const TiffEntry& entry, Timestamp& timestamp) {
         if (entry.tag != TIFF_TAG_XMP || entry.type != TIFF_TYPE_BYTE || !entry.count) return false;
         const std::string xmp(reinterpret_cast<const char*>(data.data() + entry.valueOffset), entry.count);
-        if (xmp.find(RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) == std::string::npos) return false;
+        if (xmp.find(RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) == std::string::npos &&
+            xmp.find(LEGACY_RELATIVE_PRESENTATION_TIMESTAMP_NAMESPACE) == std::string::npos)
+            return false;
         const std::string marker = RELATIVE_PRESENTATION_TIMESTAMP_NS;
         const auto markerPos = xmp.find(marker);
         if (markerPos == std::string::npos || markerPos + marker.size() >= xmp.size()) return false;
@@ -2478,13 +2483,13 @@ void DNGDecoder::findDNGFiles() {
     uintmax_t largestFrame = 1;
     for (const auto& frame : mFrames) {
         std::error_code error;
-        const auto size = motioncam::sourceFileSize(frame.filePath, error);
+        const auto size = rawpreamp::sourceFileSize(frame.filePath, error);
         if (error) { largestFrame = 128ULL * 1024 * 1024; break; }
         largestFrame = std::max(largestFrame, size);
     }
     const size_t workers = std::max<size_t>(1, std::min({size_t{8}, mFrames.size(),
         size_t(utils::availableCpuWorkers()), size_t((128ULL * 1024 * 1024) / largestFrame)}));
-    const auto indexingStarted = motioncam::diagnosticNow();
+    const auto indexingStarted = rawpreamp::diagnosticNow();
     uint64_t metadataReadBytes = 0;
     if (workers == 1) metadataReadBytes = indexFrames(0, mFrames.size());
     else {
@@ -2497,7 +2502,7 @@ void DNGDecoder::findDNGFiles() {
         }
         for (auto& task : tasks) metadataReadBytes += task.get();
     }
-    motioncam::trimSourceAnalysisCache(dngDuplicateCachePath("").parent_path().parent_path());
+    rawpreamp::trimSourceAnalysisCache(dngDuplicateCachePath("").parent_path().parent_path());
     // Choose the first positive rate in source order after all workers finish.
     // Workers only write their own frame's slot.
     if (!(mSequenceInfo.fps > 0.0)) {
@@ -2508,10 +2513,10 @@ void DNGDecoder::findDNGFiles() {
             }
         }
     }
-    MOTIONCAM_DIAGNOSTIC_INFO("DNG metadata indexing: {} frames, {} source bytes, {} workers, {:.1f} ms",
+    RAWPREAMP_DIAGNOSTIC_INFO("DNG metadata indexing: {} frames, {} source bytes, {} workers, {:.1f} ms",
                  mFrames.size(), metadataReadBytes, workers,
                  std::chrono::duration<double, std::milli>(
-                     motioncam::diagnosticNow() - indexingStarted).count());
+                     rawpreamp::diagnosticNow() - indexingStarted).count());
     mFrames.erase(std::remove_if(mFrames.begin(), mFrames.end(), [&](const DNGFrameInfo& frame) {
         if (frame.width > 0 && frame.height > 0 && frame.imagePayloadBytes) return false;
         spdlog::warn("Skipping incomplete DNG frame: {} ({}x{}, {} image bytes)",
@@ -2588,7 +2593,7 @@ bool DNGDecoder::imagePayloadSampleHash(int frameNumber, uint64_t& hash) const {
     if (frameNumber < 0 || frameNumber >= static_cast<int>(mFrames.size())) return false;
     const auto& frame = mFrames[frameNumber];
     if (!frame.imagePayloadBytes || !frame.fileSize || !frame.imageIfdOffset) return false;
-    motioncam::SourceInputStream file(frame.filePath, std::ios::binary);
+    rawpreamp::SourceInputStream file(frame.filePath, std::ios::binary);
     if (!file) return false;
     // Some DNGs put the raw IFD after the image. Seek to the offset captured
     // during indexing instead of reading the entire file to find its strips.
@@ -4641,7 +4646,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         if (!updateGeometryMetadata(sourceWidth, sourceHeight, width, height))
             return false;
         if (!remosaic) {
-            // RGB DirectLog DNGs can be JPEG-compressed and use 10/12-bit
+            // RGB Native Video DNGs can be JPEG-compressed and use 10/12-bit
             // samples. The decoded proxy is canonical uint16 RGB, so make
             // the output strip and its TIFF sample tags agree with that data.
             if (proxy) {
@@ -4754,13 +4759,13 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     const uint32_t stripBytes = scalar(*countsE);
     if (!width || !height || bits < 1 || bits > 16 || stripOffset > data.size() ||
         stripBytes > data.size() - stripOffset) return false;
-    const bool profileTopology = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    const auto topologyStarted = motioncam::diagnosticNow();
+    const bool profileTopology = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+    const auto topologyStarted = rawpreamp::diagnosticNow();
     DecodedDNGImage decoded;
     if (!decodeImageBorrowed(data, decoded, false, false) || decoded.layout.width != width ||
         decoded.layout.height != height || decoded.layout.samplesPerPixel != 1)
         return false;
-    const auto decodedAt = motioncam::diagnosticNow();
+    const auto decodedAt = rawpreamp::diagnosticNow();
     std::vector<uint16_t> pixels = std::move(decoded.samples);
 
     std::array<double, 4> sourceBlack = {0.0, 0.0, 0.0, 0.0};
@@ -4904,7 +4909,7 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
         else output = std::move(rgb);
     }
 
-    const auto convertedAt = motioncam::diagnosticNow();
+    const auto convertedAt = rawpreamp::diagnosticNow();
     const uint32_t newBytes = static_cast<uint32_t>(output.size() * sizeof(uint16_t));
     auto setScalar = [&](const TiffEntry& e, uint32_t value) {
         if (e.type == TIFF_TYPE_SHORT) write16(data.data() + e.valueOffset, value, little);
@@ -4990,14 +4995,14 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
     }
     // Write the converted samples at their final strip position. The TIFF
     // replacement helper moves the buffer when the strip size changes.
-    const auto metadataFinishedAt = motioncam::diagnosticNow();
+    const auto metadataFinishedAt = rawpreamp::diagnosticNow();
     std::vector<uint8_t> preparedOutput;
     if (newBytes != stripBytes)
         preparedOutput.resize(data.size() - stripBytes + newBytes);
     uint8_t* destination = newBytes == stripBytes
         ? data.data() + stripOffset : preparedOutput.data() + stripOffset;
     writeSampleBytes(destination, output.data(), output.size(), little);
-    const auto serializedAt = motioncam::diagnosticNow();
+    const auto serializedAt = rawpreamp::diagnosticNow();
     const bool replaced = newBytes == stripBytes ||
         replaceTiffStrip(data, stripOffset, stripBytes, {}, little,
                          &preparedOutput, newBytes);
@@ -5008,13 +5013,13 @@ bool DNGDecoder::processHigherCFA(std::vector<uint8_t>& data,
                      std::chrono::duration<double, std::milli>(convertedAt-decodedAt).count(),
                      std::chrono::duration<double, std::milli>(metadataFinishedAt-convertedAt).count(),
                      std::chrono::duration<double, std::milli>(serializedAt-metadataFinishedAt).count(),
-                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-serializedAt).count());
+                     std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-serializedAt).count());
     return replaced;
 }
 
 static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundWork,
                                     DecodedDNGImage* decodedImage, bool preferResident = false) {
-    const auto ensureStarted = motioncam::diagnosticNow();
+    const auto ensureStarted = rawpreamp::diagnosticNow();
     if (backgroundWork) yieldToForegroundDngWork();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
@@ -5089,7 +5094,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         imageSamples > std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) ||
         width > static_cast<uint32_t>(std::numeric_limits<int>::max()) / channels)
         return false;
-    if (decodedImage && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (decodedImage && rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=dng_decode_layout width={} height={} channels={} bits={} compression={} planar={} strips={} tiles={}",
                      width, height, channels, bits, compression, planar,
                      stripOffsetsE ? stripOffsetsE->count : 0,
@@ -5262,7 +5267,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         // run. Coalescing first turns thousands of vector erases and complete
         // TIFF rescans into a single relocation operation.
         if (!removeTiffRanges(data, ranges, little)) return false;
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("DNG decode trace: coalesced {} source chunks into {} removal range(s)",
                          chunks.size(), ranges.size());
         return true;
@@ -5358,10 +5363,10 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         return true;
     }
 
-    const auto parsedAt = motioncam::diagnosticNow();
+    const auto parsedAt = rawpreamp::diagnosticNow();
     std::vector<uint16_t> pixels;
     if (!preferResident) pixels.resize(imageSamples, 0);
-    const auto allocatedAt = motioncam::diagnosticNow();
+    const auto allocatedAt = rawpreamp::diagnosticNow();
     if (tileOffsetsE || tileCountsE) {
         const auto tileWidthE = find(TIFF_TAG_TILE_WIDTH);
         const auto tileHeightE = find(TIFF_TAG_TILE_LENGTH);
@@ -5400,7 +5405,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
             !interleaved && (channels == 1 || channels == 3) &&
             bits >= 8 &&
             width % tileWidth == 0 && height % tileHeight == 0 &&
-            !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DECODE_DISABLE")) {
+            !rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DECODE_DISABLE")) {
             std::vector<VulkanJpegTile> tiles;
             tiles.reserve(expectedCount);
             for (const auto& [offset, byteCount] : sourceChunks) {
@@ -5452,7 +5457,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
                 }
             }
         }
-        if (gpuDecoded && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (gpuDecoded && rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_tiled_decode width={} height={} channels={} tiles={}",
                          width, height, channels, expectedCount);
         if (pixels.empty()) pixels.resize(imageSamples, 0);
@@ -5550,7 +5555,7 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         }
         if (decodeFailed.load(std::memory_order_relaxed)) return false;
         if (!restoreInterleave(pixels)) return false;
-        const auto decodedAt = motioncam::diagnosticNow();
+        const auto decodedAt = rawpreamp::diagnosticNow();
         if (decodedImage) {
             decodedImage->samples = std::move(pixels);
             return true;
@@ -5558,10 +5563,10 @@ static bool decodeOrCanonicalizeDng(std::vector<uint8_t>& data, bool backgroundW
         // Repurpose the four tile entries so no standard tile tag survives.
         write16(data.data() + tileHeightE->entryOffset, TIFF_TAG_UNUSED_TILE_LENGTH, little);
         if (!finishCanonical(pixels, *tileOffsetsE, *tileCountsE, *tileWidthE)) return false;
-        const auto canonicalAt = motioncam::diagnosticNow();
+        const auto canonicalAt = rawpreamp::diagnosticNow();
         if (!discardSourceChunks(std::move(sourceChunks))) return false;
-        const auto completedAt = motioncam::diagnosticNow();
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) spdlog::info(
+        const auto completedAt = rawpreamp::diagnosticNow();
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) spdlog::info(
             "DNG decode trace: {}x{} bits={} channels={} tiles={} tile={}x{} "
             "workers={} background={} turbo={}/{} legacy={} parse={:.1f} ms "
             "allocate={:.1f} ms decode={:.1f} ms canonical={:.1f} ms discard={:.1f} ms total={:.1f} ms",
@@ -5752,8 +5757,8 @@ bool DNGDecoder::decodeImageBorrowed(std::vector<uint8_t>& data,
 bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
                                     DecodedDNGImage& image,
                                     bool backgroundWork, bool applyLinearization, bool preferResident) {
-    const bool profileDecode = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    const auto decodeStarted = motioncam::diagnosticNow();
+    const bool profileDecode = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+    const auto decodeStarted = rawpreamp::diagnosticNow();
     image = {};
     if (!getImageLayout(data, image.layout)) return false;
     image.storedBitsPerSample = image.layout.bitsPerSample;
@@ -5761,7 +5766,7 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
     getTimingMetadata(data, image.timestamp);
     getGainMaps(data, 2, image.opcodeList2);
     getGainMaps(data, 3, image.opcodeList3);
-    const auto metadataAt = motioncam::diagnosticNow();
+    const auto metadataAt = rawpreamp::diagnosticNow();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     std::vector<uint16_t> linearization;
@@ -5778,7 +5783,7 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
     if (!decodeOrCanonicalizeDng(data, backgroundWork, &image,
             preferResident && (linearization.empty() ||
                 image.layout.pixels == DNGPixelLayout::CFA))) return false;
-    const auto pixelsAt = motioncam::diagnosticNow();
+    const auto pixelsAt = rawpreamp::diagnosticNow();
     if (applyLinearization && !linearization.empty() && image.gpuImage) {
         image.residentLinearization = std::move(linearization);
     } else if (applyLinearization && !linearization.empty()) {
@@ -5797,7 +5802,7 @@ bool DNGDecoder::decodeImageInPlace(std::vector<uint8_t>& data,
                      image.opcodeList3.size(),
                      std::chrono::duration<double, std::milli>(metadataAt-decodeStarted).count(),
                      std::chrono::duration<double, std::milli>(pixelsAt-metadataAt).count(),
-                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-pixelsAt).count());
+                     std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-pixelsAt).count());
     return true;
 }
 
@@ -7247,7 +7252,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                 static_cast<float>(map.spacingH), static_cast<float>(map.spacingV),
                 map.data});
         deferredFrame->galleryCfaGain = std::move(prepared);
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=preview_gain_deferred pixels={} maps={} log={}",
                 static_cast<size_t>(image.layout.width) * image.layout.height,
                 maps.size(), fusedLogWhite != 0);
@@ -7262,7 +7267,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     // Prefer the supported GPU bake even when the final display pass cannot
     // consume deferred gains. CPU normalization remains the fallback.
     if (preferVulkan &&
-        !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU") &&
         sourceScale == 1 && sourceWidth == image.layout.width &&
         sourceHeight == image.layout.height && phaseGroup == 1 &&
         !fusedLogWhite && (channels == 1 || channels == 3) &&
@@ -7312,7 +7317,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
                 reinterpret_cast<uint8_t*>(baked.data()),
                 baked.size() * sizeof(uint16_t));
         if (success) {
-            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=preview_gain_gpu pixels={} channels={} maps={}",
                     static_cast<size_t>(gpu.width) * gpu.height,
                     channels, maps.size());
@@ -7357,7 +7362,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
             ? scalarCfaGroupOrigin(map, maps) : std::nullopt);
     const auto scalarMapByParity = directScalarCfaMapIndices(maps, axes);
     const bool directScalarCfa =
-        motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_DISABLE_DIRECT_GAIN") == nullptr &&
+        rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_DISABLE_DIRECT_GAIN") == nullptr &&
         !rgb && channels == 1 && phaseGroup == 1 &&
         sourceScale == 1 && sourceWidth == image.layout.width &&
         sourceHeight == image.layout.height && scalarMapByParity.has_value();
@@ -7368,7 +7373,7 @@ bool bakeDecodedPreviewGainMaps(DecodedDNGImage& image,
     const bool fullRgbMap = directRgbMap && maps.front().left == 0 &&
         maps.front().top == 0 && maps.front().right >= image.layout.width &&
         maps.front().bottom >= image.layout.height;
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=preview_gain_path direct_scalar_cfa={} maps={} pixels={}",
             directScalarCfa, maps.size(),
             static_cast<size_t>(image.layout.width) * image.layout.height);
@@ -7556,7 +7561,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             settings.logTransform) : 0;
         const uint16_t logWhite = logBits ? static_cast<uint16_t>((1u << logBits) - 1u) : 0;
         const bool compatible = settings.streamingPreview && !retainSourceSamples &&
-            !frame.clippingRequested && !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
+            !frame.clippingRequested && !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU") &&
             !(settings.options & (RENDER_OPT_CROPPING | RENDER_OPT_REMOSAIC_TO_BAYER)) &&
             (!encodeLog || cfa) &&
             (proxyScale == 1 || !cfa || (proxyScale % 2u == 0)) &&
@@ -7672,7 +7677,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
                 }
             }
             frame = std::move(deferred);
-            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_resident width={} height={} channels={} gain={} source_width={} source_height={} scale={}",
                     resident->width, resident->height, resident->channels, frame.gainMapApplied,
                     sourceWidth, sourceHeight, proxyScale);
@@ -7725,7 +7730,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         ? static_cast<uint32_t>(std::max(1, settings.draftScale)) : 1u;
     const uint32_t sourceWidth = image.layout.width;
     const uint32_t sourceHeight = image.layout.height;
-    const auto proxyStarted = motioncam::diagnosticNow();
+    const auto proxyStarted = rawpreamp::diagnosticNow();
     uint32_t gainMapSourceScale = 1;
     uint32_t remainingPreviewScale = requestedPreviewScale;
     const bool hasCrop = (settings.options & RENDER_OPT_CROPPING) &&
@@ -7770,7 +7775,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             remainingPreviewScale = std::max(1u,
                 remainingPreviewScale / topologyScale);
     }
-    const auto topologyFinished = motioncam::diagnosticNow();
+    const auto topologyFinished = rawpreamp::diagnosticNow();
     // Ordinary Bayer proxy previews do not need full-resolution demosaic or
     // gain-map traversal. Decimate the CFA first, while retaining the source
     // geometry for gain-map interpolation. Restrict this to the nearest/HQ
@@ -7824,9 +7829,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         image.layout.height = proxyHeight;
         gainMapSourceScale = remainingPreviewScale;
     }
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") &&
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") &&
         static_cast<uint64_t>(sourceWidth) * sourceHeight >= 10000000) {
-        const auto proxyFinished = motioncam::diagnosticNow();
+        const auto proxyFinished = rawpreamp::diagnosticNow();
         spdlog::info(
             "GALLERY_PERF event=large_dng_proxy source={}x{} proxy={}x{} cfa={} scale={} remaining={} topology_ms={:.3f} reduction_ms={:.3f}",
             sourceWidth, sourceHeight, image.layout.width, image.layout.height,
@@ -7850,9 +7855,9 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
     const uint16_t cfaLogWhite = cfaLog ? static_cast<uint16_t>(
         (uint32_t{1} << std::min(16u, cfaLogBits)) - 1u) : 0;
     const bool fuseCfaLog = cfaLog && !frame.clippingRequested;
-    const auto gainStarted = motioncam::diagnosticNow();
+    const auto gainStarted = rawpreamp::diagnosticNow();
     const bool deferGalleryGain = settings.streamingPreview &&
-        !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU") &&
         vulkanGalleryPreviewReady() &&
         previewGainBake &&
         !frame.clippingRequested && !hasCrop &&
@@ -7870,8 +7875,8 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             deferGalleryGain ? &frame : nullptr)) return false;
     if (frame.galleryCfaGain) frame.galleryCfaRecoverCpu = std::move(recoverCpu);
     const bool cfaLogFused = fuseCfaLog && frame.gainMapApplied;
-    const auto gainFinished = motioncam::diagnosticNow();
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    const auto gainFinished = rawpreamp::diagnosticNow();
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=preview_gain_bake pixels={} gain_ms={:.3f} applied={} log_fused={}",
             static_cast<size_t>(image.layout.width) * image.layout.height,
             std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
@@ -7936,7 +7941,7 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         for (auto& thread : threads) thread.join();
     }
     }
-    const auto clippingFinished = motioncam::diagnosticNow();
+    const auto clippingFinished = rawpreamp::diagnosticNow();
     frame.metadata = image.metadata;
     frame.timestamp = image.timestamp;
     uint32_t width = image.layout.width;
@@ -8034,13 +8039,13 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
             frame.width = width;
             frame.height = height;
             if (frame.clippingRequested) frame.clipping = std::move(clipping);
-            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+            if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
                 spdlog::info("GALLERY_PERF event=decoded_preview_stage pixels={} gain_ms={:.3f} clipping_ms={:.3f} remaining_ms={:.3f}",
                     static_cast<size_t>(width) * height,
                     std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
                     std::chrono::duration<double, std::milli>(clippingFinished-gainFinished).count(),
                     std::chrono::duration<double, std::milli>(
-                        motioncam::diagnosticNow()-clippingFinished).count());
+                        rawpreamp::diagnosticNow()-clippingFinished).count());
             return true;
         }
         if (!highQuality) {
@@ -8171,13 +8176,13 @@ bool DNGDecoder::decodePreview(DecodedDNGImage image,
         // subsequent copy (155 MiB each for a 27 MP Quad Bayer preview).
         const bool normalized = utils::normalizeRgb16Bytes(
             rgb, frame.rgb, outputBlack, outputWhite);
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=decoded_preview_stage pixels={} gain_ms={:.3f} clipping_ms={:.3f} remaining_ms={:.3f}",
                 static_cast<size_t>(width) * height,
                 std::chrono::duration<double, std::milli>(gainFinished-gainStarted).count(),
                 std::chrono::duration<double, std::milli>(clippingFinished-gainFinished).count(),
                 std::chrono::duration<double, std::milli>(
-                    motioncam::diagnosticNow()-clippingFinished).count());
+                    rawpreamp::diagnosticNow()-clippingFinished).count());
         return normalized;
     }
     std::vector<uint16_t> normalizedSamples;
@@ -8384,8 +8389,8 @@ bool DNGDecoder::interpolateFrameMetadata(std::vector<uint8_t>& data,
 
 bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance,
                                 bool clampToWhiteLevel) {
-    const bool profileJxl = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    const auto startedAt = motioncam::diagnosticNow();
+    const bool profileJxl = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+    const auto startedAt = rawpreamp::diagnosticNow();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     auto scalar = [&](const TiffEntry& entry) -> uint32_t {
@@ -8599,16 +8604,16 @@ bool DNGDecoder::compressJPEGXL(std::vector<uint8_t>& data, float distance,
         }
         input = reinterpret_cast<const uint8_t*>(pixels.data());
     }
-    const auto preparedAt = motioncam::diagnosticNow();
+    const auto preparedAt = rawpreamp::diagnosticNow();
     std::vector<uint8_t> encoded;
     size_t encodedBytes = 0;
     if (!encodeJPEGXL(input, sampleCount * sizeof(uint16_t),
                       width, height, channels, distance, encoded,
                       stripOffset, encodedBytes)) return false;
-    const auto encodedAt = motioncam::diagnosticNow();
+    const auto encodedAt = rawpreamp::diagnosticNow();
     const auto reportJxlStages = [&] {
         if (!profileJxl) return;
-        const auto completedAt = motioncam::diagnosticNow();
+        const auto completedAt = rawpreamp::diagnosticNow();
         spdlog::info("GALLERY_PERF event=jxl_compress_stage width={} height={} channels={} bits={} distance={} reorder={} clamp={} prepare_ms={:.3f} codec_ms={:.3f} finalize_ms={:.3f}",
                      width, height, channels, bits, distance, reorderCfa,
                      clampMaximum != UINT16_MAX,
@@ -9172,14 +9177,14 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data,
     }
     uint8_t* encodedBuffer = nullptr;
     size_t encodedLength = 0;
-    const char* encoderSetting = motioncam::debugEnvironment("MOTIONCAM_LOSSLESS_JPEG_ENCODER");
+    const char* encoderSetting = rawpreamp::debugEnvironment("RAWPREAMP_LOSSLESS_JPEG_ENCODER");
     const bool useTurbo = bits > 8 && encoderSetting &&
         std::strcmp(encoderSetting, "turbo") == 0;
     // TIFF tiles give decoders independent JPEG scans to process in parallel.
-    // MOTIONCAM_JPEG_TILED enables this output topology explicitly.
+    // RAWPREAMP_JPEG_TILED enables this output topology explicitly.
     if (allowLegacyTiles && channels == 1 &&
         scalar(*photo) == TIFF_PHOTOMETRIC_CFA && width % 16u == 0 &&
-        motioncam::debugEnvironment("MOTIONCAM_JPEG_TILED")) {
+        rawpreamp::debugEnvironment("RAWPREAMP_JPEG_TILED")) {
         const uint32_t desiredRows = static_cast<uint32_t>(
             std::min<uint64_t>(1024u,
                 (uint64_t{4} * 1024u * 1024u + rowSamples - 1u) / rowSamples));
@@ -9328,8 +9333,8 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data,
         return replaceTiffStrip(data, stripOffset, stripBytes,
                                 payload, length, little);
     };
-    if (!motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") &&
-        !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE")) {
+    if (!rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DISABLE") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE")) {
         bool delivered = false;
         if (jpegEncodeFullyVulkanBorrowed(
                 pixels, width, height, channels, bits,
@@ -9342,7 +9347,7 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data,
     }
     // Borrowed output avoids one host copy. Keep the owned GPU path as a
     // fallback when mapped output is unavailable or explicitly disabled.
-    if (!motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE")) {
+    if (!rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DISABLE")) {
         int gpuLength = 0;
         if (jpegEncodeFullyVulkan(pixels, width, height, channels, bits,
                                   &encodedBuffer, &gpuLength))
@@ -9355,7 +9360,7 @@ bool DNGDecoder::compressLosslessJPEG(std::vector<uint8_t>& data,
     if (!encodedBuffer && useTurbo) {
         unsigned long turboLength = 0;
         int predictor = channels == 3 ? 4 : 6;
-        if (const char* setting = motioncam::debugEnvironment("MOTIONCAM_LOSSLESS_JPEG_PREDICTOR"))
+        if (const char* setting = rawpreamp::debugEnvironment("RAWPREAMP_LOSSLESS_JPEG_PREDICTOR"))
             predictor = std::clamp(std::atoi(setting), 1, 7);
         if (encodeLosslessJPEGTurbo(pixels, width, height, channels, bits, predictor,
                                    &encodedBuffer, &turboLength))
@@ -9459,11 +9464,11 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                               std::vector<uint8_t>* gpuJpeg,
                               std::vector<std::vector<uint8_t>>* gpuJpegTiles, LogCurve curve) {
     if (logFused) *logFused = false;
-    const char* cpuOptSetting = motioncam::debugEnvironment("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+    const char* cpuOptSetting = rawpreamp::debugEnvironment("RAWPREAMP_GAIN_BAKE_CPU_OPT");
     const bool cpuOpt = !cpuOptSetting || cpuOptSetting[0] != '0';
-    const bool profileBake = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr ||
-        motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS") != nullptr;
-    const auto bakeStarted = motioncam::diagnosticNow();
+    const bool profileBake = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr ||
+        rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_DIAGNOSTICS") != nullptr;
+    const auto bakeStarted = rawpreamp::diagnosticNow();
     bool little = true;
     const auto entries = findTiffEntries(data, little);
     if (entries.empty()) return false;
@@ -9552,7 +9557,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         maps.insert(maps.end(), std::make_move_iterator(opcode3Maps.begin()),
                     std::make_move_iterator(opcode3Maps.end()));
 
-    bool motionCamProducer = false;
+    bool legacyGainMapProducer = false;
     for (const auto& entry : entries) {
         if (entry.tag != TIFF_TAG_SOFTWARE || !entry.count ||
             entry.valueOffset + entry.count > data.size()) continue;
@@ -9562,7 +9567,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         boost::algorithm::trim(software);
         boost::algorithm::to_lower(software);
         constexpr std::string_view product = "motioncam";
-        motionCamProducer |= boost::algorithm::starts_with(software, product) &&
+        legacyGainMapProducer |= boost::algorithm::starts_with(software, product) &&
             (software.size() == product.size() ||
              std::isspace(static_cast<unsigned char>(software[product.size()])) ||
              software[product.size()] == '-' || software[product.size()] == 'v');
@@ -9645,7 +9650,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                                          : std::array<uint8_t, 4>{0, 1, 1, 2};
     if (sourceIsRgb) maps = collapseCfaGainMapsForRgb(maps, cfaPhase);
 
-    const auto predecodeAt = motioncam::diagnosticNow();
+    const auto predecodeAt = rawpreamp::diagnosticNow();
     DecodedDNGImage decodedImage;
     const size_t sampleCount = static_cast<size_t>(width) * height * imageChannels;
     const uint16_t endianCheck = 1;
@@ -9659,7 +9664,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         little == hostLittle && !linearizationE &&
         sampleCount <= std::numeric_limits<uint32_t>::max() / sizeof(uint16_t) &&
         stripBytes == sampleCount * (packedGpuPlaceholder ? 1u : sizeof(uint16_t));
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE"))
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE"))
         inPlace = false;
     if (inPlace) {
         for (uint32_t i = 1; i < bitsE->count; ++i)
@@ -9688,7 +9693,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             return false;
         }
     }
-    const auto decodedAt = motioncam::diagnosticNow();
+    const auto decodedAt = rawpreamp::diagnosticNow();
     auto* stripPixels = inPlace ? data.data() + stripOffset : nullptr;
     std::vector<uint16_t> recoveredGpuSamples;
     auto* pixels = decodedImage.samples.data();
@@ -9731,10 +9736,10 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             origin = std::min(origin, horizontal ? candidate.originH : candidate.originV);
             ++compatible;
         }
-        if (!motionCamProducer || compatible < 4 || spacing <= 0.0)
+        if (!legacyGainMapProducer || compatible < 4 || spacing <= 0.0)
             return horizontal ? map.originH : map.originV;
 
-        // MotionCam's four scalar CFA opcodes encode the same physical lens
+        // These four scalar CFA opcodes encode the same physical lens
         // shading grid, but older files add half a grid interval to MapOrigin
         // for the odd row/column phases. Applying those origins independently
         // displaces the optical center by about 128 sensor pixels. Keep the
@@ -10309,7 +10314,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
             : textureSource->download &&
               textureSource->download(destination, sampleCount);
         if (!recovered) {
-            spdlog::warn("Could not recover DirectLog image for CPU gain-bake fallback");
+            spdlog::warn("Could not recover Native Video image for CPU gain-bake fallback");
             return false;
         }
     }
@@ -10392,12 +10397,12 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
         }
     }
     activeBakeGuard.release();
-    const auto bakedAt = motioncam::diagnosticNow();
+    const auto bakedAt = rawpreamp::diagnosticNow();
 
     const uint32_t newBytes = packDuringBake
         ? static_cast<uint32_t>(packedBytes)
         : width * height * imageChannels * 2;
-    const auto serializedAt = motioncam::diagnosticNow();
+    const auto serializedAt = rawpreamp::diagnosticNow();
     auto writeScalar = [&](const TiffEntry& e, uint32_t value, uint32_t index = 0) {
         const size_t pos = e.valueOffset + index * (e.type == TIFF_TYPE_SHORT ? 2 : 4);
         if (e.type == TIFF_TYPE_SHORT) write16(data.data() + pos, static_cast<uint16_t>(value), little);
@@ -10502,7 +10507,7 @@ bool DNGDecoder::bakeGainMaps(std::vector<uint8_t>& data,
                      std::chrono::duration<double, std::milli>(decodedAt-predecodeAt).count(),
                      std::chrono::duration<double, std::milli>(bakedAt-decodedAt).count(),
                      std::chrono::duration<double, std::milli>(serializedAt-bakedAt).count(),
-                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-serializedAt).count());
+                     std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-serializedAt).count());
     if (replaced && logFused) *logFused = fuseLog;
     return replaced;
 }
@@ -10669,7 +10674,7 @@ bool DNGDecoder::repairGainMapCfaPhase(
         maps[i].left = (maps[i].left & ~1u) + target[i] % 2;
     }
     if (!overwriteGainMapPayloads(data, opcode->valueOffset, payloads, maps)) return false;
-    spdlog::warn("Corrected legacy MotionCam OpcodeList2 gain-map phase from RGGB to CFA pattern {}{}{}{}",
+    spdlog::warn("Corrected legacy OpcodeList2 gain-map phase from RGGB to CFA pattern {}{}{}{}",
                  cfa[0], cfa[1], cfa[2], cfa[3]);
     return true;
 }
@@ -10715,7 +10720,7 @@ bool DNGDecoder::cropGainMapsToFullSensor(
           return false;
       if (maps.empty()) continue;
       for (auto& map : maps) {
-        // Some MotionCam gain maps use 1/pointCount instead of
+        // Some legacy gain maps use 1/pointCount instead of
         // 1/(pointCount-1), leaving the final row/column short of the sensor
         // edge. Extending that malformed grid by clamping produces visible
         // repeated bands after crop remapping. A full-sensor map is expected
@@ -10861,25 +10866,25 @@ bool DNGDecoder::canonicalizeGainMapOpcodes(std::vector<uint8_t>& data) {
 
 bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& data,
                              uintmax_t indexedSize) {
-    const auto started = motioncam::diagnosticNow();
-    motioncam::SourceInputStream file(filePath, std::ios::binary);
+    const auto started = rawpreamp::diagnosticNow();
+    rawpreamp::SourceInputStream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         spdlog::error("Could not open DNG file: {}", filePath);
         return false;
     }
     
-    const auto opened = motioncam::diagnosticNow();
+    const auto opened = rawpreamp::diagnosticNow();
     // Frame indexing already validated this size. Reuse it rather than crossing
     // JNI again for every frame; sidecar reads without an indexed size resolve
     // it normally. Avoid SEEK_END/provider attribute refreshes.
     std::error_code error;
-    const auto sourceSize = indexedSize ? indexedSize : motioncam::sourceFileSize(filePath, error);
+    const auto sourceSize = indexedSize ? indexedSize : rawpreamp::sourceFileSize(filePath, error);
     if (error || sourceSize > std::numeric_limits<size_t>::max()) return false;
     const size_t fileSize = static_cast<size_t>(sourceSize);
 
     // Read entire file
     data.resize(fileSize);
-    const auto allocated = motioncam::diagnosticNow();
+    const auto allocated = rawpreamp::diagnosticNow();
     file.read(reinterpret_cast<char*>(data.data()), fileSize);
     
     if (!file.good()) {
@@ -10887,8 +10892,8 @@ bool DNGDecoder::readDNGFile(const std::string& filePath, std::vector<uint8_t>& 
         return false;
     }
     
-    if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
-        const auto finished = motioncam::diagnosticNow();
+    if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) {
+        const auto finished = rawpreamp::diagnosticNow();
         spdlog::info("GALLERY_PERF event=dng_source_read bytes={} open_ms={:.3f} allocate_ms={:.3f} read_ms={:.3f}",
             fileSize, std::chrono::duration<double, std::milli>(opened - started).count(),
             std::chrono::duration<double, std::milli>(allocated - opened).count(),
@@ -10995,4 +11000,4 @@ bool DNGDecoder::parseOpcodeGainMaps(const uint8_t* opcodeData, size_t opcodeSiz
     return !gainMaps.empty();
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

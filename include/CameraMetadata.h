@@ -6,7 +6,7 @@
 #include <string>
 #include <array>
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct DeviceSpecificProfile {
     std::string cameraId;

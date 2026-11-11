@@ -50,7 +50,7 @@ GalleryOverlayCapture captureGalleryOverlay(QWidget& viewport,
 
 class QVulkanInstance;
 class GalleryVulkanSurface;
-namespace motioncam { struct VulkanGalleryGpuBuffer; }
+namespace rawpreamp { struct VulkanGalleryGpuBuffer; }
 
 // Native Vulkan presentation keeps swapchain pacing off the GUI thread.
 // The widget owns the window container and destroys it before the instance.
@@ -62,7 +62,7 @@ public:
     bool usable() const;
     qreal pixelRatio() const;
     void setFrame(const QImage& image, const QRectF& target, bool smooth);
-    void setGpuFrame(std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame,
+    void setGpuFrame(std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> frame,
                      const QRectF& target, bool smooth,
                      const QImage& overlay = {},
                      const std::vector<GalleryOverlayPart>& parts = {});
@@ -72,7 +72,7 @@ public:
     void stopPresentation();
 
 private:
-#if defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO) && QT_CONFIG(vulkan)
+#if defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO) && QT_CONFIG(vulkan)
     std::unique_ptr<QVulkanInstance> mInstance;
 #endif
     GalleryVulkanSurface* mSurface = nullptr;

@@ -22,7 +22,7 @@
 #include <QScroller>
 
 
-namespace motioncam {
+namespace rawpreamp {
 
 // Cache whole control groups as opaque rasters, avoiding repeated background
 // fills as well as text painting. The shared signature keeps live state fresh.
@@ -113,7 +113,7 @@ public:
             }
         });
         connect(mScroller, &QScroller::stateChanged, this, [this](QScroller::State state) {
-            if(motioncam::debugEnvironmentIsSet("MOTIONCAM_GALLERY_PERF_PROFILE")){
+            if(rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_PERF_PROFILE")){
                 if(mProfileClock.isValid()&&mProfileFrames)
                     qInfo().nospace()<<"TOUCH_SCROLL state="<<mProfileState
                         <<" duration_ms="<<mProfileClock.elapsed()<<" position_updates="<<mProfileFrames
@@ -251,4 +251,4 @@ private:
     QPointF mTarget;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

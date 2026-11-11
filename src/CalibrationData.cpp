@@ -9,7 +9,7 @@
 
 using json = nlohmann::json;
 
-namespace motioncam {
+namespace rawpreamp {
 
 namespace {
     float parseFraction(const json& value, const char* name) {
@@ -125,7 +125,7 @@ namespace {
 
 std::optional<CalibrationData> CalibrationData::loadFromFile(const std::string& filePath) {
     try {
-        motioncam::SourceInputStream file(filePath);
+        rawpreamp::SourceInputStream file(filePath);
         if (!file.is_open()) {
             spdlog::warn("Could not open calibration file: {}", filePath);
             return std::nullopt;
@@ -456,9 +456,9 @@ std::string CalibrationData::createExampleJson() {
   "_ignoreForwardMat": false,
   "_asShotNeutral": [0.5, 1.0, 0.5],
   "_orientation": 0,
-  "_comment4": "For DirectLog RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
+  "_comment4": "For Native Video RGB remosaic Bayer phases rggb grbg gbrg bggr default bggr if not specified",
   "_cfaPhase": "bggr",
-  "_comment5": "DirectLog input levels: Auto uses video metadata; Full or Limited overrides it per clip",
+  "_comment5": "Native Video input levels: Auto uses video metadata; Full or Limited overrides it per clip",
   "_dataLevels": "Full",
   "_comment6": "Raw white/black override; numeric RGB black levels may be written as white/r,g,b",
   "_levels": "Dynamic",
@@ -484,4 +484,4 @@ std::string CalibrationData::createExampleJson() {
 })";
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

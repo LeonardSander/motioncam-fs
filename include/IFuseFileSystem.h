@@ -8,7 +8,7 @@
 #include "Types.h"
 #include "DNGImage.h"
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct FileInfo;
 
@@ -60,4 +60,4 @@ protected:
     IFuseFileSystem() = default;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

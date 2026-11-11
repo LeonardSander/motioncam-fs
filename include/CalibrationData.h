@@ -7,7 +7,7 @@
 #include <optional>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct CalibrationData {
     enum class BadPixelAction { Brighten, Dampen, Interpolate };
@@ -35,7 +35,7 @@ struct CalibrationData {
     uint16_t calibrationIlluminant2 = 0;
     std::array<float, 3> asShotNeutral;
     std::string cfaPhase;  // Bayer pattern: "bggr", "rggb", "grbg", "gbrg"
-    std::string dataLevels = "Auto";  // DirectLog: "Auto", "Full", or "Limited"
+    std::string dataLevels = "Auto";  // Native Video: "Auto", "Full", or "Limited"
     std::string levels = "Dynamic"; // Raw white/black calibration override.
     std::array<int, 2> centerCrop = {0, 0};
     std::array<int, 3> leftTopCropStride = {0, 0, 0}; // width, height, source stride
@@ -82,4 +82,4 @@ struct CalibrationData {
     static std::string createExampleJson();
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

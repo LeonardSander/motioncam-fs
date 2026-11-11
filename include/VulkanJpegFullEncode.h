@@ -4,7 +4,7 @@
 #include <functional>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 // Returns a malloc-owned JPEG stream. A false result leaves the CPU codec as
 // fallback.
 bool jpegEncodeFullyVulkan(const uint16_t *pixels, uint32_t width,
@@ -74,4 +74,4 @@ bool jpegEncodeFullyVulkanPackedBufferBorrowed(
     const JpegOutputConsumer &consume,
     const void *validationBuffer = nullptr);
 void releaseVulkanJpegFullEncodeDevice(const void *gpu);
-} // namespace motioncam
+} // namespace rawpreamp

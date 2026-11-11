@@ -17,7 +17,7 @@
 #include <limits>
 #endif
 
-namespace motioncam {
+namespace rawpreamp {
 
 // Render suspended/hidden Qt pages without scheduling a backing-store repaint.
 inline QPixmap grabPageSnapshot(QWidget* page){
@@ -149,4 +149,4 @@ private:
     QWidget* mPage;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

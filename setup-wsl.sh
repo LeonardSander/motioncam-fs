@@ -1,9 +1,9 @@
 #!/bin/bash
-# WSL Ubuntu setup script for MotionCam Fuse
+# WSL Ubuntu setup script for RawPreamp
 
 set -e
 
-echo "=== MotionCam Fuse WSL Setup ==="
+echo "=== RawPreamp WSL Setup ==="
 
 # Update package lists
 echo "Updating package lists..."
@@ -80,7 +80,7 @@ git pull
 
 echo ""
 echo "=== Setup Complete ==="
-echo "WSL environment ready for building MotionCam Fuse"
+echo "WSL environment ready for building RawPreamp"
 echo ""
 echo "Next steps:"
 echo "  1. Ensure Windows Qt is installed (e.g., /mnt/c/Qt/6.9.1/mingw_64)"
@@ -93,5 +93,5 @@ echo "  - WSL GCC/Clang (for DWARF debug symbols)"
 echo "  - vcpkg dependencies from WSL"
 echo ""
 echo "For debugging:"
-echo "  - Use VSCode 'MotionCam FS Debug (WSL + GDB)' launch config"
-echo "  - Or run: gdb ./build-wsl-debug/MotionCamFuse"
+echo "  - Use VSCode 'RawPreamp Debug (WSL + GDB)' launch config"
+echo "  - Or run: gdb ./build-wsl-debug/RawPreamp"

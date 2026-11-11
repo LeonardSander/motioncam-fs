@@ -10,7 +10,7 @@ Recognition uses the `MCPH` signature; file routing uses `.mcpro`.
 
 The decoder scans records by their declared lengths, without reading compressed
 frame payloads during indexing. It validates record boundaries. CRC32C validation is disabled by default;
-set `MOTIONCAM_MC24_VALIDATE_CHECKSUMS=1` to validate record headers and
+set `RAWPREAMP_MC24_VALIDATE_CHECKSUMS=1` to validate record headers and
 compressed strips. Checksum fields and both hardware/portable validation
 implementations are retained.
 
@@ -60,7 +60,7 @@ by mcpro24fps 044 on a OnePlus CPH2581, 4096×3072, approximately 60 fps.
   capture, and extracted PCM audio, gyro and acceleration samples.
 - The release app imported all 12 clips in an isolated offscreen session.
   Gallery playback and seeking succeeded for the 8-bit log and HQ captures.
-- `decoder_mc24_test` / `motioncam-mc24-test` cover metadata inheritance, random
+- `decoder_mc24_test` / `rawpreamp-mc24-test` cover metadata inheritance, random
   frame access, Bayer prediction, lane packing, table application, audio,
   motion, truncated input and corrupted strip rejection. Existing decoder,
   gyro, acceleration, core, audio-finalization and interpolation tests passed.

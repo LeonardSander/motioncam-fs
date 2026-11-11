@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <thread>
 
-namespace motioncam {
+namespace rawpreamp {
 
 // libjxl uses Highway to dispatch its SIMD kernels on x86 and ARM64. Give
 // large images a bounded per-operation thread pool as well. The eight-worker
@@ -23,7 +23,7 @@ public:
         if (sampleCount < 1024 * 1024) return;
         const unsigned int cores = std::thread::hardware_concurrency();
         size_t workers = std::min<size_t>(cores > 0 ? cores - 1 : 0, maxWorkers);
-        if (const char* configured = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_JXL_WORKERS")) {
+        if (const char* configured = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_JXL_WORKERS")) {
             char* end = nullptr;
             const long requested = std::strtol(configured, &end, 10);
             if (end != configured && *end == '\0' && requested >= 0 && requested <= 16)
@@ -53,4 +53,9 @@ private:
     void* runner_ = nullptr;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp
+
+// The bundled decoder’s DNG writer uses this name.
+namespace motioncam {
+using rawpreamp::JxlParallelRunner;
+}

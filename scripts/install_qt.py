@@ -86,7 +86,7 @@ def main():
         print("\n".join(urls))
         return
     target.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="motioncam-qt-") as temp:
+    with tempfile.TemporaryDirectory(prefix="rawpreamp-qt-") as temp:
         temporary = Path(temp)
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda url: download(url, temporary / url.rsplit("/", 1)[-1]), urls))

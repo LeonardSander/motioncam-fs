@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 // Computes liblj92's sampled lossless-JPEG predictor histogram on Vulkan.
 // Returns false when a compute device is unavailable or the input is too large.
 bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,

@@ -5,7 +5,7 @@
 
 // Console tests have local fixtures and no Android activity/document provider.
 // SourceInputStream itself still uses the production Android pread buffer.
-namespace motioncam {
+namespace rawpreamp {
 void prefetchSourceReadDescriptor(const std::string&) noexcept {}
 int openSourceReadDescriptor(const std::string& path) {
     return ::open(path.c_str(), O_RDONLY | O_CLOEXEC);

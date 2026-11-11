@@ -5,20 +5,20 @@
 #include <cstdlib>
 
 // Set per configuration by CMake, including standalone tests with -UNDEBUG.
-#ifndef MOTIONCAM_DEBUG_INSTRUMENTATION
+#ifndef RAWPREAMP_DEBUG_INSTRUMENTATION
 # ifdef NDEBUG
-#  define MOTIONCAM_DEBUG_INSTRUMENTATION 0
+#  define RAWPREAMP_DEBUG_INSTRUMENTATION 0
 # else
-#  define MOTIONCAM_DEBUG_INSTRUMENTATION 1
+#  define RAWPREAMP_DEBUG_INSTRUMENTATION 1
 # endif
 #endif
 
-namespace motioncam {
-inline constexpr bool debugInstrumentation = MOTIONCAM_DEBUG_INSTRUMENTATION != 0;
+namespace rawpreamp {
+inline constexpr bool debugInstrumentation = RAWPREAMP_DEBUG_INSTRUMENTATION != 0;
 
 // Developer overrides must not change the shipped rendering path.
 inline const char* debugEnvironment(const char* name) {
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
     return std::getenv(name);
 #else
     (void)name;
@@ -29,7 +29,7 @@ inline bool debugEnvironmentIsSet(const char* name) {
     return debugEnvironment(name) != nullptr;
 }
 inline std::chrono::steady_clock::time_point diagnosticNow() {
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
     return std::chrono::steady_clock::now();
 #else
     return {};
@@ -42,10 +42,10 @@ inline std::chrono::steady_clock::time_point galleryBenchmarkNow() {
         return std::chrono::steady_clock::now();
     return {};
 }
-} // namespace motioncam
+} // namespace rawpreamp
 
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
-# define MOTIONCAM_DIAGNOSTIC_INFO(...) SPDLOG_INFO(__VA_ARGS__)
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
+# define RAWPREAMP_DIAGNOSTIC_INFO(...) SPDLOG_INFO(__VA_ARGS__)
 #else
-# define MOTIONCAM_DIAGNOSTIC_INFO(...) ((void)0)
+# define RAWPREAMP_DIAGNOSTIC_INFO(...) ((void)0)
 #endif

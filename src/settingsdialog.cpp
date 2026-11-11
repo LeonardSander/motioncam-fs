@@ -1,7 +1,7 @@
 #include "UiMode.h"
 #include "TouchScrolling.h"
 #include "settingsdialog.h"
-#include "DirectLogDecoder.h"
+#include "NativeVideoDecoder.h"
 #include "DNGDecoder.h"
 #include "VirtualFileSystemImpl_MCRAW.h"
 #include <QVBoxLayout>
@@ -31,7 +31,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("Preferences");
-    setMinimumWidth(motioncam::touchUi() ? 0 : 600);
+    setMinimumWidth(rawpreamp::touchUi() ? 0 : 600);
     setMinimumHeight(200);
 
 #ifdef __APPLE__
@@ -50,13 +50,13 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     auto* outerLayout = new QVBoxLayout(this);
     auto* content = new QWidget(this);
     auto* mainLayout = new QVBoxLayout(content);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         auto* scroll = new QScrollArea(this);
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setWidget(content);
         outerLayout->addWidget(scroll, 1);
-        new motioncam::TouchScrolling(scroll);
+        new rawpreamp::TouchScrolling(scroll);
     } else {
         outerLayout->addWidget(content);
     }
@@ -68,14 +68,14 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     uiMode->addItem(tr("Automatic"), QStringLiteral("auto"));
     uiMode->addItem(tr("Desktop"), QStringLiteral("desktop"));
     uiMode->addItem(tr("Touch"), QStringLiteral("touch"));
-    uiMode->setCurrentIndex(uiMode->findData(motioncam::preferredUiMode()));
+    uiMode->setCurrentIndex(uiMode->findData(rawpreamp::preferredUiMode()));
     interfaceLayout->addWidget(uiMode);
     auto* modeHelp = new QLabel(tr("Interface changes take effect after restarting the application."), interfaceGroup);
     modeHelp->setWordWrap(true);
     interfaceLayout->addWidget(modeHelp);
     mainLayout->addWidget(interfaceGroup);
     connect(this, &QDialog::accepted, this, [uiMode] {
-        QSettings("com.motioncam", "MotionCam FS").setValue("interface/mode", uiMode->currentData());
+        QSettings("com.rawpreamp", "RawPreamp").setValue("interface/mode", uiMode->currentData());
     });
 #endif
 
@@ -91,7 +91,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     auto* cacheLabel = new QLabel("Folder Path:", this);
     mCacheFolderEdit = new QLineEdit(this);
 #ifdef __APPLE__
-    mCacheFolderEdit->setPlaceholderText("Leave empty to use ~/Mounts/MotionCamFuse...");
+    mCacheFolderEdit->setPlaceholderText("Leave empty to use ~/Mounts/RawPreamp...");
 #else
     mCacheFolderEdit->setPlaceholderText("Leave empty for same folder as source file...");
 #endif
@@ -147,14 +147,14 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mAndroidFinalizeDestinationCombo = new QComboBox(finalizeDestinationGroup);
     mAndroidFinalizeDestinationCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     mAndroidFinalizeDestinationCombo->setMinimumContentsLength(16);
-    mAndroidFinalizeDestinationCombo->addItem(tr("Documents/mcFuse"),
+    mAndroidFinalizeDestinationCombo->addItem(tr("Documents/RawPreamp"),
                                                QStringLiteral("documents"));
     mAndroidFinalizeDestinationCombo->addItem(tr("Source directory"),
                                                QStringLiteral("source"));
     mAndroidFinalizeDestinationCombo->addItem(tr("Custom directory"),
                                                QStringLiteral("custom"));
     finalizeDestinationLayout->addWidget(mAndroidFinalizeDestinationCombo);
-    const auto history=QSettings("com.motioncam","MotionCam FS").value(
+    const auto history=QSettings("com.rawpreamp","RawPreamp").value(
         "android/finalizeDirectoryHistory").toList();
     for(const auto& value:history){
         const auto entry=value.toMap();
@@ -260,31 +260,31 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     cacheManagementGroup->setVisible(false);
 #endif
 
-    auto* directLogCacheGroup = new QGroupBox("Indexing Cache", this);
-    auto* directLogCacheLayout = new QVBoxLayout(directLogCacheGroup);
-    auto* directLogCacheUsageLayout = new QHBoxLayout();
-    auto* directLogCacheLabel = new QLabel("Cached index data:", this);
-    mDirectLogCacheUsageLabel = new QLabel(this);
-    mClearDirectLogCacheButton = new QPushButton("Clear", this);
-    mClearDirectLogCacheButton->setMaximumWidth(100);
-    directLogCacheUsageLayout->addWidget(directLogCacheLabel);
-    directLogCacheUsageLayout->addWidget(mDirectLogCacheUsageLabel, 1);
-    directLogCacheUsageLayout->addWidget(mClearDirectLogCacheButton);
-    directLogCacheLayout->addLayout(directLogCacheUsageLayout);
-    auto* directLogCacheHelpLabel = new QLabel(
-        helpSpan("Stores DirectLog timelines, MCRAW indexes, and DNG frame metadata and "
+    auto* nativeVideoCacheGroup = new QGroupBox("Indexing Cache", this);
+    auto* nativeVideoCacheLayout = new QVBoxLayout(nativeVideoCacheGroup);
+    auto* nativeVideoCacheUsageLayout = new QHBoxLayout();
+    auto* nativeVideoCacheLabel = new QLabel("Cached index data:", this);
+    mNativeVideoCacheUsageLabel = new QLabel(this);
+    mClearNativeVideoCacheButton = new QPushButton("Clear", this);
+    mClearNativeVideoCacheButton->setMaximumWidth(100);
+    nativeVideoCacheUsageLayout->addWidget(nativeVideoCacheLabel);
+    nativeVideoCacheUsageLayout->addWidget(mNativeVideoCacheUsageLabel, 1);
+    nativeVideoCacheUsageLayout->addWidget(mClearNativeVideoCacheButton);
+    nativeVideoCacheLayout->addLayout(nativeVideoCacheUsageLayout);
+    auto* nativeVideoCacheHelpLabel = new QLabel(
+        helpSpan("Stores Native Video timelines, MCRAW indexes, and DNG frame metadata and "
                  "sequence analysis so previously imported clips open faster. Clear removes "
                  "these indexes from memory and disk; they are rebuilt on the next import."),
         this);
-    directLogCacheHelpLabel->setWordWrap(true);
-    directLogCacheLayout->addWidget(directLogCacheHelpLabel);
-    mainLayout->addWidget(directLogCacheGroup);
+    nativeVideoCacheHelpLabel->setWordWrap(true);
+    nativeVideoCacheLayout->addWidget(nativeVideoCacheHelpLabel);
+    mainLayout->addWidget(nativeVideoCacheGroup);
 
     // Clip settings group
     auto* clipSettingsGroup = new QGroupBox("Clip Settings", this);
     QVBoxLayout* clipSettingsLayout = nullptr;
     QVBoxLayout* secondClipSettingsLayout = nullptr;
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         auto* clipGroupLayout = new QVBoxLayout(clipSettingsGroup);
         clipGroupLayout->setContentsMargins(0, 0, 0, 0);
         auto* clipScrollArea = new QScrollArea(clipSettingsGroup);
@@ -308,7 +308,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         clipColumns->addWidget(secondColumn, 1);
         clipScrollArea->setWidget(clipContent);
         clipGroupLayout->addWidget(clipScrollArea);
-        new motioncam::TouchScrolling(clipScrollArea);
+        new rawpreamp::TouchScrolling(clipScrollArea);
         clipScrollArea->setMinimumHeight(360);
     } else {
         clipSettingsLayout = new QVBoxLayout(clipSettingsGroup);
@@ -346,7 +346,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     mGalleryFpsIndicatorCheckBox = new QCheckBox("Show FPS indicator in gallery", this);
     mGalleryFpsIndicatorCheckBox->setChecked(true);
     clipSettingsLayout->addWidget(mGalleryFpsIndicatorCheckBox);
-    if (motioncam::touchUi()) {
+    if (rawpreamp::touchUi()) {
         clipSettingsLayout->addStretch();
         clipSettingsLayout = secondClipSettingsLayout;
     }
@@ -381,8 +381,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         this);
     heroSidecarHelpLabel->setWordWrap(true);
     clipSettingsLayout->addWidget(heroSidecarHelpLabel);
-    if (motioncam::touchUi()) clipSettingsLayout->addStretch();
-    mainLayout->addWidget(clipSettingsGroup, motioncam::touchUi() ? 1 : 0);
+    if (rawpreamp::touchUi()) clipSettingsLayout->addStretch();
+    mainLayout->addWidget(clipSettingsGroup, rawpreamp::touchUi() ? 1 : 0);
 
     // Matrix override group (disabled for Fuse-AllV2)
     auto* matrixGroup = new QGroupBox("Color Matrix Override", this);
@@ -443,8 +443,8 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     connect(mCacheQuotaComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCacheQuotaChanged);
     connect(mCacheCleanupIntervalComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::onCleanupIntervalChanged);
     connect(mResetPathsButton, &QPushButton::clicked, this, &SettingsDialog::onResetPaths);
-    connect(mClearDirectLogCacheButton, &QPushButton::clicked,
-            this, &SettingsDialog::onClearDirectLogCache);
+    connect(mClearNativeVideoCacheButton, &QPushButton::clicked,
+            this, &SettingsDialog::onClearNativeVideoCache);
     connect(mMatrixOverrideCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
         mMatrixProfileComboBox->setEnabled(checked);
     });
@@ -452,7 +452,7 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     onCachePolicyChanged(mCachePolicyComboBox->currentIndex());
     onCacheQuotaChanged(mCacheQuotaComboBox->currentIndex());
     onCleanupIntervalChanged(mCacheCleanupIntervalComboBox->currentIndex());
-    updateDirectLogCacheUsage();
+    updateNativeVideoCacheUsage();
 
     setLayout(mainLayout);
 }
@@ -783,13 +783,13 @@ void SettingsDialog::onResetPaths() {
     setCacheFolderWarning("");
 }
 
-void SettingsDialog::updateDirectLogCacheUsage()
+void SettingsDialog::updateNativeVideoCacheUsage()
 {
     const auto [timelineBytes, timelineFiles] =
-        motioncam::DirectLogDecoder::timelineCacheUsage();
+        rawpreamp::NativeVideoDecoder::timelineCacheUsage();
     const auto [mcrawBytes, mcrawFiles] =
-        motioncam::VirtualFileSystemImpl_MCRAW::analysisCacheUsage();
-    const auto [dngBytes, dngSequences] = motioncam::DNGDecoder::analysisCacheUsage();
+        rawpreamp::VirtualFileSystemImpl_MCRAW::analysisCacheUsage();
+    const auto [dngBytes, dngSequences] = rawpreamp::DNGDecoder::analysisCacheUsage();
     const uintmax_t bytes = timelineBytes + mcrawBytes + dngBytes;
     const size_t files = timelineFiles + mcrawFiles + dngSequences;
     const QLocale locale;
@@ -802,17 +802,17 @@ void SettingsDialog::updateDirectLogCacheUsage()
         size = tr("%1 MB").arg(locale.toString(bytes / (1024.0 * 1024.0), 'f', 1));
     else
         size = tr("%1 GB").arg(locale.toString(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 2));
-    mDirectLogCacheUsageLabel->setText(
+    mNativeVideoCacheUsageLabel->setText(
         tr("%1 (%n file(s))", nullptr, static_cast<int>(files)).arg(size));
-    mClearDirectLogCacheButton->setEnabled(files > 0);
+    mClearNativeVideoCacheButton->setEnabled(files > 0);
 }
 
-void SettingsDialog::onClearDirectLogCache()
+void SettingsDialog::onClearNativeVideoCache()
 {
-    motioncam::DirectLogDecoder::clearTimelineCache();
-    motioncam::VirtualFileSystemImpl_MCRAW::clearAnalysisCache();
-    motioncam::DNGDecoder::clearAnalysisCache();
-    updateDirectLogCacheUsage();
+    rawpreamp::NativeVideoDecoder::clearTimelineCache();
+    rawpreamp::VirtualFileSystemImpl_MCRAW::clearAnalysisCache();
+    rawpreamp::DNGDecoder::clearAnalysisCache();
+    updateNativeVideoCacheUsage();
 }
 
 #ifdef __ANDROID__
@@ -837,14 +837,14 @@ QString SettingsDialog::getAndroidFinalizeDestination() const {
 int SettingsDialog::rememberAndroidFinalizeDirectory(const QString& uri) {
     int index=mAndroidFinalizeDestinationCombo->findData(uri);
     if(index>=0)return index;
-    QString path=motioncam::finalizeDirectoryPath(uri);
+    QString path=rawpreamp::finalizeDirectoryPath(uri);
     if(path.isEmpty())path=uri;
     mAndroidFinalizeDestinationCombo->insertItem(3,path,uri);
     QVariantList history;
     for(int row=3;row<mAndroidFinalizeDestinationCombo->count();++row)
         history.append(QVariantMap{{"uri",mAndroidFinalizeDestinationCombo->itemData(row)},
             {"path",mAndroidFinalizeDestinationCombo->itemText(row)}});
-    QSettings("com.motioncam","MotionCam FS").setValue("android/finalizeDirectoryHistory",history);
+    QSettings("com.rawpreamp","RawPreamp").setValue("android/finalizeDirectoryHistory",history);
     return 3;
 }
 

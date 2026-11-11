@@ -42,7 +42,7 @@ void checkP010Packing() {
     constexpr int stride = 96, slice = 32;
     constexpr size_t size = stride * slice * 3 / 2;
     std::vector<uint8_t> packed(size + 16, 0xab);
-    require(motioncam::packP010Input(*frame, packed.data(), size, stride, slice) == size, "P010 packed byte count");
+    require(rawpreamp::packP010Input(*frame, packed.data(), size, stride, slice) == size, "P010 packed byte count");
     for (int plane = 0; plane < 2; ++plane) {
         for (int y = 0; y < (plane ? slice / 2 : slice); ++y) {
             for (int x = 0; x < stride / 2; ++x) {
@@ -55,7 +55,7 @@ void checkP010Packing() {
     }
     for (size_t i = size; i < packed.size(); ++i) require(packed[i] == 0xab, "P010 buffer bounds");
     try {
-        motioncam::packP010Input(*frame, packed.data(), size - 1, stride, slice);
+        rawpreamp::packP010Input(*frame, packed.data(), size - 1, stride, slice);
         require(false, "Reject undersized P010 buffers");
     } catch (const std::runtime_error& e) {
         require(std::string(e.what()).find("too small") != std::string::npos, "P010 bounds validation");
@@ -64,7 +64,7 @@ void checkP010Packing() {
 void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "prores_ks",
                     const std::string& pixelFormat = "yuv444p10le", const QString& audio = {}, int orientation = 90) {
     const bool shoulder = path.contains("LLOG60_NATIVE");
-    motioncam::NativeVideoEncoder::Options options;
+    rawpreamp::NativeVideoEncoder::Options options;
     options.outputPath = path.toStdString();
     options.encoder = codec;
     options.inBandHeaders = codec == "libx265" || codec == "libaom-av1" || codec == "libx264";
@@ -86,7 +86,7 @@ void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "p
     options.fps = 25;
     options.constantFrameRate = cfr;
     {
-        motioncam::NativeVideoEncoder encoder(options);
+        rawpreamp::NativeVideoEncoder encoder(options);
         const int64_t timestamps[] = {0, 40000000, 120000000};
         const int64_t durations[] = {40000000, 80000000, 40000000};
         std::vector<uint8_t> rgb(64 * 64 * 6);
@@ -123,7 +123,7 @@ void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "p
     size_t size = 0;
     const auto* matrix = reinterpret_cast<const int32_t*>(av_stream_get_side_data(stream, AV_PKT_DATA_DISPLAYMATRIX, &size));
 #endif
-    // Import the track using the same clockwise convention as DirectLogDecoder.
+    // Import the track using the same clockwise convention as NativeVideoDecoder.
     const int importedOrientation = matrix ? ((static_cast<int>(std::lround(-av_display_rotation_get(matrix))) % 360) + 360) % 360 : 0;
     require(importedOrientation == (orientation < 0 ? 0 : orientation), "Round-trip clockwise display orientation");
     const auto* decoder = avcodec_find_decoder(stream->codecpar->codec_id);
@@ -146,12 +146,12 @@ void encodeAndCheck(const QString& path, bool cfr, const std::string& codec = "p
                 const int sample = format->comp[0].depth == 8 ? row[32] : row[64] | (row[65] << 8);
                 return double(sample) / ((1 << format->comp[0].depth) - 1);
             };
-            const double expected = motioncam::LLog60::encode(0.1);
+            const double expected = rawpreamp::LLog60::encode(0.1);
             require(std::abs(luma(24) - expected) < .015, "Native transfer full-range pixel value");
             if (shoulder) {
-                require(std::abs(luma(56) - motioncam::LLog60::encode(64552. / 65535)) < .006,
+                require(std::abs(luma(56) - rawpreamp::LLog60::encode(64552. / 65535)) < .006,
                     "AV1 retains modified highlight transition");
-                require(std::abs(motioncam::LLog60::decode(luma(56)) - 64552. / 65535) < .007,
+                require(std::abs(rawpreamp::LLog60::decode(luma(56)) - 64552. / 65535) < .007,
                     "AV1 highlights round-trip through modified inverse");
             }
             require(luma(8) < .02 && luma(40) > .98, "Full-range black and white endpoints (no 16-235/64-940 scaling)");
@@ -192,7 +192,7 @@ int main() {
     // No event loop or Java activity is needed for local-file codec fixtures.
     try {
         checkP010Packing();
-        using Curve = motioncam::LLog60;
+        using Curve = rawpreamp::LLog60;
         double previousCode = -1;
         for (int i = 0; i <= 65535; ++i) {
             const double x = i / 65535., y = Curve::encode(x);
@@ -211,17 +211,17 @@ int main() {
         QTemporaryDir directory;
         require(directory.isValid(), "Temporary directory");
         try {
-            motioncam::NativeVideoEncoder::Options legacy;
+            rawpreamp::NativeVideoEncoder::Options legacy;
             legacy.width = legacy.height = 64;
             legacy.encoder = "prores_ks";
             legacy.pixelFormat = "yuvj420p";
-            motioncam::NativeVideoEncoder encoder(legacy);
+            rawpreamp::NativeVideoEncoder encoder(legacy);
             require(false, "Reject deprecated JPEG-range pixel formats");
         } catch (const std::runtime_error& e) {
             require(std::string(e.what()).find("Deprecated yuvj") != std::string::npos, "Reject yuvj before opening an encoder");
         }
-        require(!motioncam::NativeVideoEncoder::supports("missing_encoder", "yuv420p10le"), "Reject missing encoders");
-        require(!motioncam::NativeVideoEncoder::supports("prores_ks", "yuv420p"), "Reject unsupported pixel formats");
+        require(!rawpreamp::NativeVideoEncoder::supports("missing_encoder", "yuv420p10le"), "Reject missing encoders");
+        require(!rawpreamp::NativeVideoEncoder::supports("prores_ks", "yuv420p"), "Reject unsupported pixel formats");
         const QString audio = directory.filePath("audio.wav");
         std::vector<uint8_t> wav(44 + 15360, 0);
         auto le32 = [&](size_t at, uint32_t value) {
@@ -236,7 +236,7 @@ int main() {
         require(audioFile.open(QIODevice::WriteOnly) && audioFile.write(reinterpret_cast<const char*>(wav.data()), wav.size()) == static_cast<qint64>(wav.size()), "Create audio fixture");
         audioFile.close();
         const QString flacAudio = directory.filePath("audio.flac");
-        motioncam::AudioWriter::convertFile(audio.toStdString(), flacAudio.toStdString(), "flac", false);
+        rawpreamp::AudioWriter::convertFile(audio.toStdString(), flacAudio.toStdString(), "flac", false);
         encodeAndCheck(directory.filePath("vfr.mov"), false, "prores_ks", "yuv444p10le", audio);
         encodeAndCheck(directory.filePath("cfr.mov"), true);
         encodeAndCheck(directory.filePath("prores422.mov"), false, "prores_ks", "yuv422p10le");
@@ -245,14 +245,14 @@ int main() {
         for (int rotation : {-1, 0, 180, 270})
             encodeAndCheck(directory.filePath(QString("rotation-%1.mov").arg(rotation)), false,
                 "cfhd", "yuv422p10le", {}, rotation);
-        if (motioncam::NativeVideoEncoder::supports("libx264", "nv12"))
+        if (rawpreamp::NativeVideoEncoder::supports("libx264", "nv12"))
             encodeAndCheck(directory.filePath("nv12.mov"), false, "libx264", "nv12", audio);
-        if (motioncam::NativeVideoEncoder::supports("libaom-av1", "yuv420p10le"))
+        if (rawpreamp::NativeVideoEncoder::supports("libaom-av1", "yuv420p10le"))
             encodeAndCheck(directory.filePath("clip_LLOG60_NATIVE.mp4"), false,
                 "libaom-av1", "yuv420p10le", flacAudio);
         for (const char* codec : {"libx265", "libaom-av1"}) {
             for (const char* format : {"yuv420p10le", "yuv422p10le", "yuv444p10le"}) {
-                if (!motioncam::NativeVideoEncoder::supports(codec, format)) continue;
+                if (!rawpreamp::NativeVideoEncoder::supports(codec, format)) continue;
                 const bool av1 = std::string(codec) == "libaom-av1";
                 encodeAndCheck(directory.filePath(QString::fromLatin1(codec) + format + (av1 ? ".mp4" : ".mov")),
                     false, codec, format, av1 ? flacAudio : audio);

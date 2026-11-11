@@ -1,5 +1,5 @@
 #include "android/VulkanHardwareBuffer.h"
-#if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
+#if defined(__ANDROID__) && defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO)
 #include <spdlog/spdlog.h>
 #include <shaderc/shaderc.h>
 #include "android/VulkanInteropFence.h"
@@ -7,7 +7,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
-namespace motioncam {
+namespace rawpreamp {
 VulkanHardwareBuffer::~VulkanHardwareBuffer() {
     if (!mDevice) return;
     const VkDevice device = mDevice->device;
@@ -61,13 +61,13 @@ layout(local_size_x=16, local_size_y=16) in;
 layout(set=0, binding=0) uniform sampler2D decoderImage;
 layout(set=0, binding=1, rgba16) writeonly uniform image2D rgbImage;
 layout(push_constant) uniform Transfer { uint curve; } transfer;
-)glsl") + DirectLogGpuRgb::transferShader() + R"glsl(
+)glsl") + NativeVideoGpuRgb::transferShader() + R"glsl(
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     ivec2 dimensions = imageSize(rgbImage);
     if (any(greaterThanEqual(p, dimensions))) return;
     vec2 uv = (vec2(p) + 0.5) / vec2(dimensions);
-    imageStore(rgbImage, p, vec4(motioncamDecodeDirectLog(
+    imageStore(rgbImage, p, vec4(decodeNativeVideo(
         texture(decoderImage, uv).rgb, transfer.curve), 1.0));
 }
 )glsl";

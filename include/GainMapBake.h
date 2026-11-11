@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 
 inline std::array<uint8_t, 4> cfaColorsFromPhase(std::string phase) {
     std::transform(phase.begin(), phase.end(), phase.begin(), [](unsigned char value) {
@@ -178,7 +178,7 @@ struct GainMapMetadataAdjustment {
 };
 
 // Convert the two OpcodeList2 representations accepted by DNG readers into
-// the representation emitted by MotionCam: one scalar GainMap per CFA phase.
+// the representation emitted by RawPreamp: one scalar GainMap per CFA phase.
 // Existing scalar maps are retained so multiple spatial regions remain valid.
 template<typename Map>
 inline bool canonicalizeCfaGainMaps(std::vector<Map>& maps) {
@@ -602,7 +602,7 @@ inline GainMapOptimization optimizeGainMapStack(
 
 // Optimize all independently encoded gain-map layers and return the metadata
 // compensation which preserves their combined rendering.  Keeping this here
-// makes MCRAW, mounted DNG and DirectLog use the same layer semantics.
+// makes MCRAW, mounted DNG and Native Video use the same layer semantics.
 template<typename Map, typename LayerRange>
 inline GainMapMetadataAdjustment optimizeGainMapLayers(
         LayerRange&& layers, const std::array<uint8_t, 4>& cfa) {
@@ -669,4 +669,4 @@ inline bool reduceGainMapStackToColor(std::vector<Map>& maps) {
     return separateGainMapLuminance(maps).valid;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

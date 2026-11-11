@@ -15,9 +15,8 @@ namespace BS {
 class thread_pool;
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
-class Decoder;
 class LRUCache;
 
 class VirtualFileSystemImpl_MCRAW : public MountedDngSource
@@ -77,4 +76,4 @@ private:
     mutable std::shared_mutex mRenderMutex;
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

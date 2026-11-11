@@ -12,7 +12,7 @@ LLOG60 preserves normalized black = 0 and white = 1:
 
 The transition starts at encoded 0.971335276138720. The curve and its inverse
 are in `include/RawLogTransform.h`. Matching GPU arithmetic is in
-`shaders/vulkan_gain_display_math.glsl` and `src/DirectLogGpuRgb.cpp`.
+`shaders/vulkan_gain_display_math.glsl` and `src/NativeVideoGpuRgb.cpp`.
 
 DNG output passes an explicit `LogCurve` through standalone and fused CPU
 and Vulkan encoders. The same selection builds the embedded TIFF

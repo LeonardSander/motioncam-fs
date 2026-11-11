@@ -6,7 +6,7 @@
 #include <memory>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct VulkanJpegTile {
     const uint8_t* bytes = nullptr;
@@ -85,4 +85,4 @@ bool jpegDecodeResidentTiledImageVulkan(
     const std::function<bool(const VulkanDecodedJpegImage&)>& consume);
 void releaseVulkanJpegDecodeDevice(const void* gpu);
 
-} // namespace motioncam
+} // namespace rawpreamp

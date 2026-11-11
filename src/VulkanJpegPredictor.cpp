@@ -2,7 +2,7 @@
 #include "VulkanJpegPredictor.h"
 #include "SharedVulkanDevice.h"
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include "VulkanJpegContext.h"
 #include <libplacebo/vulkan.h>
 #include <libplacebo/gpu.h>
@@ -16,7 +16,7 @@
 #include <limits>
 #include <mutex>
 
-namespace motioncam {
+namespace rawpreamp {
 VulkanJpegContext& jpegContext() {
     static VulkanJpegContext context;
     return context;
@@ -210,7 +210,7 @@ bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,
                                   uint32_t bits, int& predictor,
                                   int histogram[18],
                                   std::vector<int16_t>* residuals) {
-    const auto started = motioncam::diagnosticNow();
+    const auto started = rawpreamp::diagnosticNow();
     if (residuals) residuals->clear();
     if (!pixels || !histogram || !width || !height ||
         (channels != 1 && channels != 3) || bits < 8 || bits > 16 ||
@@ -271,7 +271,7 @@ bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,
     s.residentHeight = height;
     s.residentChannels = channels;
     s.residentBits = bits;
-    const auto histogramReady = motioncam::diagnosticNow();
+    const auto histogramReady = rawpreamp::diagnosticNow();
     predictor = 1;
     uint64_t best = UINT64_MAX;
     for (int mode = 1; mode <= 7; ++mode) {
@@ -323,17 +323,17 @@ bool jpegPredictorHistogramVulkan(const uint16_t* pixels, uint32_t width,
             else residuals->clear();
         }
     }
-    if (motioncam::debugEnvironment("MOTIONCAM_JPEG_ENCODE_PROFILE"))
+    if (rawpreamp::debugEnvironment("RAWPREAMP_JPEG_ENCODE_PROFILE"))
         std::fprintf(stderr, "JPEG encode GPU predictor: histogram_ms=%.3f residual_ms=%.3f samples=%zu\n",
                      std::chrono::duration<double, std::milli>(histogramReady - started).count(),
                      std::chrono::duration<double, std::milli>(
-                         motioncam::diagnosticNow() - histogramReady).count(),
+                         rawpreamp::diagnosticNow() - histogramReady).count(),
                      samples);
     return true;
 }
 }
 #else
-namespace motioncam {
+namespace rawpreamp {
 bool jpegPredictorHistogramVulkan(const uint16_t*, uint32_t, uint32_t,
                                   uint32_t, uint32_t, int&, int[18],
                                   std::vector<int16_t>*) {

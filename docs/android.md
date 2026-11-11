@@ -148,7 +148,7 @@ The local arm64 APK build was verified with Qt 6.12.0, a full JDK 21,
 Android SDK platform and build tools 36, and NDK r27c. The SDK must contain
 `platforms/android-36` and `build-tools/36.0.0`. The APK is signed with a
 debug key. The Android vcpkg overlay builds libplacebo 7.360.1 and FFmpeg
-with avfilter support so DirectLog's Vulkan conversion and gallery color
+with avfilter support so Native Video's Vulkan conversion and gallery color
 processing can run on compatible devices. Android uses the native Vulkan
 gallery presenter inside the existing Qt activity surface. The same presenter is
 selected by default on supported desktop builds. Gallery frames are presented
@@ -185,7 +185,7 @@ MediaCodec hardware-buffer import and native surface creation remain
 platform adapters, independent of that memory policy. macOS is enabled but requires validation
 on hardware; Android testing does not validate its import/presentation backend.
 
-DirectLog uses MediaCodec AImageReader output when FFmpeg Vulkan decode is
+Native Video uses MediaCodec AImageReader output when FFmpeg Vulkan decode is
 unavailable. Hardware-buffer imports and submission resources are cached, with
 at most three output images. The intermediate is RGBA16 UNORM; displayed 10-bit
 frames use packed RGB10A2 UNORM. Full-resolution deferred RGB decoding fuses
@@ -281,7 +281,7 @@ automatically; CI supplies the same variables through its environment.
 Use matching Qt 6.12.0 Android and Linux host kits, a full JDK 21, SDK
 platform/build tools 36, NDK 27.2.12479018, and the pinned vcpkg checkout.
 Keep these tools outside `/tmp`. The example uses `~/Qt/6.12.0` and
-`~/.local/share/mcfuse`; generated build files and dependencies stay in
+`~/.local/share/rawpreamp`; generated build files and dependencies stay in
 `build-android-arm64`. `scripts/install_qt_android.py` installs the Android
 kit; aqt can install the matching host kit with Qt Declarative and Shader Tools.
 
@@ -290,20 +290,20 @@ four build jobs. The build requires the Vulkan backend and retains runtime
 CPU fallback. The vcpkg overlay builds unmodified libplacebo; no external-buffer
 import patch is needed.
 
-Desktop regression targets include `motioncam-lossless-jpeg-test`,
-`motioncam-audio-finalize-test` and `motioncam-finalize-interpolation-test`.
+Desktop regression targets include `rawpreamp-lossless-jpeg-test`,
+`rawpreamp-audio-finalize-test` and `rawpreamp-finalize-interpolation-test`.
 GPU checks cover CFA/RGB output, gain/LOG equivalence and resource lifetime;
 finalizer checks cover sink failures, sidecars, audio conversion and cancellation.
 
 Gallery controls use a refresh timer coalesced with active video handoffs.
 Their occupied bands are packed into a small texture and composited at
 viewport pixel coordinates by the native Vulkan presenter. The offscreen
-`motioncam-gallery-overlay-test` compares reconstructed overlays against full
+`rawpreamp-gallery-overlay-test` compares reconstructed overlays against full
 widget captures at multiple viewport offsets, sizes, opacities and display
 scales, including fractional scaling. Linux compute output uses exportable
 storage buffers directly; drivers that reject them retain the transfer-copy
-fallback. Set `MOTIONCAM_GALLERY_PERF_FULLSCREEN=1` for actual fullscreen
-performance runs (`MOTIONCAM_GALLERY_PERF_VIEWPORT=1280x720` selects a window).
+fallback. Set `RAWPREAMP_GALLERY_PERF_FULLSCREEN=1` for actual fullscreen
+performance runs (`RAWPREAMP_GALLERY_PERF_VIEWPORT=1280x720` selects a window).
 Keep histogram settings identical when comparing runs: raw readback and
 histogram computation remain a separate cost.
 
@@ -324,7 +324,7 @@ intent extras. Use `profile,nohist,hidethumbnails,skipbackfill,preserveproxy,kee
 with thumbnails explicitly off for playback comparisons. Basic structured events
 are retained in the bounded `files/diagnostics/gallery-perf.log`. Add `zerocopy`
 to require resident GPU input and direct shared-image presentation. This strict
-validation rejects CPU-decoded DirectLog, full-frame DirectLog readback, host
+validation rejects CPU-decoded Native Video, full-frame Native Video readback, host
 preview input, buffer-upload presentation and CPU display fallback. Use it with
 `nohist`; the raw histogram currently requires CPU samples. Small asynchronous
 thumbnail readbacks and Qt control overlays are separate from video-frame
@@ -342,7 +342,7 @@ first, then run:
 ```sh
 python3 scripts/profile_android_gallery.py \
   --ndk "$ANDROID_NDK_ROOT" \
-  --session /data/user/0/com.motioncam.fuse/files/sessions/zero-copy-directlog.json \
+  --session /data/user/0/com.rawpreamp.app/files/sessions/zero-copy-native-video.json \
   --output /tmp/gallery-profile --landscape \
   --symbols build-android-arm64-mediacodec --symbols "$QT_ANDROID_ROOT"
 ```
@@ -367,7 +367,7 @@ The UI stays at native device resolution. Android disables Qt's GUI raster
 worker pool: the short fills at high display density were slower when dispatched
 to those workers. Other platforms retain their existing Qt setting.
 
-On the CPH2581 landscape test (4096×3072 DirectLog, 30 fps source, audio on,
+On the CPH2581 landscape test (4096×3072 Native Video, 30 fps source, audio on,
 histogram off), steady measurements after the initial playback burst were:
 
 | Overlay path | Capture time | Displayed fps |

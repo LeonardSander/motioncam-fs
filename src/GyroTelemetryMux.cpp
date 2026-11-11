@@ -14,7 +14,7 @@ extern "C" {
 #include <limits>
 #include <stdexcept>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 void check(int status, const char* operation) {
     if (status >= 0) return;
@@ -202,8 +202,8 @@ void GyroTelemetry::embed(const std::string& videoPath, const std::vector<int64_
             }
             chunkCount = chunkOffsets.size() - 1;
             header["camera"]["additionalData"] = {
-                {"motioncamVideoClockOriginUs", 0},
-                {"motioncamTelemetryChunks", {{"version", 1}, {"count", chunkCount}}}};
+                {"rawpreampVideoClockOriginUs", 0},
+                {"rawpreampTelemetryChunks", {{"version", 1}, {"count", chunkCount}}}};
         } else
             additionalData.clear();
     }
@@ -230,7 +230,7 @@ void GyroTelemetry::embed(const std::string& videoPath, const std::vector<int64_
             if (chunk) {
                 auto chunkHeader = header;
                 chunkHeader["camera"]["additionalData"] = {
-                    {"motioncamTelemetryChunk",
+                    {"rawpreampTelemetryChunk",
                      {{"version", 1},
                       {"index", nextChunk},
                       {"text",
@@ -307,4 +307,4 @@ void GyroTelemetry::embed(const std::string& videoPath, const std::vector<int64_
     }
     std::filesystem::remove(backup);
 }
-} // namespace motioncam
+} // namespace rawpreamp

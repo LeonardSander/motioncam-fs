@@ -1,9 +1,9 @@
 @echo off
-REM MotionCam Fuse Clean Script
+REM RawPreamp Clean Script
 REM This script removes the build directory
 
 echo ======================================
-echo MotionCam Fuse Clean Script
+echo RawPreamp Clean Script
 echo ======================================
 echo.
 

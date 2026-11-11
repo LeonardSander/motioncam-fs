@@ -18,7 +18,7 @@ uint packedInputSample(uint index) {
 #endif
 
 float ditherAt(uint x, uint y) {
-    return motioncamDither(x, y, p.ditherSeed, (p.flags & 2u) != 0u);
+    return rawpreampDither(x, y, p.ditherSeed, (p.flags & 2u) != 0u);
 }
 
 uint swapWordBytes(uint packed) {

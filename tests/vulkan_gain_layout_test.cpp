@@ -26,20 +26,20 @@ int main() {
         memory.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
         memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-        if (!motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        if (!rawpreamp::vulkanMemoryIsUnified(properties, memory)) return 1;
         properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
-        if (motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        if (rawpreamp::vulkanMemoryIsUnified(properties, memory)) return 1;
         properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
         memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        if (motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        if (rawpreamp::vulkanMemoryIsUnified(properties, memory)) return 1;
         memory.memoryTypes[0].propertyFlags |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
         memory.memoryHeapCount = memory.memoryTypeCount = 2;
         memory.memoryHeaps[1].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
         memory.memoryTypes[1].heapIndex = 1;
         memory.memoryTypes[1].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        if (motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        if (rawpreamp::vulkanMemoryIsUnified(properties, memory)) return 1;
         memory.memoryTypes[1].propertyFlags |= VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
-        if (!motioncam::vulkanMemoryIsUnified(properties, memory)) return 1;
+        if (!rawpreamp::vulkanMemoryIsUnified(properties, memory)) return 1;
     }
     // Compare the gallery compute pass with the established CPU fallback,
     // including odd dimensions and all four Bayer phases.
@@ -55,13 +55,13 @@ int main() {
         const std::array<double, 3> black{64.0, 72.0, 80.0};
         const std::array<double, 3> white{16000.0, 16000.0, 16000.0};
         std::vector<uint8_t> gpu, cpu;
-        if (!motioncam::demosaicGalleryBayerVulkan(
+        if (!rawpreamp::demosaicGalleryBayerVulkan(
                 mosaic.data(), gpu, previewWidth, previewHeight,
                 phase, black, white)) {
             std::fprintf(stderr, "Vulkan gallery demosaic unavailable; test skipped\n");
             return 77;
         }
-        if (!motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+        if (!rawpreamp::utils::demosaicBilinearBayerToRgb16Bytes(
                 mosaic.data(), cpu, previewWidth, previewHeight,
                 phase, black, white) || gpu.size() != cpu.size()) {
             std::fprintf(stderr, "Gallery demosaic output size mismatch\n");
@@ -77,7 +77,7 @@ int main() {
                 return 1;
             }
         }
-        motioncam::VulkanGalleryBayerSource source;
+        rawpreamp::VulkanGalleryBayerSource source;
         source.samples = mosaic.data();
         source.width = previewWidth;
         source.height = previewHeight;
@@ -88,10 +88,10 @@ int main() {
         const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
         auto separate = cpu;
         std::vector<uint8_t> fused;
-        if (!motioncam::colorGalleryRgbVulkan(separate, gains, identity,
+        if (!rawpreamp::colorGalleryRgbVulkan(separate, gains, identity,
                                                identity, 1.0f, nullptr, nullptr,
                                                false, false) ||
-            !motioncam::colorGalleryRgbVulkan(fused, gains, identity,
+            !rawpreamp::colorGalleryRgbVulkan(fused, gains, identity,
                                               identity, 1.0f, nullptr, nullptr,
                                               false, false, &source) ||
             fused.size() != separate.size()) {
@@ -109,21 +109,21 @@ int main() {
         }
         // Strict shared-image validation must reject host input instead of
         // silently uploading a full frame and calling it zero-copy.
-        motioncam::VulkanGalleryOutput strictOutput;
+        rawpreamp::VulkanGalleryOutput strictOutput;
         strictOutput.width = previewWidth;
         strictOutput.height = previewHeight;
         strictOutput.rgb24 = true;
         strictOutput.requireZeroCopy = true;
         auto strictInput = cpu;
-        if (motioncam::colorGalleryRgbVulkan(strictInput, gains, identity,
+        if (rawpreamp::colorGalleryRgbVulkan(strictInput, gains, identity,
                 identity, 1.0f, nullptr, nullptr, false, false, nullptr,
                 &strictOutput) || strictInput != cpu) {
             std::fprintf(stderr, "Zero-copy validation accepted or modified host input\n");
             return 1;
         }
-        motioncam::VulkanGalleryBayerGain bake;
+        rawpreamp::VulkanGalleryBayerGain bake;
         bake.scale.fill(1.0f);
-        motioncam::VulkanGalleryBayerGainMap map;
+        rawpreamp::VulkanGalleryBayerGainMap map;
         map.width = map.height = 1;
         map.channels = 4;
         map.right = previewWidth;
@@ -135,7 +135,7 @@ int main() {
         source.white = {65535, 65535, 65535};
         source.gain = &bake;
         std::vector<uint8_t> baked;
-        if (!motioncam::colorGalleryRgbVulkan(baked, gains, identity,
+        if (!rawpreamp::colorGalleryRgbVulkan(baked, gains, identity,
                 identity, 1.0f, nullptr, nullptr, false, false, &source)) {
             std::fprintf(stderr, "Fused gallery gain pass failed\n");
             return 1;
@@ -145,7 +145,7 @@ int main() {
         source.samples = doubled.data();
         source.gain = nullptr;
         std::vector<uint8_t> reference;
-        if (!motioncam::colorGalleryRgbVulkan(reference, gains, identity,
+        if (!rawpreamp::colorGalleryRgbVulkan(reference, gains, identity,
                 identity, 1.0f, nullptr, nullptr, false, false, &source) ||
             reference.size() != baked.size()) return 1;
         for (size_t index = 0; index < baked.size() / 2; ++index) {
@@ -170,7 +170,7 @@ int main() {
         source[1] = 64000;
         source[2] = 65000;
         std::memcpy(pixels.data(), source.data(), pixels.size());
-        if (!motioncam::colorGalleryRgbVulkan(
+        if (!rawpreamp::colorGalleryRgbVulkan(
                 pixels, gains, unusedMatrix, unusedMatrix, 1.0f,
                 nullptr, nullptr, false, false)) {
             std::fprintf(stderr, "Vulkan gallery color transform unavailable\n");
@@ -216,14 +216,14 @@ int main() {
     }
     for (bool combined : {false, true}) {
         constexpr size_t count = 97;
-        motioncam::DNGProfileTable hue, look;
+        rawpreamp::DNGProfileTable hue, look;
         hue.hueDivisions = look.hueDivisions = 4;
         hue.saturationDivisions = look.saturationDivisions = 2;
         hue.valueDivisions = combined ? 1 : 2;
         look.valueDivisions = 2;
         hue.encoding = combined ? 0 : 1;
         look.encoding = 0;
-        auto fill = [](motioncam::DNGProfileTable& table, float amount) {
+        auto fill = [](rawpreamp::DNGProfileTable& table, float amount) {
             table.values.resize(static_cast<size_t>(table.hueDivisions) *
                 table.saturationDivisions * table.valueDivisions * 3);
             for (size_t i = 0; i < table.values.size() / 3; ++i) {
@@ -245,7 +245,7 @@ int main() {
         const std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
         const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
         constexpr float exposure = 1.1f;
-        if (!motioncam::colorGalleryRgbVulkan(gpu, gains, identity, identity,
+        if (!rawpreamp::colorGalleryRgbVulkan(gpu, gains, identity, identity,
                                                exposure, &hue, &look, true, false)) {
             std::fprintf(stderr, "Vulkan profile color transform unavailable\n");
             return 1;
@@ -262,11 +262,11 @@ int main() {
                     0.0205351f * camera[2],
                 1.2118128f * camera[2]};
             if (combined)
-                motioncam::gallery::applyHueSatAndLook(proPhoto, hue, look, exposure);
+                rawpreamp::gallery::applyHueSatAndLook(proPhoto, hue, look, exposure);
             else {
-                motioncam::gallery::applyProfileTable(proPhoto, hue);
+                rawpreamp::gallery::applyProfileTable(proPhoto, hue);
                 for (auto& channel : proPhoto) channel *= exposure;
-                motioncam::gallery::applyProfileTable(proPhoto, look);
+                rawpreamp::gallery::applyProfileTable(proPhoto, look);
             }
             std::array<float, 3> xyz{
                 0.7976749f * proPhoto[0] + 0.1351917f * proPhoto[1] +
@@ -312,13 +312,13 @@ int main() {
         const std::array<float, 3> gains{1.0f, 1.0f, 1.0f};
         const std::array<float, 9> matrix{1,0,0,0,1,0,0,0,1};
         auto colored = source;
-        if (!motioncam::colorGalleryRgbVulkan(colored, gains, matrix,
+        if (!rawpreamp::colorGalleryRgbVulkan(colored, gains, matrix,
                                                matrix, 1.0f, nullptr, nullptr,
                                                false, false)) return 1;
         for (int orientation : {0, 90, 180, 270})
             for (bool rgb24 : {false, true})
               for(bool clippingOn:{true,false,true}) {
-                motioncam::VulkanGalleryOutput output;
+                rawpreamp::VulkanGalleryOutput output;
                 output.width = width;
                 output.height = height;
                 output.orientation = orientation;
@@ -332,7 +332,7 @@ int main() {
                     output.thumbnailOrientation = orientation;
                 }
                 auto actual = source;
-                if (!motioncam::colorGalleryRgbVulkan(actual, gains, matrix,
+                if (!rawpreamp::colorGalleryRgbVulkan(actual, gains, matrix,
                         matrix, 1.0f, nullptr, nullptr, false, false,
                         nullptr, &output)) return 1;
                 const uint32_t outputWidth = orientation == 90 || orientation == 270
@@ -407,7 +407,7 @@ int main() {
         // or their frame index as a thumbnail for the new playback generation.
         const std::array<float, 3> gains{1, 1, 1};
         const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
-        motioncam::VulkanGalleryOutput output;
+        rawpreamp::VulkanGalleryOutput output;
         output.width = output.height = 16;
         output.rgb24 = true;
         output.thumbnailWidth = 5;
@@ -429,7 +429,7 @@ int main() {
                     samples[pixel * 3u + channel] = 65535;
                 std::vector<uint8_t> rgb(samples.size() * 2u);
                 std::memcpy(rgb.data(), samples.data(), rgb.size());
-                if (!motioncam::colorGalleryRgbVulkan(rgb, gains, identity,
+                if (!rawpreamp::colorGalleryRgbVulkan(rgb, gains, identity,
                         identity, 1.0f, nullptr, nullptr, false, false,
                         nullptr, &output)) return 1;
                 if (thumbnail.empty()) continue;
@@ -459,7 +459,7 @@ int main() {
         // when its byte count equals the new shape's byte count.
         const std::array<float,3> gains{1,1,1};
         const std::array<float,9> identity{1,0,0,0,1,0,0,0,1};
-        motioncam::VulkanGalleryOutput output;
+        rawpreamp::VulkanGalleryOutput output;
         output.width=output.height=16;output.rgb24=true;
         output.thumbnailGeneration=77;output.thumbnailSourceFrame=19;
         std::vector<uint8_t> thumbnail;
@@ -473,7 +473,7 @@ int main() {
                 for(size_t i=0;i<samples.size();++i)samples[i]=uint16_t(i*7919u);
                 std::vector<uint8_t> rgb(samples.size()*2u);
                 std::memcpy(rgb.data(),samples.data(),rgb.size());
-                if(!motioncam::colorGalleryRgbVulkan(rgb,gains,identity,identity,1.0f,
+                if(!rawpreamp::colorGalleryRgbVulkan(rgb,gains,identity,identity,1.0f,
                     nullptr,nullptr,false,false,nullptr,&output))return 1;
                 if(thumbnail.empty())continue;
                 if(thumbnail.size()!=shape.first*shape.second*3u)return 1;
@@ -492,7 +492,7 @@ int main() {
     {
         // RGB texture specialization must match the existing buffer shader;
         // excluding Bayer branches must not alter normalization or color math.
-        pl_vulkan vk = motioncam::createGalleryVulkanContext(nullptr);
+        pl_vulkan vk = rawpreamp::createGalleryVulkanContext(nullptr);
         if (!vk) return 1;
         const pl_fmt format = pl_find_fmt(vk->gpu, PL_FMT_UNORM, 4, 16, 16,
                                           PL_FMT_CAP_SAMPLEABLE);
@@ -509,7 +509,7 @@ int main() {
         transfer.tex = tex;
         transfer.ptr = rgba.data();
         if (!tex || !pl_tex_upload(vk->gpu, &transfer)) return 1;
-        motioncam::VulkanGalleryTextureSource texture;
+        rawpreamp::VulkanGalleryTextureSource texture;
         texture.gpu = vk->gpu;
         texture.texture = tex;
         texture.width = texture.height = 16;
@@ -517,32 +517,32 @@ int main() {
         const std::array<float, 3> gains{1.1f, 0.9f, 1.2f};
         const std::array<float, 9> matrix{1,0,0,0,1,0,0,0,1};
         for (bool rgb24 : {false, true}) {
-            motioncam::VulkanGalleryOutput output;
+            rawpreamp::VulkanGalleryOutput output;
             output.width = output.height = 16;
             output.orientation = 90;
             output.rgb24 = rgb24;
             std::vector<uint8_t> expected(samples.size() * 2u), actual;
             std::memcpy(expected.data(), samples.data(), expected.size());
-            if (!motioncam::colorGalleryRgbVulkan(expected, gains, matrix, matrix,
+            if (!rawpreamp::colorGalleryRgbVulkan(expected, gains, matrix, matrix,
                     1.0f, nullptr, nullptr, false, false, nullptr, &output) ||
-                !motioncam::colorGalleryRgbVulkan(actual, gains, matrix, matrix,
+                !rawpreamp::colorGalleryRgbVulkan(actual, gains, matrix, matrix,
                     1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
                 actual != expected) {
                 std::fprintf(stderr, "RGB texture shader differs from buffer shader\n");
                 return 1;
             }
         }
-        if (auto shared = motioncam::sharedVulkanDevice()) {
+        if (auto shared = rawpreamp::sharedVulkanDevice()) {
             // Exercise the common image transport on any GPU with the shared
             // device enabled, including dedicated Linux hardware in CI/tests.
-            motioncam::VulkanGalleryOutput output;
+            rawpreamp::VulkanGalleryOutput output;
             output.width = output.height = 16;
             output.rgb24 = true;
             output.requireZeroCopy = true;
-            std::shared_ptr<motioncam::VulkanGalleryGpuBuffer> frame;
+            std::shared_ptr<rawpreamp::VulkanGalleryGpuBuffer> frame;
             output.gpuBuffer = &frame;
             std::vector<uint8_t> pixels;
-            if (!motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+            if (!rawpreamp::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
                     1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
                 !pixels.empty() || !frame || !frame->texture || frame->fd >= 0 ||
                 pl_vulkan_get(static_cast<pl_gpu>(frame->gpu))->device != shared->device)
@@ -565,24 +565,24 @@ int main() {
             std::memcpy(&ready, &frame->readySemaphore, sizeof(ready));
             release.semaphore = {ready, 1};
             pl_vulkan_release_ex(shared->gpu, &release);
-            motioncam::VulkanGalleryTextureSource presented;
+            rawpreamp::VulkanGalleryTextureSource presented;
             presented.gpu = shared->gpu;
             presented.texture = wrapped;
             presented.width = presented.height = 16;
             presented.white.fill(65535);
-            if (!motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+            if (!rawpreamp::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
                     1.0f, nullptr, nullptr, false, false, nullptr, nullptr, &presented) ||
                 pixels.size() != 16u * 16u * 6u) return 1;
             pl_gpu_finish(shared->gpu);
             pl_tex_destroy(shared->gpu, &wrapped);
-            motioncam::releaseVulkanGalleryTextureDevice(shared->gpu);
+            rawpreamp::releaseVulkanGalleryTextureDevice(shared->gpu);
             if (!frame->rejectSharedImage || !frame->rejectSharedImage() ||
                 frame->rejectSharedImage()) return 1;
             frame.reset();
-            if (motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+            if (rawpreamp::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
                     1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture)) return 1;
             output.requireZeroCopy = false;
-            if (!motioncam::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
+            if (!rawpreamp::colorGalleryRgbVulkan(pixels, gains, matrix, matrix,
                     1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
                 (pixels.empty() && (!frame || frame->texture || frame->fd < 0))) return 1;
             frame.reset();
@@ -605,7 +605,7 @@ int main() {
             }
             for (int orientation : {0, 90, 180, 270}) {
                 for (bool enabled : {true, false, true}) {
-                    motioncam::VulkanGalleryOutput output;
+                    rawpreamp::VulkanGalleryOutput output;
                     output.width = output.height = 16;
                     output.rgb24 = true;
                     output.orientation = orientation;
@@ -614,11 +614,11 @@ int main() {
                     output.thumbnailHeight = 3;
                     output.thumbnailPixels = &expectedThumbnail;
                     output.clipping = enabled ? &mask : nullptr;
-                    if (!motioncam::colorGalleryRgbVulkan(expected, gains, matrix, matrix,
+                    if (!rawpreamp::colorGalleryRgbVulkan(expected, gains, matrix, matrix,
                             1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture)) return 1;
                     output.clipping = enabled ? &residentMask : nullptr;
                     output.thumbnailPixels = &actualThumbnail;
-                    if (!motioncam::colorGalleryRgbVulkan(actual, gains, matrix, matrix,
+                    if (!rawpreamp::colorGalleryRgbVulkan(actual, gains, matrix, matrix,
                             1.0f, nullptr, nullptr, false, false, nullptr, &output, &texture) ||
                         actual != expected || actualThumbnail.empty() ||
                         actualThumbnail != expectedThumbnail) {
@@ -631,7 +631,7 @@ int main() {
             texture.white.fill(65535);
         }
         {
-            motioncam::VulkanGalleryOutput output;
+            rawpreamp::VulkanGalleryOutput output;
             output.width=output.height=16;output.rgb24=true;
             output.thumbnailWidth=5;output.thumbnailHeight=3;
             output.thumbnailGeneration=91;output.thumbnailSourceFrame=1;
@@ -643,7 +643,7 @@ int main() {
                 bool received=false;
                 for(int attempt=0;attempt<32;++attempt){
                     std::vector<uint8_t> actual;
-                    if(!motioncam::colorGalleryRgbVulkan(actual,gains,matrix,matrix,1.0f,
+                    if(!rawpreamp::colorGalleryRgbVulkan(actual,gains,matrix,matrix,1.0f,
                         nullptr,nullptr,false,false,nullptr,&output,&texture))return 1;
                     if(thumbnail.empty())continue;
                     for(uint32_t y=0;y<3;++y)for(uint32_t x=0;x<5;++x){
@@ -657,7 +657,7 @@ int main() {
                 if(!received)return 1;
             }
         }
-        motioncam::releaseVulkanGalleryTextureDevice(vk->gpu);
+        rawpreamp::releaseVulkanGalleryTextureDevice(vk->gpu);
         pl_tex_destroy(vk->gpu, &tex);
         pl_vulkan_destroy(&vk);
     }
@@ -669,7 +669,7 @@ int main() {
         1.25f, 1.0f, 0.75f, 1.25f, 1.0f, 0.75f};
     auto gainMap = [height](const std::vector<float>& data, uint32_t channels,
                       uint32_t left, uint32_t right, uint32_t pitch) {
-        motioncam::VulkanRgbGainMap map;
+        rawpreamp::VulkanRgbGainMap map;
         map.width = map.height = 2;
         map.channels = channels;
         map.left = left;
@@ -682,7 +682,7 @@ int main() {
         return map;
     };
     auto params = [&](uint32_t channels) {
-        motioncam::VulkanGainBakeParams result;
+        rawpreamp::VulkanGainBakeParams result;
         result.width = width;
         result.height = height;
         result.channels = channels;
@@ -692,14 +692,14 @@ int main() {
         return result;
     };
     auto run = [](const std::vector<uint16_t>& source,
-                  const motioncam::VulkanGainBakeParams& settings,
+                  const rawpreamp::VulkanGainBakeParams& settings,
                   bool cfa, std::vector<uint16_t>& result,
                   bool allowSkip = false) {
         result.resize(source.size());
         const bool ok = cfa
-            ? motioncam::bakeCfaGainVulkan(source.data(), settings,
+            ? rawpreamp::bakeCfaGainVulkan(source.data(), settings,
                 reinterpret_cast<uint8_t*>(result.data()), result.size() * 2)
-            : motioncam::bakeRgbGainVulkan(source.data(), settings,
+            : rawpreamp::bakeRgbGainVulkan(source.data(), settings,
                 reinterpret_cast<uint8_t*>(result.data()), result.size() * 2);
         if (!ok) {
             std::fprintf(stderr, "Vulkan gain bake %s\n",
@@ -752,7 +752,7 @@ int main() {
             source[i] = logSamples[i % logSamples.size()];
         run(source, modified, channels == 1, output);
         for (size_t i = 0; i < source.size(); ++i) {
-            const double expected = motioncam::LLog60::encode(source[i] / 65535.) * 65535;
+            const double expected = rawpreamp::LLog60::encode(source[i] / 65535.) * 65535;
             if (std::abs(output[i] - expected) > 1.1) {
                 std::fprintf(stderr, "LLOG60 GPU/CPU mismatch (%u channels)\n", channels);
                 return 1;

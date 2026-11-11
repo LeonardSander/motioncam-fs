@@ -17,7 +17,7 @@
 #include "VulkanJpegEntropy.h"
 #include "VulkanJpegFullEncode.h"
 #include "VulkanGainBake.h"
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include "VulkanJpegContext.h"
 #include <libplacebo/gpu.h>
 #endif
@@ -39,7 +39,7 @@ int verifiedGpuEntropy(const int16_t* residuals, int sampleCount,
                        const uint16_t codes[18], const uint16_t codeBits[18],
                        uint8_t* output, int capacity, int* written,
                        void* context) {
-    const int result = motioncam::jpegEntropyVulkan(
+    const int result = rawpreamp::jpegEntropyVulkan(
         residuals, sampleCount, codes, codeBits,
         output, capacity, written, nullptr);
     if (result == 0) *static_cast<bool*>(context) = true;
@@ -120,7 +120,7 @@ std::pair<size_t, uint32_t> tagPayload(const std::vector<uint8_t>& dng, uint16_t
 
 std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
                              float baseline, const std::array<float, 3>& neutral,
-                             motioncam::Timestamp timestamp,
+                             rawpreamp::Timestamp timestamp,
                              uint32_t width = 8, uint32_t height = 8) {
     std::vector<uint16_t> pixels(width * height * 3, value);
     tinydngwriter::DNGImage image;
@@ -146,11 +146,11 @@ std::vector<uint8_t> makeDng(uint16_t value, float exposure, int iso,
     assert(writer.WriteToFile(output, &error));
     const auto bytes = output.str();
     std::vector<uint8_t> result(bytes.begin(), bytes.end());
-    assert(motioncam::DNGDecoder::setTimingMetadata(result, 24.0, timestamp));
+    assert(rawpreamp::DNGDecoder::setTimingMetadata(result, 24.0, timestamp));
     return result;
 }
 
-std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestamp,
+std::vector<uint8_t> makeLogCfaDng(uint16_t value, rawpreamp::Timestamp timestamp,
                                    bool withLinearization = true,
                                    uint32_t width = 32, bool patterned = false,
                                    uint32_t repeatSize = 2, uint32_t identityBits = 0,
@@ -183,7 +183,7 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
     assert(image.SetPlanarConfig(tinydngwriter::PLANARCONFIG_CONTIG));
     if (interleaved) {
         std::vector<uint16_t> grouped;
-        assert(motioncam::reorderDngSamples(pixels, grouped, width, height, 1, 2, 2, true));
+        assert(rawpreamp::reorderDngSamples(pixels, grouped, width, height, 1, 2, 2, true));
         pixels = std::move(grouped);
         assert(image.SetCustomFieldULong(50975, 2));
         assert(image.SetCustomFieldULong(52547, 2));
@@ -206,26 +206,26 @@ std::vector<uint8_t> makeLogCfaDng(uint16_t value, motioncam::Timestamp timestam
     assert(writer.WriteToFile(output, &error));
     const auto bytes = output.str();
     std::vector<uint8_t> result(bytes.begin(), bytes.end());
-    assert(motioncam::DNGDecoder::setTimingMetadata(result, 24.0, timestamp));
+    assert(rawpreamp::DNGDecoder::setTimingMetadata(result, 24.0, timestamp));
     return result;
 }
 
-class FakeFileSystem final : public motioncam::IVirtualFileSystem {
+class FakeFileSystem final : public rawpreamp::IVirtualFileSystem {
 public:
     FakeFileSystem(std::vector<uint8_t> left, std::vector<uint8_t> right,
                    size_t duplicatedFrames = 1, bool markDuplicates = true,
                    bool includeAncillary = false)
         : mLeft(std::move(left)), mRight(std::move(right)) {
         if (includeAncillary) {
-            motioncam::Entry audio;
-            audio.type = motioncam::EntryType::FILE_ENTRY;
+            rawpreamp::Entry audio;
+            audio.type = rawpreamp::EntryType::FILE_ENTRY;
             audio.name = "audio.wav";
             audio.size = 4;
             mEntries.push_back(audio);
         }
         for (size_t i = 0; i < duplicatedFrames + 2; ++i) {
-            motioncam::Entry entry;
-            entry.type = motioncam::EntryType::FILE_ENTRY;
+            rawpreamp::Entry entry;
+            entry.type = rawpreamp::EntryType::FILE_ENTRY;
             char name[32];
             std::snprintf(name, sizeof(name), "frame-%06zu.dng", i);
             entry.name = name;
@@ -236,11 +236,11 @@ public:
             mEntries.push_back(entry);
         }
     }
-    std::vector<motioncam::Entry> listFiles(const std::string&) const override { return mEntries; }
-    std::optional<motioncam::Entry> findEntry(const std::string&) const override { return {}; }
-    int readFile(const motioncam::Entry&, size_t, size_t, void*,
+    std::vector<rawpreamp::Entry> listFiles(const std::string&) const override { return mEntries; }
+    std::optional<rawpreamp::Entry> findEntry(const std::string&) const override { return {}; }
+    int readFile(const rawpreamp::Entry&, size_t, size_t, void*,
                  std::function<void(size_t, int)>, bool) override { return -1; }
-    std::shared_ptr<std::vector<uint8_t>> materializeFile(const motioncam::Entry& entry, bool, bool = false, bool = false) override {
+    std::shared_ptr<std::vector<uint8_t>> materializeFile(const rawpreamp::Entry& entry, bool, bool = false, bool = false) override {
         if (entry.name == "audio.wav") {
             ++mAncillaryMaterializations;
             return std::make_shared<std::vector<uint8_t>>(
@@ -248,30 +248,30 @@ public:
         }
         const auto& source = std::get<int64_t>(entry.userData) == 0 ? mLeft : mRight;
         auto timed = source;
-        const auto frame = static_cast<motioncam::Timestamp>(
+        const auto frame = static_cast<rawpreamp::Timestamp>(
             std::distance(mEntries.begin(), std::find_if(mEntries.begin(), mEntries.end(),
                 [&](const auto& candidate) { return candidate.name == entry.name; })));
-        assert(motioncam::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
+        assert(rawpreamp::DNGDecoder::setTimingMetadata(timed, 24.0, frame));
         return std::make_shared<std::vector<uint8_t>>(timed.begin(), timed.end());
     }
-    bool materializePreviewFrame(const motioncam::Entry&, motioncam::PreviewFrame&,
+    bool materializePreviewFrame(const rawpreamp::Entry&, rawpreamp::PreviewFrame&,
                                  bool = false) override {
         return false;
     }
-    bool sourceImagePayloadsEqual(const motioncam::Entry& left,
-                                  const motioncam::Entry& right) override {
+    bool sourceImagePayloadsEqual(const rawpreamp::Entry& left,
+                                  const rawpreamp::Entry& right) override {
         const auto leftDng = materializeFile(left, false);
         const auto rightDng = materializeFile(right, false);
-        return motioncam::DNGDecoder::imagePayloadsEqual(
+        return rawpreamp::DNGDecoder::imagePayloadsEqual(
             std::vector<uint8_t>(leftDng->begin(), leftDng->end()),
             std::vector<uint8_t>(rightDng->begin(), rightDng->end()));
     }
-    void updateOptions(const motioncam::RenderSettings&) override {}
-    motioncam::FileInfo getFileInfo() const override { return {}; }
+    void updateOptions(const rawpreamp::RenderSettings&) override {}
+    rawpreamp::FileInfo getFileInfo() const override { return {}; }
     int ancillaryMaterializations() const { return mAncillaryMaterializations; }
 private:
     std::vector<uint8_t> mLeft, mRight;
-    std::vector<motioncam::Entry> mEntries;
+    std::vector<rawpreamp::Entry> mEntries;
     int mAncillaryMaterializations = 0;
 };
 } // namespace
@@ -279,7 +279,7 @@ private:
 int main(int argc, char** argv) {
     if (argc == 2 && std::strcmp(argv[1], "--zip-source-self-test") == 0) {
         namespace fs = std::filesystem;
-        const auto root = fs::temp_directory_path() / ("motioncam-zip-dng-" +
+        const auto root = fs::temp_directory_path() / ("rawpreamp-zip-dng-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         fs::create_directories(root);
         struct Cleanup { fs::path path; ~Cleanup() { fs::remove_all(path); } } cleanup{root};
@@ -322,21 +322,21 @@ int main(int argc, char** argv) {
             add("clip-00000000.jsonl", gyroJsonl.data(), gyroJsonl.size());
             assert(archive_write_close(output) == ARCHIVE_OK);
             archive_write_free(output);
-            const auto imported = motioncam::extractReviewArchive(QString::fromStdString(zipPath.string()));
-            motioncam::DNGDecoder decoder(imported.sourcePath.toStdString());
-            const auto metadata = motioncam::vfs::readDngTimingSidecar(imported.sourcePath.toStdString(), timingNames);
-            decoder.overrideTimestamps(motioncam::vfs::sidecarTimestamps(metadata, timingNames.size()));
+            const auto imported = rawpreamp::extractReviewArchive(QString::fromStdString(zipPath.string()));
+            rawpreamp::DNGDecoder decoder(imported.sourcePath.toStdString());
+            const auto metadata = rawpreamp::vfs::readDngTimingSidecar(imported.sourcePath.toStdString(), timingNames);
+            decoder.overrideTimestamps(rawpreamp::vfs::sidecarTimestamps(metadata, timingNames.size()));
             assert(decoder.getFrames().size() == 3);
             assert(decoder.getFrames()[1].timestamp == 33327083);
             assert(decoder.getFrames()[2].timestamp == 219022448);
             for (int i : {2, 0, 1}) {
-                motioncam::DNGFrameMetadata frameMetadata;
+                rawpreamp::DNGFrameMetadata frameMetadata;
                 assert(decoder.getFrameMetadata(i, frameMetadata));
                 std::vector<uint8_t> frame;
                 assert(decoder.extractFrame(i, frame) && frame == uncompressedA);
                 assert(fs::file_size(decoder.getFrames()[i].filePath) == 0);
             }
-            const auto telemetry = motioncam::GyroTelemetry::load(imported.sourcePath.toStdString());
+            const auto telemetry = rawpreamp::GyroTelemetry::load(imported.sourcePath.toStdString());
             // Protobuf sensor timing deliberately conflicts with CSV timing.
             auto preferredTimes = telemetry->frameTimestamps(timingNames.size());
             assert(preferredTimes == std::vector<int64_t>({0,16667000,33334000}));
@@ -345,75 +345,75 @@ int main(int argc, char** argv) {
             assert(decoder.getFrames()[2].timestamp == 33334000);
             auto filled = uncompressedA;
             assert(telemetry->fillMissingDngMetadata(filled, 0));
-            motioncam::DNGFrameMetadata retained;
-            assert(motioncam::DNGDecoder::getColorMetadata(filled, retained));
+            rawpreamp::DNGFrameMetadata retained;
+            assert(rawpreamp::DNGDecoder::getColorMetadata(filled, retained));
             assert(retained.iso == 100 && std::abs(retained.exposureTime - 0.01) < 1e-6);
             assert(nestedIfdHasTag(filled, 34665, 33437) && nestedIfdHasTag(filled, 34665, 37386));
-            assert(motioncam::DNGDecoder::imagePayloadsEqual(filled, uncompressedA));
+            assert(rawpreamp::DNGDecoder::imagePayloadsEqual(filled, uncompressedA));
             const auto once = filled;
             assert(telemetry->fillMissingDngMetadata(filled, 0) && filled == once);
             // mcpro24fps uses TIFF IFD (13), rather than LONG (4), for Exif links.
             auto ifdPointer = filled;
             assert(setTagType(ifdPointer, 34665, 13));
-            assert(motioncam::DNGDecoder::removeMetadataTags(ifdPointer, {33437}));
+            assert(rawpreamp::DNGDecoder::removeMetadataTags(ifdPointer, {33437}));
             assert(telemetry->fillMissingDngMetadata(ifdPointer, 0));
             assert(nestedIfdHasTag(ifdPointer, 34665, 33437));
             assert(nestedIfdHasTag(ifdPointer, 34665, 37386));
-            assert(motioncam::DNGDecoder::imagePayloadsEqual(ifdPointer, uncompressedA));
+            assert(rawpreamp::DNGDecoder::imagePayloadsEqual(ifdPointer, uncompressedA));
             // Adding a new GPS directory inserts a root pointer and relocates
             // the existing type-13 Exif directory and its external values.
-            motioncam::DNGSidecarMetadataEntry gps;
+            rawpreamp::DNGSidecarMetadataEntry gps;
             gps.tag = 18; gps.type = 2; gps.count = 7; gps.gps = true;
             gps.value = {'W', 'G', 'S', '-', '8', '4', 0};
-            assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(ifdPointer, {gps}));
+            assert(rawpreamp::DNGDecoder::fillMissingSidecarMetadata(ifdPointer, {gps}));
             assert(nestedIfdHasTag(ifdPointer, 34665, 33437));
             assert(nestedIfdHasTag(ifdPointer, 34665, 37386));
             assert(nestedIfdHasTag(ifdPointer, 34853, 18));
-            assert(motioncam::DNGDecoder::imagePayloadsEqual(ifdPointer, uncompressedA));
+            assert(rawpreamp::DNGDecoder::imagePayloadsEqual(ifdPointer, uncompressedA));
             const auto ifdOnce = ifdPointer;
             assert(telemetry->fillMissingDngMetadata(ifdPointer, 0) && ifdPointer == ifdOnce);
             auto missingExposure = uncompressedA;
-            assert(motioncam::DNGDecoder::removeMetadataTags(missingExposure, {34855,33434}));
+            assert(rawpreamp::DNGDecoder::removeMetadataTags(missingExposure, {34855,33434}));
             assert(telemetry->fillMissingDngMetadata(missingExposure, 0));
-            assert(motioncam::DNGDecoder::getColorMetadata(missingExposure, retained));
+            assert(rawpreamp::DNGDecoder::getColorMetadata(missingExposure, retained));
             assert(retained.iso == 800 && std::abs(retained.exposureTime - 0.008333) < 1e-6);
-            motioncam::removeReviewArchive(imported.temporaryRoot);
+            rawpreamp::removeReviewArchive(imported.temporaryRoot);
         }
         return 0;
     }
     if (argc >= 3 && std::strcmp(argv[1], "--zip-linear-levels") == 0) {
         for (int arg = 2; arg < argc; ++arg) {
-            const auto imported = motioncam::extractReviewArchive(QString::fromLocal8Bit(argv[arg]));
+            const auto imported = rawpreamp::extractReviewArchive(QString::fromLocal8Bit(argv[arg]));
             struct Cleanup {
                 QString root;
-                ~Cleanup() { motioncam::removeReviewArchive(root); }
+                ~Cleanup() { rawpreamp::removeReviewArchive(root); }
             } cleanup{imported.temporaryRoot};
-            motioncam::DNGDecoder decoder(imported.sourcePath.toStdString());
+            rawpreamp::DNGDecoder decoder(imported.sourcePath.toStdString());
             const auto count = decoder.getFrames().size();
             assert(count > 0);
             for (const auto index : {size_t{0}, count / 2, count - 1}) {
                 std::vector<uint8_t> bytes;
-                motioncam::DNGFrameMetadata before;
+                rawpreamp::DNGFrameMetadata before;
                 assert(decoder.extractFrame(index, bytes));
                 assert(decoder.getFrameMetadata(index, before));
                 std::vector<uint16_t> table;
                 assert(!decoder.getLinearizationTable(index, table) && table.empty());
-                assert(before.inputBitDepth == motioncam::utils::evenBitsNeeded(
+                assert(before.inputBitDepth == rawpreamp::utils::evenBitsNeeded(
                     static_cast<uint16_t>(before.whiteLevel[0])));
-                const auto projected = motioncam::vfs::projectedDngSize(
+                const auto projected = rawpreamp::vfs::projectedDngSize(
                     decoder.getFrames()[index].width, decoder.getFrames()[index].height,
                     1, before.inputBitDepth, before.metadataBytes, 256 * 1024);
-                motioncam::RenderSettings settings;
-                settings.options = static_cast<motioncam::FileRenderOptions>(0);
-                motioncam::vfs::DngFinalizeOptions finalize;
+                rawpreamp::RenderSettings settings;
+                settings.options = static_cast<rawpreamp::FileRenderOptions>(0);
+                rawpreamp::vfs::DngFinalizeOptions finalize;
                 finalize.writeTiming = false;
                 finalize.packToWhiteLevel = true;
-                assert(motioncam::DNGDecoder::ensureUncompressed(bytes));
-                motioncam::vfs::finalizeDng(bytes, settings, finalize);
+                assert(rawpreamp::DNGDecoder::ensureUncompressed(bytes));
+                rawpreamp::vfs::finalizeDng(bytes, settings, finalize);
                 assert(bytes.size() <= projected);
-                assert(motioncam::DNGDecoder::getLinearizationTableCount(bytes) == 0);
-                motioncam::DNGFrameMetadata after;
-                assert(motioncam::DNGDecoder::getColorMetadata(bytes, after));
+                assert(rawpreamp::DNGDecoder::getLinearizationTableCount(bytes) == 0);
+                rawpreamp::DNGFrameMetadata after;
+                assert(rawpreamp::DNGDecoder::getColorMetadata(bytes, after));
                 assert(after.whiteLevel == before.whiteLevel);
                 assert(after.blackLevel == before.blackLevel);
                 std::fprintf(stderr, "%s frame %zu: %ub, white %.0f, output %zu bytes fits projection\n",
@@ -424,13 +424,13 @@ int main(int argc, char** argv) {
     }
     if (argc >= 3 && std::strcmp(argv[1], "--zip-capture-metadata") == 0) {
         for (int arg = 2; arg < argc; ++arg) {
-            const auto imported = motioncam::extractReviewArchive(QString::fromLocal8Bit(argv[arg]));
+            const auto imported = rawpreamp::extractReviewArchive(QString::fromLocal8Bit(argv[arg]));
             struct Cleanup {
                 QString root;
-                ~Cleanup() { motioncam::removeReviewArchive(root); }
+                ~Cleanup() { rawpreamp::removeReviewArchive(root); }
             } cleanup{imported.temporaryRoot};
-            motioncam::DNGDecoder decoder(imported.sourcePath.toStdString());
-            const auto telemetry = motioncam::GyroTelemetry::load(imported.sourcePath.toStdString());
+            rawpreamp::DNGDecoder decoder(imported.sourcePath.toStdString());
+            const auto telemetry = rawpreamp::GyroTelemetry::load(imported.sourcePath.toStdString());
             const auto count = decoder.getFrames().size();
             assert(count > 0 && telemetry->frames().size() == count);
             const auto protobufTimes = telemetry->frameTimestamps(count);
@@ -441,15 +441,15 @@ int main(int argc, char** argv) {
                 assert(decoder.getFrames()[index].timestamp == protobufTimes[index]);
                 assert(decoder.extractFrame(index, bytes));
                 const auto original = bytes;
-                motioncam::DNGFrameMetadata before, after, fromFile;
-                assert(motioncam::DNGDecoder::getColorMetadata(bytes, before));
+                rawpreamp::DNGFrameMetadata before, after, fromFile;
+                assert(rawpreamp::DNGDecoder::getColorMetadata(bytes, before));
                 assert(decoder.getFrameMetadata(index, fromFile));
                 assert(before.iso > 0 && before.exposureTime > 0);
                 assert(before.iso == fromFile.iso && before.exposureTime == fromFile.exposureTime);
                 assert(telemetry->fillMissingDngMetadata(bytes, index));
-                assert(motioncam::DNGDecoder::getColorMetadata(bytes, after));
+                assert(rawpreamp::DNGDecoder::getColorMetadata(bytes, after));
                 assert(after.iso == before.iso && after.exposureTime == before.exposureTime);
-                assert(motioncam::DNGDecoder::imagePayloadsEqual(bytes, original));
+                assert(rawpreamp::DNGDecoder::imagePayloadsEqual(bytes, original));
                 const auto once = bytes;
                 assert(telemetry->fillMissingDngMetadata(bytes, index) && bytes == once);
             }
@@ -477,11 +477,11 @@ int main(int argc, char** argv) {
                             width * channels, 0, nullptr, 0, &cpu,
                             &cpuBytes) != LJ92_ERROR_NONE) return 2;
             const auto cpuEnd = std::chrono::steady_clock::now();
-            if (!motioncam::jpegEncodeFullyVulkan(
+            if (!rawpreamp::jpegEncodeFullyVulkan(
                     pixels.data(), width, height, channels, bits,
                     &cold, &coldBytes)) return 3;
             const auto coldEnd = std::chrono::steady_clock::now();
-            if (!motioncam::jpegEncodeFullyVulkan(
+            if (!rawpreamp::jpegEncodeFullyVulkan(
                     pixels.data(), width, height, channels, bits,
                     &warm, &warmBytes)) return 4;
             const auto warmEnd = std::chrono::steady_clock::now();
@@ -496,9 +496,9 @@ int main(int argc, char** argv) {
                 std::chrono::duration<double, std::milli>(coldEnd - cpuEnd).count(),
                 std::chrono::duration<double, std::milli>(warmEnd - coldEnd).count(),
                 equal);
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
             if (channels == 3) {
-                auto &context = motioncam::jpegContext();
+                auto &context = rawpreamp::jpegContext();
                 if (!context.init()) return 6;
                 const pl_gpu gpu = context.vulkan->gpu;
                 const pl_fmt format = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
@@ -524,11 +524,11 @@ int main(int argc, char** argv) {
                 uint8_t *textureCold = nullptr, *textureWarm = nullptr;
                 int textureColdBytes = 0, textureWarmBytes = 0;
                 const auto textureStart = std::chrono::steady_clock::now();
-                if (!motioncam::jpegEncodeFullyVulkanTexture(
+                if (!rawpreamp::jpegEncodeFullyVulkanTexture(
                         gpu, texture, width, height, 3, bits,
                         &textureCold, &textureColdBytes)) return 10;
                 const auto textureColdEnd = std::chrono::steady_clock::now();
-                if (!motioncam::jpegEncodeFullyVulkanTexture(
+                if (!rawpreamp::jpegEncodeFullyVulkanTexture(
                         gpu, texture, width, height, 3, bits,
                         &textureWarm, &textureWarmBytes)) return 11;
                 const auto textureWarmEnd = std::chrono::steady_clock::now();
@@ -545,7 +545,7 @@ int main(int argc, char** argv) {
                         textureWarmEnd - textureColdEnd).count(), textureEqual);
                 std::free(textureCold);
                 std::free(textureWarm);
-                motioncam::releaseVulkanJpegFullEncodeDevice(gpu);
+                rawpreamp::releaseVulkanJpegFullEncodeDevice(gpu);
                 pl_tex_destroy(gpu, &texture);
                 if (!textureEqual) return 12;
 
@@ -560,42 +560,42 @@ int main(int argc, char** argv) {
                             pixels.data(), pixels.size() * sizeof(uint16_t));
                 auto cpuDng = uncompressedDng;
 #ifdef _WIN32
-                _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "1");
+                _putenv_s("RAWPREAMP_GPU_JPEG_DISABLE", "1");
 #else
-                setenv("MOTIONCAM_GPU_JPEG_DISABLE", "1", 1);
+                setenv("RAWPREAMP_GPU_JPEG_DISABLE", "1", 1);
 #endif
-                const bool cpuDngOk = motioncam::DNGDecoder::compressLosslessJPEG(
+                const bool cpuDngOk = rawpreamp::DNGDecoder::compressLosslessJPEG(
                     cpuDng);
 #ifdef _WIN32
-                _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "");
+                _putenv_s("RAWPREAMP_GPU_JPEG_DISABLE", "");
 #else
-                unsetenv("MOTIONCAM_GPU_JPEG_DISABLE");
+                unsetenv("RAWPREAMP_GPU_JPEG_DISABLE");
 #endif
                 if (!cpuDngOk) return 14;
                 auto ownedDng = uncompressedDng;
 #ifdef _WIN32
-                _putenv_s("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE", "1");
+                _putenv_s("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE", "1");
 #else
-                setenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE", "1", 1);
+                setenv("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE", "1", 1);
 #endif
                 const auto ownedStart = std::chrono::steady_clock::now();
-                const bool ownedOk = motioncam::DNGDecoder::compressLosslessJPEG(
+                const bool ownedOk = rawpreamp::DNGDecoder::compressLosslessJPEG(
                     ownedDng);
                 const auto ownedEnd = std::chrono::steady_clock::now();
 #ifdef _WIN32
-                _putenv_s("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE", "");
+                _putenv_s("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE", "");
 #else
-                unsetenv("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE");
+                unsetenv("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE");
 #endif
                 if (!ownedOk) return 15;
                 auto gpuDng = uncompressedDng;
                 const auto dngStart = std::chrono::steady_clock::now();
-                const bool gpuDngOk = motioncam::DNGDecoder::compressLosslessJPEG(
+                const bool gpuDngOk = rawpreamp::DNGDecoder::compressLosslessJPEG(
                     gpuDng);
                 const auto dngEnd = std::chrono::steady_clock::now();
-                motioncam::DecodedDNGImage decodedDng;
+                rawpreamp::DecodedDNGImage decodedDng;
                 const bool pixelEqual = gpuDngOk &&
-                    motioncam::DNGDecoder::decodeImageBorrowed(
+                    rawpreamp::DNGDecoder::decodeImageBorrowed(
                         gpuDng, decodedDng, false, false) &&
                     decodedDng.samples == pixels;
                 const bool dngEqual = gpuDngOk && gpuDng == cpuDng &&
@@ -627,46 +627,46 @@ int main(int argc, char** argv) {
         if (!file) return 2;
         std::vector<uint8_t> input((std::istreambuf_iterator<char>(file)),
                                     std::istreambuf_iterator<char>());
-        if (!motioncam::DNGDecoder::ensureUncompressed(input)) return 3;
+        if (!rawpreamp::DNGDecoder::ensureUncompressed(input)) return 3;
         auto cpu = input, gpu = input, warmGpu = input;
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "1");
+        _putenv_s("RAWPREAMP_GPU_JPEG_DISABLE", "1");
 #else
-        setenv("MOTIONCAM_GPU_JPEG_DISABLE", "1", 1);
+        setenv("RAWPREAMP_GPU_JPEG_DISABLE", "1", 1);
 #endif
         const auto started = std::chrono::steady_clock::now();
-        if (!motioncam::DNGDecoder::compressLosslessJPEG(cpu)) return 4;
+        if (!rawpreamp::DNGDecoder::compressLosslessJPEG(cpu)) return 4;
         const auto cpuEnd = std::chrono::steady_clock::now();
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GPU_JPEG_DISABLE", "");
-        _putenv_s("MOTIONCAM_JPEG_ENCODE_PROFILE", "1");
+        _putenv_s("RAWPREAMP_GPU_JPEG_DISABLE", "");
+        _putenv_s("RAWPREAMP_JPEG_ENCODE_PROFILE", "1");
 #else
-        unsetenv("MOTIONCAM_GPU_JPEG_DISABLE");
-        setenv("MOTIONCAM_JPEG_ENCODE_PROFILE", "1", 1);
+        unsetenv("RAWPREAMP_GPU_JPEG_DISABLE");
+        setenv("RAWPREAMP_JPEG_ENCODE_PROFILE", "1", 1);
 #endif
         const auto compress = [&](auto& bytes) {
-            return tiled ? motioncam::DNGDecoder::compressLosslessJPEGTiled(bytes)
-                         : motioncam::DNGDecoder::compressLosslessJPEG(bytes);
+            return tiled ? rawpreamp::DNGDecoder::compressLosslessJPEGTiled(bytes)
+                         : rawpreamp::DNGDecoder::compressLosslessJPEG(bytes);
         };
         if (!compress(gpu)) return 5;
         const auto gpuEnd = std::chrono::steady_clock::now();
         if (!compress(warmGpu)) return 6;
         const auto warmEnd = std::chrono::steady_clock::now();
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_JPEG_ENCODE_PROFILE", "");
+        _putenv_s("RAWPREAMP_JPEG_ENCODE_PROFILE", "");
 #else
-        unsetenv("MOTIONCAM_JPEG_ENCODE_PROFILE");
+        unsetenv("RAWPREAMP_JPEG_ENCODE_PROFILE");
 #endif
         const bool byteEqual = cpu == gpu && cpu == warmGpu;
         bool equal = byteEqual;
         double cpuDecodeMs = 0, tiledDecodeMs = 0;
         if (tiled) {
-            motioncam::DecodedDNGImage cpuPixels, tiledPixels;
+            rawpreamp::DecodedDNGImage cpuPixels, tiledPixels;
             const auto decodeStarted = std::chrono::steady_clock::now();
-            if (!motioncam::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels,
+            if (!rawpreamp::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels,
                                                             false, false)) return 8;
             const auto cpuDecodeEnd = std::chrono::steady_clock::now();
-            if (!motioncam::DNGDecoder::decodeImageBorrowed(gpu, tiledPixels,
+            if (!rawpreamp::DNGDecoder::decodeImageBorrowed(gpu, tiledPixels,
                                                             false, false)) return 9;
             const auto tiledDecodeEnd = std::chrono::steady_clock::now();
             cpuDecodeMs = std::chrono::duration<double, std::milli>(
@@ -675,12 +675,12 @@ int main(int argc, char** argv) {
                 tiledDecodeEnd - cpuDecodeEnd).count();
             equal = cpuPixels.samples == tiledPixels.samples && gpu == warmGpu;
         } else if (!byteEqual) {
-            motioncam::DecodedDNGImage cpuPixels, gpuPixels, warmPixels;
-            if (!motioncam::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels,
+            rawpreamp::DecodedDNGImage cpuPixels, gpuPixels, warmPixels;
+            if (!rawpreamp::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels,
                                                             false, false) ||
-                !motioncam::DNGDecoder::decodeImageBorrowed(gpu, gpuPixels,
+                !rawpreamp::DNGDecoder::decodeImageBorrowed(gpu, gpuPixels,
                                                             false, false) ||
-                !motioncam::DNGDecoder::decodeImageBorrowed(warmGpu, warmPixels,
+                !rawpreamp::DNGDecoder::decodeImageBorrowed(warmGpu, warmPixels,
                                                             false, false)) return 8;
             equal = cpuPixels.samples == gpuPixels.samples &&
                     cpuPixels.samples == warmPixels.samples;
@@ -703,9 +703,9 @@ int main(int argc, char** argv) {
         if (!file) return 2;
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),
                                     std::istreambuf_iterator<char>());
-        motioncam::DecodedDNGImage decoded;
+        rawpreamp::DecodedDNGImage decoded;
         const auto started = std::chrono::steady_clock::now();
-        const bool ok = motioncam::DNGDecoder::decodeImageBorrowed(
+        const bool ok = rawpreamp::DNGDecoder::decodeImageBorrowed(
             bytes, decoded, false, false);
         const auto finished = std::chrono::steady_clock::now();
         uint64_t hash = 1469598103934665603ull;
@@ -737,7 +737,7 @@ int main(int argc, char** argv) {
             int predictor = 0, histogram[18] = {};
             std::vector<int16_t> residuals;
             const auto gpuStart = std::chrono::steady_clock::now();
-            if (motioncam::jpegPredictorHistogramVulkan(pixels.data(), width,
+            if (rawpreamp::jpegPredictorHistogramVulkan(pixels.data(), width,
                                                         height, 1, bits,
                                                         predictor, histogram,
                                                         &residuals)) {
@@ -745,7 +745,7 @@ int main(int argc, char** argv) {
                 int warmPredictor = 0, warmHistogram[18] = {};
                 std::vector<int16_t> warmResiduals;
                 const auto warmStart = std::chrono::steady_clock::now();
-                assert(motioncam::jpegPredictorHistogramVulkan(
+                assert(rawpreamp::jpegPredictorHistogramVulkan(
                     pixels.data(), width, height, 1, bits, warmPredictor,
                     warmHistogram, &warmResiduals));
                 const auto warmEnd = std::chrono::steady_clock::now();
@@ -793,14 +793,14 @@ int main(int argc, char** argv) {
                 assert(std::memcmp(cpu, gpu, cpuBytes) == 0);
                 uint8_t* fullGpu = nullptr;
                 int fullGpuBytes = 0;
-                assert(motioncam::jpegEncodeFullyVulkan(
+                assert(rawpreamp::jpegEncodeFullyVulkan(
                     pixels.data(), width, height, 1, bits,
                     &fullGpu, &fullGpuBytes));
                 assert(fullGpuBytes == cpuBytes &&
                        std::memcmp(cpu, fullGpu, cpuBytes) == 0);
                 free(fullGpu);
                 bool directUsed = false;
-                motioncam::JpegEntropyImageSource source{
+                rawpreamp::JpegEntropyImageSource source{
                     pixels.data(), width, height, 1,
                     static_cast<uint32_t>(bits),
                     static_cast<uint32_t>(predictor), &directUsed
@@ -809,7 +809,7 @@ int main(int argc, char** argv) {
                 int directBytes = 0;
                 assert(lj92_encode_with_entropy_writer(
                     pixels.data(), width, height, bits, 1, width, 0,
-                    predictor, histogram, nullptr, motioncam::jpegEntropyVulkan,
+                    predictor, histogram, nullptr, rawpreamp::jpegEntropyVulkan,
                     &source, &direct, &directBytes) == LJ92_ERROR_NONE);
                 assert(directUsed && directBytes == cpuBytes &&
                        std::memcmp(cpu, direct, cpuBytes) == 0);
@@ -821,7 +821,7 @@ int main(int argc, char** argv) {
                 directBytes = 0;
                 assert(lj92_encode_with_entropy_writer(
                     pixels.data(), width, height, bits, 1, width, 0,
-                    predictor, histogram, nullptr, motioncam::jpegEntropyVulkan,
+                    predictor, histogram, nullptr, rawpreamp::jpegEntropyVulkan,
                     &source, &direct, &directBytes) == LJ92_ERROR_NONE);
                 assert(!directUsed && directBytes == cpuBytes &&
                        std::memcmp(cpu, direct, cpuBytes) == 0);
@@ -841,7 +841,7 @@ int main(int argc, char** argv) {
         }
         int predictor = 0, histogram[18] = {};
         std::vector<int16_t> residuals;
-        if (motioncam::jpegPredictorHistogramVulkan(
+        if (rawpreamp::jpegPredictorHistogramVulkan(
                 rgb.data(), width, height, 3, 12, predictor, histogram,
                 &residuals)) {
             uint8_t *cpu = nullptr, *gpu = nullptr;
@@ -861,14 +861,14 @@ int main(int argc, char** argv) {
             assert(gpuEntropyUsed);
             uint8_t* fullGpu = nullptr;
             int fullGpuBytes = 0;
-            assert(motioncam::jpegEncodeFullyVulkan(
+            assert(rawpreamp::jpegEncodeFullyVulkan(
                 rgb.data(), width, height, 3, 12,
                 &fullGpu, &fullGpuBytes));
             assert(fullGpuBytes == cpuBytes &&
                    std::memcmp(cpu, fullGpu, cpuBytes) == 0);
             free(fullGpu);
             bool directUsed = false;
-            motioncam::JpegEntropyImageSource source{
+            rawpreamp::JpegEntropyImageSource source{
                 rgb.data(), width, height, 3, 12,
                 static_cast<uint32_t>(predictor), &directUsed
             };
@@ -876,7 +876,7 @@ int main(int argc, char** argv) {
             int directBytes = 0;
             assert(lj92_encode_with_entropy_writer(
                 rgb.data(), width, height, 12, 3, width * 3, 0,
-                predictor, histogram, nullptr, motioncam::jpegEntropyVulkan,
+                predictor, histogram, nullptr, rawpreamp::jpegEntropyVulkan,
                 &source, &direct, &directBytes) == LJ92_ERROR_NONE);
             assert(directUsed && directBytes == cpuBytes &&
                    std::memcmp(cpu, direct, cpuBytes) == 0);
@@ -913,127 +913,127 @@ int main(int argc, char** argv) {
         assert(writer.WriteToFile(output, &error));
         const auto bytes = output.str();
         std::vector<uint8_t> dng(bytes.begin(), bytes.end());
-        assert(motioncam::DNGDecoder::compressLosslessJPEG(dng));
-        motioncam::DecodedDNGImage decoded;
-        assert(motioncam::DNGDecoder::decodeImage(dng, decoded));
+        assert(rawpreamp::DNGDecoder::compressLosslessJPEG(dng));
+        rawpreamp::DecodedDNGImage decoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(dng, decoded));
         assert(decoded.samples == pixels);
         auto defaultTiled = std::vector<uint8_t>(bytes.begin(), bytes.end());
-        assert(motioncam::DNGDecoder::compressLosslessJPEGTiled(defaultTiled));
+        assert(rawpreamp::DNGDecoder::compressLosslessJPEGTiled(defaultTiled));
         assert(tagValue(defaultTiled, 324).count > 1);
-        motioncam::DecodedDNGImage defaultTiledDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(defaultTiled,
+        rawpreamp::DecodedDNGImage defaultTiledDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(defaultTiled,
                                                   defaultTiledDecoded));
         assert(defaultTiledDecoded.samples == pixels);
-        motioncam::RenderSettings jpeg92Settings;
-        jpeg92Settings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
-        motioncam::vfs::DngFinalizeOptions jpeg92Finalize;
+        rawpreamp::RenderSettings jpeg92Settings;
+        jpeg92Settings.jxlDistance = rawpreamp::DNG_COMPRESSION_JPEG_LOSSLESS;
+        rawpreamp::vfs::DngFinalizeOptions jpeg92Finalize;
         jpeg92Finalize.compression = true;
         jpeg92Finalize.writeTiming = false;
         auto finalizedTiles = std::vector<uint8_t>(bytes.begin(), bytes.end());
-        motioncam::vfs::finalizeDng(finalizedTiles, jpeg92Settings, jpeg92Finalize);
+        rawpreamp::vfs::finalizeDng(finalizedTiles, jpeg92Settings, jpeg92Finalize);
         assert(tagValue(finalizedTiles, 324).count > 1);
-        jpeg92Settings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
+        jpeg92Settings.jxlDistance = rawpreamp::DNG_COMPRESSION_JPEG92_STRIP;
         auto finalizedStrip = std::vector<uint8_t>(bytes.begin(), bytes.end());
-        motioncam::vfs::finalizeDng(finalizedStrip, jpeg92Settings, jpeg92Finalize);
+        rawpreamp::vfs::finalizeDng(finalizedStrip, jpeg92Settings, jpeg92Finalize);
         assert(tagValue(finalizedStrip, 273).count == 1);
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
         // Legacy developer overrides are intentionally ignored in Release.
         auto tiled = std::vector<uint8_t>(bytes.begin(), bytes.end());
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_JPEG_TILED", "1");
+        _putenv_s("RAWPREAMP_JPEG_TILED", "1");
 #else
-        setenv("MOTIONCAM_JPEG_TILED", "1", 1);
+        setenv("RAWPREAMP_JPEG_TILED", "1", 1);
 #endif
-        assert(motioncam::DNGDecoder::compressLosslessJPEG(tiled));
+        assert(rawpreamp::DNGDecoder::compressLosslessJPEG(tiled));
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_JPEG_TILED", "");
+        _putenv_s("RAWPREAMP_JPEG_TILED", "");
 #else
-        unsetenv("MOTIONCAM_JPEG_TILED");
+        unsetenv("RAWPREAMP_JPEG_TILED");
 #endif
         assert(tagValue(tiled, 324).count >= 2);
-        motioncam::DecodedDNGImage tiledDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(tiled, tiledDecoded));
+        rawpreamp::DecodedDNGImage tiledDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(tiled, tiledDecoded));
         assert(tiledDecoded.samples == pixels);
 #endif
     }
-    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(1920, 1080, 1920, 1080) ==
+    assert((rawpreamp::vfs::inferLegacyGainMapSensorResolution(1920, 1080, 1920, 1080) ==
             std::array<int, 2>{2048, 1536}));
-    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 3840, 2160) ==
+    assert((rawpreamp::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 3840, 2160) ==
             std::array<int, 2>{4096, 3072}));
-    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 4600, 3400) ==
+    assert((rawpreamp::vfs::inferLegacyGainMapSensorResolution(3840, 2160, 4600, 3400) ==
             std::array<int, 2>{4608, 3456}));
-    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(4400, 2500, 4400, 2500) ==
+    assert((rawpreamp::vfs::inferLegacyGainMapSensorResolution(4400, 2500, 4400, 2500) ==
             std::array<int, 2>{4608, 3456}));
-    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(7680, 4320, 7680, 4320) ==
+    assert((rawpreamp::vfs::inferLegacyGainMapSensorResolution(7680, 4320, 7680, 4320) ==
             std::array<int, 2>{8192, 6144}));
-    assert((motioncam::vfs::inferLegacyGainMapSensorResolution(9000, 6000, 9000, 6000) ==
+    assert((rawpreamp::vfs::inferLegacyGainMapSensorResolution(9000, 6000, 9000, 6000) ==
             std::array<int, 2>{9248, 6944}));
-    motioncam::RenderSettings exposureSettings;
+    rawpreamp::RenderSettings exposureSettings;
     exposureSettings.cameraModel.clear();
     exposureSettings.exposureCompensation = "0.8";
-    assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) - 0.8f) < 1e-6f);
+    assert(std::abs(rawpreamp::vfs::configuredExposureOffset(exposureSettings) - 0.8f) < 1e-6f);
     exposureSettings.exposureCompensation = " -1.25ev ";
-    assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) + 1.25f) < 1e-6f);
+    assert(std::abs(rawpreamp::vfs::configuredExposureOffset(exposureSettings) + 1.25f) < 1e-6f);
     exposureSettings.exposureCompensation = "2.5 EV";
-    assert(std::abs(motioncam::vfs::configuredExposureOffset(exposureSettings) - 2.5f) < 1e-6f);
+    assert(std::abs(rawpreamp::vfs::configuredExposureOffset(exposureSettings) - 2.5f) < 1e-6f);
     exposureSettings.exposureCompensation = "0.8invalid";
-    assert(motioncam::vfs::configuredExposureOffset(exposureSettings) == 0.0f);
+    assert(rawpreamp::vfs::configuredExposureOffset(exposureSettings) == 0.0f);
     exposureSettings.exposureCompensation = "0.75";
-    motioncam::DNGFrameMetadata galleryExposure;
+    rawpreamp::DNGFrameMetadata galleryExposure;
     galleryExposure.baselineExposure = 1.25; // Normalized or smoothed source value.
     galleryExposure.hasBaselineExposure = true;
-    motioncam::vfs::applyPreviewExposureOffset(galleryExposure, exposureSettings);
+    rawpreamp::vfs::applyPreviewExposureOffset(galleryExposure, exposureSettings);
     assert(std::abs(galleryExposure.baselineExposure - 2.0) < 1e-6);
 
     const std::array<float, 4> black{64.0f, 64.0f, 64.0f, 64.0f};
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         15408.0f, black, 15408.0f, black,
         "Dynamic", "", true, false, 16) == "15408/64 -> 65535/256 16b");
     const std::array<float, 4> zeroBlack{0.0f, 0.0f, 0.0f, 0.0f};
     const std::array<float, 4> pro18Black{132.0f, 132.0f, 132.0f, 132.0f};
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         1024.0f, pro18Black, 1024.0f, pro18Black,
         "Dynamic", "", true, false) == "1024/132 -> 4095/256 12b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         32000.0f, zeroBlack, 32000.0f, zeroBlack,
         "Dynamic", "", false, false) == "32000/0 16b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         32000.0f, zeroBlack, 32000.0f, zeroBlack,
         "Dynamic", "Reduce by 2bit", false, false) ==
         "32000/0 -> 16383/0 14b log");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         2047.0f, zeroBlack, 2047.0f, zeroBlack,
         "Dynamic", "", true, false) == "2047/0 -> 16383/0 14b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         2047.0f, zeroBlack, 2047.0f, zeroBlack,
         "Dynamic", "", false, false) == "2047/0 12b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         46915.0f, zeroBlack, 46915.0f, zeroBlack,
         "Dynamic", "", true, false, 16) ==
         "46915/0 -> 65535/0 16b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         65535.0f, zeroBlack, 65535.0f, zeroBlack,
         "46915/0", "", true, false, 16) ==
         "46915/0 -> 65535/0 16b");
     const std::vector<uint16_t> displayTable{0, 1, 1, 3, 7, 15};
-    assert(motioncam::encodedBlackPoint(displayTable, -1.0f) == 0);
-    assert(motioncam::encodedBlackPoint(displayTable, 1.0f) == 1);
-    assert(motioncam::encodedBlackPoint(displayTable, 1.5f) == 3);
-    assert(motioncam::encodedBlackPoint(displayTable, 100.0f) == 5);
+    assert(rawpreamp::encodedBlackPoint(displayTable, -1.0f) == 0);
+    assert(rawpreamp::encodedBlackPoint(displayTable, 1.0f) == 1);
+    assert(rawpreamp::encodedBlackPoint(displayTable, 1.5f) == 3);
+    assert(rawpreamp::encodedBlackPoint(displayTable, 100.0f) == 5);
     const std::array<float, 4> tableBlack{7, 7, 7, 7};
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         15, tableBlack, 15, tableBlack, "Dynamic", "", false, false, 4,
         &displayTable) == "5/4 4b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         15, tableBlack, 15, tableBlack, "Dynamic/1.5", "", false, false, 4,
         &displayTable) == "5/3 4b");
-    assert(motioncam::vfs::getDisplayDataLevels(
+    assert(rawpreamp::vfs::getDisplayDataLevels(
         15, tableBlack, 15, tableBlack, "Dynamic", "", true, false, 4,
         &displayTable) == "5/4 -> 63/16 6b");
-    assert(motioncam::utils::evenBitsNeeded(32000) == 16);
-    assert(motioncam::vfs::getDisplayDataType(false, 2) == "2x2");
-    assert(motioncam::vfs::getDisplayDataType(false, 8) == "8x8");
-    assert(motioncam::vfs::getDisplayDataType(true, 0) == "RGB");
+    assert(rawpreamp::utils::evenBitsNeeded(32000) == 16);
+    assert(rawpreamp::vfs::getDisplayDataType(false, 2) == "2x2");
+    assert(rawpreamp::vfs::getDisplayDataType(false, 8) == "8x8");
+    assert(rawpreamp::vfs::getDisplayDataType(true, 0) == "RGB");
 
     namespace fs = std::filesystem;
     const auto uncompressedA = makeDng(
@@ -1043,69 +1043,69 @@ int main(int argc, char** argv) {
     const auto uncompressedDifferent = makeDng(
         1235, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 1000000000);
     auto gpsDng = uncompressedA;
-    motioncam::DNGSidecarMetadataEntry gpsVersion;
+    rawpreamp::DNGSidecarMetadataEntry gpsVersion;
     gpsVersion.tag = 0;
     gpsVersion.type = 1;
     gpsVersion.count = 4;
     gpsVersion.gps = true;
     gpsVersion.value = {2, 3, 0, 0};
-    motioncam::DNGSidecarMetadataEntry gpsLatitudeRef;
+    rawpreamp::DNGSidecarMetadataEntry gpsLatitudeRef;
     gpsLatitudeRef.tag = 1;
     gpsLatitudeRef.type = 2;
     gpsLatitudeRef.count = 2;
     gpsLatitudeRef.gps = true;
     gpsLatitudeRef.value = {'N', 0};
-    assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(
+    assert(rawpreamp::DNGDecoder::fillMissingSidecarMetadata(
         gpsDng, {gpsVersion, gpsLatitudeRef}));
     assert(nestedIfdHasTag(gpsDng, 34853, 0));
     assert(nestedIfdHasTag(gpsDng, 34853, 1));
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(gpsDng));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(gpsDng));
     assert(nestedIfdHasTag(gpsDng, 34853, 0));
     assert(nestedIfdHasTag(gpsDng, 34853, 1));
     {
         auto excluded = gpsDng;
-        motioncam::DNGSidecarMetadataEntry xmp;
+        rawpreamp::DNGSidecarMetadataEntry xmp;
         xmp.tag = 700; xmp.type = 1;
         const std::string packet = "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'><rdf:Description xmlns:exif='http://ns.adobe.com/exif/1.0/' exif:GPSLatitude='51,30N' exif:GPSLongitude='13,24E'><exif:GPSTimeStamp>private timestamp</exif:GPSTimeStamp><exif:LensModel>Keep lens</exif:LensModel></rdf:Description></rdf:RDF></x:xmpmeta>";
         xmp.count = packet.size();
         xmp.value.assign(packet.begin(), packet.end());
-        assert(motioncam::DNGDecoder::replaceSidecarMetadata(excluded, {xmp}));
-        motioncam::RenderSettings settings;
+        assert(rawpreamp::DNGDecoder::replaceSidecarMetadata(excluded, {xmp}));
+        rawpreamp::RenderSettings settings;
         assert(!settings.excludeGps);
         settings.excludeGps = true;
-        motioncam::vfs::DngFinalizeOptions options;
+        rawpreamp::vfs::DngFinalizeOptions options;
         options.writeTiming = false;
         options.packToWhiteLevel = false;
-        motioncam::vfs::finalizeDng(excluded, settings, options);
+        rawpreamp::vfs::finalizeDng(excluded, settings, options);
         assert(!nestedIfdHasTag(excluded, 34853, 1));
         const std::string bytes(excluded.begin(), excluded.end());
         assert(bytes.find("51,30N") == std::string::npos);
         assert(bytes.find("private timestamp") == std::string::npos);
         assert(bytes.find("Keep lens") != std::string::npos);
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(excluded, gpsDng));
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(excluded, gpsDng));
         assert(nestedIfdHasTag(gpsDng, 34853, 1));
     }
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(uncompressedA, uncompressedB));
-    assert(!motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(uncompressedA, uncompressedB));
+    assert(!rawpreamp::DNGDecoder::imagePayloadsEqual(
         uncompressedA, uncompressedDifferent));
-    motioncam::DNGFrameMetadata packedMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(uncompressedA, packedMetadata));
+    rawpreamp::DNGFrameMetadata packedMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(uncompressedA, packedMetadata));
     assert(packedMetadata.inputBitDepth == 16);
     auto oddWhiteDng = makeLogCfaDng(1023, 0, false);
-    assert(motioncam::DNGDecoder::overrideDataLevels(oddWhiteDng, "2047/0"));
-    motioncam::DNGFrameMetadata oddWhiteMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(oddWhiteDng, oddWhiteMetadata));
+    assert(rawpreamp::DNGDecoder::overrideDataLevels(oddWhiteDng, "2047/0"));
+    rawpreamp::DNGFrameMetadata oddWhiteMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(oddWhiteDng, oddWhiteMetadata));
     assert(oddWhiteMetadata.inputBitDepth == 12);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(oddWhiteDng));
-    motioncam::DecodedDNGImage oddWhiteImage;
-    assert(motioncam::DNGDecoder::decodeImage(oddWhiteDng, oddWhiteImage));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(oddWhiteDng));
+    rawpreamp::DecodedDNGImage oddWhiteImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(oddWhiteDng, oddWhiteImage));
     assert(oddWhiteImage.layout.bitsPerSample == 12);
     // Container width only caps level-derived depth. These fixtures exercise
     // metadata at supported storage depths without decoding pixels.
     for (uint32_t storedBits : {8u, 10u, 12u, 14u, 16u}) {
         for (uint32_t white : {63u, 255u, 1023u, 4095u, 65535u}) {
             auto dng = makeLogCfaDng(15, 0, false);
-            assert(motioncam::DNGDecoder::overrideDataLevels(
+            assert(rawpreamp::DNGDecoder::overrideDataLevels(
                 dng, std::to_string(white) + "/0"));
             // This fixture has one SHORT BitsPerSample in its root IFD.
             const auto ifd = static_cast<uint32_t>(dng[4] | dng[5] << 8 |
@@ -1120,12 +1120,12 @@ int main(int argc, char** argv) {
                 changed = true;
             }
             assert(changed);
-            motioncam::DNGFrameMetadata metadata;
-            assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
+            rawpreamp::DNGFrameMetadata metadata;
+            assert(rawpreamp::DNGDecoder::getColorMetadata(dng, metadata));
             assert(metadata.inputBitDepth == std::min<uint32_t>(storedBits,
-                motioncam::utils::evenBitsNeeded(static_cast<uint16_t>(white))));
-            assert(motioncam::DNGDecoder::removeMetadataTags(dng, {50717}));
-            assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
+                rawpreamp::utils::evenBitsNeeded(static_cast<uint16_t>(white))));
+            assert(rawpreamp::DNGDecoder::removeMetadataTags(dng, {50717}));
+            assert(rawpreamp::DNGDecoder::getColorMetadata(dng, metadata));
             assert(metadata.inputBitDepth == storedBits);
         }
     }
@@ -1133,63 +1133,63 @@ int main(int argc, char** argv) {
     // 10-bit clipping white even when their stored code range is 12/14 bits.
     for (uint32_t bits : {10u, 12u, 14u}) {
         auto identityDng = makeLogCfaDng(511, 0, true, 32, false, 2, bits);
-        assert(motioncam::DNGDecoder::overrideDataLevels(identityDng, "1023/64"));
-        motioncam::DNGFrameMetadata metadata;
-        assert(motioncam::DNGDecoder::getColorMetadata(identityDng, metadata));
+        assert(rawpreamp::DNGDecoder::overrideDataLevels(identityDng, "1023/64"));
+        rawpreamp::DNGFrameMetadata metadata;
+        assert(rawpreamp::DNGDecoder::getColorMetadata(identityDng, metadata));
         assert(metadata.inputBitDepth == 10);
         assert(metadata.linearizationInputMax == 0);
         const auto original = identityDng;
-        motioncam::DecodedDNGImage identityDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(original, identityDecoded));
+        rawpreamp::DecodedDNGImage identityDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(original, identityDecoded));
         assert(!identityDecoded.linearizationApplied);
         assert(identityDecoded.residentLinearization.empty());
-        assert(motioncam::DNGDecoder::discardIdentityLinearizationTables(identityDng));
-        assert(motioncam::DNGDecoder::getLinearizationTableCount(identityDng) == 0);
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(original, identityDng));
+        assert(rawpreamp::DNGDecoder::discardIdentityLinearizationTables(identityDng));
+        assert(rawpreamp::DNGDecoder::getLinearizationTableCount(identityDng) == 0);
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(original, identityDng));
         auto finalizedIdentity = original;
-        motioncam::RenderSettings settings;
-        motioncam::vfs::DngFinalizeOptions finalize;
+        rawpreamp::RenderSettings settings;
+        rawpreamp::vfs::DngFinalizeOptions finalize;
         finalize.writeTiming = false;
         finalize.packToWhiteLevel = false;
-        motioncam::vfs::finalizeDng(finalizedIdentity, settings, finalize);
-        assert(motioncam::DNGDecoder::getLinearizationTableCount(finalizedIdentity) == 0);
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(original, finalizedIdentity));
-        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(identityDng));
-        motioncam::DecodedDNGImage image;
-        assert(motioncam::DNGDecoder::decodeImage(identityDng, image, false, false));
+        rawpreamp::vfs::finalizeDng(finalizedIdentity, settings, finalize);
+        assert(rawpreamp::DNGDecoder::getLinearizationTableCount(finalizedIdentity) == 0);
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(original, finalizedIdentity));
+        assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(identityDng));
+        rawpreamp::DecodedDNGImage image;
+        assert(rawpreamp::DNGDecoder::decodeImage(identityDng, image, false, false));
         assert(image.layout.bitsPerSample == metadata.inputBitDepth);
     }
     auto nonlinearDng = makeLogCfaDng(511, 0);
     const auto originalNonlinear = nonlinearDng;
-    assert(motioncam::DNGDecoder::discardIdentityLinearizationTables(nonlinearDng));
+    assert(rawpreamp::DNGDecoder::discardIdentityLinearizationTables(nonlinearDng));
     assert(nonlinearDng == originalNonlinear);
     // Configured exposure compensation is a metadata-only operation. Gallery
     // applies BaselineExposure while color-transforming its decoded preview;
     // the DNG sample payload itself must remain byte-for-byte equivalent.
     auto exposureTagged = uncompressedA;
-    motioncam::RenderSettings taggedSettings;
+    rawpreamp::RenderSettings taggedSettings;
     taggedSettings.cameraModel.clear();
     taggedSettings.exposureCompensation = "0.75";
-    motioncam::vfs::DngFinalizeOptions taggedFinalize;
+    rawpreamp::vfs::DngFinalizeOptions taggedFinalize;
     taggedFinalize.writeTiming = false;
-    motioncam::vfs::finalizeDng(exposureTagged, taggedSettings, taggedFinalize);
-    motioncam::DNGFrameMetadata taggedMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(exposureTagged, taggedMetadata));
+    rawpreamp::vfs::finalizeDng(exposureTagged, taggedSettings, taggedFinalize);
+    rawpreamp::DNGFrameMetadata taggedMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(exposureTagged, taggedMetadata));
     assert(std::abs(taggedMetadata.baselineExposure - 0.75) < 1e-5);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         exposureTagged, uncompressedA));
     auto normalizedExposureDng = uncompressedA;
     const double normalizedBaseline = 1.25;
-    assert(motioncam::DNGDecoder::updateMetadata(
+    assert(rawpreamp::DNGDecoder::updateMetadata(
         normalizedExposureDng, &normalizedBaseline, nullptr));
-    motioncam::vfs::finalizeDng(
+    rawpreamp::vfs::finalizeDng(
         normalizedExposureDng, taggedSettings, taggedFinalize);
-    motioncam::DNGFrameMetadata normalizedOutputMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    rawpreamp::DNGFrameMetadata normalizedOutputMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         normalizedExposureDng, normalizedOutputMetadata));
     assert(std::abs(normalizedOutputMetadata.baselineExposure -
                     galleryExposure.baselineExposure) < 1e-5);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         normalizedExposureDng, uncompressedA));
     // Output-mode switches must select matching pixels and inverse tables,
     // even when the same worker reuses its LOG/LLOG lookup caches.
@@ -1200,22 +1200,22 @@ int main(int argc, char** argv) {
                 std::pair{true, -2.0f}, std::pair{true, 1.0f},
                 std::pair{false, 1.0f}}) {
             const auto curve = compressed && (distance == -2.0f || distance > 0)
-                ? motioncam::LogCurve::LLOG60 : motioncam::LogCurve::LOG60;
+                ? rawpreamp::LogCurve::LLOG60 : rawpreamp::LogCurve::LOG60;
             auto output = cfa ? makeLogCfaDng(64552, 0, false)
                 : makeDng(64552, .01f, 100, 0, {1, 1, 1}, 0, 32, 32);
-            if (cfa) assert(motioncam::DNGDecoder::overrideDataLevels(output, "65535/0"));
-            motioncam::RenderSettings curveSettings;
-            curveSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
-            curveSettings.logTransform = motioncam::LogTransformMode::ReduceBy4Bit;
+            if (cfa) assert(rawpreamp::DNGDecoder::overrideDataLevels(output, "65535/0"));
+            rawpreamp::RenderSettings curveSettings;
+            curveSettings.options = rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+            curveSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy4Bit;
             curveSettings.jxlDistance = distance;
-            motioncam::vfs::DngPixelPipelineOptions pipeline;
+            rawpreamp::vfs::DngPixelPipelineOptions pipeline;
             pipeline.hasCfa = cfa;
             pipeline.compression = compressed;
             pipeline.inputQuantizationWhite = 65535;
             pipeline.preferVulkan = gpu;
             // Also exercise the texture-free GPU log path and its CPU fallback.
-            motioncam::vfs::processDngPixels(output, curveSettings, pipeline);
-            auto expectedTable = motioncam::makeLog60LinearizationTable(4095, curve);
+            rawpreamp::vfs::processDngPixels(output, curveSettings, pipeline);
+            auto expectedTable = rawpreamp::makeLog60LinearizationTable(4095, curve);
             auto checkTable = [&](const std::vector<uint16_t>& expected) {
                 const auto [offset, count] = tagPayload(output, 50712);
                 assert(offset && count == expected.size());
@@ -1225,30 +1225,30 @@ int main(int argc, char** argv) {
                 }
             };
             checkTable(expectedTable);
-            if (!cfa && curve == motioncam::LogCurve::LLOG60) {
+            if (!cfa && curve == rawpreamp::LogCurve::LLOG60) {
                 auto interpolated = output;
                 std::vector<uint8_t> rgb(32 * 32 * 6, 0);
                 for (size_t i = 1; i < rgb.size(); i += 2) rgb[i] = 128;
-                assert(motioncam::DNGDecoder::replaceNormalizedRGB16(interpolated, rgb, 32, 32));
-                motioncam::DecodedDNGImage decoded;
-                assert(motioncam::DNGDecoder::decodeImage(interpolated, decoded));
+                assert(rawpreamp::DNGDecoder::replaceNormalizedRGB16(interpolated, rgb, 32, 32));
+                rawpreamp::DecodedDNGImage decoded;
+                assert(rawpreamp::DNGDecoder::decodeImage(interpolated, decoded));
                 assert(decoded.linearizationApplied);
                 for (uint16_t value : decoded.samples)
                     assert(std::abs(int(value) - 32768) < 32);
             }
-            motioncam::DecodedDNGImage codes;
-            assert(motioncam::DNGDecoder::decodeImage(output, codes, false, false));
-            const double expectedCode = motioncam::encodeLog60Normalized(64552. / 65535, 4095., curve);
+            rawpreamp::DecodedDNGImage codes;
+            assert(rawpreamp::DNGDecoder::decodeImage(output, codes, false, false));
+            const double expectedCode = rawpreamp::encodeLog60Normalized(64552. / 65535, 4095., curve);
             for (uint16_t code : codes.samples)
                 assert(std::abs(code - expectedCode) <= 1.1);
-            motioncam::vfs::DngFinalizeOptions finish;
+            rawpreamp::vfs::DngFinalizeOptions finish;
             finish.compression = compressed;
             finish.packToWhiteLevel = true;
             finish.writeTiming = false;
-            motioncam::vfs::finalizeDng(output, curveSettings, finish);
+            rawpreamp::vfs::finalizeDng(output, curveSettings, finish);
             checkTable(expectedTable);
-            motioncam::DecodedDNGImage linear;
-            assert(motioncam::DNGDecoder::decodeImage(output, linear));
+            rawpreamp::DecodedDNGImage linear;
+            assert(rawpreamp::DNGDecoder::decodeImage(output, linear));
             for (uint16_t value : linear.samples)
                 assert(std::abs(int(value) - 64552) < 1000);
         }
@@ -1257,106 +1257,106 @@ int main(int argc, char** argv) {
     auto rasterCfa = makeLogCfaDng(0, 0, false, 1024, true);
     auto interleavedCfa = makeLogCfaDng(0, 0, false, 1024, true, 2, 0, true);
     for (auto* dng : {&rasterCfa, &interleavedCfa}) {
-        assert(motioncam::DNGDecoder::overrideDataLevels(*dng, "4095/0"));
-        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(*dng));
+        assert(rawpreamp::DNGDecoder::overrideDataLevels(*dng, "4095/0"));
+        assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(*dng));
         assert(tagValue(*dng, 258).value == 12);
         assert(tagValue(*dng, 279).value == 49152);
         assert(setTagType(*dng, 279, 3));
-        assert(motioncam::DNGDecoder::applyLogTransform(
-            *dng, motioncam::LogTransformMode::KeepInput, 0, false, false,
-            0, motioncam::LogCurve::LLOG60));
+        assert(rawpreamp::DNGDecoder::applyLogTransform(
+            *dng, rawpreamp::LogTransformMode::KeepInput, 0, false, false,
+            0, rawpreamp::LogCurve::LLOG60));
         assert(tagValue(*dng, 279).value == 65536);
     }
     assert(tagValue(interleavedCfa, 50975).value == 1);
     assert(tagValue(interleavedCfa, 52547).value == 1);
-    motioncam::DecodedDNGImage rasterLog, interleavedLog;
-    assert(motioncam::DNGDecoder::decodeImage(rasterCfa, rasterLog));
-    assert(motioncam::DNGDecoder::decodeImage(interleavedCfa, interleavedLog));
+    rawpreamp::DecodedDNGImage rasterLog, interleavedLog;
+    assert(rawpreamp::DNGDecoder::decodeImage(rasterCfa, rasterLog));
+    assert(rawpreamp::DNGDecoder::decodeImage(interleavedCfa, interleavedLog));
     assert(rasterLog.samples == interleavedLog.samples);
 
     // Keep Input must replace a packed LOG60 source table for lossy export
     // while keeping the 12-bit precision of its stored samples.
-    for (float distance : {motioncam::DNG_COMPRESSION_JPEG_DCT, 1.0f}) {
+    for (float distance : {rawpreamp::DNG_COMPRESSION_JPEG_DCT, 1.0f}) {
         auto output = makeDng(64552, .01f, 100, 0, {1, 1, 1}, 0, 32, 32);
-        assert(motioncam::DNGDecoder::applyLogTransform(
-            output, motioncam::LogTransformMode::ReduceBy4Bit, 65535));
-        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(output));
+        assert(rawpreamp::DNGDecoder::applyLogTransform(
+            output, rawpreamp::LogTransformMode::ReduceBy4Bit, 65535));
+        assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(output));
         assert(tagValue(output, 258).value == 12);
 
-        motioncam::RenderSettings settings;
-        settings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
-        settings.logTransform = motioncam::LogTransformMode::KeepInput;
+        rawpreamp::RenderSettings settings;
+        settings.options = rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+        settings.logTransform = rawpreamp::LogTransformMode::KeepInput;
         settings.jxlDistance = distance;
-        motioncam::vfs::DngPixelPipelineOptions pipeline;
+        rawpreamp::vfs::DngPixelPipelineOptions pipeline;
         pipeline.compression = true;
-        motioncam::vfs::processDngPixels(output, settings, pipeline);
+        rawpreamp::vfs::processDngPixels(output, settings, pipeline);
 
         const auto [offset, count] = tagPayload(output, 50712);
-        const auto expected = motioncam::makeLog60LinearizationTable(
-            4095, motioncam::LogCurve::LLOG60);
+        const auto expected = rawpreamp::makeLog60LinearizationTable(
+            4095, rawpreamp::LogCurve::LLOG60);
         assert(offset && count == expected.size());
         for (size_t i = 0; i < expected.size(); ++i) {
             const size_t at = offset + i * 2;
             assert(static_cast<uint16_t>(output[at] | output[at + 1] << 8) == expected[i]);
         }
 
-        motioncam::vfs::DngFinalizeOptions finish;
+        rawpreamp::vfs::DngFinalizeOptions finish;
         finish.compression = true;
         finish.packToWhiteLevel = true;
         finish.writeTiming = false;
-        motioncam::vfs::finalizeDng(output, settings, finish);
-        motioncam::DecodedDNGImage linear;
-        assert(motioncam::DNGDecoder::decodeImage(output, linear));
+        rawpreamp::vfs::finalizeDng(output, settings, finish);
+        rawpreamp::DecodedDNGImage linear;
+        assert(rawpreamp::DNGDecoder::decodeImage(output, linear));
         for (uint16_t value : linear.samples)
             assert(std::abs(int(value) - 64552) < 1000);
     }
-    motioncam::CalibrationData badPixelCalibration;
+    rawpreamp::CalibrationData badPixelCalibration;
     badPixelCalibration.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel defect;
+    rawpreamp::CalibrationData::BadPixel defect;
     defect.x = 0;
     defect.y = 0;
-    defect.action = motioncam::CalibrationData::BadPixelAction::Dampen;
+    defect.action = rawpreamp::CalibrationData::BadPixelAction::Dampen;
     defect.amount = 0.5f;
     badPixelCalibration.badPixels.push_back(defect);
-    motioncam::RenderSettings badPixelSettings;
-    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
+    rawpreamp::RenderSettings badPixelSettings;
+    badPixelSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::Bake;
     auto rgbIgnoresBadPixels = uncompressedA;
-    motioncam::vfs::DngPixelPipelineOptions rgbPipeline;
+    rawpreamp::vfs::DngPixelPipelineOptions rgbPipeline;
     rgbPipeline.hasCfa = false;
     rgbPipeline.calibration = &badPixelCalibration;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         rgbIgnoresBadPixels, badPixelSettings, rgbPipeline);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         rgbIgnoresBadPixels, uncompressedA));
     auto correctedCfa = makeLogCfaDng(1023, 0);
-    motioncam::vfs::DngPixelPipelineOptions cfaPipeline;
+    rawpreamp::vfs::DngPixelPipelineOptions cfaPipeline;
     cfaPipeline.hasCfa = true;
     cfaPipeline.cfaRepeatSize = 2;
     cfaPipeline.calibration = &badPixelCalibration;
     cfaPipeline.iso = 100.0;
     cfaPipeline.exposureTime = 0.01;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         correctedCfa, badPixelSettings, cfaPipeline);
-    motioncam::DecodedDNGImage correctedImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage correctedImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         correctedCfa, correctedImage, false, false));
     assert(correctedImage.samples.front() == 512);
     // Gain-map-only output is a synthetic flat field. Bad-pixel policy must
     // behave as Disabled, including suppressing FixBadPixelsList metadata.
     auto debugGainOnly = makeLogCfaDng(1023, 0);
-    motioncam::RenderSettings debugBadPixelSettings;
-    debugBadPixelSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-        motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
+    rawpreamp::RenderSettings debugBadPixelSettings;
+    debugBadPixelSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP);
     debugBadPixelSettings.badPixelTreatment =
-        motioncam::BadPixelTreatment::OpcodeOnly;
-    motioncam::vfs::processDngPixels(
+        rawpreamp::BadPixelTreatment::OpcodeOnly;
+    rawpreamp::vfs::processDngPixels(
         debugGainOnly, debugBadPixelSettings, cfaPipeline);
     const auto [debugBadPixelOffset, debugBadPixelBytes] =
         tagPayload(debugGainOnly, 51008);
     assert(!debugBadPixelOffset && !debugBadPixelBytes);
     auto debugRgb = makeLogCfaDng(1023, 0);
-    std::vector<motioncam::GainMap> constantPhaseMaps(4);
+    std::vector<rawpreamp::GainMap> constantPhaseMaps(4);
     for (size_t phaseIndex = 0; phaseIndex < constantPhaseMaps.size(); ++phaseIndex) {
         auto& map = constantPhaseMaps[phaseIndex];
         map.top = static_cast<uint32_t>(phaseIndex / 2);
@@ -1371,30 +1371,30 @@ int main(int argc, char** argv) {
         map.data = {1.25f + static_cast<float>(phaseIndex) * 0.25f};
     }
     auto pro18BakedDng = makeLogCfaDng(512, 0, false);
-    assert(motioncam::DNGDecoder::overrideDataLevels(pro18BakedDng, "1024/132"));
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::overrideDataLevels(pro18BakedDng, "1024/132"));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         pro18BakedDng, 2, constantPhaseMaps));
-    assert(motioncam::DNGDecoder::bakeGainMaps(pro18BakedDng, false, false));
-    motioncam::DNGFrameMetadata pro18BakedMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(pro18BakedDng, false, false));
+    rawpreamp::DNGFrameMetadata pro18BakedMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         pro18BakedDng, pro18BakedMetadata));
     assert(pro18BakedMetadata.whiteLevel[0] == 4095.0f);
     assert(pro18BakedMetadata.blackLevel[0] == 256.0f);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(pro18BakedDng));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(pro18BakedDng));
     assert(tagValue(pro18BakedDng, 258).value == 12);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         debugRgb, 2, constantPhaseMaps));
     auto debugRgbSettings = debugBadPixelSettings;
-    debugRgbSettings.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
+    debugRgbSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::Disabled;
     auto debugRgbPipeline = cfaPipeline;
     debugRgbPipeline.calibration = nullptr;
     debugRgbPipeline.cfaRepeatSize = 4;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         debugRgb, debugRgbSettings, debugRgbPipeline);
-    motioncam::DecodedDNGImage debugRgbImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage debugRgbImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         debugRgb, debugRgbImage, false, false));
-    assert(debugRgbImage.layout.pixels == motioncam::DNGPixelLayout::LinearRGB);
+    assert(debugRgbImage.layout.pixels == rawpreamp::DNGPixelLayout::LinearRGB);
     const auto rgbPixel = [&](uint32_t x, uint32_t y) {
         const size_t offset = (static_cast<size_t>(y) * debugRgbImage.layout.width + x) * 3;
         return std::array<uint16_t, 3>{debugRgbImage.samples[offset],
@@ -1405,139 +1405,139 @@ int main(int argc, char** argv) {
     assert(rgbPixel(0, 31) == rgbPixel(1, 30));
     assert(rgbPixel(31, 31) == rgbPixel(30, 30));
     auto proxyCfa = makeLogCfaDng(1023, 0);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         proxyCfa, 2, constantPhaseMaps));
-    motioncam::RenderSettings cfaProxySettings;
-    cfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_DRAFT |
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+    rawpreamp::RenderSettings cfaProxySettings;
+    cfaProxySettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_DRAFT |
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
     cfaProxySettings.draftScale = 2;
     auto proxyPipeline = cfaPipeline;
     proxyPipeline.calibration = nullptr;
     proxyPipeline.outputScale = 2;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         proxyCfa, cfaProxySettings, proxyPipeline);
-    motioncam::DecodedDNGImage proxyImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage proxyImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         proxyCfa, proxyImage, false, false));
-    assert(proxyImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(proxyImage.layout.pixels == rawpreamp::DNGPixelLayout::CFA);
     assert(proxyImage.layout.width == 16 && proxyImage.layout.height == 16);
 
     auto preScaledCfa = makeLogCfaDng(1023, 0);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         preScaledCfa, 2, constantPhaseMaps));
     proxyPipeline.preScaledProxy = true;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         preScaledCfa, cfaProxySettings, proxyPipeline);
-    motioncam::DecodedDNGImage preScaledImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage preScaledImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         preScaledCfa, preScaledImage, false, false));
-    assert(preScaledImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(preScaledImage.layout.pixels == rawpreamp::DNGPixelLayout::CFA);
     assert(preScaledImage.layout.width == 32 && preScaledImage.layout.height == 32);
 
     auto hqProxy = makeLogCfaDng(1023, 0);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         hqProxy, 2, constantPhaseMaps));
-    cfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
-        cfaProxySettings.options | motioncam::RENDER_OPT_HIGHER_CFA_HQ);
+    cfaProxySettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        cfaProxySettings.options | rawpreamp::RENDER_OPT_HIGHER_CFA_HQ);
     proxyPipeline.preScaledProxy = false;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         hqProxy, cfaProxySettings, proxyPipeline);
-    motioncam::DecodedDNGImage hqProxyImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage hqProxyImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         hqProxy, hqProxyImage, false, false));
-    assert(hqProxyImage.layout.pixels == motioncam::DNGPixelLayout::LinearRGB);
+    assert(hqProxyImage.layout.pixels == rawpreamp::DNGPixelLayout::LinearRGB);
     auto keepInputGain = makeLogCfaDng(1023, 0);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         keepInputGain, 2, constantPhaseMaps));
-    motioncam::RenderSettings keepInputSettings;
-    keepInputSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_LOG_TRANSFORM |
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
-    keepInputSettings.logTransform = motioncam::LogTransformMode::KeepInput;
+    rawpreamp::RenderSettings keepInputSettings;
+    keepInputSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_LOG_TRANSFORM |
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+    keepInputSettings.logTransform = rawpreamp::LogTransformMode::KeepInput;
     auto keepInputPipeline = cfaPipeline;
     keepInputPipeline.calibration = nullptr;
     keepInputPipeline.inputQuantizationWhite = 1023;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         keepInputGain, keepInputSettings, keepInputPipeline);
     assert(tagValue(keepInputGain, 50712).count == 1024);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(keepInputGain));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(keepInputGain));
     assert(tagValue(keepInputGain, 50712).count == 1024);
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(keepInputGain));
-    assert(motioncam::DNGDecoder::getLinearizationTableCount(keepInputGain) == 1024);
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(keepInputGain));
+    assert(rawpreamp::DNGDecoder::getLinearizationTableCount(keepInputGain) == 1024);
     const std::array packedLogModes{
-        motioncam::LogTransformMode::ReduceBy2Bit,
-        motioncam::LogTransformMode::ReduceBy4Bit,
-        motioncam::LogTransformMode::ReduceBy6Bit,
-        motioncam::LogTransformMode::ReduceBy8Bit,
-        motioncam::LogTransformMode::ReduceBy10Bit,
-        motioncam::LogTransformMode::ReduceBy12Bit,
-        motioncam::LogTransformMode::ReduceBy14Bit};
-    assert(motioncam::stringToLogTransformMode("14") ==
-           motioncam::LogTransformMode::ReduceBy14Bit);
-    assert(motioncam::logOutputBits(10, motioncam::LogTransformMode::ReduceBy14Bit) == 2);
-    for (auto curve : {motioncam::LogCurve::LOG60, motioncam::LogCurve::LLOG60})
+        rawpreamp::LogTransformMode::ReduceBy2Bit,
+        rawpreamp::LogTransformMode::ReduceBy4Bit,
+        rawpreamp::LogTransformMode::ReduceBy6Bit,
+        rawpreamp::LogTransformMode::ReduceBy8Bit,
+        rawpreamp::LogTransformMode::ReduceBy10Bit,
+        rawpreamp::LogTransformMode::ReduceBy12Bit,
+        rawpreamp::LogTransformMode::ReduceBy14Bit};
+    assert(rawpreamp::stringToLogTransformMode("14") ==
+           rawpreamp::LogTransformMode::ReduceBy14Bit);
+    assert(rawpreamp::logOutputBits(10, rawpreamp::LogTransformMode::ReduceBy14Bit) == 2);
+    for (auto curve : {rawpreamp::LogCurve::LOG60, rawpreamp::LogCurve::LLOG60})
     for (size_t modeIndex = 0; modeIndex < packedLogModes.size(); ++modeIndex) {
         const auto mode = packedLogModes[modeIndex];
         const uint32_t ditherSeed = static_cast<uint32_t>(modeIndex + 1);
         const uint32_t expectedBits = 14 - static_cast<uint32_t>(modeIndex) * 2;
         auto fusedUnpacked = makeLogCfaDng(0, 0, false, 33, true);
-        assert(motioncam::DNGDecoder::replaceGainMaps(
+        assert(rawpreamp::DNGDecoder::replaceGainMaps(
             fusedUnpacked, 2, constantPhaseMaps));
         auto fusedPacked = fusedUnpacked;
         auto separateBake = fusedUnpacked;
         bool logFused = false;
-        assert(motioncam::DNGDecoder::bakeGainMaps(
+        assert(rawpreamp::DNGDecoder::bakeGainMaps(
             fusedUnpacked, false, false, false, false, 2, std::nullopt,
             mode, 65535, true, &logFused, false, ditherSeed, false, nullptr, nullptr, nullptr, curve));
         assert(logFused);
-        assert(motioncam::DNGDecoder::bakeGainMaps(
+        assert(rawpreamp::DNGDecoder::bakeGainMaps(
             fusedPacked, false, false, false, false, 2, std::nullopt,
             mode, 65535, true, &logFused, true, ditherSeed, false, nullptr, nullptr, nullptr, curve));
         assert(logFused);
         assert(tagValue(fusedUnpacked, 258).value == 16);
         assert(tagValue(fusedPacked, 258).value == expectedBits);
-        assert(motioncam::DNGDecoder::applyLogTransform(
+        assert(rawpreamp::DNGDecoder::applyLogTransform(
             fusedUnpacked, mode, 65535, true, true, ditherSeed, curve));
-        assert(motioncam::DNGDecoder::applyLogTransform(
+        assert(rawpreamp::DNGDecoder::applyLogTransform(
             fusedPacked, mode, 65535, true, true, ditherSeed, curve));
         assert(tagValue(fusedPacked, 50712).count == (1u << expectedBits));
-        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedUnpacked));
-        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(fusedPacked));
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(fusedUnpacked, fusedPacked));
-        assert(motioncam::DNGDecoder::bakeGainMaps(
+        assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(fusedUnpacked));
+        assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(fusedPacked));
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(fusedUnpacked, fusedPacked));
+        assert(rawpreamp::DNGDecoder::bakeGainMaps(
             separateBake, false, false, false, false, 2, std::nullopt));
-        assert(motioncam::DNGDecoder::applyLogTransform(
+        assert(rawpreamp::DNGDecoder::applyLogTransform(
             separateBake, mode, 65535, true, false, ditherSeed, curve));
-        assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(separateBake));
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(separateBake, fusedPacked));
+        assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(separateBake));
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(separateBake, fusedPacked));
     }
     // Compressed input must take the decoded-source path, then fuse the gain
     // and packed LOG bake without serializing an unused 16-bit intermediate.
     auto compressedGainLog = makeLogCfaDng(0, 0, false, 32, true);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         compressedGainLog, 2, constantPhaseMaps));
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedGainLog));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(compressedGainLog));
     auto compressedGainCpu = compressedGainLog;
-    motioncam::DecodedDNGImage compressedGainImage, uncompressedGainImage;
-    motioncam::RenderSettings compressedGainSettings;
-    compressedGainSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-        motioncam::RENDER_OPT_LOG_TRANSFORM | motioncam::RENDER_OPT_LOG_HQ);
-    compressedGainSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
+    rawpreamp::DecodedDNGImage compressedGainImage, uncompressedGainImage;
+    rawpreamp::RenderSettings compressedGainSettings;
+    compressedGainSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        rawpreamp::RENDER_OPT_LOG_TRANSFORM | rawpreamp::RENDER_OPT_LOG_HQ);
+    compressedGainSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy8Bit;
     auto compressedGainPipeline = cfaPipeline;
     compressedGainPipeline.calibration = nullptr;
     compressedGainPipeline.inputQuantizationWhite = 65535;
     auto compressedCpuPipeline = compressedGainPipeline;
     compressedCpuPipeline.preferVulkan = false;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         compressedGainLog, compressedGainSettings, compressedGainPipeline);
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         compressedGainCpu, compressedGainSettings, compressedCpuPipeline);
     assert(tagValue(compressedGainLog, 258).value == 8);
-    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+    assert(rawpreamp::DNGDecoder::decodeImageBorrowed(
         compressedGainLog, compressedGainImage, false, false));
-    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+    assert(rawpreamp::DNGDecoder::decodeImageBorrowed(
         compressedGainCpu, uncompressedGainImage, false, false));
     assert(compressedGainImage.samples.size() == uncompressedGainImage.samples.size());
     // The shared finalizer must attach a terminal GPU JPEG after metadata work
@@ -1545,39 +1545,39 @@ int main(int argc, char** argv) {
     auto gpuFinalDng = makeDng(32768, 0.01f, 100, 0.0f,
                                {1, 1, 1}, 0, 1024, 512);
     auto referenceFinalDng = gpuFinalDng;
-    motioncam::RenderSettings gpuFinalSettings;
-    gpuFinalSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
-    gpuFinalSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
-    gpuFinalSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
+    rawpreamp::RenderSettings gpuFinalSettings;
+    gpuFinalSettings.options = rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+    gpuFinalSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy8Bit;
+    gpuFinalSettings.jxlDistance = rawpreamp::DNG_COMPRESSION_JPEG92_STRIP;
     std::vector<uint8_t> preparedJpeg;
-    motioncam::vfs::DngPixelPipelineOptions gpuFinalPixels;
+    rawpreamp::vfs::DngPixelPipelineOptions gpuFinalPixels;
     gpuFinalPixels.gpuJpeg = &preparedJpeg;
     gpuFinalPixels.inputQuantizationWhite = 65535;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         gpuFinalDng, gpuFinalSettings, gpuFinalPixels);
-    if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"))
+    if (std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST"))
         assert(!preparedJpeg.empty());
-    motioncam::vfs::DngPixelPipelineOptions referenceFinalPixels;
+    rawpreamp::vfs::DngPixelPipelineOptions referenceFinalPixels;
     referenceFinalPixels.inputQuantizationWhite = 65535;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         referenceFinalDng, gpuFinalSettings, referenceFinalPixels);
-    motioncam::vfs::DngFinalizeOptions gpuFinalOptions;
+    rawpreamp::vfs::DngFinalizeOptions gpuFinalOptions;
     gpuFinalOptions.writeTiming = false;
     gpuFinalOptions.packToWhiteLevel = true;
     gpuFinalOptions.compression = true;
     gpuFinalOptions.gpuJpeg = &preparedJpeg;
-    motioncam::vfs::finalizeDng(
+    rawpreamp::vfs::finalizeDng(
         gpuFinalDng, gpuFinalSettings, gpuFinalOptions);
     gpuFinalOptions.gpuJpeg = nullptr;
-    motioncam::vfs::finalizeDng(
+    rawpreamp::vfs::finalizeDng(
         referenceFinalDng, gpuFinalSettings, gpuFinalOptions);
-    motioncam::DecodedDNGImage gpuFinalDecoded, referenceFinalDecoded;
-    assert(motioncam::DNGDecoder::decodeImage(gpuFinalDng, gpuFinalDecoded));
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage gpuFinalDecoded, referenceFinalDecoded;
+    assert(rawpreamp::DNGDecoder::decodeImage(gpuFinalDng, gpuFinalDecoded));
+    assert(rawpreamp::DNGDecoder::decodeImage(
         referenceFinalDng, referenceFinalDecoded));
     assert(gpuFinalDecoded.samples == referenceFinalDecoded.samples);
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
-    // DirectLog's terminal decode texture can supply JPEG without first
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
+    // Native Video's terminal decode texture can supply JPEG without first
     // materializing the placeholder DNG strip.
     {
         constexpr uint32_t textureWidth = 1024, textureHeight = 512;
@@ -1592,10 +1592,10 @@ int main(int argc, char** argv) {
                 rgb[pixel * 3u + channel] = value;
                 rgba[pixel * 4u + channel] = value;
             }
-        auto& context = motioncam::jpegContext();
+        auto& context = rawpreamp::jpegContext();
         const bool textureGpuReady = context.init();
         if (!textureGpuReady)
-            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
+            assert(!std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST"));
         if (textureGpuReady) {
         const pl_gpu gpu = context.vulkan->gpu;
         const pl_fmt format = pl_find_fmt(
@@ -1614,7 +1614,7 @@ int main(int argc, char** argv) {
         upload.ptr = rgba.data();
         upload.row_pitch = size_t(textureWidth) * 4u * sizeof(uint16_t);
         assert(pl_tex_upload(gpu, &upload));
-        motioncam::VulkanGainBakeTextureSource source;
+        rawpreamp::VulkanGainBakeTextureSource source;
         source.gpu = gpu;
         source.texture = texture;
         size_t textureDownloads = 0;
@@ -1628,25 +1628,25 @@ int main(int argc, char** argv) {
                                   {1, 1, 1}, 0,
                                   textureWidth, textureHeight);
         std::vector<uint8_t> textureJpeg;
-        motioncam::vfs::DngPixelPipelineOptions texturePixels;
+        rawpreamp::vfs::DngPixelPipelineOptions texturePixels;
         texturePixels.textureSource = &source;
         texturePixels.gpuJpeg = &textureJpeg;
-        motioncam::RenderSettings textureSettings;
-        textureSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG92_STRIP;
-        motioncam::vfs::processDngPixels(
+        rawpreamp::RenderSettings textureSettings;
+        textureSettings.jxlDistance = rawpreamp::DNG_COMPRESSION_JPEG92_STRIP;
+        rawpreamp::vfs::processDngPixels(
             textureDng, textureSettings, texturePixels);
         if (!textureJpeg.empty()) assert(textureDownloads == 0);
-        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"))
+        if (std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST"))
             assert(!textureJpeg.empty());
-        motioncam::vfs::DngFinalizeOptions textureFinalize;
+        rawpreamp::vfs::DngFinalizeOptions textureFinalize;
         textureFinalize.writeTiming = false;
         textureFinalize.packToWhiteLevel = true;
         textureFinalize.compression = true;
         textureFinalize.gpuJpeg = &textureJpeg;
-        motioncam::vfs::finalizeDng(
+        rawpreamp::vfs::finalizeDng(
             textureDng, textureSettings, textureFinalize);
-        motioncam::DecodedDNGImage textureDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(
+        rawpreamp::DecodedDNGImage textureDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(
             textureDng, textureDecoded));
         assert(textureDecoded.samples == rgb);
 
@@ -1654,68 +1654,68 @@ int main(int argc, char** argv) {
                                      {1, 1, 1}, 0,
                                      textureWidth, textureHeight);
         auto referenceLogDng = textureLogDng;
-        assert(motioncam::DNGDecoder::fillUncompressedImageStrip(
+        assert(rawpreamp::DNGDecoder::fillUncompressedImageStrip(
             referenceLogDng, [&rgb](uint16_t* output, size_t count) {
                 if (count != rgb.size()) return false;
                 std::copy(rgb.begin(), rgb.end(), output);
                 return true;
             }));
         auto textureLogSettings = textureSettings;
-        textureLogSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
+        textureLogSettings.options = rawpreamp::RENDER_OPT_LOG_TRANSFORM;
         textureLogSettings.logTransform =
-            motioncam::LogTransformMode::ReduceBy4Bit;
+            rawpreamp::LogTransformMode::ReduceBy4Bit;
         std::vector<uint8_t> textureLogJpeg;
         auto textureLogPixels = texturePixels;
         textureLogPixels.gpuJpeg = &textureLogJpeg;
         textureLogPixels.inputQuantizationWhite = 65535;
         const size_t downloadsBeforeLog = textureDownloads;
-        motioncam::vfs::processDngPixels(
+        rawpreamp::vfs::processDngPixels(
             textureLogDng, textureLogSettings, textureLogPixels);
-        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST")) {
+        if (std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST")) {
             assert(!textureLogJpeg.empty());
             assert(textureDownloads == downloadsBeforeLog);
         }
-        motioncam::vfs::DngPixelPipelineOptions referenceLogPixels;
+        rawpreamp::vfs::DngPixelPipelineOptions referenceLogPixels;
         referenceLogPixels.inputQuantizationWhite = 65535;
-        motioncam::vfs::processDngPixels(
+        rawpreamp::vfs::processDngPixels(
             referenceLogDng, textureLogSettings, referenceLogPixels);
         textureFinalize.gpuJpeg = &textureLogJpeg;
-        motioncam::vfs::finalizeDng(
+        rawpreamp::vfs::finalizeDng(
             textureLogDng, textureLogSettings, textureFinalize);
         textureFinalize.gpuJpeg = nullptr;
-        motioncam::vfs::finalizeDng(
+        rawpreamp::vfs::finalizeDng(
             referenceLogDng, textureLogSettings, textureFinalize);
-        motioncam::DecodedDNGImage textureLogDecoded, referenceLogDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(
+        rawpreamp::DecodedDNGImage textureLogDecoded, referenceLogDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(
             textureLogDng, textureLogDecoded));
-        assert(motioncam::DNGDecoder::decodeImage(
+        assert(rawpreamp::DNGDecoder::decodeImage(
             referenceLogDng, referenceLogDecoded));
         assert(textureLogDecoded.samples == referenceLogDecoded.samples);
         auto tiledTextureSettings = textureSettings;
-        tiledTextureSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
+        tiledTextureSettings.jxlDistance = rawpreamp::DNG_COMPRESSION_JPEG_LOSSLESS;
         auto tiledTextureDng = makeDng(0, 0.01f, 100, 0.0f,
                                        {1, 1, 1}, 0,
                                        textureWidth, textureHeight);
-        motioncam::vfs::GpuJpegTiles textureTiles;
+        rawpreamp::vfs::GpuJpegTiles textureTiles;
         auto tiledTexturePixels = texturePixels;
         tiledTexturePixels.gpuJpeg = nullptr;
         tiledTexturePixels.gpuJpegTiles = &textureTiles;
         const size_t downloadsBeforeTiles = textureDownloads;
-        motioncam::vfs::processDngPixels(
+        rawpreamp::vfs::processDngPixels(
             tiledTextureDng, tiledTextureSettings, tiledTexturePixels);
-        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST")) {
+        if (std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST")) {
             assert(!textureTiles.bytes.empty());
             assert(textureDownloads == downloadsBeforeTiles);
         }
-        motioncam::vfs::DngFinalizeOptions tiledTextureFinalize;
+        rawpreamp::vfs::DngFinalizeOptions tiledTextureFinalize;
         tiledTextureFinalize.writeTiming = false;
         tiledTextureFinalize.packToWhiteLevel = true;
         tiledTextureFinalize.compression = true;
         tiledTextureFinalize.gpuJpegTiles = &textureTiles;
-        motioncam::vfs::finalizeDng(
+        rawpreamp::vfs::finalizeDng(
             tiledTextureDng, tiledTextureSettings, tiledTextureFinalize);
-        motioncam::DecodedDNGImage tiledTextureDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(
+        rawpreamp::DecodedDNGImage tiledTextureDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(
             tiledTextureDng, tiledTextureDecoded));
         assert(tiledTextureDecoded.samples == rgb);
 
@@ -1723,23 +1723,23 @@ int main(int argc, char** argv) {
                                           {1, 1, 1}, 0,
                                           textureWidth, textureHeight);
         auto tiledTextureLogSettings = textureLogSettings;
-        tiledTextureLogSettings.jxlDistance = motioncam::DNG_COMPRESSION_JPEG_LOSSLESS;
-        motioncam::vfs::GpuJpegTiles textureLogTiles;
+        tiledTextureLogSettings.jxlDistance = rawpreamp::DNG_COMPRESSION_JPEG_LOSSLESS;
+        rawpreamp::vfs::GpuJpegTiles textureLogTiles;
         auto tiledTextureLogPixels = textureLogPixels;
         tiledTextureLogPixels.gpuJpeg = nullptr;
         tiledTextureLogPixels.gpuJpegTiles = &textureLogTiles;
         const size_t downloadsBeforeTiledLog = textureDownloads;
-        motioncam::vfs::processDngPixels(
+        rawpreamp::vfs::processDngPixels(
             tiledTextureLogDng, tiledTextureLogSettings, tiledTextureLogPixels);
-        if (std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST")) {
+        if (std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST")) {
             assert(!textureLogTiles.bytes.empty());
             assert(textureDownloads == downloadsBeforeTiledLog);
         }
         tiledTextureFinalize.gpuJpegTiles = &textureLogTiles;
-        motioncam::vfs::finalizeDng(
+        rawpreamp::vfs::finalizeDng(
             tiledTextureLogDng, tiledTextureLogSettings, tiledTextureFinalize);
-        motioncam::DecodedDNGImage tiledTextureLogDecoded;
-        assert(motioncam::DNGDecoder::decodeImage(
+        rawpreamp::DecodedDNGImage tiledTextureLogDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(
             tiledTextureLogDng, tiledTextureLogDecoded));
         assert(tiledTextureLogDecoded.samples == referenceLogDecoded.samples);
         pl_tex_destroy(gpu, &texture);
@@ -1757,25 +1757,25 @@ int main(int argc, char** argv) {
     // GPU also has to consume decoded pixels and produce packed DNG output.
     for (unsigned variant = 0; variant < 16; ++variant) {
         auto gpu = makeLogCfaDng(0, 0, false, 32, true);
-        assert(motioncam::DNGDecoder::replaceGainMaps(gpu, 2, constantPhaseMaps));
-        assert(motioncam::DNGDecoder::compressLosslessJPEG(gpu));
+        assert(rawpreamp::DNGDecoder::replaceGainMaps(gpu, 2, constantPhaseMaps));
+        assert(rawpreamp::DNGDecoder::compressLosslessJPEG(gpu));
         auto cpu = gpu;
-        motioncam::RenderSettings matrixSettings;
-        matrixSettings.options = motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-        if (variant & 1u) matrixSettings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
-        if (variant & 2u) matrixSettings.options |= motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP;
-        if (variant & 4u) matrixSettings.options |= motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
+        rawpreamp::RenderSettings matrixSettings;
+        matrixSettings.options = rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+        if (variant & 1u) matrixSettings.options |= rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+        if (variant & 2u) matrixSettings.options |= rawpreamp::RENDER_OPT_NORMALIZE_SHADING_MAP;
+        if (variant & 4u) matrixSettings.options |= rawpreamp::RENDER_OPT_OPTIMIZE_GAIN_MAPS;
         if (variant & 8u) {
-            matrixSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM |
-                                      motioncam::RENDER_OPT_LOG_HQ;
-            matrixSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
+            matrixSettings.options |= rawpreamp::RENDER_OPT_LOG_TRANSFORM |
+                                      rawpreamp::RENDER_OPT_LOG_HQ;
+            matrixSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy8Bit;
         }
-        motioncam::vfs::processDngPixels(gpu, matrixSettings, compressedGainPipeline);
-        motioncam::vfs::processDngPixels(cpu, matrixSettings, compressedCpuPipeline);
+        rawpreamp::vfs::processDngPixels(gpu, matrixSettings, compressedGainPipeline);
+        rawpreamp::vfs::processDngPixels(cpu, matrixSettings, compressedCpuPipeline);
         assert(tagValue(gpu, 258).value == tagValue(cpu, 258).value);
-        motioncam::DecodedDNGImage gpuPixels, cpuPixels;
-        assert(motioncam::DNGDecoder::decodeImageBorrowed(gpu, gpuPixels, false, false));
-        assert(motioncam::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels, false, false));
+        rawpreamp::DecodedDNGImage gpuPixels, cpuPixels;
+        assert(rawpreamp::DNGDecoder::decodeImageBorrowed(gpu, gpuPixels, false, false));
+        assert(rawpreamp::DNGDecoder::decodeImageBorrowed(cpu, cpuPixels, false, false));
         assert(gpuPixels.samples.size() == cpuPixels.samples.size());
         for (size_t sample = 0; sample < gpuPixels.samples.size(); ++sample)
             assert(std::abs(int(gpuPixels.samples[sample]) -
@@ -1791,18 +1791,18 @@ int main(int argc, char** argv) {
                 ? makeDng(1000, 0.01f, 100, 0.0f, {1, 1, 1}, 0)
                 : makeLogCfaDng(0, 0, false, 32, true);
             auto cpu = gpu;
-            if (!motioncam::DNGDecoder::bakeLogStripVulkan(
+            if (!rawpreamp::DNGDecoder::bakeLogStripVulkan(
                     gpu, mode, 65535, true, 17)) continue;
             ++gpuLogCases;
-            assert(motioncam::DNGDecoder::applyLogTransform(
+            assert(rawpreamp::DNGDecoder::applyLogTransform(
                 cpu, mode, 65535, true, false, 17));
-            assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(cpu));
+            assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(cpu));
             assert(tagValue(gpu, 258).value == tagValue(cpu, 258).value);
             assert(tagValue(gpu, 50712).count == tagValue(cpu, 50712).count);
-            motioncam::DecodedDNGImage gpuImage, cpuImage;
-            assert(motioncam::DNGDecoder::decodeImageBorrowed(
+            rawpreamp::DecodedDNGImage gpuImage, cpuImage;
+            assert(rawpreamp::DNGDecoder::decodeImageBorrowed(
                 gpu, gpuImage, false, false));
-            assert(motioncam::DNGDecoder::decodeImageBorrowed(
+            assert(rawpreamp::DNGDecoder::decodeImageBorrowed(
                 cpu, cpuImage, false, false));
             assert(gpuImage.samples.size() == cpuImage.samples.size());
             for (size_t i = 0; i < gpuImage.samples.size(); ++i)
@@ -1810,24 +1810,24 @@ int main(int argc, char** argv) {
                                 int(cpuImage.samples[i])) <= 1);
         }
     }
-    if (std::getenv("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (std::getenv("RAWPREAMP_GALLERY_PERF_PROFILE"))
         std::fprintf(stderr, "GPU LOG comparison cases: %zu\n", gpuLogCases);
     auto overlayPacked = makeLogCfaDng(500, 0, false, 128);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         overlayPacked, 2, constantPhaseMaps));
     bool overlayLogFused = false;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         overlayPacked, false, false, false, false, 2, std::nullopt,
-        motioncam::LogTransformMode::ReduceBy6Bit, 65535, false,
+        rawpreamp::LogTransformMode::ReduceBy6Bit, 65535, false,
         &overlayLogFused, true));
     assert(overlayLogFused);
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        overlayPacked, motioncam::LogTransformMode::ReduceBy6Bit,
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        overlayPacked, rawpreamp::LogTransformMode::ReduceBy6Bit,
         65535, false, true));
     std::vector<std::pair<uint32_t, uint32_t>> isoForeground;
     std::pair<uint32_t, uint32_t> isoOutline{};
     bool hasOutline = false;
-    motioncam::utils::forEachIsoOverlayPixel(128, 32, 100.0,
+    rawpreamp::utils::forEachIsoOverlayPixel(128, 32, 100.0,
         [&](uint32_t x, uint32_t y, bool foreground) {
             if (foreground && isoForeground.size() < 2)
                 isoForeground.emplace_back(x, y);
@@ -1842,7 +1842,7 @@ int main(int argc, char** argv) {
     const size_t protectedOffset = (static_cast<size_t>(protectedY) * 128 + protectedX) * 3;
     isoRgb[protectedOffset] = isoRgb[protectedOffset + 1] =
         isoRgb[protectedOffset + 2] = 0;
-    motioncam::utils::bakeIsoOverlay(
+    rawpreamp::utils::bakeIsoOverlay(
         isoRgb.data(), 128, 32, 3, 100.0, 0, 65535);
     const auto [whiteX, whiteY] = isoForeground.back();
     const size_t whiteOffset = (static_cast<size_t>(whiteY) * 128 + whiteX) * 3;
@@ -1852,61 +1852,61 @@ int main(int argc, char** argv) {
            isoRgb[whiteOffset + 1] == 65535 &&
            isoRgb[whiteOffset + 2] == 65535);
     assert(isoRgb[outlineOffset] == 0 && isoRgb[protectedOffset] == 0);
-    const std::vector<motioncam::utils::ActiveBadPixel> protectedPackedMark{
+    const std::vector<rawpreamp::utils::ActiveBadPixel> protectedPackedMark{
         {protectedY, protectedX}};
-    assert(motioncam::DNGDecoder::markBadPixels(
+    assert(rawpreamp::DNGDecoder::markBadPixels(
         overlayPacked, 128, 32, 0, 0, protectedPackedMark, false));
     auto beforeOverlay = overlayPacked;
-    assert(motioncam::DNGDecoder::bakeIsoOverlay(overlayPacked, 100.0));
+    assert(rawpreamp::DNGDecoder::bakeIsoOverlay(overlayPacked, 100.0));
     assert(tagValue(overlayPacked, 258).value == 10);
-    assert(!motioncam::DNGDecoder::imagePayloadsEqual(beforeOverlay, overlayPacked));
-    motioncam::DecodedDNGImage isoPackedImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    assert(!rawpreamp::DNGDecoder::imagePayloadsEqual(beforeOverlay, overlayPacked));
+    rawpreamp::DecodedDNGImage isoPackedImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         overlayPacked, isoPackedImage, false, true));
     assert(isoPackedImage.samples[static_cast<size_t>(whiteY) * 128 + whiteX] >= 65000);
     assert(isoPackedImage.samples[
         static_cast<size_t>(isoOutline.second) * 128 + isoOutline.first] == 0);
     assert(isoPackedImage.samples[
         static_cast<size_t>(protectedY) * 128 + protectedX] == 0);
-    const std::vector<motioncam::utils::ActiveBadPixel> packedMarks{{5, 5}};
-    assert(motioncam::DNGDecoder::markBadPixels(
+    const std::vector<rawpreamp::utils::ActiveBadPixel> packedMarks{{5, 5}};
+    assert(rawpreamp::DNGDecoder::markBadPixels(
         overlayPacked, 128, 32, 0, 0, packedMarks, false));
-    motioncam::DecodedDNGImage markedPackedImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage markedPackedImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         overlayPacked, markedPackedImage, false, false));
     assert(markedPackedImage.samples[5 * 128 + 5] == 0);
     assert(tagValue(overlayPacked, 258).value == 10);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(overlayPacked));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(overlayPacked));
     assert(tagValue(overlayPacked, 258).value == 10);
     auto unpackedIsoLog = makeLogCfaDng(500, 0, false, 128);
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        unpackedIsoLog, motioncam::LogTransformMode::ReduceBy6Bit, 65535));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        unpackedIsoLog, rawpreamp::LogTransformMode::ReduceBy6Bit, 65535));
     assert(tagValue(unpackedIsoLog, 258).value == 16);
     assert(tagValue(unpackedIsoLog, 50712).count == 1024);
     auto compressedIsoLog = unpackedIsoLog;
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedIsoLog));
-    assert(motioncam::DNGDecoder::bakeIsoOverlay(compressedIsoLog, 100.0));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(compressedIsoLog));
+    assert(rawpreamp::DNGDecoder::bakeIsoOverlay(compressedIsoLog, 100.0));
     assert(tagValue(compressedIsoLog, 50712).count == 1024);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(compressedIsoLog));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(compressedIsoLog));
     assert(tagValue(compressedIsoLog, 258).value == 10);
-    motioncam::vfs::DngFinalizeOptions isoLogFinalize;
+    rawpreamp::vfs::DngFinalizeOptions isoLogFinalize;
     isoLogFinalize.writeTiming = false;
     isoLogFinalize.isoOverlay = 100.0;
     isoLogFinalize.packToWhiteLevel = true;
-    motioncam::RenderSettings isoLogSettings;
-    motioncam::vfs::finalizeDng(unpackedIsoLog, isoLogSettings, isoLogFinalize);
+    rawpreamp::RenderSettings isoLogSettings;
+    rawpreamp::vfs::finalizeDng(unpackedIsoLog, isoLogSettings, isoLogFinalize);
     assert(tagValue(unpackedIsoLog, 258).value == 10);
     assert(tagValue(unpackedIsoLog, 50712).count == 1024);
     auto markedRgbPacked = makeDng(
         1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        markedRgbPacked, motioncam::LogTransformMode::ReduceBy6Bit, 65535));
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(markedRgbPacked));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        markedRgbPacked, rawpreamp::LogTransformMode::ReduceBy6Bit, 65535));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(markedRgbPacked));
     assert(tagValue(markedRgbPacked, 258).value == 10);
-    assert(motioncam::DNGDecoder::markBadPixels(
+    assert(rawpreamp::DNGDecoder::markBadPixels(
         markedRgbPacked, 8, 8, 0, 0, packedMarks, true));
-    motioncam::DecodedDNGImage markedRgbPackedImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage markedRgbPackedImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         markedRgbPacked, markedRgbPackedImage, false, false));
     const size_t rgbMarkOffset = (5 * 8 + 5) * 3;
     assert(markedRgbPackedImage.samples[rgbMarkOffset] == 0 &&
@@ -1914,46 +1914,46 @@ int main(int argc, char** argv) {
            markedRgbPackedImage.samples[rgbMarkOffset + 2] == 0);
     auto linearCfa = makeLogCfaDng(1023, 0, false);
     assert(tagValue(linearCfa, 50712).count == 0);
-    motioncam::vfs::DngPixelPipelineOptions sourceDngPipeline;
+    rawpreamp::vfs::DngPixelPipelineOptions sourceDngPipeline;
     sourceDngPipeline.hasCfa = true;
     sourceDngPipeline.cfaRepeatSize = 2;
-    motioncam::RenderSettings sourceKeepInput;
-    sourceKeepInput.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
-    sourceKeepInput.logTransform = motioncam::LogTransformMode::KeepInput;
+    rawpreamp::RenderSettings sourceKeepInput;
+    sourceKeepInput.options = rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+    sourceKeepInput.logTransform = rawpreamp::LogTransformMode::KeepInput;
     auto keepExistingLog = makeLogCfaDng(1023, 0);
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         keepExistingLog, sourceKeepInput, sourceDngPipeline);
     assert(tagValue(keepExistingLog, 50712).count == 1024);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         keepExistingLog, makeLogCfaDng(1023, 0)));
     auto keepExistingProxyLog = makeLogCfaDng(1023, 0);
-    sourceKeepInput.options = static_cast<motioncam::FileRenderOptions>(
-        sourceKeepInput.options | motioncam::RENDER_OPT_DRAFT);
+    sourceKeepInput.options = static_cast<rawpreamp::FileRenderOptions>(
+        sourceKeepInput.options | rawpreamp::RENDER_OPT_DRAFT);
     sourceKeepInput.draftScale = 2;
     sourceDngPipeline.outputScale = 2;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         keepExistingProxyLog, sourceKeepInput, sourceDngPipeline);
     assert(tagValue(keepExistingProxyLog, 50712).count == 1024);
-    motioncam::DecodedDNGImage keptProxyImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage keptProxyImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         keepExistingProxyLog, keptProxyImage, false, false));
-    assert(keptProxyImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(keptProxyImage.layout.pixels == rawpreamp::DNGPixelLayout::CFA);
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         linearCfa, 2, constantPhaseMaps));
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         linearCfa, keepInputSettings, keepInputPipeline);
     assert(tagValue(linearCfa, 50712).count > 0);
     badPixelCalibration.badPixels.front().action =
-        motioncam::CalibrationData::BadPixelAction::Interpolate;
+        rawpreamp::CalibrationData::BadPixelAction::Interpolate;
     auto opcodeCfa = makeLogCfaDng(1023, 0);
-    assert(motioncam::DNGDecoder::setWarpFisheye(
+    assert(rawpreamp::DNGDecoder::setWarpFisheye(
         opcodeCfa, {0.01, 0.0, 0.0, 0.0}, 0.5, 0.5));
     const auto [existingOpcode3Offset, existingOpcode3Bytes] =
         tagPayload(opcodeCfa, 51022);
     assert(existingOpcode3Offset && existingOpcode3Bytes > 4);
-    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OpcodeOnly;
-    motioncam::vfs::processDngPixels(opcodeCfa, badPixelSettings, cfaPipeline);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    badPixelSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::OpcodeOnly;
+    rawpreamp::vfs::processDngPixels(opcodeCfa, badPixelSettings, cfaPipeline);
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         opcodeCfa, makeLogCfaDng(1023, 0)));
     const auto [badPixelOpcodeOffset, badPixelOpcodeBytes] =
         tagPayload(opcodeCfa, 51008);
@@ -1966,34 +1966,34 @@ int main(int argc, char** argv) {
     assert(opcodeBe32(badPixelOpcodeOffset) == 1);
     assert(opcodeBe32(badPixelOpcodeOffset + 4) == 5);
     auto optionsJsonCfa = makeLogCfaDng(1023, 0);
-    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OptionsJsonOnly;
-    motioncam::vfs::processDngPixels(optionsJsonCfa, badPixelSettings, cfaPipeline);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    badPixelSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::OptionsJsonOnly;
+    rawpreamp::vfs::processDngPixels(optionsJsonCfa, badPixelSettings, cfaPipeline);
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         optionsJsonCfa, makeLogCfaDng(1023, 0)));
     assert(tagPayload(optionsJsonCfa, 51008).second == 0);
     badPixelCalibration.badPixels.front().action =
-        motioncam::CalibrationData::BadPixelAction::Dampen;
+        rawpreamp::CalibrationData::BadPixelAction::Dampen;
     auto resampledBakeCfa = makeLogCfaDng(1023, 0);
-    badPixelSettings.vignetteCorrection = motioncam::VignetteCorrectionMode::Resample;
-    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OptionsJsonOnly;
-    motioncam::vfs::processDngPixels(resampledBakeCfa, badPixelSettings, cfaPipeline);
-    assert(!motioncam::DNGDecoder::imagePayloadsEqual(
+    badPixelSettings.vignetteCorrection = rawpreamp::VignetteCorrectionMode::Resample;
+    badPixelSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::OptionsJsonOnly;
+    rawpreamp::vfs::processDngPixels(resampledBakeCfa, badPixelSettings, cfaPipeline);
+    assert(!rawpreamp::DNGDecoder::imagePayloadsEqual(
         resampledBakeCfa, makeLogCfaDng(1023, 0)));
     assert(tagPayload(resampledBakeCfa, 51008).second == 0);
     auto resampledDisabledCfa = makeLogCfaDng(1023, 0);
-    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
-    motioncam::vfs::processDngPixels(resampledDisabledCfa, badPixelSettings, cfaPipeline);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    badPixelSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::Disabled;
+    rawpreamp::vfs::processDngPixels(resampledDisabledCfa, badPixelSettings, cfaPipeline);
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         resampledDisabledCfa, makeLogCfaDng(1023, 0)));
     badPixelCalibration.badPixels.front().action =
-        motioncam::CalibrationData::BadPixelAction::Interpolate;
-    badPixelSettings.vignetteCorrection = motioncam::VignetteCorrectionMode::Bake;
-    badPixelSettings.badPixelTreatment = motioncam::BadPixelTreatment::OpcodeOnly;
+        rawpreamp::CalibrationData::BadPixelAction::Interpolate;
+    badPixelSettings.vignetteCorrection = rawpreamp::VignetteCorrectionMode::Bake;
+    badPixelSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::OpcodeOnly;
     const auto [preservedOpcode3Offset, preservedOpcode3Bytes] =
         tagPayload(opcodeCfa, 51022);
     assert(preservedOpcode3Offset && preservedOpcode3Bytes == existingOpcode3Bytes);
     auto appendedOpcodeCfa = opcodeCfa;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         appendedOpcodeCfa, badPixelSettings, cfaPipeline);
     const auto [appendedOpcodeOffset, appendedOpcodeBytes] =
         tagPayload(appendedOpcodeCfa, 51008);
@@ -2010,11 +2010,11 @@ int main(int argc, char** argv) {
         appendedOpcodeBe32(appendedOpcodeOffset + 16);
     assert(appendedOpcodeBe32(secondOpcode) == 5);
     auto finalizedOpcodeCfa = opcodeCfa;
-    motioncam::vfs::DngFinalizeOptions opcodeFinalize;
+    rawpreamp::vfs::DngFinalizeOptions opcodeFinalize;
     opcodeFinalize.frameRate = 24.0f;
     opcodeFinalize.packToWhiteLevel = true;
     opcodeFinalize.compression = true;
-    motioncam::vfs::finalizeDng(
+    rawpreamp::vfs::finalizeDng(
         finalizedOpcodeCfa, badPixelSettings, opcodeFinalize);
     const auto [finalOpcodeOffset, finalOpcodeBytes] =
         tagPayload(finalizedOpcodeCfa, 51008);
@@ -2027,41 +2027,41 @@ int main(int argc, char** argv) {
     };
     assert(finalOpcodeBe32(finalOpcodeOffset) == 1);
     assert(finalOpcodeBe32(finalOpcodeOffset + 4) == 5);
-    motioncam::CalibrationData boundedPattern;
+    rawpreamp::CalibrationData boundedPattern;
     boundedPattern.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel lattice;
+    rawpreamp::CalibrationData::BadPixel lattice;
     lattice.x = 1;
     lattice.y = 1;
     lattice.repeatX = lattice.repeatY = 2;
     lattice.endX = lattice.endY = 3;
     boundedPattern.badPixels.push_back(lattice);
     std::vector<uint16_t> marked(8 * 8, 1000);
-    const auto markedPixels = motioncam::utils::applyCfaBadPixels(
+    const auto markedPixels = rawpreamp::utils::applyCfaBadPixels(
         marked.data(), 8, 8, 8, 8, 2, 1023.0f, {0, 0, 0, 0},
         100.0, 0.01, boundedPattern,
-        motioncam::BadPixelTreatment::MarkPixels);
+        rawpreamp::BadPixelTreatment::MarkPixels);
     assert(markedPixels.size() == 4);
     assert(marked[1 * 8 + 1] == 0 && marked[1 * 8 + 3] == 0 &&
            marked[3 * 8 + 1] == 0 && marked[3 * 8 + 3] == 0);
     assert(marked[5 * 8 + 5] == 1000);
-    motioncam::CalibrationData dampenPattern;
+    rawpreamp::CalibrationData dampenPattern;
     dampenPattern.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel dampenedPixel;
+    rawpreamp::CalibrationData::BadPixel dampenedPixel;
     dampenedPixel.x = dampenedPixel.y = 1;
     dampenedPixel.action =
-        motioncam::CalibrationData::BadPixelAction::Dampen;
+        rawpreamp::CalibrationData::BadPixelAction::Dampen;
     dampenedPixel.amount = 0.25f;
     dampenPattern.badPixels.push_back(dampenedPixel);
     std::vector<uint16_t> preDemosaicMarked(8 * 8, 1000);
-    const auto preDemosaicMarkedPixels = motioncam::utils::applyCfaBadPixels(
+    const auto preDemosaicMarkedPixels = rawpreamp::utils::applyCfaBadPixels(
         preDemosaicMarked.data(), 8, 8, 8, 8, 2, 1023.0f,
         {0, 0, 0, 0}, 100.0, 0.01, dampenPattern,
-        motioncam::BadPixelTreatment::MarkPixels, true);
+        rawpreamp::BadPixelTreatment::MarkPixels, true);
     assert(preDemosaicMarkedPixels.size() == 1);
     assert(preDemosaicMarked[1 * 8 + 1] == 750);
-    motioncam::CalibrationData interpolateOne;
+    rawpreamp::CalibrationData interpolateOne;
     interpolateOne.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel interpolatedPixel;
+    rawpreamp::CalibrationData::BadPixel interpolatedPixel;
     interpolatedPixel.x = interpolatedPixel.y = 1;
     interpolateOne.badPixels.push_back(interpolatedPixel);
     std::vector<uint16_t> quadInterpolation(8 * 8, 200);
@@ -2069,65 +2069,65 @@ int main(int argc, char** argv) {
     quadInterpolation[1] = 110;
     quadInterpolation[8] = 120;
     quadInterpolation[9] = 65535;
-    motioncam::utils::applyCfaBadPixels(
+    rawpreamp::utils::applyCfaBadPixels(
         quadInterpolation.data(), 8, 8, 8, 8, 4, 65535.0f,
         {0, 0, 0, 0}, 100.0, 0.01, interpolateOne,
-        motioncam::BadPixelTreatment::Bake);
+        rawpreamp::BadPixelTreatment::Bake);
     // The three valid samples in this 2x2 Quad Bayer group dominate the
     // surrounding same-colour groups: (median(100,110,120) * 4 + 200) / 5.
     assert(quadInterpolation[9] == 128);
     auto directBadPixelDng = makeLogCfaDng(0, 0, false, 32, true);
     auto decodedBadPixelDng = directBadPixelDng;
-    motioncam::RenderSettings badPixelBakeSettings;
-    badPixelBakeSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
+    rawpreamp::RenderSettings badPixelBakeSettings;
+    badPixelBakeSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::Bake;
     auto badPixelPipeline = cfaPipeline;
     badPixelPipeline.calibration = &interpolateOne;
     // Table-backed preview staging must use the same bad-pixel treatment as
     // an imported DNG, retaining the table and linearizing exactly once.
     auto tableBadPixelDng = makeLogCfaDng(10, 0);
-    motioncam::CalibrationData tableDefect;
+    rawpreamp::CalibrationData tableDefect;
     tableDefect.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel tablePixel;
+    rawpreamp::CalibrationData::BadPixel tablePixel;
     tablePixel.x = tablePixel.y = 1;
-    tablePixel.action = motioncam::CalibrationData::BadPixelAction::Dampen;
+    tablePixel.action = rawpreamp::CalibrationData::BadPixelAction::Dampen;
     tablePixel.amount = 0.5f;
     tableDefect.badPixels.push_back(tablePixel);
     auto tablePipeline = cfaPipeline;
     tablePipeline.calibration = &tableDefect;
     tablePipeline.cfaRepeatSize = 2;
     tablePipeline.outputScale = 1;
-    motioncam::RenderSettings tableSettings;
-    tableSettings.options = static_cast<motioncam::FileRenderOptions>(0);
-    tableSettings.quadBayerOption = motioncam::QuadBayerMode::CorrectQBCFAMetadata;
-    tableSettings.badPixelTreatment = motioncam::BadPixelTreatment::Bake;
-    motioncam::vfs::processDngPixels(tableBadPixelDng, tableSettings, tablePipeline);
-    motioncam::DecodedDNGImage correctedTableImage;
-    assert(motioncam::DNGDecoder::decodeImage(tableBadPixelDng, correctedTableImage));
+    rawpreamp::RenderSettings tableSettings;
+    tableSettings.options = static_cast<rawpreamp::FileRenderOptions>(0);
+    tableSettings.quadBayerOption = rawpreamp::QuadBayerMode::CorrectQBCFAMetadata;
+    tableSettings.badPixelTreatment = rawpreamp::BadPixelTreatment::Bake;
+    rawpreamp::vfs::processDngPixels(tableBadPixelDng, tableSettings, tablePipeline);
+    rawpreamp::DecodedDNGImage correctedTableImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(tableBadPixelDng, correctedTableImage));
     assert(correctedTableImage.samples[33] == 320);
     assert(correctedTableImage.samples[0] == 640);
-    assert(motioncam::DNGDecoder::getLinearizationTableCount(tableBadPixelDng) == 1024);
+    assert(rawpreamp::DNGDecoder::getLinearizationTableCount(tableBadPixelDng) == 1024);
 
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         directBadPixelDng, badPixelBakeSettings, badPixelPipeline);
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE", "1");
+    _putenv_s("RAWPREAMP_BAD_PIXEL_DIRECT_STRIP_DISABLE", "1");
 #else
-    setenv("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE", "1", 1);
+    setenv("RAWPREAMP_BAD_PIXEL_DIRECT_STRIP_DISABLE", "1", 1);
 #endif
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         decodedBadPixelDng, badPixelBakeSettings, badPixelPipeline);
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE", "");
+    _putenv_s("RAWPREAMP_BAD_PIXEL_DIRECT_STRIP_DISABLE", "");
 #else
-    unsetenv("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE");
+    unsetenv("RAWPREAMP_BAD_PIXEL_DIRECT_STRIP_DISABLE");
 #endif
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         directBadPixelDng, decodedBadPixelDng));
     // Exercise the dense 2x2 median cache with an offset active area and
     // compare every output sample against the uncached interpolation path.
-    motioncam::CalibrationData densePattern;
+    rawpreamp::CalibrationData densePattern;
     densePattern.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel denseDefect;
+    rawpreamp::CalibrationData::BadPixel denseDefect;
     denseDefect.x = denseDefect.y = 1;
     denseDefect.repeatX = denseDefect.repeatY = 2;
     densePattern.badPixels.push_back(denseDefect);
@@ -2136,23 +2136,23 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < denseCached.size(); ++i)
         denseCached[i] = static_cast<uint16_t>((i * 31337u + i / denseSize * 97u) & 65535u);
     auto denseUncached = denseCached;
-    motioncam::utils::applyCfaBadPixels(
+    rawpreamp::utils::applyCfaBadPixels(
         denseCached.data(), denseSize, denseSize, denseSize + 2, denseSize + 2,
         4, 65535.0f, {0, 0, 0, 0}, 100.0, 0.01, densePattern,
-        motioncam::BadPixelTreatment::Bake);
+        rawpreamp::BadPixelTreatment::Bake);
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE", "1");
+    _putenv_s("RAWPREAMP_BAD_PIXEL_CACHE_DISABLE", "1");
 #else
-    setenv("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE", "1", 1);
+    setenv("RAWPREAMP_BAD_PIXEL_CACHE_DISABLE", "1", 1);
 #endif
-    motioncam::utils::applyCfaBadPixels(
+    rawpreamp::utils::applyCfaBadPixels(
         denseUncached.data(), denseSize, denseSize, denseSize + 2, denseSize + 2,
         4, 65535.0f, {0, 0, 0, 0}, 100.0, 0.01, densePattern,
-        motioncam::BadPixelTreatment::Bake);
+        rawpreamp::BadPixelTreatment::Bake);
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE", "");
+    _putenv_s("RAWPREAMP_BAD_PIXEL_CACHE_DISABLE", "");
 #else
-    unsetenv("MOTIONCAM_BAD_PIXEL_CACHE_DISABLE");
+    unsetenv("RAWPREAMP_BAD_PIXEL_CACHE_DISABLE");
 #endif
     assert(denseCached == denseUncached);
     std::vector<uint16_t> bayerInterpolation(8 * 8, 200);
@@ -2160,74 +2160,74 @@ int main(int argc, char** argv) {
     bayerInterpolation[1 * 8 + 3] = 400;
     bayerInterpolation[3 * 8 + 1] = 400;
     bayerInterpolation[3 * 8 + 3] = 400;
-    motioncam::utils::applyCfaBadPixels(
+    rawpreamp::utils::applyCfaBadPixels(
         bayerInterpolation.data(), 8, 8, 8, 8, 2, 65535.0f,
         {0, 0, 0, 0}, 100.0, 0.01, interpolateOne,
-        motioncam::BadPixelTreatment::Bake);
+        rawpreamp::BadPixelTreatment::Bake);
     assert(bayerInterpolation[9] == 400);
-    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+    assert(rawpreamp::vfs::projectedBadPixelOpcodeSize(
         boundedPattern, 8, 8) == 32 + 4 * 8);
-    motioncam::CalibrationData fullSensorPattern;
+    rawpreamp::CalibrationData fullSensorPattern;
     fullSensorPattern.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel fullSensorPixel;
+    rawpreamp::CalibrationData::BadPixel fullSensorPixel;
     fullSensorPixel.x = 5000;
     fullSensorPixel.y = 100;
     fullSensorPattern.badPixels.push_back(fullSensorPixel);
-    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+    assert(rawpreamp::vfs::projectedBadPixelOpcodeSize(
         fullSensorPattern, 4000, 3000) == 32);
-    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+    assert(rawpreamp::vfs::projectedBadPixelOpcodeSize(
         fullSensorPattern, 8000, 6000) == 32 + 8);
-    motioncam::CalibrationData overflowingPattern;
+    rawpreamp::CalibrationData overflowingPattern;
     overflowingPattern.hasBadPixels = true;
-    motioncam::CalibrationData::BadPixel overflowingLattice;
+    rawpreamp::CalibrationData::BadPixel overflowingLattice;
     overflowingLattice.repeatX = overflowingLattice.repeatY = 1;
     overflowingLattice.endX = overflowingLattice.endY =
         std::numeric_limits<int>::max();
     overflowingPattern.badPixels.push_back(overflowingLattice);
-    assert(motioncam::vfs::projectedBadPixelOpcodeSize(
+    assert(rawpreamp::vfs::projectedBadPixelOpcodeSize(
         overflowingPattern, 1, 1) == std::numeric_limits<size_t>::max());
-    assert(motioncam::vfs::projectedDngSize(
+    assert(rawpreamp::vfs::projectedDngSize(
         1, 1, 1, 16, std::numeric_limits<size_t>::max(), 1) ==
         std::numeric_limits<size_t>::max());
-    assert(motioncam::vfs::projectedDngSize(100, 10, 1, 10, 0, 0) == 1250);
-    assert(motioncam::vfs::projectedDngSize(1, 2, 3, 10, 0, 0) == 8);
+    assert(rawpreamp::vfs::projectedDngSize(100, 10, 1, 10, 0, 0) == 1250);
+    assert(rawpreamp::vfs::projectedDngSize(1, 2, 3, 10, 0, 0) == 8);
     std::vector<uint16_t> markedRgb(8 * 8 * 3, 1000);
-    motioncam::utils::markBadPixelsRgb(
+    rawpreamp::utils::markBadPixelsRgb(
         markedRgb.data(), 8, 8, 8, 8, 0, 0, markedPixels);
     const size_t markedRgbOffset = (1 * 8 + 1) * 3;
     assert(markedRgb[markedRgbOffset] == 0 &&
            markedRgb[markedRgbOffset + 1] == 0 &&
            markedRgb[markedRgbOffset + 2] == 0);
     auto streamingMarked = makeLogCfaDng(1023, 0);
-    motioncam::RenderSettings streamingMarkSettings;
+    rawpreamp::RenderSettings streamingMarkSettings;
     streamingMarkSettings.badPixelTreatment =
-        motioncam::BadPixelTreatment::MarkPixels;
-    streamingMarkSettings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+        rawpreamp::BadPixelTreatment::MarkPixels;
+    streamingMarkSettings.quadBayerOption = rawpreamp::QuadBayerMode::Demosaic;
     streamingMarkSettings.streamingPreview = true;
     auto quadPipeline = cfaPipeline;
     quadPipeline.cfaRepeatSize = 4;
     quadPipeline.calibration = &boundedPattern;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         streamingMarked, streamingMarkSettings, quadPipeline);
-    motioncam::DecodedDNGImage streamingMarkedImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage streamingMarkedImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         streamingMarked, streamingMarkedImage, false, false));
-    assert(streamingMarkedImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(streamingMarkedImage.layout.pixels == rawpreamp::DNGPixelLayout::CFA);
     assert(streamingMarkedImage.samples[1 * streamingMarkedImage.layout.width + 1] == 0);
 
     auto remosaicedMarked = makeLogCfaDng(1023, 0);
-    motioncam::RenderSettings remosaicMarkSettings;
+    rawpreamp::RenderSettings remosaicMarkSettings;
     remosaicMarkSettings.badPixelTreatment =
-        motioncam::BadPixelTreatment::MarkPixels;
-    remosaicMarkSettings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
-    remosaicMarkSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
-    motioncam::vfs::processDngPixels(
+        rawpreamp::BadPixelTreatment::MarkPixels;
+    remosaicMarkSettings.quadBayerOption = rawpreamp::QuadBayerMode::Demosaic;
+    remosaicMarkSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER);
+    rawpreamp::vfs::processDngPixels(
         remosaicedMarked, remosaicMarkSettings, quadPipeline);
-    motioncam::DecodedDNGImage remosaicedMarkedImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage remosaicedMarkedImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         remosaicedMarked, remosaicedMarkedImage, false, false));
-    assert(remosaicedMarkedImage.layout.pixels == motioncam::DNGPixelLayout::CFA);
+    assert(remosaicedMarkedImage.layout.pixels == rawpreamp::DNGPixelLayout::CFA);
     assert(remosaicedMarkedImage.samples[
         1 * remosaicedMarkedImage.layout.width + 1] == 0);
     // CPU higher-CFA remosaic now runs before the GPU gain stage. Its phase
@@ -2236,59 +2236,59 @@ int main(int argc, char** argv) {
     auto higherCfaMaps = constantPhaseMaps;
     for (size_t index = 0; index < higherCfaMaps.size(); ++index)
         higherCfaMaps[index].data = {1.0f + static_cast<float>(index) * 0.5f};
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         higherCfaInput, 2, higherCfaMaps));
     auto higherCfaReference = higherCfaInput;
-    assert(motioncam::DNGDecoder::processHigherCFA(
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
         higherCfaReference, 4, {0, 1, 1, 2},
-        motioncam::QuadBayerMode::Demosaic, true, 1, false,
+        rawpreamp::QuadBayerMode::Demosaic, true, 1, false,
         false, true));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         higherCfaReference, false, false, false, false, 2));
-    motioncam::RenderSettings phaseMapRemosaicSettings;
-    phaseMapRemosaicSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-        motioncam::RENDER_OPT_REMOSAIC_TO_BAYER);
-    phaseMapRemosaicSettings.quadBayerOption = motioncam::QuadBayerMode::Demosaic;
+    rawpreamp::RenderSettings phaseMapRemosaicSettings;
+    phaseMapRemosaicSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER);
+    phaseMapRemosaicSettings.quadBayerOption = rawpreamp::QuadBayerMode::Demosaic;
     auto higherCfaPipeline = cfaPipeline;
     higherCfaPipeline.cfaRepeatSize = 4;
     higherCfaPipeline.calibration = nullptr;
     higherCfaPipeline.preferVulkan = true;
     auto higherCfaActual = higherCfaInput;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         higherCfaActual, phaseMapRemosaicSettings, higherCfaPipeline);
-    motioncam::DecodedDNGImage higherCfaExpectedImage, higherCfaActualImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage higherCfaExpectedImage, higherCfaActualImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         higherCfaReference, higherCfaExpectedImage, false, false));
-    assert(motioncam::DNGDecoder::decodeImage(
+    assert(rawpreamp::DNGDecoder::decodeImage(
         higherCfaActual, higherCfaActualImage, false, false));
     assert(higherCfaActualImage.samples == higherCfaExpectedImage.samples);
     int higherCfaOutputRepeat = 0;
     std::array<uint8_t, 4> higherCfaOutputPhase{};
-    assert(motioncam::DNGDecoder::getCFAMetadata(
+    assert(rawpreamp::DNGDecoder::getCFAMetadata(
         higherCfaActual, higherCfaOutputRepeat, higherCfaOutputPhase));
     assert(higherCfaOutputRepeat == 2);
     auto higherCfaProxyReference = higherCfaInput;
-    assert(motioncam::DNGDecoder::processHigherCFA(
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
         higherCfaProxyReference, 4, {0, 1, 1, 2},
-        motioncam::QuadBayerMode::Demosaic, true, 2, false,
+        rawpreamp::QuadBayerMode::Demosaic, true, 2, false,
         false, true));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         higherCfaProxyReference, false, false, false, false, 2));
     auto higherCfaProxyActual = higherCfaInput;
     auto higherCfaProxySettings = phaseMapRemosaicSettings;
-    higherCfaProxySettings.options = static_cast<motioncam::FileRenderOptions>(
-        higherCfaProxySettings.options | motioncam::RENDER_OPT_DRAFT);
+    higherCfaProxySettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        higherCfaProxySettings.options | rawpreamp::RENDER_OPT_DRAFT);
     auto higherCfaProxyPipeline = higherCfaPipeline;
     higherCfaProxyPipeline.outputScale = 2;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         higherCfaProxyActual, higherCfaProxySettings,
         higherCfaProxyPipeline);
-    motioncam::DecodedDNGImage higherCfaProxyExpectedImage,
+    rawpreamp::DecodedDNGImage higherCfaProxyExpectedImage,
                                higherCfaProxyActualImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    assert(rawpreamp::DNGDecoder::decodeImage(
         higherCfaProxyReference, higherCfaProxyExpectedImage, false, false));
-    assert(motioncam::DNGDecoder::decodeImage(
+    assert(rawpreamp::DNGDecoder::decodeImage(
         higherCfaProxyActual, higherCfaProxyActualImage, false, false));
     assert(higherCfaProxyActualImage.samples ==
            higherCfaProxyExpectedImage.samples);
@@ -2296,7 +2296,7 @@ int main(int argc, char** argv) {
     // metadata. Higher CFA phase maps are handled above on their source grid.
     auto orderedRgb = makeDng(
         1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
-    motioncam::GainMap lumaMap{};
+    rawpreamp::GainMap lumaMap{};
     lumaMap.top = lumaMap.left = 0;
     lumaMap.bottom = lumaMap.right = 8;
     lumaMap.coordinateWidth = lumaMap.coordinateHeight = 8;
@@ -2307,107 +2307,107 @@ int main(int argc, char** argv) {
     lumaMap.channels = 1;
     lumaMap.spacingV = lumaMap.spacingH = 1.0;
     lumaMap.data.assign(4, 1.25f);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         orderedRgb, 3, {lumaMap}));
     auto neutralGainDng = orderedRgb;
     auto neutralMap = lumaMap;
     neutralMap.data.assign(neutralMap.data.size(), 1.0f);
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         neutralGainDng, 2, {neutralMap}));
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         neutralGainDng, 3, {neutralMap}));
-    motioncam::RenderSettings neutralPreviewSettings;
-    neutralPreviewSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-        motioncam::RENDER_OPT_LOG_TRANSFORM);
-    neutralPreviewSettings.logTransform = motioncam::LogTransformMode::KeepInput;
-    motioncam::PreviewFrame neutralPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    rawpreamp::RenderSettings neutralPreviewSettings;
+    neutralPreviewSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        rawpreamp::RENDER_OPT_LOG_TRANSFORM);
+    neutralPreviewSettings.logTransform = rawpreamp::LogTransformMode::KeepInput;
+    rawpreamp::PreviewFrame neutralPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         neutralGainDng, neutralPreviewSettings, neutralPreview, true));
     assert(!neutralPreview.gainMapApplied);
     auto noMapPreviewDng = neutralGainDng;
-    assert(motioncam::DNGDecoder::replaceGainMaps(noMapPreviewDng, 2, {}));
-    assert(motioncam::DNGDecoder::replaceGainMaps(noMapPreviewDng, 3, {}));
-    motioncam::PreviewFrame noMapPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(noMapPreviewDng, 2, {}));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(noMapPreviewDng, 3, {}));
+    rawpreamp::PreviewFrame noMapPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         noMapPreviewDng, neutralPreviewSettings, noMapPreview, true));
     assert(neutralPreview.rgb == noMapPreview.rgb);
-    motioncam::RenderSettings neutralSettings;
-    motioncam::vfs::DngPixelPipelineOptions neutralPipeline;
+    rawpreamp::RenderSettings neutralSettings;
+    rawpreamp::vfs::DngPixelPipelineOptions neutralPipeline;
     neutralPipeline.hasCfa = false;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         neutralGainDng, neutralSettings, neutralPipeline);
-    std::vector<motioncam::GainMap> neutralMaps;
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> neutralMaps;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         neutralGainDng, 2, neutralMaps));
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         neutralGainDng, 3, neutralMaps));
-    std::vector<motioncam::GainMap> retainedMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> retainedMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         orderedRgb, 3, retainedMaps));
     assert(retainedMaps.size() == 1 && retainedMaps.front().data[0] == 1.25f);
-    motioncam::RenderSettings orderedSettings;
-    orderedSettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_CROPPING |
-        motioncam::RENDER_OPT_DRAFT |
-        motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
+    rawpreamp::RenderSettings orderedSettings;
+    orderedSettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_CROPPING |
+        rawpreamp::RENDER_OPT_DRAFT |
+        rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER |
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION);
     orderedSettings.cropTarget = "4x4";
     orderedSettings.draftScale = 2;
-    motioncam::vfs::DngPixelPipelineOptions orderedPipeline;
+    rawpreamp::vfs::DngPixelPipelineOptions orderedPipeline;
     orderedPipeline.hasCfa = false;
     orderedPipeline.outputScale = 2;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         orderedRgb, orderedSettings, orderedPipeline);
-    motioncam::DNGImageLayout orderedLayout;
-    assert(motioncam::DNGDecoder::getImageLayout(
+    rawpreamp::DNGImageLayout orderedLayout;
+    assert(rawpreamp::DNGDecoder::getImageLayout(
         orderedRgb, orderedLayout));
     assert(orderedLayout.width == 2 && orderedLayout.height == 2);
-    assert(orderedLayout.pixels == motioncam::DNGPixelLayout::CFA);
-    std::vector<motioncam::GainMap> consumedOrderedMap;
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    assert(orderedLayout.pixels == rawpreamp::DNGPixelLayout::CFA);
+    std::vector<rawpreamp::GainMap> consumedOrderedMap;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         orderedRgb, 3, consumedOrderedMap));
-    motioncam::DNGFrameMetadata logMetadata;
+    rawpreamp::DNGFrameMetadata logMetadata;
     const auto logDng = makeLogCfaDng(1023, 0);
-    assert(motioncam::DNGDecoder::getColorMetadata(logDng, logMetadata));
+    assert(rawpreamp::DNGDecoder::getColorMetadata(logDng, logMetadata));
     // LinearizationTable has 1024 inputs, so it takes precedence over the
     // 16-bit container declared by BitsPerSample.
     assert(logMetadata.inputBitDepth == 10);
     auto levelTaggedLog = logDng;
-    motioncam::RenderSettings levelSettings;
+    rawpreamp::RenderSettings levelSettings;
     levelSettings.levels = "900/32";
-    motioncam::vfs::DngPixelPipelineOptions levelPipeline;
+    rawpreamp::vfs::DngPixelPipelineOptions levelPipeline;
     levelPipeline.hasCfa = true;
-    motioncam::vfs::processDngPixels(
+    rawpreamp::vfs::processDngPixels(
         levelTaggedLog, levelSettings, levelPipeline);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         levelTaggedLog, logDng));
     assert(tagValue(levelTaggedLog, 50712).count == 1024);
     assert(tagValue(levelTaggedLog, 50717).value == 900);
-    // DirectLog enters the shared pipeline as linear 16-bit RGB. KeepInput
+    // Native Video enters the shared pipeline as linear 16-bit RGB. KeepInput
     // therefore targets 12-bit log unless a <=10-bit white-level override
     // makes the effective input and output depth identical.
-    auto directLogDefault = makeDng(
+    auto nativeVideoDefault = makeDng(
         1000, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0);
-    const auto directLogLinear = directLogDefault;
-    motioncam::RenderSettings directLogSettings;
-    directLogSettings.options = motioncam::RENDER_OPT_LOG_TRANSFORM;
-    directLogSettings.logTransform = motioncam::LogTransformMode::KeepInput;
-    motioncam::vfs::DngPixelPipelineOptions directLogPipeline;
-    directLogPipeline.hasCfa = false;
-    directLogPipeline.inputQuantizationWhite = 4095;
-    directLogPipeline.linearInputBitDepth = 16;
-    motioncam::vfs::processDngPixels(
-        directLogDefault, directLogSettings, directLogPipeline);
-    assert(!motioncam::DNGDecoder::imagePayloadsEqual(
-        directLogDefault, directLogLinear));
-    motioncam::DNGFrameMetadata directLogMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(
-        directLogDefault, directLogMetadata));
-    assert(directLogMetadata.inputBitDepth == 12);
+    const auto nativeVideoLinear = nativeVideoDefault;
+    rawpreamp::RenderSettings nativeVideoSettings;
+    nativeVideoSettings.options = rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+    nativeVideoSettings.logTransform = rawpreamp::LogTransformMode::KeepInput;
+    rawpreamp::vfs::DngPixelPipelineOptions nativeVideoPipeline;
+    nativeVideoPipeline.hasCfa = false;
+    nativeVideoPipeline.inputQuantizationWhite = 4095;
+    nativeVideoPipeline.linearInputBitDepth = 16;
+    rawpreamp::vfs::processDngPixels(
+        nativeVideoDefault, nativeVideoSettings, nativeVideoPipeline);
+    assert(!rawpreamp::DNGDecoder::imagePayloadsEqual(
+        nativeVideoDefault, nativeVideoLinear));
+    rawpreamp::DNGFrameMetadata nativeVideoMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
+        nativeVideoDefault, nativeVideoMetadata));
+    assert(nativeVideoMetadata.inputBitDepth == 12);
 
-    auto matrixOverrideDng = directLogLinear;
-    motioncam::DNGFrameMetadata matrixOverrides;
+    auto matrixOverrideDng = nativeVideoLinear;
+    rawpreamp::DNGFrameMetadata matrixOverrides;
     matrixOverrides.colorMatrix1 = {1.1f, -0.1f, 0.0f,
                                     0.0f, 1.0f, 0.0f,
                                     0.0f, 0.0f, 0.9f};
@@ -2418,10 +2418,10 @@ int main(int argc, char** argv) {
     matrixOverrides.hasForwardMatrix2 = true;
     matrixOverrides.calibrationIlluminant1 = 23;
     matrixOverrides.calibrationIlluminant2 = 17;
-    assert(motioncam::DNGDecoder::updateColorMatrices(
+    assert(rawpreamp::DNGDecoder::updateColorMatrices(
         matrixOverrideDng, matrixOverrides));
-    motioncam::DNGFrameMetadata insertedMatrices;
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    rawpreamp::DNGFrameMetadata insertedMatrices;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         matrixOverrideDng, insertedMatrices));
     assert(insertedMatrices.hasColorMatrix1 && insertedMatrices.hasForwardMatrix2);
     assert(std::abs(insertedMatrices.colorMatrix1[0] - 1.1f) < 0.0001f);
@@ -2431,15 +2431,15 @@ int main(int argc, char** argv) {
     assert(setTagType(matrixOverrideDng, 50721, 5));
     matrixOverrides.colorMatrix1[0] = 1.2f;
     matrixOverrides.hasForwardMatrix2 = false;
-    assert(motioncam::DNGDecoder::updateColorMatrices(
+    assert(rawpreamp::DNGDecoder::updateColorMatrices(
         matrixOverrideDng, matrixOverrides));
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         matrixOverrideDng, insertedMatrices));
     assert(insertedMatrices.hasColorMatrix1);
     assert(std::abs(insertedMatrices.colorMatrix1[0] - 1.2f) < 0.0001f);
 
-    motioncam::vfs::ManualVignetteSidecars manualMetadataSidecar;
-    motioncam::vfs::ManualVignetteSidecars::Candidate manualMetadataCandidate;
+    rawpreamp::vfs::ManualVignetteSidecars manualMetadataSidecar;
+    rawpreamp::vfs::ManualVignetteSidecars::Candidate manualMetadataCandidate;
     manualMetadataCandidate.image.metadata.colorMatrix1 = matrixOverrides.colorMatrix1;
     manualMetadataCandidate.image.metadata.hasColorMatrix1 = true;
     manualMetadataCandidate.image.metadata.forwardMatrix2 = matrixOverrides.forwardMatrix2;
@@ -2449,14 +2449,14 @@ int main(int argc, char** argv) {
     manualMetadataCandidate.image.metadata.calibrationIlluminant1 = 23;
     manualMetadataCandidate.image.metadata.calibrationIlluminant2 = 17;
     manualMetadataSidecar.candidates.push_back(std::move(manualMetadataCandidate));
-    assert(!motioncam::vfs::manualSidecarsNeedPixelProcessing(
+    assert(!rawpreamp::vfs::manualSidecarsNeedPixelProcessing(
         manualMetadataSidecar));
     auto spatialSidecar = manualMetadataSidecar;
     spatialSidecar.candidates.front().image.opcodeList2.push_back(
-        motioncam::GainMap{});
-    assert(motioncam::vfs::manualSidecarsNeedPixelProcessing(spatialSidecar));
-    motioncam::DNGFrameMetadata previewMetadata;
-    motioncam::vfs::mergeManualDngMetadata(
+        rawpreamp::GainMap{});
+    assert(rawpreamp::vfs::manualSidecarsNeedPixelProcessing(spatialSidecar));
+    rawpreamp::DNGFrameMetadata previewMetadata;
+    rawpreamp::vfs::mergeManualDngMetadata(
         previewMetadata, manualMetadataSidecar, nullptr);
     assert(previewMetadata.hasColorMatrix1 && previewMetadata.hasForwardMatrix2);
     assert(previewMetadata.hasAsShotNeutral);
@@ -2465,62 +2465,62 @@ int main(int argc, char** argv) {
     assert(previewMetadata.calibrationIlluminant2 == 17);
     previewMetadata.colorMatrix1[0] = 3.0f;
     previewMetadata.hasColorMatrix1 = true;
-    motioncam::vfs::mergeManualDngMetadata(
+    rawpreamp::vfs::mergeManualDngMetadata(
         previewMetadata, manualMetadataSidecar, nullptr);
     assert(std::abs(previewMetadata.colorMatrix1[0] - 3.0f) < 0.0001f);
-    motioncam::CalibrationData previewCalibration;
+    rawpreamp::CalibrationData previewCalibration;
     previewCalibration.hasColorMatrix1 = true;
     previewCalibration.colorMatrix1 = matrixOverrides.colorMatrix1;
     previewCalibration.colorMatrix1[0] = 4.0f;
     previewCalibration.hasAsShotNeutral = true;
     previewCalibration.asShotNeutral = {0.8f, 1.0f, 0.9f};
-    motioncam::vfs::mergeManualDngMetadata(
+    rawpreamp::vfs::mergeManualDngMetadata(
         previewMetadata, manualMetadataSidecar, &previewCalibration);
     assert(std::abs(previewMetadata.colorMatrix1[0] - 4.0f) < 0.0001f);
     assert(previewMetadata.asShotNeutral == previewCalibration.asShotNeutral);
-    motioncam::DNGFrameMetadata calibrationOnlyMetadata;
-    motioncam::vfs::mergeManualDngMetadata(
+    rawpreamp::DNGFrameMetadata calibrationOnlyMetadata;
+    rawpreamp::vfs::mergeManualDngMetadata(
         calibrationOnlyMetadata, {}, &previewCalibration);
     assert(calibrationOnlyMetadata.hasColorMatrix1 &&
            calibrationOnlyMetadata.hasAsShotNeutral);
-    motioncam::DNGFrameMetadata preprocessedMcrawMetadata;
+    rawpreamp::DNGFrameMetadata preprocessedMcrawMetadata;
     preprocessedMcrawMetadata.asShotNeutral = {0.4f, 1.0f, 0.6f};
     preprocessedMcrawMetadata.hasAsShotNeutral = true;
-    motioncam::vfs::mergeManualDngMetadata(
+    rawpreamp::vfs::mergeManualDngMetadata(
         preprocessedMcrawMetadata, {}, &previewCalibration, false);
     assert(preprocessedMcrawMetadata.asShotNeutral[0] == 0.4f);
 
-    auto directLogTwelveBit = directLogLinear;
-    directLogSettings.levels = "4095/Dynamic";
-    directLogPipeline.linearInputBitDepth = 12;
-    motioncam::vfs::processDngPixels(
-        directLogTwelveBit, directLogSettings, directLogPipeline);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
-        directLogTwelveBit, directLogLinear));
-    auto directLogReducedOverride = directLogLinear;
-    directLogSettings.levels = "1023/Dynamic";
-    directLogSettings.logTransform = motioncam::LogTransformMode::ReduceBy2Bit;
-    directLogPipeline.inputQuantizationWhite = 1023;
-    directLogPipeline.linearInputBitDepth = 10;
-    motioncam::vfs::processDngPixels(
-        directLogReducedOverride, directLogSettings, directLogPipeline);
-    assert(motioncam::DNGDecoder::getColorMetadata(
-        directLogReducedOverride, directLogMetadata));
-    assert(directLogMetadata.inputBitDepth == 8);
+    auto nativeVideoTwelveBit = nativeVideoLinear;
+    nativeVideoSettings.levels = "4095/Dynamic";
+    nativeVideoPipeline.linearInputBitDepth = 12;
+    rawpreamp::vfs::processDngPixels(
+        nativeVideoTwelveBit, nativeVideoSettings, nativeVideoPipeline);
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
+        nativeVideoTwelveBit, nativeVideoLinear));
+    auto nativeVideoReducedOverride = nativeVideoLinear;
+    nativeVideoSettings.levels = "1023/Dynamic";
+    nativeVideoSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy2Bit;
+    nativeVideoPipeline.inputQuantizationWhite = 1023;
+    nativeVideoPipeline.linearInputBitDepth = 10;
+    rawpreamp::vfs::processDngPixels(
+        nativeVideoReducedOverride, nativeVideoSettings, nativeVideoPipeline);
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
+        nativeVideoReducedOverride, nativeVideoMetadata));
+    assert(nativeVideoMetadata.inputBitDepth == 8);
     auto compressedA = uncompressedA, compressedB = uncompressedB;
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedA));
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(compressedB));
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(compressedA, compressedB));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(compressedA));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(compressedB));
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(compressedA, compressedB));
 
-    const auto root = fs::temp_directory_path() / "motioncam-rife-finalize-test";
+    const auto root = fs::temp_directory_path() / "rawpreamp-rife-finalize-test";
     fs::remove_all(root);
     // mcpro24fps CSV timestamps override filename slot timing exactly, including
     // non-grid intervals and large absolute sensor timestamps.
     fs::create_directories(root / "mc24-timing");
-    motioncam::Timestamp embedded = 40000000;
+    rawpreamp::Timestamp embedded = 40000000;
     for (const auto* name : {"clip-00000000.DNG", "clip-00000002.DNG", "clip-00000013.DNG"}) {
         auto bytes = uncompressedA;
-        assert(motioncam::DNGDecoder::setTimingMetadata(bytes, 60.0, embedded));
+        assert(rawpreamp::DNGDecoder::setTimingMetadata(bytes, 60.0, embedded));
         embedded -= 20000000;
         std::ofstream out(root / "mc24-timing" / name, std::ios::binary);
         out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
@@ -2534,18 +2534,18 @@ int main(int argc, char** argv) {
     };
     const std::vector<std::string> timingNames{
         "clip-00000000.DNG", "clip-00000002.DNG", "clip-00000013.DNG"};
-    const auto applyCsvTiming = [&](motioncam::DNGDecoder& decoder) {
+    const auto applyCsvTiming = [&](rawpreamp::DNGDecoder& decoder) {
         // Embedded timing deliberately reverses filename order. Sidecar timing
         // must restore the correct association rather than attach PTS by that order.
         assert(fs::path(decoder.getFrames().front().filePath).filename() == "clip-00000013.DNG");
         std::vector<std::string> names;
         for (const auto& frame : decoder.getFrames()) names.push_back(fs::path(frame.filePath).filename().string());
-        const auto metadata = motioncam::vfs::readDngTimingSidecar((root / "mc24-timing").string(), names);
-        decoder.overrideTimestamps(motioncam::vfs::sidecarTimestamps(metadata, names.size()));
+        const auto metadata = rawpreamp::vfs::readDngTimingSidecar((root / "mc24-timing").string(), names);
+        decoder.overrideTimestamps(rawpreamp::vfs::sidecarTimestamps(metadata, names.size()));
     };
     writeTiming(1708783991190968);
     {
-        motioncam::DNGDecoder decoder((root / "mc24-timing").string());
+        rawpreamp::DNGDecoder decoder((root / "mc24-timing").string());
         applyCsvTiming(decoder);
         assert(decoder.getSequenceInfo().hasFrameNumberSequence);
         const auto& frames = decoder.getFrames();
@@ -2555,7 +2555,7 @@ int main(int argc, char** argv) {
     }
     writeTiming(1708783991190969);
     {
-        motioncam::DNGDecoder decoder((root / "mc24-timing").string());
+        rawpreamp::DNGDecoder decoder((root / "mc24-timing").string());
         applyCsvTiming(decoder);
         assert(decoder.getFrames()[2].timestamp == 219022449);
     }
@@ -2568,11 +2568,11 @@ int main(int argc, char** argv) {
     std::ofstream(root / "mixed-csv" / "clip.frames.csv")
         << "name,sensor_timestamp_ns,slot\nclip-00000000.DNG,1708783772168520,0\n";
     {
-        motioncam::DNGDecoder decoder((root / "mixed-csv").string());
-        const auto sidecar = motioncam::vfs::readDngTimingSidecar((root / "mixed-csv").string(),
+        rawpreamp::DNGDecoder decoder((root / "mixed-csv").string());
+        const auto sidecar = rawpreamp::vfs::readDngTimingSidecar((root / "mixed-csv").string(),
             {"clip-00000000.DNG", "other-00000002.DNG"});
-        assert(motioncam::vfs::sidecarTimestamps(sidecar, 2).empty());
-        assert(motioncam::vfs::sidecarTimestamps(nlohmann::json{}, 3).empty());
+        assert(rawpreamp::vfs::sidecarTimestamps(sidecar, 2).empty());
+        assert(rawpreamp::vfs::sidecarTimestamps(nlohmann::json{}, 3).empty());
         for (const auto& invalid : {
                 nlohmann::json::array({0, 17, 17}),
                 nlohmann::json::array({0, 17, 16}),
@@ -2580,7 +2580,7 @@ int main(int argc, char** argv) {
                 nlohmann::json::array({0, 17, UINT64_MAX})}) {
             auto bad = sidecar;
             for (size_t i = 0; i < 3; ++i) bad["dynamic"]["frames"][i]["timestampNs"] = invalid[i];
-            assert(motioncam::vfs::sidecarTimestamps(bad, 3).empty());
+            assert(rawpreamp::vfs::sidecarTimestamps(bad, 3).empty());
         }
         assert(!decoder.getSequenceInfo().hasFrameNumberSequence);
         assert(decoder.getFrames().size() == 2);
@@ -2591,12 +2591,12 @@ int main(int argc, char** argv) {
         const nlohmann::json sidecar{{"dynamic", {{"frames", {
             {{"timestampNs", 0}}, {{"timestampNs", 17000001}}, {{"timestampNs", 41000003}}
         }}}}};
-        motioncam::DNGDecoder decoder((root / "mc24-timing").string());
-        decoder.overrideTimestamps(motioncam::vfs::sidecarTimestamps(sidecar, 3));
+        rawpreamp::DNGDecoder decoder((root / "mc24-timing").string());
+        decoder.overrideTimestamps(rawpreamp::vfs::sidecarTimestamps(sidecar, 3));
         assert(decoder.getFrames()[1].timestamp == 17000001);
         assert(decoder.getFrames()[2].timestamp == 41000003);
-        assert(motioncam::vfs::sidecarTimestamps(sidecar, 2).empty());
-        assert(motioncam::vfs::sidecarTimestamps(nlohmann::json{}, 3).empty());
+        assert(rawpreamp::vfs::sidecarTimestamps(sidecar, 2).empty());
+        assert(rawpreamp::vfs::sidecarTimestamps(nlohmann::json{}, 3).empty());
         for (const auto& invalid : {
                 nlohmann::json::array({0, 17, 17}),
                 nlohmann::json::array({0, 17, 16}),
@@ -2604,7 +2604,7 @@ int main(int argc, char** argv) {
                 nlohmann::json::array({0, 17, UINT64_MAX})}) {
             auto bad = sidecar;
             for (size_t i = 0; i < 3; ++i) bad["dynamic"]["frames"][i]["timestampNs"] = invalid[i];
-            assert(motioncam::vfs::sidecarTimestamps(bad, 3).empty());
+            assert(rawpreamp::vfs::sidecarTimestamps(bad, 3).empty());
         }
     }
     for (const auto& text : {"", "name,sensor_timestamp_ns,slot\n",
@@ -2612,7 +2612,7 @@ int main(int argc, char** argv) {
             "name,sensor_timestamp_ns,slot\nclip.DNG,123,0\nclip.DNG,456,1\n"}) {
         std::ofstream(csv) << text;
         bool rejected = false;
-        try { motioncam::vfs::readDngTimingSidecar((root / "mc24-timing").string(), timingNames); }
+        try { rawpreamp::vfs::readDngTimingSidecar((root / "mc24-timing").string(), timingNames); }
         catch (const std::runtime_error&) { rejected = true; }
         assert(rejected);
     }
@@ -2638,14 +2638,14 @@ int main(int argc, char** argv) {
         std::ofstream output(tailPath, std::ios::binary);
         output.write(reinterpret_cast<const char*>(metadataTail.data()), metadataTail.size());
     }
-    motioncam::DNGFrameMetadata expectedTailMetadata, actualTailMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(metadataTail, expectedTailMetadata));
-    motioncam::DNGDecoder tailDecoder(tailPath.string());
+    rawpreamp::DNGFrameMetadata expectedTailMetadata, actualTailMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(metadataTail, expectedTailMetadata));
+    rawpreamp::DNGDecoder tailDecoder(tailPath.string());
     assert(tailDecoder.getFrames().size() == 1);
     std::vector<uint16_t> importedTable;
     assert(tailDecoder.getLinearizationTable(0, importedTable));
     assert(importedTable.size() == 1024 && importedTable[0] == 0 && importedTable[7] == 448);
-    assert(motioncam::encodedBlackPoint(importedTable, 448.0f) == 7);
+    assert(rawpreamp::encodedBlackPoint(importedTable, 448.0f) == 7);
     assert(!tailDecoder.getLinearizationTable(-1, importedTable) && importedTable.empty());
 
     assert(tailDecoder.getFrames()[0].width == 32 && tailDecoder.getFrames()[0].height == 32);
@@ -2664,11 +2664,11 @@ int main(int argc, char** argv) {
     const nlohmann::json referencedFiles{{"gyroflow", "calibration/profile.json"}};
     const boost::filesystem::path calibrationJson((root / "clip.json").string());
     const boost::filesystem::path conventional((root / "clip_gyroflow.json").string());
-    assert(motioncam::vfs::referencedSidecarPath(
+    assert(rawpreamp::vfs::referencedSidecarPath(
         conventional, referencedFiles, calibrationJson, "gyroflow") ==
         boost::filesystem::path((root / "calibration" / "profile.json").string()));
     std::ofstream(root / "clip_gyroflow.json") << "{}";
-    assert(motioncam::vfs::referencedSidecarPath(
+    assert(rawpreamp::vfs::referencedSidecarPath(
         conventional, referencedFiles, calibrationJson, "gyroflow") == conventional);
     const auto gyroflowPath = root / "clip_gyroflow.json";
     std::ofstream(gyroflowPath) << R"JSON({
@@ -2677,13 +2677,13 @@ int main(int argc, char** argv) {
       [0,2789.180091093196,1489.6929103453012],[0,0,1]],
       "distortion_coeffs":[0.2527778305758484,0.9221266625169533,-1.8210242102121037,1.3375587148511772]}}
     )JSON";
-    const auto gyroflow = motioncam::vfs::loadGyroflowLensProfile(
+    const auto gyroflow = rawpreamp::vfs::loadGyroflowLensProfile(
         boost::filesystem::path(gyroflowPath.string()));
     assert(gyroflow);
     assert(gyroflow->rectilinearRmsPixels < 0.8 &&
         gyroflow->rectilinearMaxPixels < 2.1);
     auto warped = uncompressedA;
-    motioncam::vfs::applyGyroflowLensProfile(warped, *gyroflow);
+    rawpreamp::vfs::applyGyroflowLensProfile(warped, *gyroflow);
     const auto [opcodeOffset, opcodeBytes] = tagPayload(warped, 51022);
     assert(opcodeOffset && opcodeBytes == 88);
     auto be32 = [&](size_t offset) { return static_cast<uint32_t>(warped[offset] << 24 |
@@ -2715,13 +2715,13 @@ int main(int argc, char** argv) {
     assert(std::abs(beDouble(opcodeOffset + 72) - croppedCx / 7) < 1e-15);
     assert(std::abs(beDouble(opcodeOffset + 80) - croppedCy / 7) < 1e-15);
     auto sourceWarp = uncompressedA;
-    assert(motioncam::DNGDecoder::setWarpRectilinear(
+    assert(rawpreamp::DNGDecoder::setWarpRectilinear(
         sourceWarp, {1.0, 0.2, 0.03, 0.004}, 0.5, 0.5));
     std::array<std::vector<uint8_t>, 3> rectilinearSidecar;
-    assert(motioncam::DNGDecoder::extractNonGainMapOpcodes(
+    assert(rawpreamp::DNGDecoder::extractNonGainMapOpcodes(
         sourceWarp, rectilinearSidecar));
     auto croppedWarp = sourceWarp;
-    assert(motioncam::DNGDecoder::cropImage(croppedWarp, 4, 4));
+    assert(rawpreamp::DNGDecoder::cropImage(croppedWarp, 4, 4));
     const auto [cropWarpOffset, cropWarpBytes] = tagPayload(croppedWarp, 51022);
     assert(cropWarpOffset && cropWarpBytes == 88);
     auto cropDouble = [&](size_t at) {
@@ -2734,25 +2734,25 @@ int main(int argc, char** argv) {
     assert(std::abs(cropDouble(cropWarpOffset + 72) - 0.5) < 1e-15);
     assert(std::abs(cropDouble(cropWarpOffset + 32) - 0.2 * 9.0 / 49.0) < 1e-15);
     auto packedCrop = makeLogCfaDng(400, 0);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(packedCrop));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(packedCrop));
     assert(tagValue(packedCrop, 258).value == 10);
     auto packedPattern = makeLogCfaDng(0, 0, true, 18, true);
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(packedPattern));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(packedPattern));
     const auto packedPatternBytes = packedPattern;
-    motioncam::DecodedDNGImage packedPatternImage;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage packedPatternImage;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         packedPattern, packedPatternImage, false, false));
-    motioncam::DecodedDNGImage borrowedPackedPattern;
-    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+    rawpreamp::DecodedDNGImage borrowedPackedPattern;
+    assert(rawpreamp::DNGDecoder::decodeImageBorrowed(
         packedPattern, borrowedPackedPattern, false, false));
     assert(packedPattern == packedPatternBytes);
     assert(borrowedPackedPattern.samples == packedPatternImage.samples);
     auto omittedDefaults = makeLogCfaDng(0, 0, true, 18, true);
-    assert(motioncam::DNGDecoder::removeMetadataTags(
+    assert(rawpreamp::DNGDecoder::removeMetadataTags(
         omittedDefaults, {259, 277, 278}));
     const auto omittedDefaultsBytes = omittedDefaults;
-    motioncam::DecodedDNGImage omittedDefaultsImage;
-    assert(motioncam::DNGDecoder::decodeImageBorrowed(
+    rawpreamp::DecodedDNGImage omittedDefaultsImage;
+    assert(rawpreamp::DNGDecoder::decodeImageBorrowed(
         omittedDefaults, omittedDefaultsImage, false, false));
     assert(omittedDefaults == omittedDefaultsBytes);
     assert(omittedDefaultsImage.samples == packedPatternImage.samples);
@@ -2760,24 +2760,24 @@ int main(int argc, char** argv) {
         for (uint32_t x = 0; x < 18; ++x)
             assert(packedPatternImage.samples[static_cast<size_t>(y) * 18 + x] ==
                    ((y * 37 + x * 53) & 1023));
-    assert(motioncam::DNGDecoder::cropImage(packedCrop, 16, 16));
+    assert(rawpreamp::DNGDecoder::cropImage(packedCrop, 16, 16));
     assert(tagValue(packedCrop, 258).value == 16);
-    motioncam::DecodedDNGImage croppedSamples;
-    assert(motioncam::DNGDecoder::decodeImage(
+    rawpreamp::DecodedDNGImage croppedSamples;
+    assert(rawpreamp::DNGDecoder::decodeImage(
         packedCrop, croppedSamples, false, false));
     assert(croppedSamples.samples.size() == 16 * 16);
     assert(std::all_of(croppedSamples.samples.begin(), croppedSamples.samples.end(),
         [](uint16_t sample) { return sample == 400; }));
     auto mergedCropWarp = uncompressedA;
-    assert(motioncam::DNGDecoder::cropImage(mergedCropWarp, 4, 4));
-    assert(motioncam::DNGDecoder::mergeNonGainMapOpcodes(
+    assert(rawpreamp::DNGDecoder::cropImage(mergedCropWarp, 4, 4));
+    assert(rawpreamp::DNGDecoder::mergeNonGainMapOpcodes(
         mergedCropWarp, rectilinearSidecar, 8, 8));
     const auto [mergedCropOffset, mergedCropBytes] = tagPayload(mergedCropWarp, 51022);
     assert(mergedCropOffset && mergedCropBytes == cropWarpBytes);
     for (size_t i = 24; i < 88; ++i)
         assert(mergedCropWarp[mergedCropOffset + i] == croppedWarp[cropWarpOffset + i]);
     auto fisheyeWarped = uncompressedA;
-    assert(motioncam::DNGDecoder::setWarpFisheye(fisheyeWarped,
+    assert(rawpreamp::DNGDecoder::setWarpFisheye(fisheyeWarped,
         {1.0, 0.1, -0.01, 0.001}, gyroflow->cx / (gyroflow->width - 1.0),
         gyroflow->cy / (gyroflow->height - 1.0)));
     const auto [fisheyeOffset, fisheyeBytes] = tagPayload(fisheyeWarped, 51022);
@@ -2790,24 +2790,24 @@ int main(int argc, char** argv) {
     assert(fisheyeBe32(fisheyeOffset) == 1 && fisheyeBe32(fisheyeOffset + 4) == 2);
     assert(fisheyeBe32(fisheyeOffset + 16) == 52);
     std::array<std::vector<uint8_t>, 3> cachedSidecarOpcodes;
-    assert(motioncam::DNGDecoder::extractNonGainMapOpcodes(
+    assert(rawpreamp::DNGDecoder::extractNonGainMapOpcodes(
         fisheyeWarped, cachedSidecarOpcodes));
-    motioncam::vfs::ManualVignetteSidecars mixedIlluminantSidecars;
-    motioncam::vfs::ManualVignetteSidecars::Candidate d65White;
+    rawpreamp::vfs::ManualVignetteSidecars mixedIlluminantSidecars;
+    rawpreamp::vfs::ManualVignetteSidecars::Candidate d65White;
     d65White.whiteImage = true;
     d65White.illuminant = "d65";
     mixedIlluminantSidecars.candidates.push_back(std::move(d65White));
-    motioncam::vfs::ManualVignetteSidecars::Candidate defaultOpcodes;
+    rawpreamp::vfs::ManualVignetteSidecars::Candidate defaultOpcodes;
     defaultOpcodes.nonGainMapOpcodes = cachedSidecarOpcodes;
     mixedIlluminantSidecars.candidates.push_back(std::move(defaultOpcodes));
     auto mixedIlluminantOpcodes = uncompressedA;
-    assert(motioncam::vfs::applyManualOpcodeSidecar(
+    assert(rawpreamp::vfs::applyManualOpcodeSidecar(
         mixedIlluminantOpcodes, mixedIlluminantSidecars));
     const auto [mixedWarpOffset, mixedWarpBytes] =
         tagPayload(mixedIlluminantOpcodes, 51022);
     assert(mixedWarpOffset && mixedWarpBytes == fisheyeBytes);
     auto mergedOpcodes = opcodeCfa;
-    assert(motioncam::DNGDecoder::mergeNonGainMapOpcodes(
+    assert(rawpreamp::DNGDecoder::mergeNonGainMapOpcodes(
         mergedOpcodes, cachedSidecarOpcodes));
     const auto [mergedList1Offset, mergedList1Bytes] =
         tagPayload(mergedOpcodes, 51008);
@@ -2820,7 +2820,7 @@ int main(int argc, char** argv) {
     const auto [mergedWarpOffset, mergedWarpBytes] = tagPayload(mergedOpcodes, 51022);
     assert(mergedWarpOffset && mergedWarpBytes == fisheyeBytes);
     assert(mergedBe32(mergedWarpOffset) == 1 && mergedBe32(mergedWarpOffset + 4) == 2);
-    motioncam::vfs::applyGyroflowLensProfile(mergedOpcodes, *gyroflow);
+    rawpreamp::vfs::applyGyroflowLensProfile(mergedOpcodes, *gyroflow);
     const auto [gyroOverrideOffset, gyroOverrideBytes] = tagPayload(mergedOpcodes, 51022);
     assert(gyroOverrideOffset && gyroOverrideBytes == 88);
     assert(mergedBe32(gyroOverrideOffset) == 1 &&
@@ -2834,17 +2834,17 @@ int main(int argc, char** argv) {
     // become an OpcodeList2 gain map; profile and matrix fields remain usable
     // when the profile is selected from a sibling or JSON reference.
     auto profile = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
-    motioncam::DNGFrameMetadata profileMatrices;
+    rawpreamp::DNGFrameMetadata profileMatrices;
     profileMatrices.hasColorMatrix1 = true;
     profileMatrices.colorMatrix1 = {0.8f, 0.1f, 0.1f,
                                     0.1f, 0.8f, 0.1f,
                                     0.1f, 0.1f, 0.8f};
-    assert(motioncam::DNGDecoder::updateColorMatrices(profile, profileMatrices));
-    motioncam::DNGSidecarMetadataEntry profileName;
+    assert(rawpreamp::DNGDecoder::updateColorMatrices(profile, profileMatrices));
+    rawpreamp::DNGSidecarMetadataEntry profileName;
     profileName.tag = 50936; profileName.type = 2;
     profileName.value = {'T', 'e', 's', 't', ' ', 'D', 'C', 'P', 0};
     profileName.count = static_cast<uint32_t>(profileName.value.size());
-    motioncam::DNGSidecarMetadataEntry gainTable;
+    rawpreamp::DNGSidecarMetadataEntry gainTable;
     gainTable.tag = 52525; gainTable.type = 7;
     gainTable.value.resize(64 + 4 * 2 * 2);
     gainTable.count = static_cast<uint32_t>(gainTable.value.size());
@@ -2865,11 +2865,11 @@ int main(int argc, char** argv) {
     putDouble(24, 0.0); putDouble(32, 0.0);
     put32(40, 1);
     for (size_t i = 0; i < 4; ++i) putFloat(64 + i * 4, 1.0f + i * 0.25f);
-    assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(
+    assert(rawpreamp::DNGDecoder::fillMissingSidecarMetadata(
         profile, {profileName, gainTable}));
     auto profileTag = [](uint16_t tag, uint16_t type,
                          std::initializer_list<uint32_t> values) {
-        motioncam::DNGSidecarMetadataEntry entry;
+        rawpreamp::DNGSidecarMetadataEntry entry;
         entry.tag = tag;
         entry.type = type;
         entry.count = static_cast<uint32_t>(values.size());
@@ -2890,7 +2890,7 @@ int main(int argc, char** argv) {
         profileFloatBits(60), profileFloatBits(1), profileFloatBits(1)});
     auto lookData = hueData;
     lookData.tag = 50982;
-    assert(motioncam::DNGDecoder::fillMissingSidecarMetadata(profile, {
+    assert(rawpreamp::DNGDecoder::fillMissingSidecarMetadata(profile, {
         profileTag(50937, 4, {2, 2, 1}), hueData,
         profileTag(50981, 4, {2, 2, 1}), lookData,
         profileTag(50940, 11, {profileFloatBits(0), profileFloatBits(0),
@@ -2898,15 +2898,15 @@ int main(int argc, char** argv) {
     auto adobeDcp = profile;
     adobeDcp[2] = 'R'; adobeDcp[3] = 'C';
     writeDng(root / "profileclip.dcp", adobeDcp);
-    auto selectedProfile = motioncam::vfs::loadManualVignetteSidecars(
+    auto selectedProfile = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "profileclip.dng").string());
     assert(selectedProfile.hasDcp && selectedProfile.dcpSpatialGainMap &&
            !selectedProfile.useDcpGainmap);
     assert(selectedProfile.dcpColor.profileTables &&
            selectedProfile.dcpColor.profileTables->hueSat1.values.size() == 12 &&
            selectedProfile.dcpColor.profileTables->look.values.size() == 12);
-    motioncam::DNGFrameMetadata directDcpPreviewColor;
-    motioncam::vfs::mergeManualDngMetadata(
+    rawpreamp::DNGFrameMetadata directDcpPreviewColor;
+    rawpreamp::vfs::mergeManualDngMetadata(
         directDcpPreviewColor, selectedProfile, nullptr);
     assert(directDcpPreviewColor.profileTables &&
            directDcpPreviewColor.profileTables->hueSat1.values.size() == 12);
@@ -2914,20 +2914,20 @@ int main(int argc, char** argv) {
            std::abs(directDcpPreviewColor.colorMatrix1[0] - 0.8f) < 1e-4f);
     const nlohmann::json enableDcpGain{{"useDcpGainmap", true}};
     const boost::filesystem::path profileClipJson((root / "profileclip.json").string());
-    auto activeProfile = motioncam::vfs::loadManualVignetteSidecars(
+    auto activeProfile = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "profileclip.dng").string(), &enableDcpGain, &profileClipJson);
     assert(activeProfile.useDcpGainmap);
     auto profileOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
-    motioncam::GainMap staleMap = *activeProfile.dcpSpatialGainMap;
+    rawpreamp::GainMap staleMap = *activeProfile.dcpSpatialGainMap;
     staleMap.top = staleMap.left = 0; staleMap.bottom = staleMap.right = 8;
     staleMap.channels = staleMap.planes = 1;
-    assert(motioncam::DNGDecoder::replaceGainMaps(profileOutput, 2, {staleMap}));
-    assert(motioncam::vfs::applyManualVignetteSidecar(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(profileOutput, 2, {staleMap}));
+    assert(rawpreamp::vfs::applyManualVignetteSidecar(
         profileOutput, activeProfile));
-    assert(motioncam::vfs::applyManualDngMetadata(
+    assert(rawpreamp::vfs::applyManualDngMetadata(
         profileOutput, activeProfile, nullptr));
-    motioncam::DNGFrameMetadata profileOutputColor;
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    rawpreamp::DNGFrameMetadata profileOutputColor;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         profileOutput, profileOutputColor));
     assert(profileOutputColor.hasColorMatrix1 &&
            std::abs(profileOutputColor.colorMatrix1[0] - 0.8f) < 1e-4f);
@@ -2935,71 +2935,71 @@ int main(int argc, char** argv) {
            profileOutputColor.profileTables->hueSat1.values.size() == 12 &&
            profileOutputColor.profileTables->look.values.size() == 12);
     assert(tagValue(profileOutput, 50940).count == 4);
-    std::vector<motioncam::GainMap> profileOutputMaps;
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> profileOutputMaps;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         profileOutput, 2, profileOutputMaps));
     assert(profileOutputMaps.empty());
-    assert(motioncam::DNGDecoder::getGainMaps(
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         profileOutput, 3, profileOutputMaps));
     assert(profileOutputMaps.size() == 1 &&
            profileOutputMaps.front().channels == 1 &&
            profileOutputMaps.front().planes == 3);
     auto bakedProfile = profileOutput;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         bakedProfile, false, false));
     profileOutputMaps.clear();
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         bakedProfile, 3, profileOutputMaps));
     assert(tagValue(profileOutput, 50936).count == profileName.count);
     assert(tagValue(profileOutput, 52525).count == 0);
     auto optOutOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
-    assert(motioncam::vfs::applyManualVignetteSidecar(
+    assert(rawpreamp::vfs::applyManualVignetteSidecar(
         optOutOutput, selectedProfile));
-    assert(motioncam::vfs::applyManualDngMetadata(
+    assert(rawpreamp::vfs::applyManualDngMetadata(
         optOutOutput, selectedProfile, nullptr));
     assert(tagValue(optOutOutput, 52525).count == gainTable.count);
     profileOutputMaps.clear();
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         optOutOutput, 3, profileOutputMaps));
     assert(profileOutputMaps.empty());
-    motioncam::CalibrationData explicitJson;
+    rawpreamp::CalibrationData explicitJson;
     explicitJson.hasColorMatrix1 = true;
     auto jsonOwnedOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
-    assert(motioncam::vfs::applyManualDngMetadata(
+    assert(rawpreamp::vfs::applyManualDngMetadata(
         jsonOwnedOutput, selectedProfile, &explicitJson));
     assert(tagValue(jsonOwnedOutput, 50721).count == 0);
     const nlohmann::json referencedProfile{{"dcp", "profileclip.dcp"}};
     const boost::filesystem::path profileJson((root / "profileclip.json").string());
-    assert(motioncam::vfs::loadManualVignetteSidecars(
+    assert(rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "otherclip.dng").string(), &referencedProfile,
         &profileJson).hasDcp);
     auto siblingProfile = profile;
     profileMatrices.colorMatrix1[0] = 0.6f;
-    assert(motioncam::DNGDecoder::updateColorMatrices(
+    assert(rawpreamp::DNGDecoder::updateColorMatrices(
         siblingProfile, profileMatrices));
     writeDng(root / "otherclip.dcp", siblingProfile);
-    const auto siblingSelected = motioncam::vfs::loadManualVignetteSidecars(
+    const auto siblingSelected = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "otherclip.dng").string(), &referencedProfile, &profileJson);
     assert(siblingSelected.hasDcp &&
            std::abs(siblingSelected.dcpColor.colorMatrix1[0] - 0.6f) < 1e-4f);
     writeDng(root / "metadata_opcode.dng", profile);
-    const auto metadataDngSidecar = motioncam::vfs::loadManualVignetteSidecars(
+    const auto metadataDngSidecar = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "metadata.dng").string());
     assert(metadataDngSidecar.candidates.size() == 1);
     auto metadataOutput = makeDng(0, 0.01f, 100, 0.0f, {1, 1, 1}, 0);
-    assert(motioncam::vfs::applyManualDngMetadata(
+    assert(rawpreamp::vfs::applyManualDngMetadata(
         metadataOutput, metadataDngSidecar, nullptr));
     assert(tagValue(metadataOutput, 50936).count == profileName.count);
     assert(tagValue(metadataOutput, 52525).count == gainTable.count);
     writeDng(root / "legacy_gainmap.dng", fisheyeWarped);
-    auto legacySidecar = motioncam::vfs::loadManualVignetteSidecars(
+    auto legacySidecar = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "legacy.dng").string());
     assert(legacySidecar.candidates.size() == 1);
     writeDng(root / "legacy_opcode.dng", warped);
-    auto preferredOpcodeSidecar = motioncam::vfs::loadManualVignetteSidecars(
+    auto preferredOpcodeSidecar = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "legacy.dng").string());
     auto discoveredOpcodes = uncompressedA;
-    assert(motioncam::vfs::applyManualOpcodeSidecar(
+    assert(rawpreamp::vfs::applyManualOpcodeSidecar(
         discoveredOpcodes, preferredOpcodeSidecar));
     const auto [discoveredWarpOffset, discoveredWarpBytes] =
         tagPayload(discoveredOpcodes, 51022);
@@ -3012,22 +3012,22 @@ int main(int argc, char** argv) {
     assert(discoveredBe32(discoveredWarpOffset + 4) == 1);
     const nlohmann::json referencedOpcode{{"dng_opcode", "legacy_opcode.dng"}};
     const boost::filesystem::path referencedJson((root / "referenced.json").string());
-    auto jsonOpcodeSidecar = motioncam::vfs::loadManualVignetteSidecars(
+    auto jsonOpcodeSidecar = rawpreamp::vfs::loadManualVignetteSidecars(
         (root / "referenced.dng").string(), &referencedOpcode, &referencedJson);
     assert(jsonOpcodeSidecar.candidates.size() == 1);
     std::ofstream(root / "rife" / "inference_img.py") << "# protocol double\n";
     FakeFileSystem filesystem(
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0),
         makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2));
-    motioncam::FinalizeOptions options;
+    rawpreamp::FinalizeOptions options;
     options.interpolateDuplicatedFrames = true;
     options.rifeDirectory = (root / "rife").string();
     options.rifePythonExecutable = RIFE_FAKE_EXECUTABLE;
     bool sawInterpolation = false, sawRebuild = false;
     std::vector<std::string> readyNames;
-    std::vector<motioncam::Timestamp> readyTimestamps;
+    std::vector<rawpreamp::Timestamp> readyTimestamps;
     size_t previous = 0;
-    motioncam::vfs::finalize(filesystem, (root / "out").string(), false, options,
+    rawpreamp::vfs::finalize(filesystem, (root / "out").string(), false, options,
         [&](size_t completed, size_t total, const std::string& label) {
             assert(completed >= previous && completed <= total);
             previous = completed;
@@ -3035,7 +3035,7 @@ int main(int argc, char** argv) {
             sawRebuild |= label.find("Rebuilt") != std::string::npos;
             return true;
         },
-        [&](const std::vector<uint8_t>& readyDng, motioncam::Timestamp timestamp) {
+        [&](const std::vector<uint8_t>& readyDng, rawpreamp::Timestamp timestamp) {
             readyNames.push_back("frame-" + std::to_string(readyNames.size()));
             readyTimestamps.push_back(timestamp);
             if (readyNames.size() == 2) {
@@ -3046,34 +3046,34 @@ int main(int argc, char** argv) {
         });
     assert(sawInterpolation && sawRebuild);
     assert((readyNames == std::vector<std::string>{"frame-0", "frame-1", "frame-2"}));
-    assert((readyTimestamps == std::vector<motioncam::Timestamp>{0, 1, 2}));
+    assert((readyTimestamps == std::vector<rawpreamp::Timestamp>{0, 1, 2}));
     std::ifstream stream(root / "out" / "frame-000001.dng", std::ios::binary);
     std::vector<uint8_t> dng{std::istreambuf_iterator<char>(stream), {}};
     stream.close(); // Windows cannot remove the fixture while it is open.
-    motioncam::PreviewFrame preview;
-    assert(motioncam::DNGDecoder::decodePreview(
-        dng, motioncam::RenderSettings{}, preview, false, true));
+    rawpreamp::PreviewFrame preview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
+        dng, rawpreamp::RenderSettings{}, preview, false, true));
     assert(preview.rawSamples && preview.rawWidth > 0 && preview.rawHeight > 0);
-    assert(motioncam::DNGDecoder::decodePreview(
-        dng, motioncam::RenderSettings{}, preview, false, false));
+    assert(rawpreamp::DNGDecoder::decodePreview(
+        dng, rawpreamp::RenderSettings{}, preview, false, false));
     assert(!preview.rawSamples && preview.rawWidth == 0 &&
            preview.rawHeight == 0 && preview.rawChannels == 0);
-    auto inactiveCrop = motioncam::RenderSettings{};
+    auto inactiveCrop = rawpreamp::RenderSettings{};
     inactiveCrop.cropTarget = "4x4_4";
-    assert(motioncam::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
+    assert(rawpreamp::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
     assert(preview.width == 8 && preview.height == 8);
-    inactiveCrop.options |= motioncam::RENDER_OPT_CROPPING;
-    assert(motioncam::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
+    inactiveCrop.options |= rawpreamp::RENDER_OPT_CROPPING;
+    assert(rawpreamp::DNGDecoder::decodePreview(dng, inactiveCrop, preview, true));
     assert(preview.width == 4 && preview.height == 4);
     assert(preview.rgb[0] == 0 && preview.rgb[1] == 128);
     // An inactive crop forces the existing two-pass DNG preview route. Its
     // pixels and clipping overlay must match the direct CFA output route.
-    motioncam::DecodedDNGImage cfaPreviewImage;
+    rawpreamp::DecodedDNGImage cfaPreviewImage;
     cfaPreviewImage.layout.width = 64;
     cfaPreviewImage.layout.height = 48;
     cfaPreviewImage.layout.bitsPerSample = 12;
     cfaPreviewImage.layout.samplesPerPixel = 1;
-    cfaPreviewImage.layout.pixels = motioncam::DNGPixelLayout::CFA;
+    cfaPreviewImage.layout.pixels = rawpreamp::DNGPixelLayout::CFA;
     cfaPreviewImage.layout.cfaRepeatSize = 2;
     cfaPreviewImage.layout.cfaPhase = {0, 1, 1, 2};
     cfaPreviewImage.metadata.blackLevel = {64.0f, 66.0f, 68.0f, 70.0f};
@@ -3086,23 +3086,23 @@ int main(int argc, char** argv) {
             index % 53 == 0 ? 4095 : index % 47 == 0 ? 32 : (index * 37) % 4096);
     auto gainPreviewImage = cfaPreviewImage;
     gainPreviewImage.opcodeList2 = constantPhaseMaps;
-    motioncam::RenderSettings gainPreviewSettings;
+    rawpreamp::RenderSettings gainPreviewSettings;
     gainPreviewSettings.streamingPreview = true;
-    gainPreviewSettings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    motioncam::PreviewFrame cpuGainPreview, gpuGainPreview;
+    gainPreviewSettings.options |= rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    rawpreamp::PreviewFrame cpuGainPreview, gpuGainPreview;
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "1");
+    _putenv_s("RAWPREAMP_GALLERY_FORCE_CPU", "1");
 #else
-    setenv("MOTIONCAM_GALLERY_FORCE_CPU", "1", 1);
+    setenv("RAWPREAMP_GALLERY_FORCE_CPU", "1", 1);
 #endif
-    assert(motioncam::DNGDecoder::decodePreview(
+    assert(rawpreamp::DNGDecoder::decodePreview(
         gainPreviewImage, gainPreviewSettings, cpuGainPreview, true));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "");
+    _putenv_s("RAWPREAMP_GALLERY_FORCE_CPU", "");
 #else
-    unsetenv("MOTIONCAM_GALLERY_FORCE_CPU");
+    unsetenv("RAWPREAMP_GALLERY_FORCE_CPU");
 #endif
-    assert(motioncam::DNGDecoder::decodePreview(
+    assert(rawpreamp::DNGDecoder::decodePreview(
         gainPreviewImage, gainPreviewSettings, gpuGainPreview, true));
     assert(gpuGainPreview.galleryCfa.size() == cpuGainPreview.galleryCfa.size());
     auto gpuGainSamples = gpuGainPreview.galleryCfa;
@@ -3111,13 +3111,13 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < gpuGainSamples.size(); ++i)
         assert(std::abs(int(gpuGainSamples[i]) -
                         int(cpuGainPreview.galleryCfa[i])) <= 1);
-    if (motioncam::waitVulkanGalleryPreviewReady()) {
-        motioncam::PreviewFrame deferredGainPreview;
-        assert(motioncam::DNGDecoder::decodePreview(
+    if (rawpreamp::waitVulkanGalleryPreviewReady()) {
+        rawpreamp::PreviewFrame deferredGainPreview;
+        assert(rawpreamp::DNGDecoder::decodePreview(
             gainPreviewImage, gainPreviewSettings, deferredGainPreview, true));
         assert(deferredGainPreview.galleryCfaGain);
         assert(deferredGainPreview.galleryCfaRecoverCpu);
-        motioncam::VulkanGalleryBayerSource deferredSource;
+        rawpreamp::VulkanGalleryBayerSource deferredSource;
         deferredSource.samples = deferredGainPreview.galleryCfaSamples();
         deferredSource.width = deferredGainPreview.width;
         deferredSource.height = deferredGainPreview.height;
@@ -3133,10 +3133,10 @@ int main(int argc, char** argv) {
         const std::array<float, 3> unity{1.0f, 1.0f, 1.0f};
         const std::array<float, 9> identity{1,0,0,0,1,0,0,0,1};
         std::vector<uint8_t> deferredColor, referenceColor;
-        assert(motioncam::colorGalleryRgbVulkan(deferredColor, unity,
+        assert(rawpreamp::colorGalleryRgbVulkan(deferredColor, unity,
             identity, identity, 1.0f, nullptr, nullptr, false, false,
             &deferredSource));
-        assert(motioncam::colorGalleryRgbVulkan(referenceColor, unity,
+        assert(rawpreamp::colorGalleryRgbVulkan(referenceColor, unity,
             identity, identity, 1.0f, nullptr, nullptr, false, false,
             &cpuSource));
         assert(deferredColor.size() == referenceColor.size());
@@ -3147,7 +3147,7 @@ int main(int argc, char** argv) {
             assert(std::abs(int(actual) - int(expected)) <= 8);
         }
         auto overrideImage = cfaPreviewImage;
-        motioncam::GainMap rgbGrid{};
+        rawpreamp::GainMap rgbGrid{};
         rgbGrid.top = rgbGrid.left = 0;
         rgbGrid.bottom = overrideImage.layout.height;
         rgbGrid.right = overrideImage.layout.width;
@@ -3163,31 +3163,31 @@ int main(int argc, char** argv) {
         overrideImage.opcodeList2 = {rgbGrid};
         auto overrideSettings = gainPreviewSettings;
         overrideSettings.cfaPhase = "BGGR";
-        motioncam::PreviewFrame overrideGpu, overrideCpu;
-        assert(motioncam::DNGDecoder::decodePreview(
+        rawpreamp::PreviewFrame overrideGpu, overrideCpu;
+        assert(rawpreamp::DNGDecoder::decodePreview(
             overrideImage, overrideSettings, overrideGpu, true));
         assert(overrideGpu.galleryCfaGain);
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "1");
+        _putenv_s("RAWPREAMP_GALLERY_FORCE_CPU", "1");
 #else
-        setenv("MOTIONCAM_GALLERY_FORCE_CPU", "1", 1);
+        setenv("RAWPREAMP_GALLERY_FORCE_CPU", "1", 1);
 #endif
-        assert(motioncam::DNGDecoder::decodePreview(
+        assert(rawpreamp::DNGDecoder::decodePreview(
             overrideImage, overrideSettings, overrideCpu, true));
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "");
+        _putenv_s("RAWPREAMP_GALLERY_FORCE_CPU", "");
 #else
-        unsetenv("MOTIONCAM_GALLERY_FORCE_CPU");
+        unsetenv("RAWPREAMP_GALLERY_FORCE_CPU");
 #endif
         deferredSource.samples = overrideGpu.galleryCfaSamples();
         deferredSource.gain = overrideGpu.galleryCfaGain.get();
         cpuSource.samples = overrideCpu.galleryCfaSamples();
         deferredColor.clear();
         referenceColor.clear();
-        assert(motioncam::colorGalleryRgbVulkan(deferredColor, unity,
+        assert(rawpreamp::colorGalleryRgbVulkan(deferredColor, unity,
             identity, identity, 1.0f, nullptr, nullptr, false, false,
             &deferredSource));
-        assert(motioncam::colorGalleryRgbVulkan(referenceColor, unity,
+        assert(rawpreamp::colorGalleryRgbVulkan(referenceColor, unity,
             identity, identity, 1.0f, nullptr, nullptr, false, false,
             &cpuSource));
         assert(deferredColor.size() == referenceColor.size());
@@ -3198,25 +3198,25 @@ int main(int argc, char** argv) {
             assert(std::abs(int(actual) - int(expected)) <= 8);
         }
         auto logPreviewSettings = gainPreviewSettings;
-        logPreviewSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM |
-                                      motioncam::RENDER_OPT_LOG_HQ;
-        logPreviewSettings.logTransform = motioncam::LogTransformMode::ReduceBy8Bit;
-        motioncam::PreviewFrame deferredLog, cpuLog;
-        assert(motioncam::DNGDecoder::decodePreview(
+        logPreviewSettings.options |= rawpreamp::RENDER_OPT_LOG_TRANSFORM |
+                                      rawpreamp::RENDER_OPT_LOG_HQ;
+        logPreviewSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy8Bit;
+        rawpreamp::PreviewFrame deferredLog, cpuLog;
+        assert(rawpreamp::DNGDecoder::decodePreview(
             gainPreviewImage, logPreviewSettings, deferredLog, true));
         assert(deferredLog.galleryCfaGain &&
                deferredLog.galleryCfaGain->encodedWhite != 0);
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "1");
+        _putenv_s("RAWPREAMP_GALLERY_FORCE_CPU", "1");
 #else
-        setenv("MOTIONCAM_GALLERY_FORCE_CPU", "1", 1);
+        setenv("RAWPREAMP_GALLERY_FORCE_CPU", "1", 1);
 #endif
-        assert(motioncam::DNGDecoder::decodePreview(
+        assert(rawpreamp::DNGDecoder::decodePreview(
             gainPreviewImage, logPreviewSettings, cpuLog, true));
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GALLERY_FORCE_CPU", "");
+        _putenv_s("RAWPREAMP_GALLERY_FORCE_CPU", "");
 #else
-        unsetenv("MOTIONCAM_GALLERY_FORCE_CPU");
+        unsetenv("RAWPREAMP_GALLERY_FORCE_CPU");
 #endif
         auto recoveredLog = deferredLog.galleryCfa;
         assert(deferredLog.galleryCfaRecoverCpu(recoveredLog));
@@ -3226,10 +3226,10 @@ int main(int argc, char** argv) {
         cpuSource.samples = cpuLog.galleryCfaSamples();
         deferredColor.clear();
         referenceColor.clear();
-        assert(motioncam::colorGalleryRgbVulkan(deferredColor, unity,
+        assert(rawpreamp::colorGalleryRgbVulkan(deferredColor, unity,
             identity, identity, 1.0f, nullptr, nullptr, false, false,
             &deferredSource));
-        assert(motioncam::colorGalleryRgbVulkan(referenceColor, unity,
+        assert(rawpreamp::colorGalleryRgbVulkan(referenceColor, unity,
             identity, identity, 1.0f, nullptr, nullptr, false, false,
             &cpuSource));
         assert(deferredColor.size() == referenceColor.size());
@@ -3240,14 +3240,14 @@ int main(int argc, char** argv) {
             assert(std::abs(int(actual) - int(expected)) <= 8);
         }
     }
-    motioncam::PreviewFrame directCfaPreview, twoPassCfaPreview;
+    rawpreamp::PreviewFrame directCfaPreview, twoPassCfaPreview;
     directCfaPreview.clippingRequested = true;
     twoPassCfaPreview.clippingRequested = true;
-    motioncam::RenderSettings directSettings, twoPassSettings;
-    twoPassSettings.options |= motioncam::RENDER_OPT_CROPPING;
-    if (!motioncam::DNGDecoder::decodePreview(
+    rawpreamp::RenderSettings directSettings, twoPassSettings;
+    twoPassSettings.options |= rawpreamp::RENDER_OPT_CROPPING;
+    if (!rawpreamp::DNGDecoder::decodePreview(
             cfaPreviewImage, directSettings, directCfaPreview, true) ||
-        !motioncam::DNGDecoder::decodePreview(
+        !rawpreamp::DNGDecoder::decodePreview(
             std::move(cfaPreviewImage), twoPassSettings, twoPassCfaPreview, true) ||
         directCfaPreview.width != twoPassCfaPreview.width ||
         directCfaPreview.height != twoPassCfaPreview.height ||
@@ -3255,12 +3255,12 @@ int main(int argc, char** argv) {
         directCfaPreview.clipping != twoPassCfaPreview.clipping) return 2;
     // An explicit 8x8-to-4x4 reduction must still reach Bayer before the
     // non-HQ gallery demosaic; no higher-CFA nearest path remains.
-    motioncam::DecodedDNGImage higherCfaPreview;
+    rawpreamp::DecodedDNGImage higherCfaPreview;
     higherCfaPreview.layout.width = 64;
     higherCfaPreview.layout.height = 64;
     higherCfaPreview.layout.bitsPerSample = 12;
     higherCfaPreview.layout.samplesPerPixel = 1;
-    higherCfaPreview.layout.pixels = motioncam::DNGPixelLayout::CFA;
+    higherCfaPreview.layout.pixels = rawpreamp::DNGPixelLayout::CFA;
     higherCfaPreview.layout.cfaRepeatSize = 8;
     higherCfaPreview.layout.cfaPhase = {0, 1, 1, 2};
     higherCfaPreview.metadata.blackLevel = {64.0f, 64.0f, 64.0f, 64.0f};
@@ -3273,26 +3273,26 @@ int main(int argc, char** argv) {
             higherCfaPreview.samples[y * 64 + x] =
                 std::array<uint16_t, 3>{1000, 2000, 3000}[
                     higherCfaPreview.layout.cfaPhase[(y / 4 % 2) * 2 + x / 4 % 2]];
-    motioncam::RenderSettings higherCfaSettings;
-    higherCfaSettings.quadBayerOption = motioncam::QuadBayerMode::Bin8x8To4x4;
-    motioncam::PreviewFrame higherCfaResult;
+    rawpreamp::RenderSettings higherCfaSettings;
+    higherCfaSettings.quadBayerOption = rawpreamp::QuadBayerMode::Bin8x8To4x4;
+    rawpreamp::PreviewFrame higherCfaResult;
     higherCfaResult.clippingRequested = true;
-    if (!motioncam::DNGDecoder::decodePreview(
+    if (!rawpreamp::DNGDecoder::decodePreview(
             std::move(higherCfaPreview), higherCfaSettings,
             higherCfaResult, true) ||
         higherCfaResult.width != 32 || higherCfaResult.height != 32 ||
         higherCfaResult.rgb.size() != 32 * 32 * 6 ||
         higherCfaResult.clipping.size() != 32 * 32) return 3;
-    motioncam::DNGFrameMetadata metadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(dng, metadata));
+    rawpreamp::DNGFrameMetadata metadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(dng, metadata));
     assert(std::abs(metadata.exposureTime - 0.02) < 1e-5);
     assert(std::abs(metadata.iso - 200.0) < 1.0);
     assert(std::abs(metadata.baselineExposure - 1.0) < 1e-5);
     for (const auto neutral : metadata.asShotNeutral) assert(std::abs(neutral - 2.0f) < 1e-4f);
     const std::string marker = "rpt:SyntheticFrame='true'";
     assert(std::search(dng.begin(), dng.end(), marker.begin(), marker.end()) != dng.end());
-    assert(motioncam::DNGDecoder::isSyntheticFrame(dng));
-    assert(!motioncam::DNGDecoder::isDuplicateFrame(dng));
+    assert(rawpreamp::DNGDecoder::isSyntheticFrame(dng));
+    assert(!rawpreamp::DNGDecoder::isDuplicateFrame(dng));
 
     // Pixel duplicate detection must persist its result even when interpolation
     // is disabled. This also covers Camera Native, which consumes the same
@@ -3300,26 +3300,26 @@ int main(int argc, char** argv) {
     FakeFileSystem detectedFilesystem(
         makeDng(42, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 0),
         makeDng(84, 0.01f, 100, 0.0f, {1.0f, 1.0f, 1.0f}, 2), 1, false);
-    motioncam::FinalizeOptions detectionOptions;
+    rawpreamp::FinalizeOptions detectionOptions;
     detectionOptions.detectDuplicateDngs = true;
     size_t detectedFrames = 0;
-    motioncam::vfs::finalize(detectedFilesystem, (root / "detected-out").string(),
+    rawpreamp::vfs::finalize(detectedFilesystem, (root / "detected-out").string(),
         false, detectionOptions, {},
-        [&](const std::vector<uint8_t>& detectedDng, motioncam::Timestamp timestamp) {
-            assert(motioncam::DNGDecoder::isDuplicateFrame(detectedDng) == (timestamp == 1));
+        [&](const std::vector<uint8_t>& detectedDng, rawpreamp::Timestamp timestamp) {
+            assert(rawpreamp::DNGDecoder::isDuplicateFrame(detectedDng) == (timestamp == 1));
             ++detectedFrames;
         }, false);
     assert(detectedFrames == 3);
     assert(!fs::exists(root / "detected-out"));
 
     FakeFileSystem cfaFilesystem(makeLogCfaDng(0, 0), makeLogCfaDng(1023, 2));
-    motioncam::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});
+    rawpreamp::vfs::finalize(cfaFilesystem, (root / "cfa-out").string(), false, options, {});
     std::ifstream cfaStream(root / "cfa-out" / "frame-000001.dng", std::ios::binary);
     std::vector<uint8_t> cfa{std::istreambuf_iterator<char>(cfaStream), {}};
     cfaStream.close();
     int repeat = 0;
     std::array<uint8_t, 4> phase{};
-    assert(motioncam::DNGDecoder::getCFAMetadata(cfa, repeat, phase) && repeat == 2);
+    assert(rawpreamp::DNGDecoder::getCFAMetadata(cfa, repeat, phase) && repeat == 2);
     assert(std::search(cfa.begin(), cfa.end(), marker.begin(), marker.end()) != cfa.end());
     assert(tagValue(cfa, 50712).count == 1024); // LinearizationTable survived.
     assert(tagValue(cfa, 50717).value == 1023); // Original log code range survived.
@@ -3331,9 +3331,9 @@ int main(int argc, char** argv) {
         makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 2),
         1, true, true);
     size_t streamedFrames = 0;
-    motioncam::vfs::finalize(streamingFilesystem, (root / "stream-out").string(),
+    rawpreamp::vfs::finalize(streamingFilesystem, (root / "stream-out").string(),
         false, options, {},
-        [&](const std::vector<uint8_t>& streamedDng, motioncam::Timestamp) {
+        [&](const std::vector<uint8_t>& streamedDng, rawpreamp::Timestamp) {
             assert(!streamedDng.empty());
             ++streamedFrames;
         }, false);
@@ -3347,9 +3347,9 @@ int main(int argc, char** argv) {
     auto compressedOptions = options;
     compressedOptions.jxlDistance = 0.0f;
     size_t compressedFrames = 0;
-    motioncam::vfs::finalize(compressedStreamingFilesystem,
+    rawpreamp::vfs::finalize(compressedStreamingFilesystem,
         (root / "compressed-stream-out").string(), true, compressedOptions, {},
-        [&](const std::vector<uint8_t>& streamedDng, motioncam::Timestamp) {
+        [&](const std::vector<uint8_t>& streamedDng, rawpreamp::Timestamp) {
             assert(tagValue(streamedDng, 259).value == 52546);
             ++compressedFrames;
         }, false);
@@ -3361,13 +3361,13 @@ int main(int argc, char** argv) {
         makeDng(65535, 0.04f, 400, 2.0f, {4.0f, 2.0f, 1.0f}, 33), 32);
     bool interpolatedLongGap = false;
     size_t longGapFrames = 0;
-    motioncam::vfs::finalize(longGapFilesystem, (root / "long-gap-out").string(),
+    rawpreamp::vfs::finalize(longGapFilesystem, (root / "long-gap-out").string(),
         false, options,
         [&](size_t, size_t, const std::string& label) {
             interpolatedLongGap |= label.find("Interpolating") != std::string::npos;
             return true;
         },
-        [&](const std::vector<uint8_t>& heldDng, motioncam::Timestamp) {
+        [&](const std::vector<uint8_t>& heldDng, rawpreamp::Timestamp) {
             assert(std::search(heldDng.begin(), heldDng.end(), marker.begin(), marker.end()) ==
                 heldDng.end());
             ++longGapFrames;
@@ -3378,19 +3378,19 @@ int main(int argc, char** argv) {
     // Android's entry sink must receive ancillary files as well as DNGs,
     // propagate destination failures, and avoid materializing an output tree.
     std::vector<std::string> emittedEntries;
-    motioncam::vfs::finalize(streamingFilesystem, (root / "entry-stream-out").string(),
+    rawpreamp::vfs::finalize(streamingFilesystem, (root / "entry-stream-out").string(),
         false, options, {}, {}, false,
         [&](const std::string& name, const std::vector<uint8_t>& bytes) {
             emittedEntries.push_back(name);
             if (name == "audio.wav") assert(bytes == std::vector<uint8_t>({'R','I','F','F'}));
-            else { motioncam::Timestamp timestamp; assert(motioncam::DNGDecoder::getTimingMetadata(bytes, timestamp)); }
+            else { rawpreamp::Timestamp timestamp; assert(rawpreamp::DNGDecoder::getTimingMetadata(bytes, timestamp)); }
         });
     assert(emittedEntries.size() == 4 && emittedEntries.front() == "audio.wav");
     assert(!fs::exists(root / "entry-stream-out"));
     bool sinkFailed = false;
     size_t attemptedEntries = 0;
     try {
-        motioncam::vfs::finalize(streamingFilesystem, (root / "failed-entry-out").string(),
+        rawpreamp::vfs::finalize(streamingFilesystem, (root / "failed-entry-out").string(),
             false, options, {}, {}, false,
             [&](const std::string&, const std::vector<uint8_t>&) {
                 if (++attemptedEntries == 2) throw std::runtime_error("Destination write failed");
@@ -3399,16 +3399,16 @@ int main(int argc, char** argv) {
     assert(sinkFailed && attemptedEntries == 2);
     const auto pixelOptions = root / "bad-pixel-options.json";
     { std::ofstream sidecar(pixelOptions); sidecar << R"({"badPixels":[[4,6]],"fullSensorResolution":[4096,3072],"levels":"123/4","colorMatrix1":[1,2,3]})"; }
-    const auto preserved = nlohmann::json::parse(motioncam::vfs::finalizedCfaBadPixelOptions(pixelOptions.string(), makeLogCfaDng(0, 0)));
+    const auto preserved = nlohmann::json::parse(rawpreamp::vfs::finalizedCfaBadPixelOptions(pixelOptions.string(), makeLogCfaDng(0, 0)));
     assert(preserved.size() == 2 && preserved.at("badPixels")[0][0] == 4);
     assert(preserved.at("fullSensorResolution")[0] == 4096);
-    assert(motioncam::vfs::finalizedCfaBadPixelOptions(pixelOptions.string(),
+    assert(rawpreamp::vfs::finalizedCfaBadPixelOptions(pixelOptions.string(),
         makeDng(0, 0.01f, 100, 0.0f, {1.0f, 2.0f, 4.0f}, 0)).empty());
-    assert(motioncam::vfs::finalizedCfaBadPixelOptions((root / "absent.json").string(), {}).empty());
+    assert(rawpreamp::vfs::finalizedCfaBadPixelOptions((root / "absent.json").string(), {}).empty());
 
     bool rejectedMissingCallback = false;
     try {
-        motioncam::vfs::finalize(streamingFilesystem,
+        rawpreamp::vfs::finalize(streamingFilesystem,
             (root / "invalid-stream-out").string(), false, options, {}, {}, false);
     } catch (const std::invalid_argument&) {
         rejectedMissingCallback = true;
@@ -3418,89 +3418,89 @@ int main(int argc, char** argv) {
     // Exposure analysis operates on effective exposure, so source baseline
     // metadata participates in normalization and smoothing instead of being
     // blindly copied to the output.
-    const std::vector<motioncam::vfs::ExposureSample> exposureSamples{
+    const std::vector<rawpreamp::vfs::ExposureSample> exposureSamples{
         {0, 100.0, 0.01, 2.0, {1.0f, 1.0f, 1.0f}},
         {1, 200.0, 0.01, 0.0, {2.0f, 1.0f, 0.5f}}};
-    const auto exposureAnalysis = motioncam::vfs::analyzeExposureMetadata(
+    const auto exposureAnalysis = rawpreamp::vfs::analyzeExposureMetadata(
         exposureSamples, 24.0f);
     // The second frame defines the minimum effective exposure. The first
     // therefore needs a replacement baseline of one stop.
     assert(std::abs(exposureAnalysis.normalizedBaseline.at(0) - 1.0f) < 1e-5f);
     assert(std::abs(exposureAnalysis.normalizedBaseline.at(1) - 0.0f) < 1e-5f);
 
-    std::vector<motioncam::Entry> cadenceSources(2);
-    cadenceSources[0].type = cadenceSources[1].type = motioncam::EntryType::FILE_ENTRY;
+    std::vector<rawpreamp::Entry> cadenceSources(2);
+    cadenceSources[0].type = cadenceSources[1].type = rawpreamp::EntryType::FILE_ENTRY;
     cadenceSources[0].userData = 0;
     cadenceSources[1].userData = 2000000000LL;
     int cadenceDrops = 0, cadenceDuplicates = 0;
-    const auto cadence = motioncam::vfs::mapFramesToCfr(cadenceSources,
+    const auto cadence = rawpreamp::vfs::mapFramesToCfr(cadenceSources,
         {0, 2000000000LL}, "frame-", 1.0f, true,
         cadenceDrops, cadenceDuplicates);
     assert(cadence.size() == 3 && cadenceDuplicates == 1 && cadenceDrops == 0);
     assert(cadence[1].duplicateFrame && std::get<int64_t>(cadence[1].userData) == 0);
-    assert(motioncam::vfs::outputFrameNumber(cadence[2]) == 2);
-    assert(motioncam::vfs::outputTimestamp(
+    assert(rawpreamp::vfs::outputFrameNumber(cadence[2]) == 2);
+    assert(rawpreamp::vfs::outputTimestamp(
         cadence[2], 2000000000LL, 0, 1.0f, true) == 2000000000LL);
 
-    motioncam::RenderSettings proxySettings;
-    proxySettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_DRAFT);
+    rawpreamp::RenderSettings proxySettings;
+    proxySettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_DRAFT);
     proxySettings.draftScale = 4;
-    const auto mountedPlan = motioncam::vfs::planDngRender(
+    const auto mountedPlan = rawpreamp::vfs::planDngRender(
         cadence[0], 0, 0, proxySettings, 24.0f, false, true);
     assert(mountedPlan.nativeMetadataFrame && mountedPlan.scale == 1);
-    const auto finalizedPlan = motioncam::vfs::planDngRender(
+    const auto finalizedPlan = rawpreamp::vfs::planDngRender(
         cadence[0], 0, 0, proxySettings, 24.0f, true, true);
     assert(!finalizedPlan.nativeMetadataFrame && finalizedPlan.scale == 4);
-    const auto stillPlan = motioncam::vfs::planDngRender(
+    const auto stillPlan = rawpreamp::vfs::planDngRender(
         cadence[0], 0, 0, proxySettings, 24.0f, false, false);
     assert(!stillPlan.nativeMetadataFrame && stillPlan.scale == 4);
 
     // Source identity must not depend on timestamps being unique. Cameras can
     // emit repeated or repaired timestamps without making either frame a drop.
-    std::vector<motioncam::Entry> repeatedTimestampSources(2);
+    std::vector<rawpreamp::Entry> repeatedTimestampSources(2);
     repeatedTimestampSources[0].type=repeatedTimestampSources[1].type=
-        motioncam::EntryType::FILE_ENTRY;
+        rawpreamp::EntryType::FILE_ENTRY;
     repeatedTimestampSources[0].userData=repeatedTimestampSources[1].userData=42LL;
     int repeatedDrops=0,repeatedDuplicates=0;
-    const auto repeatedMapped=motioncam::vfs::mapFramesToCfr(
+    const auto repeatedMapped=rawpreamp::vfs::mapFramesToCfr(
         repeatedTimestampSources,{42LL,42LL},"repeat-",24.0f,false,
         repeatedDrops,repeatedDuplicates);
     std::shared_ptr<const std::vector<int>> repeatedOutputs;
     std::shared_ptr<const std::vector<bool>> repeatedFlags;
-    motioncam::vfs::buildGalleryFrameMap({42LL,42LL},repeatedMapped,
+    rawpreamp::vfs::buildGalleryFrameMap({42LL,42LL},repeatedMapped,
         repeatedOutputs,repeatedFlags);
     assert(repeatedOutputs&&repeatedOutputs->size()==2);
     assert((*repeatedOutputs)[0]==0&&(*repeatedOutputs)[1]==1);
     assert(!(*repeatedFlags)[0]&&!(*repeatedFlags)[1]);
 
-    motioncam::Entry mountedEntry;
-    mountedEntry.type = motioncam::EntryType::FILE_ENTRY;
+    rawpreamp::Entry mountedEntry;
+    mountedEntry.type = rawpreamp::EntryType::FILE_ENTRY;
     mountedEntry.name = "frame-000001.dng";
     mountedEntry.userData = 1LL;
-    motioncam::LRUCache cache(1024);
+    rawpreamp::LRUCache cache(1024);
     int renders = 0;
     const auto render = [&] {
         ++renders;
         return std::make_shared<std::vector<uint8_t>>(
             std::initializer_list<uint8_t>{'a', 'b', 'c', 'd'});
     };
-    assert(*motioncam::vfs::materializeCached(cache, mountedEntry, false, render) ==
+    assert(*rawpreamp::vfs::materializeCached(cache, mountedEntry, false, render) ==
         std::vector<uint8_t>({'a', 'b', 'c', 'd'}));
-    assert(*motioncam::vfs::materializeCached(cache, mountedEntry, false, render) ==
+    assert(*rawpreamp::vfs::materializeCached(cache, mountedEntry, false, render) ==
         std::vector<uint8_t>({'a', 'b', 'c', 'd'}));
     assert(renders == 1);
 
-    motioncam::LRUCache undersizedCache(2);
+    rawpreamp::LRUCache undersizedCache(2);
     int oversizedRenders = 0;
     const auto oversizedRender = [&] {
         ++oversizedRenders;
         return std::make_shared<std::vector<uint8_t>>(
             std::initializer_list<uint8_t>{'a', 'b', 'c', 'd'});
     };
-    assert(motioncam::vfs::materializeCached(
+    assert(rawpreamp::vfs::materializeCached(
         undersizedCache, mountedEntry, false, oversizedRender)->size() == 4);
-    assert(motioncam::vfs::materializeCached(
+    assert(rawpreamp::vfs::materializeCached(
         undersizedCache, mountedEntry, false, oversizedRender)->size() == 4);
     assert(oversizedRenders == 1);
     assert(undersizedCache.size() == 4);
@@ -3509,19 +3509,19 @@ int main(int argc, char** argv) {
     char range[2]{};
     size_t callbackBytes = 0;
     int callbackError = -1;
-    assert(motioncam::vfs::readMountedEntry(
+    assert(rawpreamp::vfs::readMountedEntry(
         mountedEntry, 1, sizeof(range), range,
         [&](size_t bytes, int error) { callbackBytes = bytes; callbackError = error; },
         false, pool, render) == 2);
     assert(range[0] == 'b' && range[1] == 'c');
     assert(callbackBytes == 2 && callbackError == 0);
 
-    std::vector<motioncam::Entry> desktopEntries;
-    motioncam::vfs::appendDesktopIni(desktopEntries);
+    std::vector<rawpreamp::Entry> desktopEntries;
+    rawpreamp::vfs::appendDesktopIni(desktopEntries);
 #ifdef _WIN32
     char desktopRange[8]{};
     assert(desktopEntries.size() == 1);
-    assert(motioncam::vfs::readDesktopIni(
+    assert(rawpreamp::vfs::readDesktopIni(
         desktopEntries.front(), 0, sizeof(desktopRange), desktopRange,
         [&](size_t bytes, int error) { callbackBytes = bytes; callbackError = error; }) == 0);
     assert(callbackBytes == 8 && callbackError == 0);

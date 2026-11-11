@@ -11,7 +11,7 @@ set logging redirect on
 
 define hook-stop
     set logging enabled on
-    echo ==== MotionCam Fuse GDB stop ====\n
+    echo ==== RawPreamp GDB stop ====\n
     info program
     echo \n==== Selected thread ====\n
     thread

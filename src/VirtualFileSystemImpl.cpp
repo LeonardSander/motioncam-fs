@@ -32,7 +32,7 @@
 #include <cstdlib>
 #include <BS_thread_pool.hpp>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace vfs {
 
 namespace {
@@ -135,8 +135,8 @@ void processDngPixels(std::vector<uint8_t>& dng,
         const DngPixelPipelineOptions& options) {
     if (options.gpuJpeg) options.gpuJpeg->clear();
     if (options.gpuJpegTiles) options.gpuJpegTiles->bytes.clear();
-    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    const auto pipelineStarted = motioncam::diagnosticNow();
+    const bool profile = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+    const auto pipelineStarted = rawpreamp::diagnosticNow();
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
     if (!DNGDecoder::discardIdentityLinearizationTables(dng))
@@ -199,7 +199,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         DNGImageLayout stripLayout;
         DNGFrameMetadata stripMetadata;
         const bool directStrip =
-            !motioncam::debugEnvironment("MOTIONCAM_BAD_PIXEL_DIRECT_STRIP_DISABLE") &&
+            !rawpreamp::debugEnvironment("RAWPREAMP_BAD_PIXEL_DIRECT_STRIP_DISABLE") &&
             DNGDecoder::getImageLayout(dng, stripLayout) &&
             stripLayout.pixels == DNGPixelLayout::CFA &&
             DNGDecoder::getColorMetadata(dng, stripMetadata) &&
@@ -274,14 +274,14 @@ void processDngPixels(std::vector<uint8_t>& dng,
          (remosaic && !options.textureSource) ||
          (!options.hasCfa && remosaic) ||
          (debugGainMap && options.hasCfa && demosaics(mode) && !remosaic));
-    const auto texturePreparationStarted = motioncam::diagnosticNow();
+    const auto texturePreparationStarted = rawpreamp::diagnosticNow();
     const VulkanGainBakeTextureSource* textureSource = options.textureSource;
-    // A DirectLog texture with no remaining pixel operation can go straight
+    // A Native Video texture with no remaining pixel operation can go straight
     // to JPEG. Metadata edits below still run against the DNG template; the
     // finalizer replaces its placeholder strip with the encoded payload.
     if ((options.gpuJpeg || options.gpuJpegTiles) && textureSource &&
-        !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") &&
-        !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DISABLE") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE") &&
         !bakeGain && !debugGainMap &&
         !remosaic && scale == 1 && options.cfaRepeatSize == 2 &&
         !settings.cameraNativeStaging &&
@@ -337,7 +337,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         ? LogCurve::LLOG60 : LogCurve::LOG60;
     bool logFused = false;
     bool logMetadataDone = false;
-    if (!motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_GPU_LOG_DISABLE") && textureSource &&
+    if (!rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_GPU_LOG_DISABLE") && textureSource &&
         !bakeGain && !topologyBeforeBake && !options.hasCfa && scale == 1 &&
         (settings.options & RENDER_OPT_LOG_TRANSFORM) && !debugGainMap &&
         logReductionBits(settings.logTransform) > 0 &&
@@ -371,25 +371,25 @@ void processDngPixels(std::vector<uint8_t>& dng,
              (!textureSource->recoverCpu ||
               !textureSource->recoverCpu(decoded.samples.data(), decoded.samples.size()))) ||
             !DNGDecoder::encodeImage(dng, decoded))
-            throw std::runtime_error("Could not materialize DirectLog GPU source for " + source);
+            throw std::runtime_error("Could not materialize Native Video GPU source for " + source);
         textureSource = nullptr;
         if (options.textureMaterialized) options.textureMaterialized();
     }
     if (profile && options.textureSource) {
-        const auto textureFinished = motioncam::diagnosticNow();
+        const auto textureFinished = rawpreamp::diagnosticNow();
         spdlog::info("GALLERY_PERF event=dng_texture_setup source={} metadata_ms={:.3f} materialize_ms={:.3f} deferred={}",
             source,
             std::chrono::duration<double, std::milli>(texturePreparationStarted-pipelineStarted).count(),
             std::chrono::duration<double, std::milli>(textureFinished-texturePreparationStarted).count(),
             textureSource != nullptr);
     }
-    const auto setupFinished = motioncam::diagnosticNow();
+    const auto setupFinished = rawpreamp::diagnosticNow();
     if (topologyBeforeBake && !DNGDecoder::processHigherCFA(
             dng, options.cfaRepeatSize, options.cfaPhase, mode, remosaic,
             scale, settings.options & RENDER_OPT_HIGHER_CFA_HQ,
             false, true))
         throw std::runtime_error("Unsupported pre-gain topology conversion for " + source);
-    const auto preTopologyFinished = motioncam::diagnosticNow();
+    const auto preTopologyFinished = rawpreamp::diagnosticNow();
     const bool normalizeGainMaps = settings.options & RENDER_OPT_NORMALIZE_SHADING_MAP;
     const bool optimizeGainMaps = settings.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS;
     const bool postTopologyAfterBake =
@@ -424,7 +424,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
             !postTopologyAfterBake && options.gpuJpegTiles
                 ? &options.gpuJpegTiles->bytes : nullptr, logCurve))
         throw std::runtime_error("Unsupported gain-map bake for " + source);
-    const auto gainFinished = motioncam::diagnosticNow();
+    const auto gainFinished = rawpreamp::diagnosticNow();
     if (!topologyBeforeBake &&
         (options.cfaRepeatSize > 2 ||
          (options.hasCfa && settings.cameraNativeStaging) ||
@@ -439,7 +439,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
         !DNGDecoder::processHigherCFA(
             dng, 2, options.cfaPhase, mode, false, 1, false))
         throw std::runtime_error("Unsupported post-gain demosaic for " + source);
-    const auto postTopologyFinished = motioncam::diagnosticNow();
+    const auto postTopologyFinished = rawpreamp::diagnosticNow();
     bool applyLog = settings.logTransform != LogTransformMode::KeepInput || bakeGain;
     if (options.linearInputBitDepth) {
         uint32_t outputBits = 1;
@@ -455,7 +455,7 @@ void processDngPixels(std::vector<uint8_t>& dng,
     if ((settings.options & RENDER_OPT_LOG_TRANSFORM) &&
         !(settings.options & RENDER_OPT_DEBUG_SHADING_MAP) &&
         applyLog && !logFused && !logMetadataDone && options.preferVulkan &&
-        !motioncam::debugEnvironment("MOTIONCAM_GPU_LOG_STRIP_DISABLE") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GPU_LOG_STRIP_DISABLE") &&
         DNGDecoder::bakeLogStripVulkan(
             dng, settings.logTransform, options.inputQuantizationWhite,
             settings.options & RENDER_OPT_LOG_HQ, options.ditherSeed,
@@ -513,14 +513,14 @@ void processDngPixels(std::vector<uint8_t>& dng,
         options.gpuJpegTiles->width = shape.width;
         options.gpuJpegTiles->height = shape.height;
     }
-    if (profile || (source == "DirectLog" && motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS")))
+    if (profile || (source == "Native Video" && rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_DIAGNOSTICS")))
         spdlog::info("GALLERY_PERF event=dng_pixel_pipeline source={} pre_scaled={} scale={} log_fused={} setup_ms={:.3f} pre_topology_ms={:.3f} gain_ms={:.3f} post_topology_ms={:.3f} finish_ms={:.3f}",
                      source, options.preScaledProxy, options.outputScale, logFused,
                      std::chrono::duration<double, std::milli>(setupFinished-pipelineStarted).count(),
                      std::chrono::duration<double, std::milli>(preTopologyFinished-setupFinished).count(),
                      std::chrono::duration<double, std::milli>(gainFinished-preTopologyFinished).count(),
                      std::chrono::duration<double, std::milli>(postTopologyFinished-gainFinished).count(),
-                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-postTopologyFinished).count());
+                     std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-postTopologyFinished).count());
 }
 
 void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
@@ -529,11 +529,11 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
         throw std::runtime_error("Could not discard identity DNG linearization tables");
     const std::string source = options.sourceName.empty()
         ? std::string("frame") : std::string(options.sourceName);
-    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-    auto stageStarted = motioncam::diagnosticNow();
+    const bool profile = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+    auto stageStarted = rawpreamp::diagnosticNow();
     auto profileStage = [&](const char* stage) {
         if (profile) {
-            const auto now = motioncam::diagnosticNow();
+            const auto now = rawpreamp::diagnosticNow();
             spdlog::info("GALLERY_PERF event=dng_finalize_stage source={} stage={} elapsed_ms={:.3f} bytes={}",
                          source, stage,
                          std::chrono::duration<double, std::milli>(now-stageStarted).count(),
@@ -602,7 +602,7 @@ void finalizeDng(std::vector<uint8_t>& dng, const RenderSettings& settings,
             : DNGDecoder::compressJPEGXL(dng, settings.jxlDistance, fusedJxlPacking);
     if (!compressed)
         throw std::runtime_error("Could not compress " + source + " DNG");
-    if (gpuJpegReady && motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+    if (gpuJpegReady && rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
         spdlog::info("GALLERY_PERF event=dng_gpu_jpeg_attach source={} bytes={}",
                      source, options.gpuJpeg->size());
     profileStage("compression");
@@ -976,7 +976,7 @@ void replaceSidecarGainMapOpcodes(
 nlohmann::json loadSidecarMetadataFile(const boost::filesystem::path& path) {
     if (!boost::filesystem::exists(path)) return {};
     try {
-        motioncam::SourceInputStream input(path.string());
+        rawpreamp::SourceInputStream input(path.string());
         if (!input) throw std::runtime_error("could not open file");
         std::ostringstream contents;
         contents << input.rdbuf();
@@ -1282,7 +1282,7 @@ ManualVignetteSidecars loadManualVignetteSidecars(
         ? referencedSidecarPath(discoveredDcp, *sidecar, *sidecarFile, "dcp")
         : discoveredDcp;
     if (boost::filesystem::is_regular_file(dcpPath)) {
-        motioncam::SourceInputStream profile(dcpPath.string(), std::ios::binary);
+        rawpreamp::SourceInputStream profile(dcpPath.string(), std::ios::binary);
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(profile)), {});
         // Adobe DCP uses a TIFF directory with the 'CR' version marker
         // instead of TIFF's 42. The remaining offsets and entries are TIFF.
@@ -1324,7 +1324,7 @@ ManualVignetteSidecars loadManualVignetteSidecars(
     }
     auto loadCandidate = [&](const boost::filesystem::path& path, bool white,
                              std::string illuminant = {}, bool legacyGainMapName = false) {
-        motioncam::SourceInputStream input(path.string(), std::ios::binary);
+        rawpreamp::SourceInputStream input(path.string(), std::ios::binary);
         std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
         ManualVignetteSidecars::Candidate candidate;
         candidate.path = path.string();
@@ -1763,7 +1763,7 @@ std::array<int, 2> manualVignetteSensorResolution(
 std::array<int, 2> inferLegacyGainMapSensorResolution(
         uint32_t frameWidth, uint32_t frameHeight,
         uint32_t mapRight, uint32_t mapBottom) {
-    // Same smallest-fitting sensor catalog used by legacy DirectLog maps.
+    // Same smallest-fitting sensor catalog used by legacy Native Video maps.
     constexpr std::array<std::array<int, 2>, 5> sensors{{
         {2048, 1536}, {4096, 3072}, {4608, 3456},
         {8192, 6144}, {9248, 6944}}};
@@ -2120,7 +2120,7 @@ std::string finalizedCfaBadPixelOptions(const std::string& sourceSidecar,
     if (!DNGDecoder::getImageLayout(finalizedDng, layout))
         throw std::runtime_error("Could not inspect finalized DNG pixel layout");
     if (layout.pixels != DNGPixelLayout::CFA) return {};
-    motioncam::SourceInputStream input(sourceSidecar);
+    rawpreamp::SourceInputStream input(sourceSidecar);
     if (!input) throw std::runtime_error("Could not read source bad-pixel options JSON");
     const auto source = nlohmann::json::parse(input);
     if (!source.is_object() || !source.contains("badPixels")) return {};
@@ -2177,7 +2177,7 @@ void finalize(
         return entry.name.size() >= 4 && entry.name.substr(entry.name.size() - 4) == ".dng";
     };
     auto readBytes = [](const stdfs::path& path) {
-        motioncam::SourceInputStream stream(path, std::ios::binary);
+        rawpreamp::SourceInputStream stream(path, std::ios::binary);
         if (!stream) throw std::runtime_error("Could not read " + path.string());
         return std::vector<uint8_t>((std::istreambuf_iterator<char>(stream)), {});
     };
@@ -2325,12 +2325,12 @@ import os, sys, types, numpy as np, torch
 from torch.nn import functional as F
 repo = sys.argv.pop(1)
 os.chdir(repo); sys.path.insert(0, repo)
-# MotionCam supplies raw tensors directly; RIFE's OpenCV image I/O is unused.
+# RawPreamp supplies raw tensors directly; RIFE's OpenCV image I/O is unused.
 # Avoid importing its binary cv2 wheel, which may target an older NumPy ABI.
 sys.modules['cv2'] = types.ModuleType('cv2')
 import inference_img as rife
 rife.LoadModel(None); rife.StartModel()
-print('MOTIONCAM_READY',flush=True)
+print('RAWPREAMP_READY',flush=True)
 def load(path,width,height):
     a=np.fromfile(path,dtype='<u2').reshape(height,width,3).astype(np.float32)/65535.0
     t=torch.tensor(a.transpose(2,0,1)).to(rife.DEVICE).unsqueeze(0)
@@ -2346,7 +2346,7 @@ for line in sys.stdin:
         pixels.tofile(out)
     del a,b,image,pixels
     if torch.cuda.is_available(): torch.cuda.empty_cache()
-    print('MOTIONCAM_DONE',flush=True)
+    print('RAWPREAMP_DONE',flush=True)
 )PY");
         QString python = options.rifePythonExecutable.empty()
             ? QString("python3") : QString::fromStdString(options.rifePythonExecutable);
@@ -2370,7 +2370,7 @@ for line in sys.stdin:
         rife.start(python, {"-c", code, QString::fromStdString(options.rifeDirectory)}, QIODevice::ReadWrite);
         if (!rife.waitForStarted()) throw std::runtime_error("Could not start the RIFE Python environment");
         QByteArray startupDiagnostic;
-        while (!startupDiagnostic.contains("MOTIONCAM_READY")) {
+        while (!startupDiagnostic.contains("RAWPREAMP_READY")) {
             if (!rife.waitForReadyRead(250) && rife.state() == QProcess::NotRunning) {
                 startupDiagnostic += rife.readAll();
                 const std::string detail = startupDiagnostic.toStdString();
@@ -2473,7 +2473,7 @@ for line in sys.stdin:
             if (!rife.waitForReadyRead(250) && rife.state() == QProcess::NotRunning)
                 throw std::runtime_error("RIFE failed: " + (diagnostic + rife.readAll()).toStdString());
             diagnostic += rife.readAll();
-            done = diagnostic.contains("MOTIONCAM_DONE");
+            done = diagnostic.contains("RAWPREAMP_DONE");
             const std::string label = "Interpolating " + std::to_string(gap.frames.size()) +
                 " duplicated frame(s) with RIFE";
             if (progress && !progress(completed, totalWork, label)) {
@@ -2720,7 +2720,7 @@ int getScaleFromOptions(FileRenderOptions options, int draftScale) {
 
 void syncAudio(
     Timestamp videoTimestamp,
-    std::vector<AudioChunk>& audioChunks,
+    std::vector<motioncam::AudioChunk>& audioChunks,
     int sampleRate,
     int numChannels)
 {
@@ -2734,7 +2734,7 @@ void syncAudio(
         return;
     }
 
-    AudioSampleFormat format = audioChunks[0].format;
+    motioncam::AudioSampleFormat format = audioChunks[0].format;
 
     if (audioVideoDriftMs > 0) {
         int audioFramesToRemove = static_cast<int>(std::round(audioVideoDriftMs * sampleRate / 1000));
@@ -2752,7 +2752,7 @@ void syncAudio(
                 it = audioChunks.erase(it);
             }
             else {
-                if (format == AudioSampleFormat::Float32) {
+                if (format == motioncam::AudioSampleFormat::Float32) {
                     it->float32Data.erase(
                         it->float32Data.begin(),
                         it->float32Data.begin() + remainingSamplesToRemove);
@@ -2771,10 +2771,10 @@ void syncAudio(
         int silenceFrames = static_cast<int>(std::round(silenceDuration * sampleRate / 1000));
         int silenceSamples = silenceFrames * numChannels;
 
-        AudioChunk silenceChunk;
+        motioncam::AudioChunk silenceChunk;
         silenceChunk.timestamp = videoTimestamp;
         silenceChunk.format = format;
-        if (format == AudioSampleFormat::Float32) {
+        if (format == motioncam::AudioSampleFormat::Float32) {
             silenceChunk.float32Data.resize(silenceSamples, 0.0f);
         } else {
             silenceChunk.int16Data.resize(silenceSamples, 0);
@@ -2937,4 +2937,4 @@ int MountedDngSource::readFile(
         staticMaterializer(entry), readPriority(entry));
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

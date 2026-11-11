@@ -1,7 +1,7 @@
 #include "DebugInstrumentation.h"
-#include "VirtualFileSystemImpl_DirectLog.h"
+#include "VirtualFileSystemImpl_NativeVideo.h"
 #include "VirtualFileSystemImpl.h"
-#include "DirectLogDecoder.h"
+#include "NativeVideoDecoder.h"
 #include "DNGDecoder.h"
 #include "CalibrationData.h"
 #include "DataLevels.h"
@@ -31,13 +31,13 @@
 #include <mutex>
 #include <QByteArray>
 
-using motioncam::Timestamp;
+using rawpreamp::Timestamp;
 
 namespace {
 
 // Leave space for TIFF metadata so decoded RGB can occupy its final strip
 // position before the writer runs. Keep this below the mounted size slack.
-constexpr size_t directLogStripOffset = 16 * 1024;
+constexpr size_t nativeVideoStripOffset = 16 * 1024;
 
 bool isIdentityMatrix(const std::array<float, 9>& matrix) {
     for (size_t i = 0; i < matrix.size(); ++i) {
@@ -47,56 +47,56 @@ bool isIdentityMatrix(const std::array<float, 9>& matrix) {
     return true;
 }
 
-motioncam::ResolvedDataLevels directLogDataLevels(
-        const motioncam::RenderSettings& settings, float defaultWhite = 65535.0f) {
+rawpreamp::ResolvedDataLevels nativeVideoDataLevels(
+        const rawpreamp::RenderSettings& settings, float defaultWhite = 65535.0f) {
     const std::array<float, 4> black{0, 0, 0, 0};
-    return motioncam::resolveDataLevels(
+    return rawpreamp::resolveDataLevels(
         settings.levels, defaultWhite, black, defaultWhite, black, 3);
 }
 
-int directLogBaseLogBits(const motioncam::RenderSettings& settings) {
-    const auto levels = directLogDataLevels(settings);
-    const int effectiveBits = motioncam::utils::evenBitsNeeded(static_cast<uint16_t>(
+int nativeVideoBaseLogBits(const rawpreamp::RenderSettings& settings) {
+    const auto levels = nativeVideoDataLevels(settings);
+    const int effectiveBits = rawpreamp::utils::evenBitsNeeded(static_cast<uint16_t>(
         std::clamp(std::lround(levels.white), 1l, 65535l)));
     return effectiveBits <= 10 ? effectiveBits : 12;
 }
 
-int directLogLogBits(motioncam::LogTransformMode mode, int baseBits = 12) {
-    return static_cast<int>(motioncam::logOutputBits(
+int nativeVideoLogBits(rawpreamp::LogTransformMode mode, int baseBits = 12) {
+    return static_cast<int>(rawpreamp::logOutputBits(
         static_cast<uint32_t>(baseBits), mode));
 }
 
-bool directLogAppliesLogTransform(const motioncam::RenderSettings& settings, bool hasGainMaps = true) {
-    if (!(settings.options & motioncam::RENDER_OPT_LOG_TRANSFORM) ||
-        settings.logTransform == motioncam::LogTransformMode::Disabled)
+bool nativeVideoAppliesLogTransform(const rawpreamp::RenderSettings& settings, bool hasGainMaps = true) {
+    if (!(settings.options & rawpreamp::RENDER_OPT_LOG_TRANSFORM) ||
+        settings.logTransform == rawpreamp::LogTransformMode::Disabled)
         return false;
-    if (hasGainMaps && (settings.options & motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION))
+    if (hasGainMaps && (settings.options & rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION))
         return true;
-    const auto levels = directLogDataLevels(settings);
+    const auto levels = nativeVideoDataLevels(settings);
     const auto white = static_cast<uint16_t>(std::clamp(
         std::lround(levels.white), 1l, 65535l));
-    return directLogLogBits(settings.logTransform, directLogBaseLogBits(settings)) <
-        motioncam::utils::bitsNeeded(white);
+    return nativeVideoLogBits(settings.logTransform, nativeVideoBaseLogBits(settings)) <
+        rawpreamp::utils::bitsNeeded(white);
 }
 
-uint32_t directLogQuantizationWhite(const motioncam::RenderSettings& settings) {
-    const auto levels = directLogDataLevels(settings);
+uint32_t nativeVideoQuantizationWhite(const rawpreamp::RenderSettings& settings) {
+    const auto levels = nativeVideoDataLevels(settings);
     const auto white = static_cast<uint16_t>(std::clamp(
         std::lround(levels.white), 1l, 65535l));
-    return motioncam::utils::bitsNeeded(white) <= 10 ? white : 4095;
+    return rawpreamp::utils::bitsNeeded(white) <= 10 ? white : 4095;
 }
 
-bool directLogDiagnosticsEnabled() {
+bool nativeVideoDiagnosticsEnabled() {
     static const bool enabled = [] {
-        const char* value = motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_DIAGNOSTICS");
+        const char* value = rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_DIAGNOSTICS");
         return value && value[0] != '\0' && std::string(value) != "0";
     }();
     return enabled;
 }
 
-std::array<uint8_t, 4> directLogCfaPhase(
-        const motioncam::RenderSettings& settings,
-        const std::optional<motioncam::CalibrationData>& calibration) {
+std::array<uint8_t, 4> nativeVideoCfaPhase(
+        const rawpreamp::RenderSettings& settings,
+        const std::optional<rawpreamp::CalibrationData>& calibration) {
     std::string phase = "bggr";
     if (calibration && !calibration->cfaPhase.empty())
         phase = calibration->cfaPhase;
@@ -104,23 +104,23 @@ std::array<uint8_t, 4> directLogCfaPhase(
              settings.cfaPhase != "Don't override CFA")
         phase = settings.cfaPhase;
     std::transform(phase.begin(), phase.end(), phase.begin(), ::tolower);
-    return motioncam::cfaColorsFromPhase(phase);
+    return rawpreamp::cfaColorsFromPhase(phase);
 }
 
 double elapsedMilliseconds(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
-        motioncam::diagnosticNow() - start).count();
+        rawpreamp::diagnosticNow() - start).count();
 }
 
 
 
 } // namespace
 
-namespace motioncam {
+namespace rawpreamp {
 
 
 
-VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
+VirtualFileSystemImpl_NativeVideo::VirtualFileSystemImpl_NativeVideo(
         BS::thread_pool&,
         BS::thread_pool& processingThreadPool,
         LRUCache& lruCache,
@@ -153,7 +153,7 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
                                      std::to_string(mCalibration->centerCrop[1]);
                 mConfig.options |= RENDER_OPT_CROPPING;
             }
-            spdlog::info("Loaded calibration for DirectLog: {}", calibPath.string());
+            spdlog::info("Loaded calibration for Native Video: {}", calibPath.string());
         }
     }
     mManualVignetteSidecars = vfs::loadManualVignetteSidecars(
@@ -165,9 +165,9 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
     if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
         warmVulkanGainBake();
 
-    // Initialize DirectLogDecoder
+    // Initialize NativeVideoDecoder
     try {
-        mDecoder = std::make_unique<DirectLogDecoder>(mSrcPath);
+        mDecoder = std::make_unique<NativeVideoDecoder>(mSrcPath);
         mDecoder->overrideTimestamps(vfs::sidecarTimestamps(
             mSidecarMetadata, mDecoder->getFrames().size()));
         if (mCalibration && mCalibration->hasDataLevels) {
@@ -198,35 +198,35 @@ VirtualFileSystemImpl_DirectLog::VirtualFileSystemImpl_DirectLog(
             try {
                 mAudioWav = AudioWriter::decodeWav(mSrcPath, mFps);
             } catch (const std::exception& error) {
-                spdlog::warn("Could not project DirectLog audio for {}: {}",
+                spdlog::warn("Could not project Native Video audio for {}: {}",
                              mSrcPath, error.what());
             }
         }
         
-        spdlog::info("DirectLog video loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames, format: {}, HLG: {}", 
+        spdlog::info("Native video loaded: {}x{} @ {:.2f}fps (avg: {:.2f}, med: {:.2f}), {} frames, format: {}, HLG: {}", 
                      mWidth, mHeight, mFps, mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate, mTotalFrames, mPixelFormat, mIsHLG);
     }
     catch (const std::exception& e) {
-        spdlog::error("Failed to initialize DirectLogDecoder: {}", e.what());
+        spdlog::error("Failed to initialize NativeVideoDecoder: {}", e.what());
         throw;
     }
     
     this->init();
 }
 
-VirtualFileSystemImpl_DirectLog::~VirtualFileSystemImpl_DirectLog() {
+VirtualFileSystemImpl_NativeVideo::~VirtualFileSystemImpl_NativeVideo() {
     if (mPrefetchFuture.valid()) mPrefetchFuture.wait();
     mDecoder.reset();
-    spdlog::info("Destroying VirtualFileSystemImpl_DirectLog({})", mSrcPath);
+    spdlog::info("Destroying VirtualFileSystemImpl_NativeVideo({})", mSrcPath);
 }
 
-int VirtualFileSystemImpl_DirectLog::readFile(
+int VirtualFileSystemImpl_NativeVideo::readFile(
         const Entry& entry, size_t pos, size_t len, void* dst,
         std::function<void(size_t, int)> result, bool async) {
     const int count = MountedDngSource::readFile(
         entry, pos, len, dst, std::move(result), async);
     if (async || count <= 0 ||
-        motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_PREFETCH_DISABLE") ||
+        rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_PREFETCH_DISABLE") ||
         entry.name.size() < 4 ||
         entry.name.compare(entry.name.size() - 4, 4, ".dng") != 0)
         return count;
@@ -251,15 +251,15 @@ int VirtualFileSystemImpl_DirectLog::readFile(
         try {
             materializeFile(nextEntry, false);
         } catch (const std::exception& error) {
-            spdlog::warn("DirectLog read-ahead failed for {}: {}",
+            spdlog::warn("Native Video read-ahead failed for {}: {}",
                          nextEntry.name, error.what());
         }
     });
     return count;
 }
 
-void VirtualFileSystemImpl_DirectLog::init() {
-    SPDLOG_DEBUG("VirtualFileSystemImpl_DirectLog::init(options={})", optionsToString(mConfig.options));
+void VirtualFileSystemImpl_NativeVideo::init() {
+    SPDLOG_DEBUG("VirtualFileSystemImpl_NativeVideo::init(options={})", optionsToString(mConfig.options));
     
     mFiles.clear();
 
@@ -281,7 +281,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
     bool applyCFRConversion = mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION;
     mFps = vfs::determineCFRTarget(mFrameRateInfo, mConfig.cfrTarget, applyCFRConversion);
     
-    spdlog::info("DirectLog target FPS: {:.2f} (CFR conversion: {})", mFps, applyCFRConversion);
+    spdlog::info("Native Video target FPS: {:.2f} (CFR conversion: {})", mFps, applyCFRConversion);
     
     size_t firstDngSize = 0;
 
@@ -333,11 +333,11 @@ void VirtualFileSystemImpl_DirectLog::init() {
         measuredMetadataBytes += largestManualSidecarBytes;
         const uint32_t projectedChannels =
             (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) ? 1u : 3u;
-        const auto levels = directLogDataLevels(mConfig);
-        const bool appliesLog = directLogAppliesLogTransform(mConfig, hasSourceGainMaps()) &&
+        const auto levels = nativeVideoDataLevels(mConfig);
+        const bool appliesLog = nativeVideoAppliesLogTransform(mConfig, hasSourceGainMaps()) &&
             !(mConfig.options & RENDER_OPT_DEBUG_SHADING_MAP);
         const double sizingWhite = appliesLog
-            ? static_cast<double>(directLogQuantizationWhite(mConfig))
+            ? static_cast<double>(nativeVideoQuantizationWhite(mConfig))
             : levels.white;
         const std::array<double, 4> sizingBlack{
             levels.black[0], levels.black[1], levels.black[2], levels.black[3]};
@@ -364,7 +364,7 @@ void VirtualFileSystemImpl_DirectLog::init() {
             (height + proxyScale - 1) / proxyScale);
         firstDngSize = proxyScale > 1
             ? projectedSize(width, height) : mTypicalDngSize;
-        spdlog::info("DirectLog projected DNG size: {} bytes ({:.2f} MB)",
+        spdlog::info("Native Video projected DNG size: {} bytes ({:.2f} MB)",
                      mTypicalDngSize, mTypicalDngSize / (1024.0 * 1024.0));
     }
     std::vector<Entry> sourceEntries;
@@ -396,11 +396,11 @@ void VirtualFileSystemImpl_DirectLog::init() {
     mFiles.insert(mFiles.end(), std::make_move_iterator(mapped.begin()),
                   std::make_move_iterator(mapped.end()));
     
-    spdlog::info("DirectLog generated {} DNG entries (dropped: {}, duplicated: {})", 
+    spdlog::info("Native Video generated {} DNG entries (dropped: {}, duplicated: {})", 
                  mFiles.size(), mDroppedFrames, mDuplicatedFrames);
 }
 
-void VirtualFileSystemImpl_DirectLog::analyzeSidecarExposure() {
+void VirtualFileSystemImpl_NativeVideo::analyzeSidecarExposure() {
     mNormalizedExposureOffsets.clear();
     mSmoothedExposureOffsets.clear();
     mSmoothedAsShotNeutrals.clear();
@@ -427,8 +427,8 @@ void VirtualFileSystemImpl_DirectLog::analyzeSidecarExposure() {
     mSmoothedAsShotNeutrals = analysis.smoothedNeutral;
 }
 
-VirtualFileSystemImpl_DirectLog::FrameMetadata
-VirtualFileSystemImpl_DirectLog::frameMetadata(int frameNumber) const {
+VirtualFileSystemImpl_NativeVideo::FrameMetadata
+VirtualFileSystemImpl_NativeVideo::frameMetadata(int frameNumber) const {
     FrameMetadata result;
     const nlohmann::json* dynamic = nullptr;
     if (frameNumber >= 0 && mSidecarMetadata.contains("dynamic") &&
@@ -473,15 +473,15 @@ VirtualFileSystemImpl_DirectLog::frameMetadata(int frameNumber) const {
     return result;
 }
 
-std::vector<GainMap> VirtualFileSystemImpl_DirectLog::loadSidecarGainMaps(
+std::vector<GainMap> VirtualFileSystemImpl_NativeVideo::loadSidecarGainMaps(
         int frameNumber, const char* field) const {
     return frameNumber < 0 ? std::vector<GainMap>{} :
         vfs::loadSidecarGainMaps(mSidecarMetadata, static_cast<size_t>(frameNumber),
                                 field, mWidth, mHeight);
 }
 
-VirtualFileSystemImpl_DirectLog::PreparedSidecarGainMaps
-VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
+VirtualFileSystemImpl_NativeVideo::PreparedSidecarGainMaps
+VirtualFileSystemImpl_NativeVideo::prepareSidecarGainMaps(int frameNumber) const {
     PreparedSidecarGainMaps prepared;
     if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude)
         return prepared;
@@ -494,14 +494,14 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
         else if (maps.size() == 1 && maps.front().channels == 1)
             prepared.opcodeList3.push_back(maps.front());
         else
-            throw std::runtime_error("Unsupported DirectLog gain-map layout");
+            throw std::runtime_error("Unsupported Native Video gain-map layout");
     };
     classify(gainMaps);
     classify(deferredGainMaps);
     if (!canonicalizeCfaGainMaps(prepared.opcodeList2))
-        throw std::runtime_error("Unsupported DirectLog OpcodeList2 gain-map layout");
+        throw std::runtime_error("Unsupported Native Video OpcodeList2 gain-map layout");
 
-    // Some DirectLog sidecars retain full-sensor gain-map coordinates even
+    // Some Native Video sidecars retain full-sensor gain-map coordinates even
     // though the encoded video already contains only the map's active window.
     // Rebase that exact-size window onto the video instead of applying the map
     // only to an incorrectly offset center rectangle.
@@ -526,9 +526,9 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
             map.right = mWidth; map.bottom = mHeight;
             map.coordinateWidth = mWidth;
             map.coordinateHeight = mHeight;
-            if (directLogDiagnosticsEnabled())
+            if (nativeVideoDiagnosticsEnabled())
                 spdlog::info(
-                    "DirectLog diagnostic: rebased gain map sensor={}x{} offset={},{} video={}x{}",
+                    "Native Video diagnostic: rebased gain map sensor={}x{} offset={},{} video={}x{}",
                     coordinateWidth, coordinateHeight, encodedLeft, encodedTop, mWidth, mHeight);
         }
     };
@@ -536,7 +536,7 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     rebaseEncodedWindow(prepared.opcodeList3);
 
     // JSON gain maps finalized for the requested output crop need to pass
-    // through the shared pipeline in the uncropped DirectLog staging DNG.
+    // through the shared pipeline in the uncropped Native Video staging DNG.
     // Lift them into staging coordinates here; cropImage() will then bring
     // them back to their original geometry together with the pixels. This
     // also preserves the distinct Top/Left values of the four CFA phases.
@@ -596,7 +596,7 @@ VirtualFileSystemImpl_DirectLog::prepareSidecarGainMaps(int frameNumber) const {
     return prepared;
 }
 
-bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
+bool VirtualFileSystemImpl_NativeVideo::convertRGBToDNG(
     std::vector<uint16_t> rgbData,
     std::vector<uint8_t>& dngData,
     int frameNumber,
@@ -611,15 +611,15 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     int decodedWidth, int decodedHeight, bool prepopulatedImage, bool inputBayer) {
 
     try {
-        const bool diagnostics = directLogDiagnosticsEnabled();
-        auto diagnosticStage = motioncam::diagnosticNow();
+        const bool diagnostics = nativeVideoDiagnosticsEnabled();
+        auto diagnosticStage = rawpreamp::diagnosticNow();
         const auto& videoInfo = mDecoder->getVideoInfo();
         int width = decodedWidth > 0 ? decodedWidth : videoInfo.width;
         int height = decodedHeight > 0 ? decodedHeight : videoInfo.height;
         
         // This adapter emits one canonical, uncompressed 16-bit linear RGB
         // DNG. Source-independent processing happens after construction.
-        const auto outputLevels = directLogDataLevels(mConfig);
+        const auto outputLevels = nativeVideoDataLevels(mConfig);
         std::vector<uint16_t> imageSamples = std::move(rgbData);
         const int samplesPerPixel = inputBayer ? 1 : 3;
         const int photometric = inputBayer
@@ -629,27 +629,27 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             samplesPerPixel * sizeof(uint16_t);
         const size_t packedImageBytes = expectedImageBytes / sizeof(uint16_t);
         const bool packedGpuStrip = prepopulatedImage && !inputBayer &&
-            dngData.size() == directLogStripOffset + packedImageBytes;
+            dngData.size() == nativeVideoStripOffset + packedImageBytes;
         if (prepopulatedImage && !packedGpuStrip &&
-            dngData.size() != directLogStripOffset + expectedImageBytes)
-            throw std::runtime_error("Invalid prepopulated DirectLog strip size");
+            dngData.size() != nativeVideoStripOffset + expectedImageBytes)
+            throw std::runtime_error("Invalid prepopulated Native Video strip size");
 
         if (diagnostics) {
-            spdlog::info("DirectLog diagnostic: frame={} process_ms={:.3f} samples={} channels={}",
+            spdlog::info("Native Video diagnostic: frame={} process_ms={:.3f} samples={} channels={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage),
                          prepopulatedImage ? expectedImageBytes / 2 : imageSamples.size(),
                          samplesPerPixel);
-            diagnosticStage = motioncam::diagnosticNow();
+            diagnosticStage = rawpreamp::diagnosticNow();
         }
 
         const uint8_t* imageData = prepopulatedImage
-            ? dngData.data() + directLogStripOffset
+            ? dngData.data() + nativeVideoStripOffset
             : reinterpret_cast<const uint8_t*>(imageSamples.data());
         const size_t imageDataSize = prepopulatedImage
             ? (packedGpuStrip ? packedImageBytes : expectedImageBytes)
             : imageSamples.size() * sizeof(uint16_t);
         if (diagnostics) {
-            spdlog::info("DirectLog diagnostic: frame={} pack_ms={:.3f} image_bytes={}",
+            spdlog::info("Native Video diagnostic: frame={} pack_ms={:.3f} image_bytes={}",
                          frameNumber, elapsedMilliseconds(diagnosticStage), imageDataSize);
         }
         
@@ -670,7 +670,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         // Photometric interpretation
         dng.SetPhotometric(photometric);
         if (inputBayer) {
-            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            const auto phase = nativeVideoCfaPhase(mConfig, mCalibration);
             dng.SetCFARepeatPatternDim(2, 2);
             dng.SetCFAPattern(4, phase.data());
         }
@@ -691,13 +691,13 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         if (!identity.uniqueModel.empty()) dng.SetUniqueCameraModel(identity.uniqueModel);
         if (!identity.make.empty()) dng.SetMake(identity.make);
         if (!identity.model.empty()) dng.SetCameraModelName(identity.model);
-        dng.SetSoftware("MotionCam DirectLog Decoder");
+        dng.SetSoftware("RawPreamp Native Video Decoder");
         if (iso > 0.0) dng.SetIso(static_cast<unsigned int>(std::lround(iso)));
         if (shutterSpeed > 0.0) dng.SetExposureTime(shutterSpeed);
         
         // Set image description with frame info
         std::ostringstream desc;
-        desc << "Frame " << frameNumber << " from DirectLog video";
+        desc << "Frame " << frameNumber << " from native video";
         if (mIsHLG) {
             desc << " (HLG to Linear)";
         }
@@ -735,7 +735,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             blackLevel[channel] = static_cast<unsigned short>(std::clamp(
                 std::lround(outputLevels.black[channel]), 0l, 65535l));
         if (inputBayer) {
-            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            const auto phase = nativeVideoCfaPhase(mConfig, mCalibration);
             unsigned short phaseBlack[4]{};
             for (int i = 0; i < 4; ++i) phaseBlack[i] = blackLevel[phase[i]];
             dng.SetBlackLevelRepeatDim(2, 2);
@@ -803,7 +803,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             for (const auto& map : maps) {
                 if (!map.coordinateWidth || !map.coordinateHeight ||
                     map.left >= map.right || map.top >= map.bottom)
-                    throw std::runtime_error("Invalid DirectLog opcode coordinate geometry");
+                    throw std::runtime_error("Invalid Native Video opcode coordinate geometry");
                 tinydngwriter::GainMapParams params{};
                 params.top = map.top; params.left = map.left;
                 params.bottom = std::min<uint32_t>(height, map.bottom);
@@ -828,7 +828,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                 }
                 const size_t planeSize = static_cast<size_t>(map.width) * map.height;
                 if (!map.channels || map.data.size() != planeSize * map.channels)
-                    throw std::runtime_error("Invalid DirectLog opcode gain-map payload");
+                    throw std::runtime_error("Invalid Native Video opcode gain-map payload");
                 // GainMap stores samples point-major; tinydngwriter expects
                 // each plane contiguous and interleaves them on disk.
                 params.gain_data.resize(map.data.size());
@@ -847,7 +847,7 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
                     continue;
                 }
                 if (cfaPhases && map.channels > 1 && map.channels != 4)
-                    throw std::runtime_error("Unsupported DirectLog CFA gain-map channel count");
+                    throw std::runtime_error("Unsupported Native Video CFA gain-map channel count");
                 utils::addSinglePlaneGainMaps(
                     result, params, cfaPhases && map.channels > 1);
             }
@@ -857,20 +857,20 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         const auto opcodeList3 = makeOpcodeList(opcodeList3Maps, false);
         if (!opcodeList2.IsEmpty()) dng.SetOpcodeList2(opcodeList2);
         if (!opcodeList3.IsEmpty()) dng.SetOpcodeList3(opcodeList3);
-        if (prepopulatedImage && !dng.PadImageDataOffset(directLogStripOffset - 8)) {
+        if (prepopulatedImage && !dng.PadImageDataOffset(nativeVideoStripOffset - 8)) {
             if (packedGpuStrip)
-                throw std::runtime_error("Packed DirectLog metadata exceeds strip headroom");
+                throw std::runtime_error("Packed Native Video metadata exceeds strip headroom");
             // An unusually large metadata payload needs the ordinary writer.
             imageSamples.resize(expectedImageBytes / sizeof(uint16_t));
             std::memcpy(imageSamples.data(), imageData, expectedImageBytes);
             imageData = reinterpret_cast<const uint8_t*>(imageSamples.data());
             prepopulatedImage = false;
         }
-        diagnosticStage = motioncam::diagnosticNow();
+        diagnosticStage = rawpreamp::diagnosticNow();
         if (!dng.SetImageDataBorrowed(imageData, imageDataSize))
-            throw std::runtime_error("Failed to attach DirectLog image data");
+            throw std::runtime_error("Failed to attach Native Video image data");
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} attach_image_ms={:.3f}",
+            spdlog::info("Native Video diagnostic: frame={} attach_image_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));
         // Use the same vector-backed writer as MCRAW. Avoid constructing an
         // intermediate string and copying the complete RGB DNG afterward.
@@ -883,34 +883,34 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
         writer.AddImage(&dng);
         
         std::string err;
-        diagnosticStage = motioncam::diagnosticNow();
+        diagnosticStage = rawpreamp::diagnosticNow();
         if (!writer.WriteToFile(stream, &err)) {
             spdlog::error("Failed to write DNG for frame {}: {}", frameNumber, err);
             return false;
         }
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} writer_ms={:.3f}",
+            spdlog::info("Native Video diagnostic: frame={} writer_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));
 
         // Apply metadata directly to the vector-backed DNG.
-        diagnosticStage = motioncam::diagnosticNow();
+        diagnosticStage = rawpreamp::diagnosticNow();
         if (!vfs::applyManualOpcodeSidecar(dngData, mManualVignetteSidecars))
-            throw std::runtime_error("Could not apply DirectLog opcode sidecar");
+            throw std::runtime_error("Could not apply Native Video opcode sidecar");
         // A cropped frame already carries remapped gain maps from processFrame.
         // Reapplying the sidecar here would replace them with maps whose CFA
         // phase bounds have been lost during crop rebasing.
         if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude &&
             width == mWidth && height == mHeight &&
             !vfs::applyManualVignetteSidecar(dngData, mManualVignetteSidecars))
-            throw std::runtime_error("Could not apply manual DirectLog vignette sidecar");
+            throw std::runtime_error("Could not apply manual Native Video vignette sidecar");
         if (!vfs::applyManualDngMetadata(
                 dngData, mManualVignetteSidecars,
                 mCalibration ? &*mCalibration : nullptr))
-            throw std::runtime_error("Could not apply manual DirectLog metadata sidecar");
+            throw std::runtime_error("Could not apply manual Native Video metadata sidecar");
         if (mConfig.vignetteCorrection == VignetteCorrectionMode::Exclude &&
             (!DNGDecoder::replaceGainMaps(dngData, 2, {}) ||
              !DNGDecoder::replaceGainMaps(dngData, 3, {})))
-            throw std::runtime_error("Could not exclude DirectLog gain maps");
+            throw std::runtime_error("Could not exclude Native Video gain maps");
         if (!mConfig.cameraNativeStaging &&
             mConfig.vignetteCorrection == VignetteCorrectionMode::Resample) {
             const auto manualResolution =
@@ -928,10 +928,10 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
             if (sensorWidth > 0 && sensorHeight > 0 &&
                 !DNGDecoder::cropGainMapsToFullSensor(
                     dngData, sensorWidth, sensorHeight))
-                throw std::runtime_error("Could not resample DirectLog gain maps for crop");
+                throw std::runtime_error("Could not resample Native Video gain maps for crop");
         }
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} output_copy_ms={:.3f}",
+            spdlog::info("Native Video diagnostic: frame={} output_copy_ms={:.3f}",
                          frameNumber, elapsedMilliseconds(diagnosticStage));
         
         return true;
@@ -942,24 +942,24 @@ bool VirtualFileSystemImpl_DirectLog::convertRGBToDNG(
     }
 }
 
-VirtualFileSystemImpl_DirectLog::ProcessedFrame
-VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewScale,
+VirtualFileSystemImpl_NativeVideo::ProcessedFrame
+VirtualFileSystemImpl_NativeVideo::processFrame(const Entry& entry, int previewScale,
                                                bool prepopulateDng,
                                                bool outputBayer,
                                                bool deferGpuDownload,
                                                bool textureOnly,
                                                bool packedGpuDng) {
-    const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE");
-    const auto processStarted = motioncam::diagnosticNow();
+    const bool profile = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE");
+    const auto processStarted = rawpreamp::diagnosticNow();
     ProcessedFrame result;
     result.timestamp = std::get<Timestamp>(entry.userData);
     const auto frameIt = mFrameIndexByTimestamp.find(result.timestamp);
     if (frameIt == mFrameIndexByTimestamp.end())
-        throw std::runtime_error("DirectLog source frame not found");
+        throw std::runtime_error("Native Video source frame not found");
     result.frameNumber = static_cast<int>(frameIt->second);
 
     result.gainMaps = prepareSidecarGainMaps(result.frameNumber);
-    const auto sidecarsFinished = motioncam::diagnosticNow();
+    const auto sidecarsFinished = rawpreamp::diagnosticNow();
     if (mConfig.vignetteCorrection != VignetteCorrectionMode::Exclude) {
         DNGImageLayout manualTarget;
         manualTarget.width = static_cast<uint32_t>(mWidth);
@@ -968,12 +968,12 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         manualTarget.samplesPerPixel = 3;
         manualTarget.pixels = DNGPixelLayout::LinearRGB;
         manualTarget.cfaRepeatSize = 2;
-        manualTarget.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+        manualTarget.cfaPhase = nativeVideoCfaPhase(mConfig, mCalibration);
         std::vector<GainMap> manualOpcode2, manualOpcode3;
         if (!vfs::manualVignetteSidecarGainMaps(
                 mManualVignetteSidecars, manualTarget,
                 manualOpcode2, manualOpcode3))
-            throw std::runtime_error("Could not prepare manual DirectLog vignette sidecar");
+            throw std::runtime_error("Could not prepare manual Native Video vignette sidecar");
         if (mManualVignetteSidecars.useDcpGainmap) {
             result.gainMaps.opcodeList2.clear();
             result.gainMaps.opcodeList3.clear();
@@ -989,7 +989,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     std::vector<GainMap> rgbMaps;
     if (!outputBayer || previewScale > 1)
         rgbMaps = collapseCfaGainMapsForRgb(
-            result.gainMaps.opcodeList2, directLogCfaPhase(mConfig, mCalibration));
+            result.gainMaps.opcodeList2, nativeVideoCfaPhase(mConfig, mCalibration));
     const bool rgbMapsSafe = std::all_of(rgbMaps.begin(), rgbMaps.end(),
         [](const GainMap& map) {
             return validGainMap(map) && map.channels == 3 &&
@@ -1025,12 +1025,12 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     result.bayer = bayerOutput;
     const bool extractedFrame = bayerOutput && directStrip
         ? mDecoder->extractFrameBayerIntoBytes(result.frameNumber,
-              result.dngStripBuffer, directLogStripOffset,
-              directLogCfaPhase(mConfig, mCalibration),
+              result.dngStripBuffer, nativeVideoStripOffset,
+              nativeVideoCfaPhase(mConfig, mCalibration),
               result.width, result.height, keepGpuTexture)
         : bayerOutput && textureOnly && keepGpuTexture
         ? [&] {
-            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            const auto phase = nativeVideoCfaPhase(mConfig, mCalibration);
             return mDecoder->extractFrameTextureDeferred(result.frameNumber,
                 result.width > 0 ? result.width : mWidth,
                 result.height > 0 ? result.height : mHeight, smoothChroma, &phase);
@@ -1038,18 +1038,18 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         : bayerOutput
         ? keepGpuTexture
             ? mDecoder->extractFrameBayerDeferred(result.frameNumber, result.rgb,
-                                     directLogCfaPhase(mConfig, mCalibration),
+                                     nativeVideoCfaPhase(mConfig, mCalibration),
                                      result.width, result.height)
             : mDecoder->extractFrameBayer(result.frameNumber, result.rgb,
-                                     directLogCfaPhase(mConfig, mCalibration),
+                                     nativeVideoCfaPhase(mConfig, mCalibration),
                                      result.width, result.height)
         : directStrip
         ? keepGpuTexture
             ? mDecoder->extractFrameIntoBytesDeferred(result.frameNumber,
-              result.dngStripBuffer, directLogStripOffset,
+              result.dngStripBuffer, nativeVideoStripOffset,
               result.width, result.height, smoothChroma)
             : mDecoder->extractFrameIntoBytes(result.frameNumber,
-              result.dngStripBuffer, directLogStripOffset,
+              result.dngStripBuffer, nativeVideoStripOffset,
               result.width, result.height, false, smoothChroma)
         : (textureOnly && keepGpuTexture && !outputBayer) || packedGpuStrip
             ? mDecoder->extractFrameTextureDeferred(result.frameNumber,
@@ -1067,7 +1067,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         return processFrame(entry, previewScale, prepopulateDng, outputBayer,
                             false, false, false);
     if (!extractedFrame)
-        throw std::runtime_error("Could not decode DirectLog frame");
+        throw std::runtime_error("Could not decode Native Video frame");
     if (keepGpuTexture) {
         const void* gpu = nullptr;
         const void* texture = nullptr;
@@ -1076,11 +1076,11 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
     if (packedGpuStrip && !result.gpuPending)
         return processFrame(entry, previewScale, prepopulateDng, outputBayer,
                             deferGpuDownload, textureOnly, false);
-    const auto extracted = motioncam::diagnosticNow();
+    const auto extracted = rawpreamp::diagnosticNow();
     if (result.width <= 0) result.width = mWidth;
     if (result.height <= 0) result.height = mHeight;
     if (packedGpuStrip && result.gpuPending) {
-        const size_t stripBytes = directLogStripOffset +
+        const size_t stripBytes = nativeVideoStripOffset +
             static_cast<size_t>(result.width) * result.height * 3u;
         // The writer appends TIFF directories after the image. Keep space for
         // them so an append does not relocate the entire populated strip.
@@ -1099,7 +1099,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         const double sourcePerPixelX = static_cast<double>(sourceWidth) / result.width;
         const double sourcePerPixelY = static_cast<double>(sourceHeight) / result.height;
         if (directStrip) {
-            auto* pixels = result.dngStripBuffer.data() + directLogStripOffset;
+            auto* pixels = result.dngStripBuffer.data() + nativeVideoStripOffset;
             const size_t rowBytes = static_cast<size_t>(targetWidth) * 3 * sizeof(uint16_t);
             for (int y = 0; y < targetHeight; ++y) {
                 const size_t source =
@@ -1108,7 +1108,7 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
                              pixels + source, rowBytes);
             }
             result.dngStripBuffer.resize(
-                directLogStripOffset + static_cast<size_t>(targetHeight) * rowBytes);
+                nativeVideoStripOffset + static_cast<size_t>(targetHeight) * rowBytes);
         } else {
             std::vector<uint16_t> cropped(static_cast<size_t>(targetWidth) * targetHeight * 3);
             for (int y = 0; y < targetHeight; ++y)
@@ -1175,20 +1175,20 @@ VirtualFileSystemImpl_DirectLog::processFrame(const Entry& entry, int previewSca
         mSmoothedAsShotNeutrals.count(result.timestamp))
         result.metadata.asShotNeutral = mSmoothedAsShotNeutrals.at(result.timestamp);
     if (profile)
-        spdlog::info("GALLERY_PERF event=directlog_process_stage sidecars_ms={:.3f} extract_ms={:.3f} remaining_ms={:.3f}",
+        spdlog::info("GALLERY_PERF event=native_video_process_stage sidecars_ms={:.3f} extract_ms={:.3f} remaining_ms={:.3f}",
             std::chrono::duration<double, std::milli>(sidecarsFinished-processStarted).count(),
             std::chrono::duration<double, std::milli>(extracted-sidecarsFinished).count(),
-            std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-extracted).count());
+            std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-extracted).count());
     return result;
 }
 
 std::function<std::shared_ptr<std::vector<uint8_t>>()>
-VirtualFileSystemImpl_DirectLog::staticMaterializer(const Entry& entry) {
+VirtualFileSystemImpl_NativeVideo::staticMaterializer(const Entry& entry) {
     if (entry.name != "audio.wav") return {};
     return [this, entry] { return materializeFile(entry, false); };
 }
 
-std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materializeFile(
+std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_NativeVideo::materializeFile(
     const Entry& entry, bool outputCompression, bool savedOutput,
     bool deferCompression) {
     const bool jpegCompression = outputCompression && !deferCompression;
@@ -1196,7 +1196,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
     std::shared_lock renderLock(mRenderMutex);
     return vfs::materializeCached(mCache, entry, outputCompression || savedOutput, [&] {
         std::unique_lock gpuFrameLock(mGpuFrameMutex);
-        const auto materializeStart = motioncam::diagnosticNow();
+        const auto materializeStart = rawpreamp::diagnosticNow();
         const auto& frames = mDecoder->getFrames();
         const int configuredScale = std::max(1,
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
@@ -1206,7 +1206,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                                  RENDER_OPT_HIGHER_CFA_HQ)) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             mWidth / configuredScale > 0 && mHeight / configuredScale > 0;
-        const auto acquiredAt = motioncam::diagnosticNow();
+        const auto acquiredAt = rawpreamp::diagnosticNow();
         // The per-clip center crop is applied later by processDngPixels().
         // Keep the strip buffer here; only the source's left/top crop needs
         // to compact rows before the DNG writer runs.
@@ -1220,20 +1220,20 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             !(mCalibration && mCalibration->hasLeftTopCropStride);
         const bool deferGpuDownload = (configuredScale == 1 || directProxy) &&
             (!mConfig.streamingPreview ||
-             (bakedGallery && !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU"))) &&
+             (bakedGallery && !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU"))) &&
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride) &&
             ((mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
              (jpegCompression && isLosslessJpeg92(mConfig.jxlDistance) &&
-              !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_DISABLE") &&
-              !motioncam::debugEnvironment("MOTIONCAM_GPU_JPEG_BORROWED_DISABLE") &&
-              !motioncam::debugEnvironment("MOTIONCAM_JPEG_TILED")));
+              !rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_DISABLE") &&
+              !rawpreamp::debugEnvironment("RAWPREAMP_GPU_JPEG_BORROWED_DISABLE") &&
+              !rawpreamp::debugEnvironment("RAWPREAMP_JPEG_TILED")));
         const uint32_t inputBits = utils::evenBitsNeeded(
             static_cast<uint16_t>(std::min<uint32_t>(
-                directLogQuantizationWhite(mConfig), 65535u)));
+                nativeVideoQuantizationWhite(mConfig), 65535u)));
         const bool packedGpuDng = prepopulateDng && deferGpuDownload &&
-            !motioncam::debugEnvironment("MOTIONCAM_DIRECTLOG_PACKED_GPU_DISABLE") &&
-            !motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE") &&
+            !rawpreamp::debugEnvironment("RAWPREAMP_NATIVE_VIDEO_PACKED_GPU_DISABLE") &&
+            !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_FORCE_DECODED_GAIN_BAKE") &&
             !mConfig.streamingPreview && !directProxy && !outputBayer &&
             !mConfig.cameraNativeStaging &&
             !(mConfig.options & (RENDER_OPT_BAKE_ISO |
@@ -1244,16 +1244,16 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         auto processed = processFrame(entry, directProxy ? configuredScale : 1,
                                       prepopulateDng, outputBayer,
                                       deferGpuDownload, false, packedGpuDng);
-        const auto decodedAt = motioncam::diagnosticNow();
+        const auto decodedAt = rawpreamp::diagnosticNow();
         const bool preScaledProxy = directProxy &&
             processed.width == mWidth / configuredScale &&
             processed.height == mHeight / configuredScale;
         const auto timestamp = processed.timestamp;
         const int frameNumber = processed.frameNumber;
-        const bool diagnostics = directLogDiagnosticsEnabled();
-        auto stageStart = motioncam::diagnosticNow();
+        const bool diagnostics = nativeVideoDiagnosticsEnabled();
+        auto stageStart = rawpreamp::diagnosticNow();
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} materialize begin name={}",
+            spdlog::info("Native Video diagnostic: frame={} materialize begin name={}",
                          frameNumber, entry.name);
 
         const auto renderPlan = vfs::planDngRender(
@@ -1261,9 +1261,9 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
             savedOutput || jpegCompression);
         const int outputFrameNumber = renderPlan.outputFrameNumber;
         if (diagnostics) {
-            spdlog::info("DirectLog diagnostic: frame={} metadata_ms={:.3f}; DNG construction begin",
+            spdlog::info("Native Video diagnostic: frame={} metadata_ms={:.3f}; DNG construction begin",
                          frameNumber, elapsedMilliseconds(stageStart));
-            stageStart = motioncam::diagnosticNow();
+            stageStart = rawpreamp::diagnosticNow();
         }
         std::vector<uint8_t> dngData = std::move(processed.dngStripBuffer);
         const bool prepopulatedImage = !dngData.empty();
@@ -1278,10 +1278,10 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                              processed.gainMaps.opcodeList3,
                              processed.width, processed.height, prepopulatedImage,
                              processed.bayer))
-            throw std::runtime_error("Could not generate DirectLog DNG");
+            throw std::runtime_error("Could not generate Native Video DNG");
         if (!mTelemetry->fillMissingDngMetadata(dngData, frameNumber))
-            throw std::runtime_error("Could not fill DirectLog capture metadata");
-        const auto generatedAt = motioncam::diagnosticNow();
+            throw std::runtime_error("Could not fill Native Video capture metadata");
+        const auto generatedAt = rawpreamp::diagnosticNow();
         vfs::DngPixelPipelineOptions pixels;
         pixels.compression = outputCompression;
         std::vector<uint8_t> gpuJpeg;
@@ -1294,13 +1294,13 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                 pixels.gpuJpegTiles = &gpuJpegTiles;
         }
         pixels.hasCfa = processed.bayer;
-        pixels.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+        pixels.cfaPhase = nativeVideoCfaPhase(mConfig, mCalibration);
         pixels.outputScale = renderPlan.scale;
         pixels.preScaledProxy = preScaledProxy;
-        pixels.inputQuantizationWhite = directLogQuantizationWhite(mConfig);
+        pixels.inputQuantizationWhite = nativeVideoQuantizationWhite(mConfig);
         pixels.linearInputBitDepth = utils::evenBitsNeeded(static_cast<uint16_t>(
-            std::clamp(std::lround(directLogDataLevels(mConfig).white), 1l, 65535l)));
-        pixels.sourceName = "DirectLog";
+            std::clamp(std::lround(nativeVideoDataLevels(mConfig).white), 1l, 65535l)));
+        pixels.sourceName = "Native Video";
         pixels.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
         // CPU topology processing produces the input for the shared GPU
         // gain/LOG bake. Upload it once, then read back only the DNG output.
@@ -1308,11 +1308,11 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         VulkanGainBakeTextureSource gpuTexture;
         if (processed.gpuPending) {
             if (!mDecoder->pendingGpuTexture(gpuTexture.gpu, gpuTexture.texture))
-                throw std::runtime_error("DirectLog GPU image unavailable");
+                throw std::runtime_error("Native Video GPU image unavailable");
             gpuTexture.download = [this](uint16_t* samples, size_t count) {
                 return mDecoder->downloadPendingGpu(samples, count);
             };
-            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            const auto phase = nativeVideoCfaPhase(mConfig, mCalibration);
             const bool smoothChroma =
                 !(mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER);
             gpuTexture.recoverCpu = [this, frameNumber, width = processed.width,
@@ -1338,7 +1338,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                 pixelSettings.options & ~RENDER_OPT_REMOSAIC_TO_BAYER);
         vfs::processDngPixels(dngData, pixelSettings, pixels);
         if (gpuFrameLock.owns_lock()) gpuFrameLock.unlock();
-        const auto processedAt = motioncam::diagnosticNow();
+        const auto processedAt = rawpreamp::diagnosticNow();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
         finalize.timestamp = renderPlan.outputTimestamp;
@@ -1350,21 +1350,21 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
         finalize.gpuJpegTiles = pixels.gpuJpegTiles;
         finalize.gyroflowLensProfile = mGyroflowLensProfile && !mConfig.cameraNativeStaging
             ? &*mGyroflowLensProfile : nullptr;
-        finalize.sourceName = "DirectLog";
+        finalize.sourceName = "Native Video";
         vfs::finalizeDng(dngData, mConfig, finalize);
-        const auto finalizedAt = motioncam::diagnosticNow();
+        const auto finalizedAt = rawpreamp::diagnosticNow();
         if (!jpegCompression && !mConfig.streamingPreview && mConfig.projectedFileSizes && !savedOutput) {
             if (dngData.size() > entry.size)
                 throw std::runtime_error(
-                    "Generated DirectLog DNG exceeds advertised mounted size");
+                    "Generated Native Video DNG exceeds advertised mounted size");
             dngData.resize(entry.size, 0);
         }
         auto output = std::make_shared<std::vector<uint8_t>>(std::move(dngData));
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE")) {
-            spdlog::info("GALLERY_PERF event=directlog_mounted_proxy frame={} pre_scaled_proxy={} width={} height={}",
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE")) {
+            spdlog::info("GALLERY_PERF event=native_video_mounted_proxy frame={} pre_scaled_proxy={} width={} height={}",
                          frameNumber, preScaledProxy, processed.width,
                          processed.height);
-            spdlog::info("GALLERY_PERF event=mounted_frame_stage source=DirectLog source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
+            spdlog::info("GALLERY_PERF event=mounted_frame_stage source=native-video source_path={} frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
                          mSrcPath, frameNumber,
                          0.0,
                          std::chrono::duration<double, std::milli>(decodedAt-acquiredAt).count(),
@@ -1374,7 +1374,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
                          elapsedMilliseconds(materializeStart), output->size());
         }
         if (diagnostics)
-            spdlog::info("DirectLog diagnostic: frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
+            spdlog::info("Native Video diagnostic: frame={} queue_ms={:.3f} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} dng_ms={:.3f} total_ms={:.3f} output_bytes={}",
                          frameNumber,
                          0.0,
                          std::chrono::duration<double, std::milli>(decodedAt-acquiredAt).count(),
@@ -1387,7 +1387,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_DirectLog::materiali
     });
 }
 
-bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
+bool VirtualFileSystemImpl_NativeVideo::materializePreviewFrame(
         const Entry& entry, PreviewFrame& preview, bool retainSourceSamples) {
     RenderSettings currentSettings;
     {
@@ -1395,19 +1395,19 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         currentSettings = mConfig;
     }
     const bool fastBakedGalleryCandidate =
-        !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU") &&
         !currentSettings.thumbnailPreview &&
         (((currentSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) && hasSourceGainMaps()) ||
-         directLogAppliesLogTransform(currentSettings, hasSourceGainMaps())) &&
+         nativeVideoAppliesLogTransform(currentSettings, hasSourceGainMaps())) &&
         !(currentSettings.options & (RENDER_OPT_CROPPING |
             RENDER_OPT_REMOSAIC_TO_BAYER |
             RENDER_OPT_BAKE_ISO)) &&
         (!mCalibration || (!mCalibration->hasLeftTopCropStride &&
             (!mCalibration->hasBadPixels ||
              !processesBadPixels(currentSettings.badPixelTreatment)))) &&
-        (!directLogAppliesLogTransform(currentSettings, hasSourceGainMaps()) ||
-         directLogLogBits(currentSettings.logTransform,
-             directLogBaseLogBits(currentSettings)) <= 16);
+        (!nativeVideoAppliesLogTransform(currentSettings, hasSourceGainMaps()) ||
+         nativeVideoLogBits(currentSettings.logTransform,
+             nativeVideoBaseLogBits(currentSettings)) <= 16);
     const bool fastBakedGallery = fastBakedGalleryCandidate &&
         mDecoder->canExtractFrameTexture() && waitVulkanGalleryPreviewReady();
     auto bakedFallback = [&]() -> bool {
@@ -1425,7 +1425,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 }
             }
         } catch (const std::exception& error) {
-            spdlog::warn("DirectLog baked gallery preview failed: {}", error.what());
+            spdlog::warn("Native Video baked gallery preview failed: {}", error.what());
         }
         return false;
     };
@@ -1436,7 +1436,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
     }
     std::shared_lock renderLock(mRenderMutex);
     try {
-        const auto processStarted = motioncam::diagnosticNow();
+        const auto processStarted = rawpreamp::diagnosticNow();
         const int configuredScale = std::max(1,
             vfs::getScaleFromOptions(mConfig.options, mConfig.draftScale));
         const bool directProxy = configuredScale > 1 &&
@@ -1449,18 +1449,18 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             !(mConfig.options & RENDER_OPT_CROPPING) &&
             !(mCalibration && mCalibration->hasLeftTopCropStride);
         const bool residentBayerCandidate = gpuBayer && configuredScale == 1 &&
-            !motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
+            !rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU") &&
             !(mConfig.options & (RENDER_OPT_HIGHER_CFA_HQ | RENDER_OPT_BAKE_ISO)) &&
             !(mCalibration && mCalibration->hasBadPixels &&
                 processesBadPixels(mConfig.badPixelTreatment)) &&
             mDecoder->canExtractFrameTexture();
-        const bool textureCandidate = residentBayerCandidate || (!motioncam::debugEnvironment("MOTIONCAM_GALLERY_FORCE_CPU") &&
+        const bool textureCandidate = residentBayerCandidate || (!rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU") &&
             !remosaic &&
             !(mConfig.options & (RENDER_OPT_CROPPING |
                                  RENDER_OPT_BAKE_ISO)) &&
             (!(mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) ||
                 !hasSourceGainMaps() || fastBakedGallery) &&
-            (!directLogAppliesLogTransform(mConfig, hasSourceGainMaps()) || fastBakedGallery) &&
+            (!nativeVideoAppliesLogTransform(mConfig, hasSourceGainMaps()) || fastBakedGallery) &&
             !(mCalibration && (mCalibration->hasLeftTopCropStride ||
                 (mCalibration->hasBadPixels &&
                  processesBadPixels(mConfig.badPixelTreatment)))) &&
@@ -1481,7 +1481,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             processed.gpuPending = false;
         }
         if (remosaic && !processed.bayer) {
-            const auto phase = directLogCfaPhase(mConfig, mCalibration);
+            const auto phase = nativeVideoCfaPhase(mConfig, mCalibration);
             std::vector<uint16_t> bayer(
                 static_cast<size_t>(processed.width) * processed.height);
             for (int y = 0; y < processed.height; ++y)
@@ -1493,7 +1493,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             processed.rgb = std::move(bayer);
             processed.bayer = true;
         }
-        const auto processFinished = motioncam::diagnosticNow();
+        const auto processFinished = rawpreamp::diagnosticNow();
         DecodedDNGImage image;
         image.samples = std::move(processed.rgb);
         image.ditherSeed = static_cast<uint32_t>(vfs::outputFrameNumber(entry) + 1);
@@ -1504,11 +1504,11 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.layout.pixels = processed.bayer
             ? DNGPixelLayout::CFA : DNGPixelLayout::LinearRGB;
         image.layout.cfaRepeatSize = 2;
-        image.layout.cfaPhase = directLogCfaPhase(mConfig, mCalibration);
+        image.layout.cfaPhase = nativeVideoCfaPhase(mConfig, mCalibration);
         image.opcodeList2 = std::move(processed.gainMaps.opcodeList2);
         image.opcodeList3 = std::move(processed.gainMaps.opcodeList3);
 
-        const auto levels = directLogDataLevels(mConfig);
+        const auto levels = nativeVideoDataLevels(mConfig);
         if (processed.bayer) {
             for (size_t i = 0; i < 4; ++i)
                 image.metadata.blackLevel[i] = levels.black[image.layout.cfaPhase[i]];
@@ -1570,7 +1570,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
         image.timestamp = vfs::outputTimestamp(
             entry, processed.timestamp, mDecoder->getFrames().front().timestamp,
             mFps, mConfig.options & RENDER_OPT_FRAMERATE_CONVERSION);
-        const auto previewStarted = motioncam::diagnosticNow();
+        const auto previewStarted = rawpreamp::diagnosticNow();
         auto previewSettings = mConfig;
         if (processed.bayer)
             previewSettings.options = static_cast<FileRenderOptions>(
@@ -1587,7 +1587,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 image.opcodeList2.size() > 1 || image.opcodeList3.size() > 1 ||
                 (!image.opcodeList2.empty() &&
                  image.opcodeList2.front().channels != 3))
-                throw std::runtime_error("DirectLog fused gallery gain unavailable");
+                throw std::runtime_error("Native Video fused gallery gain unavailable");
             auto maps = (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
                 ? image.opcodeList2 : std::vector<GainMap>{};
             const bool colorOnly = mConfig.options & RENDER_OPT_VIGNETTE_ONLY_COLOR;
@@ -1595,7 +1595,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             if (!colorOnly && (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
                 !image.opcodeList3.empty()) {
                 if (image.opcodeList3.front().channels != 1)
-                    throw std::runtime_error("DirectLog fused gallery luminance map unavailable");
+                    throw std::runtime_error("Native Video fused gallery luminance map unavailable");
                 maps.push_back(image.opcodeList3.front());
             }
             if (!maps.empty() && (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS)) {
@@ -1609,13 +1609,13 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             }
             galleryGain = std::make_shared<VulkanGalleryGain>();
             if (debugGainMap && maps.empty())
-                throw std::runtime_error("DirectLog fused gain-map debug has no maps");
+                throw std::runtime_error("Native Video fused gain-map debug has no maps");
             galleryGain->debugGainMap = debugGainMap;
             if (!maps.empty()) {
                 if (colorOnly) {
                     auto separation = separateGainMapLuminance(maps);
                     if (!separation.valid)
-                        throw std::runtime_error("DirectLog fused gallery color map unavailable");
+                        throw std::runtime_error("Native Video fused gallery color map unavailable");
                     if (mConfig.options & RENDER_OPT_OPTIMIZE_GAIN_MAPS)
                         image.metadata.baselineExposure += std::log2(
                             normalizePositiveGainMinimum(separation.luminance.data));
@@ -1628,7 +1628,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                         (map.channels != 1 && map.channels != 3) ||
                         map.data.size() != static_cast<size_t>(map.width) *
                             map.height * map.channels)
-                        throw std::runtime_error("DirectLog fused gallery gain geometry unavailable");
+                        throw std::runtime_error("Native Video fused gallery gain geometry unavailable");
                     if (map.channels == 3) {
                         galleryGain->width = map.width;
                         galleryGain->height = map.height;
@@ -1663,9 +1663,9 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                 galleryGain->spacingH = galleryGain->spacingV = 1.0f;
                 galleryGain->values = {1.0f, 1.0f, 1.0f};
             }
-            if (directLogAppliesLogTransform(mConfig, hasSourceGainMaps()) && !debugGainMap) {
-                const auto bits = directLogLogBits(mConfig.logTransform,
-                    directLogBaseLogBits(mConfig));
+            if (nativeVideoAppliesLogTransform(mConfig, hasSourceGainMaps()) && !debugGainMap) {
+                const auto bits = nativeVideoLogBits(mConfig.logTransform,
+                    nativeVideoBaseLogBits(mConfig));
                 galleryGain->encodedWhite = (1u << bits) - 1u;
                 galleryGain->ditherSeed = image.ditherSeed;
                 galleryGain->highQualityDither = mConfig.options & RENDER_OPT_LOG_HQ;
@@ -1734,10 +1734,10 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
                     // Software recovery replaces the decoder state. Rebuild
                     // the preview rather than mix its previous GPU texture
                     // with recovered CPU samples.
-                    if(motioncam::debugEnvironment("MOTIONCAM_GALLERY_REQUIRE_ZERO_COPY")||
+                    if(rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_REQUIRE_ZERO_COPY")||
                        !mDecoder->recoverFrameInSoftware(processed.frameNumber,source->data(),
                            source->size(),processed.width,processed.height,true,nullptr))
-                        throw std::runtime_error("DirectLog gallery source readback failed");
+                        throw std::runtime_error("Native Video gallery source readback failed");
                     PreviewFrame retry;
                     retry.sourceFrameIndex=preview.sourceFrameIndex;
                     retry.clippingRequested=preview.clippingRequested;
@@ -1775,23 +1775,23 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
             }
             preview.gallerySource.lease =
                 std::make_shared<std::unique_lock<std::mutex>>(std::move(gpuFrameLock));
-            if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
-                spdlog::info("GALLERY_PERF event=directlog_texture_preview source={} width={} height={}",
+            if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
+                spdlog::info("GALLERY_PERF event=native_video_texture_preview source={} width={} height={}",
                     mSrcPath, processed.width, processed.height);
             return true;
         }
         const bool decoded = DNGDecoder::decodePreview(
             std::move(image), previewSettings, preview, true, retainSourceSamples);
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
-            spdlog::info("GALLERY_PERF event=directlog_preview_stage source={} pre_scaled_proxy={} width={} height={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
+            spdlog::info("GALLERY_PERF event=native_video_preview_stage source={} pre_scaled_proxy={} width={} height={} process_ms={:.3f} metadata_ms={:.3f} preview_ms={:.3f}",
                 mSrcPath, preScaledProxy, processed.width, processed.height,
                 std::chrono::duration<double, std::milli>(processFinished-processStarted).count(),
                 std::chrono::duration<double, std::milli>(previewStarted-processFinished).count(),
-                std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-previewStarted).count());
+                std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-previewStarted).count());
         return decoded;
     } catch (const std::exception& error) {
         if (fastBakedGallery) {
-            spdlog::warn("DirectLog fused gallery preview fell back: {}", error.what());
+            spdlog::warn("Native Video fused gallery preview fell back: {}", error.what());
             renderLock.unlock();
             return bakedFallback();
         }
@@ -1799,7 +1799,7 @@ bool VirtualFileSystemImpl_DirectLog::materializePreviewFrame(
     }
 }
 
-void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config) {
+void VirtualFileSystemImpl_NativeVideo::updateOptions(const RenderSettings& config) {
     std::unique_lock renderLock(mRenderMutex);
     std::lock_guard<std::mutex> lock(mMutex);
     {
@@ -1811,8 +1811,8 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     mConfig = config;
     if (mConfig.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
         warmVulkanGainBake();
-    if (directLogDiagnosticsEnabled())
-        spdlog::info("DirectLog diagnostic: settings updated options={} log={} draft_scale={}",
+    if (nativeVideoDiagnosticsEnabled())
+        spdlog::info("Native Video diagnostic: settings updated options={} log={} draft_scale={}",
                      optionsToString(mConfig.options),
                      logTransformModeToString(mConfig.logTransform), mConfig.draftScale);
     
@@ -1829,7 +1829,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
                                      std::to_string(mCalibration->centerCrop[1]);
                 mConfig.options |= RENDER_OPT_CROPPING;
             }
-            spdlog::info("Reloaded calibration for DirectLog: {}", calibPath.string());
+            spdlog::info("Reloaded calibration for Native Video: {}", calibPath.string());
         }
     }
     mGyroflowLensProfile = vfs::loadGyroflowLensProfile(
@@ -1849,7 +1849,7 @@ void VirtualFileSystemImpl_DirectLog::updateOptions(const RenderSettings& config
     init();
 }
 
-FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
+FileInfo VirtualFileSystemImpl_NativeVideo::getFileInfo() const {
     int outputWidth = mWidth;
     int outputHeight = mHeight;
     auto applyReportedCrop = [&](int width, int height) {
@@ -1910,7 +1910,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     vfs::buildGalleryFrameMap(galleryTimestamps, mFiles,
         info.sourceFrameToOutput, info.sourceFrameDuplicated);
     
-    // DirectLog's source representation is the encoded video pixel format;
+    // Native Video's source representation is the encoded video pixel format;
     // CFA overrides describe a later interpretation/rendering step.
     info.dataType = mPixelFormat;
     const bool outputBayer = (mConfig.options & RENDER_OPT_REMOSAIC_TO_BAYER) &&
@@ -1921,7 +1921,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
         info.outputPixelFormat = "2x2";
     
     // Determine levels info
-    const bool applyLogCurve = directLogAppliesLogTransform(mConfig, hasSourceGainMaps());
+    const bool applyLogCurve = nativeVideoAppliesLogTransform(mConfig, hasSourceGainMaps());
     const std::array<float, 4> sourceBlack{0, 0, 0, 0};
     const auto displayLevels = resolveDataLevels(
         mConfig.levels, 65535.0f, sourceBlack, 65535.0f, sourceBlack, 3);
@@ -1932,8 +1932,8 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     info.levelsInfo = std::to_string(static_cast<int>(displayLevels.white)) + "/" +
         std::to_string(static_cast<int>(displayLevels.black[0]));
     if (applyLogCurve) {
-        const int outputBits = directLogLogBits(
-            mConfig.logTransform, directLogBaseLogBits(mConfig));
+        const int outputBits = nativeVideoLogBits(
+            mConfig.logTransform, nativeVideoBaseLogBits(mConfig));
         info.levelsInfo += " -> " +
             std::to_string((1 << outputBits) - 1) + "/0 " +
             std::to_string(outputBits) + "b log";
@@ -1966,7 +1966,7 @@ FileInfo VirtualFileSystemImpl_DirectLog::getFileInfo() const {
     return info;
 }
 
-bool VirtualFileSystemImpl_DirectLog::hasSourceGainMaps() const {
+bool VirtualFileSystemImpl_NativeVideo::hasSourceGainMaps() const {
     return vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "gainMaps") ||
         vfs::hasSidecarGainMaps(mSidecarMetadata, 0, "deferredGainMaps") ||
         !mManualVignetteSidecars.candidates.empty() ||
@@ -1974,11 +1974,11 @@ bool VirtualFileSystemImpl_DirectLog::hasSourceGainMaps() const {
          mManualVignetteSidecars.dcpSpatialGainMap.has_value());
 }
 
-bool VirtualFileSystemImpl_DirectLog::isHLGVideo() const {
+bool VirtualFileSystemImpl_NativeVideo::isHLGVideo() const {
     return mIsHLG;
 }
 
-void VirtualFileSystemImpl_DirectLog::calculateFrameRateStats() {
+void VirtualFileSystemImpl_NativeVideo::calculateFrameRateStats() {
     const auto& frames = mDecoder->getFrames();
     
     if (frames.size() < 2) {
@@ -1994,7 +1994,7 @@ void VirtualFileSystemImpl_DirectLog::calculateFrameRateStats() {
     
     mFrameRateInfo = vfs::calculateFrameRate(timestamps);
     
-    SPDLOG_DEBUG("DirectLog frame rate stats: avg={:.2f}fps, median={:.2f}fps", mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
+    SPDLOG_DEBUG("Native Video frame rate stats: avg={:.2f}fps, median={:.2f}fps", mFrameRateInfo.averageFrameRate, mFrameRateInfo.medianFrameRate);
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

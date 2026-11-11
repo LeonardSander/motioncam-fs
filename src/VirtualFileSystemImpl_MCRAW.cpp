@@ -35,12 +35,12 @@
 #include <tuple>
 
 namespace {
-void cropPreviewRawToVisibleTopLeft(motioncam::PreviewFrame& preview,
-                                    const motioncam::RenderSettings& settings) {
-    if (!(settings.options & motioncam::RENDER_OPT_CROPPING) ||
+void cropPreviewRawToVisibleTopLeft(rawpreamp::PreviewFrame& preview,
+                                    const rawpreamp::RenderSettings& settings) {
+    if (!(settings.options & rawpreamp::RENDER_OPT_CROPPING) ||
         !preview.rawSamples || preview.rawChannels != 1) return;
     uint32_t cropWidth = 0, cropHeight = 0, stride = 0;
-    motioncam::utils::parseCropTarget(settings.cropTarget, cropWidth, cropHeight, stride);
+    rawpreamp::utils::parseCropTarget(settings.cropTarget, cropWidth, cropHeight, stride);
     if (!cropWidth || !cropHeight || cropWidth > preview.rawWidth ||
         cropHeight > preview.rawHeight ||
         !preview.width || !preview.height ||
@@ -64,18 +64,18 @@ void cropPreviewRawToVisibleTopLeft(motioncam::PreviewFrame& preview,
 }
 
 struct CachedMcrawAnalysis {
-    std::vector<motioncam::Timestamp> frames;
+    std::vector<rawpreamp::Timestamp> frames;
     double baselineExposure = 0.0;
-    std::map<motioncam::Timestamp, float> smoothedExposure;
-    std::map<motioncam::Timestamp, std::array<float, 3>> smoothedNeutral;
+    std::map<rawpreamp::Timestamp, float> smoothedExposure;
+    std::map<rawpreamp::Timestamp, std::array<float, 3>> smoothedNeutral;
 };
 std::mutex mcrawAnalysisCacheMutex;
 std::unordered_map<std::string, CachedMcrawAnalysis> mcrawAnalysisCache;
 constexpr uint64_t mcrawAnalysisCacheMagic = 0x4d43464d43000001ULL;
 
 std::string effectiveCfaArrangement(
-        const motioncam::RenderSettings& settings,
-        const std::optional<motioncam::CalibrationData>& calibration,
+        const rawpreamp::RenderSettings& settings,
+        const std::optional<rawpreamp::CalibrationData>& calibration,
         std::string sensorArrangement) {
     auto validOverride = [](std::string phase) {
         boost::algorithm::to_lower(phase);
@@ -92,10 +92,10 @@ std::string effectiveCfaArrangement(
 }
 
 void resolveOverriddenGainMapSensor(
-        motioncam::CameraFrameMetadata& frame,
-        const std::optional<motioncam::CalibrationData>& calibration,
-        const motioncam::vfs::ManualVignetteSidecars& manualSidecars,
-        const std::vector<motioncam::GainMap>& maps) {
+        rawpreamp::CameraFrameMetadata& frame,
+        const std::optional<rawpreamp::CalibrationData>& calibration,
+        const rawpreamp::vfs::ManualVignetteSidecars& manualSidecars,
+        const std::vector<rawpreamp::GainMap>& maps) {
     if (maps.empty() && manualSidecars.candidates.empty()) return;
     if (calibration && calibration->hasFullSensorResolution) {
         frame.originalWidth = calibration->fullSensorResolution[0];
@@ -113,38 +113,38 @@ void resolveOverriddenGainMapSensor(
         frame.originalHeight = bottom;
         return;
     }
-    const auto manual = motioncam::vfs::manualVignetteSensorResolution(manualSidecars);
+    const auto manual = rawpreamp::vfs::manualVignetteSensorResolution(manualSidecars);
     if (manual[0] >= frame.width && manual[1] >= frame.height) {
         frame.originalWidth = manual[0];
         frame.originalHeight = manual[1];
     }
 }
 
-motioncam::RenderSettings canonicalMcrawGenerationSettings(
-        const motioncam::RenderSettings& settings, bool earlyProxy = false) {
+rawpreamp::RenderSettings canonicalMcrawGenerationSettings(
+        const rawpreamp::RenderSettings& settings, bool earlyProxy = false) {
     auto canonical = settings;
-    canonical.options = static_cast<motioncam::FileRenderOptions>(
+    canonical.options = static_cast<rawpreamp::FileRenderOptions>(
         canonical.options &
-        ~(motioncam::RENDER_OPT_CROPPING | motioncam::RENDER_OPT_DRAFT |
-          motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-          motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR |
-          motioncam::RENDER_OPT_NORMALIZE_SHADING_MAP |
-          motioncam::RENDER_OPT_OPTIMIZE_GAIN_MAPS |
-          motioncam::RENDER_OPT_DEBUG_SHADING_MAP |
-          motioncam::RENDER_OPT_LOG_TRANSFORM |
-          motioncam::RENDER_OPT_REMOSAIC_TO_BAYER |
-          motioncam::RENDER_OPT_HIGHER_CFA_HQ |
-          motioncam::RENDER_OPT_BAKE_ISO));
+        ~(rawpreamp::RENDER_OPT_CROPPING | rawpreamp::RENDER_OPT_DRAFT |
+          rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+          rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR |
+          rawpreamp::RENDER_OPT_NORMALIZE_SHADING_MAP |
+          rawpreamp::RENDER_OPT_OPTIMIZE_GAIN_MAPS |
+          rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP |
+          rawpreamp::RENDER_OPT_LOG_TRANSFORM |
+          rawpreamp::RENDER_OPT_REMOSAIC_TO_BAYER |
+          rawpreamp::RENDER_OPT_HIGHER_CFA_HQ |
+          rawpreamp::RENDER_OPT_BAKE_ISO));
     if (earlyProxy)
-        canonical.options |= motioncam::RENDER_OPT_DRAFT;
-    canonical.quadBayerOption = motioncam::QuadBayerMode::CorrectQBCFAMetadata;
+        canonical.options |= rawpreamp::RENDER_OPT_DRAFT;
+    canonical.quadBayerOption = rawpreamp::QuadBayerMode::CorrectQBCFAMetadata;
     canonical.cameraNativeStaging = false;
     canonical.streamingPreview = false;
-    canonical.badPixelTreatment = motioncam::BadPixelTreatment::Disabled;
+    canonical.badPixelTreatment = rawpreamp::BadPixelTreatment::Disabled;
     return canonical;
 }
 
-bool hasNonNeutralShadingMap(const motioncam::CameraFrameMetadata& frame) {
+bool hasNonNeutralShadingMap(const rawpreamp::CameraFrameMetadata& frame) {
     if (frame.lensShadingMapWidth <= 0 || frame.lensShadingMapHeight <= 0 ||
         frame.lensShadingMap.size() < 4)
         return false;
@@ -160,18 +160,18 @@ bool hasNonNeutralShadingMap(const motioncam::CameraFrameMetadata& frame) {
         });
 }
 
-bool hasNonNeutralGainMaps(const std::vector<motioncam::GainMap>& maps) {
+bool hasNonNeutralGainMaps(const std::vector<rawpreamp::GainMap>& maps) {
     return std::any_of(maps.begin(), maps.end(), [](const auto& map) {
         return std::any_of(map.data.begin(), map.data.end(),
             [](float gain) { return gain != 1.0f; });
     });
 }
 
-bool hasExternalGainToBake(const motioncam::vfs::ManualVignetteSidecars& manual,
+bool hasExternalGainToBake(const rawpreamp::vfs::ManualVignetteSidecars& manual,
                            const nlohmann::json& sidecar, size_t frameIndex) {
-    if (hasNonNeutralGainMaps(motioncam::vfs::loadSidecarGainMaps(
+    if (hasNonNeutralGainMaps(rawpreamp::vfs::loadSidecarGainMaps(
             sidecar, frameIndex, "gainMaps")) ||
-        hasNonNeutralGainMaps(motioncam::vfs::loadSidecarGainMaps(
+        hasNonNeutralGainMaps(rawpreamp::vfs::loadSidecarGainMaps(
             sidecar, frameIndex, "deferredGainMaps")))
         return true;
     if (manual.useDcpGainmap && manual.dcpSpatialGainMap &&
@@ -185,23 +185,23 @@ bool hasExternalGainToBake(const motioncam::vfs::ManualVignetteSidecars& manual,
         });
 }
 
-void disableUnavailableVignetteBake(motioncam::RenderSettings& settings,
-                                    const motioncam::CameraFrameMetadata& frame,
+void disableUnavailableVignetteBake(rawpreamp::RenderSettings& settings,
+                                    const rawpreamp::CameraFrameMetadata& frame,
                                     bool externalGain) {
     if (hasNonNeutralShadingMap(frame) || externalGain) return;
-    settings.options = static_cast<motioncam::FileRenderOptions>(
-        settings.options & ~(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-                             motioncam::RENDER_OPT_DEBUG_SHADING_MAP));
+    settings.options = static_cast<rawpreamp::FileRenderOptions>(
+        settings.options & ~(rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+                             rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP));
 }
 
 void reorderNativeShadingMapToCfaPhases(
-        motioncam::CameraFrameMetadata& metadata,
+        rawpreamp::CameraFrameMetadata& metadata,
         std::string sensorArrangement) {
     if (metadata.lensShadingMap.size() != 4) return;
     boost::algorithm::to_lower(sensorArrangement);
     if (sensorArrangement != "rggb" && sensorArrangement != "bggr" &&
         sensorArrangement != "grbg" && sensorArrangement != "gbrg") return;
-    const auto cfa = motioncam::cfaColorsFromPhase(sensorArrangement);
+    const auto cfa = rawpreamp::cfaColorsFromPhase(sensorArrangement);
 
     // MotionCam stores Android LensShadingMap channels as R, G-even,
     // G-odd, B. The processing and DNG opcode paths use spatial CFA phases.
@@ -217,9 +217,9 @@ void reorderNativeShadingMapToCfaPhases(
 std::string mcrawAnalysisCacheKey(const std::string& path) {
     std::error_code error;
     const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
-    const auto size = motioncam::sourceFileSize(absolute, error);
+    const auto size = rawpreamp::sourceFileSize(absolute, error);
     if (error) return absolute.string();
-    const auto revision = motioncam::sourceRevision(absolute.string());
+    const auto revision = rawpreamp::sourceRevision(absolute.string());
     if (!revision.empty()) return "timestamp-repair-v1:" + absolute.string() + ":" + std::to_string(size) + ":" + revision;
     const auto modified = std::filesystem::last_write_time(absolute, error);
     return "timestamp-repair-v1:" + absolute.string() + ":" + std::to_string(size) +
@@ -233,7 +233,7 @@ std::filesystem::path mcrawAnalysisCachePath(const std::string& key) {
     if (cacheRoot && cacheRoot[0] != '\0') root = cacheRoot;
     else if (const char* home = std::getenv("HOME")) root = std::filesystem::path(home) / ".cache";
     else root = std::filesystem::temp_directory_path();
-    return root / "motioncam-fuse" / "mcraw-analysis" /
+    return root / "rawpreamp" / "mcraw-analysis" /
            (std::to_string(std::hash<std::string>{}(key)) + ".bin");
 }
 
@@ -255,7 +255,7 @@ void writeCacheString(std::ostream& output, const std::string& value) {
     output.write(value.data(), size);
 }
 bool loadPersistentMcrawAnalysis(const std::string& key, CachedMcrawAnalysis& cached) {
-    motioncam::SourceInputStream input(mcrawAnalysisCachePath(key), std::ios::binary);
+    rawpreamp::SourceInputStream input(mcrawAnalysisCachePath(key), std::ios::binary);
     uint64_t magic = 0, frameCount = 0, exposureCount = 0, neutralCount = 0;
     std::string storedKey;
     if (!readCacheValue(input, magic) || magic != mcrawAnalysisCacheMagic ||
@@ -266,14 +266,14 @@ bool loadPersistentMcrawAnalysis(const std::string& key, CachedMcrawAnalysis& ca
     for (auto& frame : cached.frames) if (!readCacheValue(input, frame)) return false;
     if (!readCacheValue(input, exposureCount) || exposureCount > frameCount) return false;
     for (uint64_t index = 0; index < exposureCount; ++index) {
-        motioncam::Timestamp timestamp;
+        rawpreamp::Timestamp timestamp;
         float value;
         if (!readCacheValue(input, timestamp) || !readCacheValue(input, value)) return false;
         cached.smoothedExposure.emplace(timestamp, value);
     }
     if (!readCacheValue(input, neutralCount) || neutralCount > frameCount) return false;
     for (uint64_t index = 0; index < neutralCount; ++index) {
-        motioncam::Timestamp timestamp;
+        rawpreamp::Timestamp timestamp;
         std::array<float, 3> value;
         if (!readCacheValue(input, timestamp) ||
             !input.read(reinterpret_cast<char*>(value.data()), sizeof(value))) return false;
@@ -311,20 +311,20 @@ void savePersistentMcrawAnalysis(const std::string& key, const CachedMcrawAnalys
         error.clear();
         std::filesystem::rename(temporary, path, error);
     }
-    motioncam::trimSourceAnalysisCache(path.parent_path().parent_path());
+    rawpreamp::trimSourceAnalysisCache(path.parent_path().parent_path());
 }
 
 double elapsedMs(const std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(
-        motioncam::diagnosticNow() - start).count();
+        rawpreamp::diagnosticNow() - start).count();
 }
 bool galleryDiagnosticsEnabled() {
-    const char* value = motioncam::debugEnvironment("MOTIONCAM_GALLERY_DIAGNOSTICS");
+    const char* value = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_DIAGNOSTICS");
     return value && value[0] != '\0' && std::string(value) != "0";
 }
 }
 
-namespace motioncam {
+namespace rawpreamp {
 
 VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         BS::thread_pool&,
@@ -344,7 +344,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         mSettings(settings) {
     if (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION)
         warmVulkanGainBake();
-    const auto initializationStarted = motioncam::diagnosticNow();
+    const auto initializationStarted = rawpreamp::diagnosticNow();
     mSettings.draftScale =
         vfs::getScaleFromOptions(mSettings.options, mSettings.draftScale);
     
@@ -392,7 +392,7 @@ VirtualFileSystemImpl_MCRAW::VirtualFileSystemImpl_MCRAW(
         vfs::referencedSidecarPath(
             mGyroflowSidecarPath, mSidecarMetadata, calibPath, "gyroflow"));
     if (!reusedAnalysis) {
-        Decoder decoder(motioncam::decoderSource(mSrcPath));
+        motioncam::Decoder decoder(rawpreamp::decoderSource(mSrcPath));
         auto frames = decoder.getFrames();
         std::sort(frames.begin(), frames.end());
         if(frames.empty()) return;
@@ -446,7 +446,7 @@ VirtualFileSystemImpl_MCRAW::~VirtualFileSystemImpl_MCRAW() {
 }
 
 void VirtualFileSystemImpl_MCRAW::init() {
-    Decoder decoder(motioncam::decoderSource(mSrcPath));
+    motioncam::Decoder decoder(rawpreamp::decoderSource(mSrcPath));
     const auto& frames = mSourceFrames;
 
     if(frames.empty())
@@ -592,14 +592,14 @@ void VirtualFileSystemImpl_MCRAW::init() {
     // Generate and add audio (TODO: We're loading all the audio into memory)
     Entry audioEntry;
 
-    std::vector<AudioChunk> audioChunks;
+    std::vector<motioncam::AudioChunk> audioChunks;
     if (!mSettings.streamingPreview)
         decoder.loadAudio(audioChunks);
 
     if(!audioChunks.empty()) {
         auto fpsFraction = utils::toFraction(mFps);
-        AudioSampleFormat audioFormat = audioChunks[0].format;
-        int bitDepth = audioFormat == AudioSampleFormat::Float32 ? 32 : 16;
+        motioncam::AudioSampleFormat audioFormat = audioChunks[0].format;
+        int bitDepth = audioFormat == motioncam::AudioSampleFormat::Float32 ? 32 : 16;
         AudioWriter audioWriter(
             mAudioFile,
             decoder.numAudioChannels(),
@@ -618,7 +618,7 @@ void VirtualFileSystemImpl_MCRAW::init() {
         // Calculate total audio duration
         for(auto& x : audioChunks) {
             int numFrames = x.sampleCount() / decoder.numAudioChannels();
-            if (audioFormat == AudioSampleFormat::Float32) {
+            if (audioFormat == motioncam::AudioSampleFormat::Float32) {
                 audioWriter.write(x.float32Data, numFrames);
             } else {
                 audioWriter.write(x.int16Data, numFrames);
@@ -822,12 +822,12 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         return std::make_shared<std::vector<uint8_t>>(mAudioFile.begin(), mAudioFile.end());
 
     return vfs::materializeCached(mCache, entry, outputCompression || savedOutput, [&] {
-        const bool profile = motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE") != nullptr;
-        const auto materializeStarted = motioncam::diagnosticNow();
-        thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
+        const bool profile = rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE") != nullptr;
+        const auto materializeStarted = rawpreamp::diagnosticNow();
+        thread_local std::map<std::string, std::unique_ptr<motioncam::Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
-            decoder = std::make_unique<Decoder>(motioncam::decoderSource(mSrcPath));
+            decoder = std::make_unique<motioncam::Decoder>(rawpreamp::decoderSource(mSrcPath));
         const auto timestamp = std::get<Timestamp>(entry.userData);
         const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
         if (frameIt == mFrameIndexByTimestamp.end())
@@ -839,7 +839,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight, strideOverride);
         decoder->loadFrame(timestamp, frameData, metadata, static_cast<int>(strideOverride));
-        const auto loadedAt = motioncam::diagnosticNow();
+        const auto loadedAt = rawpreamp::diagnosticNow();
         RenderSettings frameSettings = mSettings;
         const auto renderPlan = vfs::planDngRender(
             entry, timestamp, mSourceFrames.front(), frameSettings, mFps,
@@ -873,7 +873,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         // The native adapter performs CFA-only bad-pixel treatment and emits
         // an otherwise canonical, uncompressed CFA DNG.
         // All source-independent pixel operations run below through the same
-        // DNG pipeline used by imported DNG and DirectLog frames.
+        // DNG pipeline used by imported DNG and Native Video frames.
         const bool earlyProxy = frameMetadata.linearizationTable.empty() &&
             !jpegCompression && !frameSettings.streamingPreview &&
             renderPlan.scale > 1 &&
@@ -920,7 +920,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             nullptr, false, nullptr, unpackedIntermediate);
         if (!output)
             throw std::runtime_error("DNG generation returned no data");
-        const auto generatedAt = motioncam::diagnosticNow();
+        const auto generatedAt = rawpreamp::diagnosticNow();
         std::vector<uint8_t>& timed = *output;
         if (!mTelemetry->fillMissingDngMetadata(timed, frameIt->second))
             throw std::runtime_error("Could not fill raw-container capture metadata");
@@ -964,7 +964,7 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
         pixels.sourceName = boost::algorithm::iends_with(mSrcPath, ".mcpro") ? "mc24" : "MCRAW";
         pixels.ditherSeed = static_cast<uint32_t>(renderPlan.outputFrameNumber + 1);
         vfs::processDngPixels(timed, frameSettings, pixels);
-        const auto processedAt = motioncam::diagnosticNow();
+        const auto processedAt = rawpreamp::diagnosticNow();
         vfs::DngFinalizeOptions finalize;
         finalize.frameRate = mFps;
         finalize.timestamp = renderPlan.outputTimestamp;
@@ -985,20 +985,20 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
             if (!DNGDecoder::setOrientation(timed, orientationDegrees))
                 throw std::runtime_error("Could not set raw container DNG orientation");
         }
-        const auto finalizedAt = motioncam::diagnosticNow();
+        const auto finalizedAt = rawpreamp::diagnosticNow();
         if (!jpegCompression && !mSettings.streamingPreview && mSettings.projectedFileSizes && !savedOutput) {
             if (timed.size() > entry.size)
                 throw std::runtime_error(
                     "Generated MCRAW DNG exceeds advertised mounted size");
             timed.resize(entry.size, 0);
         }
-        MOTIONCAM_DIAGNOSTIC_INFO("MCRAW timing [{} frame={}]: load {:.1f} ms, generate {:.1f} ms, process {:.1f} ms, finalize {:.1f} ms, total {:.1f} ms, output {:.2f} MiB",
+        RAWPREAMP_DIAGNOSTIC_INFO("MCRAW timing [{} frame={}]: load {:.1f} ms, generate {:.1f} ms, process {:.1f} ms, finalize {:.1f} ms, total {:.1f} ms, output {:.2f} MiB",
                      mSrcPath, vfs::outputFrameNumber(entry),
                      std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
                      std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
                      std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
                      std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
-                     std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-materializeStarted).count(),
+                     std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-materializeStarted).count(),
                      static_cast<double>(timed.size()) / (1024.0 * 1024.0));
         if (profile) {
             spdlog::info("GALLERY_PERF event=mcraw_mounted_stage source={} frame={} early_proxy={} load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f}",
@@ -1007,14 +1007,14 @@ std::shared_ptr<std::vector<uint8_t>> VirtualFileSystemImpl_MCRAW::materializeFi
                          std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
                          std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
                          std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
-                         std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-materializeStarted).count());
+                         std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-materializeStarted).count());
             spdlog::info("GALLERY_PERF event=mounted_frame_stage source=MCRAW source_path={} frame={} queue_ms=0 load_ms={:.3f} generate_ms={:.3f} process_ms={:.3f} finalize_ms={:.3f} total_ms={:.3f} bytes={}",
                          mSrcPath, vfs::outputFrameNumber(entry),
                          std::chrono::duration<double, std::milli>(loadedAt-materializeStarted).count(),
                          std::chrono::duration<double, std::milli>(generatedAt-loadedAt).count(),
                          std::chrono::duration<double, std::milli>(processedAt-generatedAt).count(),
                          std::chrono::duration<double, std::milli>(finalizedAt-processedAt).count(),
-                         std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-materializeStarted).count(),
+                         std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-materializeStarted).count(),
                          output->size());
         }
         return output;
@@ -1029,10 +1029,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         const auto frameIt = mFrameIndexByTimestamp.find(timestamp);
         if (frameIt == mFrameIndexByTimestamp.end())
             return false;
-        thread_local std::map<std::string, std::unique_ptr<Decoder>> decoders;
+        thread_local std::map<std::string, std::unique_ptr<motioncam::Decoder>> decoders;
         auto& decoder = decoders[mSrcPath];
         if (!decoder)
-            decoder = std::make_unique<Decoder>(motioncam::decoderSource(mSrcPath));
+            decoder = std::make_unique<motioncam::Decoder>(rawpreamp::decoderSource(mSrcPath));
         const bool hasNonGainMapSidecar = std::any_of(
             mManualVignetteSidecars.candidates.begin(),
             mManualVignetteSidecars.candidates.end(),
@@ -1101,10 +1101,10 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         if (mSettings.options & RENDER_OPT_CROPPING)
             utils::parseCropTarget(mSettings.cropTarget, cropWidth, cropHeight,
                                    strideOverride);
-        const auto loadStarted = motioncam::diagnosticNow();
+        const auto loadStarted = rawpreamp::diagnosticNow();
         decoder->loadFrame(timestamp, frameData, metadata,
                            static_cast<int>(strideOverride));
-        const auto loadFinished = motioncam::diagnosticNow();
+        const auto loadFinished = rawpreamp::diagnosticNow();
         auto frameMetadata = CameraFrameMetadata::parse(metadata);
         frameMetadata.filename = boost::filesystem::path(mSrcPath).filename().string();
         const auto sidecarMaps = vfs::loadSidecarGainMaps(
@@ -1196,7 +1196,7 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
             cropPreviewRawToVisibleTopLeft(preview, mSettings);
             return !preview.rgb.empty() || preview.hasGalleryCfa();
         }
-        const auto generateStarted = motioncam::diagnosticNow();
+        const auto generateStarted = rawpreamp::diagnosticNow();
         utils::generateDng(frameData, frameMetadata, cameraConfig, mFps,
                            vfs::outputFrameNumber(entry), mBaselineExpValue,
                            previewSettings, mCalibration, false, exposureOverride,
@@ -1206,12 +1206,12 @@ bool VirtualFileSystemImpl_MCRAW::materializePreviewFrame(
         vfs::mergeManualDngMetadata(preview.metadata, mManualVignetteSidecars,
                                      mCalibration ? &*mCalibration : nullptr, false);
         vfs::applyPreviewExposureOffset(preview.metadata, mSettings);
-        if (motioncam::debugEnvironment("MOTIONCAM_GALLERY_PERF_PROFILE"))
+        if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_PERF_PROFILE"))
             spdlog::info("GALLERY_PERF event=mcraw_preview_stage source={} load_ms={:.3f} prepare_ms={:.3f} generate_ms={:.3f}",
                 mSrcPath,
                 std::chrono::duration<double, std::milli>(loadFinished-loadStarted).count(),
                 std::chrono::duration<double, std::milli>(generateStarted-loadFinished).count(),
-                std::chrono::duration<double, std::milli>(motioncam::diagnosticNow()-generateStarted).count());
+                std::chrono::duration<double, std::milli>(rawpreamp::diagnosticNow()-generateStarted).count());
         if (frameMetadata.linearizationTable.empty())
             preview.gainMapApplied =
                 (mSettings.options & RENDER_OPT_APPLY_VIGNETTE_CORRECTION) &&
@@ -1300,4 +1300,4 @@ FileInfo VirtualFileSystemImpl_MCRAW::getFileInfo() const {
     return mFileInfo;
 }
 
-} // namespace motioncam
+} // namespace rawpreamp

@@ -1,9 +1,9 @@
 #pragma once
 
-#if defined(__ANDROID__) && defined(MOTIONCAM_HAS_DIRECTLOG_PLACEBO)
+#if defined(__ANDROID__) && defined(RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO)
 #include <libplacebo/vulkan.h>
 
-namespace motioncam {
+namespace rawpreamp {
 // Both ends of the gallery handoff must enable the same interop extensions.
 // Optional negotiation preserves devices that only support ordinary uploads.
 inline void enableAndroidVulkanInterop(pl_vulkan_params& params) {

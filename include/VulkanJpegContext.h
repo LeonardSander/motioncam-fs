@@ -1,12 +1,12 @@
 #pragma once
 
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libplacebo/vulkan.h>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 
-namespace motioncam {
+namespace rawpreamp {
 // Shared by the lossless JPEG predictor and entropy passes. Both callers hold
 // this mutex while issuing commands on the libplacebo GPU.
 struct VulkanJpegContext {

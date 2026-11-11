@@ -87,7 +87,7 @@ jobs:
 
     - name: Build APK
       run: |
-        cmake --build build-android-arm64 --target MotionCamFuse --parallel 4
+        cmake --build build-android-arm64 --target RawPreamp --parallel 4
         cmake --build build-android-arm64 --target apk --parallel 4
 
     - name: Package APK
@@ -98,7 +98,7 @@ jobs:
         export ANDROID_SDK_ROOT="$ANDROID_HOME"
         bash scripts/sign_android_apk.sh \
           build-android-arm64/android-build/build/outputs/apk/release/android-build-release-unsigned.apk \
-          "artifacts/motioncam-${ref_safe}-android-arm64.apk"
+          "artifacts/rawpreamp-${ref_safe}-android-arm64.apk"
 
     - name: Upload APK
       uses: actions/upload-artifact@v7
@@ -130,11 +130,11 @@ jobs:
       continue-on-error: true
       shell: bash
       run: |
-        cmake --build build-android-tests --parallel 4 --target motioncam-portable-tests
+        cmake --build build-android-tests --parallel 4 --target rawpreamp-portable-tests
 
     - name: Build device tests (advisory)
       continue-on-error: true
-      run: cmake --build build-android-tests --target motioncam-device-tests --parallel 4
+      run: cmake --build build-android-tests --target rawpreamp-device-tests --parallel 4
 
     - name: Enable emulator acceleration
       continue-on-error: true
@@ -232,7 +232,7 @@ jobs:
           -DVCPKG_OVERLAY_TRIPLETS="$PWD/scripts/vcpkg-triplets" \
           -DVCPKG_MANIFEST_MODE=ON \
           -DBUILD_TESTING=ON \
-          -DMOTIONCAM_REQUIRE_VULKAN=ON \
+          -DRAWPREAMP_REQUIRE_VULKAN=ON \
           -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config \
           -DPKG_CONFIG_ARGN=--static
 
@@ -240,26 +240,26 @@ jobs:
       if: failure() && steps.linux-configure.outcome == 'failure'
       uses: actions/upload-artifact@v4
       with:
-        name: motioncam-Linux-${{ matrix.arch }}-dependency-logs
+        name: rawpreamp-Linux-${{ matrix.arch }}-dependency-logs
         if-no-files-found: ignore
         path: |
           build-linux/vcpkg-manifest-install.log
           vcpkg/buildtrees/ffmpeg/*.log
 
     - name: Build runtime
-      run: cmake --build build-linux --config Release --target MotionCamFuse motioncam-hardware-video-decoder-test --parallel
+      run: cmake --build build-linux --config Release --target RawPreamp rawpreamp-hardware-video-decoder-test --parallel
 
     - name: Check Linux hardware decoder coverage
-      run: ctest --test-dir build-linux -R '^motioncam-hardware-video-decoder-test$' --output-on-failure --no-tests=error
+      run: ctest --test-dir build-linux -R '^rawpreamp-hardware-video-decoder-test$' --output-on-failure --no-tests=error
 
     - name: Build portable tests
       id: test-build
       continue-on-error: true
-      run: cmake --build build-linux --config Release --target motioncam-portable-tests --parallel
+      run: cmake --build build-linux --config Release --target rawpreamp-portable-tests --parallel
 
     - name: Build device tests (advisory)
       continue-on-error: true
-      run: cmake --build build-linux --config Release --target motioncam-device-tests --parallel 4
+      run: cmake --build build-linux --config Release --target rawpreamp-device-tests --parallel 4
 
     - name: Test portable suite
       id: portable-tests
@@ -276,10 +276,10 @@ jobs:
       run: |
         set -euxo pipefail
         DESTDIR="$PWD/AppDir" cmake --install build-linux --prefix /usr --strip
-        install -Dm644 packaging/linux/com.motioncam.fuse.desktop \
-          AppDir/usr/share/applications/com.motioncam.fuse.desktop
+        install -Dm644 packaging/linux/com.rawpreamp.app.desktop \
+          AppDir/usr/share/applications/com.rawpreamp.app.desktop
         install -Dm644 assets/app_icon_linux.png \
-          AppDir/usr/share/icons/hicolor/256x256/apps/motioncam-fuse.png
+          AppDir/usr/share/icons/hicolor/256x256/apps/rawpreamp.png
         # Ubuntu's 7zip package exposes /usr/bin/7z as a wrapper around the
         # real binary. Bundle the binary itself so it also works in the AppImage.
         install -Dm755 /usr/lib/7zip/7z AppDir/usr/bin/7z
@@ -308,7 +308,7 @@ jobs:
         done
         ./linuxdeploy.AppImage --appimage-extract-and-run \
           --appdir AppDir \
-          --desktop-file packaging/linux/com.motioncam.fuse.desktop \
+          --desktop-file packaging/linux/com.rawpreamp.app.desktop \
           --icon-file assets/app_icon_linux.png \
           --plugin qt
         # Qt opens the unversioned Vulkan name. Without this alias it can load
@@ -320,7 +320,7 @@ jobs:
           --appdir AppDir --output appimage
         mkdir -p artifacts
         ref_safe="${GITHUB_REF_NAME//\//-}"
-        mv MotionCam_Fuse-*.AppImage artifacts/motioncam-${ref_safe}-linux-${{ matrix.arch }}.AppImage
+        mv RawPreamp-*.AppImage artifacts/rawpreamp-${ref_safe}-linux-${{ matrix.arch }}.AppImage
 
     - name: Check packaged Linux display backends
       shell: bash
@@ -336,10 +336,10 @@ jobs:
         # Test the deployed runtime and libraries without requiring a GPU.
         export LD_LIBRARY_PATH="$PWD/AppDir/usr/lib"
         export QT_PLUGIN_PATH="$PWD/AppDir/usr/plugins"
-        xvfb-run -a env QT_QPA_PLATFORM=xcb AppDir/usr/bin/MotionCamFuse --help
+        xvfb-run -a env QT_QPA_PLATFORM=xcb AppDir/usr/bin/RawPreamp --help
         # A missing Wayland compositor must fall back to the X11 display.
         xvfb-run -a env -u QT_QPA_PLATFORM XDG_SESSION_TYPE=wayland \
-          WAYLAND_DISPLAY=motioncam-missing-compositor AppDir/usr/bin/MotionCamFuse --help
+          WAYLAND_DISPLAY=rawpreamp-missing-compositor AppDir/usr/bin/RawPreamp --help
 
     - name: Upload AppImage
       uses: actions/upload-artifact@v7
@@ -498,7 +498,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
           -DCMAKE_VERBOSE_MAKEFILE=ON \
           -DBUILD_TESTING=ON \
-          -DMOTIONCAM_REQUIRE_VULKAN=ON \
+          -DRAWPREAMP_REQUIRE_VULKAN=ON \
           -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
           -DVCPKG_HOST_TRIPLET=${{ matrix.vcpkg_triplet }} \
@@ -508,7 +508,7 @@ jobs:
           -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_target }} \
           -DCMAKE_IGNORE_PREFIX_PATH="$BREW_PREFIX" \
           -DQt6_DIR="$QT_PREFIX/lib/cmake/Qt6" \
-          -DMOTIONCAM_MOLTENVK_LIBRARY="$(brew --prefix molten-vk)/lib/libMoltenVK.dylib" \
+          -DRAWPREAMP_MOLTENVK_LIBRARY="$(brew --prefix molten-vk)/lib/libMoltenVK.dylib" \
           -DJPEG_ROOT="$VCPKG_PREFIX" \
           -DFUSE_T_FRAMEWORK="$FUSE_LIB"
 
@@ -516,19 +516,19 @@ jobs:
     # ---------- BUILD ----------
     # Test failures preserve build artifacts; the portable-tests job gates prereleases.
     - name: Build runtime
-      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target MotionCamFuse motioncam-hardware-video-decoder-test --parallel
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target RawPreamp rawpreamp-hardware-video-decoder-test --parallel
 
     - name: Check platform hardware decoder coverage
-      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -R '^motioncam-hardware-video-decoder-test$' --output-on-failure --no-tests=error
+      run: ctest --test-dir "${{ matrix.build_dir }}" -C ${{ matrix.build_type }} -R '^rawpreamp-hardware-video-decoder-test$' --output-on-failure --no-tests=error
 
     - name: Build portable tests
       id: test-build
       continue-on-error: true
-      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target motioncam-portable-tests --parallel
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target rawpreamp-portable-tests --parallel
 
     - name: Build device tests (advisory)
       continue-on-error: true
-      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target motioncam-device-tests --parallel 4
+      run: cmake --build "${{ matrix.build_dir }}" --config ${{ matrix.build_type }} --target rawpreamp-device-tests --parallel 4
 
     - name: Test portable suite
       id: portable-tests
@@ -550,7 +550,7 @@ jobs:
         ref_safe="${GITHUB_REF_NAME//\//-}"
         if [[ "${{ matrix.platform }}" == "windows" ]]; then
           cd "${{ matrix.build_dir }}/${{ matrix.build_type }}"
-          exe=./MotionCamFuse.exe
+          exe=./RawPreamp.exe
           if [ ! -f "$exe" ]; then
             echo "No Windows executable found in $PWD" >&2
             exit 1
@@ -559,11 +559,11 @@ jobs:
           # Keep the hardware-enabled FFmpeg DLLs copied by vcpkg. Qt 6.12
           # bundles the same DLL names and must not replace that tested build.
           windeployqt.exe --release --no-ffmpeg "$exe"
-          ./motioncam-hardware-video-decoder-test.exe
+          ./rawpreamp-hardware-video-decoder-test.exe
           sevenzip_dir="$(dirname "$(command -v 7z)")"
           cp "$sevenzip_dir/7z.exe" .
           if [ -f "$sevenzip_dir/7z.dll" ]; then cp "$sevenzip_dir/7z.dll" .; fi
-          7z a ../../artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}.zip ./*
+          7z a ../../artifacts/rawpreamp-${ref_safe}-${{ matrix.artifact_suffix }}.zip ./*
         elif [[ "${{ runner.os }}" == "macOS" ]]; then
           cd "${{ matrix.build_dir }}"
           app=$(find . -name "*.app" -print -quit)
@@ -573,13 +573,13 @@ jobs:
           fi
           echo "Packaging $app"
           mkdir -p ../debug-symbols
-          dsymutil "$app/Contents/MacOS/MotionCamFuse" -o MotionCamFuse.dSYM
-          ditto -c -k --keepParent MotionCamFuse.dSYM \
-            "../debug-symbols/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}-symbols.zip"
+          dsymutil "$app/Contents/MacOS/RawPreamp" -o RawPreamp.dSYM
+          ditto -c -k --keepParent RawPreamp.dSYM \
+            "../debug-symbols/rawpreamp-${ref_safe}-${{ matrix.artifact_suffix }}-symbols.zip"
           cp "$(command -v 7zz)" "$app/Contents/MacOS/7zz"
           bash "${{ github.workspace }}/scripts/package_macos_app.sh" "$app"
           ditto -c -k --sequesterRsrc --keepParent \
-            "$app" "../artifacts/motioncam-${ref_safe}-${{ matrix.artifact_suffix }}.zip"
+            "$app" "../artifacts/rawpreamp-${ref_safe}-${{ matrix.artifact_suffix }}.zip"
         else
           echo "Unsupported packaging platform: ${{ matrix.platform }}" >&2
           exit 1
@@ -589,10 +589,10 @@ jobs:
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: motioncam-${{ matrix.artifact_suffix }}
+        name: rawpreamp-${{ matrix.artifact_suffix }}
         path: artifacts/*
 
-    # Keep crash symbols available for this run, outside the motioncam-* set
+    # Keep crash symbols available for this run, outside the rawpreamp-* set
     # downloaded by the prerelease job.
     - name: Upload macOS debug symbols
       if: matrix.platform == 'macos'
@@ -655,7 +655,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: release-files/
-          pattern: motioncam-*
+          pattern: rawpreamp-*
 
       - name: Create GitHub prerelease
         uses: softprops/action-gh-release@v2
@@ -664,7 +664,7 @@ jobs:
           fail_on_unmatched_files: true
           tag_name: v${{ steps.version.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: "MotionCam-FS ${{ steps.version.outputs.version }}"
+          name: "RawPreamp ${{ steps.version.outputs.version }}"
           prerelease: true
           make_latest: false
           body: |

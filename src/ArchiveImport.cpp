@@ -23,7 +23,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace motioncam {
+namespace rawpreamp {
 namespace {
 struct Entry {
     QString path;
@@ -219,7 +219,7 @@ ArchiveImportResult extractReviewArchive(const QString& archivePath) {
     }
 
     const QString temporaryRoot = QDir::temp().absoluteFilePath(
-        "motioncam-fuse-archive-" + QUuid::createUuid().toString(QUuid::WithoutBraces));
+        "rawpreamp-archive-" + QUuid::createUuid().toString(QUuid::WithoutBraces));
     if (!QDir().mkpath(temporaryRoot)) throw std::runtime_error("Could not create archive staging directory");
     try {
         if (directZip) {

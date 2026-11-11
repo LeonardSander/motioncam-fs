@@ -6,9 +6,9 @@
 #include <string_view>
 #include <spdlog/spdlog.h>
 
-namespace motioncam {
+namespace rawpreamp {
 
-#if MOTIONCAM_DEBUG_INSTRUMENTATION
+#if RAWPREAMP_DEBUG_INSTRUMENTATION
 class Measure {
 public:
     explicit Measure(std::string_view name)
@@ -43,4 +43,4 @@ public:
 };
 #endif
 
-} // namespace motioncam
+} // namespace rawpreamp

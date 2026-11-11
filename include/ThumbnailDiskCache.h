@@ -8,7 +8,7 @@
 #include <QScopeGuard>
 #include <atomic>
 
-namespace motioncam {
+namespace rawpreamp {
 enum class ThumbnailCacheWrite { Saved, Full, Failed };
 
 inline ThumbnailCacheWrite saveThumbnailCacheFile(

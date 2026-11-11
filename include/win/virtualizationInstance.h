@@ -4,7 +4,7 @@
 #include <projectedfslib.h>
 #include <stdexcept>
 
-namespace motioncam {
+namespace rawpreamp {
 
 struct GUIDComparer {
     bool operator()(const GUID & Left, const GUID & Right) const
@@ -134,7 +134,7 @@ private:
     PRJ_STARTVIRTUALIZING_OPTIONS _options = {};
     PRJ_CALLBACKS _callbacks = {};
     OptionalMethods _implementedOptionalMethods = OptionalMethods::None;
-    const std::wstring _instanceIdFile = LR"(\.motioncam-fs)";
+    const std::wstring _instanceIdFile = LR"(\.RawPreamp)";
 
     HRESULT EnsureVirtualizationRoot();
 
@@ -194,4 +194,4 @@ private:
     );
 };
 
-} // namespace motioncam
+} // namespace rawpreamp

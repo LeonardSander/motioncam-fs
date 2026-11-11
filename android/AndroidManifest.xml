@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.motioncam.fuse"
+    package="com.rawpreamp.app"
     android:installLocation="auto"
     android:versionCode="-- %%INSERT_VERSION_CODE%% --"
     android:versionName="-- %%INSERT_VERSION_NAME%% --">
@@ -21,7 +21,7 @@
         android:allowBackup="true"
         android:fullBackupOnly="false">
         <activity
-            android:name="com.motioncam.fuse.MotionCamActivity"
+            android:name="com.rawpreamp.app.RawPreampActivity"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
             android:launchMode="singleTop"
             android:screenOrientation="fullSensor"

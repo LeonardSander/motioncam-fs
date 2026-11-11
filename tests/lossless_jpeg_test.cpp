@@ -4,7 +4,7 @@
 #include "DNGDecoder.h"
 #include "VulkanJpegDecode.h"
 #include "VulkanGalleryPreview.h"
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
 #include <libplacebo/gpu.h>
 #endif
 #include "VulkanJpegFullEncode.h"
@@ -303,12 +303,12 @@ static int benchmarkRealJpegDng(const char* path) {
             width, height, channels, bits, size, cpuMs);
         return 0;
     }
-    const motioncam::VulkanJpegTile tile{jpeg, size, width, height, bits, channels};
-    const motioncam::VulkanJpegContiguousSource contiguous{jpeg, size};
+    const rawpreamp::VulkanJpegTile tile{jpeg, size, width, height, bits, channels};
+    const rawpreamp::VulkanJpegContiguousSource contiguous{jpeg, size};
     for (int attempt = 0; attempt < 2; ++attempt) {
         std::vector<std::vector<uint16_t>> gpu;
         const auto started = std::chrono::steady_clock::now();
-        const bool ok = motioncam::jpegDecodeTilesVulkan({tile}, gpu, &contiguous);
+        const bool ok = rawpreamp::jpegDecodeTilesVulkan({tile}, gpu, &contiguous);
         const auto finished = std::chrono::steady_clock::now();
         const bool equal = ok && gpu.size() == 1u && gpu.front() == cpu;
         std::fprintf(stderr,
@@ -329,7 +329,7 @@ int main() {
     {
         auto owner = std::make_shared<int>(7);
         std::weak_ptr<int> lifetime = owner;
-        motioncam::DNGGpuImage source;
+        rawpreamp::DNGGpuImage source;
         source.buffer = owner.get();
         source.width = source.height = 2; source.channels = 1;
         source.lease = owner;
@@ -338,7 +338,7 @@ int main() {
             std::fill_n(samples, count, 17);
             return true;
         };
-        motioncam::PreviewFrame frame;
+        rawpreamp::PreviewFrame frame;
         frame.gallerySource = source;
         assert(frame.hasGalleryCfa());
         auto readback = frame.gallerySource.vectorDownloader();
@@ -354,7 +354,7 @@ int main() {
         bool resourceReleased = false;
         auto source = std::make_shared<int>(1);
         std::weak_ptr<int> device = source;
-        auto frame = std::make_shared<motioncam::VulkanGalleryGpuBuffer>();
+        auto frame = std::make_shared<rawpreamp::VulkanGalleryGpuBuffer>();
         frame->sourceLease = std::move(source);
         frame->resourceLease = std::shared_ptr<void>(new int(2), [&](void* value) {
             assert(!device.expired());
@@ -364,12 +364,12 @@ int main() {
         frame.reset();
         assert(resourceReleased && device.expired());
     }
-    if (const char* path = std::getenv("MOTIONCAM_GPU_JPEG_REAL_DNG_BENCHMARK"))
+    if (const char* path = std::getenv("RAWPREAMP_GPU_JPEG_REAL_DNG_BENCHMARK"))
         return benchmarkRealJpegDng(path);
     // Only the two CFA representations may be split into color and luminance.
     {
         const auto directory = std::filesystem::temp_directory_path() /
-            ("mcfuse-incomplete-sequence-" + std::to_string(
+            ("rawpreamp-incomplete-sequence-" + std::to_string(
                 std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directory(directory);
         struct Cleanup {
@@ -407,10 +407,10 @@ int main() {
         write("frame-000001.dng", complete.size());
         write("frame-000002.dng", 0);
         write("frame-000003.dng", 8);
-        motioncam::DNGDecoder sequence(directory.string());
+        rawpreamp::DNGDecoder sequence(directory.string());
         assert(sequence.getFrames().size() == 1);
         bool rejected = false;
-        try { motioncam::DNGDecoder invalid((directory / "frame-000002.dng").string()); }
+        try { rawpreamp::DNGDecoder invalid((directory / "frame-000002.dng").string()); }
         catch (const std::runtime_error&) { rejected = true; }
         assert(rejected);
 
@@ -420,12 +420,12 @@ int main() {
         auto large = chunkedDng(512, 512, 16, 1, 1, 512, 256, false, false,
             {std::vector<uint8_t>(512 * 256 * 2, 7),
              std::vector<uint8_t>(512 * 256 * 2, 9)});
-        motioncam::DNGFrameMetadata fullMetadata;
-        assert(motioncam::DNGDecoder::getColorMetadata(large, fullMetadata));
+        rawpreamp::DNGFrameMetadata fullMetadata;
+        assert(rawpreamp::DNGDecoder::getColorMetadata(large, fullMetadata));
         auto prefix = large;
         prefix.resize(65536);
-        motioncam::DNGFrameMetadata prefixMetadata;
-        assert(motioncam::DNGDecoder::getColorMetadata(prefix, prefixMetadata, large.size()));
+        rawpreamp::DNGFrameMetadata prefixMetadata;
+        assert(rawpreamp::DNGDecoder::getColorMetadata(prefix, prefixMetadata, large.size()));
         assert(prefixMetadata.metadataBytes == fullMetadata.metadataBytes);
         assert(fullMetadata.metadataBytes < 65536);
         uint64_t originalHash = 0;
@@ -436,10 +436,10 @@ int main() {
                 std::ofstream output(path, std::ios::binary);
                 output.write(reinterpret_cast<const char*>(large.data()), large.size());
             }
-            motioncam::DNGDecoder decoder(path.string());
+            rawpreamp::DNGDecoder decoder(path.string());
             assert(decoder.getFrames().size() == 1);
             assert(decoder.getFrames()[0].fileSize == large.size());
-            motioncam::DNGFrameMetadata imported;
+            rawpreamp::DNGFrameMetadata imported;
             assert(decoder.getFrameMetadata(0, imported));
             assert(imported.hasImageLayout);
             assert(imported.metadataBytes == fullMetadata.metadataBytes);
@@ -454,9 +454,9 @@ int main() {
             assert(extracted == large);
             // A fresh decoder with no in-memory analysis must round-trip the
             // persistent compact TIFF, including original payload locations.
-            motioncam::DNGDecoder::clearAnalysisCache(false);
-            motioncam::DNGDecoder cached(path.string());
-            motioncam::DNGFrameMetadata restored;
+            rawpreamp::DNGDecoder::clearAnalysisCache(false);
+            rawpreamp::DNGDecoder cached(path.string());
+            rawpreamp::DNGFrameMetadata restored;
             assert(cached.getFrameMetadata(0, restored));
             assert(restored.metadataBytes == imported.metadataBytes);
             assert(restored.orientation == imported.orientation);
@@ -468,8 +468,8 @@ int main() {
                     std::ofstream corrupt(entry.path(), std::ios::binary | std::ios::trunc);
                     corrupt << "truncated";
                 }
-            motioncam::DNGDecoder::clearAnalysisCache(false);
-            motioncam::DNGDecoder recovered(path.string());
+            rawpreamp::DNGDecoder::clearAnalysisCache(false);
+            rawpreamp::DNGDecoder recovered(path.string());
             assert(recovered.getFrameMetadata(0, restored));
             assert(restored.metadataBytes == imported.metadataBytes);
             assert(restored.orientation == imported.orientation);
@@ -477,19 +477,19 @@ int main() {
         checkImportedMetadata("prefix.dng");
         // Inserting a missing orientation appends an IFD after the pixels.
         // Metadata at the end of the file must still be read correctly.
-        assert(motioncam::DNGDecoder::setOrientation(large, 90));
-        assert(motioncam::DNGDecoder::getColorMetadata(large, fullMetadata));
+        assert(rawpreamp::DNGDecoder::setOrientation(large, 90));
+        assert(rawpreamp::DNGDecoder::getColorMetadata(large, fullMetadata));
         assert(fullMetadata.orientation == 90);
         checkImportedMetadata("trailing.dng");
         // Replacing an earlier source must invalidate its previous revision.
         checkImportedMetadata("prefix.dng");
-        assert(motioncam::DNGDecoder::analysisCacheUsage().first > 0);
+        assert(rawpreamp::DNGDecoder::analysisCacheUsage().first > 0);
         // Preferences uses the default clear operation: memory and disk.
-        motioncam::DNGDecoder::clearAnalysisCache();
-        assert(motioncam::DNGDecoder::analysisCacheUsage().first == 0);
-        assert(!std::filesystem::exists(directory / "cache" / "motioncam-fuse" / "dng-analysis"));
+        rawpreamp::DNGDecoder::clearAnalysisCache();
+        assert(rawpreamp::DNGDecoder::analysisCacheUsage().first == 0);
+        assert(!std::filesystem::exists(directory / "cache" / "rawpreamp" / "dng-analysis"));
     }
-    motioncam::GainMap region{};
+    rawpreamp::GainMap region{};
     region.top = 0; region.left = 0; region.bottom = 8; region.right = 8;
     region.plane = 0; region.planes = 1;
     region.rowPitch = region.colPitch = 2;
@@ -497,19 +497,19 @@ int main() {
     region.spacingV = region.spacingH = 1.0;
     region.channels = 1;
     region.data.assign(4, 2.0f);
-    std::vector<motioncam::GainMap> unrelatedRegions(4, region);
+    std::vector<rawpreamp::GainMap> unrelatedRegions(4, region);
     unrelatedRegions[1].left = 2;
     unrelatedRegions[2].top = 2;
     unrelatedRegions[3].top = unrelatedRegions[3].left = 2;
     const auto originalRegions = unrelatedRegions;
-    assert(!motioncam::reduceGainMapStackToColor(unrelatedRegions));
+    assert(!rawpreamp::reduceGainMapStackToColor(unrelatedRegions));
     for (size_t i = 0; i < unrelatedRegions.size(); ++i)
         assert(unrelatedRegions[i].data == originalRegions[i].data);
 
     // Four Bayer phases can encode slightly different exclusive end bounds.
     // Accept them only when one common area visits exactly the same samples.
     for (const uint32_t extent : {8u, 9u}) {
-        std::vector<motioncam::GainMap> phaseMaps(4, region);
+        std::vector<rawpreamp::GainMap> phaseMaps(4, region);
         for (uint32_t phase = 0; phase < 4; ++phase) {
             auto& map = phaseMaps[phase];
             map.top = phase / 2; map.left = phase % 2;
@@ -517,7 +517,7 @@ int main() {
             map.data.assign(4, 2.0f + phase);
         }
         const auto sourceMaps = phaseMaps;
-        const auto separation = motioncam::separateGainMapLuminance(phaseMaps);
+        const auto separation = rawpreamp::separateGainMapLuminance(phaseMaps);
         assert(separation.valid && separation.colorSeparated);
         const uint32_t commonEnd = extent - ((extent & 1u) ? 0 : 1);
         assert(separation.luminance.bottom == commonEnd && separation.luminance.right == commonEnd);
@@ -538,7 +538,7 @@ int main() {
         }
         auto incompatible = sourceMaps;
         incompatible[0].bottom += 4;
-        assert(!motioncam::separateGainMapLuminance(incompatible).valid);
+        assert(!rawpreamp::separateGainMapLuminance(incompatible).valid);
     }
 
     // Uncompressed tiles, compressed strips, planar LinearRaw, and omitted
@@ -557,7 +557,7 @@ int main() {
             chunks.push_back(std::move(tile));
         }
         auto tiled = chunkedDng(w, h, 16, 1, 1, tw, th, true, false, chunks);
-        assert(motioncam::DNGDecoder::ensureUncompressed(tiled));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(tiled));
         assert(tagScalar(tiled, 259) == 1 && tagScalar(tiled, 273) > 0);
         assert(tagScalar(tiled, 278) == h && tagScalar(tiled, 279) == w * h * 2);
         assert(ifdsAreTagSorted(tiled));
@@ -566,7 +566,7 @@ int main() {
         // byte or allocation-size arithmetic.
         auto hostile = chunkedDng(w, h, 16, 1, 1, UINT32_MAX, UINT32_MAX,
                                   true, false, {{0, 0}});
-        assert(!motioncam::DNGDecoder::ensureUncompressed(hostile));
+        assert(!rawpreamp::DNGDecoder::ensureUncompressed(hostile));
     }
     {
         constexpr uint32_t w = 6, h = 5, rows = 2;
@@ -581,7 +581,7 @@ int main() {
             chunks.emplace_back(encoded, encoded + bytes); free(encoded);
         }
         auto strips = chunkedDng(w, h, 12, 1, 7, w, rows, false, false, chunks);
-        assert(motioncam::DNGDecoder::ensureUncompressed(strips));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(strips));
         assert(tagScalar(strips, 259) == 1 && tagScalar(strips, 258) == 16);
     }
     {
@@ -594,7 +594,7 @@ int main() {
             chunks.push_back(jpeg8(pixels, w, rows));
         }
         auto strips = chunkedDng(w, h, 8, 1, 34892, w, rows, false, false, chunks);
-        assert(motioncam::DNGDecoder::ensureUncompressed(strips));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(strips));
         assert(tagScalar(strips, 259) == 1 && tagScalar(strips, 258) == 16);
     }
     {
@@ -610,10 +610,10 @@ int main() {
             }
         }
         auto planar = chunkedDng(w, h, 16, 3, 1, w, h, false, true, planes);
-        assert(motioncam::DNGDecoder::ensureUncompressed(planar));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(planar));
         assert(tagScalar(planar, 284) == 1);
-        motioncam::DecodedDNGImage decoded;
-        assert(motioncam::DNGDecoder::decodeImage(planar, decoded, false, false));
+        rawpreamp::DecodedDNGImage decoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(planar, decoded, false, false));
         assert(decoded.layout.width == w && decoded.layout.height == h &&
                decoded.samples.size() == expected.size());
         for (size_t i = 0; i < expected.size(); ++i)
@@ -636,10 +636,10 @@ int main() {
             free(encoded);
         }
         auto planar = chunkedDng(w, h, 12, 3, 7, w, h, false, true, encodedPlanes);
-        assert(motioncam::DNGDecoder::ensureUncompressed(planar));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(planar));
         assert(tagScalar(planar, 284) == 1 && ifdsAreTagSorted(planar));
-        motioncam::DecodedDNGImage decoded;
-        assert(motioncam::DNGDecoder::decodeImage(planar, decoded, false, false));
+        rawpreamp::DecodedDNGImage decoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(planar, decoded, false, false));
         assert(decoded.layout.width == w && decoded.layout.height == h &&
                decoded.samples.size() == expected.size());
         for (size_t i = 0; i < expected.size(); ++i)
@@ -649,7 +649,7 @@ int main() {
         constexpr uint32_t w = 4, h = 2;
         std::vector<uint8_t> pixels(w * h * 2);
         auto defaults = chunkedDng(w, h, 16, 1, 1, w, h, false, false, {pixels}, true);
-        assert(motioncam::DNGDecoder::ensureUncompressed(defaults));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(defaults));
         assert(tagScalar(defaults, 259) == 1 && tagScalar(defaults, 277) == 1);
         assert(ifdsAreTagSorted(defaults));
     }
@@ -663,7 +663,7 @@ int main() {
             stripPixels[i] = static_cast<uint16_t>(1000 + i);
         auto multiStrip = multiStripUncompressedDng(
             stripPixels, stripWidth, stripHeight, rowsPerStrip);
-        assert(motioncam::DNGDecoder::ensureUncompressed(multiStrip));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(multiStrip));
         auto read16 = [&](size_t at) {
             return static_cast<uint16_t>(multiStrip[at] | multiStrip[at + 1] << 8);
         };
@@ -710,10 +710,10 @@ int main() {
         }
         auto dng = chunkedDng(w, h, 16, 1, 7, w, rowsPerStrip,
                               false, false, strips);
-        motioncam::DecodedDNGImage decoded;
-        assert(motioncam::DNGDecoder::decodeImage(dng, decoded, false, false));
+        rawpreamp::DecodedDNGImage decoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(dng, decoded, false, false));
         assert(decoded.samples == expected);
-        assert(motioncam::DNGDecoder::ensureUncompressed(dng));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(dng));
         assert(ifdsAreTagSorted(dng));
     }
 
@@ -878,13 +878,13 @@ int main() {
                 tiledPixels[y * tiledWidth + x] = static_cast<uint16_t>(y * 100 + x);
         auto directTiles = tiledLosslessJpegDng(
             tiledPixels, tiledWidth, tiledHeight, 4, 3, bits);
-        motioncam::DecodedDNGImage directDecoded;
-        assert(motioncam::DNGDecoder::decodeImageBorrowed(directTiles, directDecoded));
+        rawpreamp::DecodedDNGImage directDecoded;
+        assert(rawpreamp::DNGDecoder::decodeImageBorrowed(directTiles, directDecoded));
         assert(directDecoded.samples == tiledPixels);
         auto tiled = tiledLosslessJpegDng(
             tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2);
         const size_t compressedTiledSize = tiled.size();
-        assert(motioncam::DNGDecoder::ensureUncompressed(tiled));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(tiled));
         // Canonicalization must replace compressed tile payloads, not retain
         // them as unreachable data before the new uncompressed strip.
         assert(tiled.size() < compressedTiledSize +
@@ -908,7 +908,7 @@ int main() {
         // pad samples outside the image. Those padding samples must be ignored.
         auto padded = tiledLosslessJpegDng(
             tiledPixels, tiledWidth, tiledHeight, 4, 3, bits, 2, true);
-        assert(motioncam::DNGDecoder::ensureUncompressed(padded));
+        assert(rawpreamp::DNGDecoder::ensureUncompressed(padded));
         auto padded16 = [&](size_t at) {
             return static_cast<uint16_t>(padded[at] | padded[at + 1] << 8);
         };
@@ -935,7 +935,7 @@ int main() {
         // JPEG width is two pixels with two components; make it one pixel.
         sof[7] = 0;
         sof[8] = 1;
-        assert(!motioncam::DNGDecoder::ensureUncompressed(shortTile));
+        assert(!rawpreamp::DNGDecoder::ensureUncompressed(shortTile));
     }
 
     constexpr unsigned int rgbWidth = 19;
@@ -1060,23 +1060,23 @@ int main() {
     assert(writer.WriteToFile(gainMapOutput, &error));
     const std::string gainMapDng = gainMapOutput.str();
     std::vector<uint8_t> croppedGainMapDng(gainMapDng.begin(), gainMapDng.end());
-    std::vector<motioncam::GainMap> originalMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(croppedGainMapDng, 2, originalMaps));
+    std::vector<rawpreamp::GainMap> originalMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(croppedGainMapDng, 2, originalMaps));
     assert(!originalMaps.empty());
     auto replacementMaps = originalMaps;
     std::fill(replacementMaps.front().data.begin(), replacementMaps.front().data.end(), 2.0f);
     std::vector<uint8_t> replacedGainMapDng(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::replaceGainMaps(replacedGainMapDng, 2, replacementMaps));
-    std::vector<motioncam::GainMap> replacedMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(replacedGainMapDng, 2, replacedMaps));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(replacedGainMapDng, 2, replacementMaps));
+    std::vector<rawpreamp::GainMap> replacedMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(replacedGainMapDng, 2, replacedMaps));
     assert(replacedMaps.size() == replacementMaps.size());
     assert(replacedMaps.front().data == replacementMaps.front().data);
-    motioncam::RenderSettings gainOnlySettings;
-    gainOnlySettings.options = static_cast<motioncam::FileRenderOptions>(
-        motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-        motioncam::RENDER_OPT_DEBUG_SHADING_MAP);
-    motioncam::PreviewFrame gainOnlyPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    rawpreamp::RenderSettings gainOnlySettings;
+    gainOnlySettings.options = static_cast<rawpreamp::FileRenderOptions>(
+        rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+        rawpreamp::RENDER_OPT_DEBUG_SHADING_MAP);
+    rawpreamp::PreviewFrame gainOnlyPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         replacedGainMapDng, gainOnlySettings, gainOnlyPreview, false));
     assert(gainOnlyPreview.gainMapApplied);
     assert(std::any_of(gainOnlyPreview.rgb.begin(), gainOnlyPreview.rgb.end(),
@@ -1091,29 +1091,29 @@ int main() {
         static_cast<size_t>(scalarSpatialMaps.front().width) *
         scalarSpatialMaps.front().height);
     std::vector<uint8_t> scalarSpatialDng(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         scalarSpatialDng, 2, scalarSpatialMaps));
     auto scalarCachedBake = scalarSpatialDng;
     auto scalarCachedBakeAgain = scalarSpatialDng;
     auto scalarReferenceBake = scalarSpatialDng;
-    assert(motioncam::DNGDecoder::bakeGainMaps(scalarCachedBake, false, false));
-    assert(motioncam::DNGDecoder::bakeGainMaps(scalarCachedBakeAgain, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(scalarCachedBake, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(scalarCachedBakeAgain, false, false));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0");
 #else
-    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+    setenv("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0", 1);
 #endif
-    assert(motioncam::DNGDecoder::bakeGainMaps(scalarReferenceBake, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(scalarReferenceBake, false, false));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "");
 #else
-    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+    unsetenv("RAWPREAMP_GAIN_BAKE_CPU_OPT");
 #endif
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         scalarCachedBake, scalarReferenceBake));
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         scalarCachedBakeAgain, scalarReferenceBake));
-    // RGB DirectLog frames can carry one scalar gain map shared by all three
+    // RGB Native Video frames can carry one scalar gain map shared by all three
     // channels. The optimized path must match the generic channel loop.
     tinydngwriter::DNGImage rgbScalarImage;
     rgbScalarImage.SetBigEndian(false);
@@ -1149,22 +1149,22 @@ int main() {
     const std::string rgbScalarDng = rgbScalarOutput.str();
     std::vector<uint8_t> rgbLosslessDng(rgbScalarDng.begin(), rgbScalarDng.end());
     auto rgbTiledDng = rgbLosslessDng;
-    assert(motioncam::DNGDecoder::compressLosslessJPEGTiled(rgbTiledDng));
-    motioncam::DecodedDNGImage rgbTiledDecoded;
-    assert(motioncam::DNGDecoder::decodeImage(rgbTiledDng, rgbTiledDecoded));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEGTiled(rgbTiledDng));
+    rawpreamp::DecodedDNGImage rgbTiledDecoded;
+    assert(rawpreamp::DNGDecoder::decodeImage(rgbTiledDng, rgbTiledDecoded));
     assert(rgbTiledDecoded.samples == rgb);
-    assert(motioncam::DNGDecoder::compressLosslessJPEG(rgbLosslessDng));
-    motioncam::DecodedDNGImage rgbLosslessDecoded;
-    assert(motioncam::DNGDecoder::decodeImage(rgbLosslessDng, rgbLosslessDecoded));
+    assert(rawpreamp::DNGDecoder::compressLosslessJPEG(rgbLosslessDng));
+    rawpreamp::DecodedDNGImage rgbLosslessDecoded;
+    assert(rawpreamp::DNGDecoder::decodeImage(rgbLosslessDng, rgbLosslessDecoded));
     assert(rgbLosslessDecoded.samples == rgb);
     auto rgbProxy = rgbLosslessDng;
-    assert(motioncam::DNGDecoder::processHigherCFA(rgbProxy, 2, {0,1,1,2},
-        motioncam::QuadBayerMode::Binning, false, 2, false));
-    motioncam::DecodedDNGImage decodedProxy;
-    assert(motioncam::DNGDecoder::decodeImage(rgbProxy, decodedProxy));
+    assert(rawpreamp::DNGDecoder::processHigherCFA(rgbProxy, 2, {0,1,1,2},
+        rawpreamp::QuadBayerMode::Binning, false, 2, false));
+    rawpreamp::DecodedDNGImage decodedProxy;
+    assert(rawpreamp::DNGDecoder::decodeImage(rgbProxy, decodedProxy));
     std::vector<uint16_t> expectedProxy;
     uint32_t proxyWidth = 0, proxyHeight = 0;
-    motioncam::utils::reduceRGB(rgb, expectedProxy, rgbWidth, rgbHeight,
+    rawpreamp::utils::reduceRGB(rgb, expectedProxy, rgbWidth, rgbHeight,
                               2, false, proxyWidth, proxyHeight);
     assert(decodedProxy.layout.width == proxyWidth && decodedProxy.layout.height == proxyHeight);
     assert(decodedProxy.storedBitsPerSample == 16 && decodedProxy.samples == expectedProxy);
@@ -1189,23 +1189,23 @@ int main() {
     lj92_close(rgbIndependentDecoder);
     assert(rgbIndependent == rgb);
     std::vector<uint8_t> rgbScalarBaked(rgbScalarDng.begin(), rgbScalarDng.end());
-    std::vector<motioncam::GainMap> rgbScalarMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(rgbScalarBaked, 2, rgbScalarMaps));
+    std::vector<rawpreamp::GainMap> rgbScalarMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(rgbScalarBaked, 2, rgbScalarMaps));
     assert(rgbScalarMaps.size() == 1 && rgbScalarMaps.front().channels == 1);
     auto rgbScalarReference = rgbScalarBaked;
-    assert(motioncam::DNGDecoder::bakeGainMaps(rgbScalarBaked, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(rgbScalarBaked, false, false));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0");
 #else
-    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+    setenv("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0", 1);
 #endif
-    assert(motioncam::DNGDecoder::bakeGainMaps(rgbScalarReference, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(rgbScalarReference, false, false));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "");
 #else
-    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+    unsetenv("RAWPREAMP_GAIN_BAKE_CPU_OPT");
 #endif
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         rgbScalarBaked, rgbScalarReference));
     // RGB maps may cover only part of the image. Pixels outside the map
     // must keep unit gain even with fused, dithered LOG60 packing.
@@ -1219,21 +1219,21 @@ int main() {
     std::fill(rgbCropMap.data.begin(), rgbCropMap.data.end(), 1.5f);
     std::vector<uint8_t> rgbUnitDng(rgbScalarDng.begin(), rgbScalarDng.end());
     auto rgbCropDng = rgbUnitDng;
-    assert(motioncam::DNGDecoder::replaceGainMaps(rgbUnitDng, 2, {rgbUnitMap}));
-    assert(motioncam::DNGDecoder::replaceGainMaps(rgbCropDng, 2, {rgbCropMap}));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(rgbUnitDng, 2, {rgbUnitMap}));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(rgbCropDng, 2, {rgbCropMap}));
     bool rgbUnitFused = false, rgbCropFused = false;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         rgbUnitDng, false, false, false, false, 0, std::nullopt,
-        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        rawpreamp::LogTransformMode::ReduceBy4Bit, 4095, false,
         &rgbUnitFused, true, 17));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         rgbCropDng, false, false, false, false, 0, std::nullopt,
-        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        rawpreamp::LogTransformMode::ReduceBy4Bit, 4095, false,
         &rgbCropFused, true, 17));
     assert(rgbUnitFused && rgbCropFused);
-    motioncam::DecodedDNGImage rgbUnitDecoded, rgbCropDecoded;
-    assert(motioncam::DNGDecoder::decodeImage(rgbUnitDng, rgbUnitDecoded));
-    assert(motioncam::DNGDecoder::decodeImage(rgbCropDng, rgbCropDecoded));
+    rawpreamp::DecodedDNGImage rgbUnitDecoded, rgbCropDecoded;
+    assert(rawpreamp::DNGDecoder::decodeImage(rgbUnitDng, rgbUnitDecoded));
+    assert(rawpreamp::DNGDecoder::decodeImage(rgbCropDng, rgbCropDecoded));
     bool cropChanged = false;
     for (uint32_t y = 0; y < rgbHeight; ++y)
         for (uint32_t x = 0; x < rgbWidth; ++x)
@@ -1252,83 +1252,83 @@ int main() {
         auto changedMaps = scalarSpatialMaps;
         changedMaps.front().data.front() += 0.1f * (variation + 1);
         auto changed = scalarSpatialDng;
-        assert(motioncam::DNGDecoder::replaceGainMaps(changed, 2, changedMaps));
+        assert(rawpreamp::DNGDecoder::replaceGainMaps(changed, 2, changedMaps));
         auto changedReference = changed;
-        assert(motioncam::DNGDecoder::bakeGainMaps(changed, false, false));
+        assert(rawpreamp::DNGDecoder::bakeGainMaps(changed, false, false));
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+        _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0");
 #else
-        setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+        setenv("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0", 1);
 #endif
-        assert(motioncam::DNGDecoder::bakeGainMaps(changedReference, false, false));
+        assert(rawpreamp::DNGDecoder::bakeGainMaps(changedReference, false, false));
 #ifdef _WIN32
-        _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+        _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "");
 #else
-        unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+        unsetenv("RAWPREAMP_GAIN_BAKE_CPU_OPT");
 #endif
-        assert(motioncam::DNGDecoder::imagePayloadsEqual(changed, changedReference));
+        assert(rawpreamp::DNGDecoder::imagePayloadsEqual(changed, changedReference));
     }
     auto packedScalarBake = scalarSpatialDng;
-    assert(motioncam::DNGDecoder::ensureUncompressed(packedScalarBake));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(packedScalarBake));
     auto packedScalarReference = packedScalarBake;
     bool packedLogFused = false;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         packedScalarBake, false, false, false, false, 0, std::nullopt,
-        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        rawpreamp::LogTransformMode::ReduceBy4Bit, 4095, false,
         &packedLogFused, true));
     assert(packedLogFused);
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0");
 #else
-    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+    setenv("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0", 1);
 #endif
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         packedScalarReference, false, false, false, false, 0, std::nullopt,
-        motioncam::LogTransformMode::ReduceBy4Bit, 4095, false,
+        rawpreamp::LogTransformMode::ReduceBy4Bit, 4095, false,
         &packedLogFused, true));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "");
 #else
-    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+    unsetenv("RAWPREAMP_GAIN_BAKE_CPU_OPT");
 #endif
     assert(packedLogFused);
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         packedScalarBake, packedScalarReference));
-    motioncam::RenderSettings fullPreviewSettings;
-    fullPreviewSettings.options = motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-    motioncam::PreviewFrame fullPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    rawpreamp::RenderSettings fullPreviewSettings;
+    fullPreviewSettings.options = rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+    rawpreamp::PreviewFrame fullPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         scalarSpatialDng, fullPreviewSettings, fullPreview, false));
     // KeepInput with a vignette bake still runs the log quantization and
     // linearization path. The fast Bayer preview must not bypass it.
     auto keepInputPreviewSettings = fullPreviewSettings;
-    keepInputPreviewSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
-    keepInputPreviewSettings.logTransform = motioncam::LogTransformMode::KeepInput;
-    motioncam::PreviewFrame keepInputPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    keepInputPreviewSettings.options |= rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+    keepInputPreviewSettings.logTransform = rawpreamp::LogTransformMode::KeepInput;
+    rawpreamp::PreviewFrame keepInputPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         scalarSpatialDng, keepInputPreviewSettings, keepInputPreview, true));
     assert(keepInputPreview.rgb.size() == fullPreview.rgb.size());
     assert(keepInputPreview.rgb != fullPreview.rgb);
     auto twoBitPreviewSettings = keepInputPreviewSettings;
-    twoBitPreviewSettings.logTransform = motioncam::LogTransformMode::ReduceBy14Bit;
-    motioncam::PreviewFrame twoBitPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    twoBitPreviewSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy14Bit;
+    rawpreamp::PreviewFrame twoBitPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         scalarSpatialDng, twoBitPreviewSettings, twoBitPreview, true));
     assert(twoBitPreview.displayBitDepth == 2);
     assert(twoBitPreview.rgb.size() == fullPreview.rgb.size());
     auto colorPreviewSettings = fullPreviewSettings;
-    colorPreviewSettings.options |= motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR;
-    motioncam::PreviewFrame colorPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    colorPreviewSettings.options |= rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR;
+    rawpreamp::PreviewFrame colorPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         scalarSpatialDng, colorPreviewSettings, colorPreview, false));
     assert(!colorPreview.gainMapApplied);
-    motioncam::PreviewFrame scalarUnprocessedPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
-        scalarSpatialDng, motioncam::RenderSettings{}, scalarUnprocessedPreview, false));
+    rawpreamp::PreviewFrame scalarUnprocessedPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
+        scalarSpatialDng, rawpreamp::RenderSettings{}, scalarUnprocessedPreview, false));
     assert(colorPreview.rgb == scalarUnprocessedPreview.rgb);
     {
         auto phaseDng = std::vector<uint8_t>(gainMapDng.begin(), gainMapDng.end());
-        std::vector<motioncam::GainMap> phases(4, originalMaps.front());
+        std::vector<rawpreamp::GainMap> phases(4, originalMaps.front());
         for (uint32_t phase = 0; phase < 4; ++phase) {
             auto& map = phases[phase];
             map.top = phase / 2; map.left = phase % 2;
@@ -1336,41 +1336,41 @@ int main() {
             map.channels = 1; map.rowPitch = map.colPitch = 2;
             map.data.assign(size_t(map.width) * map.height, 2.0f + phase);
         }
-        assert(motioncam::DNGDecoder::replaceGainMaps(phaseDng, 2, phases));
+        assert(rawpreamp::DNGDecoder::replaceGainMaps(phaseDng, 2, phases));
         for (bool bake : {false, true}) {
             auto output = phaseDng;
-            const bool ok = bake ? motioncam::DNGDecoder::bakeGainMaps(output, false, true)
-                                 : motioncam::DNGDecoder::transformGainMaps(output, false, true, false);
+            const bool ok = bake ? rawpreamp::DNGDecoder::bakeGainMaps(output, false, true)
+                                 : rawpreamp::DNGDecoder::transformGainMaps(output, false, true, false);
             assert(ok);
-            std::vector<motioncam::GainMap> luminance;
-            assert(motioncam::DNGDecoder::getGainMaps(output, 3, luminance));
+            std::vector<rawpreamp::GainMap> luminance;
+            assert(rawpreamp::DNGDecoder::getGainMaps(output, 3, luminance));
             assert(luminance.size() == 1 && luminance[0].channels == 1);
             assert(luminance[0].right == width - 1 && luminance[0].bottom == height - 1);
         }
-        motioncam::RenderSettings colorOnly;
-        colorOnly.options = motioncam::FileRenderOptions(motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
-                                                        motioncam::RENDER_OPT_VIGNETTE_ONLY_COLOR);
-        motioncam::PreviewFrame frame;
-        assert(motioncam::DNGDecoder::decodePreview(phaseDng, colorOnly, frame, false));
+        rawpreamp::RenderSettings colorOnly;
+        colorOnly.options = rawpreamp::FileRenderOptions(rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION |
+                                                        rawpreamp::RENDER_OPT_VIGNETTE_ONLY_COLOR);
+        rawpreamp::PreviewFrame frame;
+        assert(rawpreamp::DNGDecoder::decodePreview(phaseDng, colorOnly, frame, false));
         assert(frame.gainMapApplied);
     }
     std::vector<uint8_t> clearedGainMapDng(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::replaceGainMaps(clearedGainMapDng, 2, {}));
-    std::vector<motioncam::GainMap> clearedMaps;
-    assert(!motioncam::DNGDecoder::getGainMaps(clearedGainMapDng, 2, clearedMaps));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(clearedGainMapDng, 2, {}));
+    std::vector<rawpreamp::GainMap> clearedMaps;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(clearedGainMapDng, 2, clearedMaps));
     assert(clearedMaps.empty());
     const auto clearedBeforeDebugBake = clearedGainMapDng;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         clearedGainMapDng, false, false, false, true));
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         clearedGainMapDng, clearedBeforeDebugBake));
-    motioncam::PreviewFrame noGainOnlyPreview;
-    assert(motioncam::DNGDecoder::decodePreview(
+    rawpreamp::PreviewFrame noGainOnlyPreview;
+    assert(rawpreamp::DNGDecoder::decodePreview(
         clearedGainMapDng, gainOnlySettings, noGainOnlyPreview, false));
     assert(!noGainOnlyPreview.gainMapApplied);
     // Excluding all gain maps removes OpcodeList2 instead of leaving a
     // four-byte zero-count list behind.
-    assert(motioncam::DNGDecoder::repairGainMapCfaPhase(clearedGainMapDng, true));
+    assert(rawpreamp::DNGDecoder::repairGainMapCfaPhase(clearedGainMapDng, true));
     auto cleared16 = [&](size_t offset) {
         return static_cast<uint16_t>(clearedGainMapDng[offset] |
                                      clearedGainMapDng[offset + 1] << 8);
@@ -1413,7 +1413,7 @@ int main() {
         break;
     }
     assert(corruptedOpcodeList);
-    assert(!motioncam::DNGDecoder::bakeGainMaps(
+    assert(!rawpreamp::DNGDecoder::bakeGainMaps(
         malformedGainMapDng, false, false));
 
     bool removedOpcodeTag = false;
@@ -1426,14 +1426,14 @@ int main() {
         break;
     }
     assert(removedOpcodeTag);
-    assert(motioncam::DNGDecoder::replaceGainMaps(addedGainMapDng, 2, replacementMaps));
-    std::vector<motioncam::GainMap> addedMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(addedGainMapDng, 2, addedMaps));
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(addedGainMapDng, 2, replacementMaps));
+    std::vector<rawpreamp::GainMap> addedMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(addedGainMapDng, 2, addedMaps));
     assert(addedMaps.front().data == replacementMaps.front().data);
-    assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
+    assert(rawpreamp::DNGDecoder::cropGainMapsToFullSensor(
         croppedGainMapDng, width * 2, height * 2));
-    std::vector<motioncam::GainMap> croppedMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(croppedGainMapDng, 2, croppedMaps));
+    std::vector<rawpreamp::GainMap> croppedMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(croppedGainMapDng, 2, croppedMaps));
     assert(croppedMaps.size() == originalMaps.size());
     assert(std::abs(croppedMaps.front().spacingH - 1.0) < 1e-9);
     assert(std::abs(croppedMaps.front().spacingV - 1.0) < 1e-9);
@@ -1443,12 +1443,12 @@ int main() {
 
     std::vector<uint8_t> croppedDeferredGainMapDng(
         gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         croppedDeferredGainMapDng, 3, originalMaps));
-    assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
+    assert(rawpreamp::DNGDecoder::cropGainMapsToFullSensor(
         croppedDeferredGainMapDng, width * 2, height * 2));
-    std::vector<motioncam::GainMap> croppedDeferredMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> croppedDeferredMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         croppedDeferredGainMapDng, 3, croppedDeferredMaps));
     assert(croppedDeferredMaps.size() == originalMaps.size());
     assert(croppedDeferredMaps.front().data != originalMaps.front().data);
@@ -1460,14 +1460,14 @@ int main() {
     fourPlaneMap.front().rowPitch = 2;
     fourPlaneMap.front().colPitch = 2;
     std::vector<uint8_t> fourPlaneDng(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::replaceGainMaps(fourPlaneDng, 2, fourPlaneMap));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(fourPlaneDng, 2, fourPlaneMap));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         fourPlaneDng, false, false, false, true, 4));
 
     std::vector<uint8_t> canonical(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(canonical));
-    std::vector<motioncam::GainMap> canonicalMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(canonical, 2, canonicalMaps));
+    assert(rawpreamp::DNGDecoder::canonicalizeGainMapOpcodes(canonical));
+    std::vector<rawpreamp::GainMap> canonicalMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(canonical, 2, canonicalMaps));
     assert(canonicalMaps.size() == 4);
     for (size_t phase = 0; phase < canonicalMaps.size(); ++phase) {
         assert(canonicalMaps[phase].channels == 1);
@@ -1478,50 +1478,50 @@ int main() {
     }
     std::vector<uint8_t> baked(gainMapDng.begin(), gainMapDng.end());
     const size_t originalSize = baked.size();
-    assert(motioncam::DNGDecoder::bakeGainMaps(baked, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(baked, false, false));
     assert(baked.size() > originalSize);
-    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(baked));
+    assert(rawpreamp::DNGDecoder::canonicalizeGainMapOpcodes(baked));
 
     // Baking expands the intermediate linear range, but a following log
     // transform must retain the bit-depth target of the original raw samples.
     std::vector<uint8_t> bakedLog(gainMapDng.begin(), gainMapDng.end());
-    motioncam::DNGFrameMetadata preBakeMetadata;
-    assert(motioncam::DNGDecoder::getColorMetadata(bakedLog, preBakeMetadata));
+    rawpreamp::DNGFrameMetadata preBakeMetadata;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(bakedLog, preBakeMetadata));
     const uint32_t preBakeWhite = static_cast<uint32_t>(preBakeMetadata.whiteLevel[0]);
-    assert(motioncam::DNGDecoder::bakeGainMaps(bakedLog, false, false));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(bakedLog, false, false));
     auto expandedLog = bakedLog;
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        expandedLog, motioncam::LogTransformMode::ReduceBy4Bit));
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(expandedLog));
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        bakedLog, motioncam::LogTransformMode::ReduceBy4Bit, preBakeWhite));
-    assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(bakedLog));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        expandedLog, rawpreamp::LogTransformMode::ReduceBy4Bit));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(expandedLog));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        bakedLog, rawpreamp::LogTransformMode::ReduceBy4Bit, preBakeWhite));
+    assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(bakedLog));
     assert(bakedLog.size() < expandedLog.size());
 
     std::vector<uint8_t> debugBaked(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         debugBaked, false, false, false, true));
     assert(debugBaked != baked);
 
     std::vector<uint8_t> croppedDebug(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::cropGainMapsToFullSensor(
+    assert(rawpreamp::DNGDecoder::cropGainMapsToFullSensor(
         croppedDebug, width * 2, height * 2));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         croppedDebug, false, false, false, true));
     assert(croppedDebug != debugBaked);
 
     // Existing linearization must be consumed before gain-map baking rather
     // than making the vignette path reject the DNG.
     std::vector<uint8_t> linearizedThenBaked(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::ensureUncompressed(linearizedThenBaked));
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        linearizedThenBaked, motioncam::LogTransformMode::KeepInput));
-    assert(motioncam::DNGDecoder::bakeGainMaps(linearizedThenBaked, false, false));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(linearizedThenBaked));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        linearizedThenBaked, rawpreamp::LogTransformMode::KeepInput));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(linearizedThenBaked, false, false));
 
     // A raw IFD may be reached through the ordinary TIFF next-IFD chain rather
     // than IFD0 or SubIFDs. Rebuilding it for the log table must preserve that chain.
     std::vector<uint8_t> nextIfdLog(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::ensureUncompressed(nextIfdLog));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(nextIfdLog));
     auto put16le = [](std::vector<uint8_t>& bytes, size_t at, uint16_t value) {
         bytes[at] = static_cast<uint8_t>(value);
         bytes[at + 1] = static_cast<uint8_t>(value >> 8);
@@ -1537,54 +1537,54 @@ int main() {
     put16le(nextIfdLog, emptyRoot, 0);
     put32le(nextIfdLog, emptyRoot + 2, rawIfd);
     put32le(nextIfdLog, 4, emptyRoot);
-    assert(motioncam::DNGDecoder::applyLogTransform(
-        nextIfdLog, motioncam::LogTransformMode::KeepInput));
+    assert(rawpreamp::DNGDecoder::applyLogTransform(
+        nextIfdLog, rawpreamp::LogTransformMode::KeepInput));
     const uint32_t rebuiltRawIfd = static_cast<uint32_t>(nextIfdLog[emptyRoot + 2] |
         nextIfdLog[emptyRoot + 3] << 8 | nextIfdLog[emptyRoot + 4] << 16 |
         nextIfdLog[emptyRoot + 5] << 24);
     assert(rebuiltRawIfd != 0 && rebuiltRawIfd != rawIfd);
 
     std::vector<uint8_t> ordinaryBayer(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::ensureUncompressed(ordinaryBayer));
+    assert(rawpreamp::DNGDecoder::ensureUncompressed(ordinaryBayer));
     const std::vector<uint8_t> beforeNoopRemosaic = ordinaryBayer;
     const std::array<uint8_t, 4> ordinaryPhase = {0, 1, 1, 2};
-    assert(motioncam::DNGDecoder::processHigherCFA(
-        ordinaryBayer, 2, ordinaryPhase, motioncam::QuadBayerMode::Demosaic,
+    assert(rawpreamp::DNGDecoder::processHigherCFA(
+        ordinaryBayer, 2, ordinaryPhase, rawpreamp::QuadBayerMode::Demosaic,
         true, 1, true));
     assert(ordinaryBayer == beforeNoopRemosaic);
 
     std::vector<uint8_t> colorBaked(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::bakeGainMaps(colorBaked, false, true));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(colorBaked, false, true));
     // Color/luminance separation must be representation-independent. A single
     // four-plane map and its canonical four scalar maps produce identical
     // baked pixels and the same deferred luminance layer.
     std::vector<uint8_t> scalarColorBaked(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorBaked));
-    assert(motioncam::DNGDecoder::bakeGainMaps(scalarColorBaked, false, true));
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(colorBaked, scalarColorBaked));
+    assert(rawpreamp::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorBaked));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(scalarColorBaked, false, true));
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(colorBaked, scalarColorBaked));
     // The 2x2 color-only CFA reuse path must match the unoptimized bake.
     std::vector<uint8_t> scalarColorReference(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorReference));
+    assert(rawpreamp::DNGDecoder::canonicalizeGainMapOpcodes(scalarColorReference));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0");
 #else
-    setenv("MOTIONCAM_GAIN_BAKE_CPU_OPT", "0", 1);
+    setenv("RAWPREAMP_GAIN_BAKE_CPU_OPT", "0", 1);
 #endif
-    assert(motioncam::DNGDecoder::bakeGainMaps(scalarColorReference, false, true));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(scalarColorReference, false, true));
 #ifdef _WIN32
-    _putenv_s("MOTIONCAM_GAIN_BAKE_CPU_OPT", "");
+    _putenv_s("RAWPREAMP_GAIN_BAKE_CPU_OPT", "");
 #else
-    unsetenv("MOTIONCAM_GAIN_BAKE_CPU_OPT");
+    unsetenv("RAWPREAMP_GAIN_BAKE_CPU_OPT");
 #endif
-    assert(motioncam::DNGDecoder::imagePayloadsEqual(
+    assert(rawpreamp::DNGDecoder::imagePayloadsEqual(
         scalarColorBaked, scalarColorReference));
-    std::vector<motioncam::GainMap> scalarLuminanceMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> scalarLuminanceMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         scalarColorBaked, 3, scalarLuminanceMaps));
     // The unbaked luminance remainder is a single-map-plane OpcodeList3
     // operation targeting all three post-demosaic image planes.
-    std::vector<motioncam::GainMap> luminanceMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(colorBaked, 3, luminanceMaps));
+    std::vector<rawpreamp::GainMap> luminanceMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(colorBaked, 3, luminanceMaps));
     assert(luminanceMaps.size() == 1);
     assert(luminanceMaps.front().plane == 0);
     assert(luminanceMaps.front().planes == 3);
@@ -1599,10 +1599,10 @@ int main() {
     // With color reduction, normalize the baked color correction and the
     // deferred luminance correction independently.
     std::vector<uint8_t> normalizedColorBaked(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         normalizedColorBaked, true, true));
-    std::vector<motioncam::GainMap> normalizedBakedLuminance;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> normalizedBakedLuminance;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         normalizedColorBaked, 3, normalizedBakedLuminance));
     float normalizedBakedLuminanceMaximum = 0.0f;
     for (const float gain : normalizedBakedLuminance.front().data)
@@ -1613,10 +1613,10 @@ int main() {
     // A previously reduced DNG can contain only deferred luminance. It must
     // still honor normalization when no OpcodeList2 color maps remain.
     std::vector<uint8_t> normalizedLuminanceOnly = colorBaked;
-    assert(motioncam::DNGDecoder::transformGainMaps(
+    assert(rawpreamp::DNGDecoder::transformGainMaps(
         normalizedLuminanceOnly, true, true, false));
-    std::vector<motioncam::GainMap> normalizedLuminanceOnlyMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> normalizedLuminanceOnlyMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         normalizedLuminanceOnly, 3, normalizedLuminanceOnlyMaps));
     float normalizedLuminanceOnlyMaximum = 0.0f;
     for (const float gain : normalizedLuminanceOnlyMaps.front().data)
@@ -1627,7 +1627,7 @@ int main() {
     // Color-only baking must leave an already deferred luminance map alone.
     const auto colorOnlyLuminance = colorBaked;
     std::vector<uint8_t> colorOnlyAgain = colorOnlyLuminance;
-    assert(motioncam::DNGDecoder::bakeGainMaps(colorOnlyAgain, false, true));
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(colorOnlyAgain, false, true));
     assert(colorOnlyAgain == colorOnlyLuminance);
 
     // If both opcode stages carry gain, color-only baking combines the newly
@@ -1636,37 +1636,37 @@ int main() {
     auto existingLuminance = luminanceMaps.front();
     std::fill(existingLuminance.data.begin(), existingLuminance.data.end(), 2.0f);
     std::vector<uint8_t> bothOpcodeStages(gainMapDng.begin(), gainMapDng.end());
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         bothOpcodeStages, 3, {existingLuminance}));
-    motioncam::DNGFrameMetadata beforeCombinedOptimization;
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    rawpreamp::DNGFrameMetadata beforeCombinedOptimization;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         bothOpcodeStages, beforeCombinedOptimization));
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         bothOpcodeStages, false, true, true));
-    motioncam::DNGFrameMetadata afterCombinedOptimization;
-    assert(motioncam::DNGDecoder::getColorMetadata(
+    rawpreamp::DNGFrameMetadata afterCombinedOptimization;
+    assert(rawpreamp::DNGDecoder::getColorMetadata(
         bothOpcodeStages, afterCombinedOptimization));
     assert(std::abs(afterCombinedOptimization.baselineExposure -
                     beforeCombinedOptimization.baselineExposure - 1.0) < 1e-5);
-    std::vector<motioncam::GainMap> combinedLuminance;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> combinedLuminance;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         bothOpcodeStages, 3, combinedLuminance));
     assert(combinedLuminance.size() == 1);
-    std::vector<motioncam::GainMap> consumedColorMaps;
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> consumedColorMaps;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         bothOpcodeStages, 2, consumedColorMaps));
 
     // A later full bake must accept the lone OpcodeList3 luminance remainder;
     // the channel-relative correction is already present in the pixels.
     std::vector<uint8_t> fullyBakedAfterColor = colorBaked;
-    assert(motioncam::DNGDecoder::bakeGainMaps(
+    assert(rawpreamp::DNGDecoder::bakeGainMaps(
         fullyBakedAfterColor, false, false));
-    std::vector<motioncam::GainMap> consumedLuminanceMaps;
-    assert(!motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> consumedLuminanceMaps;
+    assert(!rawpreamp::DNGDecoder::getGainMaps(
         fullyBakedAfterColor, 3, consumedLuminanceMaps));
     assert(consumedLuminanceMaps.empty());
 
-    // Legacy MotionCam DNGs store the four CFA phases as four separate
+    // Legacy RawPreamp DNGs store the four CFA phases as four separate
     // one-channel GainMap opcodes. All of them must be transformed in place.
     tinydngwriter::OpcodeList fourGainOpcodes;
     for (unsigned int phase = 0; phase < 4; ++phase) {
@@ -1698,12 +1698,12 @@ int main() {
     assert(writer.WriteToFile(fourGainOutput, &error));
     const std::string fourGainDng = fourGainOutput.str();
     std::vector<uint8_t> fourGainBytes(fourGainDng.begin(), fourGainDng.end());
-    assert(motioncam::DNGDecoder::repairGainMapCfaPhase(fourGainBytes, true));
+    assert(rawpreamp::DNGDecoder::repairGainMapCfaPhase(fourGainBytes, true));
     std::vector<uint8_t> normalizedOutputGainMaps = fourGainBytes;
-    assert(motioncam::DNGDecoder::transformGainMaps(
+    assert(rawpreamp::DNGDecoder::transformGainMaps(
         normalizedOutputGainMaps, true, false, false));
-    std::vector<motioncam::GainMap> normalizedMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> normalizedMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         normalizedOutputGainMaps, 2, normalizedMaps));
     float normalizedMaximum = 0.0f;
     for (const auto& map : normalizedMaps)
@@ -1712,15 +1712,15 @@ int main() {
     assert(std::abs(normalizedMaximum - 1.0f) < 1e-6f);
 
     std::vector<uint8_t> normalizedReducedOutputGainMaps = fourGainBytes;
-    assert(motioncam::DNGDecoder::transformGainMaps(
+    assert(rawpreamp::DNGDecoder::transformGainMaps(
         normalizedReducedOutputGainMaps, true, true, false));
-    std::vector<motioncam::GainMap> normalizedOutputColor;
-    std::vector<motioncam::GainMap> normalizedOutputLuminance;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> normalizedOutputColor;
+    std::vector<rawpreamp::GainMap> normalizedOutputLuminance;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         normalizedReducedOutputGainMaps, 2, normalizedOutputColor));
-    assert(motioncam::DNGDecoder::getGainMaps(
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         normalizedReducedOutputGainMaps, 3, normalizedOutputLuminance));
-    auto maximumGain = [](const std::vector<motioncam::GainMap>& maps) {
+    auto maximumGain = [](const std::vector<rawpreamp::GainMap>& maps) {
         float maximum = 0.0f;
         for (const auto& map : maps)
             for (const float gain : map.data)
@@ -1733,21 +1733,21 @@ int main() {
     // Existing deferred luminance and newly separated luminance represent one
     // multiplicative correction. Merge them before normalizing the result.
     std::vector<uint8_t> normalizedCombinedOutput = fourGainBytes;
-    assert(motioncam::DNGDecoder::replaceGainMaps(
+    assert(rawpreamp::DNGDecoder::replaceGainMaps(
         normalizedCombinedOutput, 3, {existingLuminance}));
-    assert(motioncam::DNGDecoder::transformGainMaps(
+    assert(rawpreamp::DNGDecoder::transformGainMaps(
         normalizedCombinedOutput, true, true, false));
-    std::vector<motioncam::GainMap> normalizedCombinedLuminance;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    std::vector<rawpreamp::GainMap> normalizedCombinedLuminance;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         normalizedCombinedOutput, 3, normalizedCombinedLuminance));
     assert(normalizedCombinedLuminance.size() == 1);
     assert(std::abs(maximumGain(normalizedCombinedLuminance) - 1.0f) < 1e-6f);
 
-    assert(motioncam::DNGDecoder::transformGainMaps(fourGainBytes, false, true, false));
-    std::vector<motioncam::GainMap> retainedColorMaps, retainedLuminanceMaps;
-    assert(motioncam::DNGDecoder::getGainMaps(
+    assert(rawpreamp::DNGDecoder::transformGainMaps(fourGainBytes, false, true, false));
+    std::vector<rawpreamp::GainMap> retainedColorMaps, retainedLuminanceMaps;
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         fourGainBytes, 2, retainedColorMaps));
-    assert(motioncam::DNGDecoder::getGainMaps(
+    assert(rawpreamp::DNGDecoder::getGainMaps(
         fourGainBytes, 3, retainedLuminanceMaps));
     assert(retainedColorMaps.size() == 4);
     assert(retainedLuminanceMaps.size() == 1);
@@ -1768,7 +1768,7 @@ int main() {
         std::fill_n(placeholder, softwarePlaceholder.size(), 0);
         std::copy(software.begin(), software.end(), placeholder);
         const std::vector<uint8_t> original = bytes;
-        assert(motioncam::DNGDecoder::repairGainMapCfaPhase(bytes));
+        assert(rawpreamp::DNGDecoder::repairGainMapCfaPhase(bytes));
         return bytes != original;
     };
     assert(producerIsRepaired("MotionCam 4.0.4"));
@@ -1784,8 +1784,8 @@ int main() {
     auto checkGpuPackedJpeg = [&](uint32_t testWidth, uint32_t testHeight,
                                   uint32_t channels, bool fusedGain = false,
                                   uint32_t sourceWhite = 4095,
-                                  motioncam::LogTransformMode mode =
-                                      motioncam::LogTransformMode::ReduceBy4Bit,
+                                  rawpreamp::LogTransformMode mode =
+                                      rawpreamp::LogTransformMode::ReduceBy4Bit,
                                   bool packOutput = true,
                                   bool tileOutput = false) {
         std::vector<uint16_t> samples(static_cast<size_t>(testWidth) *
@@ -1836,96 +1836,96 @@ int main() {
         std::vector<std::vector<uint8_t>> gpuTiles;
         bool fused = false;
         const bool baked = fusedGain
-            ? motioncam::DNGDecoder::bakeGainMaps(
+            ? rawpreamp::DNGDecoder::bakeGainMaps(
                   fast, false, false, false, false, 0, std::nullopt,
                   mode, sourceWhite, false, &fused, packOutput, 7, true, nullptr,
                   tileOutput ? nullptr : &gpuJpeg,
                   tileOutput ? &gpuTiles : nullptr)
-            : motioncam::DNGDecoder::bakeLogStripVulkan(
+            : rawpreamp::DNGDecoder::bakeLogStripVulkan(
                   fast, mode, sourceWhite, false, 7,
                   tileOutput ? nullptr : &gpuJpeg,
                   tileOutput ? &gpuTiles : nullptr);
         if (!baked) {
-            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
+            assert(!std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST"));
             return;
         }
         if (tileOutput ? gpuTiles.empty() : gpuJpeg.empty()) {
             std::fprintf(stderr, "GPU JPEG output missing: %ux%u channels=%u sourceWhite=%u mode=%d packed=%d tiled=%d\n",
                          testWidth, testHeight, channels, sourceWhite,
                          int(mode), packOutput, tileOutput);
-            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_TEST"));
+            assert(!std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_TEST"));
             return; // Vulkan unavailable: CPU fallback ran.
         }
         if (fusedGain) {
             bool referenceFused = false;
-            assert(motioncam::DNGDecoder::bakeGainMaps(
+            assert(rawpreamp::DNGDecoder::bakeGainMaps(
                 reference, false, false, false, false, 0, std::nullopt,
                 mode, sourceWhite, false, &referenceFused, packOutput, 7, true));
             assert(fused == referenceFused);
-            assert(fused == (mode != motioncam::LogTransformMode::Disabled));
-            if (mode == motioncam::LogTransformMode::Disabled && packOutput)
-                assert(motioncam::DNGDecoder::packUncompressedToWhiteLevel(
+            assert(fused == (mode != rawpreamp::LogTransformMode::Disabled));
+            if (mode == rawpreamp::LogTransformMode::Disabled && packOutput)
+                assert(rawpreamp::DNGDecoder::packUncompressedToWhiteLevel(
                     reference));
         } else {
-            assert(motioncam::DNGDecoder::bakeLogStripVulkan(
+            assert(rawpreamp::DNGDecoder::bakeLogStripVulkan(
                 reference, mode, sourceWhite, false, 7));
         }
         if (tileOutput)
-            assert(motioncam::DNGDecoder::attachLosslessJPEGTiles(
+            assert(rawpreamp::DNGDecoder::attachLosslessJPEGTiles(
                 fast, gpuTiles, channels == 1 ? 16u : 8u,
                 channels == 1 ? 64u : 128u));
         else
-            assert(motioncam::DNGDecoder::attachLosslessJPEG(fast, gpuJpeg));
-        motioncam::DecodedDNGImage fastImage, referenceImage;
-        assert(motioncam::DNGDecoder::decodeImage(fast, fastImage));
-        assert(motioncam::DNGDecoder::decodeImage(reference, referenceImage));
+            assert(rawpreamp::DNGDecoder::attachLosslessJPEG(fast, gpuJpeg));
+        rawpreamp::DecodedDNGImage fastImage, referenceImage;
+        assert(rawpreamp::DNGDecoder::decodeImage(fast, fastImage));
+        assert(rawpreamp::DNGDecoder::decodeImage(reference, referenceImage));
         assert(fastImage.samples == referenceImage.samples);
     };
     checkGpuPackedJpeg(1024, 1024, 1);
     checkGpuPackedJpeg(1024, 512, 3);
     checkGpuPackedJpeg(1024, 512, 3, true);
     checkGpuPackedJpeg(1024, 512, 3, true, 4095,
-                       motioncam::LogTransformMode::Disabled);
+                       rawpreamp::LogTransformMode::Disabled);
     checkGpuPackedJpeg(1024, 512, 3, true, 4095,
-                       motioncam::LogTransformMode::Disabled, false);
+                       rawpreamp::LogTransformMode::Disabled, false);
     checkGpuPackedJpeg(1025, 1024, 1, false, 65535,
-                       motioncam::LogTransformMode::ReduceBy4Bit);
+                       rawpreamp::LogTransformMode::ReduceBy4Bit);
     checkGpuPackedJpeg(1023, 512, 3, false, 4095,
-                       motioncam::LogTransformMode::ReduceBy2Bit);
+                       rawpreamp::LogTransformMode::ReduceBy2Bit);
     checkGpuPackedJpeg(1024, 1024, 1, true, 65535,
-                       motioncam::LogTransformMode::Disabled, false, true);
+                       rawpreamp::LogTransformMode::Disabled, false, true);
     checkGpuPackedJpeg(1024, 512, 3, true, 65535,
-                       motioncam::LogTransformMode::Disabled, false, true);
+                       rawpreamp::LogTransformMode::Disabled, false, true);
     checkGpuPackedJpeg(1024, 1024, 1, false, 65535,
-                       motioncam::LogTransformMode::ReduceBy4Bit, true, true);
+                       rawpreamp::LogTransformMode::ReduceBy4Bit, true, true);
     checkGpuPackedJpeg(1024, 512, 3, false, 65535,
-                       motioncam::LogTransformMode::ReduceBy4Bit, true, true);
+                       rawpreamp::LogTransformMode::ReduceBy4Bit, true, true);
     checkGpuPackedJpeg(1024, 512, 3, true, 4095,
-                       motioncam::LogTransformMode::ReduceBy2Bit, true, true);
+                       rawpreamp::LogTransformMode::ReduceBy2Bit, true, true);
     checkGpuPackedJpeg(1024, 1024, 1, false, 65535,
-                       motioncam::LogTransformMode::ReduceBy8Bit, true, true);
+                       rawpreamp::LogTransformMode::ReduceBy8Bit, true, true);
     checkGpuPackedJpeg(1024, 512, 3, false, 65535,
-                       motioncam::LogTransformMode::ReduceBy2Bit, true, true);
+                       rawpreamp::LogTransformMode::ReduceBy2Bit, true, true);
     checkGpuPackedJpeg(1000, 512, 3, true, 4095,
-                       motioncam::LogTransformMode::ReduceBy2Bit, true, true);
+                       rawpreamp::LogTransformMode::ReduceBy2Bit, true, true);
     checkGpuPackedJpeg(1024, 1024, 1, true, 4095,
-                       motioncam::LogTransformMode::Disabled, true, true);
+                       rawpreamp::LogTransformMode::Disabled, true, true);
     checkGpuPackedJpeg(1024, 512, 3, true, 4095,
-                       motioncam::LogTransformMode::Disabled, true, true);
+                       rawpreamp::LogTransformMode::Disabled, true, true);
 
     // Independent lossless JPEG tiles exercise the Vulkan entropy and
     // predictor decoder, including its tile placement and 16-bit wrapping.
     {
-        const bool smallTiles = std::getenv("MOTIONCAM_JPEG_DECODE_SMALL_TILES");
+        const bool smallTiles = std::getenv("RAWPREAMP_JPEG_DECODE_SMALL_TILES");
         const uint32_t tileWidth = smallTiles ? 32u : 128u;
         const uint32_t tileHeight = tileWidth;
         const uint32_t tileCount = smallTiles ? 12288u :
-            std::getenv("MOTIONCAM_JPEG_DECODE_LARGE_BENCHMARK") ? 768u : 64u;
-        const bool residentTest = std::getenv("MOTIONCAM_JPEG_DECODE_RESIDENT_TEST");
-        const bool residentLog = std::getenv("MOTIONCAM_JPEG_DECODE_LOG_TEST");
+            std::getenv("RAWPREAMP_JPEG_DECODE_LARGE_BENCHMARK") ? 768u : 64u;
+        const bool residentTest = std::getenv("RAWPREAMP_JPEG_DECODE_RESIDENT_TEST");
+        const bool residentLog = std::getenv("RAWPREAMP_JPEG_DECODE_LOG_TEST");
         std::vector<std::vector<uint16_t>> expected(tileCount);
         std::vector<std::vector<uint8_t>> encoded(tileCount);
-        std::vector<motioncam::VulkanJpegTile> inputs(tileCount);
+        std::vector<rawpreamp::VulkanJpegTile> inputs(tileCount);
         for (uint32_t tile = 0; tile < tileCount; ++tile) {
             const uint32_t bits = residentTest ? 12u : (tile & 1u) ? 16u : 12u;
             auto& samples = expected[tile];
@@ -1943,13 +1943,13 @@ int main() {
                             tileWidth, tileHeight, bits};
         }
         std::vector<std::vector<uint16_t>> actual;
-        if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE")) {
+        if (std::getenv("RAWPREAMP_JPEG_DECODE_PROFILE")) {
             std::vector<std::vector<uint16_t>> warm;
-            assert(motioncam::jpegDecodeTilesVulkan(inputs, warm));
+            assert(rawpreamp::jpegDecodeTilesVulkan(inputs, warm));
             assert(warm == expected);
         }
         const auto gpuStart = std::chrono::steady_clock::now();
-        const bool gpuDecoded = motioncam::jpegDecodeTilesVulkan(inputs, actual);
+        const bool gpuDecoded = rawpreamp::jpegDecodeTilesVulkan(inputs, actual);
         const auto gpuEnd = std::chrono::steady_clock::now();
         if (gpuDecoded) {
             if (actual != expected)
@@ -1980,29 +1980,29 @@ int main() {
                             (tile % 8u) * 128u);
                 auto dng = tiledLosslessJpegDng(
                     imageSamples, 1024, 1024, 128, 128, 16);
-                motioncam::DecodedDNGImage imported;
-                assert(motioncam::DNGDecoder::decodeImageBorrowed(dng, imported));
+                rawpreamp::DecodedDNGImage imported;
+                assert(rawpreamp::DNGDecoder::decodeImageBorrowed(dng, imported));
                 assert(imported.samples == imageSamples);
-                motioncam::DecodedDNGImage resident;
-                assert(motioncam::DNGDecoder::decodeImage(dng, resident, false, true, true));
+                rawpreamp::DecodedDNGImage resident;
+                assert(rawpreamp::DNGDecoder::decodeImage(dng, resident, false, true, true));
                 assert(resident.gpuImage && resident.samples.empty());
                 // Reusing decoder scratch for another frame cannot overwrite a
                 // retained frame that is waiting for gallery processing.
-                motioncam::DecodedDNGImage next;
-                assert(motioncam::DNGDecoder::decodeImage(dng, next, false, true, true));
+                rawpreamp::DecodedDNGImage next;
+                assert(rawpreamp::DNGDecoder::decodeImage(dng, next, false, true, true));
                 assert(next.gpuImage && next.gpuImage->buffer != resident.gpuImage->buffer);
                 std::vector<uint16_t> recovered(imageSamples.size());
                 assert(resident.gpuImage->download(recovered.data(), recovered.size()));
                 assert(recovered == imageSamples);
                 resident.layout.cfaRepeatSize = 2;
                 resident.layout.cfaPhase = {0, 1, 1, 2};
-                motioncam::RenderSettings settings;
-                settings.options = static_cast<motioncam::FileRenderOptions>(0);
+                rawpreamp::RenderSettings settings;
+                settings.options = static_cast<rawpreamp::FileRenderOptions>(0);
                 settings.streamingPreview = true;
-                motioncam::PreviewFrame frame;
-                assert(motioncam::DNGDecoder::decodePreview(resident, settings, frame));
+                rawpreamp::PreviewFrame frame;
+                assert(rawpreamp::DNGDecoder::decodePreview(resident, settings, frame));
                 assert(frame.gallerySource.buffer && frame.galleryCfa.empty() && frame.rgb.empty());
-                motioncam::VulkanGalleryBayerSource source;
+                rawpreamp::VulkanGalleryBayerSource source;
                 source.gpu = frame.gallerySource.gpu;
                 source.buffer = frame.gallerySource.buffer;
                 source.width = frame.width; source.height = frame.height;
@@ -2011,15 +2011,15 @@ int main() {
                 const std::array<float, 3> gains{1, 1, 1};
                 const std::array<float, 9> identity{1,0,0, 0,1,0, 0,0,1};
                 std::vector<uint8_t> gpuColor, hostColor;
-                assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                assert(rawpreamp::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
                     1, nullptr, nullptr, false, false, &source));
                 source.gpu = source.buffer = nullptr;
                 source.samples = imageSamples.data();
-                assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                assert(rawpreamp::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
                     1, nullptr, nullptr, false, false, &source));
                 assert(gpuColor == hostColor);
                 auto withGain = resident;
-                motioncam::GainMap map{};
+                rawpreamp::GainMap map{};
                 map.right = map.bottom = 1024;
                 map.planes = map.channels = map.rowPitch = map.colPitch = 1;
                 map.width = map.height = 1;
@@ -2027,20 +2027,20 @@ int main() {
                 map.data = {1.1f};
                 withGain.opcodeList2 = {map};
                 auto gainSettings = settings;
-                gainSettings.options |= motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
-                motioncam::PreviewFrame gainFrame;
-                assert(motioncam::DNGDecoder::decodePreview(withGain, gainSettings, gainFrame));
+                gainSettings.options |= rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION;
+                rawpreamp::PreviewFrame gainFrame;
+                assert(rawpreamp::DNGDecoder::decodePreview(withGain, gainSettings, gainFrame));
                 assert(gainFrame.gallerySource.buffer && gainFrame.galleryCfaGain && gainFrame.gainMapApplied);
                 source.samples = nullptr;
                 source.gpu = gainFrame.gallerySource.gpu;
                 source.buffer = gainFrame.gallerySource.buffer;
                 source.black = gainFrame.galleryBlack; source.white = gainFrame.galleryWhite;
                 source.gain = gainFrame.galleryCfaGain.get();
-                assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                assert(rawpreamp::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
                     1, nullptr, nullptr, false, false, &source));
                 source.gpu = source.buffer = nullptr;
                 source.samples = imageSamples.data();
-                assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                assert(rawpreamp::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
                     1, nullptr, nullptr, false, false, &source));
                 assert(gpuColor == hostColor);
                 // CPU recovery must match the ordinary CPU preview for both
@@ -2048,10 +2048,10 @@ int main() {
                 for (bool bakeGain : {false, true}) for (bool log : {false, true}) {
                     auto input = bakeGain ? withGain : resident;
                     auto recoverySettings = bakeGain ? gainSettings : settings;
-                    if (log) recoverySettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
-                    recoverySettings.logTransform = motioncam::LogTransformMode::ReduceBy6Bit;
-                    motioncam::PreviewFrame deferred;
-                    assert(motioncam::DNGDecoder::decodePreview(input, recoverySettings, deferred, true));
+                    if (log) recoverySettings.options |= rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+                    recoverySettings.logTransform = rawpreamp::LogTransformMode::ReduceBy6Bit;
+                    rawpreamp::PreviewFrame deferred;
+                    assert(rawpreamp::DNGDecoder::decodePreview(input, recoverySettings, deferred, true));
                     std::vector<uint16_t> samples;
                     assert(deferred.gallerySource.downloadSamples(samples));
                     if (deferred.galleryCfaGain) {
@@ -2059,16 +2059,16 @@ int main() {
                         assert(deferred.galleryCfaRecoverCpu(samples));
                     }
                     std::vector<uint8_t> recoveredRgb;
-                    assert(motioncam::utils::demosaicBilinearBayerToRgb16Bytes(
+                    assert(rawpreamp::utils::demosaicBilinearBayerToRgb16Bytes(
                         samples.data(), recoveredRgb, deferred.width, deferred.height,
                         deferred.galleryCfaPhase, deferred.galleryBlack, deferred.galleryWhite));
                     input.gpuImage.reset(); input.samples = imageSamples;
                     recoverySettings.streamingPreview = false;
-                    motioncam::PreviewFrame ordinary;
-                    assert(motioncam::DNGDecoder::decodePreview(input, recoverySettings, ordinary, true));
+                    rawpreamp::PreviewFrame ordinary;
+                    assert(rawpreamp::DNGDecoder::decodePreview(input, recoverySettings, ordinary, true));
                     assert(recoveredRgb == ordinary.rgb);
                 }
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
                 const auto gpu = static_cast<pl_gpu>(resident.gpuImage->gpu);
                 pl_tex_params textureParams{};
                 textureParams.w = textureParams.h = 1024;
@@ -2085,15 +2085,15 @@ int main() {
                     });
                 for (bool log : {false, true}) {
                     auto textureImage = resident;
-                    textureImage.gpuImage = std::make_shared<motioncam::DNGGpuImage>(*resident.gpuImage);
+                    textureImage.gpuImage = std::make_shared<rawpreamp::DNGGpuImage>(*resident.gpuImage);
                     textureImage.gpuImage->buffer = nullptr;
                     textureImage.gpuImage->texture = cfaTexture;
                     textureImage.gpuImage->lease = textureLease;
                     auto textureSettings = settings;
-                    if (log) textureSettings.options |= motioncam::RENDER_OPT_LOG_TRANSFORM;
-                    textureSettings.logTransform = motioncam::LogTransformMode::ReduceBy6Bit;
-                    motioncam::PreviewFrame textureFrame;
-                    assert(motioncam::DNGDecoder::decodePreview(textureImage, textureSettings,
+                    if (log) textureSettings.options |= rawpreamp::RENDER_OPT_LOG_TRANSFORM;
+                    textureSettings.logTransform = rawpreamp::LogTransformMode::ReduceBy6Bit;
+                    rawpreamp::PreviewFrame textureFrame;
+                    assert(rawpreamp::DNGDecoder::decodePreview(textureImage, textureSettings,
                                                                textureFrame, true));
                     assert(textureFrame.gallerySource.texture && textureFrame.rgb.empty());
                     source.samples = nullptr;
@@ -2101,17 +2101,17 @@ int main() {
                     source.buffer = nullptr; source.texture = textureFrame.gallerySource.texture;
                     source.black = textureFrame.galleryBlack; source.white = textureFrame.galleryWhite;
                     source.gain = textureFrame.galleryCfaGain.get();
-                    assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                    assert(rawpreamp::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
                         1, nullptr, nullptr, false, false, &source));
                     auto cpuImage = resident;
                     cpuImage.gpuImage.reset(); cpuImage.samples = imageSamples;
-                    motioncam::PreviewFrame cpuFrame;
-                    assert(motioncam::DNGDecoder::decodePreview(cpuImage, textureSettings, cpuFrame, true));
+                    rawpreamp::PreviewFrame cpuFrame;
+                    assert(rawpreamp::DNGDecoder::decodePreview(cpuImage, textureSettings, cpuFrame, true));
                     source.gpu = source.texture = nullptr;
                     source.samples = cpuFrame.galleryCfaSamples();
                     source.black = cpuFrame.galleryBlack; source.white = cpuFrame.galleryWhite;
                     source.gain = cpuFrame.galleryCfaGain.get();
-                    assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                    assert(rawpreamp::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
                         1, nullptr, nullptr, false, false, &source));
                     if (gpuColor != hostColor) {
                         unsigned maximum = 0; size_t different = 0;
@@ -2130,41 +2130,41 @@ int main() {
                 // Finalized LOG JPEG DNGs must linearize resident codes before
                 // demosaic, matching the ordinary CPU import exactly.
                 auto logDng = dng;
-                assert(motioncam::DNGDecoder::ensureUncompressed(logDng));
-                assert(motioncam::DNGDecoder::applyLogTransform(logDng,
-                    motioncam::LogTransformMode::ReduceBy6Bit));
-                assert(motioncam::DNGDecoder::compressLosslessJPEGTiled(logDng));
-                motioncam::DecodedDNGImage logResident, logCpu;
-                assert(motioncam::DNGDecoder::decodeImage(logDng, logResident, false, true, true));
+                assert(rawpreamp::DNGDecoder::ensureUncompressed(logDng));
+                assert(rawpreamp::DNGDecoder::applyLogTransform(logDng,
+                    rawpreamp::LogTransformMode::ReduceBy6Bit));
+                assert(rawpreamp::DNGDecoder::compressLosslessJPEGTiled(logDng));
+                rawpreamp::DecodedDNGImage logResident, logCpu;
+                assert(rawpreamp::DNGDecoder::decodeImage(logDng, logResident, false, true, true));
                 assert(logResident.gpuImage && !logResident.residentLinearization.empty());
-                assert(motioncam::DNGDecoder::decodeImage(logDng, logCpu));
+                assert(rawpreamp::DNGDecoder::decodeImage(logDng, logCpu));
                 logResident.layout.cfaRepeatSize = 2;
                 logResident.layout.cfaPhase = {0,1,1,2};
-                motioncam::PreviewFrame logFrame;
-                assert(motioncam::DNGDecoder::decodePreview(logResident, settings, logFrame));
+                rawpreamp::PreviewFrame logFrame;
+                assert(rawpreamp::DNGDecoder::decodePreview(logResident, settings, logFrame));
                 assert(logFrame.gallerySource.buffer && logFrame.galleryCfaGain);
                 source.samples = nullptr;
                 source.gpu = logFrame.gallerySource.gpu; source.buffer = logFrame.gallerySource.buffer;
                 source.black = logFrame.galleryBlack; source.white = logFrame.galleryWhite;
                 source.gain = logFrame.galleryCfaGain.get();
-                assert(motioncam::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
+                assert(rawpreamp::colorGalleryRgbVulkan(gpuColor, gains, identity, identity,
                     1, nullptr, nullptr, false, false, &source));
                 source.gpu = source.buffer = nullptr;
                 source.samples = logCpu.samples.data();
                 source.gain = nullptr;
-                assert(motioncam::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
+                assert(rawpreamp::colorGalleryRgbVulkan(hostColor, gains, identity, identity,
                     1, nullptr, nullptr, false, false, &source));
                 assert(gpuColor == hostColor);
                 std::vector<uint16_t> fallback;
                 assert(logFrame.gallerySource.downloadSamples(fallback));
                 assert(fallback == logCpu.samples);
                 // Histogram/clipping requests recover through shared CPU processing.
-                motioncam::PreviewFrame histogram;
-                assert(motioncam::DNGDecoder::decodePreview(resident, settings,
+                rawpreamp::PreviewFrame histogram;
+                assert(rawpreamp::DNGDecoder::decodePreview(resident, settings,
                     histogram, false, true));
                 assert(histogram.rawSamples && *histogram.rawSamples == imageSamples);
             }
-            if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE")) {
+            if (std::getenv("RAWPREAMP_JPEG_DECODE_PROFILE")) {
                 std::fprintf(stderr, "Vulkan JPEG tile decode %.3f ms\n",
                     std::chrono::duration<double, std::milli>(gpuEnd - gpuStart).count());
                 std::atomic_uint nextTile{0};
@@ -2197,7 +2197,7 @@ int main() {
                     std::chrono::duration<double, std::milli>(cpuEnd - cpuStart).count());
             }
         } else {
-            assert(!std::getenv("MOTIONCAM_REQUIRE_GPU_JPEG_DECODE_TEST"));
+            assert(!std::getenv("RAWPREAMP_REQUIRE_GPU_JPEG_DECODE_TEST"));
         }
         if (residentTest && gpuDecoded) {
             const uint32_t canvasWidth = tileCount == 64 ? 1024u : 4096u;
@@ -2207,13 +2207,13 @@ int main() {
             double residentMs[2]{};
             for (int attempt = 0; attempt < 2; ++attempt) {
                 const auto start = std::chrono::steady_clock::now();
-                assert(motioncam::jpegDecodeTiledImageVulkan(
+                assert(rawpreamp::jpegDecodeTiledImageVulkan(
                 inputs, canvasWidth, canvasHeight, tileWidth, tileHeight,
-                [&](const motioncam::VulkanDecodedJpegImage& image) {
+                [&](const rawpreamp::VulkanDecodedJpegImage& image) {
                     residentGpu = image.gpu;
                     const std::vector<float> gains{1.1f};
-                    motioncam::VulkanGainBakeBufferSource source{image.gpu, image.buffer};
-                    motioncam::VulkanGainBakeParams params;
+                    rawpreamp::VulkanGainBakeBufferSource source{image.gpu, image.buffer};
+                    rawpreamp::VulkanGainBakeParams params;
                     params.width = image.width;
                     params.height = image.height;
                     params.channels = 1;
@@ -2224,13 +2224,13 @@ int main() {
                     params.log60 = residentLog;
                     params.scale.fill(1.0f);
                     params.bufferSource = &source;
-                    params.map = motioncam::VulkanRgbGainMap{
+                    params.map = rawpreamp::VulkanRgbGainMap{
                         1, 1, 1, 0, 0, image.width, image.height,
                         1, 1, 0, 0, 1, 1, &gains};
                     params.cfaMapCount = 1;
                     params.cfaMaps[0] = params.map;
-                    params.consumePackedOutput = [&](const motioncam::VulkanPackedImage& packed) {
-                        return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                    params.consumePackedOutput = [&](const rawpreamp::VulkanPackedImage& packed) {
+                        return rawpreamp::jpegEncodeFullyVulkanPackedBufferBorrowed(
                             packed.gpu, packed.buffer, packed.width, packed.height,
                             packed.channels, packed.bits, packed.wordsPerRow,
                             [&](const uint8_t* bytes, size_t count) {
@@ -2240,14 +2240,14 @@ int main() {
                     };
                     std::vector<uint8_t> unused(size_t(image.width) * image.height *
                                                 (residentLog ? 3u : 4u) / 2u);
-                    return motioncam::bakeCfaGainVulkan(nullptr, params,
+                    return rawpreamp::bakeCfaGainVulkan(nullptr, params,
                                                          unused.data(), unused.size());
                 }));
                 const auto end = std::chrono::steady_clock::now();
                 residentMs[attempt] =
                     std::chrono::duration<double, std::milli>(end - start).count();
             }
-            motioncam::releaseVulkanGainBakeBufferDevice(residentGpu);
+            rawpreamp::releaseVulkanGainBakeBufferDevice(residentGpu);
             if (tileCount == 64) {
                 auto brokenInputs = inputs;
                 auto brokenTile = encoded.front();
@@ -2255,10 +2255,10 @@ int main() {
                 brokenTile.erase(brokenTile.end() - 102, brokenTile.end() - 2);
                 brokenInputs.front().bytes = brokenTile.data();
                 brokenInputs.front().size = brokenTile.size();
-                assert(!motioncam::jpegDecodeTiledImageVulkan(
+                assert(!rawpreamp::jpegDecodeTiledImageVulkan(
                     brokenInputs, canvasWidth, canvasHeight, tileWidth, tileHeight,
-                    [&](const motioncam::VulkanDecodedJpegImage& image) {
-                        return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                    [&](const rawpreamp::VulkanDecodedJpegImage& image) {
+                        return rawpreamp::jpegEncodeFullyVulkanPackedBufferBorrowed(
                             image.gpu, image.buffer, image.width, image.height,
                             1, 16, image.wordsPerRow,
                             [](const uint8_t*, size_t) { return true; },
@@ -2288,7 +2288,7 @@ int main() {
             }
             std::fprintf(stderr, "Vulkan JPEG decode->gain->encode resident cold=%.3f warm=%.3f ms\n",
                          residentMs[0], residentMs[1]);
-            if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE") || residentLog) {
+            if (std::getenv("RAWPREAMP_JPEG_DECODE_PROFILE") || residentLog) {
                 std::vector<uint16_t> sourceCanvas(canvas.size());
                 const uint32_t tilesAcross = canvasWidth / tileWidth;
                 for (uint32_t t = 0; t < tileCount; ++t) {
@@ -2300,7 +2300,7 @@ int main() {
                                     sourceCanvas.data() + size_t(oy + y) * canvasWidth + ox);
                 }
                 const std::vector<float> gains{1.1f};
-                motioncam::VulkanGainBakeParams params;
+                rawpreamp::VulkanGainBakeParams params;
                 params.width = canvasWidth;
                 params.height = canvasHeight;
                 params.channels = 1;
@@ -2310,13 +2310,13 @@ int main() {
                 params.encodedWhite = residentLog ? 4095u : 0u;
                 params.log60 = residentLog;
                 params.scale.fill(1.0f);
-                params.map = motioncam::VulkanRgbGainMap{
+                params.map = rawpreamp::VulkanRgbGainMap{
                     1, 1, 1, 0, 0, canvasWidth, canvasHeight,
                     1, 1, 0, 0, 1, 1, &gains};
                 params.cfaMapCount = 1;
                 params.cfaMaps[0] = params.map;
-                params.consumePackedOutput = [&](const motioncam::VulkanPackedImage& packed) {
-                    return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                params.consumePackedOutput = [&](const rawpreamp::VulkanPackedImage& packed) {
+                    return rawpreamp::jpegEncodeFullyVulkanPackedBufferBorrowed(
                         packed.gpu, packed.buffer, packed.width, packed.height,
                         packed.channels, packed.bits, packed.wordsPerRow,
                         [&](const uint8_t*, size_t) { return true; });
@@ -2326,17 +2326,17 @@ int main() {
                 double cpuSourceMs[2]{};
                 for (int attempt = 0; attempt < 2; ++attempt) {
                     const auto start = std::chrono::steady_clock::now();
-                    assert(motioncam::bakeCfaGainVulkan(
+                    assert(rawpreamp::bakeCfaGainVulkan(
                         sourceCanvas.data(), params, unused.data(), unused.size()));
                     cpuSourceMs[attempt] = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - start).count();
                 }
-                if (std::getenv("MOTIONCAM_JPEG_DECODE_PROFILE"))
+                if (std::getenv("RAWPREAMP_JPEG_DECODE_PROFILE"))
                     std::fprintf(stderr, "CPU pixels->Vulkan gain->JPEG cold=%.3f warm=%.3f ms\n",
                                  cpuSourceMs[0], cpuSourceMs[1]);
                 if (residentLog) {
                     params.consumePackedOutput = {};
-                    assert(motioncam::bakeCfaGainVulkan(
+                    assert(rawpreamp::bakeCfaGainVulkan(
                         sourceCanvas.data(), params, unused.data(), unused.size()));
                     const size_t rowBytes = size_t(canvasWidth) * 12u / 8u;
                     for (uint32_t y = 0; y < canvasHeight; ++y)
@@ -2354,8 +2354,8 @@ int main() {
             }
         }
     }
-#ifdef MOTIONCAM_HAS_DIRECTLOG_PLACEBO
-    if (std::getenv("MOTIONCAM_GPU_PROXY_TEST")) {
+#ifdef RAWPREAMP_HAS_NATIVE_VIDEO_PLACEBO
+    if (std::getenv("RAWPREAMP_GPU_PROXY_TEST")) {
         constexpr uint32_t width = 96, height = 64;
         std::vector<uint16_t> pixels(width * height);
         for (uint32_t y = 0; y < height; ++y)
@@ -2363,11 +2363,11 @@ int main() {
                 pixels[y * width + x] = uint16_t(1000 +
                     (x * 91 + y * 173 + (x & 1) * 1200 + (y & 1) * 4000) % 50000);
         const auto dng = tiledLosslessJpegDng(pixels, width, height, 16, 16, 16);
-        motioncam::DecodedDNGImage decoded;
-        assert(motioncam::DNGDecoder::decodeImage(dng, decoded, false, true, true));
+        rawpreamp::DecodedDNGImage decoded;
+        assert(rawpreamp::DNGDecoder::decodeImage(dng, decoded, false, true, true));
         assert(decoded.gpuImage && decoded.samples.empty());
-        auto render = [](const motioncam::PreviewFrame& frame) {
-            motioncam::VulkanGalleryBayerSource source;
+        auto render = [](const rawpreamp::PreviewFrame& frame) {
+            rawpreamp::VulkanGalleryBayerSource source;
             source.gpu = frame.gallerySource.gpu;
             source.buffer = frame.gallerySource.buffer;
             source.samples = frame.galleryCfa.data();
@@ -2378,7 +2378,7 @@ int main() {
             const std::array<float, 3> gains{1, 1, 1};
             const std::array<float, 9> identity{1,0,0, 0,1,0, 0,0,1};
             std::vector<uint8_t> rgb;
-            assert(motioncam::colorGalleryRgbVulkan(rgb, gains, identity, identity,
+            assert(rawpreamp::colorGalleryRgbVulkan(rgb, gains, identity, identity,
                 1, nullptr, nullptr, false, false, &source));
             return rgb;
         };
@@ -2395,7 +2395,7 @@ int main() {
                 for (auto& sample : cpu.samples) sample = resident.residentLinearization[sample];
             }
             if (gain) {
-                motioncam::GainMap map{};
+                rawpreamp::GainMap map{};
                 map.left = 6; map.top = 4; map.right = width - 7; map.bottom = height - 9;
                 map.width = map.height = 2; map.channels = gainChannels;
                 map.rowPitch = map.colPitch = gainChannels == 1 ? 2 : 1;
@@ -2406,16 +2406,16 @@ int main() {
                 resident.opcodeList2 = cpu.opcodeList2 = {map};
             }
             for (bool log : {false, true}) for (int scale : {2, 4, 8}) {
-                motioncam::RenderSettings settings;
+                rawpreamp::RenderSettings settings;
                 settings.streamingPreview = true;
-                settings.options = static_cast<motioncam::FileRenderOptions>(
-                    motioncam::RENDER_OPT_DRAFT |
-                    (gain ? motioncam::RENDER_OPT_APPLY_VIGNETTE_CORRECTION : 0) |
-                    (log ? motioncam::RENDER_OPT_LOG_TRANSFORM : 0));
-                settings.logTransform = motioncam::LogTransformMode::ReduceBy4Bit;
+                settings.options = static_cast<rawpreamp::FileRenderOptions>(
+                    rawpreamp::RENDER_OPT_DRAFT |
+                    (gain ? rawpreamp::RENDER_OPT_APPLY_VIGNETTE_CORRECTION : 0) |
+                    (log ? rawpreamp::RENDER_OPT_LOG_TRANSFORM : 0));
+                settings.logTransform = rawpreamp::LogTransformMode::ReduceBy4Bit;
                 settings.draftScale = scale;
-                motioncam::PreviewFrame gpuFrame, cpuFrame;
-                assert(motioncam::DNGDecoder::decodePreview(resident, settings, gpuFrame, true));
+                rawpreamp::PreviewFrame gpuFrame, cpuFrame;
+                assert(rawpreamp::DNGDecoder::decodePreview(resident, settings, gpuFrame, true));
                 assert(gpuFrame.gallerySource.buffer && gpuFrame.rgb.empty());
                 assert(gpuFrame.width == width / scale && gpuFrame.height == height / scale);
                 std::vector<uint16_t> reduced;
@@ -2424,7 +2424,7 @@ int main() {
                     for (uint32_t x = 0; x < gpuFrame.width; ++x)
                         assert(reduced[y * gpuFrame.width + x] ==
                             cpu.samples[(y * scale + (y & 1)) * width + x * scale + (x & 1)]);
-                assert(motioncam::DNGDecoder::decodePreview(cpu, settings, cpuFrame, true));
+                assert(rawpreamp::DNGDecoder::decodePreview(cpu, settings, cpuFrame, true));
                 if (gpuFrame.galleryCfaRecoverCpu) {
                     auto recovered = reduced;
                     assert(gpuFrame.galleryCfaRecoverCpu(recovered));
@@ -2449,24 +2449,24 @@ int main() {
             }
         }
         // An odd CFA scale uses the established CPU processing path.
-        motioncam::RenderSettings fallbackSettings;
+        rawpreamp::RenderSettings fallbackSettings;
         fallbackSettings.streamingPreview = true;
-        fallbackSettings.options = motioncam::RENDER_OPT_DRAFT;
+        fallbackSettings.options = rawpreamp::RENDER_OPT_DRAFT;
         fallbackSettings.draftScale = 3;
-        motioncam::PreviewFrame fallback, reference;
-        assert(motioncam::DNGDecoder::decodePreview(decoded, fallbackSettings, fallback, true));
+        rawpreamp::PreviewFrame fallback, reference;
+        assert(rawpreamp::DNGDecoder::decodePreview(decoded, fallbackSettings, fallback, true));
         auto cpu = decoded;
         cpu.gpuImage.reset(); cpu.samples = pixels;
-        assert(motioncam::DNGDecoder::decodePreview(cpu, fallbackSettings, reference, true));
+        assert(rawpreamp::DNGDecoder::decodePreview(cpu, fallbackSettings, reference, true));
         assert(!fallback.gallerySource.buffer && fallback.width == reference.width &&
                fallback.height == reference.height && fallback.rgb == reference.rgb);
     }
-    if (std::getenv("MOTIONCAM_GPU_JPEG_RGB_DECODE_TEST")) {
+    if (std::getenv("RAWPREAMP_GPU_JPEG_RGB_DECODE_TEST")) {
         constexpr uint32_t tileSide = 128, across = 8, tileCount = across * across;
         constexpr uint32_t width = tileSide * across, height = width;
         std::vector<std::vector<uint16_t>> reference(tileCount);
         std::vector<std::vector<uint8_t>> encoded(tileCount);
-        std::vector<motioncam::VulkanJpegTile> tiles(tileCount);
+        std::vector<rawpreamp::VulkanJpegTile> tiles(tileCount);
         for (uint32_t t = 0; t < tileCount; ++t) {
             reference[t].resize(size_t(tileSide) * tileSide * 3u);
             for (size_t i = 0; i < reference[t].size(); ++i)
@@ -2482,34 +2482,34 @@ int main() {
                         tileSide, tileSide, 16, 3};
         }
         std::vector<std::vector<uint16_t>> decodedTiles;
-        assert(motioncam::jpegDecodeTilesVulkan(tiles, decodedTiles));
+        assert(rawpreamp::jpegDecodeTilesVulkan(tiles, decodedTiles));
         assert(decodedTiles == reference);
-        motioncam::VulkanDecodedJpegImage retained;
-        assert(motioncam::jpegDecodeTiledImageVulkanRetained(
+        rawpreamp::VulkanDecodedJpegImage retained;
+        assert(rawpreamp::jpegDecodeTiledImageVulkanRetained(
             tiles, width, height, tileSide, tileSide, retained));
-        motioncam::DecodedDNGImage rgbImage;
-        rgbImage.gpuImage = std::make_shared<motioncam::DNGGpuImage>();
+        rawpreamp::DecodedDNGImage rgbImage;
+        rgbImage.gpuImage = std::make_shared<rawpreamp::DNGGpuImage>();
         rgbImage.gpuImage->gpu = retained.gpu; rgbImage.gpuImage->buffer = retained.buffer;
         rgbImage.gpuImage->width = retained.width; rgbImage.gpuImage->height = retained.height;
         rgbImage.gpuImage->channels = retained.channels;
         rgbImage.gpuImage->lease = retained.lease;
         rgbImage.gpuImage->download = [retained](uint16_t* pixels, size_t samples) {
-            return motioncam::downloadVulkanDecodedJpegImage(retained, pixels, samples);
+            return rawpreamp::downloadVulkanDecodedJpegImage(retained, pixels, samples);
         };
         rgbImage.layout.width = width; rgbImage.layout.height = height;
         rgbImage.layout.samplesPerPixel = 3;
         rgbImage.layout.bitsPerSample = rgbImage.storedBitsPerSample = 16;
-        rgbImage.layout.pixels = motioncam::DNGPixelLayout::LinearRGB;
+        rgbImage.layout.pixels = rawpreamp::DNGPixelLayout::LinearRGB;
         rgbImage.metadata.blackLevelCount = rgbImage.metadata.whiteLevelCount = 3;
         rgbImage.metadata.blackLevel.fill(123);
         rgbImage.metadata.whiteLevel.fill(60000);
-        motioncam::RenderSettings rgbSettings;
-        rgbSettings.options = static_cast<motioncam::FileRenderOptions>(0);
+        rawpreamp::RenderSettings rgbSettings;
+        rgbSettings.options = static_cast<rawpreamp::FileRenderOptions>(0);
         rgbSettings.streamingPreview = true;
-        motioncam::PreviewFrame rgbFrame;
-        assert(motioncam::DNGDecoder::decodePreview(rgbImage, rgbSettings, rgbFrame));
+        rawpreamp::PreviewFrame rgbFrame;
+        assert(rawpreamp::DNGDecoder::decodePreview(rgbImage, rgbSettings, rgbFrame));
         assert(rgbFrame.gallerySource.buffer && rgbFrame.rgb.empty());
-        motioncam::VulkanGalleryTextureSource rgbSource;
+        rawpreamp::VulkanGalleryTextureSource rgbSource;
         rgbSource.gpu = rgbFrame.gallerySource.gpu;
         rgbSource.buffer = rgbFrame.gallerySource.buffer;
         rgbSource.width = width; rgbSource.height = height;
@@ -2517,10 +2517,10 @@ int main() {
         const std::array<float, 3> gains{1, 1, 1};
         const std::array<float, 9> identity{1,0,0, 0,1,0, 0,0,1};
         std::vector<uint8_t> residentColor;
-        assert(motioncam::colorGalleryRgbVulkan(residentColor, gains, identity, identity,
+        assert(rawpreamp::colorGalleryRgbVulkan(residentColor, gains, identity, identity,
             1, nullptr, nullptr, false, false, nullptr, nullptr, &rgbSource));
         rgbImage.samples.resize(size_t(width) * height * 3u);
-        assert(motioncam::downloadVulkanDecodedJpegImage(retained,
+        assert(rawpreamp::downloadVulkanDecodedJpegImage(retained,
             rgbImage.samples.data(), rgbImage.samples.size()));
         // Plain sampled RGB needs the neutral gain binding too. Baking used
         // to hide its missing descriptor by supplying a nonempty gain buffer.
@@ -2543,17 +2543,17 @@ int main() {
         assert(pl_tex_upload(gpu, &transfer));
         rgbSource.buffer = nullptr; rgbSource.texture = rgbTexture;
         std::vector<uint8_t> textureColor;
-        assert(motioncam::colorGalleryRgbVulkan(textureColor, gains, identity, identity,
+        assert(rawpreamp::colorGalleryRgbVulkan(textureColor, gains, identity, identity,
             1, nullptr, nullptr, false, false, nullptr, nullptr, &rgbSource));
         assert(textureColor == residentColor);
         assert(std::any_of(textureColor.begin(), textureColor.end(),
                            [](uint8_t value) { return value != 0; }));
         pl_tex_destroy(gpu, &rgbTexture);
         for (uint32_t scale : {2u, 4u, 8u}) {
-            motioncam::VulkanDecodedJpegImage reduced;
-            assert(motioncam::downscaleVulkanDecodedJpegImage(retained, scale, false, reduced));
+            rawpreamp::VulkanDecodedJpegImage reduced;
+            assert(rawpreamp::downscaleVulkanDecodedJpegImage(retained, scale, false, reduced));
             std::vector<uint16_t> samples(size_t(reduced.width) * reduced.height * 3);
-            assert(motioncam::downloadVulkanDecodedJpegImage(reduced, samples.data(), samples.size()));
+            assert(rawpreamp::downloadVulkanDecodedJpegImage(reduced, samples.data(), samples.size()));
             for (uint32_t y = 0; y < reduced.height; ++y)
                 for (uint32_t x = 0; x < reduced.width; ++x)
                     for (uint32_t c = 0; c < 3; ++c)
@@ -2562,9 +2562,9 @@ int main() {
                              x * scale + (scale - 1) / 2) * 3 + c]);
         }
         rgbImage.gpuImage.reset();
-        motioncam::PreviewFrame cpuFrame;
-        assert(motioncam::DNGDecoder::decodePreview(rgbImage, rgbSettings, cpuFrame));
-        assert(motioncam::colorGalleryRgbVulkan(cpuFrame.rgb, gains, identity, identity,
+        rawpreamp::PreviewFrame cpuFrame;
+        assert(rawpreamp::DNGDecoder::decodePreview(rgbImage, rgbSettings, cpuFrame));
+        assert(rawpreamp::colorGalleryRgbVulkan(cpuFrame.rgb, gains, identity, identity,
             1, nullptr, nullptr, false, false));
         assert(residentColor.size() == cpuFrame.rgb.size());
         unsigned maximumError = 0;
@@ -2584,11 +2584,11 @@ int main() {
         assert(maximumError <= 13u);
         assert(errorSum < residentColor.size() / 2u);
         std::vector<uint8_t> jpeg;
-        assert(motioncam::jpegDecodeTiledImageVulkan(
+        assert(rawpreamp::jpegDecodeTiledImageVulkan(
             tiles, width, height, tileSide, tileSide,
-            [&](const motioncam::VulkanDecodedJpegImage& image) {
+            [&](const rawpreamp::VulkanDecodedJpegImage& image) {
                 assert(image.channels == 3);
-                return motioncam::jpegEncodeFullyVulkanPackedBufferBorrowed(
+                return rawpreamp::jpegEncodeFullyVulkanPackedBufferBorrowed(
                     image.gpu, image.buffer, image.width, image.height,
                     3, 16, image.wordsPerRow,
                     [&](const uint8_t* bytes, size_t size) {
