@@ -8504,6 +8504,10 @@ bool MainWindow::saveSessionToFile(const QString& path) {
     for (const auto& file : mMountedFiles) {
         QJsonObject clip;
         clip["path"] = file.importFile;
+#ifdef __ANDROID__
+        clip["sourceUri"] = rawpreamp::sessionSourceUri(file.importFile);
+        clip["sourceIsSequence"] = QFileInfo(file.importFile).isDir();
+#endif
         if (mLocalSettings.contains(file.mountId))
             clip["localSettings"] = encode(mLocalSettings.value(file.mountId));
         QJsonArray selectedFrames;
@@ -8559,14 +8563,21 @@ void MainWindow::clearSession() {
 }
 
 void MainWindow::loadSessionFromFile(const QString& path) {
+    const auto showError = [this](const QString& message) {
+#ifdef __ANDROID__
+        showAndroidNotice(tr("Load Session"), message);
+#else
+        QMessageBox::warning(this, tr("Load Session"), message);
+#endif
+    };
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, tr("Load Session"), tr("Could not open %1").arg(path));
+        showError(tr("Could not open %1").arg(path));
         return;
     }
     const auto document = QJsonDocument::fromJson(file.readAll());
     if (!document.isObject()) {
-        QMessageBox::warning(this, tr("Load Session"), tr("Invalid session file"));
+        showError(tr("Invalid session file"));
         return;
     }
     auto decode = [this](const QJsonObject& object) {
@@ -8592,18 +8603,31 @@ void MainWindow::loadSessionFromFile(const QString& path) {
     };
     const auto root = document.object();
     const auto clips = root["clips"].toArray();
-    clearSession();
-    mCacheRootFolder = root["cacheFolder"].toString();
-    mGlobalRenderSettings = decode(root["globalSettings"].toObject());
-    mRenderSettings = mGlobalRenderSettings;
-    updateSelectionUi();
+    if (!root["clips"].isArray() || !root["globalSettings"].isObject()) {
+        showError(tr("This JSON file is not a saved session."));
+        return;
+    }
+    QStringList unavailable;
     QStringList clipPaths;
     QHash<QString, QJsonObject> clipsByPath;
     for (const auto& value : clips) {
         const auto clip = value.toObject();
-        const QString clipPath = clip["path"].toString();
+        QString clipPath = clip["path"].toString();
 #ifdef __ANDROID__
-        if (!QFileInfo::exists(clipPath)) {
+        QString sourceUri = clip["sourceUri"].toString();
+        if (sourceUri.isEmpty()) sourceUri = rawpreamp::sessionSourceUri(clipPath);
+        if (!sourceUri.isEmpty()) {
+            auto restore = QtConcurrent::run([clip, clipPath, sourceUri] {
+                return rawpreamp::restoreSessionSource(
+                    sourceUri, QFileInfo(clipPath).fileName(),
+                    clip["sourceIsSequence"].toBool(QFileInfo(clipPath).isDir()));
+            });
+            waitForBackgroundTask(restore);
+            const QString restored = restore.result();
+            if (!restored.isEmpty()) clipPath = restored;
+            else clipPath.clear();
+        }
+        if (!clipPath.isEmpty() && !QFileInfo::exists(clipPath)) {
             auto refresh = QtConcurrent::run([clipPath] {
                 return rawpreamp::refreshImportedSource(clipPath);
             });
@@ -8611,35 +8635,82 @@ void MainWindow::loadSessionFromFile(const QString& path) {
             refresh.result();
         }
 #endif
-        if (!QFileInfo::exists(clipPath)) continue;
+        if (clipPath.isEmpty() || !QFileInfo::exists(clipPath)) {
+            const QString savedPath = clip["path"].toString();
+            unavailable.append(savedPath.isEmpty() ? tr("(missing clip path)") : savedPath);
+            spdlog::warn("Session source unavailable: {}", savedPath.toStdString());
+            continue;
+        }
         clipPaths.append(clipPath);
         clipsByPath.insert(QFileInfo(clipPath).absoluteFilePath(), clip);
     }
-    mountFiles(clipPaths, [this, &clipsByPath, &decode](
-            const rawpreamp::MountedFile& mounted) {
-        const auto clip = clipsByPath.value(
-            QFileInfo(mounted.importFile).absoluteFilePath());
-        if (clip.contains("localSettings") && !mMountedFiles.isEmpty()) {
-            const auto id = mounted.mountId;
-            const auto local = decode(clip["localSettings"].toObject());
-            mLocalSettings.insert(id, local);
-            mFuseFilesystem->updateOptions(id, settingsForMount(id));
-            updateLocalBadge(id);
+    const auto restoreSession = [this, path, root, clipPaths, clipsByPath, decode] {
+        clearSession();
+        mCacheRootFolder = root["cacheFolder"].toString();
+        mGlobalRenderSettings = decode(root["globalSettings"].toObject());
+        mRenderSettings = mGlobalRenderSettings;
+        updateSelectionUi();
+        mountFiles(clipPaths, [this, clipsByPath, decode](
+                const rawpreamp::MountedFile& mounted) {
+            const auto clip = clipsByPath.value(
+                QFileInfo(mounted.importFile).absoluteFilePath());
+            if (clip.contains("localSettings") && !mMountedFiles.isEmpty()) {
+                const auto id = mounted.mountId;
+                const auto local = decode(clip["localSettings"].toObject());
+                mLocalSettings.insert(id, local);
+                mFuseFilesystem->updateOptions(id, settingsForMount(id));
+                updateLocalBadge(id);
+            }
+            QSet<int> selected;
+            for(const auto& value:clip["selectedFrames"].toArray())
+                if(value.isDouble()&&value.toInt()>=0)selected.insert(value.toInt());
+            if(!selected.isEmpty())mSelectedFrames.insert(mounted.mountId,std::move(selected));
+        });
+        // Cards are created with global settings before their local overrides
+        // are restored. Refresh their metadata from the updated backend now.
+        updateFpsLabels();
+        updateCalibrationButtonStates();
+        const bool snapshot=QFileInfo(path).absoluteFilePath()==QFileInfo(autoSessionPath()).absoluteFilePath();
+        mCurrentSessionFile=snapshot?root.value("sessionFile").toString(path):path;
+        if(mCurrentSessionFile.isEmpty())mCurrentSessionFile=path;
+        if(!snapshot)addRecentSession(path);
+        autoSaveSession();
+    };
+    if (!unavailable.isEmpty()) {
+        const QString message = tr("%1 saved clip(s) could not be found. Import the original sources and save a new session. "
+                                   "Sessions from another Android app or installation may refer to private files that are no longer accessible.\n\n%2")
+            .arg(unavailable.size()).arg(unavailable.mid(0, 5).join("\n"));
+        // Preserve the current session when none of the saved sources can load.
+        if (clipPaths.isEmpty()) {
+            showError(message);
+            return;
         }
-        QSet<int> selected;
-        for(const auto& value:clip["selectedFrames"].toArray())
-            if(value.isDouble()&&value.toInt()>=0)selected.insert(value.toInt());
-        if(!selected.isEmpty())mSelectedFrames.insert(mounted.mountId,std::move(selected));
-    });
-    // Cards are created with global settings before their local overrides
-    // are restored. Refresh their metadata from the updated backend now.
-    updateFpsLabels();
-    updateCalibrationButtonStates();
-    const bool snapshot=QFileInfo(path).absoluteFilePath()==QFileInfo(autoSessionPath()).absoluteFilePath();
-    mCurrentSessionFile=snapshot?document.object().value("sessionFile").toString(path):path;
-    if(mCurrentSessionFile.isEmpty())mCurrentSessionFile=path;
-    if(!snapshot)addRecentSession(path);
-    autoSaveSession();
+#ifdef __ANDROID__
+        auto* overlay = new TouchPopup(this, tr("Load Session"));
+        auto* label = new QLabel(message + tr("\n\nLoad the available clips?"), overlay->panel);
+        label->setTextFormat(Qt::PlainText);
+        label->setWordWrap(true);
+        overlay->content->addWidget(label);
+        auto* buttons = new QDialogButtonBox(overlay->panel);
+        auto* load = buttons->addButton(tr("Load Available Clips"), QDialogButtonBox::AcceptRole);
+        buttons->addButton(QDialogButtonBox::Cancel);
+        overlay->content->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, overlay, &QWidget::deleteLater);
+        connect(load, &QPushButton::clicked, overlay, [this, overlay, restoreSession] {
+            overlay->hide();
+            overlay->deleteLater();
+            QTimer::singleShot(0, this, restoreSession);
+        });
+        overlay->open();
+        return;
+#else
+        if (QMessageBox::question(this, tr("Load Session"),
+                message + tr("\n\nLoad the available clips?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+            return;
+#endif
+    }
+    restoreSession();
 }
 
 QString MainWindow::sessionDirectory() const {

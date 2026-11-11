@@ -28,6 +28,8 @@ QString sidecarScanStatus();
 void beginSourceImportBatch();
 void endSourceImportBatch();
 QString registerImportedClip(const QString& importPath, const QString& sourceUri);
+QString sessionSourceUri(const QString& importPath);
+QString restoreSessionSource(const QString& uri, const QString& name, bool sequence);
 QString refreshImportedSource(const QString& importPath);
 bool sameImportedSource(const QString& first, const QString& second);
 QString importDisplayName(const QString& importPath);

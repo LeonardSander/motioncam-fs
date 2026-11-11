@@ -145,6 +145,14 @@ QString registerImportedClip(const QString& importPath, const QString& sourceUri
                           "registerImportedClip", importPath, sourceUri);
 }
 
+QString sessionSourceUri(const QString& importPath) {
+    return activityString({}, "sessionSourceUri", importPath);
+}
+
+QString restoreSessionSource(const QString& uri, const QString& name, bool sequence) {
+    return activityString({}, "restoreSessionSource", uri, name, jboolean(sequence));
+}
+
 QString refreshImportedSource(const QString& importPath) {
     releaseSourceReadDescriptors(importPath.toStdString());
     const QString result = activityString(QStringLiteral("Android activity unavailable"),

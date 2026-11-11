@@ -928,7 +928,10 @@ public class RawPreampActivity extends QtActivity {
                 .getString("source_uri:" + token, "");
         String saved = getSharedPreferences(PREFS, MODE_PRIVATE)
                 .getString("source_tree:" + token, "");
-        Uri original = source.isEmpty() ? null : Uri.parse(source);
+        return grantedSourceTree(source.isEmpty() ? null : Uri.parse(source), saved);
+    }
+
+    private Uri grantedSourceTree(Uri original, String saved) {
         String originalId = null;
         if (original != null) {
             try { originalId = documentIdentityId(original); }
@@ -1229,6 +1232,78 @@ public class RawPreampActivity extends QtActivity {
                 .getLong("document_modified:" + key, 0);
     }
 
+    public String sessionSourceUri(String importPath) {
+        File imported = new File(importPath);
+        File directory = importDirectory(imported);
+        if (directory == null) return "";
+        return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString("source_uri:" + directory.getName(), "");
+    }
+
+    // Check provider access without changing an index that may still be in use.
+    private void checkSessionSource(Uri document) throws IOException {
+        try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(document, "r")) {
+            if (descriptor == null) throw new IOException("The source document is no longer accessible");
+        }
+    }
+
+    private void checkSessionSequence(Uri tree, Uri root) throws IOException {
+        int frames = 0;
+        Uri firstFrame = null;
+        for (String[] entry : listSourceFolder(tree, root)) {
+            if (!DocumentsContract.Document.MIME_TYPE_DIR.equals(entry[2]) && entry[1] != null &&
+                    entry[1].toLowerCase(Locale.ROOT).endsWith(".dng")) {
+                ++frames;
+                if (firstFrame == null)
+                    firstFrame = DocumentsContract.buildDocumentUriUsingTree(tree, entry[0]);
+            }
+        }
+        if (frames < 2) throw new IOException("The source folder no longer contains a DNG sequence");
+        checkSessionSource(firstFrame);
+    }
+
+    // Restore source identity using existing grants; never guess by filename.
+    public String restoreSessionSource(String sourceUri, String name, boolean sequence) {
+        try {
+            Uri original = sourceDocumentUri(sourceUri);
+            if (!sequence && (name.isEmpty() || name.equals(".") || name.equals("..") ||
+                    name.contains("/") || name.contains("\\"))) return "";
+            android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+            File directory = null;
+            String savedTree = "";
+            for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+                if (!entry.getKey().startsWith("source_uri:") || !(entry.getValue() instanceof String)) continue;
+                String token = entry.getKey().substring("source_uri:".length());
+                if (prefs.getBoolean("source_is_folder:" + token, false) != sequence ||
+                        !sameImportedSource((String) entry.getValue(), sourceUri)) continue;
+                directory = new File(new File(getFilesDir(), "imports"), token);
+                savedTree = prefs.getString("source_tree:" + token, "");
+                break;
+            }
+            Uri tree = grantedSourceTree(original, savedTree);
+            Uri document = tree == null ? original : DocumentsContract.buildDocumentUriUsingTree(
+                    tree, documentIdentityId(original));
+            if (sequence) {
+                if (tree == null) throw new IOException("The source folder is no longer accessible");
+                checkSessionSequence(tree, document);
+            } else {
+                checkSessionSource(document);
+            }
+
+            if (directory == null)
+                directory = new File(new File(getFilesDir(), "imports"), UUID.randomUUID().toString());
+            File imported = sequence ? directory : new File(directory, name);
+            // Mounting refreshes an existing index after the previous session is closed.
+            if (imported.exists()) return imported.getAbsolutePath();
+            if (sequence) return indexDngSequenceFolder(tree, directory, document).getAbsolutePath();
+            return registerImportedClip(imported.getAbsolutePath(), document.toString()).isEmpty()
+                    ? imported.getAbsolutePath() : "";
+        } catch (Exception error) {
+            android.util.Log.w("RawPreamp", "Could not restore session source: " + sourceUri, error);
+            return "";
+        }
+    }
+
     public String refreshImportedSource(String importPath) {
         File file = new File(importPath);
         String key = sourceKey(file);
@@ -1243,7 +1318,11 @@ public class RawPreampActivity extends QtActivity {
                 if (tree == null) throw new IOException("The source folder is no longer accessible");
                 indexDngSequenceFolder(tree, new File(new File(getFilesDir(), "imports"), folder));
             } else {
-                bindDocument(file, sourceDocumentUri(uri));
+                Uri document = sourceDocumentUri(uri);
+                Uri tree = grantedSourceTree(importPath);
+                if (tree != null) document = DocumentsContract.buildDocumentUriUsingTree(
+                        tree, documentIdentityId(document));
+                bindDocument(file, document);
             }
             return "";
         } catch (Exception error) {
@@ -1365,7 +1444,10 @@ public class RawPreampActivity extends QtActivity {
     }
 
     private File indexDngSequenceFolder(Uri tree, File destination) throws IOException {
-        Uri root = sourceFolder(tree, destination);
+        return indexDngSequenceFolder(tree, destination, sourceFolder(tree, destination));
+    }
+
+    private File indexDngSequenceFolder(Uri tree, File destination, Uri root) throws IOException {
         ArrayList<String[]> entries = new ArrayList<>();
         for (String[] entry : listSourceFolder(tree, root)) {
             String name = entry[1];

@@ -34,7 +34,18 @@ Revision checks remain live on each open. Cached handles are released when their
 unmounted. Bounded lookahead overlaps opens during sequential playback. Reimporting an
 already mounted document or sequence is ignored.
 Session JSON selected through the picker is also read from its URI; the small
-automatic resume snapshot remains application state.
+automatic resume snapshot remains application state. Saved clips include their original
+source URI and sequence flag as well as the private index path. Restore rebuilds
+index entries using existing document grants, including a parent-folder grant
+covering a saved sequence. Before replacing the current session, restore opens
+source documents for reading and checks that sequence folders still contain
+DNG frames; existing index entries alone do not establish source access.
+It does not match sources by filename.
+After reinstalling or changing the app package, grant source access again before
+restoring. Legacy sessions containing only private paths cannot recover those
+identities across installations: reimport the sources and save a new session.
+Unavailable clips are reported before replacing the current session; if every
+source is unavailable, the current clip list is preserved.
 
 Sidecars are refreshed automatically during manual import and session load,
 using retained folder permissions. Manual clip import requests missing source
