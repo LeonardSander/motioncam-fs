@@ -851,7 +851,8 @@ struct Device {
         logParams.log_level = PL_LOG_ERR;
         log = pl_log_create(PL_API_VER, &logParams);
 #else
-        log = pl_log_create(PL_API_VER, nullptr);
+        const auto logParams = galleryVulkanLogParams();
+        log = pl_log_create(PL_API_VER, &logParams);
 #endif
         if (!log) return false;
         vk = createGalleryVulkanContext(log);
@@ -1155,8 +1156,13 @@ void warmVulkanGalleryPreview(const std::string& cacheDirectory) {
         warmup = std::async(std::launch::async, [] {
             std::lock_guard lock(deviceMutex);
             auto candidate = std::make_shared<Device>();
-            if (candidate->init()) device = std::move(candidate);
-            else unavailable = true;
+            if (candidate->init()) {
+                device = std::move(candidate);
+                spdlog::info("Gallery Vulkan preview initialized");
+            } else {
+                unavailable = true;
+                spdlog::warn("Gallery Vulkan preview initialization failed; CPU preview processing will be used");
+            }
             warming = false;
         });
     });
@@ -1276,7 +1282,9 @@ bool colorGalleryRgbVulkan(
     bool useMatrix, bool gainMapOnlyDebug,
     const VulkanGalleryBayerSource* bayer,
     const VulkanGalleryOutput* output,
-    const VulkanGalleryTextureSource* texture) {
+    const VulkanGalleryTextureSource* texture,
+    bool* warmingFallback) {
+    if (warmingFallback) *warmingFallback = false;
     if (rawpreamp::debugEnvironment("RAWPREAMP_GALLERY_FORCE_CPU")) return false;
     // Device warmup runs on another thread. Keep host previews responsive
     // through the CPU fallback instead of blocking on device creation.
@@ -1284,7 +1292,10 @@ bool colorGalleryRgbVulkan(
     // Falling back during warmup would compile it on a later playback frame.
     const bool residentSource = texture ||
         (bayer && bayer->gpu && (bayer->buffer || bayer->texture));
-    if (warming.load() && !residentSource) return false;
+    if (warming.load() && !residentSource) {
+        if (warmingFallback) *warmingFallback = true;
+        return false;
+    }
     if (texture) {
         if (bayer || !texture->gpu || (!texture->texture && !texture->buffer) ||
             texture->width == 0 || texture->height == 0 ||

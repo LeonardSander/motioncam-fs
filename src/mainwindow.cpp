@@ -834,6 +834,9 @@ namespace {
         }
         const bool validateGpu = enableGpu && !output &&
             rawpreamp::debugEnvironmentIsSet("RAWPREAMP_GALLERY_VALIDATE_GPU");
+        enum class ColorProcessing { Unknown, Warming, Vulkan, Cpu };
+        static std::atomic<ColorProcessing> colorProcessing{ColorProcessing::Unknown};
+        bool warmingFallback = false;
         std::vector<uint8_t> original;
         if (validateGpu) original = bytes;
         if (enableGpu && rawpreamp::colorGalleryRgbVulkan(
@@ -841,7 +844,10 @@ namespace {
                 useProfileTables ? hueSatTable : nullptr,
                 useProfileTables && !metadata.profileTables->look.values.empty()
                     ? &metadata.profileTables->look : nullptr,
-                useMatrix, gainMapOnlyDebug, bayer, output, texture)) {
+                useMatrix, gainMapOnlyDebug, bayer, output, texture, &warmingFallback)) {
+            const auto previous = colorProcessing.exchange(ColorProcessing::Vulkan);
+            if (previous == ColorProcessing::Cpu || previous == ColorProcessing::Warming)
+                spdlog::info("Gallery Vulkan color processing is now active");
             if (gpuApplied) *gpuApplied = true;
             if (validateGpu) {
                 applyGalleryColorTransform(original, metadata, ignoreForwardMat,
@@ -874,6 +880,15 @@ namespace {
         }
         if (output && output->requireZeroCopy)
             throw std::runtime_error("Zero-copy gallery requires resident GPU input and shared Vulkan image output");
+        if (enableGpu) {
+            const auto next = warmingFallback ? ColorProcessing::Warming : ColorProcessing::Cpu;
+            if (colorProcessing.exchange(next) != next) {
+                if (warmingFallback)
+                    spdlog::info("Gallery Vulkan is warming up; using CPU color processing temporarily");
+                else
+                    spdlog::warn("Gallery Vulkan color processing unavailable or failed; using CPU processing");
+            }
+        }
         if (bayer) {
             std::vector<uint16_t> recovered;
             const uint16_t* samples = bayer->samples;

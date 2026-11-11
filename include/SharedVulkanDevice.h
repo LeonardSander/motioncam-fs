@@ -6,6 +6,7 @@
 #include <libplacebo/vulkan.h>
 #include "VulkanDevicePolicy.h"
 #include <cstdlib>
+#include <spdlog/spdlog.h>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -21,6 +22,18 @@
 #endif
 
 namespace rawpreamp {
+inline pl_log_params galleryVulkanLogParams() {
+    pl_log_params params{};
+    params.log_level = PL_LOG_WARN;
+    params.log_cb = [](void*, pl_log_level level, const char* message) {
+        if (level <= PL_LOG_ERR)
+            spdlog::error("Gallery Vulkan: {}", message);
+        else
+            spdlog::warn("Gallery Vulkan: {}", message);
+    };
+    return params;
+}
+
 inline PFN_vkGetInstanceProcAddr galleryVulkanGetInstanceProcAddr() {
 #ifdef _WIN32
     // Keep the loader alive with the process's Vulkan devices. No static DLL
@@ -46,7 +59,8 @@ inline pl_vulkan sharedVulkanDevice() {
         if (requested && requested[0] == '0')
             return pl_vulkan{};
         const bool forced = requested && requested[0] == '1';
-        pl_log log = pl_log_create(PL_API_VER, nullptr);
+        const auto logParams = galleryVulkanLogParams();
+        pl_log log = pl_log_create(PL_API_VER, &logParams);
         if (!log) return pl_vulkan{};
         pl_vk_inst_params instanceParams = pl_vk_inst_default_params;
         instanceParams.get_proc_addr = galleryVulkanGetInstanceProcAddr();
@@ -109,6 +123,9 @@ inline pl_vulkan createSharedVulkanContext(pl_log log) {
     logParams.log_cb = [](void*, pl_log_level, const char* message) {
         __android_log_write(ANDROID_LOG_WARN, "RawPreampVulkan", message);
     };
+    if (log) pl_log_update(log, &logParams);
+#else
+    const auto logParams = galleryVulkanLogParams();
     if (log) pl_log_update(log, &logParams);
 #endif
     const auto owner = sharedVulkanDevice();

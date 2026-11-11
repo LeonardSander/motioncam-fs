@@ -578,7 +578,8 @@ jobs:
           ditto -c -k --keepParent RawPreamp.dSYM \
             "../debug-symbols/rawpreamp-${ref_safe}-${{ matrix.artifact_suffix }}-symbols.zip"
           cp "$(command -v 7zz)" "$app/Contents/MacOS/7zz"
-          bash "${{ github.workspace }}/scripts/package_macos_app.sh" "$app"
+          python3 -B "${{ github.workspace }}/tests/macos_bundle_validation_test.py"
+          bash "${{ github.workspace }}/scripts/package_macos_app.sh" "$app" --require-vulkan
           ditto -c -k --sequesterRsrc --keepParent \
             "$app" "../artifacts/rawpreamp-${ref_safe}-${{ matrix.artifact_suffix }}.zip"
         else

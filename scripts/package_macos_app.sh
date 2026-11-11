@@ -4,7 +4,7 @@ set -euo pipefail
 APP_PATH="${1:-}"
 
 if [[ -z "$APP_PATH" ]]; then
-  echo "Usage: $0 /path/to/RawPreamp.app" >&2
+  echo "Usage: $0 /path/to/RawPreamp.app [--require-vulkan]" >&2
   exit 1
 fi
 
@@ -207,6 +207,27 @@ if [[ -n "$LEFTOVER_MISSING" ]]; then
   echo "$LEFTOVER_MISSING" >&2
   exit 1
 fi
+
+# Libraries copied outside macdeployqt (notably the Vulkan loader and
+# MoltenVK) can retain absolute install names from vcpkg or Homebrew. Repair
+# references when the matching library is already bundled; reject any other
+# external dependency below instead of shipping a build-machine-only app.
+while IFS= read -r -d '' file; do
+  while IFS= read -r dependency; do
+    case "$dependency" in
+      /usr/lib/*|/System/Library/*) continue ;;
+      /*.dylib)
+        name="$(basename "$dependency")"
+        if [[ -f "$APP_PATH/Contents/Frameworks/$name" ]]; then
+          chmod u+w "$file"
+          install_name_tool -change "$dependency" "@rpath/$name" "$file"
+        fi
+        ;;
+    esac
+  done < <(otool -L "$file" 2>/dev/null | tail -n +2 | awk '{print $1}')
+done < <(find "$APP_PATH/Contents" -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) -print0)
+
+python3 "$(dirname "${BASH_SOURCE[0]}")/validate_macos_bundle.py" "$APP_PATH" "${@:2}"
 
 codesign --force --deep --sign - "$APP_PATH"
 echo "Packaged: $APP_PATH"

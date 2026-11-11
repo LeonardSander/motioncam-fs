@@ -128,7 +128,8 @@ bool colorGalleryRgbVulkan(
     bool useMatrix, bool gainMapOnlyDebug,
     const VulkanGalleryBayerSource* bayer = nullptr,
     const VulkanGalleryOutput* output = nullptr,
-    const VulkanGalleryTextureSource* texture = nullptr);
+    const VulkanGalleryTextureSource* texture = nullptr,
+    bool* warmingFallback = nullptr);
 #else
 inline void warmVulkanGalleryPreview(const std::string& = {}) {}
 inline bool vulkanGalleryPreviewReady() { return false; }
@@ -145,7 +146,11 @@ inline bool colorGalleryRgbVulkan(
     float, const DNGProfileTable*, const DNGProfileTable*,
     bool, bool, const VulkanGalleryBayerSource* = nullptr,
     const VulkanGalleryOutput* = nullptr,
-    const VulkanGalleryTextureSource* = nullptr) { return false; }
+    const VulkanGalleryTextureSource* = nullptr,
+    bool* warmingFallback = nullptr) {
+    if (warmingFallback) *warmingFallback = false;
+    return false;
+}
 #endif
 
 } // namespace rawpreamp
