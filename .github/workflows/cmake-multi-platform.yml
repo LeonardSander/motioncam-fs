@@ -396,9 +396,10 @@ jobs:
         path: |
           ~/.cache/vcpkg
           ${{ matrix.build_dir }}/
-        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', 'scripts/vcpkg-triplets/**', '.github/workflows/**') }}
+        # CMake caches contain absolute checkout paths, which change on rename.
+        key: ${{ github.repository }}-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-${{ hashFiles('CMakeLists.txt', 'vcpkg.json', 'scripts/vcpkg-triplets/**', '.github/workflows/**') }}
         restore-keys: |
-          ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-
+          ${{ github.repository }}-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-deps-
 
     # ---------- QT ----------
     - name: Set up Python (Windows Qt installer)
