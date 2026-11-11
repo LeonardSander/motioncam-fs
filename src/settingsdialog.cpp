@@ -58,7 +58,15 @@ SettingsDialog::SettingsDialog(QWidget *parent)
         outerLayout->addWidget(scroll, 1);
         new rawpreamp::TouchScrolling(scroll);
     } else {
-        outerLayout->addWidget(content);
+        auto* scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        // Keep the controls at their preferred height when the window is short.
+        content->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+        mainLayout->setSizeConstraint(QLayout::SetMinimumSize);
+        scroll->setWidget(content);
+        outerLayout->addWidget(scroll, 1);
     }
 #ifndef __ANDROID__
     auto* interfaceGroup = new QGroupBox(tr("Interface"), this);
@@ -454,7 +462,6 @@ SettingsDialog::SettingsDialog(QWidget *parent)
     onCleanupIntervalChanged(mCacheCleanupIntervalComboBox->currentIndex());
     updateNativeVideoCacheUsage();
 
-    setLayout(mainLayout);
 }
 
 SettingsDialog::~SettingsDialog()
