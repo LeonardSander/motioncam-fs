@@ -19,7 +19,9 @@ class BundleValidationTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.app = Path(self.temp.name) / "RawPreamp.app"
+        # macOS temp paths can use /var, which resolves to /private/var.
+        # Match the canonical paths passed to otool by the validator.
+        self.app = Path(self.temp.name).resolve() / "RawPreamp.app"
         self.metadata = {}
         self.main = self.image("MacOS/RawPreamp", rpaths=["@executable_path/../Frameworks"])
         mock = patch.object(validator.subprocess, "check_output", side_effect=self.otool)
