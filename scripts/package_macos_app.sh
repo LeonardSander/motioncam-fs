@@ -25,7 +25,8 @@ if [[ ! -x "$QT_DEPLOY" ]]; then
   exit 1
 fi
 
-"$QT_DEPLOY" "$APP_PATH" -verbose=2
+# Sign only after our additional libraries and load-command edits are done.
+"$QT_DEPLOY" "$APP_PATH" -verbose=2 -no-codesign
 
 QT_PREFIX="$(cd "$(dirname "$QT_DEPLOY")/.." && pwd)"
 QT_LIB_DIR="${QT_PREFIX}/lib"
@@ -41,6 +42,7 @@ copy_framework() {
   fi
   local candidates=(
     "$QT_LIB_DIR/${name}.framework"
+    "/Library/Filesystems/macfuse.fs/Contents/Frameworks/${name}.framework"
     "/usr/local/opt/qt/lib/${name}.framework"
     "/usr/local/opt/qtbase/lib/${name}.framework"
     "/usr/local/opt/qtpdf/lib/${name}.framework"
@@ -175,6 +177,15 @@ if [[ -n "$FUSE_LIB" ]]; then
   copy_file_force "$FUSE_LIB" "$APP_PATH/Contents/Frameworks/libfuse.2.dylib"
   install_name_tool -id "@rpath/libfuse.2.dylib" "$APP_PATH/Contents/Frameworks/libfuse.2.dylib"
 
+  # Current macFUSE libraries also link MFMount. Copying libfuse alone leaves
+  # a launch-time dependency on the system macFUSE installation.
+  if otool -L "$FUSE_LIB" | grep -q '/MFMount.framework/'; then
+    if ! copy_framework "MFMount"; then
+      echo "libfuse requires MFMount.framework, but it could not be bundled" >&2
+      exit 1
+    fi
+  fi
+
   # macFUSE is linked by an absolute Homebrew/system path. Point every Mach-O
   # image in the bundle at the copy shipped in Contents/Frameworks instead.
   while IFS= read -r -d '' file; do
@@ -216,6 +227,15 @@ while IFS= read -r -d '' file; do
   while IFS= read -r dependency; do
     case "$dependency" in
       /usr/lib/*|/System/Library/*) continue ;;
+      /*.framework/*)
+        name="${dependency%%.framework/*}"
+        name="${name##*/}"
+        rel="$name.framework/${dependency#*.framework/}"
+        if [[ -f "$APP_PATH/Contents/Frameworks/$rel" ]]; then
+          chmod u+w "$file"
+          install_name_tool -change "$dependency" "@rpath/$rel" "$file"
+        fi
+        ;;
       /*.dylib)
         name="$(basename "$dependency")"
         if [[ -f "$APP_PATH/Contents/Frameworks/$name" ]]; then
@@ -229,5 +249,13 @@ done < <(find "$APP_PATH/Contents" -type f \( -perm -111 -o -name "*.dylib" -o -
 
 python3 "$(dirname "${BASH_SOURCE[0]}")/validate_macos_bundle.py" "$APP_PATH" "${@:2}"
 
+# Include manually copied Mach-O images (including both Vulkan loader names),
+# which macdeployqt's signing list does not necessarily contain.
+while IFS= read -r -d '' file; do
+  if otool -h "$file" >/dev/null 2>&1; then
+    codesign --force --sign - "$file"
+  fi
+done < <(find "$APP_PATH/Contents" -type f \( -perm -111 -o -name "*.dylib" -o -name "*.so" \) -print0)
 codesign --force --deep --sign - "$APP_PATH"
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 echo "Packaged: $APP_PATH"

@@ -73,6 +73,18 @@ class BundleValidationTest(unittest.TestCase):
         self.metadata[self.main] = (["/opt/homebrew/lib/libtest.dylib"], [])
         self.assertEqual(len(validator.validate(self.app)), 1)
 
+    def test_macfuse_mount_framework_must_be_bundled(self):
+        self.metadata[self.main] = (["@rpath/libfuse.2.dylib"], self.metadata[self.main][1])
+        fuse = self.image("Frameworks/libfuse.2.dylib", dependencies=[
+            "/Library/Filesystems/macfuse.fs/Contents/Frameworks/"
+            "MFMount.framework/Versions/A/MFMount"])
+        errors = validator.validate(self.app)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("MFMount.framework", errors[0])
+        self.image("Frameworks/MFMount.framework/Versions/A/MFMount")
+        self.metadata[fuse] = (["@rpath/MFMount.framework/Versions/A/MFMount"], [])
+        self.assertEqual(validator.validate(self.app), [])
+
     def test_entire_required_vulkan_runtime_missing(self):
         self.assertEqual(len(validator.validate(self.app, require_vulkan=True)), 3)
 
